@@ -606,7 +606,16 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
     recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
     return { kind: 'miss' };
   }
-  recordSearch(found.searchId, query, found.decision, found.stored, sessionId, source, shelfBaseUrl);
+  recordSearch(
+    found.searchId,
+    query,
+    found.decision,
+    found.stored,
+    sessionId,
+    args.agentId,
+    source,
+    shelfBaseUrl,
+  );
   const v = verdict(found);
   const row = {
     ...base,
@@ -1747,6 +1756,7 @@ function closeOpenPairings(sessionId, agentId, cwd, command, heads) {
     const status = closePairing(
       pairing.id,
       sessionId,
+      agentId,
       passed,
       fixFiles,
       pairingScope(pairing.errorLine, fixFiles),

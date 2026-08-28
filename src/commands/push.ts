@@ -429,19 +429,19 @@ export interface ScoreInput {
    */
   events: ScoreEvent[];
   /**
-   * When this SESSION closed a pairing (`pairing_closes.at`).
+   * When THIS WORKER closed a pairing (`pairing_closes.at`).
    *
-   * SESSION-WIDE, AND THE PARTITION DOES NOT REACH IT: `pairing_closes` has no
-   * agent column, so every agent in the session sees every close. The one
-   * pattern this feeds — `error-edit-resolved`, whose resolution may be a close
-   * — can still be completed by a sibling's close. Narrowing it needs a column
-   * on that table, which is DDL and not this change.
+   * PARTITIONED LIKE THE EVENTS, on (session, agent). `pairing_closes.agent`
+   * arrived with store version 2 for exactly this: every child files under its
+   * parent's session id, so a session-wide list of closes let a sibling's close
+   * complete this agent's `error-edit-resolved`. Rows written before v2 carry
+   * '' and so belong to the lead, which is where an unstamped close came from.
    */
   closes: number[];
-  /** When this SESSION ran a search (`searches.at`): the research signal the
+  /** When THIS WORKER ran a search (`searches.at`): the research signal the
    *  `research` event under-reports, since that row is written on a hit only.
-   *  Session-wide for the same reason `closes` is, and feeding
-   *  `research-then-edit` with the same caveat. */
+   *  Partitioned on (session, agent) for the same reason `closes` is, so
+   *  `research-then-edit` can no longer be completed by a sibling's search. */
   searches: number[];
   /** The session's end, or the last thing on record when it has none. */
   endedAt: number | null;
@@ -462,7 +462,7 @@ const TEST_FILE_RE = /(?:^|[._-])(?:test|spec)s?(?:[._-]|$)|^test_|_test\./i;
  * order over that agent's own rows — never across siblings, which is the whole
  * reason the caller partitions (see {@link ScoreInput.events}):
  *  - error-edit-resolved: a `failure`, then an `edit`, then a `pass` (any head)
- *    or a pairing close by this session. 3.0.
+ *    or a pairing close by this worker. 3.0.
  *  - edit-across-prompt: the same non-markdown basename edited before and after
  *    a `prompt` row. 2.5.
  *  - write-over-edited: a `Write` over a basename with ≥ 3 earlier edits. 2.5.
@@ -520,7 +520,7 @@ export function scoreSession(input: ScoreInput): {
       // pass belongs to a later story.
       break;
     }
-    // A close by this session is a resolution too, whether or not the pass
+    // A close by THIS WORKER is a resolution too, whether or not the pass
     // event that made it was recorded (the close rule ran before the row did).
     if (editAt !== null) {
       const close = closes.find((at) => at >= editAt);
@@ -691,16 +691,19 @@ export async function readSessionScores(
         head: typeof data.head === 'string' ? data.head : null,
       });
     }
+    // KEYED THE SAME WAY THE EVENTS ARE, on (session, agent). Both tables carry
+    // `agent` from store version 2, '' for the lead's own turn and for every row
+    // written before the column existed — which is the same bucket the null
+    // `data.agentId` above lands in, so the two partitions line up key for key.
+    const byAgent = (map: Map<string, number[]>, row: Record<string, unknown>): void => {
+      if (typeof row.session !== 'string' || typeof row.at !== 'number') return;
+      const key = row.session + '\u0000' + (typeof row.agent === 'string' ? row.agent : '');
+      (map.get(key) ?? map.set(key, []).get(key)!).push(row.at);
+    };
     const closes = new Map<string, number[]>();
-    for (const row of store.all(STORE_SQL.scoreCloses, [since])) {
-      if (typeof row.session !== 'string' || typeof row.at !== 'number') continue;
-      (closes.get(row.session) ?? closes.set(row.session, []).get(row.session)!).push(row.at);
-    }
+    for (const row of store.all(STORE_SQL.scoreCloses, [since])) byAgent(closes, row);
     const searches = new Map<string, number[]>();
-    for (const row of store.all(STORE_SQL.scoreSearches, [since])) {
-      if (typeof row.session !== 'string' || typeof row.at !== 'number') continue;
-      (searches.get(row.session) ?? searches.set(row.session, []).get(row.session)!).push(row.at);
-    }
+    for (const row of store.all(STORE_SQL.scoreSearches, [since])) byAgent(searches, row);
     const bounds = new Map<string, { started: number | null; ended: number | null }>();
     for (const row of store.all(STORE_SQL.scoreSessions, [since, since])) {
       if (typeof row.session !== 'string') continue;
@@ -716,15 +719,15 @@ export async function readSessionScores(
       else if (typeof row.at === 'number') publishedAt.push(row.at);
     }
     const out: PushSessionScore[] = [];
-    for (const { session, agent, events } of byWorker.values()) {
+    for (const [key, { session, agent, events }] of byWorker) {
       const bound = bounds.get(session);
       const started = bound?.started ?? events[0]!.at;
       const endedAt = bound?.ended ?? null;
       const endForPublish = endedAt ?? nowMs;
       const scored = scoreSession({
         events,
-        closes: closes.get(session) ?? [],
-        searches: searches.get(session) ?? [],
+        closes: closes.get(key) ?? [],
+        searches: searches.get(key) ?? [],
         endedAt,
       });
       out.push({

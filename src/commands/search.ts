@@ -263,6 +263,12 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     // Usually absent; see readSessionId. An unstamped entry is raised in every
     // session, which is the safe direction for a reminder.
     ...(q.sessionId !== undefined ? { sessionId: q.sessionId } : {}),
+    // NO AGENT, ALWAYS. `tenjin search` is a CLI a subagent spawns through Bash,
+    // and a spawned process is handed no `agent_id` — only a hook payload
+    // carries one. So a deliberate search lands in the lead's '' bucket
+    // whichever worker typed it, and pretending otherwise would need a stamp
+    // this process cannot obtain.
+    agentId: '',
     candidates: response.items.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,

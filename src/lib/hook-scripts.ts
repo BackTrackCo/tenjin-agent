@@ -840,11 +840,25 @@ const SEARCH_MIN_LEG_MS = 150;
  * Best-effort in every direction, and it NEVER throws: a failed record costs one
  * reminder, while a hook that fails costs the tool call.
  */
-function recordSearch(searchId, question, decision, candidates, sessionId, source, shelfBaseUrl) {
+function recordSearch(
+  searchId,
+  question,
+  decision,
+  candidates,
+  sessionId,
+  agentId,
+  source,
+  shelfBaseUrl,
+) {
   if (typeof searchId !== 'string' || searchId.length === 0) return;
   // The session stamp is what later lets the Stop hook raise this loop in the
   // session that opened it and nowhere else; '' is the machine-global bucket,
   // which is the safe direction for a reminder.
+  //
+  // The AGENT stamp is what keeps \`push status --sessions\` from crediting one
+  // subagent's search to a sibling: every child files under its parent's
+  // session id, so the session alone cannot say which worker researched
+  // anything. '' is the lead's own turn.
   //
   // The shelf stamp is what lets \`tenjin outcome --search-id <id>\` — the
   // command the Stop hook's own nag prints — reach the shelf that MINTED the
@@ -857,6 +871,7 @@ function recordSearch(searchId, question, decision, candidates, sessionId, sourc
     decision,
     candidates,
     sessionId,
+    agentId,
     source,
     shelfBaseUrl,
   });
@@ -1356,6 +1371,7 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
+    agentId,
     'websearch-hook',
     // This arm asks one shelf, the configured base, whichever mode it is in.
     config.baseUrl,
@@ -1586,6 +1602,7 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
+    agentId,
     'dispatch-hook',
     shelfBase,
   );
