@@ -38,6 +38,18 @@ import {
   websearchHookScript,
 } from './hook-scripts';
 
+const DAY_MS = 24 * 60 * 60_000;
+
+/** A timestamp `ms` in the past, as an ISO string.
+ *
+ * RELATIVE, because the store's attribution window is measured against the real
+ * clock: a fixture pinned to a fixed date silently falls out of the window as
+ * the repo ages, and the test that depended on it starts failing on a day
+ * nobody touched the code. */
+function agoIso(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
 /**
  * The store's own suite. Like `hook-scripts.test.ts` it runs the REAL generated
  * bytes as child processes: the scripts never go through the bundler, their
@@ -589,6 +601,58 @@ describe('already-injected spans two different hooks', () => {
     // Session-scoped: another session has not seen it.
     expect(store?.get(STORE_SQL.alreadyShown, ['s2', 'pairing:7'])).toBeNull();
     store?.close();
+  });
+
+  /**
+   * AN OUTCOME IS A REPORT ABOUT A PIECE THE AGENT WAS SHOWN. Every decision an
+   * arm makes writes a row — `skipped`, `capped`, `none` — and the queries that
+   * feed a verdict must see only the injected ones. Without the predicate,
+   * `--label <uid> used` on a row the arm decided against would stamp it and
+   * post "the agent used this" to the shelf about a piece it never served.
+   */
+  it('only an injected row can be labelled, or owed to a shelf', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    const row = (uid: string, action: string): (string | number | null)[] => [
+      uid,
+      null,
+      Date.now(),
+      's1',
+      null,
+      'machine',
+      'failure',
+      'public',
+      `res-${uid}`,
+      'a title',
+      'https://tenjin.blog/p/x',
+      null,
+      '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+      null,
+      null,
+      null,
+      null,
+      null,
+      action,
+      null,
+      null,
+      0,
+      12,
+    ];
+    try {
+      store.run(STORE_SQL.insertInjection, row('shown', 'injected'));
+      store.run(STORE_SQL.insertInjection, row('unshown', 'skipped'));
+
+      expect(store.get(STORE_SQL.injectionByUid, ['shown'])).not.toBeNull();
+      expect(store.get(STORE_SQL.injectionByUid, ['unshown'])).toBeNull();
+
+      // Even with a verdict written straight onto it, the row the arm never
+      // showed is not in the queue owed to the shelf.
+      store.run(STORE_SQL.setOutcome, ['used', 'hand', 'shown']);
+      store.run(STORE_SQL.setOutcome, ['used', 'hand', 'unshown']);
+      expect(store.all(STORE_SQL.unpostedOutcomes, []).map((r) => r.uid)).toEqual(['shown']);
+    } finally {
+      store.close();
+    }
   });
 });
 
@@ -1608,7 +1672,7 @@ describe('searches: the typed handle', () => {
   function entry(over: Partial<StoredSearch> = {}): StoredSearch {
     return {
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
-      at: '2026-07-18T00:00:00.000Z',
+      at: agoIso(60_000),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [
@@ -1699,13 +1763,66 @@ describe('searches: the typed handle', () => {
   it('searchForResource matches by id and by url through json_each, newest first', async () => {
     const older = '0197aaaa-bbbb-cccc-dddd-000000000010';
     const newer = '0197aaaa-bbbb-cccc-dddd-000000000011';
-    await recordSearch(dataDir, entry({ searchId: older, at: '2026-07-18T00:00:00.000Z' }));
-    await recordSearch(dataDir, entry({ searchId: newer, at: '2026-07-19T00:00:00.000Z' }));
+    await recordSearch(dataDir, entry({ searchId: older, at: agoIso(2 * DAY_MS) }));
+    await recordSearch(dataDir, entry({ searchId: newer, at: agoIso(DAY_MS) }));
     expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(newer);
     expect(await findSearchForResource(dataDir, { url: 'https://x/api/read/a/b' })).toBe(newer);
     // An empty match is not a wildcard: a caller asking by url alone must not
     // match a candidate whose resourceId happens to be absent.
     expect(await findSearchForResource(dataDir, {})).toBeNull();
+  });
+
+  /**
+   * `json_each` over an unpruned table is cheap while it stops early and
+   * unbounded when it does not, and the MISS is the common case: `buy <id>` for
+   * a piece no local search surfaced expands every row's candidate array. The
+   * time bound is what keeps that proportional to recent activity — and a
+   * search from two months ago is not the attribution a purchase today belongs
+   * to anyway.
+   */
+  it('searchForResource does not reach past its window', async () => {
+    const stale = '0197aaaa-bbbb-cccc-dddd-000000000030';
+    await recordSearch(dataDir, entry({ searchId: stale, at: agoIso(31 * DAY_MS) }));
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBeNull();
+    expect(await findStoredCandidate(dataDir, 'res-1')).toBeNull();
+
+    const fresh = '0197aaaa-bbbb-cccc-dddd-000000000031';
+    await recordSearch(dataDir, entry({ searchId: fresh, at: agoIso(29 * DAY_MS) }));
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(fresh);
+  });
+
+  /**
+   * The table never prunes (plan 03, owner decision 2: no retention), so the
+   * bound belongs to the query. This one feeds a reminder, not a report: a
+   * machine with ten thousand unresolved rows must not pull them all into JS
+   * to render a nag about the newest few.
+   */
+  it('openSearches stops at the bound the file-backed store had', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    try {
+      for (let i = 0; i < 505; i += 1) {
+        store.run(STORE_SQL.recordSearch, [
+          `0197aaaa-bbbb-cccc-dddd-${String(i).padStart(12, '0')}`,
+          Date.now() - i * 1000,
+          's1',
+          'q',
+          'fp',
+          'MISS',
+          '[]',
+          null,
+          null,
+          null,
+        ]);
+      }
+    } finally {
+      store.close();
+    }
+    const open = await openSearches(dataDir);
+    expect(open).toHaveLength(500);
+    // Newest first, so the bound drops the oldest rows rather than a slice from
+    // the middle.
+    expect(open[0]?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-000000000000');
   });
 
   /** `normalizeSearchIds` case-folds every id before it looks one up, while the
@@ -1782,7 +1899,7 @@ describe('markSearchResolved', () => {
   function entry(over: Partial<StoredSearch> = {}): StoredSearch {
     return {
       searchId: ID,
-      at: '2026-07-18T00:00:00.000Z',
+      at: agoIso(60_000),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [
@@ -1944,7 +2061,7 @@ describe('a demand flood costs a deliberate search nothing', () => {
   it('keeps the deliberate entry, its candidate, and `--last`, under a 60-deep flood', async () => {
     await recordSearch(dataDir, {
       searchId: id(1),
-      at: '2026-07-18T00:00:00.000Z',
+      at: agoIso(60_000),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [

@@ -531,13 +531,25 @@ export interface LookupStats {
   triggers: TriggerStats[];
 }
 
-/** Unknown keys are stripped, like every other response this module parses: the
- *  server may grow a column before this CLI reads it. */
+/**
+ * Unknown keys are stripped, like every other response this module parses: the
+ * server may grow a column before this CLI reads it.
+ *
+ * `trigger` IS BOUNDED, unlike the rest of the strings this file accepts,
+ * because it is the one field of this response that gets printed: `push status`
+ * draws a line per trigger, and an unconstrained `z.string()` lets a shelf paint
+ * a megabyte of anything into the operator's terminal. A pattern rather than the
+ * arm names, so a shelf that adds an arm still renders instead of failing the
+ * whole block with a contract mismatch. The printer sanitizes it as well —
+ * a length bound is not an escape-sequence bound.
+ */
+const TRIGGER_RE = /^[a-z]{1,16}$/;
+
 const lookupStatsSchema = z.object({
   windowDays: z.number().int().positive(),
   triggers: z.array(
     z.object({
-      trigger: z.string(),
+      trigger: z.string().regex(TRIGGER_RE),
       lookups: z.number().int().nonnegative(),
       hits: z.number().int().nonnegative(),
       candidates: z.number().int().nonnegative(),

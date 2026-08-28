@@ -647,4 +647,50 @@ describe('getLookupStats', () => {
       }),
     ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
   });
+
+  /**
+   * `trigger` is the one field of this response that gets PRINTED, and the shelf
+   * chooses it. An unbounded string is a shelf-controlled write to the
+   * operator's terminal, so a name that is not one is a contract mismatch and
+   * the block renders "unavailable" instead.
+   */
+  it('refuses a trigger name that is not a short lowercase word', async () => {
+    for (const trigger of ['x'.repeat(17), 'Prompt', 'pro mpt', '\u001b[2Jprompt', '']) {
+      const bad = stubFetch(
+        json(200, {
+          windowDays: 7,
+          triggers: [
+            { trigger, lookups: 1, hits: 0, candidates: 0, used: 0, wrong: 0, useRate: null },
+          ],
+        }),
+      );
+      await expect(
+        getLookupStats(7, {
+          baseUrl: 'https://preview.example',
+          timeoutMs: 5000,
+          fetchImpl: bad.fetch,
+        }),
+        trigger,
+      ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+    }
+  });
+
+  /** A pattern rather than the arm names, so a shelf that grows an arm still
+   *  renders instead of failing the whole block. */
+  it('accepts an arm name this build has never heard of', async () => {
+    const { fetch } = stubFetch(
+      json(200, {
+        windowDays: 7,
+        triggers: [
+          { trigger: 'newarm', lookups: 1, hits: 1, candidates: 1, used: 1, wrong: 0, useRate: 1 },
+        ],
+      }),
+    );
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.triggers[0]?.trigger).toBe('newarm');
+  });
 });

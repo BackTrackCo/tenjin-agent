@@ -403,17 +403,27 @@ export const STORE_SQL = {
    * The candidate blob is JSON, so `json_each` asks the question in SQL rather
    * than pulling 500 rows into JS and scanning their arrays — which is what
    * \`buy <resourceId>\` and read attribution used to do on every call.
+   *
+   * TIME-BOUNDED, because `json_each` is a scan and the table never prunes. A
+   * hit stops at the first row; a MISS — a resource no local search surfaced,
+   * which is every `buy <id>` typed from outside a search — expands the
+   * candidate array of every row ever written. The bound is what keeps that
+   * proportional to recent activity rather than to the machine's whole history,
+   * and attribution older than {@link ATTRIBUTION_WINDOW_MS} is not a search
+   * this purchase came out of anyway.
    */
   searchForResource: `SELECT s.search_id, c.value AS candidate
      FROM searches s, json_each(s.candidates) c
-     WHERE json_extract(c.value, '$.resourceId') = ? OR json_extract(c.value, '$.url') = ?
+     WHERE s.at >= ?
+       AND (json_extract(c.value, '$.resourceId') = ? OR json_extract(c.value, '$.url') = ?)
      ORDER BY s.at DESC, s.rowid DESC LIMIT 1`,
   /** Every unresolved row a session may still close, newest first. '' scopes to
    *  every session; a named one keeps the unstamped rows, which belong nowhere
-   *  and so stay reachable everywhere. */
+   *  and so stay reachable everywhere. Bounded like {@link listSearches}: the
+   *  table never prunes, and the caller renders a reminder, not a report. */
   openSearches: `SELECT * FROM searches
      WHERE resolved_by IS NULL AND (? = '' OR session = ? OR session = '')
-     ORDER BY at DESC, rowid DESC`,
+     ORDER BY at DESC, rowid DESC LIMIT ?`,
 
   insertPairing: `INSERT INTO pairings (
        uid, at, session, project, machine, kind, key, coarse_key,
@@ -495,9 +505,17 @@ export const STORE_SQL = {
      FROM injections
      WHERE action = 'injected' AND outcome IS NULL AND at >= ? AND (? = '' OR session = ?)
      ORDER BY at, id`,
-  /** One row by uid, for the hand verdict `--label` writes. */
+  /**
+   * One INJECTED row by uid, for the hand verdict `--label` writes.
+   *
+   * `action = 'injected'` is the whole point of the predicate. Every decision an
+   * arm makes writes a row — `skipped`, `capped`, `none` — and only the injected
+   * ones were ever put in front of the agent. Without it, `--label <uid> used`
+   * on a row the arm decided NOT to show would stamp an outcome on it and post
+   * "the agent used this" to the shelf about a piece nobody ever saw.
+   */
   injectionByUid: `SELECT uid, at, session, hook, shelf, resource_id, search_id, outcome, outcome_by, outcome_at
-     FROM injections WHERE uid = ?`,
+     FROM injections WHERE uid = ? AND action = 'injected'`,
   /** A verdict, and the posted stamp cleared with it: a re-labelled row is owed
    *  to the shelf again. */
   setOutcome: 'UPDATE injections SET outcome = ?, outcome_by = ?, outcome_at = NULL WHERE uid = ?',
@@ -506,10 +524,16 @@ export const STORE_SQL = {
    * queue and the idempotence: a post that failed keeps a NULL and is retried
    * next run, a post that landed is never sent twice. A `local` shelf row is a
    * pairing this machine replayed to itself and has no shelf to tell.
+   *
+   * `action = 'injected'` for the reason {@link injectionByUid} carries it: an
+   * outcome is a report about a piece the agent was SHOWN, and a row the arm
+   * decided against is not one. `url` comes along because it is what the post is
+   * routed by — the shelf that minted the search id, not whatever this machine
+   * is configured for today.
    */
-  unpostedOutcomes: `SELECT uid, session, hook, shelf, resource_id, search_id, outcome, outcome_by
+  unpostedOutcomes: `SELECT uid, session, hook, shelf, url, resource_id, search_id, outcome, outcome_by
      FROM injections
-     WHERE outcome IN ('used', 'rejected') AND outcome_at IS NULL
+     WHERE action = 'injected' AND outcome IN ('used', 'rejected') AND outcome_at IS NULL
        AND search_id IS NOT NULL AND resource_id IS NOT NULL AND shelf <> 'local'
      ORDER BY at, id`,
   markPosted: 'UPDATE injections SET outcome_at = ? WHERE uid = ?',
@@ -1667,6 +1691,17 @@ export interface StoredSearch {
  */
 const RECENT_LIMIT = 500;
 
+/**
+ * How far back {@link STORE_SQL.searchForResource} looks for the search a
+ * purchase came out of.
+ *
+ * A `json_each` scan over an unpruned table is cheap while it stops early and
+ * unbounded when it does not, and the miss is the common case: `buy <id>` for a
+ * piece nobody searched for locally reads every row's candidate array. A month
+ * covers the searches a purchase could plausibly be attributed to.
+ */
+const ATTRIBUTION_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
 function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
   const searchId = typeof row.search_id === 'string' ? row.search_id : '';
   if (searchId.length === 0) return null;
@@ -1756,7 +1791,7 @@ export async function getStoredSearch(
 export async function openSearches(dataDir: string, sessionId?: string): Promise<StoredSearch[]> {
   const scope = storeSession(sessionId);
   return await withStore(dataDir, [] as StoredSearch[], (store) => {
-    const rows = store.all(STORE_SQL.openSearches, [scope, scope]);
+    const rows = store.all(STORE_SQL.openSearches, [scope, scope, RECENT_LIMIT]);
     const out: StoredSearch[] = [];
     for (const row of rows) {
       const entry = rowToSearch(row);
@@ -1871,7 +1906,11 @@ export async function findStoredCandidate(
   resourceId: string,
 ): Promise<StoredCandidate | null> {
   return await withStore(dataDir, null as StoredCandidate | null, (store) => {
-    const row = store.get(STORE_SQL.searchForResource, [resourceId, '']);
+    const row = store.get(STORE_SQL.searchForResource, [
+      Date.now() - ATTRIBUTION_WINDOW_MS,
+      resourceId,
+      '',
+    ]);
     if (row === null || typeof row.candidate !== 'string') return null;
     try {
       const parsed = StoredCandidateSchema.safeParse(JSON.parse(row.candidate));
@@ -1889,7 +1928,11 @@ export async function findSearchForResource(
   match: { resourceId?: string; url?: string },
 ): Promise<string | null> {
   return await withStore(dataDir, null as string | null, (store) => {
-    const row = store.get(STORE_SQL.searchForResource, [match.resourceId ?? '', match.url ?? '']);
+    const row = store.get(STORE_SQL.searchForResource, [
+      Date.now() - ATTRIBUTION_WINDOW_MS,
+      match.resourceId ?? '',
+      match.url ?? '',
+    ]);
     return row !== null && typeof row.search_id === 'string' ? row.search_id : null;
   });
 }
