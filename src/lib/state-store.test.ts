@@ -1631,15 +1631,32 @@ describe('retired files', () => {
   });
 });
 
+/**
+ * The coarse fingerprint as it goes on the team-shelf wire. `tenjin sync` writes
+ * this key on a post and the failure arm's resolve leg queries it; the two run in
+ * different processes, months apart, on different machines, and a shelf lookup
+ * that silently matches nothing is indistinguishable from "no teammate has hit
+ * this". So the VALUE is pinned, not the formula: a test written as
+ * `teamCoarseKey(a, b) === shortHash(a + '|' + b)` restates the implementation
+ * and would follow any change to it, including a change that stranded every key
+ * already on a shelf.
+ */
 describe('teamCoarseKey', () => {
-  it('is shortHash(coarseKey + "|" + repo), pinned so sync and resolve can never drift', () => {
-    expect(teamCoarseKey('abc', 'https://github.com/acme/widgets.git')).toBe(
-      shortHash('abc|https://github.com/acme/widgets.git'),
+  it('is a pinned value, so sync and resolve can never drift apart', () => {
+    expect(teamCoarseKey('abc123', 'https://github.com/acme/widgets.git')).toBe('a7b33a270638732d');
+  });
+
+  it('is the repo salt over the STORED coarse hash, so no raw message is needed', () => {
+    expect(teamCoarseKey('abc123', 'https://github.com/acme/widgets.git')).toBe(
+      shortHash('abc123|https://github.com/acme/widgets.git'),
     );
-    expect(teamCoarseKey('abc', 'https://github.com/acme/widgets.git')).toBe(
-      shortHash('abc|https://github.com/acme/widgets.git'),
-    );
-    expect(teamCoarseKey('abc', 'repo-a')).not.toBe(teamCoarseKey('abc', 'repo-b'));
-    expect(teamCoarseKey('abc', '')).toBe(shortHash('abc|'));
+  });
+
+  it('separates the same error across two repos, which is the whole point of the salt', () => {
+    expect(teamCoarseKey('abc123', 'repo-a')).not.toBe(teamCoarseKey('abc123', 'repo-b'));
+  });
+
+  it('still yields a key when the checkout has no origin remote', () => {
+    expect(teamCoarseKey('abc123', '')).toBe(shortHash('abc123|'));
   });
 });

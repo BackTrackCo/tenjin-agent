@@ -1547,11 +1547,16 @@ export function projectId(cwd: string | null | undefined): string | null {
  * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is the origin URL
  * read from `.git/config`. The salt goes over the stored hash, not the raw
  * message, because a `pairings` row keeps only the hashes and `tenjin sync`
- * reads rows back long after the failure arm's `sigV1()` call is gone. The
- * failure arm's inline copy (`teamCoarseKey` in the push core) must produce
- * the same bytes for the same (coarse_key, repo): a resolve query and a synced
- * post that salted two different ways would never find each other. The caller
- * adds the wire prefix: `` `sig_v1c:${teamCoarseKey(coarseKey, repo)}` ``.
+ * reads rows back long after the failure arm's `sigV1()` call is gone.
+ *
+ * THE ONE DEFINITION. `tenjin sync` (commands/sync.ts) imports it directly; a
+ * hook script cannot import, so the failure arm's resolve leg carries a copy
+ * inside its generated source, and that copy must produce the same bytes for
+ * the same (coarse_key, repo) — a resolve query and a synced post that salted
+ * two different ways would never find each other, and the miss would be
+ * indistinguishable from "no teammate has hit this". The pinned value in
+ * state-store.test.ts is what both sides are held to. The caller adds the wire
+ * prefix: `` `sig_v1c:${teamCoarseKey(coarseKey, repo)}` ``.
  */
 export function teamCoarseKey(coarseKey: string, repo: string): string {
   return shortHash(`${coarseKey}|${repo}`);
