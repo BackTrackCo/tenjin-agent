@@ -183,7 +183,9 @@ export function gradeInjection(
   const spans = backtickSpans(rows[anchor]?.text ?? '');
   for (const row of after.slice(0, SPAN_WINDOW)) {
     const hit = spans.find((span) => row.text.includes(span));
-    if (hit !== undefined) return { outcome: 'used', by: 'span', evidence: hit };
+    // Capped like every other evidence string here: the span is copied out of
+    // injected text, which came off a shelf, and `--explain` prints it.
+    if (hit !== undefined) return { outcome: 'used', by: 'span', evidence: cap(hit) };
   }
   const evidence = after.slice(0, EVIDENCE_ROWS).map(cap);
   return opts.ended ? { outcome: 'rejected', by: 'none', evidence } : { outcome: null, evidence };
@@ -204,17 +206,39 @@ export function parseSince(text: string): number {
 }
 
 /**
- * The transcript for a session, or null.
+ * Where a session's transcript is, or WHY there is none.
+ *
+ * `absent` is a FACT ABOUT THE SESSION: the projects directory was listed and
+ * holds no file for it. `unreadable` is a fact about this machine right now —
+ * no projects directory, a home that is not mounted, a permissions change
+ * mid-run — and says nothing about the session at all.
+ */
+export type TranscriptLookup =
+  { kind: 'found'; path: string } | { kind: 'absent' } | { kind: 'unreadable'; reason: string };
+
+/**
+ * The transcript for a session, or why it was not found.
  *
  * BY READDIR, not by mangling the cwd into a directory name. Claude Code names
  * the project directory from the working directory with a substitution this CLI
  * would have to reimplement and keep in step (and which a worktree, a symlinked
  * home or a renamed checkout each break differently); the session id is a uuid
  * and is unique across them, so one listing finds it wherever it landed.
+ *
+ * THE TWO NEGATIVE ANSWERS ARE NOT THE SAME ANSWER, and collapsing them to
+ * `null` is how a transient fault becomes permanent: the caller turns "no
+ * transcript" into `unobserved`, `unobserved` is a verdict, and a verdict is
+ * never re-graded. One run under a home directory that could not be read would
+ * have closed every open row on the machine as never-seen, with no way back.
  */
-export async function findTranscript(homeDir: string, sessionId: string): Promise<string | null> {
-  if (!SESSION_ID_RE.test(sessionId)) return null;
-  const { readdir } = await import('node:fs/promises');
+export async function findTranscript(
+  homeDir: string,
+  sessionId: string,
+): Promise<TranscriptLookup> {
+  // An id that cannot be a filename names no transcript in any project
+  // directory, now or ever: that is absence, and it is permanent.
+  if (!SESSION_ID_RE.test(sessionId)) return { kind: 'absent' };
+  const { readdir, stat } = await import('node:fs/promises');
   const { join } = await import('node:path');
   const projects = join(homeDir, '.claude', 'projects');
   let dirs: string[];
@@ -222,19 +246,25 @@ export async function findTranscript(homeDir: string, sessionId: string): Promis
     dirs = (await readdir(projects, { withFileTypes: true }))
       .filter((e) => e.isDirectory())
       .map((e) => e.name);
-  } catch {
-    return null;
+  } catch (err) {
+    // A missing projects directory included: a machine where the harness has
+    // never run, or has not run yet, has not told us anything about this row.
+    return { kind: 'unreadable', reason: errorReason(err) };
   }
+  let blocked: string | null = null;
   for (const dir of dirs) {
     const path = join(projects, dir, `${sessionId}.jsonl`);
     try {
-      const { stat } = await import('node:fs/promises');
-      if ((await stat(path)).isFile()) return path;
-    } catch {
-      // Not in this project directory.
+      if ((await stat(path)).isFile()) return { kind: 'found', path };
+    } catch (err) {
+      // ENOENT is the ordinary answer — the session is simply not in THIS
+      // project directory. Anything else is a directory that could be hiding
+      // it, so the sweep can no longer claim the file is absent.
+      const code = errorCode(err);
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') blocked ??= errorReason(err);
     }
   }
-  return null;
+  return blocked === null ? { kind: 'absent' } : { kind: 'unreadable', reason: blocked };
 }
 
 /** Has nothing been appended to this transcript for {@link ENDED_AFTER_MS}? The
@@ -248,6 +278,20 @@ export async function transcriptIdle(path: string, nowMs: number): Promise<boole
   } catch {
     return false;
   }
+}
+
+/** An errno if the platform gave one, else the message: short enough to print
+ *  on the one `--explain` line that says why a row was left alone. Exported so
+ *  the caller's own read of the file it was handed reports failures in the same
+ *  words this one does. */
+export function errorReason(err: unknown): string {
+  const code = errorCode(err);
+  if (code !== null) return code;
+  return cap(err instanceof Error ? err.message : 'unknown error');
+}
+
+function errorCode(err: unknown): string | null {
+  return isRecord(err) && typeof err.code === 'string' ? err.code : null;
 }
 
 function readCommandRe(resourceId: string): RegExp {

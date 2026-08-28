@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -260,18 +260,68 @@ describe('findTranscript', () => {
     const project = join(home, '.claude', 'projects', '-Users-someone-repo');
     await mkdir(project, { recursive: true });
     await writeFile(join(project, `${RES}.jsonl`), '');
-    expect(await findTranscript(home, RES)).toBe(join(project, `${RES}.jsonl`));
-    expect(await findTranscript(home, '0197aaaa-bbbb-cccc-dddd-000000000099')).toBeNull();
+    expect(await findTranscript(home, RES)).toEqual({
+      kind: 'found',
+      path: join(project, `${RES}.jsonl`),
+    });
   });
 
-  /** The id becomes a filename, so it is checked like one before it is joined. */
+  /**
+   * A LISTED directory with no file for this session is a fact about the
+   * session, and the caller is allowed to settle a verdict on it. It is the one
+   * negative answer that may.
+   */
+  it('reports absent when the projects directory was read and holds no such file', async () => {
+    await mkdir(join(home, '.claude', 'projects', '-Users-someone-repo'), { recursive: true });
+    expect(await findTranscript(home, '0197aaaa-bbbb-cccc-dddd-000000000099')).toEqual({
+      kind: 'absent',
+    });
+  });
+
+  /** The id becomes a filename, so it is checked like one before it is joined.
+   *  An id that cannot be a filename names no transcript anywhere, ever, which
+   *  is absence rather than a fault of this run. */
   it('refuses a session id that is not one', async () => {
     await mkdir(join(home, '.claude', 'projects'), { recursive: true });
-    expect(await findTranscript(home, '../../../etc/passwd')).toBeNull();
-    expect(await findTranscript(home, '')).toBeNull();
+    expect(await findTranscript(home, '../../../etc/passwd')).toEqual({ kind: 'absent' });
+    expect(await findTranscript(home, '')).toEqual({ kind: 'absent' });
   });
 
-  it('is null when there is no projects directory at all', async () => {
-    expect(await findTranscript(home, RES)).toBeNull();
+  /**
+   * NOT ABSENT. Nothing was listed, so nothing is known about the session — and
+   * the caller must not turn "this machine could not look" into a permanent
+   * `unobserved` on every open row.
+   */
+  it('reports unreadable, with a reason, when there is no projects directory at all', async () => {
+    expect(await findTranscript(home, RES)).toMatchObject({
+      kind: 'unreadable',
+      reason: 'ENOENT',
+    });
   });
+
+  it('reports unreadable when the projects path cannot be listed', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(join(home, '.claude', 'projects'), 'not a directory');
+    expect(await findTranscript(home, RES)).toMatchObject({ kind: 'unreadable' });
+  });
+
+  /** One project directory this run cannot stat into could be the one holding
+   *  the file, so the sweep can no longer claim it is absent. Skipped as root,
+   *  where the mode bits do not deny anything. */
+  it.skipIf(process.getuid?.() === 0)(
+    'reports unreadable when a project directory blocks the lookup',
+    async () => {
+      const readable = join(home, '.claude', 'projects', '-Users-someone-repo');
+      const blocked = join(home, '.claude', 'projects', '-Users-someone-other');
+      await mkdir(readable, { recursive: true });
+      await mkdir(blocked, { recursive: true });
+      await chmod(blocked, 0o000);
+      try {
+        expect(await findTranscript(home, RES)).toMatchObject({ kind: 'unreadable' });
+      } finally {
+        // Restored before teardown, which would otherwise fail to rm it.
+        await chmod(blocked, 0o700);
+      }
+    },
+  );
 });

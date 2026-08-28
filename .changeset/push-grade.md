@@ -15,13 +15,19 @@ whether or not it helped, while a tool call is a decision the agent spent
 something on. An explicit `tenjin read|inspect <id>` or the injected URL is
 `used` whenever it appears; a two-word backtick span copied out of the injected
 text within the next ten tool calls is the weaker `partially_used`; nothing at
-all, once the session has ended, is `rejected`; and a finding no transcript row
-names — every subagent injection, which reaches no transcript — is `unobserved`.
-A session still running is left open rather than called rejected, because the
-shelf keeps the first verdict per lookup and post and the next tool call could
-contradict it. Verdicts go to the shelf the row names, a landed one is never
-re-posted, and a failed one is retried on the next run. `--explain` shows the
-anchor line and the evidence; `--label` sets one verdict by hand.
+all, once the session has ended, is `rejected`; and a finding that was never in
+front of the agent — every subagent injection, which reaches no transcript — is
+`unobserved`. A session still running is left open rather than called rejected,
+because the shelf keeps the first verdict per lookup and post and the next tool
+call could contradict it, and so is a session whose transcript this machine
+could not go looking for: `unobserved` is permanent, and an unreadable home
+directory is a fact about the run rather than about the row. Verdicts go to the
+shelf that actually served the row — the origin of the URL it was shown with,
+since a search id means nothing on another shelf and that endpoint answers 202
+either way — with the team bypass header only when that origin is the configured
+team shelf's. A landed verdict is never re-posted and a failed one is retried on
+the next run. `--explain` shows the anchor line and the evidence; `--label` sets
+one verdict by hand, on an injected row only.
 
 **`tenjin push status` now says how that went.** Under the existing ledger
 tallies, the verdicts per arm and shelf (`used`, `rejected`, `unobserved`,

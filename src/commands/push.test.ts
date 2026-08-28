@@ -13,6 +13,7 @@ import {
   PUSH_PROMPT_HOOK_FILE,
   PUSH_SUBAGENT_HOOK_FILE,
 } from '../lib/push-scripts';
+import type { TranscriptLookup } from '../lib/grade';
 import type { CommandContext } from '../context';
 
 let dir: string;
@@ -537,11 +538,15 @@ describe('runPushGrade', () => {
   }
 
   /** Transcripts keyed by session; `findTranscript` hands the session id back as
-   *  the path, so no home directory is involved. */
-  function transcriptDeps(bySession: Record<string, string>) {
+   *  the path, so no home directory is involved. A session in `unreadable` is
+   *  the projects directory this run could not read — which is not the same
+   *  answer as a session that simply has no transcript. */
+  function transcriptDeps(bySession: Record<string, string>, unreadable: string[] = []) {
     return {
-      findTranscript: async (_home: string, session: string): Promise<string | null> =>
-        session in bySession ? session : null,
+      findTranscript: async (_home: string, session: string): Promise<TranscriptLookup> => {
+        if (unreadable.includes(session)) return { kind: 'unreadable', reason: 'EACCES' };
+        return session in bySession ? { kind: 'found', path: session } : { kind: 'absent' };
+      },
       transcriptText: async (path: string): Promise<string> => bySession[path] ?? '',
       transcriptIdle: async (): Promise<boolean> => false,
     };
@@ -613,6 +618,8 @@ describe('runPushGrade', () => {
     ]);
     await seedSession(dir, 'ended', true);
     await seedSession(dir, 'live', false);
+    // Ended, so "no transcript" is settled rather than "not written yet".
+    await seedSession(dir, 'gone', true);
     const { fetchImpl } = acceptingShelf();
 
     const result = await runPushGrade(
@@ -658,6 +665,117 @@ describe('runPushGrade', () => {
     store?.close();
   });
 
+  /**
+   * `unobserved` IS A VERDICT, and a verdict is never re-graded. So it may only
+   * be written from a fact about the SESSION — the projects directory was read
+   * and holds no file for it — never from a fact about this run. One sweep on a
+   * machine whose home was not mounted, or mid-permissions-change, would
+   * otherwise close every open row as never-seen with no way back.
+   */
+  it('leaves a row ungraded when the transcript could not be looked for at all', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-unreadable',
+        at: NOW - 10 * 60 * 60 * 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 'blocked',
+        searchId: SEARCH,
+      },
+    ]);
+    // Ended AND old: everything except the read itself says "settle this row".
+    await seedSession(dir, 'blocked', true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      { now: () => NOW, fetchImpl, ...transcriptDeps({}, ['blocked']) },
+    );
+
+    expect(result.data).toMatchObject({ graded: { unobserved: 0, open: 1 } });
+    expect(result.humanLines?.join('\n')).toContain('transcript unreadable (EACCES)');
+    expect(calls).toEqual([]);
+    const store = await openStore(dir);
+    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-unreadable'])).toEqual({
+      outcome: null,
+    });
+    store?.close();
+  });
+
+  /**
+   * The harness writes the transcript as the session runs, so a row minted
+   * seconds ago on a session that is still starting has no file YET. Only once
+   * a transcript would have appeared — the session ended, or the row is older
+   * than the idle window — is its absence the answer.
+   */
+  it('waits for a young row before calling an absent transcript unobserved', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-young',
+        at: NOW - 60_000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-young',
+        session: 'starting',
+        searchId: null,
+      },
+      {
+        uid: 'u-old',
+        at: NOW - 2 * 60 * 60 * 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-old',
+        session: 'long-gone',
+        searchId: null,
+      },
+    ]);
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      { now: () => NOW, ...transcriptDeps({}) },
+    );
+
+    const byUid = new Map(
+      (result.data as { rows: { uid: string; outcome: string }[] }).rows.map((r) => [r.uid, r]),
+    );
+    expect(byUid.get('u-young')).toMatchObject({ outcome: 'open' });
+    expect(byUid.get('u-old')).toMatchObject({ outcome: 'unobserved' });
+    expect(result.humanLines?.join('\n')).toContain('no transcript for this session yet');
+    const store = await openStore(dir);
+    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-young'])).toEqual({
+      outcome: null,
+    });
+    store?.close();
+  });
+
+  /** A session the store has stamped ended settles immediately: there is no
+   *  later transcript coming for it. */
+  it('settles an absent transcript as soon as the session has ended', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-ended',
+        at: NOW - 60_000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-ended',
+        session: 'stopped',
+        searchId: null,
+      },
+    ]);
+    await seedSession(dir, 'stopped', true);
+
+    const result = await runPushGrade(makeCtx(), {}, { now: () => NOW, ...transcriptDeps({}) });
+    expect(result.data).toMatchObject({ graded: { unobserved: 1, open: 0 } });
+  });
+
   it('posts used as used, a copied span as partially_used, and rejected as rejected', async () => {
     await seedRows(dir, [
       {
@@ -679,6 +797,7 @@ describe('runPushGrade', () => {
         action: 'injected',
         resourceId: 'res-span',
         title: 'span piece',
+        url: 'https://tenjin.blog/p/span-piece',
         session: 's2',
         searchId: SEARCH,
       },
@@ -690,6 +809,7 @@ describe('runPushGrade', () => {
         action: 'injected',
         resourceId: 'res-no',
         title: 'no piece',
+        url: 'https://tenjin.blog/p/no-piece',
         session: 's3',
         searchId: SEARCH,
       },
@@ -726,9 +846,12 @@ describe('runPushGrade', () => {
     expect(result.humanLines?.join('\n')).toContain('posted 3 outcome(s)');
   });
 
-  /** The key rides the origin: a public-shelf verdict must not carry the team's
-   *  bypass secret, and the two shelves have separate databases. */
-  it('routes a team row to the base URL with the bypass and a public row to the marketplace without it', async () => {
+  /**
+   * A search id is minted by ONE shelf and means nothing on another, and the
+   * row's url is the only record of which one served it. The key rides the
+   * origin too: a public-shelf verdict must not carry the team's bypass secret.
+   */
+  it('posts each verdict to the origin that served it, with the bypass only on the team shelf', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
@@ -741,7 +864,7 @@ describe('runPushGrade', () => {
         shelf: 'team',
         action: 'injected',
         resourceId: RES,
-        url: URL,
+        url: 'https://team.example/p/the-collation-trap',
         session: 's1',
         searchId: SEARCH,
       },
@@ -796,6 +919,110 @@ describe('runPushGrade', () => {
     const pub = calls[1]?.init.headers as Record<string, string>;
     expect(Object.keys(team).some((k) => k.includes('bypass'))).toBe(true);
     expect(Object.keys(pub).some((k) => k.includes('bypass'))).toBe(false);
+  });
+
+  /**
+   * The label on the row means whatever the config meant WHEN THE ARM RAN. A
+   * team base URL that has moved since then would send the verdict to a shelf
+   * that never minted the search id, where it lands as a 202 (no existence
+   * oracle, by design) and the row is stamped posted with nothing recorded
+   * anywhere.
+   */
+  it('does not reroute a verdict when the configured team shelf has moved', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://new-team.example', shelfBypassSecret: 'shh' }),
+    );
+    await seedRows(dir, [
+      {
+        uid: 'u-team',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'team',
+        action: 'injected',
+        resourceId: RES,
+        url: 'https://old-team.example/p/the-collation-trap',
+        session: 's1',
+        searchId: SEARCH,
+      },
+    ]);
+    await seedSession(dir, 's1', true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+        }),
+      },
+    );
+
+    expect(calls.map((c) => c.url)).toEqual([
+      `https://old-team.example/api/searches/${SEARCH}/outcomes`,
+    ]);
+    // The secret belongs to the CONFIGURED team origin, which this is not.
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(false);
+  });
+
+  /** With no url there is no shelf to name, and a verdict sent to a guess is
+   *  worse than one still owed: the row keeps its NULL stamp. */
+  it('skips a row whose url cannot say which shelf served it, and leaves it unposted', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-nourl',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        session: 's1',
+        searchId: SEARCH,
+      },
+      {
+        uid: 'u-badurl',
+        at: NOW - 900,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: 'not a url',
+        title: 'bad url piece',
+        session: 's2',
+        searchId: SEARCH,
+      },
+    ]);
+    for (const s of ['s1', 's2']) await seedSession(dir, s, true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s2: [contextRow('Tenjin found "bad url piece".'), toolUse({ command: 'ls' })].join('\n'),
+        }),
+      },
+    );
+
+    expect(calls).toEqual([]);
+    expect(result.data).toMatchObject({ posted: 0, postFailed: 0, postSkipped: 2 });
+    expect(result.humanLines?.join('\n')).toContain('not posted: u-nourl');
+
+    // The verdicts stand locally; only the posted stamp is withheld.
+    const store = await openStore(dir);
+    expect(store?.all('SELECT uid, outcome, outcome_at FROM injections ORDER BY uid', [])).toEqual([
+      { uid: 'u-badurl', outcome: 'rejected', outcome_at: null },
+      { uid: 'u-nourl', outcome: 'used', outcome_at: null },
+    ]);
+    store?.close();
   });
 
   /**
@@ -863,6 +1090,19 @@ describe('runPushGrade', () => {
         shelf: 'public',
         action: 'injected',
         resourceId: RES,
+        url: URL,
+        session: 's1',
+        searchId: SEARCH,
+      },
+      // An arm's decision NOT to show a piece. Nobody saw it, so nobody used it.
+      {
+        uid: 'u-skipped',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'skipped',
+        resourceId: RES,
+        url: URL,
         session: 's1',
         searchId: SEARCH,
       },
@@ -883,6 +1123,17 @@ describe('runPushGrade', () => {
     await expect(
       runPushGrade(makeCtx(), { label: ['u-missing', 'used'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
+    // A row the arm never injected is not labellable: an outcome is a report
+    // about a piece the agent was SHOWN, and posting one for a skipped decision
+    // would tell the shelf a story about a piece it never served.
+    await expect(
+      runPushGrade(makeCtx(), { label: ['u-skipped', 'used'] }, { now: () => NOW, fetchImpl }),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+    const store = await openStore(dir);
+    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-skipped'])).toEqual({
+      outcome: null,
+    });
+    store?.close();
     await expect(
       runPushGrade(makeCtx(), { label: ['u-1'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
@@ -1091,5 +1342,34 @@ describe('runPushStatus: the graded rollup and the shelf stats', () => {
     const human = result.humanLines?.join('\n') ?? '';
     expect(human).toContain('server public: unavailable');
     expect(human).toContain('failure: public used=0 rejected=0 unobserved=0 ungraded=1 posted=0');
+  });
+
+  /**
+   * The trigger name is the shelf's text, and this line is the only place it is
+   * drawn. The response schema bounds it and this strips it: a length bound is
+   * not an escape-sequence bound, and the two layers fail differently.
+   */
+  it('strips terminal escapes out of a trigger name before drawing it', async () => {
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => NOW,
+      lookupStats: async () => ({
+        windowDays: 7,
+        triggers: [
+          {
+            trigger: '\u001b[2K\u001b[1Gfailure',
+            lookups: 1,
+            hits: 0,
+            candidates: 0,
+            used: 0,
+            wrong: 0,
+            useRate: null,
+          },
+        ],
+      }),
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('  failure: lookups=1');
+    expect(human).not.toContain('\u001b');
   });
 });

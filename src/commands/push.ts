@@ -11,11 +11,14 @@ import {
   type ResolvedSettings,
 } from '../lib/settings';
 import { CliError } from '../lib/errors';
+import { sanitizeForTerminal } from '../lib/output';
 import { countPushHookEntries, pushScriptsPresent, wireSearchHooks } from '../lib/harness-hooks';
 import type { HooksResult, PushHookEntryCount } from '../lib/harness-hooks';
 import { buildOutcomeItem, getLookupStats, postOutcomes, type LookupStats } from '../lib/agent-api';
 import { UUID_RE } from '../lib/ids';
 import {
+  ENDED_AFTER_MS,
+  errorReason,
   findAnchor,
   findTranscript,
   gradeInjection,
@@ -446,8 +449,11 @@ function renderStatusLines(data: {
     lines.push(`server ${label} (${stats.windowDays}d):`);
     for (const t of stats.triggers) {
       const rate = t.useRate === null ? 'n/a' : t.useRate.toFixed(2);
+      // The one string in this block the shelf chose. Bounded by the response
+      // schema and stripped here as well: the numbers beside it are this CLI's
+      // own formatting, and the label is not.
       lines.push(
-        `  ${t.trigger}: lookups=${t.lookups} hits=${t.hits} candidates=${t.candidates} used=${t.used} wrong=${t.wrong} useRate=${rate}`,
+        `  ${sanitizeForTerminal(t.trigger)}: lookups=${t.lookups} hits=${t.hits} candidates=${t.candidates} used=${t.used} wrong=${t.wrong} useRate=${rate}`,
       );
     }
   }
@@ -561,6 +567,9 @@ interface GradedRow {
   by: string;
   anchorLine: number | null;
   evidence?: string[];
+  /** Why a row was left ungraded, for `--explain`. A verdict explains itself
+   *  through its evidence; "nothing was written" does not. */
+  note?: string;
 }
 
 const HALTING_FAILURES = new Set(['RATE_LIMITED', 'NETWORK_ERROR']);
@@ -611,10 +620,15 @@ function labelOne(store: Store, label: string[]): GradedRow {
       },
     );
   }
+  // The query asks for an INJECTED row, so an unknown uid and a uid naming a
+  // decision the arm did not act on fail the same way — and neither can be
+  // labelled. A verdict is a report about a piece the agent was shown; a
+  // `skipped` row was shown to nobody, and posting "used" for one would tell
+  // the shelf a story about a piece it never served.
   const row = store.get(STORE_SQL.injectionByUid, [uid]);
   if (row === null) {
-    throw new CliError('USAGE', `No injection ${uid} in this machine's store.`, {
-      fix: 'Take the uid from `tenjin push grade --explain`.',
+    throw new CliError('USAGE', `No injected row ${uid} in this machine's store.`, {
+      fix: 'Take the uid from `tenjin push grade --explain`; only rows an arm actually injected can be labelled.',
     });
   }
   // `setOutcome` clears `outcome_at` with the verdict, so a re-labelled row is
@@ -652,7 +666,7 @@ async function gradeSessions(
   const locate = deps.findTranscript ?? findTranscript;
   const readText = deps.transcriptText ?? ((path: string) => readFile(path, 'utf8'));
   const idle = deps.transcriptIdle ?? transcriptIdle;
-  const parsed = new Map<string, { rows: TranscriptRow[]; ended: boolean } | null>();
+  const parsed = new Map<string, SessionState>();
   const out: GradedRow[] = [];
 
   for (const row of rows) {
@@ -680,14 +694,41 @@ async function gradeSessions(
       );
       continue;
     }
-    if (!parsed.has(session)) {
-      parsed.set(
-        session,
-        await readSession(session, { homeDir, locate, readText, idle, store, now: window.now }),
-      );
+    let state = parsed.get(session);
+    if (state === undefined) {
+      state = await readSession(session, {
+        homeDir,
+        locate,
+        readText,
+        idle,
+        store,
+        now: window.now,
+      });
+      parsed.set(session, state);
     }
-    const transcript = parsed.get(session) ?? null;
-    if (transcript === null) {
+    // NOT A FACT ABOUT THE SESSION. A projects directory that is missing or
+    // unreadable says nothing about whether this row was ever shown, and
+    // `unobserved` is permanent — one run under a home that could not be read
+    // would close every open row on the machine as never-seen.
+    if (state.kind === 'unreadable') {
+      out.push(
+        ungraded({ uid, hook, shelf, target, note: `transcript unreadable (${state.reason})` }),
+      );
+      continue;
+    }
+    if (state.kind === 'absent') {
+      // The transcript IS absent — the projects directory was read and holds no
+      // file for this session. That is only `unobserved` once a transcript
+      // would have appeared by now: the harness writes the file as the session
+      // runs, so a row minted seconds ago whose session is still starting up
+      // has simply not been written yet.
+      const at = typeof row.at === 'number' ? row.at : window.now;
+      if (!state.ended && at > window.now - ENDED_AFTER_MS) {
+        out.push(
+          ungraded({ uid, hook, shelf, target, note: 'no transcript for this session yet' }),
+        );
+        continue;
+      }
       out.push(
         record(store, {
           uid,
@@ -700,8 +741,8 @@ async function gradeSessions(
       );
       continue;
     }
-    const anchor = findAnchor(transcript.rows, target);
-    const verdict = gradeInjection(transcript.rows, anchor, target, { ended: transcript.ended });
+    const anchor = findAnchor(state.rows, target);
+    const verdict = gradeInjection(state.rows, anchor, target, { ended: state.ended });
     out.push(
       record(store, {
         uid,
@@ -709,12 +750,46 @@ async function gradeSessions(
         shelf,
         target,
         verdict,
-        anchorLine: anchor === -1 ? null : (transcript.rows[anchor]?.line ?? null),
+        anchorLine: anchor === -1 ? null : (state.rows[anchor]?.line ?? null),
       }),
     );
   }
   return out;
 }
+
+/** A row this run declines to judge: nothing is written, and `--explain` says
+ *  why. It stays in the queue for the next run. */
+function ungraded(input: {
+  uid: string;
+  hook: string;
+  shelf: string;
+  target: GradeTarget;
+  note: string;
+}): GradedRow {
+  return {
+    uid: input.uid,
+    hook: input.hook,
+    shelf: input.shelf,
+    resourceId: input.target.resourceId,
+    outcome: 'open',
+    by: 'none',
+    anchorLine: null,
+    evidence: [],
+    note: input.note,
+  };
+}
+
+/**
+ * What this machine can say about one session right now.
+ *
+ * Three answers, because the two ways of having no transcript lead to opposite
+ * writes: `absent` is a fact about the session and can settle into a verdict,
+ * `unreadable` is a fact about this run and must not.
+ */
+type SessionState =
+  | { kind: 'read'; rows: TranscriptRow[]; ended: boolean }
+  | { kind: 'absent'; ended: boolean }
+  | { kind: 'unreadable'; reason: string };
 
 async function readSession(
   session: string,
@@ -726,22 +801,27 @@ async function readSession(
     store: Store;
     now: number;
   },
-): Promise<{ rows: TranscriptRow[]; ended: boolean } | null> {
-  const path = await ctx.locate(ctx.homeDir, session);
-  if (path === null) return null;
+): Promise<SessionState> {
+  const found = await ctx.locate(ctx.homeDir, session);
+  const stamped = ctx.store.get(STORE_SQL.sessionEnded, [session]);
+  const endedAt = stamped !== null && typeof stamped.ended_at === 'number';
+  if (found.kind === 'unreadable') return { kind: 'unreadable', reason: found.reason };
+  // With no file there is no mtime to go idle, so the store's stamp is the only
+  // half of "this session is over" that can answer.
+  if (found.kind === 'absent') return { kind: 'absent', ended: endedAt };
   let text: string;
   try {
-    text = await ctx.readText(path);
-  } catch {
-    return null;
+    text = await ctx.readText(found.path);
+  } catch (err) {
+    // The file is THERE and this run could not read it: a fault of the moment,
+    // and the row is owed another look rather than a verdict.
+    return { kind: 'unreadable', reason: errorReason(err) };
   }
   // Either half is enough. `ended_at` is the clean stop; a transcript nothing
   // has touched for half an hour is the harness that was killed and never
   // stamped one.
-  const stamped = ctx.store.get(STORE_SQL.sessionEnded, [session]);
-  const ended =
-    (stamped !== null && typeof stamped.ended_at === 'number') || (await ctx.idle(path, ctx.now));
-  return { rows: parseTranscript(text), ended };
+  const ended = endedAt || (await ctx.idle(found.path, ctx.now));
+  return { kind: 'read', rows: parseTranscript(text), ended };
 }
 
 /** Write the verdict, unless there is none yet: a row the session may still
@@ -782,14 +862,28 @@ function record(
 interface PostTally {
   posted: number;
   failed: number;
+  /** Rows this run would not route, and why. One `--explain` line each, and
+   *  never a posted stamp: a skipped row is still owed to its shelf. */
+  skipped: string[];
 }
 
 /**
  * Send every graded, unposted verdict to the shelf that served it.
  *
- * ROUTED BY `injections.shelf`, not by `shelfRouteFor`: that keys on a stored
- * URL, and an injection row carries the shelf LABEL the arm chose. A `local`
- * row is a pairing this machine replayed to itself and has no shelf to tell.
+ * ROUTED BY THE ROW'S OWN URL, not by today's config. A search id is minted by
+ * one shelf and means nothing on another, and the two ways of picking a shelf
+ * here are not equivalent: the row's `shelf` is a LABEL (`team`, `public`) whose
+ * meaning depends on the config in force when the arm ran, and config changes —
+ * a team base URL that moved, team mode switched on or off. Resolving the label
+ * against the current config then sends the verdict somewhere that never served
+ * the row, where it lands as a 202 (there is no existence oracle on that
+ * endpoint, by design) and the row is stamped posted. The verdict is lost, and
+ * nothing anywhere says so. Every injected row carries the read url it was shown
+ * with, on the shelf that served it, so that origin is the address.
+ *
+ * THE BYPASS SECRET RIDES THE ORIGIN, not the row: it is sent only when the
+ * row's origin is the configured team shelf's, so a verdict about a public piece
+ * never carries the team key even if the label on the row says otherwise.
  *
  * A failure never fails the command — the verdicts are already recorded locally,
  * and the row keeps its NULL stamp so the next run retries it. A rate limit or a
@@ -802,17 +896,26 @@ async function postGraded(
   deps: PushGradeDeps,
   now: number,
 ): Promise<PostTally> {
+  const tally: PostTally = { posted: 0, failed: 0, skipped: [] };
   const rows = store.all(STORE_SQL.unpostedOutcomes, []);
-  if (rows.length === 0) return { posted: 0, failed: 0 };
+  if (rows.length === 0) return tally;
   const settings = await resolveContextSettings(ctx);
-  const shelves = new Map(configuredShelves(settings).map((s) => [s.label, s]));
-  const tally: PostTally = { posted: 0, failed: 0 };
+  const teamOrigin = shelfOrigin(settings.baseUrl);
   let halted = false;
   for (const row of rows) {
     if (halted) break;
-    const shelf = shelves.get(String(row.shelf ?? ''));
+    const uid = String(row.uid ?? '');
     const searchId = typeof row.search_id === 'string' ? row.search_id : '';
-    if (shelf === undefined || !UUID_RE.test(searchId)) continue;
+    if (!UUID_RE.test(searchId)) {
+      tally.skipped.push(`${uid}: no search id to report against`);
+      continue;
+    }
+    const origin = shelfOrigin(typeof row.url === 'string' ? row.url : '');
+    if (origin === null) {
+      tally.skipped.push(`${uid}: no usable url, so the shelf that served it is unknown`);
+      continue;
+    }
+    const bypass = origin === teamOrigin ? settings.bypass : undefined;
     const resourceId = typeof row.resource_id === 'string' ? row.resource_id : '';
     try {
       const item = buildOutcomeItem({
@@ -822,12 +925,12 @@ async function postGraded(
         ...(UUID_RE.test(resourceId) ? { resourceId } : {}),
       });
       await postOutcomes(searchId, [item], {
-        baseUrl: shelf.baseUrl,
+        baseUrl: origin,
         timeoutMs: ctx.flags.timeout,
-        ...(shelf.bypass !== undefined ? { bypass: shelf.bypass } : {}),
+        ...(bypass !== undefined ? { bypass } : {}),
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       });
-      store.run(STORE_SQL.markPosted, [now, String(row.uid ?? '')]);
+      store.run(STORE_SQL.markPosted, [now, uid]);
       tally.posted += 1;
     } catch (err) {
       tally.failed += 1;
@@ -835,6 +938,17 @@ async function postGraded(
     }
   }
   return tally;
+}
+
+/** The origin a shelf is reachable at, or null for anything this CLI would not
+ *  POST to. A stored url is server text; only http(s) is an address here. */
+function shelfOrigin(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.origin : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -867,6 +981,7 @@ function buildGradeData(
     graded: counts,
     posted: posted.posted,
     postFailed: posted.failed,
+    postSkipped: posted.skipped.length,
     rows: rows.map((row) => ({
       uid: row.uid,
       hook: row.hook,
@@ -895,13 +1010,19 @@ function gradeLines(
       ? `posted ${posted.posted} outcome(s) (${posted.failed} failed; retried on the next run)`
       : `posted ${posted.posted} outcome(s)`,
   ];
+  if (posted.skipped.length > 0) {
+    lines.push(`${posted.skipped.length} verdict(s) not routed to any shelf; still unposted`);
+  }
   if (!explain) return lines;
   for (const row of rows) {
     const anchor = row.anchorLine === null ? 'no anchor' : `anchor line ${row.anchorLine}`;
     lines.push(
       `${row.uid} ${row.hook}/${row.shelf} ${row.resourceId ?? '(no resource)'}: ${row.outcome} (${row.by}) ${anchor}`,
     );
+    // Why nothing was written, for the rows where that is the whole story.
+    if (row.note !== undefined) lines.push(`    ${row.note}`);
     for (const line of row.evidence ?? []) lines.push(`    ${line}`);
   }
+  for (const skip of posted.skipped) lines.push(`not posted: ${skip}`);
   return lines;
 }
