@@ -877,7 +877,78 @@ async function askTenjin(question, config, limit = ${SEARCH_LIMIT}, shelfBaseUrl
   if (res.status !== 200) return null;
   const body = await res.json();
   if (!isRecord(body)) return null;
+  return parseSearchBody(body, url, limit);
+}
 
+/**
+ * Ask a shelf by EXACT KEY (\`POST /api/keys/resolve\`, tenjin#774): no
+ * question, no text legs, no fuzzy fallback. The push failure arm's team leg
+ * sends the two fingerprint hashes of a failure and nothing else about it.
+ *
+ * The answer is the same envelope \`/api/search\` returns, field \`items\`,
+ * so it goes through the same fail-closed validation as a search. What differs
+ * is the STATUS CODES A CALLER HAS TO TELL APART, which askTenjin folds into
+ * one null: a shelf with \`KNOWLEDGE_KEYS\` off answers 404 \`not_enabled\`,
+ * and a deployment too old to have the route answers 404 too — both mean
+ * "stop asking this shelf for a while", not "the shelf is down". Everything
+ * else that is not a 200 (a refused bypass, a 5xx, a timeout) is \`no-answer\`,
+ * which feeds the outage brake exactly as a failed search does. Never throws.
+ *
+ *  - \`{ kind: 'hit', searchId, rich, stored }\`  at least one piece carries a key
+ *  - \`{ kind: 'miss', searchId }\`                 200, nothing carried any key
+ *  - \`{ kind: 'off' }\`                            404: keys are not on here
+ *  - \`{ kind: 'no-answer' }\`                      anything else
+ */
+async function askTenjinKeys(keys, config, shelfBaseUrl, timeoutMs, trigger, limit) {
+  const target =
+    typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0 ? shelfBaseUrl : config.baseUrl;
+  let url;
+  try {
+    url = new URL('/api/keys/resolve', target);
+  } catch {
+    return { kind: 'no-answer' };
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return { kind: 'no-answer' };
+  const want = typeof limit === 'number' && limit > 0 ? limit : ${SEARCH_LIMIT};
+  try {
+    const bypass = shelfBypassHeaders(url.href, config);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'user-agent': composedUserAgent(),
+        ...bypass,
+      },
+      ...bypassRedirect(bypass),
+      body: JSON.stringify({
+        keys,
+        limit: want,
+        ...(typeof trigger === 'string' && trigger.length > 0 ? { trigger } : {}),
+      }),
+      signal: AbortSignal.timeout(
+        typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : SEARCH_TIMEOUT_MS,
+      ),
+    });
+    if (res.status === 404) return { kind: 'off' };
+    if (res.status !== 200) return { kind: 'no-answer' };
+    const body = await res.json();
+    if (!isRecord(body)) return { kind: 'no-answer' };
+    const parsed = parseSearchBody(body, url, want);
+    if (parsed === null) return { kind: 'no-answer' };
+    if (parsed.rich.length === 0) return { kind: 'miss', searchId: parsed.searchId };
+    return { kind: 'hit', searchId: parsed.searchId, rich: parsed.rich, stored: parsed.stored };
+  } catch {
+    return { kind: 'no-answer' };
+  }
+}
+
+/**
+ * The v3 discovery envelope, validated. Shared by the search and the key
+ * resolve, which answer in the same shape. \`url\` is the request url the
+ * candidates must sit on; \`limit\` bounds how many are projected. Null when
+ * the envelope is not one this hook can read.
+ */
+function parseSearchBody(body, url, limit) {
   // FAIL-CLOSED, mirroring src/lib/agent-api.ts. This script talks to whatever
   // origin baseUrl names, so the response is untrusted input, and the fields it
   // carries are ACTIONABLE: a resourceId is interpolated into a command the agent
