@@ -3881,6 +3881,36 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
+   * MINOR 3 (round 2). TWO CLOCKS, AND BOTH DECIDE. The row's own `at >=`
+   * bound is not the same fact as the parked entry the row describes: the
+   * child rejects a cache older than its window, so a handoff can be past
+   * reach while its `relayed` row is still inside the row bound. The dispatch
+   * arm stopped going silent on the slot alone for exactly that reason, and a
+   * hint arm still suppressing on the row alone only moved which row explains
+   * the silence. Aged through the cache's OWN stamp, which is what the child
+   * reads, so this pins the divergence rather than the shared expiry above.
+   */
+  it('lets the parent arm speak when the relayed row outlives its handoff', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    // The row stays fresh; only the handoff the row names goes out of reach.
+    patchCache({ at: new Date(Date.now() - PUSH_CACHE_TTL_MS - 60_000).toISOString() });
+
+    // Nothing can be handed to a child any more, so the parent gets the piece.
+    const orphaned = await runScript(pushSubagentHookScript(dataDir), start);
+    expect(orphaned.stdout).toBe('');
+
+    const prompt = await runScript(pushPromptHookScript(dataDir), parentPrompt);
+    expect(injected(prompt)).not.toBeNull();
+    expect((await ledger()).find((r) => r.trigger === 'prompt')).toMatchObject({
+      action: 'injected',
+      candidate: expect.objectContaining({ resourceId: RESOURCE_ID }),
+    });
+  });
+
+  /**
    * A paid pointer that reaches a child (a moderate hit rides the cache) is
    * metadata, the free preview verb, and defer-to-parent wording. `inspect` is
    * NOT purchase guidance: it never signs, never pays and never saves

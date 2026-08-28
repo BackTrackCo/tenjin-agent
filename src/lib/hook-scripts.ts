@@ -1719,15 +1719,10 @@ async function main() {
   //
   // \`handoffHolder\` is read only to LABEL the loss (same piece, or another
   // one), never to decide it: the claim already decided, atomically.
-  // A slot can outlive its cache, and PRESENCE is not liveness: the child
-  // rejects a cache older than the window, so a stale row must not read here as
-  // a live handoff. Same rule, same window, on both sides.
-  const liveHandoff = (sid) => {
-    const parked = getState(sid, STATE_CACHE);
-    if (parked === null || typeof parked.at !== 'string') return false;
-    const at = Date.parse(parked.at);
-    return Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS;
-  };
+  // A slot can outlive its cache, and PRESENCE is not liveness: \`liveHandoff\`
+  // (state store) applies the child's own rule, and every arm that withholds a
+  // piece because a relay is in flight asks it, so the hint path below cannot
+  // keep suppressing what this one has stopped suppressing.
   let handoff = false;
   let handoffHolder = '';
   if (config.push === 'on' && sessionId !== null) {

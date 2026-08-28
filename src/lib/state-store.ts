@@ -1425,14 +1425,41 @@ function alreadyShown(sessionId, resourceId) {
   return storeGet(STORE_SQL.alreadyShown, [storeSession(sessionId), resourceId]) !== null;
 }
 
+/**
+ * Is a handoff parked that a subagent could still consume?
+ *
+ * PRESENCE IS NOT LIVENESS, and the row is not the cache. \`STATE_RELAY_SLOT\`
+ * and the \`relayed\` injections row both outlive the parked entry they describe
+ * — the entry expires on its own clock, the first child consumes it, or a
+ * rollback of a failed park could not be written either — so anything that
+ * withholds a piece BECAUSE a relay is in flight has to ask the cache, and has
+ * to apply the child's own rule (SubagentStart rejects a cache older than the
+ * window). Same rule, same window, on every side.
+ */
+function liveHandoff(sessionId) {
+  const parked = getState(sessionId, STATE_CACHE);
+  if (!isRecord(parked) || typeof parked.at !== 'string') return false;
+  const at = Date.parse(parked.at);
+  return Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS;
+}
+
 /** Like alreadyShown, but counting a parent relay whose handoff is still live.
  *  A relayed piece is not an 'injected' claim (the child still has to deliver
  *  it), yet it is a line the parent already read, so the parent-facing arms
  *  dedupe on this set — for as long as a subagent can still be reached by it,
  *  and no longer. That window is in the name because it is the safety
- *  property: unbounded, this would suppress a piece nothing ever delivered. */
+ *  property: unbounded, this would suppress a piece nothing ever delivered.
+ *
+ *  TWO CLOCKS, BOTH REQUIRED. The row's own \`at >=\` bound expires the
+ *  suppression, but a fresh row over a cache that is already gone suppresses a
+ *  piece no child can be handed any more: the dispatch arm stopped going
+ *  silent on the slot alone for exactly that reason, and a hint arm that kept
+ *  suppressing on the row alone would have moved the silence rather than
+ *  ending it. So the relay half is gated on the parked entry too. */
 function alreadyShownOrLiveRelay(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
+  if (alreadyShown(sessionId, resourceId)) return true;
+  if (!liveHandoff(sessionId)) return false;
   return (
     storeGet(STORE_SQL.alreadyShownOrLiveRelay, [
       storeSession(sessionId),
