@@ -1307,13 +1307,13 @@ describe('runInstall: interactive walkthrough', () => {
   });
 
   /**
-   * With the experiment armed the disclosure has to stop promising the hooks are
-   * advisory: the research arm can deny a WebSearch or WebFetch outright and
-   * answer it from the marketplace. It also has to stop reporting the six push
-   * entries inside the search-hook count, which is the number an operator reads
-   * to decide whether the experiment wired anything at all.
+   * With the experiment armed the disclosure has to name the five extra events
+   * the arms fire on and say, in its own words, that none of them can block or
+   * change a tool call. It also has to stop reporting the six push entries
+   * inside the search-hook count, which is the number an operator reads to
+   * decide whether the experiment wired anything at all.
    */
-  it('discloses the deny and counts the push arms apart, once push is on', async () => {
+  it('discloses the arms and counts them apart, once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1321,15 +1321,14 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).not.toContain('They can never block or change the tool call.');
     expect(text).toContain(
-      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+      'Every arm only adds context beside the call; none can block or change it.',
     );
     expect(text).toContain(
       'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
     );
-    // ...and not the old "beside these", which put the entry that carries the
-    // deny outside the set of arms it belongs to.
+    // ...and not the old "beside these", which put the widened WebSearch entry
+    // outside the set of arms it belongs to.
     expect(text).not.toContain('more hook entries run beside these');
     expect(text).toContain('Turn it off: tenjin push off');
     // Three search EVENTS wired (PreToolUse carries two of the four base
@@ -1345,7 +1344,7 @@ describe('runInstall: interactive walkthrough', () => {
    * generated WebSearch script the push lookup runs before the reminder line, so
    * with push armed `remind` makes the same one request `auto` does. The flat
    * "they send nothing off-machine" was therefore false on exactly the arm that
-   * can cancel a tool call — and it is the string `tenjin push on` prints too.
+   * reaches the network — and it is the string `tenjin push on` prints too.
    */
   it('drops the nothing-leaves-the-machine claim on the remind branch once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
@@ -1357,7 +1356,11 @@ describe('runInstall: interactive walkthrough', () => {
     const text = human(res);
     expect(text).not.toContain('they send nothing off-machine');
     expect(text).toContain('the query text does leave the machine');
-    expect(text).toContain('that call may be denied and answered from the shelf instead');
+    // ...and it says so WITHOUT reviving the deny: no script this CLI writes can
+    // cancel a tool call any more, so the sentence has to end on the search
+    // still running.
+    expect(text).toContain('the search itself still runs');
+    expect(text).not.toContain('denied');
   });
 
   it('keeps the remind branch flat when push is NOT armed', async () => {

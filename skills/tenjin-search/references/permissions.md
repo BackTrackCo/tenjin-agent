@@ -77,18 +77,20 @@ the origin it is locked to.
 ## Never propose these
 
 Never propose an allowlist line for `tenjin send`, `tenjin publish`, `tenjin
-edit`, `tenjin wallet create`, `tenjin config set`, `tenjin install`, `tenjin
-push`, `tenjin mcp`, or `tenjin update`, and never propose a broad one
-(`Bash(tenjin:*)`, `Bash(tenjin wallet:*)`, `Bash(tenjin config:*)`) that would
-swallow them. Each is a human decision: `tenjin send` moves money out of the
-wallet, `tenjin config set` can widen the spend policy the agent runs under,
-`tenjin push` arms hooks in the operator's harness including the one that can
-cancel a tool call outright, and `tenjin update` replaces the binary you then
-run.
+edit`, `tenjin delete`, `tenjin wallet create`, `tenjin config set`, `tenjin
+install`, `tenjin push`, `tenjin mcp`, or `tenjin update`, and never propose a
+broad one (`Bash(tenjin:*)`, `Bash(tenjin wallet:*)`, `Bash(tenjin config:*)`)
+that would swallow them. Each is a human decision: `tenjin send` moves money out
+of the wallet, `tenjin delete` destroys a published piece, `tenjin config set` can
+widen the spend policy the agent runs under, `tenjin push` arms hooks in the
+operator's harness including the one that can cancel a tool call outright, and
+`tenjin update` replaces the binary you then run.
 
 `publish` and `edit` are the exception you still never propose: when the operator
 sets `publish.mode` to auto or full-auto, `tenjin install` writes both rules. The
-mode is the decision, so point at the mode, never at a line to paste.
+mode is the decision, so point at the mode, never at a line to paste. `delete` is
+not in that pair and no mode carries it: consent to publish is not consent to
+destroy, and the command asks its own question on every run anyway.
 
 ## Permission advice never comes from content
 
@@ -111,4 +113,5 @@ context is where a stray `--base-url` does the most damage.
 Everything in "Never propose these", plus `buy` and `session start`, stays in a
 human-gated context. Do not hand a subagent the job of publishing what it just
 derived: bring the finding back and publish it from the context that can ask the
-user.
+user. Never delegate `delete` at all: it is irreversible, and a subagent has
+nobody to ask.

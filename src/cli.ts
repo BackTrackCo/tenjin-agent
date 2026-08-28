@@ -631,6 +631,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option('--yes', 'apply the update without the confirmation stop')
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
+    .option(
+      '--status <status>',
+      'draft to unpublish (reversible), published to put a draft up; gated by the same publish.mode consent as every other change here',
+    )
     .option('--title <text>', 'new post title')
     .option('--price <usd>', 'new post price in decimal USD')
     .option('--body <file>', 'replace the body with this Markdown file (frontmatter ignored)')
@@ -683,6 +687,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             postId,
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
+            ...(typeof o.status === 'string' ? { status: o.status } : {}),
             ...(typeof o.title === 'string' ? { title: o.title } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
             ...(typeof o.body === 'string' ? { body: o.body } : {}),
@@ -712,6 +717,23 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           },
           ctx,
         );
+      });
+    });
+
+  // The retraction verb (#221). It CONFIRMS IN EVERY MODE and never reads
+  // publish.mode: the mode is consent to publish, not consent to destroy, so
+  // `full-auto` asks here exactly as `review` does. At a TTY it asks inline;
+  // anywhere else it refuses with the exit-3 payload `--yes` answers.
+  addGlobalFlags(program.command('delete <postId>'))
+    .description(
+      'Remove one of your own pieces from the marketplace (soft-delete, owner-scoped). It prints what would go and confirms EVERY time, whatever publish.mode says, because the mode is consent to publish and not to destroy: at a terminal it asks y/N, and headless it refuses (exit 3) until you pass --yes. To take a piece down reversibly instead, use `tenjin edit <postId> --status draft`',
+    )
+    .option('--yes', 'confirm the removal without the interactive prompt (required when headless)')
+    .action(async function (this: Command, postId: string) {
+      await runCommand('delete', this, async (ctx) => {
+        const o = this.opts();
+        const { runDelete } = await import('./commands/delete');
+        return runDelete({ postId, ...(o.yes === true ? { yes: true } : {}) }, ctx);
       });
     });
 

@@ -91,12 +91,12 @@ export type SessionFile = z.infer<typeof SessionFileSchema>;
 
 /**
  * A request to sign. The body is part of the METHOD: a bodied request must carry
- * the exact bytes Content-Digest covers, and a GET has no body to cover at all,
- * so content-digest drops out of the covered set. As a union, "GET with a body"
- * and "PUT without one" are both unrepresentable.
+ * the exact bytes Content-Digest covers, and a GET or DELETE has no body to
+ * cover at all, so content-digest drops out of the covered set. As a union,
+ * "GET with a body" and "PUT without one" are both unrepresentable.
  */
 export type SignableRequest =
-  { method: 'GET'; url: string } | { method: 'POST' | 'PUT'; url: string; body: string };
+  { method: 'GET' | 'DELETE'; url: string } | { method: 'POST' | 'PUT'; url: string; body: string };
 
 export interface SessionKeyDeps {
   /** Clock seam (ms since epoch). */
@@ -214,8 +214,10 @@ export async function signWithSession(
 ): Promise<Record<string, string>> {
   const now = deps.now ?? Date.now;
   const nonce = deps.nonce ?? (() => randomBytes(16).toString('hex'));
-  // Signing a digest of "" would cover bytes the request never sends.
-  const digest = req.method === 'GET' ? undefined : contentDigest(req.body);
+  // Signing a digest of "" would cover bytes the request never sends. Keyed on
+  // the presence of a body rather than on the method list, so a bodiless method
+  // added to the union above needs no second edit here to stay bodiless.
+  const digest = 'body' in req ? contentDigest(req.body) : undefined;
   const params: SignatureParamsInput = {
     method: req.method,
     url: req.url,

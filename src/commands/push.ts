@@ -85,8 +85,7 @@ export interface PushOnDeps {
  *    the common case and wires as before.
  *
  * And a run that does wire six entries into the operator's home has to disclose
- * what they do, in the same words `install` uses, including the one arm that can
- * deny a tool call.
+ * what they do, in the same words `install` uses.
  */
 export async function runPushOn(
   ctx: CommandContext,
@@ -191,7 +190,6 @@ export interface PushLedgerTallies {
    *  its resourceId and a local pairing by `pairing:<id>`; both land in
    *  `injections.resource_id`. */
   candidates: number;
-  denies: number;
   injectedTokens: number;
   /**
    * What `tenjin push grade` made of the injected rows, per hook x shelf.
@@ -222,15 +220,13 @@ const EMPTY_TALLIES: PushLedgerTallies = {
   byShelf: {},
   byReason: {},
   candidates: 0,
-  denies: 0,
   injectedTokens: 0,
   graded: {},
 };
 
 /**
  * Tally the last {@link LEDGER_WINDOW_DAYS} days of decision rows: total rows, a
- * trigger x action breakdown, a shelf breakdown, how many rows denied a tool
- * call, and the injected-token total.
+ * trigger x action breakdown, a shelf breakdown, and the injected-token total.
  *
  * COMPLETE, NOT A FLOOR. This used to read the last 256 KB of an append-only
  * `push-ledger.jsonl` and say so — `tail: true`, and a human line explaining
@@ -254,7 +250,6 @@ export async function readLedgerTallies(
     const byShelf: Record<string, number> = {};
     const byReason: Record<string, number> = {};
     const candidates = new Set<string>();
-    let denies = 0;
     let injectedTokens = 0;
     for (const row of rows) {
       const trigger = typeof row.hook === 'string' ? row.hook : 'unknown';
@@ -269,7 +264,6 @@ export async function readLedgerTallies(
       if (typeof row.resource_id === 'string' && row.resource_id !== '') {
         candidates.add(`${shelf}:${row.resource_id}`);
       }
-      if (row.deny === 1) denies += 1;
       if (action === 'injected' && typeof row.tokens === 'number' && Number.isFinite(row.tokens)) {
         injectedTokens += row.tokens;
       }
@@ -281,7 +275,6 @@ export async function readLedgerTallies(
       byShelf,
       byReason,
       candidates: candidates.size,
-      denies,
       injectedTokens,
       // A second query over the same open store: `statusRows` counts every
       // decision, and this one only the rows that were actually shown, which is
@@ -407,7 +400,7 @@ function renderStatusLines(data: {
     `hook entries: ${hookEntries.present}/${hookEntries.planned}${
       hookEntries.path === null ? ' (no settings.json found)' : ` in ${hookEntries.path}`
     }`,
-    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ${ledger.denies} deny(s), ~${ledger.injectedTokens} injected token(s)`,
+    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ~${ledger.injectedTokens} injected token(s)`,
   ];
   for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {
     const byAction = Object.entries(actions)

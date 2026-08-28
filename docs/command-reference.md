@@ -32,7 +32,7 @@ Useful flags:
 
 ### Hooks
 
-`install` registers four Claude Code hooks. The WebSearch hook (`hooks.webSearch`, default `auto`) checks Tenjin before a `WebSearch` (and, with the push experiment on, before a `WebFetch`). The dispatch hook (`hooks.agentDispatch`, default `auto`, disjoint from `hooks.webSearch`) asks the same question when a subagent is dispatched, sending at most 100 characters of the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session; set it to `remind` or `off` to keep subagent prompts on the machine while the WebSearch hook stays on. **It only names a piece on a strong hit** (the five-way test under [Push](#push-experimental)); weaker matches are recorded to the push ledger and not shown, because a subagent prompt is a work order rather than a question and keyword overlap with a listing means much less there. No `inherit`: both default `auto` and can be set independently. `hooks.searchMode` (shipped in `alpha.14`) still reads as `hooks.webSearch` for one release so an existing `off`/`remind` opt-out carries to both hooks; `hooks.dispatchMode` (including `inherit`) never shipped to npm and is kept only for unreleased `main` testers. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
+`install` registers four Claude Code hooks. The WebSearch hook (`hooks.webSearch`, default `auto`) checks Tenjin before a `WebSearch` (and, with the push experiment on, before a `WebFetch`). The dispatch hook (`hooks.agentDispatch`, default `auto`, disjoint from `hooks.webSearch`) asks the same question when a subagent is dispatched, sending at most 100 characters of the dispatch's description plus at most 400 characters of its prompt, at most 10 lookups per session; set it to `remind` or `off` to keep subagent prompts on the machine while the WebSearch hook stays on. **It only names a piece on a strong hit** (the marketplace's own verdict, see [Push](#push-experimental)); weaker matches are recorded to the push ledger and not shown, because a subagent prompt is a work order rather than a question and keyword overlap with a listing means much less there. No `inherit`: both default `auto` and can be set independently. `hooks.searchMode` (shipped in `alpha.14`) still reads as `hooks.webSearch` for one release so an existing `off`/`remind` opt-out carries to both hooks; `hooks.dispatchMode` (including `inherit`) never shipped to npm and is kept only for unreleased `main` testers. The Stop hook (`hooks.stopNag`) reminds you at the end of a turn about searches that are still open. The SessionStart hook (`hooks.sessionPrimer`) prints one paragraph on when to search first, and makes no network call.
 
 `tenjin push on` registers six more settings entries, across four scripts, described in [Push (experimental)](#push-experimental) below. Every `tenjin install` WRITES all four of those script files, whether or not push has ever been on — they read `hooks.push` at the top of their own run and exit in milliseconds when it is not `on` — but a machine that has never run `tenjin push on` has no entry pointing at them, so nothing invokes them and the hooks registered stay at these four.
 
@@ -226,7 +226,7 @@ Publishes Markdown with optional metadata and a local safety scan. Hard blocks c
 
 On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
 
-**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and looks for a `published:<hash>` record in the state store (`~/.tenjin/state.db`). On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The record is written after a successful publish and is never aged out. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: nothing promotes a draft, so publishing the same body again is how a draft ever reaches a public piece. It is a same-machine guard, not a guarantee across machines.
+**The same body is published once per machine.** Before any request, `publish` hashes the body (line endings and trailing whitespace normalized away, so a re-render of the same finding hashes the same) and looks for a `published:<hash>` record in the state store (`~/.tenjin/state.db`). On a hit it exits 0 without touching the wallet or the network, printing `Already published: <url>`; `--json` returns `{"alreadyPublished": true, "url": "..."}`. The record is never aged out. This exists because the Stop-hook capture ask is guarded once per _session_, which dedups nothing when two agents watching related sessions both write up the same finding. `--draft` is exempt in both directions: a draft parks privately, writes no record, and is never deduped against one. The record is written when the body actually goes public, whether by a non-draft `publish` or by promoting the draft with `tenjin edit <post-id> --status published`. It is a same-machine guard, not a guarantee across machines.
 
 The named searches are accepted or refused as one batch: Tenjin matches every id against a search it actually recorded, and one it cannot match refuses the whole publish. That refusal arrives after your wallet has signed, so any id this machine has no record of is named on stderr before anything is signed. It stays a warning rather than a refusal, because a search recorded on another machine is missing here and valid there.
 
@@ -236,13 +236,41 @@ With no change flag, prints one of your posts and its card. With change flags, m
 
 It accepts the card flags from `publish`, plus:
 
-| Flag                    | Effect                                 |
-| ----------------------- | -------------------------------------- |
-| `--title <text>`        | New post title.                        |
-| `--body <path>`         | Replace the body from a Markdown file. |
-| `--add-question <text>` | Append one question. Repeatable.       |
-| `--add-task <text>`     | Append one task. Repeatable.           |
-| `--clear <field>`       | Empty one card field. Repeatable.      |
+| Flag                    | Effect                                               |
+| ----------------------- | ---------------------------------------------------- |
+| `--title <text>`        | New post title.                                      |
+| `--body <path>`         | Replace the body from a Markdown file.               |
+| `--status <status>`     | `draft` to unpublish, `published` to put a draft up. |
+| `--add-question <text>` | Append one question. Repeatable.                     |
+| `--add-task <text>`     | Append one task. Repeatable.                         |
+| `--clear <field>`       | Empty one card field. Repeatable.                    |
+
+`--status draft` is the reversible way to take a piece off the marketplace: the id
+and the body survive, and `--status published` puts it back. It is an ordinary
+change flag, so it diffs like the rest (setting the status a post already has
+writes nothing) and it runs the same `publish.mode` consent gate. A promotion to
+`published` is the draft actually going public, so it settles what the draft
+publish deferred: the stored body is re-scanned at the block tier (a draft made
+on the web desk was never scanned locally), any searches named by the
+`publish --draft --search-id` that created the draft are claimed on the same PUT
+and their local loops closed, and the same-body dedup marker is written.
+
+That re-scan can refuse the promotion with `PUBLISH_BLOCKED`, which `--yes` never
+clears. On the `--json` envelope, each claimed search reports under
+`data.searches` as `{id, closed, relinked?}`, the same entry shape `publish`
+uses minus `prefill`; the field is absent when the promotion claimed nothing.
+
+### `tenjin delete <post-id>`
+
+Removes one of your own pieces (soft-delete, owner-scoped `DELETE /api/posts/<id>`). It reads the post first, prints the title, status, price and url, and then **confirms on every run in every `publish.mode`**: the mode is consent to publish and never consent to destroy, so `full-auto` asks here exactly as `review` does.
+
+At a terminal it asks `y/N` inline. Anywhere else, including under an agent, a pipe, or the MCP server, it refuses with `NEEDS_CONFIRMATION` (exit 3) whose `details` carry the post identity, `confirmCommand`, and `reversibleAlternative`; re-run with `--yes` to confirm. A declined prompt is `REFUSED` (exit 3), and a server refusal after the confirmation is `DELETE_FAILED` (exit 4), which means the piece is still live.
+
+| Flag    | Effect                                                                 |
+| ------- | ---------------------------------------------------------------------- |
+| `--yes` | Confirm the removal without the prompt. Required when there is no TTY. |
+
+Prefer `tenjin edit <post-id> --status draft` when the piece should come down but not be lost. Every successful `publish` prints both commands with the real id, and carries them on the `--json` envelope as `data.undo` (`remove`, plus `unpublish` on a published piece). `data.undo.remove` carries no `--yes`, deliberately: it is the command that STARTS the undo, so each surface's own confirmation still runs. The `--yes` form appears only in a refusal payload's `confirmCommand`, which answers a question the user has already been shown.
 
 ### `tenjin profile`
 
@@ -344,7 +372,9 @@ Sets `hooks.push` to `on` and immediately wires the four push hook scripts (six 
 | `tenjin-push-subagent.mjs` | `SubagentStart`                            | —                                 | Hands a subagent the finding the dispatch hook cached for it seconds earlier, at its first turn.                           |
 | `tenjin-push-context.mjs`  | `PostToolUse` (read), `PreToolUse` (churn) | `Read` / `Edit\|Write\|MultiEdit` | Notices packages a file imports, and a stuck edit loop (the same file edited repeatedly).                                  |
 
-A hit is `strong` only when all five of these hold: the marketplace returned a rank 2 to beat it (scored over the same title-and-excerpt text), rank 1's own overlap with the query is at least `0.5`, that overlap leads rank 2 by `0.15`, at least three whole query words matched, and the `0.5` floor still holds once the free `inspect` body is scored in as well (a card can promise what the body does not keep). One thing only ever takes `strong` away again and never hands it out: the server's own `low` confidence bucket demotes a locally-strong hit to `moderate`, one-directionally, so the deny arm never fires on a match the marketplace itself called weak, while `high` and `medium` change nothing. A lone candidate is at most `moderate`, which is offered as a pointer and denies nothing. On a strong, free hit the prompt, failure, and subagent arms may attach the finding's full body inline; the context arm is log-only in this phase, recording what it would have said so its precision earns out before it is allowed to speak. Separately, on a strong, free hit at the moment of the search itself, the WebSearch/WebFetch hook may deny the call outright and hand back the finding in its place (abort-and-answer) — the one hook entry in this CLI that can ever do that. Every decision, spoken or not, is written to the state store (`~/.tenjin/state.db`) that `tenjin push status` summarizes.
+A hit is `strong` when the marketplace says so: the top candidate is `corroborated` (both of its retrieval legs agreed on the piece) and its `confidence` is not `low`. Anything else is `none`, is recorded to the ledger as `weak`, and falls through from the team shelf to the public one. Nothing is scored on the machine — the shelf has the embeddings, the full body and both retrieval legs, while a hook has a title and an excerpt. On a strong, free hit the prompt, failure, research and subagent arms attach the finding's full body as context (a paid piece is offered as a pointer instead); the context arm is log-only in this phase, recording what it would have said so its precision earns out before it is allowed to speak. No arm can block or change a tool call: the WebSearch/WebFetch hook injects the finding beside the search and lets the search run. Every decision, spoken or not, is written to the state store (`~/.tenjin/state.db`) that `tenjin push status` summarizes.
+
+Every hook lookup carries its arm name as `trigger`, so the marketplace's per-trigger stats can tell a prompt lookup from a churn one. The failure, read and churn arms additionally send the package they are about as an `appliesTo: {"packages": ["<name>"]}` filter rather than pasting the name in front of the query. That filter is HARD — a piece whose card claims no packages cannot come back to an arm that sent one — and it carries exactly one name, because the marketplace ANDs every value it is given.
 
 **The failure arm fires on error markers, behind allowlisted commands.** Claude Code's Bash result carries no exit code, so a failure is inferred from the output. Two gates, both before any lookup: the command's head (any segment of a `&&`/`;`/`|` chain, after `sudo`, `timeout`, `npx`, `pnpm exec` and `FOO=bar` prefixes) must be a build, test, migration, install or lint tool (`pnpm`, `npm`, `cargo`, `make`, `tsc`, `vitest`, `pytest`, `eslint`, `drizzle-kit`, `docker`, `git`, `rustc`, `gcc`, `clang`, …; `npm ls`/`view`/`audit`-style subcommands excluded), so `which`, `grep`, `test`, `diff`, `ls` and `git diff --exit-code` — which exit 1 to say "no" — never fire it; and the output tail must carry a real marker (`FAIL`, `AssertionError`, `N failed`, a line starting `Error:`/`TypeError:`/`error:`, a Python traceback, `exit code N`, `ENOENT`-class codes, `npm ERR!`, `error TS1234:`, cargo's `error[E0…]`, `panic:`, `fatal:`), not a prose word like "error", "failed" or "not found". Stderr chatter with no marker is success.
 
@@ -360,7 +390,7 @@ To take the scripts and their settings entries away entirely, run `tenjin uninst
 
 Reports the push mode, the capture mode (`hooks.capture` — see [Stop-hook capture](#stop-hook-capture) for what it prompts), and BOTH halves of "wired": whether the four scripts are present on disk, and how many of the six settings entries are actually registered (`present/planned`, with the settings file named). Either half alone reports a healthy sidecar that does nothing — scripts with no entries never run, entries with no scripts fail silently — so `push: on` is flagged as not fully wired unless both agree.
 
-Then a tally of the last 7 days of decision rows: total rows, how many distinct findings they touched, how many denied a tool call outright, the total tokens injected, and the breakdowns by trigger x action, by shelf (`public`, `team`, or `local` for a replayed error→fix pairing this machine recorded itself), and by `reason` (why a fire said nothing: `miss`, `weak`, `already-injected`, `lookup-cap`, `quiet`, `no-answer`, `no-time` — the first leg spent the shared deadline — and `watchdog`), sorted by count. The counts are complete for the window: the rows are indexed, so nothing is a floor.
+Then a tally of the last 7 days of decision rows: total rows, how many distinct findings they touched, the total tokens injected, and the breakdowns by trigger x action, by shelf (`public`, `team`, or `local` for a replayed error→fix pairing this machine recorded itself), and by `reason` (why a fire said nothing: `miss`, `weak`, `already-injected`, `lookup-cap`, `quiet`, `no-answer`, `no-time` — the first leg spent the shared deadline — and `watchdog`), sorted by count. The counts are complete for the window: the rows are indexed, so nothing is a floor.
 
 Under that, what `tenjin push grade` has made of the rows that were actually shown, one line per arm and split by shelf: `used`, `rejected`, `unobserved`, `ungraded` (shown but not yet judged) and `posted` (verdicts that reached the shelf). Skipped fires are not counted here — nothing was shown, so there is no verdict anybody owes.
 
@@ -414,6 +444,8 @@ tenjin config set shelfBypassSecret <secret>
 `config get shelfBypassSecret` and `config` print `set` or `unset`, never the value, in both the human lines and `--json`. The value itself is in `~/.tenjin/config.json`.
 
 **Both settings are required.** Team mode is "a secret **and** a `baseUrl` that is a shelf of the team's own", not a non-empty secret. The two commands above are independent, so a machine can end up with the secret while `baseUrl` is still the marketplace — running them in the other order, or the secret line alone on a second machine. That state stays in **public mode**, with the scan's warn tier and the full confirm cascade on, rather than treating tenjin.blog as a private shelf. `config set` says so when it happens, and `tenjin doctor` carries a `team shelf` check.
+
+The mirror half is `baseUrl` on a shelf of your own with no secret. Doctor warns there too, from the settings alone, before the network says anything. And when a protected deployment answers the probes with its protection page, `api-contract`, `search-contract` and `read-path` say so and point at `shelfBypassSecret` rather than at the base URL, which was the setting that was already right. The signal comes from the response itself: an HTML content-type, a 401 or 403, or a landing on a host other than the one asked for. A 401 or 403 in the API's own JSON envelope is not called a protection page, since that is an honest refusal rather than a wall, but on a shelf of your own it still points at the key, because a missing or stale secret is the likeliest thing being refused. The remedy follows what the probe did. With no secret configured the fix is to set one; when the key WAS sent and still did not get past (a stale or rotated key, or a proxy, WAF or another sign-in layer answering instead) the fix is to update it, never to set the secret this machine already has. A blocked redirect names the key only when its `Location` leaves the host asked for, since a same-host 3xx is what an `http://` base URL or a non-canonical host name gets with a perfectly good key; that one says the URL redirects and to point `baseUrl` at the host it lands on. Naming the key at all needs a key this machine could actually use: the marketplace takes none, and a `--base-url` or `TENJIN_BASE_URL` override pointing anywhere but the configured shelf carries none, so a page arriving from either is reported as a proxy or a sign-in wall with no credential prescribed.
 
 ### What changes in team mode
 

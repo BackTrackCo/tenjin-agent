@@ -530,3 +530,36 @@ describe('skills self-heal', () => {
     expect(await readFile(wiredPath(), 'utf8')).toBe(STALE);
   });
 });
+
+/**
+ * The retraction verb the CLI simply did not have (#221): an agent asked to take
+ * a publish back got `unknown command 'delete'`. These are dispatcher-level only
+ * — routing and the edge check that fires before any wallet or network touch.
+ */
+describe('the delete verb is registered', () => {
+  it('is no longer an unknown command, and its --help names the every-mode confirm', async () => {
+    const cap = captureIo();
+    const code = await main(['delete', '--help'], cap.io);
+    expect(code).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--yes');
+    expect(help).toMatch(/confirms EVERY time/i);
+    expect(help).toContain('--status draft');
+  });
+
+  it('routes a malformed post id to the delete command as USAGE, offline', async () => {
+    const cap = captureIo();
+    const code = await main(['delete', 'not-a-uuid', '--yes'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('delete');
+    expect(parsed.error.code).toBe('USAGE');
+  });
+
+  it('offers --status on edit, the reversible half', async () => {
+    const cap = captureIo();
+    const code = await main(['edit', '--help'], cap.io);
+    expect(code).toBe(0);
+    expect(cap.stdout()).toContain('--status <status>');
+  });
+});
