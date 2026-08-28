@@ -7,7 +7,7 @@ import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { STATE_DB_FILE, STORE_SQL, openStore, projectId } from './state-store';
+import { STATE_DB_FILE, STORE_SQL, openStore, projectId, teamCoarseKey } from './state-store';
 import { loadSearches, recordSearch, type StoredSearch } from './search-store';
 import {
   CAPTURE_REASON,
@@ -2467,6 +2467,11 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     const local = (await pairings()).map((p) => String(p.coarse_key));
     expect(new Set(local).size).toBe(1);
     expect(coarse.map((k) => k.slice('sig_v1c:'.length))).not.toContain(local[0]);
+    // THE HOOK'S INLINE COPY EQUALS THE TS EXPORT `tenjin sync` publishes with:
+    // salt over the stored coarse hash, not the raw message. A drift here would
+    // make every resolve query miss every synced post, silently.
+    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'));
+    expect(coarse[1]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/web.git'));
     expect((await pairings()).map((p) => String(p.key))).toEqual(
       fine.map((k) => k.slice('sig_v1:'.length)),
     );

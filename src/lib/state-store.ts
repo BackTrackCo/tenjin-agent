@@ -579,13 +579,18 @@ const STATE_KEYS_OFF_PREFIX = 'keys_off:';
 const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
 /**
  * The team-shelf post a LOCAL pairing corresponds to, keyed by the pairing's
- * row id under the machine session: \`{ postId, origin, at, closedAt? }\`.
- * Written when the failure arm's team leg replays a post and opens a pairing
- * beside it, and stamped \`closedAt\` when this machine's later pass closes
- * that pairing — which is the second, independent close the shelf has no
- * endpoint for, so \`tenjin sync\` reads it and PUTs the post \`verified\`
- * instead of publishing a duplicate. No column: the pairings table is not
- * versioned for this, and the fact is a join key, not a row attribute.
+ * row id under the machine session. ONE SHAPE, shared with \`tenjin sync\`
+ * (commands/sync.ts, which imports the mirrored STATE_PAIRING_POST_PREFIX):
+ * \`{ postId, origin, at, own?, held?, closedAt?, status?, fixFiles? }\`.
+ * The failure arm's team leg writes \`{ postId, origin, at }\` when it replays
+ * a post and opens a pairing beside it, and stamps \`closedAt\`, \`status\`
+ * and \`fixFiles\` when this machine's later pass closes that pairing — which
+ * is the second, independent close the shelf has no endpoint for, so
+ * \`tenjin sync\` reads it and PUTs the post \`verified\` instead of
+ * publishing a duplicate. Sync itself adds \`own: true\` on a post it
+ * published and \`held: true\` on a holder it lost to. No column: the
+ * pairings table is not versioned for this, and the fact is a join key, not
+ * a row attribute.
  */
 const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 const STATE_CAPTURE_ASKED = 'capture_asked';
@@ -1604,6 +1609,12 @@ export function shortHash(text: string): string {
 export function projectId(cwd: string | null | undefined): string | null {
   return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;
 }
+
+/** ⚠ MIRRORED with `STATE_PAIRING_POST_PREFIX` in the hook core above: the
+ *  `session_state` row (machine session `''`) linking a local pairing to its
+ *  team-shelf post, `{ postId, origin, at, own?, held?, closedAt?, status?,
+ *  fixFiles? }`. The failure arm writes it; `tenjin sync` reads and extends it. */
+export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 
 /**
  * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed

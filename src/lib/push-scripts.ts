@@ -1754,16 +1754,24 @@ function originUrl(configPath) {
 }
 
 /**
- * The coarse key AS IT GOES ON THE WIRE: salted with the repo. The local
- * coarse key is unsalted because local lookups are already project-scoped
- * (\`findPairing\`); the team shelf is shared across every repo the team has,
- * and without the salt an \`ERR_PNPM_OUTDATED_LOCKFILE\`-class message would
- * match a fix from any of them. Null exactly when the local coarse key is:
- * no errno, nothing coarse to send.
+ * ⚠ MIRRORED with \`teamCoarseKey\` in lib/state-store.ts, THE ONE DEFINITION
+ * (plan 06, "The naming, fixed once"): the coarse key AS IT GOES ON THE WIRE,
+ * \`shortHash(coarse_key + '|' + repo)\` over the STORED, unsalted \`sig_v1c\`
+ * hash — never over the raw message and errno, which \`tenjin sync\` does not
+ * have when it publishes the row back. The two sides must produce the same
+ * bytes for the same (coarse_key, repo) or a resolve query and a synced post
+ * would never find each other; state-store.test.ts pins the value and
+ * push-scripts.test.ts holds this copy to the export.
+ *
+ * The local coarse key stays unsalted because local lookups are already
+ * project-scoped (\`findPairing\`); the team shelf is shared across every repo
+ * the team has, and without the salt an \`ERR_PNPM_OUTDATED_LOCKFILE\`-class
+ * message would match a fix from any of them. Null exactly when the local
+ * coarse key is: no errno, nothing coarse to send.
  */
 function teamCoarseKey(sig, repo) {
-  if (sig.errno === '') return null;
-  return shortHash('sig_v1c|' + sig.message + '|' + sig.errno + '|' + repo);
+  if (sig.coarseKey === null) return null;
+  return shortHash(sig.coarseKey + '|' + repo);
 }
 
 /** What an injected pairing says. Verified reads as a fix; unverified reads as

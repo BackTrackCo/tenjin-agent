@@ -10,6 +10,7 @@ import {
   shortHash,
   storeSession,
   teamCoarseKey,
+  STATE_PAIRING_POST_PREFIX,
   STORE_SQL,
   type Store,
 } from '../lib/state-store';
@@ -395,12 +396,12 @@ function holderFromServer(json: unknown): string | null {
 // ---- the link from a local pairing to its shelf post -------------------------
 // `pairings` has no post-id column; the link is the `session_state` row
 // `pairing_post:<row id>` under the machine bucket, SHARED with the failure
-// arm's team leg (push core, STATE_PAIRING_POST_PREFIX), which writes
-// `{ postId, origin, at }` when it opens a pairing beside a teammate's post and
-// stamps `closedAt`/`status` when this machine closes it. This command adds
-// `own: true` on a post it published and `held: true` on a holder it lost to.
+// arm's team leg (push core, STATE_PAIRING_POST_PREFIX, mirrored as the TS
+// export imported here), which writes `{ postId, origin, at }` when it opens a
+// pairing beside a teammate's post and stamps `closedAt`/`status`/`fixFiles`
+// when this machine closes it. This command adds `own: true` on a post it
+// published and `held: true` on a holder it lost to.
 
-const PAIRING_POST_PREFIX = 'pairing_post:';
 const MACHINE_SESSION = '';
 
 interface PairingLink {
@@ -411,12 +412,17 @@ interface PairingLink {
   own?: boolean;
   /** A teammate's PUBLISHED piece held the key verified; the shelf refused ours. */
   held?: boolean;
+  /** Stamped by the failure arm when this machine's pass closed the pairing. */
   closedAt?: number;
   status?: string;
+  fixFiles?: string[];
 }
 
 function getLink(store: Store, pairingId: number): PairingLink | null {
-  const row = store.get(STORE_SQL.getState, [MACHINE_SESSION, PAIRING_POST_PREFIX + pairingId]);
+  const row = store.get(STORE_SQL.getState, [
+    MACHINE_SESSION,
+    STATE_PAIRING_POST_PREFIX + pairingId,
+  ]);
   if (row === null || typeof row.value !== 'string') return null;
   try {
     const parsed: unknown = JSON.parse(row.value);
@@ -431,6 +437,9 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
       ...(link.held === true ? { held: true } : {}),
       ...(typeof link.closedAt === 'number' ? { closedAt: link.closedAt } : {}),
       ...(typeof link.status === 'string' ? { status: link.status } : {}),
+      ...(Array.isArray(link.fixFiles)
+        ? { fixFiles: link.fixFiles.filter((f): f is string => typeof f === 'string') }
+        : {}),
     };
   } catch {
     return null;
@@ -440,7 +449,7 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
 function setLink(store: Store, pairingId: number, link: PairingLink): void {
   store.run(STORE_SQL.setState, [
     MACHINE_SESSION,
-    PAIRING_POST_PREFIX + pairingId,
+    STATE_PAIRING_POST_PREFIX + pairingId,
     JSON.stringify(link),
     Date.now(),
   ]);
