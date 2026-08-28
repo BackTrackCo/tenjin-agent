@@ -456,8 +456,14 @@ function refreshReason(outcome: SpawnResult, output: string): string {
 /**
  * The `error.message` out of the one failure envelope the child printed.
  *
- * Read from the LAST parseable line because stdout carries exactly one envelope
- * while stderr may carry notices ahead of it, and the two pipes are merged here.
+ * Read from the LAST envelope because stdout carries exactly one while stderr
+ * may carry notices ahead of it, and the two pipes are merged here.
+ *
+ * `writeJson` PRETTY-PRINTS, so the envelope spans many lines and its only line
+ * starting with `{` is a bare `{` that does not parse alone. So scan backwards
+ * for an opening line and parse from there to the end; a compact single line
+ * still parses through the same path, which keeps an older child readable.
+ *
  * Sanitized because this text is bound for a human's terminal and the child
  * relays paths and parse errors it did not author.
  */
@@ -468,7 +474,7 @@ function envelopeMessage(output: string): string | undefined {
     if (line === undefined || !line.startsWith('{')) continue;
     let parsed: { ok?: unknown; error?: { message?: unknown } };
     try {
-      parsed = JSON.parse(line) as typeof parsed;
+      parsed = JSON.parse(lines.slice(i).join('\n')) as typeof parsed;
     } catch {
       continue;
     }

@@ -13,6 +13,7 @@ import {
 } from './update';
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
+import { buildFailureEnvelope } from '../lib/output';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -785,14 +786,19 @@ describe('runUpdate: the post-swap refresh', () => {
   }
 
   /** What `install --refresh` prints when it refuses: one failure envelope on
-   *  stdout, which is the only place its four refusals differ. */
+   *  stdout, which is the only place its four refusals differ.
+   *
+   *  Built through the REAL builder and the real writer's spacing. Hand-rolling
+   *  it with a compact `JSON.stringify` produced the one shape the CLI never
+   *  writes, so the parser could pass this fixture and fail on every real
+   *  refusal; going through `buildFailureEnvelope` means a change to the
+   *  envelope breaks this test instead of hiding behind it. */
   const refusalEnvelope = (message: string): string =>
-    `${JSON.stringify({
-      schemaVersion: 1,
-      command: 'install',
-      ok: false,
-      error: { code: 'REFUSED', message },
-    })}\n`;
+    `${JSON.stringify(
+      buildFailureEnvelope('install', new CliError('REFUSED', message)),
+      null,
+      2,
+    )}\n`;
 
   type FailureData = {
     refresh: { profiles: string[]; failed: { dataDir: string; reason: string; fix: string }[] };
