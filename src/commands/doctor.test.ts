@@ -190,6 +190,79 @@ describe('runDoctor — passing outcomes', () => {
     expect(store.fix).not.toMatch(/Node 24/);
   });
 
+  /**
+   * THE SAME ARGUMENT AS THE PROBE ABOVE, ONE STEP DOWN (#246).
+   *
+   * `PRAGMA journal_mode = wal` is the one statement in the store the busy
+   * timeout cannot protect, so an open that loses it twice runs on against a
+   * rollback journal — correct, but with the eight hooks a turn can fire now
+   * serialising. `openStore` records that in one row and nothing read it, which
+   * is the same invisibility the `node:sqlite` check exists to refuse.
+   */
+  it('reports a store stuck on a rollback journal, next to the node:sqlite line', async () => {
+    const at = Date.parse('2026-08-27T09:15:00.000Z');
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+      readStoreJournal: async () => ({ mode: 'rollback', at }),
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    const journal = find(checks, 'state-store-journal');
+    // WARN, NEVER FAIL, and never required: degradation is not absence. The
+    // store answers real counts on a rollback journal, so every bound still
+    // works and doctor must not tell the operator their install is broken.
+    expect(journal.status).toBe('warn');
+    expect(journal.required).toBe(false);
+    expect(journal.detail).toContain('rollback journal (WAL unavailable)');
+    expect(journal.detail).toContain('2026-08-27T09:15:00.000Z');
+    expect(journal.detail).toContain(join(dir, 'state.db'));
+    expect(journal.fix).toContain('TENJIN_DATA_DIR');
+    // `--json` readers get it as data, not only as prose.
+    expect(journal.data).toEqual({ mode: 'rollback', at });
+    // Beside the probe it belongs to, not at the bottom of the page.
+    expect(checks.map((c) => c.name).indexOf('state-store-journal')).toBe(
+      checks.map((c) => c.name).indexOf('state-store') + 1,
+    );
+  });
+
+  /**
+   * SILENT WHEN THERE IS NOTHING TO SAY. A permanently-present line about a
+   * pragma that has never failed is the noise that teaches an operator to skim
+   * the page, and the row self-heals, so a machine that got WAL back must stop
+   * mentioning it.
+   */
+  it('says nothing about the journal on a store that has WAL', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+      readStoreJournal: async () => ({ mode: 'wal', at: Date.now() }),
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
+  });
+
+  /**
+   * ...and the REAL reader, on a machine that has never run a hook. Doctor is
+   * reached for when something is already broken; it may not be the thing that
+   * first materialises the state database, so a missing file reads as nothing to
+   * report rather than as a store to bootstrap.
+   */
+  it('creates no state database just to look at the journal', async () => {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      env: {},
+      which: () => false,
+      fetchImpl: healthyFetch,
+    });
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
+    expect(existsSync(join(dir, 'state.db'))).toBe(false);
+  });
+
   // Doctor is the command you reach for when something is already broken, so the
   // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
   // some other tool would return CONFIG_INVALID and run zero checks on a machine

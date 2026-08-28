@@ -497,6 +497,8 @@ describe('the WAL switch', () => {
     // ...and the fire that opened it writes its rows.
     expect(store?.run(STORE_SQL.setState, ['s1', 'k', '"v"', Date.now()])).toBe(true);
     expect(store?.get(STORE_SQL.getState, ['s1', 'k'])).toEqual({ value: '"v"' });
+    // A store that recovered WAL is not a degraded one, so it records nothing.
+    expect(store?.get(STORE_SQL.getStoreJournal)).toBeNull();
     store?.close();
   }, 15_000);
 
@@ -535,7 +537,38 @@ describe('the WAL switch', () => {
     expect(store?.get(STORE_SQL.getState, ['s1', 'k'])).toEqual({ value: '"v"' });
     expect(store?.get(STORE_SQL.countStatePrefix, ['s1', 'k', 'l'])).toEqual({ n: 1 });
     store?.close();
+    // Nothing is asserted about `store_journal` here on purpose: the marker is
+    // one more write, so the lock that caused this give-up also refuses it. The
+    // case it survives to describe is the durable one — a data dir on a
+    // filesystem that cannot do WAL — which the eight-process case covers.
   }, 15_000);
+
+  it('records nothing on a healthy open, and clears a stale rollback mark', async () => {
+    const first = await openStore(dataDir);
+    // No row on a machine that has never lost WAL: the healthy path is one
+    // primary-key lookup and no write, on every fire.
+    expect(first?.get(STORE_SQL.getStoreJournal)).toBeNull();
+    // Now a machine that WAS degraded, by an earlier open.
+    expect(first?.run(STORE_SQL.setStoreJournal, ['rollback', 1_700_000_000_000])).toBe(true);
+    first?.close();
+
+    const second = await openStore(dataDir);
+    const healed = second?.get(STORE_SQL.getStoreJournal);
+    expect(healed?.value).toBe('wal');
+    expect(Number(healed?.at)).toBeGreaterThan(1_700_000_000_000);
+    // ...and it stays healed without a write on every open after that. Stamped
+    // by hand so a rewrite would be unmistakable rather than a same-millisecond
+    // coincidence.
+    expect(second?.run(STORE_SQL.setStoreJournal, ['wal', 1_700_000_000_001])).toBe(true);
+    second?.close();
+
+    const third = await openStore(dataDir);
+    expect(third?.get(STORE_SQL.getStoreJournal)).toEqual({
+      value: 'wal',
+      at: 1_700_000_000_001,
+    });
+    third?.close();
+  });
 });
 
 describe('fail-open before the store is even opened', () => {
@@ -976,6 +1009,12 @@ describe('concurrency', () => {
       expect(
         actions.filter((r) => r.action === 'skipped' && r.reason === 'already-injected'),
       ).toHaveLength(7);
+
+      // ...and the machine is no longer silent about it: one row, whatever the
+      // eight of them raced over.
+      expect(rows(STORE_SQL.getStoreJournal)).toEqual([
+        { value: 'rollback', at: expect.any(Number) },
+      ]);
     } finally {
       await shelf.close();
     }
