@@ -152,12 +152,14 @@ async function serveShelf(
                 {
                   resourceId,
                   url: `${base}/@${handle}/piece`,
-                  // Echoing the query back makes the overlap score 1.0 without
-                  // hand-tuning words, the same trick the unit suite uses.
                   title: query.slice(0, 190),
                   price: '0',
                   excerpt: 'the excerpt',
                   creator: { handle },
+                  // The whole verdict: a shelf that corroborated the hit and did
+                  // not call it 'low' is what makes it strong.
+                  confidence: 'high',
+                  corroborated: true,
                 },
                 {
                   resourceId: SECOND_RESOURCE_ID,
@@ -195,7 +197,6 @@ interface LedgerRow {
   shelf?: string;
   action?: string;
   reason?: string;
-  deny?: boolean;
   candidate?: { id?: string; resourceId?: string } | null;
 }
 
@@ -231,7 +232,6 @@ async function ledger(): Promise<LedgerRow[]> {
           action: r.action,
           reason: r.reason ?? undefined,
           form: r.form ?? undefined,
-          deny: r.deny === 1,
           tokens: r.tokens ?? undefined,
         } as LedgerRow;
       });
@@ -246,15 +246,6 @@ function injected(run: HookRun): string | null {
     hookSpecificOutput?: { additionalContext?: string };
   };
   return parsed.hookSpecificOutput?.additionalContext ?? null;
-}
-
-function denied(run: HookRun): string | null {
-  if (run.stdout.trim().length === 0) return null;
-  const parsed = JSON.parse(run.stdout) as {
-    hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
-  };
-  if (parsed.hookSpecificOutput?.permissionDecision !== 'deny') return null;
-  return parsed.hookSpecificOutput.permissionDecisionReason ?? null;
 }
 
 function makeCtx(): CommandContext {
@@ -310,7 +301,6 @@ describe('the sidecar, end to end over one session', () => {
       shelf: 'team',
       action: 'injected',
       candidate: { resourceId: TEAM_RESOURCE_ID },
-      deny: false,
     });
     // TEAM FIRST IS THE WHOLE ORDER: a team hit costs the public shelf nothing.
     expect(pub.hits()).toBe(0);
@@ -330,9 +320,12 @@ describe('the sidecar, end to end over one session', () => {
       }),
     );
     expect(search.code).toBe(0);
-    const reason = denied(search);
-    expect(reason).toContain(PIECE_BODY);
-    expect(reason).toContain('Third-party text');
+    // BESIDE THE SEARCH, NEVER INSTEAD OF IT: the finding is context and the
+    // WebSearch still runs.
+    expect(search.stdout).not.toContain('permissionDecision');
+    const shown = injected(search);
+    expect(shown).toContain(PIECE_BODY);
+    expect(shown).toContain('Third-party text');
     expect(pub.hits()).toBeGreaterThan(0);
     // THE KEY NEVER LEAVES ITS OWN ORIGIN, body fetch included.
     for (const h of pub.headers()) expect(h[BYPASS_HEADER]).toBeUndefined();
@@ -353,7 +346,6 @@ describe('the sidecar, end to end over one session', () => {
       shelf: 'public',
       action: 'injected',
       candidate: { resourceId: RESOURCE_ID },
-      deny: true,
     });
 
     // ---- (c) a prompt nothing on either shelf answers ------------------------
@@ -401,7 +393,6 @@ describe('the sidecar, end to end over one session', () => {
       research: { injected: 1, skipped: 1 },
       prompt: { skipped: 2 },
     });
-    expect(tallies.denies).toBe(1);
     // Two distinct findings across the two shelves.
     expect(tallies.candidates).toBe(2);
     expect(Object.values(tallies.byReason).reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(1);

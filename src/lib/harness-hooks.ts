@@ -40,13 +40,9 @@ import type { WebSearchMode } from './config';
  *    is no argument, no config key, and no call path that lets a caller point a
  *    hook at some other program, and the scripts themselves are generated from
  *    constants in lib/hook-scripts.ts rather than from anything on the wire.
- *  - Almost no hook can block, deny, or modify a tool call. Every PreToolUse
- *    entry but one emits `additionalContext` and never `permissionDecision`, so
- *    the tool always proceeds; the Stop and SessionStart hooks only ever add a
- *    line. The one exception is the push experiment's abort-and-answer arm
- *    (docs/command-reference.md#push-experimental): on a strong, free hit it may `permissionDecision: 'deny'`
- *    the WebSearch/WebFetch call it fired on and hand the model the finding in
- *    its place, and only that arm ever does.
+ *  - No hook can block, deny, or modify a tool call. Every PreToolUse entry
+ *    emits `additionalContext` and never `permissionDecision`, so the tool
+ *    always proceeds; the Stop and SessionStart hooks only ever add a line.
  *
  * OWNERSHIP IS BY PATH, PER EVENT. An entry is ours when its command mentions one
  * of our script filenames, and each script owns AT MOST ONE ENTRY PER EVENT IT IS
