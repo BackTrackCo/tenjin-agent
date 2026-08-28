@@ -860,11 +860,11 @@ export function hooksDisclosure(
     // return on `off`, then pushDecide, which reads no mode at all, then the
     // remind line). Driven against a stub, `remind` with push on makes the same
     // one request `auto` does. "They send nothing off-machine" would therefore
-    // be false on exactly the arm that can cancel a tool call, and it is the
+    // be false on exactly the arm that reaches the network, and it is the
     // string `tenjin push on` prints too, to an operator who answered a prompt
     // reading "a one-line reminder, nothing sent off-machine".
     const remindBase = pushArmed(h)
-      ? `The WebSearch and dispatch hooks only print a one-line reminder that Tenjin may have an answer, rather than looking one up for you — but the armed push arm shares the WebSearch and WebFetch entry and runs ahead of that reminder, so on a web search the query text does leave the machine for ${shelfHost}, and that call may be denied and answered from the shelf instead.`
+      ? `The WebSearch and dispatch hooks only print a one-line reminder that Tenjin may have an answer, rather than looking one up for you — but the armed push arm shares the WebSearch and WebFetch entry and runs ahead of that reminder, so on a web search the query text does leave the machine for ${shelfHost}. What comes back is added beside the search; the search itself still runs.`
       : 'The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine.';
     return `${remindBase} ${shared}${push}`;
   }

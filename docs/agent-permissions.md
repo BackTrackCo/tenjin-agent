@@ -205,17 +205,17 @@ which origin, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                   | Why it stays a human decision                                                             |
-| ---------------------- | ----------------------------------------------------------------------------------------- |
-| `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below.      |
-| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.        |
-| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.                   |
-| `tenjin wallet create` | Creates the payment credential.                                                           |
-| `tenjin config set`    | It can widen the agent's own spend policy.                                                |
-| `tenjin install`       | Writes into harness config and skills directories.                                        |
-| `tenjin push`          | Writes hook entries into harness settings; arms the one hook that can cancel a tool call. |
-| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                       |
-| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                             |
+| Verb                   | Why it stays a human decision                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------ |
+| `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
+| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
+| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.              |
+| `tenjin wallet create` | Creates the payment credential.                                                      |
+| `tenjin config set`    | It can widen the agent's own spend policy.                                           |
+| `tenjin install`       | Writes into harness config and skills directories.                                   |
+| `tenjin push`          | Writes hook entries into harness settings; they add context and never block a call.  |
+| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                  |
+| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                        |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.

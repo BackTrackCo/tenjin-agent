@@ -1344,7 +1344,7 @@ describe('runInstall: interactive walkthrough', () => {
    * generated WebSearch script the push lookup runs before the reminder line, so
    * with push armed `remind` makes the same one request `auto` does. The flat
    * "they send nothing off-machine" was therefore false on exactly the arm that
-   * can cancel a tool call — and it is the string `tenjin push on` prints too.
+   * reaches the network — and it is the string `tenjin push on` prints too.
    */
   it('drops the nothing-leaves-the-machine claim on the remind branch once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
@@ -1356,7 +1356,11 @@ describe('runInstall: interactive walkthrough', () => {
     const text = human(res);
     expect(text).not.toContain('they send nothing off-machine');
     expect(text).toContain('the query text does leave the machine');
-    expect(text).toContain('that call may be denied and answered from the shelf instead');
+    // ...and it says so WITHOUT reviving the deny: no script this CLI writes can
+    // cancel a tool call any more, so the sentence has to end on the search
+    // still running.
+    expect(text).toContain('the search itself still runs');
+    expect(text).not.toContain('denied');
   });
 
   it('keeps the remind branch flat when push is NOT armed', async () => {
