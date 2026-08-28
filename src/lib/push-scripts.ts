@@ -2872,7 +2872,21 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     }
     // Once per agent, claimed rather than checked: the same child stopping
     // twice, or a second fire racing this one, must not queue the block twice.
-    if (!claimState(sessionId, STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''))) {
+    //
+    // FAIL-CLOSED, and windowed to the signal (round-3 gate 6). \`claimState\`
+    // reports a WIN on a write the store swallowed, so a SQLITE_BUSY during a
+    // fan-out — the exact contention this claim exists for — let two fires both
+    // believe they held it and queue the same body twice. \`claimStateFresh\`
+    // reads that as a loss. Windowed rather than permanent for the same reason
+    // the arming signal is: a claim that outlives the signal it was taken under
+    // is a child that cannot be harvested again in a later hour.
+    if (
+      !claimStateFresh(
+        sessionId,
+        STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''),
+        SIGNAL_WINDOW_MS,
+      )
+    ) {
       beat('duplicate-finding');
       return quiet();
     }
@@ -2974,15 +2988,25 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // every child that stops in the hour behind it; the per-child claim only stops
   // the SAME child being asked twice. One ask per session is the cost
   // tenjin-agent#228 costed, and this is where it is held to it.
-  if (!claimState(sessionId, STATE_SUBAGENT_ASKED, { agentId })) {
+  //
+  // FAIL-CLOSED, AND WINDOWED TO THE SIGNAL (round-3 gate 6). \`claimState\`
+  // returns a win on a write the store swallowed, so a single SQLITE_BUSY on
+  // THIS insert during a fan-out left the session budget unheld while the
+  // per-child claim below landed: every later child in the hour then read a
+  // claim nobody held and was blocked for a turn, which is the runaway the
+  // budget exists to stop. \`claimStateFresh\` reads a swallowed write as a loss,
+  // and makes the budget one ask per session per hour — the same window the
+  // arming signal is read over, so the budget cannot outlive its own reason.
+  if (!claimStateFresh(sessionId, STATE_SUBAGENT_ASKED, SIGNAL_WINDOW_MS, { agentId })) {
     beat('session-asked');
     return quiet();
   }
   // The claim carries \`agentType\` as well as the signal because the parent's
   // Stop reads these rows to work out which children were ITS children, and a
-  // child publish it reports has to name who published it.
+  // child publish it reports has to name who published it. Same window and the
+  // same fail-closed rule as the budget above it.
   if (
-    !claimState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''), {
+    !claimStateFresh(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''), SIGNAL_WINDOW_MS, {
       searchId: signal.searchId,
       agentType,
     })

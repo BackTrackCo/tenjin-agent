@@ -248,13 +248,15 @@ export function projectIdOf(cwd: string | null | undefined): string | null {
  * The `session_state` key prefix, under the MACHINE session, recording that an
  * agent published something itself.
  *
- * ONE ROW PER AGENT, latest publish wins. It exists for the supervision
- * asymmetry a child publish creates: the child publishes from a sidechain
- * nobody reads, so the parent's own turn end is where that becomes visible.
- * Keyed on the harness `agent_id` the SubagentStop ask handed the child, which
- * is the same identity `identityOf` reads and every row stamps into its
- * `agent_id` COLUMN, so the parent can intersect it with the children IT asked
- * and claim nothing about anyone else's.
+ * ONE ROW PER PUBLISH: the key is `<agentId>@<at>`. Keyed per agent alone, a
+ * child that published something objectionable and then anything innocuous
+ * overwrote the first, and the parent's report showed only the second. It
+ * exists for the supervision asymmetry a child publish creates: the child
+ * publishes from a sidechain nobody reads, so the parent's own turn end is
+ * where that becomes visible. The agent id is the harness `agent_id` the
+ * SubagentStop ask handed the child, the same identity `identityOf` reads and
+ * every row stamps into its `agent_id` COLUMN, so the parent can intersect it
+ * with the children IT asked and claim nothing about anyone else's.
  *
  * DELIBERATELY NOT UNDER `published:`, which is the body-hash dedup's prefix: a
  * range scan written for one of them must never pick up the other, and two
@@ -564,6 +566,18 @@ export const STORE_SQL = {
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
   deleteState: 'DELETE FROM session_state WHERE session = ? AND key = ?',
   /**
+   * Rewrite one existing row's `value` and LEAVE ITS `at` ALONE.
+   *
+   * This is what per-row state is written with. `setState` would work except
+   * for the timestamp: `at` is the window filter every queue read applies, so
+   * an upsert that stamps `Date.now()` renews the row's age each time it is
+   * marked and a marked row would never age out of the 8h window. The UPDATE
+   * also cannot create a row, which is the property the caller needs: a mark
+   * for a key that was published or discarded out from under it reports zero
+   * changes rather than resurrecting the row it was about to describe.
+   */
+  markStateValue: 'UPDATE session_state SET value = ? WHERE session = ? AND key = ?',
+  /**
    * Take the OLDEST key under one prefix and hand back what it held, in one
    * statement.
    *
@@ -766,9 +780,15 @@ export const STORE_SQL = {
    * `events` to plan it against and adding one needs a `user_version` bump that
    * #212 already owns, so this takes the range scan the same never-pruned table
    * costs `statusRows` about 7 ms at 200k rows.
+   *
+   * SCOPED TO ONE PROJECT (round-3 item 5). It enumerated the whole machine, so
+   * a mistyped id in project A printed project B's finding ids into A's
+   * transcript — a listing of another checkout's work, reached by getting an id
+   * wrong. `project IS ?` rather than `= ?` so a null argument matches the rows
+   * that carry no project, which is the same binding `pairings` uses.
    */
   findingsRecent: `SELECT uid, at, session, project, data FROM events
-     WHERE hook = '${STORE_FINDING_HOOK}' AND at >= ?
+     WHERE hook = '${STORE_FINDING_HOOK}' AND at >= ? AND project IS ?
      ORDER BY at DESC, id DESC LIMIT ?`,
   /** One finding, whole, by the id the capture ask printed. `events.uid`
    *  is UNIQUE, so this is an index seek; the hook predicate is there to stop a
@@ -1810,6 +1830,26 @@ function setState(sessionId, key, value) {
   return storeRun(STORE_SQL.setState, [storeSession(sessionId), key, storeJson(value), Date.now()]) !== null;
 }
 
+/**
+ * Stamp new \`value\` onto a row that already exists, keeping its \`at\`.
+ *
+ * ANSWERS WHETHER THE MARK IS ON THE ROW, which is the whole reason per-row
+ * state can be relied on: false means the row is unmarked and every later read
+ * will offer it again, so a caller that has already NAMED it has to degrade
+ * rather than assume it will not repeat. Both failure directions land here —
+ * a write the store swallowed (null) and a row that is no longer there (zero
+ * changes) — and only one of them is a problem, but the caller treats them the
+ * same because neither leaves a mark behind.
+ */
+function markStateValue(sessionId, key, value) {
+  const res = storeRun(STORE_SQL.markStateValue, [
+    storeJson(value),
+    storeSession(sessionId),
+    key,
+  ]);
+  return res !== null && Number(res.changes) > 0;
+}
+
 /** Delete one key. Answers whether the row actually went, for the same reason
  *  \`setState\` answers whether it landed: \`storeRun\` swallows a busy database
  *  and a full disk as null, and a caller releasing a claim must not read that
@@ -1957,8 +1997,7 @@ function bumpState(sessionId, key) {
 }
 
 /**
- * The keys under \`prefix\` touched since \`sinceMs\`, newest first, optionally
- * only those ABOVE \`afterKey\` (the key without its prefix).
+ * The keys under \`prefix\` touched since \`sinceMs\`, newest first.
  *
  * ONE ROW PER PATH, which is what makes the close rule's evidence survive.
  * \`edited\` used to be a single JSON map, so a concurrent write could drop an
@@ -1967,19 +2006,15 @@ function bumpState(sessionId, key) {
  * (very often exactly the config file the failing command named) evicted the
  * freshest timestamp in the map and the pairing never closed.
  *
- * \`afterKey\` NARROWS THE RANGE THE STATEMENT ALREADY SEEKS ON, so a caller
- * paging by key stays a primary-key range seek. The bound is inclusive, and a
- * NUL is the smallest thing that can follow a key, so \`prefix + afterKey + NUL\`
- * is exactly "> that key" for every key there is.
+ * NO KEY CURSOR. It grew one so the capture ask could page the finding queue,
+ * and the whole point of what replaced that is that a cursor over rows written
+ * by concurrent processes excludes whatever commits late. Nothing pages here
+ * any more: the readers filter on a per-row mark instead.
  */
-function statePrefixSince(sessionId, prefix, sinceMs, limit, afterKey) {
-  const from =
-    typeof afterKey === 'string' && afterKey !== ''
-      ? prefix + afterKey + String.fromCharCode(0)
-      : prefix;
+function statePrefixSince(sessionId, prefix, sinceMs, limit) {
   const rows = storeAll(STORE_SQL.statePrefixSince, [
     storeSession(sessionId),
-    from,
+    prefix,
     prefix + String.fromCharCode(0xffff),
     sinceMs,
     limit,
@@ -2033,21 +2068,49 @@ function enqueueFinding(uid, finding) {
  * than merely late. Bounded by the window and the caller's limit; the caller
  * decides what to do with one from another session, and is told which those are.
  *
- * \`afterUid\` IS THE CALLER'S CURSOR, and it works because the uid is
- * ULID-shaped: a fixed-width millisecond prefix in Crockford base32, so key
- * order IS mint order and no two rows share a cursor position. A caller that
- * paged on the timestamp instead lost a row to every millisecond tie.
+ * UNLISTED IS A PROPERTY OF THE ROW, NOT A POSITION IN AN ORDER. This paged on
+ * a high-water cursor — first the newest \`at\`, then the greatest uid, then the
+ * pair — and each of those assumes the order rows are MINTED in is the order
+ * they become VISIBLE in. It is not: \`SubagentStop\` runs one process per child,
+ * the uid is minted a statement before the INSERT, and a child that stalls on
+ * the write lock commits a LOWER key after a later child's row has already been
+ * read and the cursor moved past it. That row is then below every future cursor
+ * and is never named, by any ask, ever. No arithmetic on a cursor fixes it,
+ * because the defect is the assumption and not the comparison.
+ *
+ * So the ask STAMPS each row it actually names (\`listedAt\`) and this returns
+ * the rows without that stamp. A late commit is simply an unstamped row the
+ * next ask picks up, a named row is stamped and not restated, and nothing here
+ * depends on any ordering at all.
+ *
+ * THE STAMP IS MACHINE-WIDE, like the queue. A cursor was per session, so every
+ * session on the machine restated the same list for the whole window (measured
+ * at ~15k tokens per session at the 200-row cap); a row is now named to one
+ * context and not to the next eight. What that costs is stated where the ask
+ * composes the list: a finding nobody acted on is not re-offered, and
+ * \`tenjin finding list\` is where it stays reachable.
+ *
+ * \`limit\` BOUNDS THE ROWS RETURNED, NOT THE ROWS READ, which is the difference
+ * between a runaway guard and a hole. A stamped row is still under the prefix,
+ * so a SQL \`LIMIT\` spends its budget on rows nobody wants: at 400 findings in
+ * one window the newest 200 filled it, and once those were stamped the older
+ * 200 were unreachable by every later ask. The window is what bounds the scan —
+ * the same shape \`liveHandoff\` takes, and for the same reason: no N here is a
+ * bound on the rows in range.
  */
-function queuedFindingQueue(sinceMs, limit, afterUid) {
-  return statePrefixSince(
+function queuedFindingQueue(sinceMs, limit) {
+  const out = [];
+  for (const row of statePrefixSince(
     MACHINE_SESSION,
     STATE_QUEUED_FINDING_PREFIX,
     sinceMs,
-    limit,
-    afterUid,
-  ).map((row) => {
+    NO_ROW_LIMIT,
+  )) {
+    if (out.length >= limit) break;
     const value = isRecord(row.value) ? row.value : {};
-    return {
+    // The one field that decides. A row stamped by any ask is spent.
+    if (typeof value.listedAt === 'number') continue;
+    out.push({
       uid: row.key,
       at: row.at,
       session: typeof value.session === 'string' ? value.session : '',
@@ -2059,19 +2122,34 @@ function queuedFindingQueue(sinceMs, limit, afterUid) {
       agentType: typeof value.agentType === 'string' ? value.agentType : '',
       searchId: typeof value.searchId === 'string' ? value.searchId : null,
       body: typeof value.body === 'string' ? value.body : '',
-    };
-  });
+      // Carried so the mark can be written back WITHOUT re-reading the row: the
+      // stamp is a whole-value UPDATE, and dropping the fields it did not set
+      // would erase the finding it is marking.
+      value,
+    });
+  }
+  return out;
 }
 
-/** Is there a queued finding at or after \`sinceMs\` whose uid is above
- *  \`afterUid\`, meaning one the caller's cursor has not already passed?
+/** Stamp a queued finding as named by an ask, so no later ask lists it.
+ *  Answers whether the stamp is on the row; the caller degrades if it is not,
+ *  because an unstamped row it already named is one that repeats forever. */
+function markFindingListed(row, atMs) {
+  return markStateValue(
+    MACHINE_SESSION,
+    STATE_QUEUED_FINDING_PREFIX + row.uid,
+    Object.assign({}, row.value, { listedAt: atMs }),
+  );
+}
+
+/** Is there a queued finding inside the window that no ask has named yet?
  *  Machine-wide, like the list it gates: a finding whose own session is gone is
  *  the case the queue exists for, so scoping this read to one session would
- *  strand exactly those rows. */
-function queuedFindingAfter(sinceMs, afterUid) {
-  return (
-    statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, 1, afterUid).length > 0
-  );
+ *  strand exactly those rows. Reads the same property the list does, so a gate
+ *  that opens is always a list with something in it, and stops at the first
+ *  row it finds. */
+function queuedFindingAfter(sinceMs) {
+  return queuedFindingQueue(sinceMs, 1).length > 0;
 }
 
 /**
@@ -2087,48 +2165,65 @@ function queuedFindingAfter(sinceMs, afterUid) {
  *
  * Machine-wide by nature (the publishing process knows its agent, not its
  * session), so the caller intersects it with the children IT asked.
+ *
+ * UNREPORTED IS A PROPERTY OF THE ROW, for the same reason the queue's is: a
+ * publish row is written by a CLI process that has no idea what the parent hook
+ * has read, so the order publishes are minted in is not the order they become
+ * visible in, and every cursor shape tried here — \`at + 1\`, then the (at, key)
+ * pair — excluded the row that committed late. The ask stamps \`reportedAt\` onto
+ * each row it names and this returns the rest.
  */
-function agentPublishes(sinceMs, limit, afterKey) {
+function agentPublishes(sinceMs, limit) {
   const out = new Map();
-  const cursor = typeof afterKey === 'string' ? afterKey : '';
   for (const row of statePrefixSince(MACHINE_SESSION, STATE_PUBLISHED_AGENT_PREFIX, sinceMs, limit)) {
-    // KEYSET, NOT \`at + 1\`. Two children publishing in the same millisecond
-    // are one tie class, and a watermark of \`at + 1\` steps over the whole of
-    // it: the row that committed after the read was never listed and never
-    // could be. The pair (at, key) is a total order — a key is
-    // \`<agentId>@<at>\`, and two rows sharing an \`at\` cannot share an agent
-    // id without being the same row — so the tie is paged rather than skipped.
-    // With no cursor (a first ask) the range is inclusive, as it was.
-    if (cursor !== '' && (row.at < sinceMs || (row.at === sinceMs && row.key <= cursor))) continue;
     const value = isRecord(row.value) ? row.value : {};
+    if (typeof value.reportedAt === 'number') continue;
     if (typeof value.url !== 'string' || value.url === '') continue;
     const cut = row.key.lastIndexOf('@');
     // A row an older build wrote has no '@' and IS the agent id.
     const agentId = cut === -1 ? row.key : row.key.slice(0, cut);
+    const hit = { url: value.url, at: row.at, key: row.key, value };
     const list = out.get(agentId);
-    if (list === undefined) out.set(agentId, [{ url: value.url, at: row.at, key: row.key }]);
-    else list.push({ url: value.url, at: row.at, key: row.key });
+    if (list === undefined) out.set(agentId, [hit]);
+    else list.push(hit);
   }
   return out;
 }
 
+/** Stamp a child publish as reported to its parent, so no later ask restates
+ *  it. Answers whether the stamp is on the row, like the queue's. */
+function markPublishReported(hit, atMs) {
+  return markStateValue(
+    MACHINE_SESSION,
+    STATE_PUBLISHED_AGENT_PREFIX + hit.key,
+    Object.assign({}, hit.value, { reportedAt: atMs }),
+  );
+}
+
 /**
- * Has a child THIS session asked published since \`sinceMs\`?
+ * Has a child THIS session asked published something not yet reported?
  *
  * THE OTHER HALF OF THE RE-ASK GATE. A successful child publish writes an
  * \`agent_published:\` row and NO queue row, so a gate that keys on the queue
  * alone reports the first child publish of a session and silently drops every
  * later one — and visibility is the only mitigation this design has for letting
  * a child publish from a sidechain nobody reads.
+ *
+ * IT APPLIES THE LINE'S OWN \`hit.at >= ask.at\` FILTER (round-3 nit). Without
+ * it a publish by an agent id this session asked LATER opened a gate the line
+ * then refused to name, and the turn ended on a block whose reason described
+ * nothing.
  */
-function childPublishedSince(sessionId, windowStart, sinceMs, limit, afterKey) {
+function childPublishedSince(sessionId, windowStart, sinceMs, limit) {
   const asked = statePrefixSince(sessionId, STATE_AGENT_ASKED_PREFIX, windowStart, limit);
   if (asked.length === 0) return false;
-  // THE SAME CURSOR THE LIST USES. A gate that admitted a row the list then
+  // THE SAME READ THE LIST USES. A gate that admitted a row the list then
   // refuses to name fires an ask with nothing in it, at every turn end.
-  const published = agentPublishes(sinceMs, limit, afterKey);
+  const published = agentPublishes(sinceMs, limit);
   for (const row of asked) {
-    if (published.has(row.key)) return true;
+    const hits = published.get(row.key);
+    if (hits === undefined) continue;
+    for (const hit of hits) if (hit.at >= row.at) return true;
   }
   return false;
 }

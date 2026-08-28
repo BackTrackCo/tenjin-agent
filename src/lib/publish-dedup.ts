@@ -160,18 +160,24 @@ export async function recordPublished(
 
 /**
  * Take a stored finding off the unpublished queue without recording a new
- * publish.
+ * publish, and SAY WHETHER IT WENT.
  *
- * The one caller is the already-published short circuit: the body is on the
- * shelf, this machine remembers where, and the queue row would otherwise keep
- * offering it. Best-effort like everything else here.
+ * Two callers assert the outcome to the operator — the already-published short
+ * circuit and `--discard`, which both print "it is off the queue" — so a
+ * best-effort void was a claim neither of them could stand behind. `changes`
+ * distinguishes a delete that happened from a row that was already gone; both
+ * leave the queue in the state the caller described, and only an unopenable
+ * store does not.
  */
-export async function dequeueFinding(dataDir: string, findingId: string): Promise<void> {
-  if (findingId === '') return;
+export async function dequeueFinding(dataDir: string, findingId: string): Promise<boolean> {
+  if (findingId === '') return false;
   const store = await openStore(dataDir);
-  if (store === null) return;
+  if (store === null) return false;
   try {
     store.run(STORE_SQL.deleteState, [MACHINE_SESSION, STORE_QUEUED_FINDING_PREFIX + findingId]);
+    return true;
+  } catch {
+    return false;
   } finally {
     store.close();
   }

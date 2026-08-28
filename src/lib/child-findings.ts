@@ -108,36 +108,44 @@ export async function readChildFinding(
   dataDir: string,
   id: string,
   now: () => number = Date.now,
+  project: string | null = null,
 ): Promise<ChildFinding> {
   const row = await withStore<Record<string, unknown> | null>(dataDir, null, (store) =>
     store.get(STORE_SQL.findingByUid, [id]),
   );
   const finding = row === null ? null : rowToFinding(row);
   if (finding !== null) return finding;
-  const known = await recentFindingIds(dataDir, now);
+  const known = await recentFindingIds(dataDir, now, project);
   throw new CliError('RESOURCE_NOT_FOUND', `No stored finding with id ${JSON.stringify(id)}`, {
     fix:
       known.length === 0
-        ? 'No findings are held on this machine. They are harvested from a subagent at its own end and need `hooks.capture` on (`tenjin push status`).'
-        : `Captured here in the last ${FINDING_WINDOW_MS / (60 * 60 * 1000)}h: ${known.join(', ')}. That listing is what the window bounds; a finding itself is never rewritten and stays publishable by its own id, so an id that does not resolve is one this machine never captured.`,
+        ? 'No findings are held for this project. They are harvested from a subagent at its own end and need `hooks.capture` on (`tenjin push status`).'
+        : `Captured in this project in the last ${FINDING_WINDOW_MS / (60 * 60 * 1000)}h: ${known.join(', ')}. That listing is what the window bounds; a finding itself is never rewritten and stays publishable by its own id, so an id that does not resolve is one this project never captured.`,
     details: { id, known },
   });
 }
 
 /**
- * The ids this machine holds inside the capture window, newest first.
+ * The ids THIS PROJECT holds inside the capture window, newest first.
  *
  * DELIBERATELY IDS ONLY. Bodies are what a finding costs to carry, and the only
  * caller is an error line; handing back a body here would rebuild the listing
  * this queue deliberately does not have.
+ *
+ * AND DELIBERATELY NOT MACHINE-WIDE (round-3 item 5). The queue is machine-wide
+ * and the capture ask marks which of its rows came from elsewhere, but this is
+ * an error path reached by typing an id wrong: enumerating every checkout's
+ * findings there hands one project a listing of another's work for the price of
+ * a typo. A null project matches the rows that carry none.
  */
 export async function recentFindingIds(
   dataDir: string,
   now: () => number = Date.now,
+  project: string | null = null,
 ): Promise<string[]> {
   const since = now() - FINDING_WINDOW_MS;
   const rows = await withStore<Record<string, unknown>[]>(dataDir, [], (store) =>
-    store.all(STORE_SQL.findingsRecent, [since, RECENT_ID_MAX]),
+    store.all(STORE_SQL.findingsRecent, [since, project, RECENT_ID_MAX]),
   );
   return rows
     .map(rowToFinding)

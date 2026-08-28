@@ -105,15 +105,19 @@ describe('buildTenjinMcpServer, tool surface', () => {
     );
   });
 
-  // The one tool that destroys. A client reads `destructiveHint` to decide how
-  // hard to gate a call, and this is the only tool here that earns it.
-  it('marks tenjin_delete destructive, and nothing else', async () => {
+  // The tools that destroy. A client reads `destructiveHint` to decide how hard
+  // to gate a call, and these are the ones that earn it: `delete` takes a piece
+  // off the shelf, and `publish` carries `discard`, which drops a stored finding
+  // permanently and no capture ask offers it again. One tool carries one
+  // annotation, so the honest one is the stronger.
+  it('marks the tools that destroy, and nothing else', async () => {
     const client = await connect({ dataDir: dir });
     const { tools } = await client.listTools();
     const destructive = tools
       .filter((t) => t.annotations?.destructiveHint === true)
-      .map((t) => t.name);
-    expect(destructive).toEqual(['tenjin_delete']);
+      .map((t) => t.name)
+      .sort();
+    expect(destructive).toEqual(['tenjin_delete', 'tenjin_publish']);
   });
 
   // The hosted server at tenjin.blog/api/mcp identifies as `tenjin`; this one
