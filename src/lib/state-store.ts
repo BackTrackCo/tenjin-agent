@@ -174,11 +174,33 @@ export const STORE_RELAY_WINDOW_MS = 120_000;
  * any plausible one-message fan-out, so eviction is the pathological case and
  * never the ordinary one.
  *
+ * WHAT IT IS NOT: a hard bound on rows held. `cacheSlot` counts and then writes
+ * in separate statements, in the one arm whose premise is N concurrent
+ * processes, so a fan-out wider than the cap holds one row per fire (measured:
+ * 16 concurrent held 16, 32 held 25); and the protect rule below skips a slot
+ * naming a piece the parent was already told about, so a run of dispatches
+ * converging on ONE top piece can hold more than this too (16 sequential held
+ * 10). The real ceiling on rows per session is `DISPATCH_SESSION_MAX` fires,
+ * and every row still dies on its own TTL. Anything that must see EVERY parked
+ * slot therefore reads to that ceiling and not to this number.
+ *
  * It lives here for the same reason the relay window does: `state-store.ts` is
  * the file the dispatch arm (which writes slots) and the subagent arm (which
  * drains them) both already import, and the reverse direction is a cycle.
  */
 export const STORE_CACHE_SLOT_MAX = 8;
+
+/**
+ * How far a piece-blind read of the parked slots has to reach.
+ *
+ * NOT THE SLOT CAP, deliberately. `statePrefixSince` orders `at DESC`, so a
+ * reader limited to the cap sees the NEWEST N while the consumer drains the
+ * OLDEST first, and the cap is not a hard bound on rows held. This is the
+ * ceiling that IS a bound: `DISPATCH_SESSION_MAX` (10) fires per session can
+ * park at most that many slots, so reading to it sees every one of them. It is
+ * a range scan on the primary key either way.
+ */
+export const STORE_HANDOFF_SCAN_MAX = 10;
 
 /**
  * The whole schema, run once at `user_version = 0` and never again: a database
@@ -911,6 +933,11 @@ const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
 const RELAY_WINDOW_MS = __RELAY_WINDOW_MS__;
 const CACHE_SLOT_MAX = __CACHE_SLOT_MAX__;
+/** How many parked slots a piece-blind read has to be able to see. The slot cap
+ *  is not a hard bound, so a reader that stops at it reads the opposite end
+ *  from the take-oldest drain; this is the ceiling on fires per session, which
+ *  IS a bound on parks. */
+const HANDOFF_SCAN_MAX = __HANDOFF_SCAN_MAX__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TRIES = __BOOTSTRAP_TRIES__;
 
@@ -1558,6 +1585,16 @@ function alreadyShown(sessionId, resourceId) {
  * dispatch parks under a slot of its own and the take-oldest consumer drains
  * that whole range. The entry's OWN timestamp decides, which is the rule the
  * child applies; the \`at\` column is the range filter and not that rule.
+ *
+ * READ TO THE FIRES-PER-SESSION CEILING, NOT TO THE SLOT CAP. This used to take
+ * \`CACHE_SLOT_MAX\` rows, which is \`ORDER BY at DESC LIMIT 8\` — the NEWEST
+ * eight — while the consumer drains OLDEST first. The slot cap is not a hard
+ * bound (see the cap's own note in state-store.ts), so past eight slots the two ends read
+ * disjoint sets: measured with 16 distinct pieces, 7 were live and deliverable
+ * and invisible here, so \`alreadyShownOrLiveRelay\` answered false and a parent
+ * arm re-offered a piece a child was about to be handed. That is the double
+ * delivery the two-clocks rule exists to prevent, reached through the read
+ * bound rather than through either clock.
  */
 function liveHandoff(sessionId, resourceId) {
   if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
@@ -1565,7 +1602,7 @@ function liveHandoff(sessionId, resourceId) {
     sessionId,
     STATE_CACHE,
     Date.now() - RELAY_WINDOW_MS,
-    CACHE_SLOT_MAX,
+    HANDOFF_SCAN_MAX,
   );
   for (const row of parked) {
     if (!isRecord(row.value) || typeof row.value.at !== 'string') continue;
@@ -2096,7 +2133,8 @@ export function storeSource(): string {
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS))
     .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS))
-    .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX));
+    .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX))
+    .replaceAll('__HANDOFF_SCAN_MAX__', String(STORE_HANDOFF_SCAN_MAX));
 }
 
 // ---------------------------------------------------------------------------

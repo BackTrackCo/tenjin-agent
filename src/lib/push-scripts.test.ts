@@ -4470,6 +4470,47 @@ describe('the subagent handoff slots', () => {
   });
 
   /**
+   * AND IT READS THE SAME END OF THE RANGE THE DRAIN DOES (runtime audit).
+   *
+   * `liveHandoff` took `CACHE_SLOT_MAX` rows, which `statePrefixSince` orders
+   * `at DESC`: the NEWEST eight. The consumer drains OLDEST first, and the slot
+   * cap is back pressure rather than a hard bound (count-then-write across
+   * processes, plus the protect rule), so past eight slots the two ends read
+   * disjoint sets. A piece that is live and deliverable then reads as no live
+   * handoff, `alreadyShownOrLiveRelay` answers false, and a parent arm re-offers
+   * a piece a child is about to be handed: the double delivery the two-clocks
+   * rule exists to prevent, reached through the read bound rather than a clock.
+   */
+  it('sees a live handoff parked behind more slots than the cap', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    // The relay this session announced to the parent, at the OLD end of the
+    // range: its own `relayed` row is what suppresses the parent arm.
+    const relayed = await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
+    expect(injected(relayed) ?? '').toContain('queued for delivery to the subagent');
+
+    // Nine newer slots on other pieces, which is reachable because the cap is
+    // not a hard bound. Read newest-first at the cap, these alone fill the
+    // window and the announced handoff is invisible.
+    for (let i = 0; i < 9; i += 1) {
+      seedSlot(
+        `dispatch_cache:toolu_filler_${i}`,
+        slotValue({ slotId: `toolu_filler_${i}`, top: { ...OTHER_TOP } }),
+      );
+    }
+
+    // The handoff is still live and still deliverable, so the parent stays
+    // silent about the piece a child is about to be handed.
+    const prompt = await runScript(pushPromptHookScript(dataDir), parentPrompt);
+    expect(prompt.stdout).toBe('');
+    expect((await ledger()).find((r) => r.trigger === 'prompt')).toMatchObject({
+      action: 'skipped',
+      reason: 'already-relayed',
+    });
+  });
+
+  /**
    * A REASON IS TERMINAL FOR A SLOT, NOT FOR THE FIRE (round-2 minor 2).
    *
    * The dispatch arm parks BEFORE it runs its own already-shown check, so a

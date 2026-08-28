@@ -1660,8 +1660,20 @@ function relayLine(candidate, isTeam) {
 function cacheSlot(sessionId, slotId, entry, opts) {
   const evict = !isRecord(opts) || opts.evict !== false;
   const protect = isRecord(opts) && typeof opts.protect === 'string' ? opts.protect : '';
-  // Evict before writing, so the cap is a bound on what is HELD rather than on
-  // what is written. An unreadable count is not a licence to drop a handoff.
+  // Evict before writing. WHAT THIS IS AND IS NOT: the count and the write are
+  // separate statements, and this is the arm whose premise is N concurrent
+  // processes, so under a fan-out every fire reads a count below the cap and
+  // writes anyway (measured: 16 concurrent held 16, 32 held 25). The protect
+  // rule below skips a slot naming a piece the parent was already told about,
+  // so a run of dispatches converging on ONE top piece also holds more than the
+  // cap (16 sequential held 10). So this is BACK PRESSURE on an always-on
+  // session, not a hard bound: what actually bounds rows is
+  // \`DISPATCH_SESSION_MAX\` fires per session, plus each entry's own TTL.
+  // Enforcing it atomically means deciding what loses when every slot is
+  // protected, which is the announced-delivery loss the protect rule exists to
+  // prevent; it is not decided here, and anything that must see every parked
+  // slot reads to the fires ceiling instead (\`HANDOFF_SCAN_MAX\`).
+  // An unreadable count is not a licence to drop a handoff.
   for (let i = 0; i < CACHE_SLOT_MAX; i += 1) {
     const held = countStatePrefix(sessionId, STATE_CACHE);
     if (!Number.isFinite(held) || held < CACHE_SLOT_MAX) break;
