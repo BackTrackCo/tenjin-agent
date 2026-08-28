@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 /**
  * The sidecar's local state: one SQLite file under the data dir, opened by the
@@ -470,6 +471,28 @@ export const STORE_SQL = {
    *  only. A scan of a table that grows by one row per distinct failure. */
   pairingsStatus: `SELECT status, scope, cmd_head, COUNT(*) AS n
      FROM pairings WHERE at >= ? GROUP BY status, scope, cmd_head`,
+
+  /**
+   * The closed, CODE-scoped pairings of one project that the team shelf has
+   * not seen in their current state: never synced, or promoted to `verified`
+   * by a close that landed AFTER the last sync (`closed_at` moves on every
+   * close, `synced_at` on every sync, so the comparison is the whole test).
+   * `user` and `ambiguous` rows never match: a fix that was somebody's laptop
+   * does not travel. The Stop hook counts these to decide whether to spawn
+   * `tenjin sync`; the command reads them. A scan of a table that grows by one
+   * row per distinct failure, on the one hook whose budget is silent.
+   */
+  unsyncedPairings: `SELECT * FROM pairings
+     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+       AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))
+     ORDER BY at`,
+  countUnsyncedPairings: `SELECT COUNT(*) AS n FROM pairings
+     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+       AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))`,
+  /** Stamp a pairing as synced (or as re-synced after a promotion). */
+  markPairingSynced: 'UPDATE pairings SET synced_at = ? WHERE id = ?',
+  /** What the last `tenjin sync` run reported, for the Stop hook's fallback line. */
+  lastSyncEvent: `SELECT data FROM events WHERE hook = 'sync' ORDER BY at DESC, id DESC LIMIT 1`,
 } as const;
 
 export type StoreSqlKey = keyof typeof STORE_SQL;
@@ -1543,4 +1566,39 @@ export function storeSession(sessionId: string | null | undefined): string {
 /** ⚠ MIRRORED with `searchFingerprint` in the hook core above. */
 export function searchFingerprint(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
+}
+
+/** ⚠ MIRRORED with `shortHash` in the hook core above: a cwd or machine string
+ *  reduced to a stable, non-reversible 16-hex join key. The CLI computes it to
+ *  read the same `pairings.project` the hooks wrote. */
+export function shortHash(text: string): string {
+  return createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
+}
+
+/** ⚠ MIRRORED with `projectId` in the hook core above. The `project` column a
+ *  pairing was stamped with, so the CLI (`tenjin sync`) scopes its read to the
+ *  same checkout the failure happened in; null for a cwd-less payload. */
+export function projectId(cwd: string | null | undefined): string | null {
+  return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;
+}
+
+/**
+ * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
+ * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
+ * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is the origin URL
+ * read from `.git/config`. The salt goes over the stored hash, not the raw
+ * message, because a `pairings` row keeps only the hashes and `tenjin sync`
+ * reads rows back long after the failure arm's `sigV1()` call is gone.
+ *
+ * THE ONE DEFINITION. `tenjin sync` (commands/sync.ts) imports it directly; a
+ * hook script cannot import, so the failure arm's resolve leg carries a copy
+ * inside its generated source, and that copy must produce the same bytes for
+ * the same (coarse_key, repo) — a resolve query and a synced post that salted
+ * two different ways would never find each other, and the miss would be
+ * indistinguishable from "no teammate has hit this". The pinned value in
+ * state-store.test.ts is what both sides are held to. The caller adds the wire
+ * prefix: `` `sig_v1c:${teamCoarseKey(coarseKey, repo)}` ``.
+ */
+export function teamCoarseKey(coarseKey: string, repo: string): string {
+  return shortHash(`${coarseKey}|${repo}`);
 }
