@@ -44,6 +44,7 @@ async function seedDecoySearches(
         `0197bbbb-cccc-dddd-eeee-${String(i).padStart(12, '0')}`,
         startAtMs + i,
         '',
+        '',
         'decoy',
         searchFingerprint('decoy'),
         'MISS',

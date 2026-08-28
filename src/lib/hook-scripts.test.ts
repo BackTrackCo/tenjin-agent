@@ -154,12 +154,16 @@ async function writeConfig(config: Record<string, unknown>): Promise<void> {
   await writeFile(join(dataDir, 'config.json'), JSON.stringify(config, null, 2));
 }
 
-const webSearchInput = (query: string): string =>
+/** `agent` is Claude Code's `agent_id`, present only inside a subagent and
+ *  never a substitute for the session id, which every child shares with its
+ *  parent. Omitted means the lead's own turn. */
+const webSearchInput = (query: string, agent?: string): string =>
   JSON.stringify({
     session_id: 'abc',
     hook_event_name: 'PreToolUse',
     tool_name: 'WebSearch',
     tool_input: { query },
+    ...(agent === undefined ? {} : { agent_id: agent }),
   });
 
 /**
@@ -1033,6 +1037,21 @@ async function storedSearches(): Promise<StoredEntry[]> {
   return (await loadSearches(dataDir)) as unknown as StoredEntry[];
 }
 
+/** The `(session, agent)` stamp on every recorded search, read as SQL rather
+ *  than through `loadSearches`: '' is reported as an absent `agentId` by the
+ *  typed handle, and the point here is the column's actual value. */
+async function searchAgents(): Promise<{ session: string; agent: unknown }[]> {
+  const store = await openStore(dataDir);
+  try {
+    return (store?.all('SELECT session, agent FROM searches ORDER BY at') ?? []).map((row) => ({
+      session: String(row.session),
+      agent: row.agent,
+    }));
+  } finally {
+    store?.close();
+  }
+}
+
 describe('WebSearch hook: recording into the one store', () => {
   const MISS_BODY = {
     schemaVersion: 3,
@@ -1080,6 +1099,27 @@ describe('WebSearch hook: recording into the one store', () => {
         price: CANDIDATE.price,
       },
     ]);
+  });
+
+  /**
+   * WHICH WORKER ASKED (store version 2). Every subagent files under its
+   * parent's `session_id`, so the session on a `searches` row cannot say who
+   * ran it, and `push status --sessions` credited one child's search to a
+   * sibling's `research-then-edit`. The arm already reads `agent_id` off the
+   * payload for its event row; this is the same id reaching the search row.
+   */
+  it("stamps a subagent's search with its agent_id, and the lead's with ''", async () => {
+    const { baseUrl } = await serveJson(() => ({ status: 200, json: MISS_BODY }));
+    await writeConfig({ baseUrl });
+
+    await runScript(websearchHookScript(dataDir), webSearchInput('a child question', 'child-a'));
+    expect(await searchAgents()).toEqual([{ session: 'abc', agent: 'child-a' }]);
+
+    // ...and the parent's own turn carries no agent_id at all, which is the ''
+    // bucket rather than a row nothing can be attributed to.
+    await clearSearches();
+    await runScript(websearchHookScript(dataDir), webSearchInput('a lead question'));
+    expect(await searchAgents()).toEqual([{ session: 'abc', agent: '' }]);
   });
 
   // The title is display text, so an oversized one is capped rather than dropped.

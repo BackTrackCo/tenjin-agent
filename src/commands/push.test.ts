@@ -410,6 +410,7 @@ describe('runPushStatus', () => {
         store.run(STORE_SQL.claimClose, [
           id,
           session,
+          '',
           at + 1,
           `${head} test`,
           '["a.ts"]',
@@ -778,7 +779,17 @@ describe('runPushStatus --sessions', () => {
     session: string,
     startedAt: number,
     events: Array<{ at: number; hook: string; tool?: string; files?: string[]; data?: unknown }>,
-    extra: { endedAt?: number; captureAskedAt?: number; closesAt?: number[] } = {},
+    extra: {
+      endedAt?: number;
+      captureAskedAt?: number;
+      /** Closes and searches AS A WORKER MAKES THEM. Both tables carry `agent`
+       *  from store version 2, so a fixture that could only stamp the session
+       *  could not express the case these tests exist for: a sibling's close or
+       *  search arriving inside the same session. `agent` defaults to '', the
+       *  lead's own turn. */
+      closes?: { at: number; agent?: string }[];
+      searches?: { at: number; agent?: string }[];
+    } = {},
   ): Promise<void> {
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
@@ -809,9 +820,35 @@ describe('runPushStatus --sessions', () => {
           extra.captureAskedAt,
         ]);
       }
-      for (const at of extra.closesAt ?? []) {
-        store.run(STORE_SQL.claimClose, [1, session, at, 'pnpm test', '["a.ts"]', 'code']);
-      }
+      // One pairing id per close: `pairing_closes` is keyed (pairing_id,
+      // session), so two closes in one session are two pairings — which is what
+      // two workers of one session closing different things looks like.
+      (extra.closes ?? []).forEach((close, i) => {
+        store.run(STORE_SQL.claimClose, [
+          i + 1,
+          session,
+          close.agent ?? '',
+          close.at,
+          'pnpm test',
+          '["a.ts"]',
+          'code',
+        ]);
+      });
+      (extra.searches ?? []).forEach((search, i) => {
+        store.run(STORE_SQL.recordSearch, [
+          `0197aaaa-bbbb-cccc-dddd-${String(i).padStart(12, '0')}`,
+          search.at,
+          session,
+          search.agent ?? '',
+          'q',
+          'q',
+          'MISS',
+          '[]',
+          'cli',
+          null,
+          null,
+        ]);
+      });
     } finally {
       store.close();
     }
@@ -1020,6 +1057,121 @@ describe('runPushStatus --sessions', () => {
     expect(human).toContain('agent=a1');
   });
 
+  /**
+   * THE PARTITION REACHES THE CLOSES AND THE SEARCHES TOO (store version 2).
+   *
+   * `pairing_closes` and `searches` used to carry only the session, and every
+   * child of a session shares its parent's id — so the two patterns those
+   * tables feed could be completed by a worker that had nothing to do with
+   * them: `error-edit-resolved` by a sibling's close, `research-then-edit` by a
+   * sibling's search. Both halves are asserted, and both directions: the
+   * sibling's row must not count, and the worker's own must.
+   */
+  it("never spans agents: a sibling's close or search completes nothing", async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    // a1 fails and edits and never passes. a2 closes a pairing right after.
+    await seedSession(
+      dir,
+      'sess-cross-close',
+      s1,
+      [
+        {
+          at: s1 + 1000,
+          hook: 'failure',
+          tool: 'Bash',
+          data: { command: 'pnpm test', agentId: 'a1' },
+        },
+        { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+        // a2 has to have a row of its own, or it is not a worker in the report.
+        { at: s1 + 2500, hook: 'prompt', data: { agentId: 'a2' } },
+      ],
+      { closes: [{ at: s1 + 3000, agent: 'a2' }] },
+    );
+    // a1 edits with no failure at all. a2 runs the search.
+    await seedSession(
+      dir,
+      'sess-cross-search',
+      s1,
+      [
+        { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+        { at: s1 + 2500, hook: 'prompt', data: { agentId: 'a2' } },
+      ],
+      { searches: [{ at: s1 + 1000, agent: 'a2' }] },
+    );
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+    const at = (session: string, agent: string): PushSessionScore | undefined =>
+      rows.find((r) => r.session === session && r.agent === agent);
+
+    // NOTHING FIRED, either side. a1 did the failure and the edit; the close
+    // and the search belong to a2, and a2 did neither.
+    // SOFT, so both halves report. They are two independent claims — a close
+    // must not travel, and a search must not — and a hard assert on the first
+    // would hide a regression in the second behind the failure of the first.
+    expect.soft(at('sess-cross-close', 'a1')?.patterns).toEqual([]);
+    expect.soft(at('sess-cross-close', 'a2')?.patterns).toEqual([]);
+    expect.soft(at('sess-cross-search', 'a1')?.patterns).toEqual([]);
+    expect.soft(at('sess-cross-search', 'a2')?.patterns).toEqual([]);
+  });
+
+  /**
+   * ...and the same rows, with the close and the search moved onto the worker
+   * that did the work. Byte for byte the case above apart from the agent stamp,
+   * so a partition that quietly dropped every close and search would fail here
+   * rather than pass both.
+   */
+  it("scores a worker's own close and search", async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    await seedSession(
+      dir,
+      'sess-own-close',
+      s1,
+      [
+        {
+          at: s1 + 1000,
+          hook: 'failure',
+          tool: 'Bash',
+          data: { command: 'pnpm test', agentId: 'a1' },
+        },
+        { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+        { at: s1 + 2500, hook: 'prompt', data: { agentId: 'a2' } },
+      ],
+      { closes: [{ at: s1 + 3000, agent: 'a1' }] },
+    );
+    await seedSession(
+      dir,
+      'sess-own-search',
+      s1,
+      [
+        { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+        { at: s1 + 2500, hook: 'prompt', data: { agentId: 'a2' } },
+      ],
+      { searches: [{ at: s1 + 1000, agent: 'a1' }] },
+    );
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+    const at = (session: string, agent: string): PushSessionScore | undefined =>
+      rows.find((r) => r.session === session && r.agent === agent);
+
+    expect(at('sess-own-close', 'a1')?.patterns).toEqual(['error-edit-resolved']);
+    expect(at('sess-own-search', 'a1')?.patterns).toEqual(['research-then-edit']);
+    // Still nothing for the sibling that only prompted.
+    expect(at('sess-own-close', 'a2')?.patterns).toEqual([]);
+    expect(at('sess-own-search', 'a2')?.patterns).toEqual([]);
+  });
+
   it("counts a child's own agent_published mark as a publish (#237)", async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
     const s1 = now - 3600_000;
@@ -1058,7 +1210,7 @@ describe('runPushStatus --sessions', () => {
         { at: s1 + 2000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
         { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
       ],
-      { endedAt: s1 + 4000, closesAt: [s1 + 4000] },
+      { endedAt: s1 + 4000, closes: [{ at: s1 + 4000 }] },
     );
     const result = await runPushStatus(
       makeCtx(),
