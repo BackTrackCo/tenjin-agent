@@ -835,12 +835,35 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
   addGlobalFlags(push.command('status'))
     .description(
-      'Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, and the last 7 days of ledger tallies',
+      "Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
     )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {
         const { runPushStatus } = await import('./commands/push');
         return runPushStatus(ctx);
+      });
+    });
+  addGlobalFlags(push.command('grade'))
+    .description(
+      'Grade what the push hooks showed: read each session transcript, mark every injection used, rejected or unobserved, and report the verdicts to the shelf that served them',
+    )
+    .option('--since <window>', 'How far back to grade (e.g. 7d, 24h, 30m)', '7d')
+    .option('--session <id>', 'Grade one session only')
+    .option('--explain', 'Print the anchor line and the evidence behind each verdict')
+    // Variadic rather than two options: `--label <uid> <status>` is one
+    // statement about one row, and splitting it into two flags makes half of it
+    // usable on its own. The pair is validated in the command.
+    .option('--label <values...>', 'Set one verdict by hand: <uid> used|rejected')
+    .action(async function (this: Command) {
+      await runCommand('push.grade', this, async (ctx) => {
+        const opts = this.opts();
+        const { runPushGrade } = await import('./commands/push');
+        return runPushGrade(ctx, {
+          ...(typeof opts.since === 'string' ? { since: opts.since } : {}),
+          ...(typeof opts.session === 'string' ? { session: opts.session } : {}),
+          ...(opts.explain === true ? { explain: true } : {}),
+          ...(Array.isArray(opts.label) ? { label: opts.label as string[] } : {}),
+        });
       });
     });
 

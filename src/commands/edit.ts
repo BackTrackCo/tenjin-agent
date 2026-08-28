@@ -8,7 +8,7 @@ import { UUID_RE } from '../lib/ids';
 import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { sanitizeForTerminal } from '../lib/output';
-import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/search-store';
+import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/state-store';
 import { recordPublished } from '../lib/publish-dedup';
 import {
   deriveCard,

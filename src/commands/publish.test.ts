@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
-import { loadSearches, markSearchResolved, recordSearch } from '../lib/search-store';
+import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
 import { openStore } from '../lib/state-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';

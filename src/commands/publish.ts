@@ -5,11 +5,11 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
 import {
+  getStoredSearch,
   linkSearchesToDraft,
-  loadSearches,
   markSearchResolved,
   type StoredSearch,
-} from '../lib/search-store';
+} from '../lib/state-store';
 import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
@@ -407,8 +407,9 @@ export async function runPublish(
 /**
  * Which named searches this machine has no record of, said BEFORE the wallet
  * touch: the server takes the batch as a unit, so one id it cannot match refuses
- * the whole publish, after the signature. Ordinary, with a 50-entry store against
- * a 90-day sweep. A warning: an id recorded elsewhere is absent here, valid there.
+ * the whole publish, after the signature. A warning and not an error: the store
+ * keeps every row, so an id missing from it was recorded somewhere else — another
+ * machine, another data dir — where it is perfectly valid.
  */
 function warnUnrecorded(
   ctx: CommandContext,
@@ -457,14 +458,14 @@ async function loadNamedSearches(
   ctx: CommandContext,
   searchIds: string[],
 ): Promise<Map<string, StoredSearch>> {
-  if (searchIds.length === 0) return new Map();
-  const searches = await loadSearches(ctx.dataDir);
-  const wanted = new Set(searchIds);
-  return new Map(
-    searches
-      .filter((s) => wanted.has(s.searchId.toLowerCase()))
-      .map((s) => [s.searchId.toLowerCase(), s]),
-  );
+  const found = new Map<string, StoredSearch>();
+  for (const id of searchIds) {
+    // The lookup itself is case-insensitive (STORE_SQL.getSearch), so the id
+    // this map is keyed by is the one the caller will ask with.
+    const stored = await getStoredSearch(ctx.dataDir, id);
+    if (stored !== null) found.set(id.toLowerCase(), stored);
+  }
+  return found;
 }
 
 /**

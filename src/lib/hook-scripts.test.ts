@@ -40,7 +40,7 @@ import {
   recordSearch,
   type SearchResolution,
   type SearchSource,
-} from './search-store';
+} from './state-store';
 import { STATE_DB_FILE, STORE_SQL, openStore } from './state-store';
 
 /**
@@ -928,8 +928,8 @@ describe('Stop hook: open-loop collection', () => {
     expect(await nagged()).toEqual([OPEN_MISS.searchId]);
   });
 
-  it('says nothing about a MISS an outcome, publish, or candidate already closed', async () => {
-    for (const by of ['outcome', 'publish', 'candidate']) {
+  it('says nothing about a MISS an outcome or a publish already closed', async () => {
+    for (const by of ['outcome', 'publish']) {
       await seedSearches([{ ...OPEN_MISS, resolved: { by, at: new Date().toISOString() } }]);
       await rm(join(dataDir, 'hook-nags.json'), { force: true });
       const run = await runScript(stopHookScript(dataDir), stopInput);
@@ -2873,7 +2873,7 @@ describe('dispatch hook: the burst ceiling', () => {
  * searches.json held 50 entries, so a wide subagent fan-out drained the slots
  * `buy <resourceId>` and `outcome --last` depend on. The answer was a
  * hand-rolled budget capping the two demand sources at 15 BETWEEN them, mirrored
- * byte for byte in the generated script and in lib/search-store.ts, with a suite
+ * byte for byte in the generated script and in lib/state-store.ts, with a suite
  * here pinning one fixture through both writers.
  *
  * All of it is gone (tenjin-agent#209): rows are rows, the store is unbounded,
