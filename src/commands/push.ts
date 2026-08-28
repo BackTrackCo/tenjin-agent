@@ -156,10 +156,18 @@ export interface PushLedgerTallies {
   /** Why a row did not inject. The eight the shipped core writes are
    *  `lookup-cap`, `quiet`, `no-time`, `no-answer`, `miss`, `weak`,
    *  `already-injected` and `watchdog` (docs/command-reference.md#push-experimental),
-   *  but the values are taken from the rows, never from a list here, so a new
-   *  reason shows up in `status` the day the script starts writing it — and a
-   *  retired one keeps counting out of the rows that still hold it. */
+   *  and the team leg by fingerprint adds `keys-off` (the shelf has
+   *  KNOWLEDGE_KEYS off; #212 PR B) — but the values are taken from the rows,
+   *  never from a list here, so a new reason shows up in `status` the day the
+   *  script starts writing it, and a retired one keeps counting out of the rows
+   *  that still hold it. */
   byReason: Record<string, number>;
+  /** The local error→fix pairings opened in the window (plan 05 rows 9 and
+   *  11): how many, how many a later pass closed, how many two independent
+   *  passes verified, what scope the closed ones landed in, and which command
+   *  heads opened them — the last being what says whether the allowlist is
+   *  still letting one head dominate. */
+  pairings: PushPairingTallies;
   /** Distinct findings surfaced in the window. A marketplace piece is keyed by
    *  its resourceId and a local pairing by `pairing:<id>`; both land in
    *  `injections.resource_id`. */
@@ -167,6 +175,26 @@ export interface PushLedgerTallies {
   denies: number;
   injectedTokens: number;
 }
+
+export interface PushPairingTallies {
+  opened: number;
+  /** Rows a later pass closed: `unverified` plus `verified`. */
+  closed: number;
+  verified: number;
+  /** Of the closed rows: `code` may sync to the team shelf, `user` never
+   *  leaves the machine, `ambiguous` is counted for the day-14 revisit. */
+  scope: Record<string, number>;
+  /** Opened rows by the command head they key on. */
+  byHead: Record<string, number>;
+}
+
+const EMPTY_PAIRINGS: PushPairingTallies = {
+  opened: 0,
+  closed: 0,
+  verified: 0,
+  scope: {},
+  byHead: {},
+};
 
 const EMPTY_TALLIES: PushLedgerTallies = {
   windowDays: LEDGER_WINDOW_DAYS,
@@ -177,6 +205,7 @@ const EMPTY_TALLIES: PushLedgerTallies = {
   candidates: 0,
   denies: 0,
   injectedTokens: 0,
+  pairings: EMPTY_PAIRINGS,
 };
 
 /**
@@ -226,6 +255,21 @@ export async function readLedgerTallies(
         injectedTokens += row.tokens;
       }
     }
+    const pairings: PushPairingTallies = { ...EMPTY_PAIRINGS, scope: {}, byHead: {} };
+    for (const row of store.all(STORE_SQL.pairingsStatus, [nowMs - LEDGER_WINDOW_MS])) {
+      const n = typeof row.n === 'number' ? row.n : 0;
+      const status = typeof row.status === 'string' ? row.status : 'unknown';
+      pairings.opened += n;
+      if (status === 'unverified' || status === 'verified') {
+        pairings.closed += n;
+        if (status === 'verified') pairings.verified += n;
+        const scope = typeof row.scope === 'string' ? row.scope : 'unknown';
+        pairings.scope[scope] = (pairings.scope[scope] ?? 0) + n;
+      }
+      const head =
+        typeof row.cmd_head === 'string' && row.cmd_head !== '' ? row.cmd_head : '(none)';
+      pairings.byHead[head] = (pairings.byHead[head] ?? 0) + n;
+    }
     return {
       windowDays: LEDGER_WINDOW_DAYS,
       rows: rows.length,
@@ -235,6 +279,7 @@ export async function readLedgerTallies(
       candidates: candidates.size,
       denies,
       injectedTokens,
+      pairings,
     };
   } catch {
     return EMPTY_TALLIES;
@@ -322,6 +367,20 @@ function renderStatusLines(data: {
   if (reasonEntries.length > 0) {
     lines.push(`  reasons: ${reasonEntries.map(([reason, n]) => `${reason}=${n}`).join(', ')}`);
   }
+  // The mechanical lane's own line, always printed: zero opened after a week of
+  // failing builds is the allowlist being too tight, and the head breakdown is
+  // what says whether one head is still opening rows it should not.
+  const p = ledger.pairings;
+  const counts = (record: Record<string, number>): string =>
+    Object.entries(record)
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([k, n]) => `${k}=${n}`)
+      .join(', ');
+  lines.push(
+    `pairings, last ${ledger.windowDays}d: ${p.opened} opened, ${p.closed} closed, ${p.verified} verified` +
+      (p.closed > 0 ? `; scope: ${counts(p.scope)}` : '') +
+      (p.opened > 0 ? `; heads: ${counts(p.byHead)}` : ''),
+  );
   return lines;
 }
 

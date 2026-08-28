@@ -464,6 +464,12 @@ export const STORE_SQL = {
   /** `tenjin push status`, one pass over the window. */
   statusRows: `SELECT hook, shelf, action, reason, resource_id, deny, tokens
      FROM injections WHERE at >= ?`,
+  /** `tenjin push status`, the pairings opened in the window, grouped the
+   *  way the line reports them. `scope` is the FIRST closer's and stays
+   *  `ambiguous` on an open row, so the scope counts are read off closed rows
+   *  only. A scan of a table that grows by one row per distinct failure. */
+  pairingsStatus: `SELECT status, scope, cmd_head, COUNT(*) AS n
+     FROM pairings WHERE at >= ? GROUP BY status, scope, cmd_head`,
 } as const;
 
 export type StoreSqlKey = keyof typeof STORE_SQL;

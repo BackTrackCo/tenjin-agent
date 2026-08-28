@@ -193,8 +193,12 @@ describe('runPushStatus', () => {
         candidates: 0,
         denies: 0,
         injectedTokens: 0,
+        pairings: { opened: 0, closed: 0, verified: 0, scope: {}, byHead: {} },
       },
     });
+    expect(result.humanLines?.join('\n')).toContain(
+      'pairings, last 7d: 0 opened, 0 closed, 0 verified',
+    );
   });
 
   it('reflects the persisted modes and whether the scripts are actually on disk', async () => {
@@ -322,6 +326,92 @@ describe('runPushStatus', () => {
       store.close();
     }
   }
+
+  /** One pairing row, as the failure arm opens it, then closed as asked. */
+  async function seedPairing(
+    dir: string,
+    at: number,
+    head: string,
+    close?: { sessions: string[]; scope: string },
+  ): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      const uid = `pair-${at}-${head}-${Math.random().toString(36).slice(2)}`;
+      store.run(STORE_SQL.insertPairing, [
+        uid,
+        at,
+        'sess',
+        'proj',
+        'machine',
+        'sig_v1',
+        `key-${uid}`,
+        null,
+        head,
+        `${head} test`,
+        'Error: ENOENT',
+        '["a.ts"]',
+        '{}',
+        'ambiguous',
+      ]);
+      if (close === undefined) return;
+      const id = (store.get('SELECT id FROM pairings WHERE uid = ?', [uid]) as { id: number }).id;
+      for (const session of close.sessions) {
+        store.run(STORE_SQL.claimClose, [
+          id,
+          session,
+          at + 1,
+          `${head} test`,
+          '["a.ts"]',
+          close.scope,
+        ]);
+      }
+      store.run(STORE_SQL.syncPairing, [
+        close.sessions.length,
+        close.sessions.length,
+        at + 1,
+        `${head} test`,
+        '["a.ts"]',
+        close.scope,
+        id,
+      ]);
+    } finally {
+      store.close();
+    }
+  }
+
+  /**
+   * Plan 05 rows 9 and 11 (tenjin-agent#212): how many pairings the machine
+   * opened, how many a later pass closed and verified, what scope the closed
+   * ones landed in, and which heads opened them.
+   */
+  it('reports the pairings opened in the window: closed, verified, scope, heads', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const recent = now - 60_000;
+    const stale = now - 8 * 24 * 60 * 60 * 1000;
+    await seedPairing(dir, recent, 'pnpm');
+    await seedPairing(dir, recent, 'pnpm', { sessions: ['s1'], scope: 'code' });
+    await seedPairing(dir, recent, 'pytest', { sessions: ['s1', 's2'], scope: 'code' });
+    await seedPairing(dir, recent, 'tsc', { sessions: ['s1'], scope: 'user' });
+    await seedPairing(dir, stale, 'cargo', { sessions: ['s1'], scope: 'code' });
+
+    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
+    expect(result.data).toMatchObject({
+      ledger: {
+        pairings: {
+          opened: 4,
+          closed: 3,
+          verified: 1,
+          scope: { code: 2, user: 1 },
+          byHead: { pnpm: 2, pytest: 1, tsc: 1 },
+        },
+      },
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain(
+      'pairings, last 7d: 4 opened, 3 closed, 1 verified; scope: code=2, user=1; heads: pnpm=2, pytest=1, tsc=1',
+    );
+  });
 
   it('tallies the last 7 days of ledger rows by trigger x action, shelf, denies, and tokens', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
