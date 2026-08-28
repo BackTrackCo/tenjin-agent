@@ -67,11 +67,23 @@ export const STORE_USER_VERSION = 1;
  * on stderr, which is exactly what Claude Code shows the operator. With
  * `busy_timeout` first, 3/3 runs completed with zero BUSY. The `timeout`
  * constructor option would do the same job but is 22.16+, so it is the pragma.
+ *
+ * FIRST, BUT IT DOES NOT COVER THE PRAGMA IT PRECEDES. Ordering fixed the
+ * common case; #246 was the rest of it. `PRAGMA journal_mode = wal` against a
+ * connection that holds a pending WRITE lock throws `database is locked` after
+ * 0 ms — the busy handler is not consulted for that lock at all — so no value
+ * here, raised or not, protects the WAL switch. That statement gets a retry
+ * instead of a wait; see `setWal`.
  */
 export const STORE_BUSY_TIMEOUT_MS = 250;
 
 /**
  * The wait for the ONE-TIME schema transaction, and how many times it is tried.
+ *
+ * The tier is a property of the STATEMENT, not of the caller: this is what
+ * `BEGIN IMMEDIATE` and the DDL it wraps run under, and nothing else. The other
+ * cold-start statement, the WAL switch, cannot use a timeout at all and is
+ * handled its own way (`setWal`).
  *
  * 250 ms is sized for a steady-state write: sub-millisecond inserts queueing
  * behind each other, inside every arm's budget. The cold start is a different
@@ -85,6 +97,16 @@ export const STORE_BUSY_TIMEOUT_MS = 250;
  * So the bootstrap gets its own, longer wait, and it is put back immediately
  * afterwards so no ordinary fire ever inherits it. This is a once-per-machine
  * cost (the gate is `user_version < 1`).
+ *
+ * WHAT THE WAL SWITCH ADDS TO THE BUDGET, AND WHEN. In the case that matters —
+ * another opener holding the write lock through its DDL — both of its attempts
+ * are decided instantly: a 0 ms throw before the bootstrap and a 1 ms no-op
+ * after it, which is the whole reason the retry sits after rather than before.
+ * A long-lived READER is the only thing that makes it wait, and then it waits
+ * the steady-state 250 ms, at most twice. So the arithmetic ceiling for the
+ * cold start is 250 + 500 x 2 + 250 = 1500 ms, which is the watchdog exactly;
+ * it needs a reader to hold on across both attempts AND the bootstrap to lose
+ * both of its own. Raise any of the three and that stops being an argument.
  *
  * THE BUDGET IS THE PRODUCT, NOT THE TIMEOUT, and the ceiling is 1500 ms, not
  * 2700. `DatabaseSync` is synchronous, so a `busy_timeout` wait blocks the
@@ -714,6 +736,42 @@ function storeSession(sessionId) {
 }
 
 /**
+ * Switch the file to WAL. Returns whether it is now in WAL; NEVER throws.
+ *
+ * THE ONE STATEMENT IN THIS FILE THE BUSY TIMEOUT DOES NOT PROTECT. Probed
+ * 2026-08-27 on node 24.19 (\`node:sqlite\`), fresh file, \`busy_timeout = 500\`:
+ *
+ *  - another connection holding a write lock -> this pragma throws
+ *    \`database is locked\` after 0 ms. The busy handler is never called. An
+ *    ordinary INSERT in the same state waited the full 554 ms and then threw.
+ *  - another connection holding only a READ lock -> the busy handler IS called
+ *    and the pragma waits out the timeout.
+ *  - the file ALREADY in WAL, another connection mid-write -> succeeds in 1 ms.
+ *    A no-op switch needs no exclusive lock at all.
+ *
+ * So the cold-start stampede (#246) killed the loser here, one line before the
+ * transaction \`bootstrap()\` protects, and no timeout could have saved it: the
+ * winner holds the write lock for its DDL and this statement will not wait.
+ * The answer is the third bullet. Fail, let the caller run the version check —
+ * which blocks on the winner properly, because the busy handler DOES cover it —
+ * and come back afterwards, by which time the file is in WAL and the retry is a
+ * no-op.
+ *
+ * AND IT IS NEVER FATAL EITHER WAY. WAL is a concurrency optimisation, not a
+ * correctness requirement; a rollback journal under busy_timeout runs every
+ * statement in this module correctly. Losing it is worth strictly less than the
+ * hook's whole state for that fire, which is what throwing here costs.
+ */
+function setWal(db) {
+  try {
+    db.exec('PRAGMA journal_mode = wal');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Open the store, once per process. NEVER AT MODULE SCOPE: a module-scope
  * \`await import\` that throws exits 1 with a stack trace, which is what the
  * operator sees as a hook error. Called inside main(), and every failure —
@@ -732,7 +790,8 @@ async function openStore() {
     // database under eight concurrent openers kills one of them outright at
     // that pragma (probed 2026-08-25).
     db.exec('PRAGMA busy_timeout = ' + STORE_BUSY_TIMEOUT_MS);
-    db.exec('PRAGMA journal_mode = wal');
+    // ...but busy_timeout DOES NOT COVER THIS ONE. See setWal.
+    let wal = setWal(db);
     db.exec('PRAGMA synchronous = normal');
     // LESS THAN, NEVER NOT-EQUAL. Hook scripts are regenerated only by
     // \`tenjin install\`, so a machine can run v1 hooks against a database a
@@ -742,6 +801,11 @@ async function openStore() {
     // under version 2) then throws and costs the newer build its store. A
     // higher version is left exactly as it is.
     if (storeVersion(db) < STORE_USER_VERSION) bootstrap(db);
+    // Second and last attempt, now that the cold start this lost to has
+    // committed: on a file another opener has already switched, this is a 1 ms
+    // read of the header. If it fails again the store is still open and
+    // correct, just on a rollback journal.
+    if (!wal) wal = setWal(db);
     try {
       chmodSync(STATE_DB_PATH, 0o600);
     } catch {
@@ -1417,6 +1481,18 @@ function storeVersionOf(db: SqliteDatabase): number {
   return isRecord(row) && typeof row.user_version === 'number' ? row.user_version : -1;
 }
 
+/** Switch the file to WAL. Returns whether it is now in WAL; never throws. See
+ *  the probe in `setWal`'s comment in the hook template above for why this is
+ *  best-effort and why one retry after the bootstrap is what fixes it. */
+function setWalOn(db: SqliteDatabase): boolean {
+  try {
+    db.exec('PRAGMA journal_mode = wal');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Open (and create) the store for the CLI.
  *
@@ -1438,7 +1514,12 @@ export async function openStore(dataDir: string): Promise<Store | null> {
     const path = stateDbPath(dataDir);
     db = new sqlite.DatabaseSync(path);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
-    db.exec('PRAGMA journal_mode = wal');
+    // Best effort, never fatal, and retried after the version check: the same
+    // two-attempt shape and the same probe as `setWal` in the hook template
+    // above. A CLI command can be the one that meets a fresh file beside a
+    // burst of hooks, and this pragma is the one statement the busy timeout
+    // does not cover.
+    let wal = setWalOn(db);
     db.exec('PRAGMA synchronous = normal');
     // `<`, never `!==`: see the note in the hook template above. A database a
     // newer build has already migrated is left alone rather than downgraded.
@@ -1480,6 +1561,9 @@ export async function openStore(dataDir: string): Promise<Store | null> {
         }
       }
     }
+    // Second and last attempt, now that whatever cold start this lost to has
+    // committed.
+    if (!wal) wal = setWalOn(db);
     try {
       chmodSync(path, 0o600);
     } catch {
