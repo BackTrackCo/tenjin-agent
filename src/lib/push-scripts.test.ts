@@ -2943,6 +2943,20 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       store?.close();
     }
 
+    /** The same row, written as RAW JSON: `JSON.stringify` turns NaN and
+     *  Infinity into `null`, so a payload carrying either has to be spelled the
+     *  way a shelf would send it over the wire. */
+    async function seedRawRates(promptRow: string, session = SESSION): Promise<void> {
+      const store = await openStore(dataDir);
+      store?.run(STORE_SQL.setState, [
+        session,
+        'trigger_rates',
+        `{"at":${Date.now()},"days":7,"triggers":{"prompt":${promptRow}}}`,
+        Date.now(),
+      ]);
+      store?.close();
+    }
+
     it('doubles the cap of an arm whose graded lookups were used at least 40% of the time', async () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
@@ -3061,6 +3075,61 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
       expect(hits()).toBeGreaterThan(0);
+    });
+
+    /**
+     * NOT-A-COUNT COUNTS. `trigger_rates` is JSON off a shelf's
+     * `/api/lookups/stats`, so its numbers are untrusted, and `typeof x ===
+     * 'number'` admits three that are not counts. JSON has no NaN or Infinity
+     * literal, but `1e999` parses to Infinity and Infinity + -Infinity is NaN,
+     * so both are reachable over the wire; a negative is reachable outright.
+     *
+     * Each is coerced to 0 — the answer a missing field already gets — rather
+     * than left to make every comparison below it false by accident. That
+     * accident happened to give the right answer for NaN and the WRONG one for
+     * Infinity, which read as a permanently cold arm.
+     */
+    it('reads an Infinity hit count as no count, not as a cold arm', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // 1e999 parses to Infinity, which is >= the 20-hit cold threshold, and
+      // the rate is 0: uncoerced this cools the cap to floor(8/3) = 2 and the
+      // fire below is suppressed.
+      await seedRawRates('{"hits":1e999,"used":0,"wrong":1}');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('keeps the base cap when the counts add up to NaN', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // Infinity + -Infinity: the guard's `used + wrong <= 0` is FALSE for NaN,
+      // so this walks past it, and every threshold below is false for the same
+      // reason. The cap must be base because the counts are not counts, not
+      // because NaN loses every comparison.
+      await seedRawRates('{"hits":30,"used":1e999,"wrong":-1e999}');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('keeps the base cap with negative counts', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRawRates('{"hits":-1,"used":-1,"wrong":-1}');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
     });
 
     it('is inert with a malformed rates row', async () => {

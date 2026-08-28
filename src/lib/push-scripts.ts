@@ -301,9 +301,16 @@ function cooldownCap(trigger, base, sessionId) {
   if (!isRecord(rates) || !isRecord(rates.triggers)) return base;
   const row = rates.triggers[triggerKey(trigger)];
   if (!isRecord(row)) return base;
-  const hits = typeof row.hits === 'number' ? row.hits : 0;
-  const used = typeof row.used === 'number' ? row.used : 0;
-  const wrong = typeof row.wrong === 'number' ? row.wrong : 0;
+  // FINITE AND NON-NEGATIVE, not merely \`typeof 'number'\`. These come off a
+  // shelf's JSON over the wire, and NaN, Infinity and -1 are all numbers: NaN
+  // made every comparison below false and reached \`return base\` by accident,
+  // Infinity would have read as a permanently cold arm, and a negative \`wrong\`
+  // can push \`used + wrong\` past the guard with a rate above 1. Coerced to 0,
+  // which is the same answer a missing field gets.
+  const count = (value) => (Number.isFinite(value) && value >= 0 ? value : 0);
+  const hits = count(row.hits);
+  const used = count(row.used);
+  const wrong = count(row.wrong);
   if (used + wrong <= 0) return base;
   const rate = used / (used + wrong);
   if (rate >= PUSH_COOLDOWN.hotRate) return base * PUSH_COOLDOWN.hotFactor;
