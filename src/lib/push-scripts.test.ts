@@ -1300,6 +1300,27 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(slash.stdout).toBe('');
     expect(hits()).toBe(0);
     expect(await ledger()).toEqual([]);
+    // BUT EVERY PROMPT IS ON RECORD (#212): a "yes" turns the user turn over
+    // as surely as a research question does, and the importance score splits a
+    // session on those turns. Skipped rows say why, and carry no decision.
+    const rows = await events();
+    expect(rows.map((r) => r.hook)).toEqual(['prompt', 'prompt']);
+    expect(rows[0]!.data).toEqual({
+      event: 'UserPromptSubmit',
+      query: 'yes, do that',
+      skipped: 'short',
+    });
+    expect(rows[1]!.data).toMatchObject({ event: 'UserPromptSubmit', skipped: 'slash' });
+  });
+
+  it('opens one event row for a looked-up prompt, not two', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).not.toHaveProperty('skipped');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'prompt', action: 'injected' });
   });
 
   it('reads the older user_input spelling too', async () => {
@@ -2358,6 +2379,36 @@ describe('the subagent arm (SubagentStart)', () => {
 });
 
 describe('the context arm (log-only)', () => {
+  /**
+   * The upserted `edited:<path>` state row keeps only the LAST timestamp per
+   * path, so "the same file edited before and after a user turn" was
+   * uncomputable from it. One appended event per edit, basename only.
+   */
+  it('appends an edit row per Edit/Write, with the basename and nothing else', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const file = join(scriptDir, 'nested', 'drizzle.config.ts');
+    for (const tool of ['Edit', 'Write']) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PreToolUse',
+          tool_name: tool,
+          tool_input: { file_path: file },
+        }),
+      );
+    }
+    expect(hits()).toBe(0);
+    const rows = await events();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.tool)).toEqual(['Edit', 'Write']);
+    for (const row of rows) {
+      expect(row).toMatchObject({ hook: 'edit', files: ['drizzle.config.ts'], error_hash: null });
+      expect(JSON.stringify(row)).not.toContain('nested');
+    }
+  });
+
   it('logs the packages a Read named and says nothing to the model', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);

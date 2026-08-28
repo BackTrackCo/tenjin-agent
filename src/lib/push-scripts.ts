@@ -881,15 +881,27 @@ async function main() {
       ? input.prompt
       : (typeof input.user_input === 'string' ? input.user_input : '');
   const prompt = raw.trim();
-  if (prompt.length < PROMPT_MIN_CHARS || prompt.length > PROMPT_MAX_CHARS) return quiet();
-  if (prompt.startsWith('/')) return quiet();
-
   // Scrubbed BEFORE the slice, so a path at character 380 cannot survive by
   // being cut in half, and what the ledger records is what was sent.
   const query = clean(scrub(prompt).slice(0, PROMPT_QUERY_CHARS), PROMPT_QUERY_CHARS);
-  // Under three content words nothing can score: overlap divides by the query's
-  // own tokens, so this would spend a request that cannot produce a hit.
-  if (tokens(query).size < 3) return quiet();
+  // Why this prompt will not be looked up, or null. Decided BEFORE the store is
+  // opened, so the row below can say so, and applied after it, so the row is
+  // written either way.
+  //  - short/long: outside the size window. Under three content words nothing
+  //    can score, either: overlap divides by the query's own tokens, so that
+  //    would spend a request that cannot produce a hit.
+  //  - slash: a harness command, not a question.
+  const skipped =
+    prompt.length < PROMPT_MIN_CHARS
+      ? 'short'
+      : prompt.length > PROMPT_MAX_CHARS
+        ? 'long'
+        : prompt.startsWith('/')
+          ? 'slash'
+          : tokens(query).size < 3
+            ? 'words'
+            : null;
+  if (prompt.length === 0) return quiet();
 
   const sessionId = sessionIdOf(input);
   const cwd = cwdOf(input);
@@ -902,6 +914,21 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+  // ONE ROW PER PROMPT, INCLUDING THE ONES NOTHING IS ASKED ABOUT. Only prompts
+  // that reached pushDecide used to leave a row, so the user-turn timestamps
+  // the importance score (#212) splits a session on were partial: a "yes",
+  // a "/clear" and a one-line correction all turned over the turn and none of
+  // them was on record. The row is what pushDecide would have opened — it is
+  // handed the uid so the lookup does not open a second one — plus \`skipped\`
+  // when this arm went no further. A skipped prompt's query is the same
+  // scrubbed, capped text a looked-up one records.
+  const eventUid = recordEvent({
+    session: sessionId,
+    cwd,
+    hook: 'prompt',
+    data: { event: 'UserPromptSubmit', query: clean(query, 512), ...(skipped === null ? {} : { skipped }) },
+  });
+  if (skipped !== null) return quiet();
   // The arm's own deadline, inside the process watchdog. Whatever is in flight
   // when it fires is abandoned, but the store LEARNS THAT IT WAS: a run killed
   // by the bare watchdog left a paid-for search recorded and no decision row at
@@ -910,6 +937,7 @@ async function main() {
     recordDecision({
       session: sessionId,
       cwd,
+      eventUid,
       trigger: 'prompt',
       event: 'UserPromptSubmit',
       action: 'skipped',
@@ -926,6 +954,7 @@ async function main() {
     config,
     sessionId,
     cwd,
+    eventUid,
     mode: 'inject',
     source: 'push-hook',
   });
@@ -1986,6 +2015,21 @@ async function main() {
     // replaces lost entries to concurrent writers and evicted by insertion
     // order, which a re-edit does not change.
     setState(sessionId, STATE_EDITED_PREFIX + filePath.slice(-200), true);
+    // AND ONE EVENT ROW PER EDIT, appended. The upsert above keeps only the
+    // last timestamp per path, so "the same file edited before and after a
+    // user turn" — a pattern the importance score (#212, CommonTrace
+    // \`detection.py\`) weights — was uncomputable from it. The basename and
+    // the tool, nothing else: a path is operator-chosen text, and the score
+    // only ever compares names.
+    const base = filePath.split(/[/\\]/).pop() || '';
+    recordEvent({
+      session: sessionId,
+      cwd,
+      hook: 'edit',
+      tool,
+      files: base.length > 0 ? [clean(base, 80)] : [],
+      data: { event },
+    });
   }
 
   if (!/\.(m?[jt]sx?|cjs|py)$/.test(filePath)) return quiet();
