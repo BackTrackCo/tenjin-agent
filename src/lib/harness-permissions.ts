@@ -125,6 +125,9 @@ export const MODE_GATED_FORBIDDEN_FRAGMENTS: readonly string[] = [
   'tenjin buy',
   'tenjin session',
   'tenjin send',
+  // The mode carries publish and edit and stops there. `delete` destroys what
+  // those two put up, and consent to publish is not consent to destroy.
+  'tenjin delete',
   'tenjin config set',
   'tenjin wallet create',
   'tenjin mcp',
@@ -192,6 +195,7 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
   'tenjin buy',
   'tenjin publish',
   'tenjin edit',
+  'tenjin delete',
   'tenjin session',
   'tenjin send',
   'tenjin config set',

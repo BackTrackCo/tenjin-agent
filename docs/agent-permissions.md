@@ -210,6 +210,7 @@ Deliberately **never** recommended, because each is a human decision:
 | `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below.      |
 | `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.        |
 | `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.                   |
+| `tenjin delete`        | Destroys a published piece. No mode clears it; see below.                                 |
 | `tenjin wallet create` | Creates the payment credential.                                                           |
 | `tenjin config set`    | It can widen the agent's own spend policy.                                                |
 | `tenjin install`       | Writes into harness config and skills directories.                                        |
@@ -234,8 +235,10 @@ the mode you chose does nothing. That is why two rules track the mode:
   strictly broader credential than the read-only one `tenjin session start` asks
   for as an explicit opt-in.
 - `Bash(tenjin edit:*)` updates posts your wallet already owns: reprices, refreshes
-  an as-of date, repairs an answer card. Owner-scoped on both legs, spends nothing,
-  and creates no new public content, but it opens the keystore on the same terms,
+  an as-of date, repairs an answer card, and flips status both ways, so it can
+  promote a draft to published under the same mode gate (a promotion re-runs the
+  block-tier secret scan over the stored body). Owner-scoped on both legs, spends
+  nothing, and mints no new posts, but it opens the keystore on the same terms,
   and it runs the same `publish.mode` gate in the CLI. A mode that can publish a
   post unattended but cannot fix that post's price is the asymmetry the mode exists
   to remove.
@@ -244,6 +247,16 @@ Neither is in any block above: there is nothing to paste here, because the mode 
 the decision and the rules only follow it. Neither can spend: `publish` and `edit`
 carry no payment path, so what they reach is your identity and your keystore, not
 your balance.
+
+**The mode carries two rules and stops there.** `tenjin delete` is the write verb
+it deliberately does not reach: consent to publish is not consent to destroy, and
+letting one decision authorize the other is how an operator ends up with a piece
+gone that they only ever agreed to have published. So `delete` sits on the never
+list above under any mode, and the CLI does not rely on the harness for that: the
+command reads no mode at all and confirms on every run, interactively at a
+terminal and by refusing with exit 3 until `--yes` anywhere else. When a piece
+should come down but not be lost, `tenjin edit <post-id> --status draft` is the
+reversible move, and it rides the ordinary `Bash(tenjin edit:*)` rule.
 
 **Installing Tenjin is the consent for these.** `tenjin install` settles
 `publish.mode` at `auto` unless you say otherwise, and writes both rules alongside
@@ -380,10 +393,11 @@ None can spend and none can move your keys; `wallet fund` mints a checkout link 
 human can pay.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
-`publish`, `edit`, `buy`, `send`,
+`publish`, `edit`, `delete`, `buy`, `send`,
 `session start`, `wallet create`, `config set`, `install`. In particular, do not
 delegate publishing what a subagent just derived: bring the finding back and
-publish it from the context that can ask the user.
+publish it from the context that can ask the user, and never delegate `delete` at
+all: it is irreversible, and a subagent has no one to ask.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
 repo, not the network: `search` and `outcome` POST off-machine (a question, a
@@ -395,9 +409,12 @@ damage, so never pass one.
 That is a different permission surface: the harness gates tools there, and these
 Bash rules do not apply. If you follow the
 [MCP section](../README.md#local-stdio-mcp-server) as well, leave
-`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`, and
-`mcp__tenjin__tenjin_wallet` gated, and treat `mcp__tenjin__tenjin_buy` as the
-same opt-in decision as the `buy` line above.
+`mcp__tenjin__tenjin_publish`, `mcp__tenjin__tenjin_edit`,
+`mcp__tenjin__tenjin_delete`, and `mcp__tenjin__tenjin_wallet` gated, and treat
+`mcp__tenjin__tenjin_buy` as the same opt-in decision as the `buy` line above.
+`mcp__tenjin__tenjin_delete` is the one whose core still confirms even if you
+clear it: it never reads `publish.mode`, so an ungated call comes back as
+`NEEDS_CONFIRMATION` rather than deleting.
 
 ## Not the same as `allowlistCreators`
 

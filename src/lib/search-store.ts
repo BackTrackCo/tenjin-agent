@@ -101,6 +101,16 @@ export interface StoredSearch {
    */
   sessionId?: string;
   /**
+   * The DRAFT this search's claim is parked on. A `publish --draft --search-id`
+   * withholds the claim from the wire (a draft answers nobody) and records the
+   * created post id here instead, so `edit --status published` can send the
+   * claim when the draft actually goes public. Cleared never: once the loop is
+   * resolved the link is inert. Stored as a machine-bucket `session_state` row
+   * (`draft-search:<searchId>`), not a `searches` column; see
+   * `STORE_SQL.listSearches`.
+   */
+  draftPostId?: string;
+  /**
    * How many of the search's browse pointers cost money, and NOT the pointers
    * themselves: keeping them out of the store is what makes `buy <resourceId>`
    * unable to reach one (see the browse comment in agent-api.ts), and a count
@@ -121,6 +131,24 @@ export interface StoredSearch {
  * the ones that need a specific row ask for it by id.
  */
 const RECENT_LIMIT = 500;
+
+/** Where a draft link lives: the machine ('') `session_state` bucket, keyed
+ *  `draft-search:<searchId>`. ⚠ MIRRORED as a literal inside
+ *  `STORE_SQL.listSearches` and `STORE_SQL.searchesForDraft`. */
+const DRAFT_LINK_PREFIX = 'draft-search:';
+const MACHINE_SESSION = '';
+
+/**
+ * ONE SPELLING for the draft link's value, on the way in and on the way out.
+ * The link is matched as SQL text under SQLite's BINARY collation while the
+ * command edge's `UUID_RE` takes a post id in either case, so an uppercase
+ * `edit 0197AAAA-… --status published` would find no parked claim and drop the
+ * attribution behind a successful receipt. Folded like the sibling id
+ * (`normalizeSearchIds`); Postgres stores `uuid` lowercased anyway.
+ */
+function foldPostId(postId: string): string {
+  return postId.toLowerCase();
+}
 
 function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
   const searchId = typeof row.search_id === 'string' ? row.search_id : '';
@@ -157,6 +185,9 @@ function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
       : {}),
     ...(typeof row.session === 'string' && row.session.length > 0
       ? { sessionId: row.session }
+      : {}),
+    ...(typeof row.draft_post_id === 'string' && row.draft_post_id.length > 0
+      ? { draftPostId: row.draft_post_id }
       : {}),
     ...(typeof row.paid_browse_count === 'number'
       ? { paidBrowseCount: row.paid_browse_count }
@@ -213,6 +244,16 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
     // loop something already closed.
     if (entry.resolved !== undefined) {
       store.run(STORE_SQL.resolveSearch, [entry.resolved.by, entry.resolved.at, entry.searchId]);
+    }
+    // Same posture as `resolved`: a caller that already knows the draft this
+    // claim is parked on (a re-record, a fixture) writes the link in one call.
+    if (entry.draftPostId !== undefined) {
+      store.run(STORE_SQL.setState, [
+        MACHINE_SESSION,
+        DRAFT_LINK_PREFIX + entry.searchId,
+        foldPostId(entry.draftPostId),
+        Date.now(),
+      ]);
     }
   });
 }
@@ -272,6 +313,53 @@ export async function markSearchResolved(
     // REPORTED, not assumed: a swallowed write must not come back as a close.
     if (!store.run(STORE_SQL.resolveSearch, [by, at, searchId])) return 'failed';
     return outcome;
+  });
+}
+
+/**
+ * Park each named search's claim on the draft that will answer it, so a later
+ * promotion can carry it to the server. Best-effort exactly like
+ * {@link markSearchResolved}: an unknown id writes nothing, and a failure to
+ * persist costs the claim rather than the publish that already succeeded.
+ */
+export async function linkSearchesToDraft(
+  dataDir: string,
+  searchIds: string[],
+  draftPostId: string,
+): Promise<void> {
+  if (searchIds.length === 0) return;
+  const parkedOn = foldPostId(draftPostId);
+  await withStore(dataDir, undefined, (store) => {
+    const at = Date.now();
+    for (const searchId of new Set(searchIds)) {
+      // A link to a row this ledger never recorded would never be read back:
+      // `searchesForDraft` joins on the searches table.
+      if (store.get(STORE_SQL.getSearch, [searchId]) === null) continue;
+      store.run(STORE_SQL.setState, [MACHINE_SESSION, DRAFT_LINK_PREFIX + searchId, parkedOn, at]);
+    }
+  });
+}
+
+/**
+ * The searches whose claims are parked on `draftPostId`. Resolved entries are
+ * INCLUDED on purpose: publish sends the id even on a relink (an `outcome`
+ * closing the loop first does not change who ended up answering it), and the
+ * promotion is that publish arriving late.
+ */
+export async function searchesForDraft(
+  dataDir: string,
+  draftPostId: string,
+): Promise<StoredSearch[]> {
+  const parkedOn = foldPostId(draftPostId);
+  return await withStore(dataDir, [] as StoredSearch[], (store) => {
+    const out: StoredSearch[] = [];
+    for (const row of store.all(STORE_SQL.searchesForDraft, [parkedOn])) {
+      const entry = rowToSearch(row);
+      // The join proved the link, so the row carries it even though the SELECT
+      // does not: `s.*` has no draft_post_id column to alias.
+      if (entry !== null) out.push({ ...entry, draftPostId: parkedOn });
+    }
+    return out;
   });
 }
 

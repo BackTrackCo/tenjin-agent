@@ -767,9 +767,9 @@ describe('runPublish — publish <file> --search-id', () => {
   });
 
   // A draft answers nobody: the local ledger says so and leaves the loop open, so
-  // the wire must say the same. Sending it anyway meant one demand signal claimed
-  // by two posts, since no command promotes a draft and the only route to a public
-  // piece is a second publish naming the same id.
+  // the wire must say the same. The claim is not lost, it is parked on the draft
+  // (the test below), and `edit --status published` carries it when the piece
+  // actually goes public.
   it('sends no searchId on a draft, and leaves the local loop open', async () => {
     await seed();
     const { fetch, body } = bodyServer();
@@ -780,6 +780,21 @@ describe('runPublish — publish <file> --search-id', () => {
     );
     expect(body()).not.toHaveProperty('searchId');
     expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
+  });
+
+  // What the withheld claim becomes instead: parked on the draft's post id, so
+  // `edit --status published` can send it when the piece actually goes public.
+  it('parks the withheld claim on the draft for the promotion to carry', async () => {
+    await seed();
+    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { searchId: SEARCH, draft: true, mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    const entry = (await loadSearches(dir))[0];
+    expect(entry?.draftPostId).toBe(CREATED.id);
+    expect(entry?.resolved).toBeUndefined();
   });
 
   // The server's declared pattern is narrower than the CLI's own UUID_RE, and the
@@ -1909,9 +1924,10 @@ describe('runPublish — the same body is published once per machine', () => {
   });
 
   /**
-   * A draft is the one case where publishing the same body twice is the point:
-   * nothing promotes a draft, so reaching a public piece MEANS a second publish
-   * of the same text. Deduping that would make the promotion silently do nothing.
+   * A draft is the one case where publishing the same body twice is the point: a
+   * draft writes no marker, so parking the same text again is legitimate and the
+   * publish that takes it public is not held back by either draft. Deduping in
+   * either direction would make that publish silently do nothing.
    */
   it('never dedups a draft, in either direction', async () => {
     const file = await writeDoc(CLEAN);
@@ -2523,5 +2539,87 @@ describe('runPublish — server ingest gate', () => {
     expect(err.message).not.toContain('wallet-address');
     expect(err.fix).toContain('block-tier material');
     expect((err.details as { findings: unknown[] }).findings).toHaveLength(1);
+  });
+});
+
+/**
+ * The undo line (#221). Its whole job is that an agent reporting a publish has a
+ * real command to hand over: the issue is a report of one inventing `tenjin
+ * delete` from an MCP tool name, before that verb existed. So it carries the real
+ * id, and it rides BOTH surfaces, because an MCP client's stderr is a discard
+ * sink and a line that lives only there is a line it can never show anyone.
+ */
+describe('runPublish — the undo line', () => {
+  it('names both commands with the real post id, on stderr and in the envelope', async () => {
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(res.data).toMatchObject({
+      undo: {
+        remove: `tenjin delete ${CREATED.id}`,
+        unpublish: `tenjin edit ${CREATED.id} --status draft`,
+      },
+    });
+    expect(res.humanLines ?? []).toContain(
+      `Undo: \`tenjin edit ${CREATED.id} --status draft\` unpublishes it (reversible), ` +
+        `\`tenjin delete ${CREATED.id}\` removes it.`,
+    );
+  });
+
+  /**
+   * The published line is copied verbatim — that is why it is printed at all — so
+   * a `--yes` in it would hand every reader a one-shot destructive command and
+   * contradict the rule stated beside it, that a delete is run bare first and
+   * confirmed only once the user has seen what would go. Pinned negatively on
+   * both surfaces, because the regression is an addition rather than a removal.
+   */
+  it('never bakes --yes into the undo commands, on either surface', async () => {
+    const { fetch } = stubServer();
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    const undo = (res.data as { undo: Record<string, string> }).undo;
+    for (const command of Object.values(undo)) expect(command).not.toContain('--yes');
+    const line = (res.humanLines ?? []).find((l) => l.startsWith('Undo:')) ?? '';
+    expect(line).not.toBe('');
+    expect(line).not.toContain('--yes');
+  });
+
+  // The schema behind the receipt refuses a server-sent id that is not exactly a
+  // uuid, so `"<uuid> --yes"` can never reach the undo line or `data.undo`: the
+  // pin above constrains the author, this one constrains the wire.
+  it('refuses a server-sent id carrying a flag, so no undo command can smuggle --yes', async () => {
+    const { fetch } = stubServer({ ...CREATED, id: `${CREATED.id} --yes` });
+    const { provider } = spyProvider();
+    await expect(
+      runPublish(
+        baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'CONTRACT_MISMATCH' });
+  });
+
+  // A draft is not up, so demoting it undoes nothing; offering `--status draft`
+  // there would be a command that changes nothing dressed as a remedy.
+  it('offers only the removal on a draft, since a draft was never published', async () => {
+    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
+    const { provider } = spyProvider();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto', draft: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    const undo = (res.data as { undo: { remove: string; unpublish?: string } }).undo;
+    expect(undo.remove).toBe(`tenjin delete ${CREATED.id}`);
+    expect(undo.unpublish).toBeUndefined();
+    expect(res.humanLines ?? []).toContain(`Undo: \`tenjin delete ${CREATED.id}\` removes it.`);
   });
 });

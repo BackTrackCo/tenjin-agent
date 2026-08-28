@@ -6,9 +6,11 @@ import {
   findSearchForResource,
   findStoredCandidate,
   latestSearch,
+  linkSearchesToDraft,
   loadSearches,
   markSearchResolved,
   recordSearch,
+  searchesForDraft,
   type StoredSearch,
 } from './search-store';
 import { STATE_DB_FILE } from './state-store';
@@ -256,6 +258,94 @@ describe('markSearchResolved', () => {
     await recordSearch(dir, entry());
     await markSearchResolved(dir, ID, 'candidate');
     expect(await latestSearch(dir)).toMatchObject({ searchId: ID, resolved: { by: 'candidate' } });
+  });
+});
+
+/**
+ * The claim a `publish --draft --search-id` withholds from the wire and parks
+ * locally, and the promotion that reads it back. Both halves live here because
+ * the two commands only ever meet in this store: publish writes the link, and
+ * `edit --status published` is the only reader.
+ */
+describe('draft claims', () => {
+  const ID = '0197aaaa-bbbb-cccc-dddd-000000000001';
+  const ID2 = '0197aaaa-bbbb-cccc-dddd-000000000002';
+  const DRAFT = '0197dddd-eeee-4fff-8aaa-bbbbbbbbbbbb';
+  const OTHER_DRAFT = '0197dddd-eeee-4fff-8aaa-cccccccccccc';
+
+  it('parks the withheld claim and hands it back for the promotion', async () => {
+    await recordSearch(dir, entry());
+    await linkSearchesToDraft(dir, [ID], DRAFT);
+    const parked = await searchesForDraft(dir, DRAFT);
+    expect(parked.map((s) => s.searchId)).toEqual([ID]);
+    expect(parked[0]?.draftPostId).toBe(DRAFT);
+    expect(await searchesForDraft(dir, OTHER_DRAFT)).toEqual([]);
+  });
+
+  // The link is a session_state row, so every `loadSearches` caller reaches it
+  // through the LEFT JOIN: it must carry the link where there is one and drop
+  // neither the unlinked rows nor a row's own identity where there is not.
+  it('rides loadSearches through the LEFT JOIN without dropping or duplicating a row', async () => {
+    await recordSearch(dir, entry());
+    await recordSearch(dir, entry({ searchId: ID2, question: 'unlinked' }));
+    await linkSearchesToDraft(dir, [ID], DRAFT);
+    const loaded = await loadSearches(dir);
+    expect(loaded).toHaveLength(2);
+    expect(loaded.find((s) => s.searchId === ID)?.draftPostId).toBe(DRAFT);
+    expect(loaded.find((s) => s.searchId === ID2)?.draftPostId).toBeUndefined();
+  });
+
+  // A link to a row this ledger never recorded would never be read back, since
+  // `searchesForDraft` joins on the searches table. Refused at the write.
+  it('writes nothing for a searchId this machine never recorded', async () => {
+    await recordSearch(dir, entry());
+    await linkSearchesToDraft(dir, ['0197aaaa-bbbb-cccc-dddd-000000000099'], DRAFT);
+    expect(await searchesForDraft(dir, DRAFT)).toEqual([]);
+    expect((await loadSearches(dir))[0]?.draftPostId).toBeUndefined();
+  });
+
+  // `UUID_RE` takes a post id in either case and SQLite compares text as bytes,
+  // so without the fold `edit 0197DDDD-… --status published` would find no
+  // claim and lose the attribution behind a successful receipt.
+  it('matches a post id in either case, in both directions', async () => {
+    await recordSearch(dir, entry());
+    await recordSearch(dir, entry({ searchId: ID2, question: 'parked in caps' }));
+    await linkSearchesToDraft(dir, [ID], DRAFT);
+    await linkSearchesToDraft(dir, [ID2], OTHER_DRAFT.toUpperCase());
+
+    expect((await searchesForDraft(dir, DRAFT.toUpperCase())).map((s) => s.searchId)).toEqual([ID]);
+    expect((await searchesForDraft(dir, OTHER_DRAFT)).map((s) => s.searchId)).toEqual([ID2]);
+    // One spelling on the way out too, so nothing downstream echoes a post id
+    // in a case the store does not hold.
+    expect((await loadSearches(dir)).find((s) => s.searchId === ID2)?.draftPostId).toBe(
+      OTHER_DRAFT,
+    );
+  });
+
+  // Resolved entries are returned ON PURPOSE: an `outcome` that closed the loop
+  // first does not change who ended up answering it, and the promotion is the
+  // publish arriving late. This is the only route to a `relinked` receipt.
+  it('includes a search something else already closed', async () => {
+    await recordSearch(dir, entry());
+    await linkSearchesToDraft(dir, [ID], DRAFT);
+    await markSearchResolved(dir, ID, 'outcome', '2026-08-09T10:00:00.000Z');
+    const parked = await searchesForDraft(dir, DRAFT);
+    expect(parked.map((s) => s.searchId)).toEqual([ID]);
+    expect(parked[0]?.resolved?.by).toBe('outcome');
+    await expect(
+      markSearchResolved(dir, ID, 'publish', '2026-08-09T11:00:00.000Z', { relink: true }),
+    ).resolves.toBe('relinked');
+  });
+
+  it('records the link in one call when the caller already knows it', async () => {
+    await recordSearch(dir, entry({ draftPostId: DRAFT.toUpperCase() }));
+    expect((await searchesForDraft(dir, DRAFT)).map((s) => s.searchId)).toEqual([ID]);
+  });
+
+  it('never throws on a corrupt store, in either direction', async () => {
+    await writeFile(join(dir, STATE_DB_FILE), 'not a database', 'utf8');
+    await expect(linkSearchesToDraft(dir, [ID], DRAFT)).resolves.toBeUndefined();
+    await expect(searchesForDraft(dir, DRAFT)).resolves.toEqual([]);
   });
 });
 

@@ -25,6 +25,7 @@ const FORBIDDEN_VERBS = [
   'tenjin send',
   'tenjin publish',
   'tenjin edit',
+  'tenjin delete',
   'tenjin wallet create',
   'tenjin config set',
   'tenjin install',
@@ -189,13 +190,14 @@ describe('the rule publish.mode carries', () => {
     for (const e of PUBLISH_MODE_ALLOWLIST) expect(ruleCovers(e.rule, e.command)).toBe(true);
   });
 
-  // edit is the NARROWER of the pair, and the note has to say why it rides along:
-  // owner-scoped, spends nothing, creates no new public content.
+  // edit is the NARROWER of the pair, and the note has to say why it rides along
+  // (owner-scoped, spends nothing) AND disclose the one publish-shaped thing the
+  // rule can do: promote a draft to published under the same mode gate.
   it("edit's note earns its place beside publish", () => {
     const note = PUBLISH_MODE_ALLOWLIST.find((e) => e.command === 'tenjin edit')?.note ?? '';
     expect(note).toMatch(/ALREADY OWNS/);
     expect(note).toMatch(/spends nothing/i);
-    expect(note).toMatch(/creates no new public content/i);
+    expect(note).toMatch(/promote a draft to published/i);
     expect(note).toMatch(/narrower blast radius|narrower/i);
   });
 
