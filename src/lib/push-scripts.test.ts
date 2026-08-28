@@ -5959,6 +5959,42 @@ describe('the capture ask (Stop)', () => {
   });
 
   /**
+   * P1 (greptile, round 3): the same race one millisecond tighter. The mark was
+   * the newest named `at` PLUS ONE against a queue read filtering `at >= mark`,
+   * so a finding committed after the list was read but stamped in the SAME
+   * millisecond as the newest row that list named landed below the mark and
+   * stayed there: never displayed, and never displayable. Concurrent
+   * `SubagentStop` processes queue findings independently, so the tie is
+   * ordinary rather than exotic.
+   *
+   * The cursor is the last named KEY now. Queue uids are ULID-shaped, a
+   * fixed-width millisecond prefix in Crockford base32, so key order is mint
+   * order and there is no tie class left to lose a row to.
+   */
+  it('names a finding queued in the same millisecond as the newest one named', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    const tie = Date.now() - 20_000;
+    const named = '01K3TIED000AAAAAAAAAAAAAAA';
+    const raced = '01K3TIED000BBBBBBBBBBBBBBB';
+    await queueFinding(named, 'named by the first ask', SESSION, { at: tie });
+
+    const first = await askReason();
+    expect(first).toContain(named);
+
+    // Committed after that read, on the same tick. A timestamp cursor put this
+    // row on the wrong side of the mark the moment it landed.
+    await queueFinding(raced, 'committed on the same millisecond', SESSION, { at: tie });
+    const second = await askReason();
+    expect(second).toContain(raced);
+    // And the named row is not restated: the cursor moved past that ROW, not
+    // past the millisecond it shared.
+    expect(second).not.toContain(named);
+
+    // And it settles: neither row re-arms the ask.
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
+
+  /**
    * A ROW FROM ANOTHER CHECKOUT IS MARKED, because `publish.mode` resolves from
    * the directory the publish runs in and this queue is machine-wide: unmarked,
    * a full-auto repo publishes a private repo's finding with nobody deciding to.

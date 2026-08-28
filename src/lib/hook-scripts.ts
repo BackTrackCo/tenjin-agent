@@ -2486,6 +2486,12 @@ function clipBody(body, max) {
  * guard; a finding it did not name is one nobody would publish, because this
  * ask is the last thing that will ever mention it.
  *
+ * \`after\` IS THE LAST NAMED UID, and it is what keeps a re-ask from restating
+ * itself. It is the key rather than a timestamp because two children stopping
+ * in the same millisecond are ordinary here, and a time cursor drops one of
+ * them; \`windowStart\` remains the only time bound. It reports the highest uid
+ * it named so the caller can advance that cursor past exactly this list.
+ *
  * A CHILD'S WORDS ARE DATA HERE TOO. This list ends up inside a BLOCKING
  * reason, one paragraph away from the resolved publish mode, and a child can be
  * handed another user's marketplace text at its own start — so each body is
@@ -2493,14 +2499,17 @@ function clipBody(body, max) {
  * it is placed on a line of its own rather than inside quotes an apostrophe in
  * it could close.
  */
-function queuedFindingsLine(sessionId, project, since, fresh) {
-  const rows = queuedFindingQueue(since, ${MAX_LISTED_FINDINGS});
+function queuedFindingsLine(sessionId, project, windowStart, after, fresh) {
+  const rows = queuedFindingQueue(windowStart, ${MAX_LISTED_FINDINGS}, after);
   if (rows.length === 0) return null;
   const mine = storeSession(sessionId);
   let anyClipped = false;
   let anyEarlier = false;
   let anyElsewhere = false;
-  let newestAt = 0;
+  // The cursor the next ask reads from: the HIGHEST uid named, not the first
+  // row, because the list is ordered by \`at\` and a row's uid is minted a tick
+  // before the row is written.
+  let newestUid = '';
   const items = rows.map((row) => {
     const who = row.agentType === '' ? 'a subagent' : row.agentType + ' subagent';
     const agent = row.agentId === null ? '' : ' ' + clean(row.agentId, 64);
@@ -2512,7 +2521,7 @@ function queuedFindingsLine(sessionId, project, since, fresh) {
     // would publish out of a private one without anybody deciding to.
     const elsewhere = row.project !== null && row.project !== project ? ', from another project' : '';
     if (elsewhere !== '') anyElsewhere = true;
-    if (row.at > newestAt) newestAt = row.at;
+    if (row.uid > newestUid) newestUid = row.uid;
     const body = clipBody(row.body, ${FINDING_LINE_MAX});
     if (body.endsWith(FINDING_CLIP_MARK)) anyClipped = true;
     // THE ID IS WHAT MAKES THE LIST A POINTER RATHER THAN THE ONLY COPY. It is
@@ -2536,7 +2545,7 @@ function queuedFindingsLine(sessionId, project, since, fresh) {
     ? ' finding(s) subagents on this machine stated at their own end, held locally and unpublished'
     : ' further finding(s) landed since the last ask, held locally and unpublished';
   return {
-    newestAt,
+    newestUid,
     text:
       String(rows.length) +
       scope +
@@ -2646,27 +2655,40 @@ function captureAsked(sessionId) {
 }
 
 /**
- * When this session was last asked, as the WATERMARK a re-ask is measured
- * against, or null when it never was.
+ * What the last ask named, as the two cursors a re-ask is measured against, or
+ * null when this session was never asked.
  *
- * A ROW WRITTEN BY AN OLDER HOOK IS A BARE ISO STRING, and its own timestamp is
- * exactly the right watermark for it: everything queued before that ask was
- * named by it. So the upgrade needs no migration and costs no re-ask.
- * An unparseable value reads as 0, which re-asks once and then settles.
+ * TWO CURSORS BECAUSE THE ASK CARRIES TWO LISTS. \`finding\` is the last queued
+ * finding uid named, and the queue pages on it. \`watermark\` is a timestamp and
+ * covers the \`agent_published:\` half only, whose keys carry the agent id first
+ * and so cannot be paged in time order.
+ *
+ * A ROW WRITTEN BY AN OLDER HOOK CARRIES NO \`finding\` (a bare ISO string, or a
+ * record with the timestamp alone), which reads as an empty cursor: the first
+ * re-ask after the upgrade may restate findings still inside the window that
+ * the last ask already named, and then it settles. One duplicated list, once,
+ * against a class of finding the timestamp cursor loses forever.
  */
-function captureAskedAt(sessionId) {
+function captureAskedMark(sessionId) {
   const value = getState(sessionId, STATE_CAPTURE_ASKED);
   if (value === null) return null;
-  if (isRecord(value) && typeof value.watermark === 'number') return value.watermark;
+  const finding = isRecord(value) && typeof value.finding === 'string' ? value.finding : '';
+  if (isRecord(value) && typeof value.watermark === 'number') {
+    return { watermark: value.watermark, finding };
+  }
   if (typeof value === 'string') {
     const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? parsed : 0;
+    return { watermark: Number.isFinite(parsed) ? parsed : 0, finding };
   }
-  return 0;
+  return { watermark: 0, finding };
 }
 
-function markCaptureAsked(sessionId, watermark) {
-  setState(sessionId, STATE_CAPTURE_ASKED, { at: new Date().toISOString(), watermark });
+function markCaptureAsked(sessionId, watermark, finding) {
+  setState(sessionId, STATE_CAPTURE_ASKED, {
+    at: new Date().toISOString(),
+    watermark,
+    finding,
+  });
 }
 
 /**
@@ -2722,7 +2744,7 @@ function didResearch(sessionId) {
   // NOT THE SIDECAR'S OWN TELEMETRY, which is what the rule above is about: a
   // queue row exists only because a child was asked at its own boundary and
   // answered in its own words.
-  if (newestQueuedFindingAt(Date.now() - ${OPEN_LOOP_WINDOW_MS}) !== 0) return true;
+  if (queuedFindingAfter(Date.now() - ${OPEN_LOOP_WINDOW_MS}, '')) return true;
   // \`shelf <> 'local'\` for the same reason 'read'/'churn' and the log-only
   // actions are excluded: a pairing this machine replayed out of its own record
   // is the sidecar's telemetry, not evidence the session researched anything. A
@@ -2949,10 +2971,25 @@ function subagentsRunning(transcriptPath) {
  * stamped before the mark but committed after the read — a \`SubagentStop\`
  * blocked on this hook's own write lock — was named by nobody and skipped by
  * every later ask, which searched from the newer mark. Permanently invisible,
- * not late. The caller therefore composes the reason first and marks with the
- * newest \`at\` it printed, plus one millisecond so that row is not re-listed;
- * anything that lands during the read is newer than everything named and is
- * picked up next time. An ask that named nothing marks with the read time.
+ * not late. The caller therefore composes the reason first and marks with what
+ * it printed.
+ *
+ * THE QUEUE'S CURSOR IS THE LAST NAMED KEY, NOT A TIMESTAMP (greptile P1 on
+ * #237). Marking the newest named \`at\` plus one millisecond lost the whole tie
+ * class: concurrent \`SubagentStop\` processes queue findings independently, so a
+ * row committed after the read bearing the SAME millisecond as the newest named
+ * row sat below the mark from the moment it landed: never displayed, and never
+ * displayable. Marking the bare \`at\` instead only moves the defect: the newest
+ * NAMED row then satisfies \`at >= mark\` at every later read and the gate fires
+ * at every turn end. A queue uid is ULID-shaped, so the KEY is a total order on
+ * mint time with no ties in it, and paging on the key both names every row once
+ * and settles.
+ *
+ * THE PUBLISH HALF STAYS ON THE TIMESTAMP, because \`agent_published:\` keys lead
+ * with the agent id and so carry no time order to page on. It marks the newest
+ * publish it named plus one millisecond, and an ask that named no publish marks
+ * with the read time, which is safe in that direction: a mark that is too EARLY
+ * re-lists nothing when nothing was named.
  */
 function captureAsk(config, sessionId, transcriptPath) {
   if (config.capture === 'off') return null;
@@ -2961,13 +2998,15 @@ function captureAsk(config, sessionId, transcriptPath) {
   // this one degrades to silence, because it is the one that can block.
   if (sessionId === null) return null;
   const windowStart = Date.now() - ${OPEN_LOOP_WINDOW_MS};
-  const asked = captureAskedAt(sessionId);
-  // A first ask covers the whole window; a re-ask covers only what has landed
-  // since the last one, and happens only if something has.
-  const since = asked === null ? windowStart : Math.max(windowStart, asked);
+  const mark = captureAskedMark(sessionId);
+  // A first ask covers the whole window; a re-ask covers only what the last one
+  // did not name, and happens only if there is any such thing. The queue is
+  // bounded by the window on both, because its cursor is the key.
+  const since = mark === null ? windowStart : Math.max(windowStart, mark.watermark);
+  const after = mark === null ? '' : mark.finding;
   if (
-    asked !== null &&
-    newestQueuedFindingAt(since) === 0 &&
+    mark !== null &&
+    !queuedFindingAfter(windowStart, after) &&
     !childPublishedSince(sessionId, windowStart, since, ${MAX_LISTED_FINDINGS})
   ) {
     return null;
@@ -2980,8 +3019,8 @@ function captureAsk(config, sessionId, transcriptPath) {
   // Only on the FIRST ask. Anything that arrived after it is its own evidence
   // the session researched, and re-testing the older signals here would just
   // re-derive an answer this session already gave.
-  if (asked === null && !didResearch(sessionId)) return null;
-  return { mode: config.capture, since, windowStart, fresh: asked === null, at: Date.now() };
+  if (mark === null && !didResearch(sessionId)) return null;
+  return { mode: config.capture, since, after, windowStart, fresh: mark === null, at: Date.now() };
 }
 
 /**
@@ -2996,9 +3035,18 @@ function captureAsk(config, sessionId, transcriptPath) {
  * RECORDED BEFORE THE ASK IS EMITTED, like the nag record, and for the same
  * reason: an ask we cannot mark is an ask that repeats at every turn end. It is
  * recorded AFTER the lists are read because the mark is derived from them.
+ *
+ * AN ASK THAT NAMED NO FINDING CARRIES THE OLD CURSOR FORWARD rather than
+ * clearing it: the queue half of a re-ask is often empty (a child publish
+ * re-arms the ask on its own), and resetting the cursor there would re-list
+ * every finding the last ask named.
  */
-function markCaptureAsk(sessionId, ask, namedAt) {
-  markCaptureAsked(sessionId, namedAt === 0 ? ask.at : namedAt + 1);
+function markCaptureAsk(sessionId, ask, publishedAt, namedUid) {
+  markCaptureAsked(
+    sessionId,
+    publishedAt === 0 ? ask.at : publishedAt + 1,
+    namedUid === '' ? ask.after : namedUid,
+  );
   if (!captureAsked(sessionId)) return ask.mode === 'block' ? 'nudge' : ask.mode;
   return ask.mode;
 }
@@ -3174,12 +3222,19 @@ async function main() {
   const ask = captureAsk(config, sessionId, transcriptPath);
   // Read only when there is an ask to attach them to: a session with capture
   // off, or one with nothing new to say, must not pay two queries for lines
-  // nothing will print. \`ask.since\` is the whole window on a first ask and the
-  // last ask's watermark on a re-ask, so neither list restates itself.
+  // nothing will print. Each list reads from its own cursor, the queue from the
+  // last uid named and the publishes from the last ask's watermark, so neither
+  // restates itself.
   let reason = '';
   let askMode = null;
   if (ask !== null) {
-    const queued = queuedFindingsLine(sessionId, projectId(cwd), ask.since, ask.fresh);
+    const queued = queuedFindingsLine(
+      sessionId,
+      projectId(cwd),
+      ask.windowStart,
+      ask.after,
+      ask.fresh,
+    );
     const published = childPublishLine(sessionId, ask.windowStart, ask.since);
     reason = boundReason(
       captureReason(
@@ -3194,7 +3249,8 @@ async function main() {
     askMode = markCaptureAsk(
       sessionId,
       ask,
-      Math.max(queued === null ? 0 : queued.newestAt, published === null ? 0 : published.newestAt),
+      published === null ? 0 : published.newestAt,
+      queued === null ? '' : queued.newestUid,
     );
   }
   if (askMode === 'block') emitBlock(reason);

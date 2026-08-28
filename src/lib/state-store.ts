@@ -1957,7 +1957,8 @@ function bumpState(sessionId, key) {
 }
 
 /**
- * The keys under \`prefix\` touched since \`sinceMs\`, newest first.
+ * The keys under \`prefix\` touched since \`sinceMs\`, newest first, optionally
+ * only those ABOVE \`afterKey\` (the key without its prefix).
  *
  * ONE ROW PER PATH, which is what makes the close rule's evidence survive.
  * \`edited\` used to be a single JSON map, so a concurrent write could drop an
@@ -1965,11 +1966,20 @@ function bumpState(sessionId, key) {
  * which a re-edit does not change — so re-editing the oldest-inserted file
  * (very often exactly the config file the failing command named) evicted the
  * freshest timestamp in the map and the pairing never closed.
+ *
+ * \`afterKey\` NARROWS THE RANGE THE STATEMENT ALREADY SEEKS ON, so a caller
+ * paging by key stays a primary-key range seek. The bound is inclusive, and a
+ * NUL is the smallest thing that can follow a key, so \`prefix + afterKey + NUL\`
+ * is exactly "> that key" for every key there is.
  */
-function statePrefixSince(sessionId, prefix, sinceMs, limit) {
+function statePrefixSince(sessionId, prefix, sinceMs, limit, afterKey) {
+  const from =
+    typeof afterKey === 'string' && afterKey !== ''
+      ? prefix + afterKey + String.fromCharCode(0)
+      : prefix;
   const rows = storeAll(STORE_SQL.statePrefixSince, [
     storeSession(sessionId),
-    prefix,
+    from,
     prefix + String.fromCharCode(0xffff),
     sinceMs,
     limit,
@@ -2022,9 +2032,20 @@ function enqueueFinding(uid, finding) {
  * ended session — so a session-scoped list makes a real finding invisible rather
  * than merely late. Bounded by the window and the caller's limit; the caller
  * decides what to do with one from another session, and is told which those are.
+ *
+ * \`afterUid\` IS THE CALLER'S CURSOR, and it works because the uid is
+ * ULID-shaped: a fixed-width millisecond prefix in Crockford base32, so key
+ * order IS mint order and no two rows share a cursor position. A caller that
+ * paged on the timestamp instead lost a row to every millisecond tie.
  */
-function queuedFindingQueue(sinceMs, limit) {
-  return statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, limit).map((row) => {
+function queuedFindingQueue(sinceMs, limit, afterUid) {
+  return statePrefixSince(
+    MACHINE_SESSION,
+    STATE_QUEUED_FINDING_PREFIX,
+    sinceMs,
+    limit,
+    afterUid,
+  ).map((row) => {
     const value = isRecord(row.value) ? row.value : {};
     return {
       uid: row.key,
@@ -2042,13 +2063,15 @@ function queuedFindingQueue(sinceMs, limit) {
   });
 }
 
-/** When the newest queued finding at or after \`sinceMs\` was filed, or 0 when
- *  there is none. Machine-wide, like the list it gates: a finding whose own
- *  session is gone is the case the queue exists for, so scoping this read to
- *  one session would strand exactly those rows. */
-function newestQueuedFindingAt(sinceMs) {
-  const rows = statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, 1);
-  return rows.length === 0 ? 0 : rows[0].at;
+/** Is there a queued finding at or after \`sinceMs\` whose uid is above
+ *  \`afterUid\`, meaning one the caller's cursor has not already passed?
+ *  Machine-wide, like the list it gates: a finding whose own session is gone is
+ *  the case the queue exists for, so scoping this read to one session would
+ *  strand exactly those rows. */
+function queuedFindingAfter(sinceMs, afterUid) {
+  return (
+    statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, 1, afterUid).length > 0
+  );
 }
 
 /**
