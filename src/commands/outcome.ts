@@ -328,9 +328,9 @@ async function resolveAllOpen(
       },
     );
   }
-  // The session predicate is the query's, not a filter over everything: it is
-  // the same rule `ownedByThisSession` states, and the unstamped rows it keeps
-  // are the ones that belong to no session and so stay reachable from any.
+  // The session predicate is the query's, not a filter over everything: a
+  // differently stamped row is that session's business, and the unstamped rows
+  // it keeps belong to no session and so stay reachable from any.
   const open = await openSearches(ctx.dataDir, readSessionId(deps.env));
   // Absent source predates sources, and those entries were all deliberate.
   const hook = open.filter((s) => s.source === 'websearch-hook');
