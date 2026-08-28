@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   STATE_DB_FILE,
+  projectIdOf,
   STORE_PUBLISHED_AGENT_PREFIX,
   STORE_QUEUED_FINDING_PREFIX,
   STORE_RELAY_WINDOW_MS,
@@ -4806,7 +4807,7 @@ describe('the subagent arm (SubagentStop)', () => {
 
     const first = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(first.code).toBe(0);
-    expect(blocked(first)).toBe(subagentCaptureReason('a1', 'review'));
+    expect(blocked(first)).toBe(subagentCaptureReason('a1', 'review', SEARCH_ID));
     // The lifecycle row is written BEFORE the block, and names the signal.
     expect(await stopRows()).toMatchObject([
       {
@@ -4843,15 +4844,25 @@ describe('the subagent arm (SubagentStop)', () => {
     await seedDispatchMiss();
 
     const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop())) ?? '';
-    // The command, with this child's own id riding along for attribution.
+    // The command, with this child's own id riding along for attribution and the
+    // loop the ask was earned by riding along so the publish CLOSES it: without
+    // that flag the preferred path leaves the dispatch MISS open (only the
+    // fallback closed it, through `inheritedSearchIds`) and the piece lands with
+    // no question on its card, ranking below every carded piece.
     expect(reason).toContain('publish it YOURSELF now');
-    expect(reason).toContain('`tenjin publish <file> --agent a1`');
+    expect(reason).toContain('`tenjin publish <file> --agent a1 --search-id ' + SEARCH_ID + '`');
+    // A rung for the child with no shell, on the same principle the child
+    // pointer ladders on: one unrunnable rung is dead context.
+    expect(reason).toContain('or call the tenjin_publish MCP tool with that file');
     // The same publish anyone runs: no child branch, no shelf restriction.
     expect(reason).toContain('the same local scan and the same publish.mode consent as any other');
-    // The fallback, triggered by the refusal and by nothing else.
+    // The fallback, triggered by the refusal and by nothing else. The codes are
+    // spelled as the CLI EMITS them: a child told to watch for `publish_blocked`
+    // is watching for a string that never appears.
     expect(reason).toContain(
-      'If that command REFUSES (it exits needs_confirmation, or publish_blocked), or you cannot run it at all',
+      'If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all',
     );
+    expect(reason).not.toContain('needs_confirmation');
     expect(reason).toContain('```' + PUSH_FINDING_TAG);
     expect(reason).toContain('recorded locally for your parent');
     // And doing nothing stays as easy as either, so no child invents a finding.
@@ -4888,7 +4899,7 @@ describe('the subagent arm (SubagentStop)', () => {
       blocked(
         await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: 'a1; rm -rf /' })),
       ) ?? '';
-    expect(reason).toContain('`tenjin publish <file>`');
+    expect(reason).toContain('`tenjin publish <file> --search-id ' + SEARCH_ID + '`');
     expect(reason).not.toContain('--agent');
     expect(reason).not.toContain('rm -rf');
     // The ask itself still fires: the finding is the point, the flag is not.
@@ -5054,6 +5065,143 @@ describe('the subagent arm (SubagentStop)', () => {
       'no-message',
     ]);
     expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(0);
+  });
+
+  /**
+   * MAJOR (round 2): the harvest bounded the block AFTER `scrub`, so `scrub`
+   * ran on up to `PUSH_FINDING_MESSAGE_TAIL` (20000) attacker-chosen characters
+   * before anything cut it to 2000. `SECRET_ASSIGN_RE`'s leading class was
+   * unbounded and backtracks super-linearly on a keyword-dotted run, and a
+   * synchronous regex cannot be pre-empted by the watchdog, so the harness
+   * timeout kills the hook mid-scrub: the harvest is lost with NO row, which is
+   * the one outcome this arm's comments say cannot happen.
+   *
+   * PINNED ON SHAPE, NOT ON WALL CLOCK. `scrub` DELETES characters, so with the
+   * cut after it, text from beyond position 2000 slides into the stored body;
+   * with the cut before it, nothing past 2000 can ever appear. The filler here
+   * is scrubbable (emails and hostnames go to one space each), which is what
+   * makes the marker's absence decisive rather than incidental.
+   */
+  it('bounds the block before scrub, not after', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    // ~2900 characters that scrub collapses to a few hundred, so under the old
+    // order the marker at ~2900 landed comfortably inside the 2000-char cut.
+    const filler = 'contact a.person@example.com on build.internal.example.com. '.repeat(50);
+    const marker = 'MARKER-PAST-THE-BOUND';
+    expect(filler.length).toBeGreaterThan(PUSH_FINDING_MAX_CHARS);
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer(filler + marker) }),
+    );
+    expect(run.stdout).toBe('');
+
+    const body = String((await stopRows()).find((r) => r.kind === 'finding')?.body);
+    // What the child wrote FIRST survives, which is the half a reader wants.
+    expect(body).toContain('contact');
+    expect(body).not.toContain(marker);
+  });
+
+  /**
+   * MINOR (round 2): the parse closed at the FIRST fence after the opener, so a
+   * finding carrying a code snippet was truncated silently and the truncation
+   * was what `publish --finding` shipped. A closing fence is now a line that is
+   * the fence and nothing else, and a line that opens one nests.
+   */
+  it('keeps a code snippet inside the finding rather than closing on its fence', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    const body = [
+      'the resolver throws unless you pin it:',
+      '```js',
+      'const schema = z.object({}).passthrough();',
+      '```',
+      'and that is the whole fix.',
+    ].join('\n');
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer(body) }),
+    );
+    const stored = String((await stopRows()).find((r) => r.kind === 'finding')?.body);
+    expect(stored).toContain('the resolver throws');
+    // The half that used to be cut off at the snippet's own closing fence.
+    expect(stored).toContain('and that is the whole fix');
+  });
+
+  /**
+   * And the other end of the same minor: `indexOf` took the FIRST opener, so a
+   * child that MENTIONED the marker while declining harvested its own decline.
+   * The opener is now a line of its own, and the last one wins.
+   */
+  it('harvests the real block, not a child quoting the marker on the way to it', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    const message =
+      'I was asked to state anything durable in a ```' +
+      PUSH_FINDING_TAG +
+      '\nblock, and here it is.\n\n' +
+      answer('Pinning the resolver to 4.1 stops the parse throw.');
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: message }),
+    );
+    const stored = String((await stopRows()).find((r) => r.kind === 'finding')?.body);
+    // The block itself, and NOTHING from between the prose mention and it: under
+    // the first-occurrence parse the harvest opened at the mention and swallowed
+    // the child's own narration up to the real fence.
+    expect(stored).toBe('Pinning the resolver to 4.1 stops the parse throw.');
+  });
+
+  /**
+   * MINOR (round 2): `claimState` fails OPEN on a write the store swallowed, so
+   * on a write-refusing store the child was blocked with no row behind it: it
+   * spends a turn, stops again, the next fire finds no `asked` row and the
+   * fenced block it was asked for is never parsed. A block with no durable row
+   * is what this arm's own comments promise cannot happen.
+   *
+   * The refusing store is a real one: a trigger that ABORTs every
+   * `session_state` insert, which is the shape `storeRun` catches and turns
+   * into the null that `claimState` reads as a win.
+   */
+  it('drops the ask rather than blocking a child on a claim that did not stick', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    const store = await openStore(dataDir);
+    store?.run(
+      "CREATE TRIGGER refuse_state BEFORE INSERT ON session_state BEGIN SELECT RAISE(ABORT, 'refused'); END",
+      [],
+    );
+    store?.close();
+
+    const run = await runScript(pushSubagentHookScript(dataDir), stop());
+    expect(run.stdout).toBe('');
+    expect((await stopRows()).map((r) => r.reason)).toEqual(['ask-unrecorded']);
+  });
+
+  /**
+   * MAJOR 1c (round 2): `nudge` means "ask, do not block", and a `SubagentStop`
+   * hook has no non-blocking channel to the child it is talking to, so asking a
+   * child IS blocking it. Gated on `off` alone, the one setting an operator
+   * picks to avoid blocking blocked a subagent. It also leaves the matrix with a
+   * middle it did not have: `block` asks the parent and its children, `nudge`
+   * asks the parent and blocks nobody, `off` asks nobody.
+   */
+  it('never spends a child turn under capture nudge', async () => {
+    await pushOn('https://tenjin.test', { capture: 'nudge' });
+    await seedDispatchMiss();
+
+    const run = await runScript(pushSubagentHookScript(dataDir), stop());
+    expect(run.stdout).toBe('');
+    expect((await stopRows()).map((r) => r.reason)).toEqual(['capture-nudge']);
+    // And nothing was claimed, so the session's budget is intact for a `block`
+    // the operator may switch on mid-session.
+    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
   });
 
   /** A child nobody asked keeps its own words: the queue takes only what this
@@ -5428,14 +5576,20 @@ describe('the capture ask (Stop)', () => {
    * `session` defaults to this session's, and a case that wants an EARLIER
    * session's finding passes another.
    */
-  async function queueFinding(rowUid: string, body: string, session = SESSION): Promise<void> {
+  async function queueFinding(
+    rowUid: string,
+    body: string,
+    session = SESSION,
+    over: { at?: number; project?: string | null } = {},
+  ): Promise<void> {
     const store = await openStore(dataDir);
-    const at = Date.now();
+    const at = over.at ?? Date.now();
+    const project = over.project ?? null;
     store?.run(STORE_SQL.insertEvent, [
       rowUid,
       at,
       session,
-      null,
+      project,
       'machine',
       'finding',
       'SubagentStop',
@@ -5454,11 +5608,56 @@ describe('the capture ask (Stop)', () => {
       STORE_QUEUED_FINDING_PREFIX + rowUid,
       JSON.stringify({
         session,
+        project,
         agentId: 'a1',
         agentType: 'general-purpose',
         searchId: SEARCH_ID,
         body,
       }),
+      at,
+    ]);
+    store?.close();
+  }
+
+  /** The log row alone, with NO queue row: what an `events` finding looks like
+   *  after a child published it and the publish deleted the queue row. */
+  async function logFindingOnly(rowUid: string, body: string): Promise<void> {
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.insertEvent, [
+      rowUid,
+      Date.now(),
+      SESSION,
+      null,
+      'machine',
+      'finding',
+      'SubagentStop',
+      null,
+      null,
+      JSON.stringify({ kind: 'finding', agentId: 'a1', agentType: 'fork', body }),
+    ]);
+    store?.close();
+  }
+
+  /** The claim this session's SubagentStop ask writes when it asks a child. */
+  async function seedChildAsk(agentId: string, at = Date.now()): Promise<void> {
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.setState, [
+      SESSION,
+      'capture:agent:' + agentId,
+      JSON.stringify({ searchId: SEARCH_ID, agentType: 'fork' }),
+      at,
+    ]);
+    store?.close();
+  }
+
+  /** A publish that child made itself. One row per publish, keyed
+   *  `agent_published:<id>@<at>`, as `recordPublished` writes them. */
+  async function seedChildPublish(agentId: string, url: string, at = Date.now()): Promise<void> {
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.setState, [
+      '',
+      'agent_published:' + agentId + '@' + at,
+      JSON.stringify({ url, at }),
       at,
     ]);
     store?.close();
@@ -5626,6 +5825,178 @@ describe('the capture ask (Stop)', () => {
   });
 
   /**
+   * A DEAD PARENT MUST DELAY A FINDING, NOT ERASE IT (greptile P1). A child
+   * queues in session A, session A never runs its parent `Stop` (a crash, an
+   * interrupt, a session ended from the UI), and a later session that did no
+   * research of its own is the only context left that could publish it. The
+   * research gate counted findings under THIS SESSION, so it exited before the
+   * machine-wide list was ever consulted and that row was never named by
+   * anybody. The gate now reads exactly what the list reads.
+   */
+  it('fires for a stranded finding a dead session left behind, with no signal of its own', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await queueFinding('UID-STRANDED', 'the pin that fixes the throw', 'a-session-that-died');
+
+    const reason = await askReason();
+    expect(reason).toContain('- UID-STRANDED');
+    expect(reason).toContain('from an earlier session');
+  });
+
+  /**
+   * MINOR (round 2): the research gate counted the append-only `events` log
+   * while the list reads the queue a publish DELETES, so after a child
+   * published under `auto` the session passed the gate on a row nothing could
+   * name and fired a bare block ask with an empty list. The gate counts the
+   * queue now, so a log row alone raises nothing.
+   */
+  it('does not ask on a logged finding that has already been published away', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await logFindingOnly('UID-PUBLISHED', 'already on a shelf, no queue row left');
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
+  });
+
+  /**
+   * MAJOR (round 2): visibility is this design's ONLY mitigation for letting a
+   * child publish from a sidechain, and it did not fire in the common ordering.
+   * A successful child publish writes an `agent_published:` row and NO queue
+   * row, so a re-ask gate keyed on the queue alone reported the FIRST child
+   * publish of a session and silently dropped every later one.
+   */
+  it('re-asks on a child publish that queued nothing', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const first = await askReason();
+    expect(first).not.toContain('published themselves');
+
+    // Nothing new: silent, exactly as before.
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+
+    await seedChildAsk('a1');
+    await seedChildPublish('a1', 'https://tenjin.test/p/late-child-piece');
+    const second = await askReason();
+    expect(second).toContain('1 finding(s) your subagents published themselves');
+    expect(second).toContain('late-child-piece');
+
+    // And it settles: the watermark moved past the publish it just reported.
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
+
+  /**
+   * MINOR (round 2): `agent_published:` was keyed on the agent id alone and
+   * upserted, so a child that published something objectionable and then
+   * anything innocuous left the parent's report showing only the second. The
+   * report is the mitigation; it silently dropped the publish worth seeing.
+   */
+  it('lists every publish one child made, not just its latest', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const at = Date.now();
+    await seedChildAsk('a1', at - 5000);
+    await seedChildPublish('a1', 'https://tenjin.test/p/the-first-one', at - 2000);
+    await seedChildPublish('a1', 'https://tenjin.test/p/the-second-one', at);
+
+    const reason = await askReason();
+    expect(reason).toContain('2 finding(s) your subagents published themselves');
+    expect(reason).toContain('the-first-one');
+    expect(reason).toContain('the-second-one');
+  });
+
+  /**
+   * AND ONLY WHAT COULD BE OURS. `agent_id` is an undocumented probed field and
+   * the publish rows are machine-wide, so a parent that matched on the id alone
+   * would claim a publish made before it ever asked that child: on a harness
+   * whose ids repeat across concurrent sessions, another session's work reported
+   * as this one's. A publish that predates this session's own ask is not ours.
+   */
+  it('does not claim a publish that predates its own ask of that child', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const at = Date.now();
+    await seedChildPublish('a1', 'https://tenjin.test/p/somebody-elses-run', at - 5000);
+    await seedChildAsk('a1', at - 2000);
+    await seedChildPublish('a1', 'https://tenjin.test/p/ours', at);
+
+    const reason = await askReason();
+    expect(reason).toContain('1 finding(s) your subagents published themselves');
+    expect(reason).toContain('/p/ours');
+    expect(reason).not.toContain('somebody-elses-run');
+  });
+
+  /**
+   * THE WATERMARK COMES FROM WHAT THE ASK NAMED, not from the clock (greptile
+   * P1). It used to be `Date.now()` taken BEFORE the two lists were read, so a
+   * row stamped before that instant but COMMITTED after the read (a
+   * `SubagentStop` blocked on this hook's own write lock) was named by nobody
+   * and skipped by every later ask, which searched from the newer mark.
+   * Permanently invisible, not late.
+   *
+   * The race is reproduced by its RESULT rather than by its timing: a row whose
+   * stamp falls between the newest row the ask named and the wall clock at the
+   * moment it marked. Under the old rule that window is exactly the set of rows
+   * that could never be named again.
+   */
+  it('names a finding stamped between the ask read and the ask mark', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    const early = Date.now() - 20_000;
+    await queueFinding('UID-FIRST', 'named by the first ask', SESSION, { at: early });
+
+    const first = await askReason();
+    expect(first).toContain('UID-FIRST');
+
+    // Stamped after everything the ask named, and well before the ask's own
+    // wall clock: the window a clock watermark swallowed whole.
+    await queueFinding('UID-RACED', 'committed while the ask was reading', SESSION, {
+      at: early + 1000,
+    });
+    const second = await askReason();
+    expect(second).toContain('UID-RACED');
+    expect(second).not.toContain('UID-FIRST');
+
+    // Still settles.
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
+
+  /**
+   * A ROW FROM ANOTHER CHECKOUT IS MARKED, because `publish.mode` resolves from
+   * the directory the publish runs in and this queue is machine-wide: unmarked,
+   * a full-auto repo publishes a private repo's finding with nobody deciding to.
+   */
+  it('marks a finding harvested in another project', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    await queueFinding('UID-HERE', 'settled in this checkout', SESSION, {
+      project: projectIdOf('/tmp'),
+    });
+    await queueFinding('UID-THERE', 'settled in the private repo', SESSION, {
+      project: projectIdOf('/somewhere/else'),
+    });
+
+    const reason = await askReason();
+    expect(reason).toContain('- UID-THERE general-purpose subagent a1, search');
+    expect(reason).toMatch(/UID-THERE[^\n]*from another project/);
+    expect(reason).not.toMatch(/UID-HERE[^\n]*from another project/);
+    expect(reason).toContain('publishing it needs an explicit --yes');
+  });
+
+  /**
+   * MINOR (round 2): `MAX_LISTED_FINDINGS` bounds ROWS, and nothing bounded the
+   * characters those rows compose. 200 queue rows and 200 published rows reach
+   * six figures inside a `decision: block` reason the model must read before it
+   * can end its turn.
+   */
+  it('bounds the composed reason rather than the row count alone', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    for (let i = 0; i < 120; i += 1) await queueFinding(`UID-BULK-${i}`, 'y'.repeat(400));
+
+    const reason = await askReason();
+    expect(reason.length).toBeLessThan(21_000);
+    expect(reason).toContain('This list is cut to fit');
+  });
+
+  /**
    * LATE FINDINGS MUST NOT BE ORPHANED. A subagent launched after the session's
    * capture ask, or one whose launch had already fallen out of the transcript
    * tail, queues its finding AFTER that ask fired. An absolute once-per-session
@@ -5652,7 +6023,10 @@ describe('the capture ask (Stop)', () => {
     expect(second).toContain('UID-LATE');
     // Only what is new. Restating the first would make every re-ask a re-read.
     expect(second).not.toContain('UID-EARLY');
-    expect(second).toContain('1 finding(s) subagents on this machine stated at their own end');
+    // And it says so: a re-ask counts what LANDED SINCE, so an unqualified
+    // "N finding(s) ... held locally" would read as the whole queue.
+    expect(second).toContain('1 further finding(s) landed since the last ask');
+    expect(first).toContain('1 finding(s) subagents on this machine stated at their own end');
 
     // And it settles: the watermark moved past everything the re-ask named.
     const third = await runScript(stopHookScript(dataDir), stopInput);

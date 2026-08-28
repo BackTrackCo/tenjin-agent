@@ -148,7 +148,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'hooks.push':
     'the push experiment (docs/command-reference.md, "Push (experimental)"): on=wire the prompt/failure/subagent/context hooks (`tenjin install`), off=any wired scripts stay but are inert',
   'hooks.capture':
-    'end-of-session publish prompt for durable findings: block=Stop hook blocks once per session, nudge=same text with no block, off=silent',
+    'publish prompt for durable findings: block=your Stop blocks once per session AND a subagent is asked once at its own end, nudge=the same text at your turn end with no block and no subagent asked (nothing is ever blocked), off=silent',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
 };

@@ -1333,12 +1333,22 @@ describe('runInstall: interactive walkthrough', () => {
     // outside the set of arms it belongs to.
     expect(text).not.toContain('more hook entries run beside these');
     // The second thing an armed sidecar does to the harness, disclosed in the
-    // same breath as the deny: it costs a subagent one more turn, and what the
-    // subagent says is recorded on this machine and published by nobody.
+    // same breath as the deny: it costs a subagent one more turn, and that turn
+    // can end in a PUBLISH with nothing further asked of the operator. The
+    // disclosure said the opposite ("nothing is sent anywhere") after the design
+    // moved from fencing to the parent to asking the child to publish, which is
+    // the one line where an operator decides whether to arm any of this.
     expect(text).toContain(
-      'the SubagentStop arm asks that subagent once for its durable finding, which costs it one more turn',
+      'the SubagentStop arm spends one more turn of that subagent asking it to PUBLISH its durable finding itself',
     );
-    expect(text).toContain('records what it says on this machine, unpublished');
+    expect(text).toContain(
+      "under this machine's publish.mode, so under auto with a clean scan, or full-auto, a piece goes to your shelf with nothing further asked of you",
+    );
+    expect(text).toContain(
+      'Only when that publish refuses, or the subagent cannot run it, is the finding recorded on this machine, unpublished',
+    );
+    // The claim the old text made, which was false at this head.
+    expect(text).not.toContain('nothing is sent anywhere');
     expect(text).toContain('Turn it all off: tenjin push off');
     // Three search EVENTS wired (PreToolUse carries two of the four base
     // entries), and the seven push entries reported as their own count rather

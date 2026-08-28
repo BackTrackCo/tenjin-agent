@@ -181,9 +181,10 @@ export const PUSH_FINDING_TAG = 'tenjin-finding';
 export const SUBAGENT_CAPTURE_REASON =
   'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: write it to a file and run `tenjin publish <file>' +
   '<agent-flag>' +
-  '` with the title as the first `# ` heading of the file (one finding per publish). It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits needs_confirmation, or publish_blocked), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block that opens with ```' +
+  '<search-flag>' +
+  '` with the title as the first `# ` heading of the file (one finding per publish), or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   PUSH_FINDING_TAG +
-  ' and closes with ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
+  ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
 /**
  * The characters an `agent_id` may have before it is spliced into a command the
@@ -191,18 +192,39 @@ export const SUBAGENT_CAPTURE_REASON =
  * arrives on an undocumented payload, and a shell metacharacter in a command
  * line an agent is invited to run is not a risk worth an attribution field.
  */
-const AGENT_ID_SHELL_SAFE = /^[A-Za-z0-9_.:-]{1,128}$/;
+export const AGENT_ID_SHELL_SAFE = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 /**
- * The child ask for this agent and this machine's mode.
+ * The search id a child may splice into its own publish, anchored. The
+ * SubagentStart arm anchors the same value for the same reason: it comes off a
+ * store row and lands in a command line an agent is invited to run.
+ */
+const CAPTURE_SEARCH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The child ask for this agent, this loop and this machine's mode.
  *
  * ⚠ MIRRORED with `captureAskText` in the generated subagent script, which
- * cannot import this. Exported so the tests assert against the same two
+ * cannot import this. Exported so the tests assert against the same three
  * substitutions the hook performs rather than against a copy of the wording.
+ *
+ * THE SEARCH ID IS THE LOOP THE ASK WAS EARNED BY. Without it the child's own
+ * publish closes nothing and the piece lands with no `questionsAnswered`
+ * prefill, so it ranks below every carded piece; the fallback path closes the
+ * same loop through `inheritedSearchIds`, and this is the preferred path
+ * getting what the fallback already had.
  */
-export function subagentCaptureReason(agentId: string | null, publishMode: string): string {
+export function subagentCaptureReason(
+  agentId: string | null,
+  publishMode: string,
+  searchId: string | null = null,
+): string {
   const flag = agentId !== null && AGENT_ID_SHELL_SAFE.test(agentId) ? ` --agent ${agentId}` : '';
-  return SUBAGENT_CAPTURE_REASON.replace('<agent-flag>', flag).replace('<mode>', publishMode);
+  const search =
+    searchId !== null && CAPTURE_SEARCH_ID_RE.test(searchId) ? ` --search-id ${searchId}` : '';
+  return SUBAGENT_CAPTURE_REASON.replace('<agent-flag>', flag)
+    .replace('<search-flag>', search)
+    .replace('<mode>', publishMode);
 }
 
 /** The churn arm's trigger: the Nth edit to one file in one session. */
@@ -2468,18 +2490,26 @@ const CAPTURE_ASK = __CAPTURE_ASK__;
 const AGENT_ID_SHELL_SAFE = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 /**
- * The child ask, with this agent's id and this machine's resolved publish mode
- * spliced in. ⚠ MIRRORED with \`subagentCaptureReason\` in lib/push-scripts.ts.
+ * The child ask, with this agent's id, the loop it was earned by and this
+ * machine's resolved publish mode spliced in.
+ * ⚠ MIRRORED with \`subagentCaptureReason\` in lib/push-scripts.ts.
  *
  * AN UNSAFE ID DROPS THE FLAG, NOT THE ASK. \`agent_id\` arrives on an
  * undocumented payload, and this string becomes a command line an agent is
  * invited to run: an id outside the safe set costs the publish its attribution,
- * which is worth strictly less than the shell metacharacter it would carry.
+ * which is worth strictly less than the shell metacharacter it would carry. The
+ * search id takes the same treatment for the same reason, anchored exactly as
+ * the SubagentStart arm anchors it; without it the child's own publish closes
+ * no loop and its piece lands with no question on its card.
  */
-function captureAskText(agentId, publishMode) {
+function captureAskText(agentId, publishMode, searchId) {
   const flag =
     typeof agentId === 'string' && AGENT_ID_SHELL_SAFE.test(agentId) ? ' --agent ' + agentId : '';
-  return CAPTURE_ASK.replace('<agent-flag>', flag).replace('<mode>', publishMode);
+  const search =
+    typeof searchId === 'string' && UUID_RE.test(searchId) ? ' --search-id ' + searchId : '';
+  return CAPTURE_ASK.replace('<agent-flag>', flag)
+    .replace('<search-flag>', search)
+    .replace('<mode>', publishMode);
 }
 
 /**
@@ -2635,8 +2665,80 @@ function agentTranscriptPath(input) {
 }
 
 /**
+ * The line offsets of \`text\`, as [start, endExclusive] pairs. One pass, no
+ * regex: everything the fence parse does is on attacker-chosen text.
+ */
+function eachLine(text, visit) {
+  let i = 0;
+  while (i <= text.length) {
+    const nl = text.indexOf('\n', i);
+    const end = nl === -1 ? text.length : nl;
+    if (visit(text.slice(i, end).trim(), i, end) === false) return;
+    if (nl === -1) return;
+    i = nl + 1;
+  }
+}
+
+/**
+ * Where the child's marked block opens, or -1.
+ *
+ * A LINE OF ITS OWN, AND THE LAST ONE. The opener used to be located with a
+ * bare \`indexOf\`, so a child that MENTIONED the marker while declining ("I have
+ * nothing worth a \`\`\`tenjin-finding block") harvested its own decline: the
+ * first occurrence won, and any newline after it opened a body. The ask now
+ * says the opening line is exactly the marker, and this reads it that way; last
+ * rather than first, because the block is the END of a final answer and a child
+ * that quotes the marker on the way to writing one must not lose it.
+ */
+function findingOpen(text) {
+  let at = -1;
+  eachLine(text, (line, start, end) => {
+    if (line === FINDING_OPEN) at = end;
+  });
+  return at;
+}
+
+/**
+ * Where the block closes, relative to \`body\`, or -1 for unterminated.
+ *
+ * FENCE-AWARE, because a finding that carries a code snippet is the common
+ * shape of a durable finding and the first \`\`\` used to end the harvest there:
+ * the block was truncated silently, and the truncation is what \`publish
+ * --finding\` then shipped. A line that is \`\`\` and nothing else closes the
+ * innermost fence; a line that opens one (\`\`\`js) nests. Depth only, no
+ * matching of info strings, because the input is a child's prose.
+ */
+function findingClose(body) {
+  let at = -1;
+  let depth = 0;
+  eachLine(body, (line, start) => {
+    if (!line.startsWith(FINDING_FENCE)) return;
+    if (line !== FINDING_FENCE) {
+      depth += 1;
+      return;
+    }
+    if (depth === 0) {
+      at = start;
+      return false;
+    }
+    depth -= 1;
+  });
+  return at;
+}
+
+/**
  * The marked block out of a child's final answer, scrubbed and bounded, or
  * null.
+ *
+ * BOUNDED BEFORE IT IS SCRUBBED, not after. \`scrub\` is a chain of backtracking
+ * regexes and this is the one place it runs on up to \`MESSAGE_TAIL\` characters
+ * an untrusted child chose; a synchronous regex cannot be pre-empted by the
+ * watchdog, so a pathological block used to mean a core spun until the harness
+ * killed the hook mid-scrub and the harvest was lost with NO row, the one
+ * outcome this arm's own comments say cannot happen. Cutting to the stored
+ * bound first makes the scrub's input the size of its output. It also means
+ * what is stored is the FIRST \`FINDING_MAX_CHARS\` of what the child wrote,
+ * rather than whatever survived the scrub's own deletions from further down.
  *
  * SCRUBBED BEFORE IT IS STORED, not before it is published: this row is the
  * input to a publish path, and a credential that reaches the queue has already
@@ -2649,12 +2751,11 @@ function agentTranscriptPath(input) {
  * capture ask without a child's newlines reshaping it.
  */
 function findingBlock(text) {
-  const open = text.indexOf(FINDING_OPEN);
-  if (open === -1) return null;
-  const start = text.indexOf('\n', open + FINDING_OPEN.length);
+  const start = findingOpen(text);
   if (start === -1) return null;
-  const end = text.indexOf(FINDING_FENCE, start + 1);
-  const raw = end === -1 ? text.slice(start + 1) : text.slice(start + 1, end);
+  const rest = text.slice(start + 1);
+  const end = findingClose(rest);
+  const raw = (end === -1 ? rest : rest.slice(0, end)).slice(0, FINDING_MAX_CHARS);
   const body = clean(scrub(raw), FINDING_MAX_CHARS);
   return body.length === 0 ? null : body;
 }
@@ -2803,7 +2904,22 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     // question — is this still unpublished — which only a row a publish can
     // DELETE can answer, and it is what lets a later session see a finding this
     // one produced. A queue write that fails costs surfacing, never the record.
-    enqueueFinding(findingUid, { session: sessionId, agentId, agentType, searchId, body });
+    //
+    // THE PROJECT TRAVELS WITH IT. The queue is machine-wide by design, and
+    // \`publish.mode\` resolves from whatever cwd the publishing process is in:
+    // without this column a finding harvested in a private repo under \`review\`
+    // is listable and publishable from an unrelated \`full-auto\` checkout with no
+    // confirm. This is the same bug class \`pairings\` already binds \`project IS ?\`
+    // against. Recorded here rather than derived later because the harvesting
+    // hook is the only process that knows where the child ran.
+    enqueueFinding(findingUid, {
+      session: sessionId,
+      project: projectId(cwd),
+      agentId,
+      agentType,
+      searchId,
+      body,
+    });
     beat('captured', { searchId, chars: body.length, findingUid });
     return quiet();
   }
@@ -2814,8 +2930,18 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // sidecar's initiative. It is also still true that the parent's ask is the
   // ONLY reader of the fallback queue, so an ask here with capture off could
   // only ever file a row nothing surfaces. Cheapest gate of the four.
-  if (config.capture === 'off') {
-    beat('capture-off');
+  //
+  // AND \`nudge\` MEANS NEVER BLOCK, HERE TOO. A \`SubagentStop\` hook has no
+  // non-blocking channel to the child it is talking to — a block IS how the
+  // harness gives a child another turn — so the only honest reading of the one
+  // setting whose meaning is "ask, do not block" is that it does not spend a
+  // child turn either. Gating on \`off\` alone made \`nudge\` block a child, which
+  // is the opposite of what an operator picks it for. It also leaves the matrix
+  // with no middle: \`block\` asks parent and children, \`nudge\` asks the parent
+  // and never blocks anybody, \`off\` asks nobody. Said in \`tenjin config\`,
+  // docs/agent-permissions.md and command-reference.md.
+  if (config.capture !== 'block') {
+    beat(config.capture === 'off' ? 'capture-off' : 'capture-nudge');
     return quiet();
   }
   // Present AND false. A missing fuse is not a licence to block.
@@ -2834,6 +2960,15 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     beat('no-signal');
     return quiet();
   }
+  // THE MODE THE CHILD'S OWN PUBLISH WOULD RUN UNDER, resolved exactly as the
+  // parent's Stop resolves it (lib/config.ts precedence: an env pin outranks the
+  // project file). The child runs in the parent's cwd, so this is the mode its
+  // command will actually meet — and under \`review\` it is why that command
+  // refuses and the fenced block is the answer instead. Resolved BEFORE the
+  // claims: it reads config and the project file and never the store, so keeping
+  // it above them is what lets the lifecycle row sit directly under them.
+  const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
+  const publishMode = project === null ? config.publishMode : project;
   // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE. Both signals are
   // session-wide, so one MISS or one claimed failure signature arms this arm for
   // every child that stops in the hour behind it; the per-child claim only stops
@@ -2855,16 +2990,26 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     beat('ask-claimed');
     return quiet();
   }
-  // THE MODE THE CHILD'S OWN PUBLISH WOULD RUN UNDER, resolved exactly as the
-  // parent's Stop resolves it (lib/config.ts precedence: an env pin outranks the
-  // project file). The child runs in the parent's cwd, so this is the mode its
-  // command will actually meet — and under \`review\` it is why that command
-  // refuses and the fenced block is the answer instead.
-  const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
-  const publishMode = project === null ? config.publishMode : project;
-  // BEFORE the emit, because emit exits the process.
+  // READ THE CLAIM BACK BEFORE BLOCKING. \`claimState\` reports success on a write
+  // this store swallowed, and a block with no durable row behind it is the one
+  // outcome this arm promises cannot happen: the child spends a turn, stops
+  // again, and the next fire finds no \`asked\` row, so the fenced block it was
+  // asked for is never parsed and the harvest is lost. The parent's Stop
+  // degrades on the same read (lib/hook-scripts.ts, the unrecordable ask); here
+  // there is no weaker tier to fall to, so the ask is dropped instead.
+  if (getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentId) === null) {
+    beat('ask-unrecorded');
+    return quiet();
+  }
+  // BEFORE THE EMIT, because emit exits the process, and IMMEDIATELY BELOW THE
+  // CLAIMS, because the claims are what spend this session's one child ask: a
+  // process killed between taking them and writing this row would leave the
+  // budget spent with nothing saying why. A lease would close that window
+  // entirely and is what the dispatch arm's asked-claim uses, but not here: a
+  // session budget that expires after the fire's own ceiling is a budget of one
+  // ask per 8 seconds, which is the runaway this claim exists to prevent.
   beat('asked', { signal: signal.kind, searchId: signal.searchId, publishMode });
-  emitStopBlock(captureAskText(agentId, publishMode));
+  emitStopBlock(captureAskText(agentId, publishMode, signal.searchId));
 }
 
 async function main() {

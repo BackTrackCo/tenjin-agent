@@ -588,6 +588,13 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       '--dry-run',
       'print what would be published, whole body included, and exit without writing or spending',
     )
+    // NO IS FINAL. Without a discard the only thing that took a finding off the
+    // queue was a publish, so a declined one was re-offered by every session's
+    // first ask for the next eight hours.
+    .option(
+      '--discard',
+      'with --finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again',
+    )
     // ATTRIBUTION, NOT AUTHORITY: it changes no gate, no shelf and no price. The
     // SubagentStop capture ask fills it in so a child that publishes from its own
     // sidechain is visible to the session that dispatched it (tenjin-agent#228).
@@ -635,6 +642,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof file === 'string' ? { file } : {}),
             ...(typeof o.finding === 'string' ? { finding: o.finding } : {}),
             ...(o.dryRun === true ? { dryRun: true } : {}),
+            ...(o.discard === true ? { discard: true } : {}),
             ...(typeof o.agent === 'string' ? { agent: o.agent } : {}),
             ...(Array.isArray(o.searchId) && o.searchId.length > 0
               ? { searchId: o.searchId as string[] }

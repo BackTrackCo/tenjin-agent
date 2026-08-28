@@ -1,5 +1,5 @@
-import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 import { z } from 'zod';
 
 /**
@@ -224,6 +224,25 @@ export const STORE_FINDING_HOOK = 'finding';
  * shape every other hook read already takes.
  */
 export const STORE_QUEUED_FINDING_PREFIX = 'queued_finding:';
+
+/**
+ * The `project` a hook stamps on a row, from the cwd on its payload.
+ *
+ * ⚠ MIRRORED with `projectId`/`shortHash` in the generated store source below,
+ * which cannot import from here; a test pins this against that source's own
+ * text. It exists because `publish --finding` has to compare the checkout it is
+ * running in against the one a finding was captured in, and a CLI process is on
+ * the other side of the generated/imported line from the hook that wrote it.
+ *
+ * IT IS A CWD HASH, NOT A REPO ROOT. Publishing from a subdirectory of the
+ * project a finding was captured in therefore reads as a different project.
+ * That errs toward asking, which is the direction this comparison is for.
+ */
+export function projectIdOf(cwd: string | null | undefined): string | null {
+  return typeof cwd === 'string' && cwd.length > 0
+    ? createHash('sha256').update(cwd).digest('hex').slice(0, 16)
+    : null;
+}
 
 /**
  * The `session_state` key prefix, under the MACHINE session, recording that an
@@ -733,20 +752,6 @@ export const STORE_SQL = {
        AND source = 'dispatch-hook'
      ORDER BY at DESC, rowid DESC LIMIT 1`,
   /**
-   * How many findings THIS session's children logged inside the window. The
-   * Stop hook's `didResearch` signal, and the only finding read still scoped to
-   * one session: a finding from another session is worth SURFACING to this one
-   * (the queue does that, machine-wide) but is not evidence this session
-   * researched anything.
-   *
-   * `hook = 'finding'` rather than a JSON predicate: the generated hooks run on
-   * whatever SQLite `node:sqlite` was built against, and a turn-end read must
-   * not be the one place that assumes the JSON1 extension is present. One row,
-   * on the `(session, at)` index.
-   */
-  queuedFindingCount: `SELECT COUNT(*) AS n FROM events
-     WHERE session = ? AND at >= ? AND hook = '${STORE_FINDING_HOOK}'`,
-  /**
    * The same queue read from a CLI process rather than by the ask: the ids
    * `publish --finding` names back when it is handed one it cannot find.
    *
@@ -762,13 +767,15 @@ export const STORE_SQL = {
    * #212 already owns, so this takes the range scan the same never-pruned table
    * costs `statusRows` about 7 ms at 200k rows.
    */
-  findingsRecent: `SELECT uid, at, session, data FROM events
+  findingsRecent: `SELECT uid, at, session, project, data FROM events
      WHERE hook = '${STORE_FINDING_HOOK}' AND at >= ?
      ORDER BY at DESC, id DESC LIMIT ?`,
   /** One finding, whole, by the id the capture ask printed. `events.uid`
    *  is UNIQUE, so this is an index seek; the hook predicate is there to stop a
-   *  uid minted by another arm from resolving as a finding. */
-  findingByUid: `SELECT uid, at, session, data FROM events
+   *  uid minted by another arm from resolving as a finding. `project` rides
+   *  along because the publish path has to know whether the checkout it is
+   *  running in is the one the finding was harvested in. */
+  findingByUid: `SELECT uid, at, session, project, data FROM events
      WHERE uid = ? AND hook = '${STORE_FINDING_HOOK}'`,
   /** Did this session ask for a search ITSELF? The push arms search on their own
    *  initiative, so their rows are not evidence the session researched anything
@@ -1992,14 +1999,6 @@ function openDispatchMiss(sessionId, sinceMs) {
   return row === null || typeof row.search_id !== 'string' ? null : row.search_id;
 }
 
-/** How many findings this session's children have queued inside the window,
- *  which is the \`didResearch\` signal and NOT the list the ask prints: that one
- *  is machine-wide, because a finding routinely outlives its own session. */
-function queuedFindingCount(sessionId, sinceMs) {
-  const row = storeGet(STORE_SQL.queuedFindingCount, [storeSession(sessionId), sinceMs]);
-  return row === null || typeof row.n !== 'number' ? 0 : row.n;
-}
-
 /**
  * Put a captured finding on the machine-wide unpublished queue, beside the
  * \`events\` row that logs it.
@@ -2031,6 +2030,10 @@ function queuedFindingQueue(sinceMs, limit) {
       uid: row.key,
       at: row.at,
       session: typeof value.session === 'string' ? value.session : '',
+      // Null, not '': a row an older build wrote carries no project at all, and
+      // "harvested somewhere unknown" is a different fact from "harvested in the
+      // project with the empty id". The publish gate treats null as unknown.
+      project: typeof value.project === 'string' ? value.project : null,
       agentId: typeof value.agentId === 'string' ? value.agentId : null,
       agentType: typeof value.agentType === 'string' ? value.agentType : '',
       searchId: typeof value.searchId === 'string' ? value.searchId : null,
@@ -2040,24 +2043,60 @@ function queuedFindingQueue(sinceMs, limit) {
 }
 
 /** When the newest queued finding at or after \`sinceMs\` was filed, or 0 when
- *  there is none. The one read behind the capture ask's re-fire rule: an ask
- *  repeats only for something it has not already named. */
+ *  there is none. Machine-wide, like the list it gates: a finding whose own
+ *  session is gone is the case the queue exists for, so scoping this read to
+ *  one session would strand exactly those rows. */
 function newestQueuedFindingAt(sinceMs) {
   const rows = statePrefixSince(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, sinceMs, 1);
   return rows.length === 0 ? 0 : rows[0].at;
 }
 
-/** What agents published themselves at or after \`sinceMs\`, keyed by agent id.
- *  Machine-wide by nature (the publishing process knows its agent, not its
- *  session), so the caller intersects it with the children IT asked. */
+/**
+ * What agents published themselves at or after \`sinceMs\`: agent id → its
+ * publishes, newest first.
+ *
+ * ONE ROW PER PUBLISH, not one per agent. Keyed per agent, a child that
+ * published something objectionable and then anything innocuous overwrote the
+ * first, and the parent's report — the whole mitigation for letting a child
+ * publish from a sidechain — showed only the second. The key carries the
+ * publish time after an \`@\`, which the agent-id charset (\`[A-Za-z0-9_.:-]\`)
+ * cannot contain, so the id is whatever precedes the last one.
+ *
+ * Machine-wide by nature (the publishing process knows its agent, not its
+ * session), so the caller intersects it with the children IT asked.
+ */
 function agentPublishes(sinceMs, limit) {
   const out = new Map();
   for (const row of statePrefixSince(MACHINE_SESSION, STATE_PUBLISHED_AGENT_PREFIX, sinceMs, limit)) {
     const value = isRecord(row.value) ? row.value : {};
     if (typeof value.url !== 'string' || value.url === '') continue;
-    out.set(row.key, { url: value.url, at: row.at });
+    const cut = row.key.lastIndexOf('@');
+    // A row an older build wrote has no '@' and IS the agent id.
+    const agentId = cut === -1 ? row.key : row.key.slice(0, cut);
+    const list = out.get(agentId);
+    if (list === undefined) out.set(agentId, [{ url: value.url, at: row.at }]);
+    else list.push({ url: value.url, at: row.at });
   }
   return out;
+}
+
+/**
+ * Has a child THIS session asked published since \`sinceMs\`?
+ *
+ * THE OTHER HALF OF THE RE-ASK GATE. A successful child publish writes an
+ * \`agent_published:\` row and NO queue row, so a gate that keys on the queue
+ * alone reports the first child publish of a session and silently drops every
+ * later one — and visibility is the only mitigation this design has for letting
+ * a child publish from a sidechain nobody reads.
+ */
+function childPublishedSince(sessionId, windowStart, sinceMs, limit) {
+  const asked = statePrefixSince(sessionId, STATE_AGENT_ASKED_PREFIX, windowStart, limit);
+  if (asked.length === 0) return false;
+  const published = agentPublishes(sinceMs, limit);
+  for (const row of asked) {
+    if (published.has(row.key)) return true;
+  }
+  return false;
 }
 
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */

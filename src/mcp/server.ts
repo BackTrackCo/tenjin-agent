@@ -158,6 +158,12 @@ const publishInput = {
     .boolean()
     .optional()
     .describe('Report what would be published, whole body included, and write and spend nothing'),
+  discard: z
+    .boolean()
+    .optional()
+    .describe(
+      'With finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again. Nothing is sent anywhere',
+    ),
   // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
     .union([z.string(), z.array(z.string())])
@@ -486,7 +492,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
         'price, findings, card, target, and for a stored finding its whole body and the child that ' +
         'wrote it under details.finding) for you to show the user before re-calling with yes:true. ' +
-        'dryRun:true returns the same body with nothing published or spent. A ' +
+        'dryRun:true returns the same body with nothing published or spent, and discard:true drops a stored finding from the local queue so no later ask offers it. A ' +
         'hard block (a live secret) returns PUBLISH_BLOCKED and is NEVER cleared by yes or any mode. ' +
         'The marketplace scans server-side as well, so either refusal can also arrive AFTER the ' +
         'local scan passed, carrying findings marked source:"server" that a yes:true given before ' +
@@ -502,6 +508,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.file !== undefined ? { file: args.file } : {}),
             ...(args.finding !== undefined ? { finding: args.finding } : {}),
             ...(args.dryRun !== undefined ? { dryRun: args.dryRun } : {}),
+            ...(args.discard !== undefined ? { discard: args.discard } : {}),
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),

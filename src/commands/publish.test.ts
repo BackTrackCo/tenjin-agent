@@ -2687,9 +2687,14 @@ describe('runPublish — publish --finding', () => {
     agentType?: string;
     searchId?: string | null;
     hook?: string;
+    /** The checkout the child ran in. Defaults to the one the tests publish
+     *  from, which is the ordinary case; pass another to reach the
+     *  cross-project gate. */
+    project?: string | null;
   }): Promise<string> {
-    const { openStore, STORE_FINDING_HOOK, STORE_QUEUED_FINDING_PREFIX, STORE_SQL } =
+    const { openStore, projectIdOf, STORE_FINDING_HOOK, STORE_QUEUED_FINDING_PREFIX, STORE_SQL } =
       await import('../lib/state-store');
+    const project = over.project === undefined ? projectIdOf(dir) : over.project;
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
     try {
@@ -2697,7 +2702,7 @@ describe('runPublish — publish --finding', () => {
         over.uid,
         Date.now(),
         'parent',
-        null,
+        project,
         'machine',
         over.hook ?? STORE_FINDING_HOOK,
         'SubagentStop',
@@ -2719,6 +2724,7 @@ describe('runPublish — publish --finding', () => {
         STORE_QUEUED_FINDING_PREFIX + over.uid,
         JSON.stringify({
           session: 'parent',
+          project,
           agentId: over.agentId ?? 'child-1',
           agentType: over.agentType ?? 'fork',
           searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
@@ -2922,6 +2928,164 @@ describe('runPublish — publish --finding', () => {
     expect(await queuedIds()).toContain(id);
   });
 
+  /**
+   * MAJOR (round 2): the block firing IS the signal that the hook's `scrub`
+   * missed a live credential, and this path attached the whole body to the
+   * error, which `emitFailure` prints, the JSON envelope carries and MCP
+   * `structuredContent` relays. Reachable: a BIP-39 mnemonic is a block-tier
+   * detector and passes all eleven scrub rules whole (no digit, no assignment
+   * shape, no hex run, no hostname). `scan.ts` promises a block excerpt is never
+   * the matched secret; the file path honours that and this one now does too.
+   */
+  it('withholds the body on PUBLISH_BLOCKED while still naming the finding', async () => {
+    const mnemonic = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
+    const id = await seedFinding({
+      uid: 'FND-MNEMONIC',
+      body: `The wallet came back: ${mnemonic}`,
+    });
+    const err = (await runPublish(
+      { finding: id, mode: 'full-auto', yes: true },
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as {
+      code: string;
+      fix?: string;
+      details?: { finding?: Record<string, unknown> };
+    };
+    expect(err.code).toBe('PUBLISH_BLOCKED');
+    // Everything a caller needs to name it, ask for it, or tell two apart...
+    expect(err.details?.finding).toMatchObject({ id, agentId: 'child-1', agentType: 'fork' });
+    // ...and not the secret the block exists because of.
+    expect(err.details?.finding).not.toHaveProperty('body');
+    expect(JSON.stringify(err.details)).not.toContain('sausage');
+    expect(err.fix).toContain('--dry-run');
+  });
+
+  /** And the confirm KEEPS it: there it is the read gate, not a leak. An
+   *  operator asked to approve a body they have not seen is not a gate. */
+  it('still carries the whole body, framed, on the confirm', async () => {
+    const id = await seedFinding({ uid: 'FND-FRAMED' });
+    const err = (await runPublish(
+      { finding: id, mode: 'review' },
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { details?: { finding?: Record<string, unknown> } };
+    expect(err.details?.finding).toMatchObject({ body: FINDING_BODY });
+    // THE FRAMING TRAVELS IN THE DATA. It lived only in the human lines the CLI
+    // prints, so an MCP failure delivered a child's words unframed on exactly
+    // the surface this design calls the read gate.
+    expect(String(err.details?.finding?.framing)).toContain('data, not instructions');
+  });
+
+  /**
+   * MAJOR (round 2): the queue is machine-wide and `publish.mode` resolves from
+   * the CURRENT directory, so a finding harvested in a private repo under
+   * `review` was listable and publishable from an unrelated `full-auto` repo
+   * inside the window with no confirm anywhere. Same bug class `pairings`
+   * already binds `project IS ?` against.
+   */
+  it('refuses a finding from another project until somebody says --yes', async () => {
+    const id = await seedFinding({ uid: 'FND-ELSEWHERE', project: 'deadbeefdeadbeef' });
+    const { fetch, calls } = stubServer();
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+    const err = (await runPublish({ finding: id, mode: 'full-auto' }, makeCtx(), deps).catch(
+      (e: unknown) => e,
+    )) as { code: string; details?: { crossProject?: { finding: string; cwd: string } } };
+    // full-auto clears the consent cascade, which is exactly why this gate is
+    // not part of it.
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.details?.crossProject?.finding).toBe('deadbeefdeadbeef');
+    expect(calls).toHaveLength(0);
+
+    // Reading it locally is how the operator decides, so --dry-run is above the
+    // gate and still works.
+    const dry = await runPublish({ finding: id, dryRun: true }, makeCtx(), deps);
+    expect((dry.data as { body: string }).body).toBe(FINDING_BODY);
+    expect(calls).toHaveLength(0);
+
+    // And somebody saying so clears it.
+    await runPublish({ finding: id, mode: 'full-auto', yes: true }, makeCtx(), deps);
+    expect(calls).toHaveLength(1);
+  });
+
+  /** A row an older build wrote carries no project, and unknown is not "here". */
+  it('treats a finding with no recorded project as one from elsewhere', async () => {
+    const id = await seedFinding({ uid: 'FND-NOPROJECT', project: null });
+    await expect(
+      runPublish(
+        { finding: id, mode: 'full-auto' },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+  });
+
+  /**
+   * MINOR (round 2): the already-published short circuit called `dequeueFinding`
+   * ABOVE the dry-run return, so inspecting an already-published finding
+   * silently took it off the queue. The test that covers the promise seeded a
+   * body this machine had never published, so it could not see it.
+   */
+  it('a dry run over an ALREADY PUBLISHED body still leaves it on the queue', async () => {
+    const id = await seedFinding({ uid: 'FND-DRY-PUBLISHED' });
+    const deps = hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider });
+    // Publish a second finding carrying the same body, so the dedup record is
+    // the one this machine wrote and the short circuit is the path taken.
+    const twin = await seedFinding({ uid: 'FND-DRY-TWIN' });
+    await runPublish({ finding: twin, mode: 'full-auto' }, makeCtx(), deps);
+
+    const result = await runPublish({ finding: id, dryRun: true }, makeCtx(), deps);
+    expect(result.data).toMatchObject({ alreadyPublished: true });
+    expect(await queuedIds()).toContain(id);
+  });
+
+  /**
+   * NO IS FINAL. The only thing that removed a `queued_finding:` row was a
+   * publish, so a finding the operator read and declined was re-offered by the
+   * first ask of every session on this machine for the next eight hours,
+   * against the standing rule that a declined offer is not asked again.
+   */
+  it('--discard takes a finding off the queue without publishing it', async () => {
+    const id = await seedFinding({ uid: 'FND-DISCARD' });
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    const result = await runPublish(
+      { finding: id, discard: true },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(result.data).toMatchObject({ discarded: true });
+    expect(await queuedIds()).not.toContain(id);
+    // No shelf, no wallet, no scan: it takes one row off a local queue.
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+    // The log row is untouched: it answers "did a child ever say this".
+    await expect(
+      runPublish(
+        { finding: id, dryRun: true },
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      ),
+    ).resolves.toMatchObject({ data: { dryRun: true } });
+  });
+
+  it('--discard without an id is USAGE, and never a silent success', async () => {
+    await expect(
+      runPublish(
+        { discard: true },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    await expect(
+      runPublish(
+        { finding: 'nothing-here', discard: true },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
+  });
+
   it('a file and an id together is USAGE, before any wallet touch', async () => {
     const id = await seedFinding({ uid: 'FND-BOTH' });
     const { provider, getSignerCount } = spyProvider();
@@ -2945,16 +3109,20 @@ describe('runPublish — publish --finding', () => {
    * gates NOTHING: the same scan, the same consent cascade, the same shelf.
    */
   describe('--agent', () => {
-    async function publishedByAgent(agentId: string): Promise<string | null> {
+    /** Every publish recorded under one agent id, oldest first. One row per
+     *  publish, keyed `agent_published:<id>@<at>`, so this is a prefix read
+     *  rather than a point read: an upsert here would hide all but the last. */
+    async function publishedByAgent(agentId: string): Promise<string[]> {
       const { openStore, STORE_PUBLISHED_AGENT_PREFIX, STORE_SQL } =
         await import('../lib/state-store');
       const store = await openStore(dir);
       if (store === null) throw new Error('no store');
+      const prefix = STORE_PUBLISHED_AGENT_PREFIX + agentId + '@';
       try {
-        const row = store.get(STORE_SQL.getState, ['', STORE_PUBLISHED_AGENT_PREFIX + agentId]);
-        if (row === null || typeof row.value !== 'string') return null;
-        const value = JSON.parse(row.value) as { url?: string };
-        return typeof value.url === 'string' ? value.url : null;
+        return store
+          .all(STORE_SQL.statePrefixSince, ['', prefix, prefix + '\uffff', 0, 50])
+          .map((row) => (JSON.parse(String(row.value)) as { url?: string }).url ?? '')
+          .reverse();
       } finally {
         store.close();
       }
@@ -2968,7 +3136,7 @@ describe('runPublish — publish --finding', () => {
         hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
       );
       // The row the parent's turn end reads to report what its children did.
-      expect(await publishedByAgent('agent-7f3a')).toBe((result.data as { url: string }).url);
+      expect(await publishedByAgent('agent-7f3a')).toEqual([(result.data as { url: string }).url]);
       // Echoed back, so an agent that passed it can see the attribution landed.
       expect(result.data).toMatchObject({ publishedBy: { agentId: 'agent-7f3a' } });
     });
@@ -2981,7 +3149,7 @@ describe('runPublish — publish --finding', () => {
           hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
         ),
       ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
-      expect(await publishedByAgent('agent-7f3a')).toBeNull();
+      expect(await publishedByAgent('agent-7f3a')).toEqual([]);
     });
 
     /** Refused rather than dropped: the caller's whole reason for passing it is
@@ -3005,7 +3173,7 @@ describe('runPublish — publish --finding', () => {
         makeCtx(),
         hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
       );
-      expect(await publishedByAgent('agent-7f3a')).toBeNull();
+      expect(await publishedByAgent('agent-7f3a')).toEqual([]);
     });
   });
 });

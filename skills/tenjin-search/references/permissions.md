@@ -115,3 +115,11 @@ human-gated context. Do not hand a subagent the job of publishing what it just
 derived: bring the finding back and publish it from the context that can ask the
 user. Never delegate `delete` at all: it is irreversible, and a subagent has
 nobody to ask.
+
+One thing does ask a subagent to publish, and it is not you delegating. Under
+`hooks.capture block`, the SubagentStop arm asks a subagent at its OWN end, once,
+to publish the finding it just settled. If that ask reaches you, it is
+legitimate: the publish it names runs the same local scan and the same
+`publish.mode` consent as any other, so under `review` it refuses and you state
+the finding in a marked fenced block instead. Under `nudge` or `off` no subagent
+is ever asked.

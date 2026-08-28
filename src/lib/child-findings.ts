@@ -34,6 +34,17 @@ export interface ChildFinding {
   at: string;
   /** The harness session whose child wrote it. */
   session: string;
+  /**
+   * The project the child ran in (`events.project`), or null for a row written
+   * with no cwd on the payload or by a build that did not carry it.
+   *
+   * WHY A PUBLISH PATH NEEDS IT. `publish.mode` resolves from the CURRENT
+   * directory and this queue is machine-wide, so without it a finding harvested
+   * in a private repo under `review` is publishable from an unrelated
+   * `full-auto` checkout with nobody deciding to. Null reads as unknown, which
+   * the publish gate treats as "not this project".
+   */
+  project: string | null;
   /** The subagent type, or null when the harness did not report one. */
   agentType: string | null;
   /** The harness's own id for the child. */
@@ -76,6 +87,7 @@ function rowToFinding(row: Record<string, unknown>): ChildFinding | null {
     id: row.uid,
     at: new Date(at).toISOString(),
     session: typeof row.session === 'string' ? row.session : '',
+    project: typeof row.project === 'string' && row.project !== '' ? row.project : null,
     agentType:
       typeof fields.agentType === 'string' && fields.agentType !== '' ? fields.agentType : null,
     agentId: typeof fields.agentId === 'string' ? fields.agentId : null,
@@ -107,7 +119,7 @@ export async function readChildFinding(
     fix:
       known.length === 0
         ? 'No findings are held on this machine. They are harvested from a subagent at its own end and need `hooks.capture` on (`tenjin push status`).'
-        : `Held here now: ${known.join(', ')}. Findings age out of the capture window and are never rewritten, so an id from an old turn end may be gone.`,
+        : `Captured here in the last ${FINDING_WINDOW_MS / (60 * 60 * 1000)}h: ${known.join(', ')}. That listing is what the window bounds; a finding itself is never rewritten and stays publishable by its own id, so an id that does not resolve is one this machine never captured.`,
     details: { id, known },
   });
 }

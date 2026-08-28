@@ -115,9 +115,14 @@ export interface PublishProvenance {
  * THE AGENT ROW ANSWERS THE SUPERVISION ASYMMETRY (tenjin-agent#228). A child
  * asked at its own end publishes from a sidechain nobody reads; this row, keyed
  * on the same harness `agent_id` the hooks stamp into `events.data`, is what
- * lets the parent's own turn end report what its children published. One row
- * per agent, latest publish wins: the question it answers is "did this child
- * publish", not "everything it ever published".
+ * lets the parent's own turn end report what its children published.
+ *
+ * ONE ROW PER PUBLISH, not one per agent. Keyed on the id alone the row was an
+ * upsert, so a child that published something objectionable and then anything
+ * innocuous left the parent's report showing only the second: the report is the
+ * whole mitigation, and it silently dropped the publish worth seeing. The time
+ * is appended after an `@`, a character the agent-id charset cannot contain, so
+ * the reader recovers the id and the parent lists every publish.
  *
  * THE DEQUEUE IS WHY THE QUEUE IS A QUEUE. A finding stays listed in every
  * capture ask inside the window until something publishes it; without this the
@@ -137,7 +142,7 @@ export async function recordPublished(
     if (typeof provenance.agentId === 'string' && provenance.agentId !== '') {
       store.run(STORE_SQL.setState, [
         MACHINE_SESSION,
-        STORE_PUBLISHED_AGENT_PREFIX + provenance.agentId,
+        `${STORE_PUBLISHED_AGENT_PREFIX}${provenance.agentId}@${at}`,
         JSON.stringify({ url, at }),
         at,
       ]);
