@@ -155,8 +155,13 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 ## Report the outcome (always)
 
 ```bash
-tenjin outcome --json --last --status used|partially_used|rejected|regenerated|purchase_declined
+tenjin outcome --json --last --status <status>
 ```
+
+`<status>` is one of: `used`, `partially_used`, `rejected`, `regenerated`,
+`purchase_declined`. Spelled out rather than pipe-separated because the line
+above is framed as runnable, and `a|b|c` copied verbatim into a shell is three
+piped commands whose first one posts `used`.
 
 Report honestly after acting on a search, rejections included. `--last` binds to
 the newest local search; after more than one, pass `--search-id` (repeatable, one

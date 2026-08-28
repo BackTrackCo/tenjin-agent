@@ -1094,9 +1094,13 @@ function parseSearchBody(body, url, limit) {
     // Same origin AND within the canonical bound. Over-length is REJECTED rather
     // than sliced for the same reason an id is: a clipped url is not a shorter
     // url, it is a different one that still looks payable.
-    if (typeof c.url !== 'string' || c.url.length > ${BROWSE_URL_MAX} || !sameOrigin(c.url, url)) {
-      continue;
-    }
+    // CLEANED BEFORE IT IS CHECKED, so the string \`sameOrigin\` approved is the
+    // string that is stored and emitted. A url carrying a newline or a C0 byte
+    // parses to the right origin and then lands raw in a line the model reads;
+    // \`clean\` cannot truncate here because the length was already refused.
+    if (typeof c.url !== 'string' || c.url.length > ${BROWSE_URL_MAX}) continue;
+    const curl = clean(c.url, ${BROWSE_URL_MAX});
+    if (!sameOrigin(curl, url)) continue;
     // A title that is not a string is not stringified into one. \`String(x)\` on an
     // object yields '[object Object]', which is display text nobody wrote.
     if (typeof c.title !== 'string') continue;
@@ -1111,7 +1115,7 @@ function parseSearchBody(body, url, limit) {
     if (typeof c.price !== 'string' || !ATOMIC_RE.test(c.price)) continue;
     stored.push({
       resourceId: c.resourceId,
-      url: c.url,
+      url: curl,
       title: clean(c.title, 200),
       price: c.price,
     });
@@ -1121,7 +1125,7 @@ function parseSearchBody(body, url, limit) {
     // the candidate.
     rich.push({
       resourceId: c.resourceId,
-      url: c.url,
+      url: curl,
       title: clean(c.title, 200),
       price: c.price,
       excerpt: typeof c.excerpt === 'string' ? clean(c.excerpt, 400) : '',
@@ -1481,6 +1485,12 @@ function dispatchQuestion(toolInput) {
   // capture, and it BLOCKS the tool call while it runs.
   const raw = typeof toolInput.description === 'string' ? toolInput.description : '';
   const descWindow = raw.slice(0, ${DISPATCH_DESCRIPTION_MAX * 4});
+  // A DESCRIPTION OVER THE WINDOW WITH NO WHITESPACE IN IT DROPS TO ''. The
+  // search returns -1, the slice is empty, and the arm sends the prompt alone
+  // rather than the 100 characters it used to truncate to. Deliberate: a single
+  // unbroken 400-character run is the one shape where a truncation cannot be cut
+  // back to a whole token, so it is the one shape a secret could survive as a
+  // fragment. Losing it costs a topic word.
   const descWhole =
     descWindow.length < raw.length
       ? descWindow.slice(0, descWindow.search(/\\s\\S*$/) + 1)

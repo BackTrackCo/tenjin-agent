@@ -954,9 +954,14 @@ describe('the public render did not move', () => {
   // so tenjin-search's digest carries that rename on top of whatever main's
   // own chain above pins. tenjin-publish is untouched by #158, so it keeps
   // main's value unchanged.
+  //
+  // Re-pinned for the outcome line's copy-paste hazard: the status list sat
+  // inside a bash fence as `a|b|c`, which a shell reads as three piped commands
+  // whose first one posts `used`. It is spelled out below the fence now, the
+  // same fix the child rung already carries. tenjin-publish is untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'c59faaebcd6e2030376d426aee9e9a7a',
+      'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
       'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
     });
   });

@@ -3348,37 +3348,44 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
-   * P for the zod work order (two candidates, so it can reach 'strong'), Q for
-   * the pgvector one (a lone candidate, so it is at most 'moderate' and never
-   * relays). Two dispatches, two different pieces, one session.
+   * P for the zod work order, Q for the pgvector one. Two dispatches, two
+   * different pieces, one session. `qStrong` decides Q's verdict, which is the
+   * whole difference between the two slot cases below: a Q the shelf did not
+   * corroborate never relays and leaves no `relayed` row to explain a loss,
+   * while a strong free Q loses the slot to P and has to fall through to the
+   * ordinary parent hint rather than go silent.
    */
-  const twoSubjects = (req: StubRequest): { status: number; json: unknown } => {
-    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
-    let query: string;
-    try {
-      query = String((JSON.parse(req.body) as { query?: unknown }).query);
-    } catch {
-      query = '';
-    }
-    if (!query.includes('pgvector')) return echo()(req);
-    return {
-      status: 200,
-      json: {
-        schemaVersion: 3,
-        searchId: SEARCH_ID,
-        items: [
-          {
-            resourceId: SECOND_RESOURCE_ID,
-            url: `${req.base}/@b/q`,
-            title: query.slice(0, 190),
-            price: '0',
-            excerpt: 'the other excerpt',
-            creator: { handle: 'someone' },
-          },
-        ],
-      },
+  const twoSubjects =
+    (qStrong: boolean) =>
+    (req: StubRequest): { status: number; json: unknown } => {
+      if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+      let query: string;
+      try {
+        query = String((JSON.parse(req.body) as { query?: unknown }).query);
+      } catch {
+        query = '';
+      }
+      if (!query.includes('pgvector')) return echo()(req);
+      return {
+        status: 200,
+        json: {
+          schemaVersion: 3,
+          searchId: SEARCH_ID,
+          items: [
+            {
+              resourceId: SECOND_RESOURCE_ID,
+              url: `${req.base}/@b/q`,
+              title: query.slice(0, 190),
+              price: '0',
+              excerpt: 'the other excerpt',
+              creator: { handle: 'someone' },
+              confidence: 'high',
+              corroborated: qStrong,
+            },
+          ],
+        },
+      };
     };
-  };
 
   /**
    * PAID on the zod work order, FREE and strong on the pgvector one, so one
@@ -3408,6 +3415,8 @@ describe('the subagent arm (SubagentStart)', () => {
             price: free ? '0' : '150000',
             excerpt: 'the excerpt',
             creator: { handle: 'vraspar' },
+            confidence: 'high',
+            corroborated: true,
           },
           {
             resourceId: '44444444-4444-4444-8444-444444444444',
@@ -3424,21 +3433,41 @@ describe('the subagent arm (SubagentStart)', () => {
 
   /** Merge a patch into the parked handoff, to reach a childPointer branch the
    *  stub servers would need a second protected deployment to produce. */
-  function patchCache(patch: Record<string, unknown>): void {
+  function patchCache(patch: Record<string, unknown>, session: string = SESSION): void {
     const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
     try {
       const row = db
         .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
-        .get(SESSION, 'dispatch_cache') as unknown as { value?: string } | undefined;
+        .get(session, 'dispatch_cache') as unknown as { value?: string } | undefined;
       const merged = { ...(JSON.parse(row?.value ?? '{}') as Record<string, unknown>), ...patch };
       db.prepare('UPDATE session_state SET value = ? WHERE session = ? AND key = ?').run(
         JSON.stringify(merged),
-        SESSION,
+        session,
         'dispatch_cache',
       );
     } finally {
       db.close();
     }
+  }
+
+  /**
+   * Reprice the parked handoff. A strong PAID hit stays with the parent by
+   * design (the only context with buy authority), so no stub server can park a
+   * paid piece for a child to read: the paid rung of `childPointer` is reachable
+   * only by rewriting the handoff a free dispatch parked.
+   */
+  function parkPaid(session: string = SESSION): void {
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    let top: Record<string, unknown>;
+    try {
+      const row = db
+        .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
+        .get(session, 'dispatch_cache') as unknown as { value?: string } | undefined;
+      top = (JSON.parse(row?.value ?? '{}') as { top?: Record<string, unknown> }).top ?? {};
+    } finally {
+      db.close();
+    }
+    patchCache({ top: { ...top, price: '150000' } }, session);
   }
 
   /** A second dispatch onto the SAME echoed piece, worded differently so the
@@ -3470,54 +3499,19 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
-   * A STRONG HIT THE PARENT CANNOT RENDER. `hintLines` skips a candidate with an
-   * empty title, so the dispatch hook caches the finding, writes its `logged`
-   * row and says nothing to the lead — which leaves the SubagentStart cache as
-   * the only channel this piece has, exactly as the handoff (T5) intends.
+   * A HIT THE PARENT COULD NOT RENDER. `hintLines` skips a candidate with an
+   * empty title, so before the relay this piece reached nobody but the cache.
+   * The relay line does not go through `hintLines`, so it names the resource id
+   * and the handoff stays visible in the parent transcript even here.
    */
-  const soloEcho = (req: StubRequest): { status: number; json: unknown } => {
-    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
-    let query: string;
-    try {
-      query = String((JSON.parse(req.body) as { query?: unknown }).query);
-    } catch {
-      query = '';
-    }
-    return {
-      status: 200,
-      json: {
-        schemaVersion: 3,
-        searchId: SEARCH_ID,
-        items: [
-          {
-            resourceId: RESOURCE_ID,
-            url: `${req.base}/@a/p`,
-            title: query.slice(0, 190),
-            price: '0',
-            excerpt: 'the excerpt',
-            creator: { handle: 'vraspar' },
-          },
-        ],
-      },
-    };
-  };
-
-  /** `soloEcho`, priced. The childPointer branch a free stub cannot reach. */
-  const paidSolo = (req: StubRequest): { status: number; json: unknown } => {
-    const out = soloEcho(req);
-    if (!req.url.startsWith('/api/search')) return out;
-    const json = out.json as { items: Array<Record<string, unknown>> };
-    return { ...out, json: { ...json, items: [{ ...json.items[0], price: '150000' }] } };
-  };
-
   it('hands the subagent what the dispatch found, once', async () => {
     const { baseUrl } = await serve(echo({ title: '' }));
     await pushOn(baseUrl);
 
     const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
-    // Nothing renderable, so the lead is told nothing; the cache is the whole
-    // handoff.
-    expect(dispatched.stdout).toBe('');
+    const relay = injected(dispatched) ?? '';
+    expect(relay).toContain('queued for delivery to the subagent');
+    expect(relay).toContain(RESOURCE_ID);
 
     const first = await runScript(pushSubagentHookScript(dataDir), start);
     expect(injected(first)).toContain('Read it free: tenjin read');
@@ -3533,7 +3527,8 @@ describe('the subagent arm (SubagentStart)', () => {
       agentId: 'a1',
       candidate: { resourceId: RESOURCE_ID },
       action: 'injected',
-      form: 'full',
+      // Pointer only for a child, whatever the strength (tenjin-agent#228).
+      form: 'short',
     });
 
     // Consumed: a second subagent from the same dispatch gets nothing.
@@ -3726,7 +3721,7 @@ describe('the subagent arm (SubagentStart)', () => {
    * explain the loss.
    */
   it('does not let a later moderate dispatch evict a relayed handoff', async () => {
-    const { baseUrl } = await serve(twoSubjects);
+    const { baseUrl } = await serve(twoSubjects(false));
     await pushOn(baseUrl);
 
     const relayed = await runScript(dispatchHookScript(dataDir), dispatch());
@@ -3759,7 +3754,7 @@ describe('the subagent arm (SubagentStart)', () => {
    * the parent gets exactly what it got before relaying existed.
    */
   it('sends a second dispatch on another piece to the parent hint instead', async () => {
-    const { baseUrl } = await serve(twoSubjects);
+    const { baseUrl } = await serve(twoSubjects(true));
     await pushOn(baseUrl);
     await runScript(dispatchHookScript(dataDir), dispatch());
 
@@ -3773,9 +3768,13 @@ describe('the subagent arm (SubagentStart)', () => {
         tool_input: { prompt: `${OTHER_PROMPT} and report what actually happens` },
       }),
     );
+    // Hinted, not silenced: the ordinary parent line the arm emitted before
+    // relaying existed. Asserting only the absence of a relay would pass on a
+    // dispatch that said nothing at all, which is the failure this covers.
     expect(injected(other) ?? '').not.toContain('queued for delivery');
+    expect(injected(other) ?? '').toContain(SECOND_RESOURCE_ID);
 
-    // Silent or hinted, but never a second relay and never an eviction.
+    // Hinted, but never a second relay and never an eviction.
     const dispatchRows = (await ledger()).filter((r) => r.trigger === 'dispatch');
     expect(dispatchRows.filter((r) => r.action === 'relayed')).toHaveLength(1);
     const first = await runScript(pushSubagentHookScript(dataDir), start);
@@ -3862,8 +3861,6 @@ describe('the subagent arm (SubagentStart)', () => {
     // A second session, because the free delivery above burned this one's
     // once-per-session claim on the same piece.
     const paidSession = 'sess-paid';
-    const paid = await serve(paidSolo);
-    await pushOn(paid.baseUrl);
     await runScript(
       dispatchHookScript(dataDir),
       JSON.stringify({
@@ -3873,6 +3870,7 @@ describe('the subagent arm (SubagentStart)', () => {
         tool_input: { prompt: DISPATCH_PROMPT },
       }),
     );
+    parkPaid(paidSession);
     const paidText =
       injected(
         await runScript(
@@ -3986,11 +3984,12 @@ describe('the subagent arm (SubagentStart)', () => {
    * context has no authority for, and it never appears.
    */
   it('a paid pointer offers the free preview and defers the purchase to the parent', async () => {
-    const { baseUrl } = await serve(paidSolo);
+    const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
 
     const dispatched = await runScript(dispatchHookScript(dataDir), dispatch());
-    expect(dispatched.stdout).toBe('');
+    expect(injected(dispatched) ?? '').toContain('queued for delivery to the subagent');
+    parkPaid();
 
     const run = await runScript(pushSubagentHookScript(dataDir), start);
     const text = injected(run) ?? '';

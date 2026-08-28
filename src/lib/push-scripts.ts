@@ -785,22 +785,26 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]
  * \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
  * secret, so the value goes whatever it happens to look like.
  *
- * THE TWO NAME CLASSES ARE BOUNDED, and the bound is load-bearing rather than
- * cosmetic. Unbounded (\`[\w.-]*\`) they backtrack super-linearly on a
- * keyword-dotted run: driving the rendered dispatch arm with a
- * \`token.token.token…\` description measured 123 ms at 1k characters, 436 ms at
- * 2k, 1.9 s at 4k and 14.6 s at 8k with nothing emitted. A synchronous regex
+ * THERE IS NO LEADING NAME CLASS, and the trailing one is BOUNDED. Both halves
+ * are load-bearing rather than cosmetic. Unbounded (\`[\w.-]*\`) they backtrack
+ * super-linearly on a keyword-dotted run: driving the rendered dispatch arm with
+ * a \`token.token.token…\` description measured 123 ms at 1k characters, 436 ms
+ * at 2k, 1.9 s at 4k and 14.6 s at 8k with nothing emitted. A synchronous regex
  * cannot be pre-empted by an event-loop watchdog, so on attacker-chosen text
  * that is a core spun until the harness kill, in front of a tool call the user
  * is waiting on. Every caller windows its own input as well (defence in depth),
  * but this is the bound that holds whatever any caller forgets.
  *
- * 64 IS FAR PAST ANY REAL IDENTIFIER AND CHANGES NO MATCH: the engine retries
- * at every start position, so a name longer than the class still matches from
- * further in and its value is still dropped.
+ * BOUNDING THE LEADING CLASS DID CHANGE MATCHES, which is why it is gone rather
+ * than capped. \`\b\` offers no start position inside an unbroken \`\w\` run,
+ * so with a leading \`[\w.-]{0,64}\` a name longer than 64 characters
+ * (\`my_service_\` x7 + \`password=\`) had no start the engine could retry from
+ * and the value leaked. Dropping the class instead is what restores that shape:
+ * the prefix was never the secret, the value is, and the match now starts at the
+ * keyword wherever it sits.
  */
 const SECRET_ASSIGN_RE =
-  /\b[\w.-]{0,64}(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+/gi;
+  /(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+/gi;
 /** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
  *  rule cannot see because that one starts at a slash. */
 const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
@@ -816,6 +820,23 @@ const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
  *  which is still under any real key's length. */
 const SECRET_ENTROPY_RE =
   /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
+/**
+ * Hostnames, and the addresses that are not names.
+ *
+ * THE TLD LIST IS WIDENED, NOT REPLACED BY A GENERIC DOTTED RUN. A rule that
+ * took any dotted run ending in letters would have to run a SECOND
+ * \`(?:label\.)+\` scan, and that shape is the quadratic residue already
+ * measured here (~1.4 s per 20k of \`a-a-a\`, x4 per doubling): a second one
+ * doubles it, in front of a tool call. Widening the alternation adds no scan and
+ * no backtracking, so \`.sh\`, \`.xyz\` and the ccTLDs an internal host actually
+ * uses leave without making the arm slower. It is a list, so it is not a promise
+ * of completeness; the path, userinfo and entropy rules are what catch the rest.
+ */
+const SECRET_HOST_RE =
+  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b/gi;
+/** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
+ *  so no TLD. Bounded repetition, so it adds no backtracking. */
+const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 /**
  * Drop every credential, scheme-less path, hostname, hex id and number: what
@@ -830,16 +851,33 @@ const SECRET_ENTROPY_RE =
  */
 function scrub(text) {
   return String(text)
+    // ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so
+    // stripping the block first would leave \`[31m\` behind as text.
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
+    // C0 BEFORE EVERY WHOLE-TOKEN RULE, and deleted rather than spaced. A
+    // control byte inside a name is a SPLITTER: \`api_key<0x01>=hunter2\` reads
+    // as two tokens to every rule below, and \`clean\` only removes it after the
+    // scrub has already decided. Whitespace controls are left alone; they are
+    // real text here and the collapse at the bottom handles them.
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
     .replace(SECRET_USERINFO_RE, ' ')
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
     .replace(SECRET_ENTROPY_RE, ' ')
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
-    .replace(/(?:^|[\s'"(=:])(?:\/[\w.@-]+){2,}/g, ' ')
+    // PATHS, ABSOLUTE OR NOT. The leading class is what a path is quoted,
+    // fenced, punctuated or attributed by in a real prompt (\`\`foo\`\`,
+    // \`<src/a/b.ts>\`, \`a/b/c.ts,\`, \`@src/a/b\`), and the second alternative
+    // takes the relative form, which carries exactly as much of a customer's
+    // name as the absolute one does (\`src/customers/acme-bank/keys.ts\`). Two
+    // separators minimum, so \`and/or\` survives. Both alternatives are anchored
+    // on a mandatory \`/\` between two classes that cannot contain one, so
+    // neither adds a backtracking seam.
+    .replace(/(?:^|[\s'"(=:,<\`~@[{])~?(?:(?:\/[\w.@-]+){2,}|[\w.@-]+(?:\/[\w.@-]+){2,})/g, ' ')
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
     .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
-    .replace(/\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|internal|local)\b/gi, ' ')
+    .replace(SECRET_HOST_RE, ' ')
+    .replace(SECRET_IPV4_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -2445,9 +2483,12 @@ async function main() {
   // was a short pointer; the body fetch is retired for child delivery until
   // receipts prove a child reads more than the pointer.
   const form = 'short';
+  // The definite opener, not a hedged one: the short openers said "may match"
+  // for the 'moderate' strength the shelf verdict retired, and only a strong
+  // hit is ever parked for a child.
   const text = childPointer(
     top,
-    shelf === 'team' ? TEAM_SHORT_OPENER : PUBLIC_SHORT_OPENER,
+    shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER,
     marker,
     shelf,
     searchId,
