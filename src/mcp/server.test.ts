@@ -33,7 +33,7 @@ import {
   reply,
   testWalletProvider,
 } from '../lib/read-test-utils';
-import { loadSearches, recordSearch } from '../lib/search-store';
+import { loadSearches, recordSearch } from '../lib/state-store';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 
 let dir: string;

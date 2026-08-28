@@ -2,13 +2,14 @@ import { CliError } from '../lib/errors';
 import { resolveContextSettings, shelfRouteFor } from '../lib/settings';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
 import { UUID_RE } from '../lib/ids';
-import { ownedByThisSession, readSessionId } from '../lib/session';
+import { readSessionId } from '../lib/session';
 import {
+  getStoredSearch,
   latestSearch,
-  loadSearches,
   markSearchResolved,
+  openSearches,
   type StoredSearch,
-} from '../lib/search-store';
+} from '../lib/state-store';
 import { isPaidPrice } from '../lib/money';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -274,15 +275,11 @@ async function resolveTargets(
   }
   if (args.allOpen === true) return resolveAllOpen(args, ctx, deps);
   if (ids.length > 0) {
-    const searches = await loadSearches(ctx.dataDir);
-    return {
-      targets: ids.map((searchId) => ({
-        searchId,
-        stored: searches.find((s) => s.searchId === searchId) ?? null,
-      })),
-      deliberateLeftOpen: 0,
-      answeredLeftOpen: 0,
-    };
+    const targets: OutcomeTarget[] = [];
+    for (const searchId of ids) {
+      targets.push({ searchId, stored: await getStoredSearch(ctx.dataDir, searchId) });
+    }
+    return { targets, deliberateLeftOpen: 0, answeredLeftOpen: 0 };
   }
   if (args.last === true) {
     const latest = await latestSearch(ctx.dataDir);
@@ -331,12 +328,10 @@ async function resolveAllOpen(
       },
     );
   }
-  const sessionId = readSessionId(deps.env);
-  const open = (await loadSearches(ctx.dataDir)).filter(
-    (s) =>
-      (s.resolved === undefined || s.resolved === null) &&
-      ownedByThisSession(s.sessionId, sessionId),
-  );
+  // The session predicate is the query's, not a filter over everything: a
+  // differently stamped row is that session's business, and the unstamped rows
+  // it keeps belong to no session and so stay reachable from any.
+  const open = await openSearches(ctx.dataDir, readSessionId(deps.env));
   // Absent source predates sources, and those entries were all deliberate.
   const hook = open.filter((s) => s.source === 'websearch-hook');
   return {

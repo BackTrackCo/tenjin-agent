@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertOnBaseOrigin, resolveResourceRef } from './resource-ref';
 import { CliError } from './errors';
-import { recordSearch } from './search-store';
+import { openStore, recordSearch, searchFingerprint, STORE_SQL } from './state-store';
 import { knownDeploymentOrigins } from './production-origin';
 
 let dir: string;
@@ -17,6 +17,46 @@ afterEach(async () => {
 
 const RES = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const BASE = 'https://tenjin.blog';
+const DAY = 24 * 60 * 60 * 1000;
+
+/** Fixture stamps are RELATIVE, always. An absolute date here dated the whole
+ *  file: the candidate lookup once carried a 30-day floor, so these rows aged
+ *  out of it by the calendar and three tests failed on a day nobody touched
+ *  them. The floor is gone, and so is the way to reintroduce it unnoticed. */
+function agoIso(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
+/** Searches carrying no candidates, indexes `from`..`to`, stamped `startAtMs`
+ *  onward — the newer rows a recency bound has to count past. Written through
+ *  ONE handle: 500 `recordSearch` calls would each open and close the file. */
+async function seedDecoySearches(
+  dataDir: string,
+  from: number,
+  to: number,
+  startAtMs: number,
+): Promise<void> {
+  const store = await openStore(dataDir);
+  if (store === null) throw new Error('no store');
+  try {
+    for (let i = from; i < to; i += 1) {
+      store.run(STORE_SQL.recordSearch, [
+        `0197bbbb-cccc-dddd-eeee-${String(i).padStart(12, '0')}`,
+        startAtMs + i,
+        '',
+        'decoy',
+        searchFingerprint('decoy'),
+        'MISS',
+        '[]',
+        null,
+        null,
+        null,
+      ]);
+    }
+  } finally {
+    store.close();
+  }
+}
 
 describe('resolveResourceRef', () => {
   it('uses a full https URL verbatim', async () => {
@@ -27,7 +67,7 @@ describe('resolveResourceRef', () => {
   it('resolves a uuid to the stored candidate URL', async () => {
     await recordSearch(dir, {
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
-      at: '2026-07-18T00:00:00.000Z',
+      at: agoIso(2 * DAY),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [
@@ -39,6 +79,61 @@ describe('resolveResourceRef', () => {
       url: 'https://tenjin.blog/api/read/iris/slug',
       resourceId: RES,
       shelfBaseUrl: BASE,
+    });
+  });
+
+  /**
+   * `tenjin buy <resourceId>` resolves the payable URL out of whichever search
+   * surfaced the piece, and an agent buys when it decides to, not inside a
+   * window. The lookup carried an `at >= now - 30d` floor for a while, which
+   * turned a months-old search into "No local search knows resource …" purely
+   * by the calendar — a piece an agent had deliberately parked became unbuyable
+   * with no way to tell why. The bound is a row count now (see
+   * `STORE_SQL.searchForResource`), so age alone never costs a resolution.
+   */
+  it('resolves a search far older than the month a date floor used to allow', async () => {
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000004',
+      at: agoIso(120 * DAY),
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [
+        { resourceId: RES, url: 'https://tenjin.blog/api/read/iris/slug', title: 't', price: '1' },
+      ],
+    });
+    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({
+      url: 'https://tenjin.blog/api/read/iris/slug',
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
+  });
+
+  /**
+   * What replaced the floor, pinned at its exact edge: the scan reads the 500
+   * most recent rows, so the 500th still resolves and the 501st does not. The
+   * bound exists because `json_each` over an unpruned table is a full scan on
+   * every MISS; it is deliberately about ACTIVITY, not time.
+   */
+  it('reaches the 500th most recent search and no further', async () => {
+    const targetAt = Date.now() - 400 * DAY;
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000005',
+      at: new Date(targetAt).toISOString(),
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [
+        { resourceId: RES, url: 'https://tenjin.blog/api/read/iris/slug', title: 't', price: '1' },
+      ],
+    });
+
+    // 499 newer searches leave the target row 500th, the last one read.
+    await seedDecoySearches(dir, 0, 499, targetAt + 1000);
+    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toMatchObject({ resourceId: RES });
+
+    // One more pushes it to 501st, past the window the scan opens.
+    await seedDecoySearches(dir, 499, 500, targetAt + 1000);
+    await expect(resolveResourceRef(RES, dir, BASE)).rejects.toMatchObject({
+      code: 'RESOURCE_NOT_FOUND',
     });
   });
 
@@ -71,7 +166,7 @@ describe('trailing-slash canonicalization', () => {
   it('canonicalizes a stored candidate URL on the same terms', async () => {
     await recordSearch(dir, {
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000003',
-      at: '2026-07-18T00:00:00.000Z',
+      at: agoIso(2 * DAY),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [
@@ -110,7 +205,7 @@ describe('origin pinning (SIWX/payment trust boundary)', () => {
   it('refuses a stored candidate whose URL no longer matches the base origin', async () => {
     await recordSearch(dir, {
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000002',
-      at: '2026-07-18T00:00:00.000Z',
+      at: agoIso(2 * DAY),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [
@@ -176,7 +271,7 @@ describe('assertOnBaseOrigin across the deployment alias set', () => {
     const url = `${sibling}/api/read/iris/slug`;
     await recordSearch(dir, {
       searchId: '0197aaaa-bbbb-cccc-dddd-000000000003',
-      at: '2026-08-17T00:00:00.000Z',
+      at: agoIso(2 * DAY),
       question: 'q',
       decision: 'CANDIDATES',
       candidates: [{ resourceId: RES, url, title: 't', price: '1' }],

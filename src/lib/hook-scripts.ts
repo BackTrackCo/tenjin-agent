@@ -821,7 +821,7 @@ function recordSearch(searchId, question, decision, candidates, sessionId, sourc
   // command the Stop hook's own nag prints — reach the shelf that MINTED the
   // id. In team mode a public-leg answer is an id the team shelf has never
   // seen, and the two shelves have separate databases. Null means the
-  // configured base, the same rule lib/search-store.ts states.
+  // configured base, the same rule lib/state-store.ts states.
   recordSearchRow({
     searchId,
     question,

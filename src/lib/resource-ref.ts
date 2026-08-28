@@ -1,5 +1,5 @@
 import { CliError } from './errors';
-import { findStoredCandidate } from './search-store';
+import { findStoredCandidate } from './state-store';
 import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
 import { isSameDeployment } from './production-origin';

@@ -137,6 +137,8 @@ tenjin publish ./finding.md --price 0.10
 tenjin edit <post-id>
 tenjin profile set --handle <handle>
 tenjin stats
+tenjin push status
+tenjin push grade
 tenjin wallet show
 tenjin wallet balance
 tenjin wallet fund 5
