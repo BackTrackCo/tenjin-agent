@@ -527,6 +527,27 @@ const STATE_SIGNATURES_PREFIX = 'sig:';
  *  lets the session that was replayed a pairing be its second independent
  *  closer, which is the only route to \`verified\` through the hooks. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
+/**
+ * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
+ * off, or a deployment too old to have the route), keyed by origin under the
+ * machine session and held for KEYS_OFF_TTL_MS. Machine-wide because the fact
+ * is about the shelf, not the session: an always-on loop session lasts a day,
+ * and a fresh session per prompt would otherwise pay one request each before
+ * learning it (tenjin-agent#212).
+ */
+const STATE_KEYS_OFF_PREFIX = 'keys_off:';
+const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
+/**
+ * The team-shelf post a LOCAL pairing corresponds to, keyed by the pairing's
+ * row id under the machine session: \`{ postId, origin, at, closedAt? }\`.
+ * Written when the failure arm's team leg replays a post and opens a pairing
+ * beside it, and stamped \`closedAt\` when this machine's later pass closes
+ * that pairing — which is the second, independent close the shelf has no
+ * endpoint for, so \`tenjin sync\` reads it and PUTs the post \`verified\`
+ * instead of publishing a duplicate. No column: the pairings table is not
+ * versioned for this, and the fact is a join key, not a row attribute.
+ */
+const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
 const MACHINE_SESSION = '';
@@ -958,6 +979,23 @@ function clearState(sessionId, key) {
 }
 
 /**
+ * A key that HOLDS until \`untilMs\` and then simply reads as absent. The
+ * expiry is the value, so a reader needs no clock column and no pruner: a
+ * stale row is one more row in a table nothing scans, overwritten the next
+ * time the fact is learned again.
+ */
+function setStateUntil(sessionId, key, untilMs) {
+  setState(sessionId, key, untilMs);
+}
+
+/** Whether \`key\` was set with setStateUntil and has not expired. A value
+ *  that is not a future timestamp reads as not held. */
+function stateHolds(sessionId, key) {
+  const until = getState(sessionId, key);
+  return typeof until === 'number' && until > Date.now();
+}
+
+/**
  * Claim \`key\` for this session: true the FIRST time, false ever after.
  *
  * ONE STATEMENT, because the pattern it replaces was a read-modify-write of a
@@ -1122,12 +1160,12 @@ function searchRow(row) {
 
 /**
  * Open a pairing on an allowlisted failure. Mechanical, no model: the key is the
- * failure's signature and the row is what a later success closes.
+ * failure's signature and the row is what a later success closes. Returns the
+ * new row's id, or null when the store refused the write.
  */
 function openPairing(row) {
-  const id = uid();
-  storeRun(STORE_SQL.insertPairing, [
-    id,
+  const result = storeRun(STORE_SQL.insertPairing, [
+    uid(),
     Date.now(),
     storeSession(row.session),
     projectId(row.cwd),
@@ -1142,7 +1180,10 @@ function openPairing(row) {
     storeJson(row.pkgVersions),
     String(row.scope),
   ]);
-  return id;
+  // The ROW ID, which is what \`replayed:<head>\` and \`pairing_post:<id>\`
+  // key on and \`pairingById\` reads back; null when nothing was written.
+  const rowid = result === null ? null : Number(result.lastInsertRowid);
+  return Number.isSafeInteger(rowid) ? rowid : null;
 }
 
 /** The best local match for a signature: verified first, then most closed, then

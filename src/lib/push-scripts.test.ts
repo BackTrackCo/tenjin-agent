@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2059,6 +2059,491 @@ describe('the failure arm (PostToolUse Bash)', () => {
       cmd_head: 'python3',
       error_files: ['script.py'],
     });
+  });
+});
+
+/**
+ * THE TEAM LEG (tenjin-agent#212, PR B): after a local miss the failure arm asks
+ * the TEAM shelf, and only it, by fingerprint through `POST /api/keys/resolve`.
+ * Two hashes on the wire and nothing else about the error; a miss asks nothing
+ * further; the response is the search envelope (`items`, not `candidates`).
+ *
+ * Every case runs in team mode against two stubs, so "the public shelf was
+ * never asked" is asserted rather than assumed.
+ */
+describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
+  const TEAM_POST_ID = '55555555-5555-4555-8555-555555555555';
+  const TEAM_FIX_MD =
+    'Fix: pnpm — ENOENT. Edited drizzle.config.ts, passed on pnpm db:migrate. pkg: drizzle-kit@0.31.0';
+  const ENOENT =
+    "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+  /** A different signature, so the once-per-session claim does not swallow it. */
+  const EADDR =
+    'Error: listen EADDRINUSE: address already in use :::3000\n    at Server.setupListenHandle (/repo/one/src/server.ts:40:8)\n';
+
+  const failing = (command: string, stderr: string, over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/one',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_response: { stdout: '', stderr, interrupted: false, isImage: false },
+      ...over,
+    });
+  const passing = (command: string, over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/one',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_response: { stdout: 'ok\n', stderr: '', interrupted: false, isImage: false },
+      ...over,
+    });
+  const edit = (path: string): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/one',
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: path },
+    });
+
+  interface ResolveBody {
+    keys: { kind: string; key: string }[];
+    trigger?: string;
+    limit?: number;
+  }
+
+  /**
+   * A team shelf whose resolve answers by status: 200 with one post (rank 1
+   * carries the server's own descriptive fields), 200 with nothing, or an
+   * error code. The free-body GET answers `bodyMd`. Every resolve body is kept.
+   */
+  function resolveStub(
+    answer: 'hit' | 'miss' | number,
+    bodyMd = TEAM_FIX_MD,
+  ): { bodies: ResolveBody[]; handler: (req: StubRequest) => { status: number; json: unknown } } {
+    const bodies: ResolveBody[] = [];
+    return {
+      bodies,
+      handler: (req) => {
+        if (req.url.startsWith('/api/keys/resolve')) {
+          bodies.push(JSON.parse(req.body) as ResolveBody);
+          if (typeof answer === 'number') return { status: answer, json: { error: 'not_enabled' } };
+          if (answer === 'miss') {
+            return {
+              status: 200,
+              json: {
+                schemaVersion: 3,
+                searchId: SEARCH_ID,
+                calibration: 'key-v1',
+                items: [],
+                matched: 0,
+                hint: 'No piece carries any of these keys.',
+              },
+            };
+          }
+          return {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              calibration: 'key-v1',
+              items: [
+                {
+                  resourceId: TEAM_POST_ID,
+                  url: `${req.base}/@team/fix`,
+                  title: 'Fix: pnpm — ENOENT',
+                  price: '0',
+                  excerpt: '',
+                  creator: { handle: 'teammate' },
+                  confidence: 'high',
+                  corroborated: true,
+                },
+              ],
+              matched: 1,
+            },
+          };
+        }
+        if (req.url.startsWith('/api/search')) {
+          return { status: 200, json: { schemaVersion: 3, searchId: SEARCH_ID, items: [] } };
+        }
+        return { status: 200, json: { bodyMd } };
+      },
+    };
+  }
+
+  /** The body between the fences of a full-form injection. */
+  function fenced(text: string): string {
+    const m = /--- tenjin-body \S+ ---\n([\s\S]*?)\n--- tenjin-body \S+ ---/.exec(text);
+    return m === null ? '' : m[1]!;
+  }
+
+  it('sends exactly two fingerprint keys, and shows the teammate record on a hit', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.code).toBe(0);
+    const text = injected(run);
+    expect(text).not.toBeNull();
+    expect(text).toContain(
+      "Tenjin sidecar (team shelf): a teammate's machine has seen this failure fixed",
+    );
+    expect(text).toContain('not instructions');
+    expect(fenced(text ?? '')).toBe(TEAM_FIX_MD);
+
+    // THE WIRE: two keys, both fingerprints, the failure's own trigger, limit
+    // 3. No command_head, no repo, no error text, no package anywhere in it.
+    expect(stub.bodies).toHaveLength(1);
+    const body = stub.bodies[0]!;
+    expect(body.trigger).toBe('failure');
+    expect(body.limit).toBe(3);
+    expect(body.keys.map((k) => k.kind)).toEqual(['fingerprint', 'fingerprint']);
+    expect(body.keys[0]!.key).toMatch(/^sig_v1:[0-9a-f]{16}$/);
+    expect(body.keys[1]!.key).toMatch(/^sig_v1c:[0-9a-f]{16}$/);
+    expect(JSON.stringify(body)).not.toMatch(/command_head|ENOENT|drizzle|migrate|pnpm/);
+    // No text search ran on either shelf, and the public one was never touched.
+    expect(team.queries()).toEqual([]);
+    expect(pub.hits()).toBe(0);
+    // The body GET carried the door key: same origin as the team shelf.
+    expect(team.headers().every((h) => h['x-vercel-protection-bypass'] === SECRET)).toBe(true);
+
+    // The row: shelf team, reason key-match, strong without judge(), the
+    // server's own fields recorded as telemetry, the searchId on the row.
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      trigger: 'failure',
+      shelf: 'team',
+      action: 'injected',
+      reason: 'key-match',
+      strength: 'strong',
+      form: 'full',
+      deny: false,
+      searchId: SEARCH_ID,
+      confidence: 'high',
+      corroborated: true,
+      candidate: { resourceId: TEAM_POST_ID },
+    });
+
+    // AND A LOCAL PAIRING, linked to the post, remembered behind the head, so
+    // this machine's later pass can close it as the second independent close.
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ status: 'open', cmd_head: 'pnpm' });
+    expect(opened[0]!.key).toBe(body.keys[0]!.key.slice('sig_v1:'.length));
+    expect(sessionState(SESSION, 'replayed:pnpm')).toBe(opened[0]!.id);
+    expect(sessionState('', `pairing_post:${opened[0]!.id}`)).toMatchObject({
+      postId: TEAM_POST_ID,
+      origin: team.baseUrl,
+    });
+  });
+
+  it('caps the record at the pairing body size, whatever the post holds', async () => {
+    const long = 'x'.repeat(50) + ' ' + 'edited many files. '.repeat(200);
+    const stub = resolveStub('hit', long);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    const body = fenced(injected(run) ?? '');
+    expect(body.length).toBeGreaterThan(0);
+    expect(body.length).toBeLessThanOrEqual(600);
+  });
+
+  it('opens a pairing on a team hit even when the error named no file', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // An errno with no frame: over the floor for a signature, but nothing a
+    // later edit could match — locally that opens nothing (PR A). A team hit
+    // is evidence enough: the same-command branch of the close rule remains.
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', 'Error: ECONNREFUSED 127.0.0.1:5432'),
+    );
+    expect(injected(run)).not.toBeNull();
+    // Both keys still go: what this error lacks is a frame, and the coarse
+    // key needs only the errno.
+    expect(stub.bodies[0]!.keys).toHaveLength(2);
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.error_files).toEqual([]);
+    expect(sessionState('', `pairing_post:${opened[0]!.id}`)).toMatchObject({
+      postId: TEAM_POST_ID,
+    });
+  });
+
+  it('records a miss with its searchId and asks nothing else', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.stdout).toBe('');
+    expect(stub.bodies).toHaveLength(1);
+    // ONE request: the resolve. No text search, no body, no public leg.
+    expect(team.hits()).toBe(1);
+    expect(pub.hits()).toBe(0);
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    // The searchId is on the miss: bucketCount counts rows that carry one, so
+    // a miss without it would be a free lookup.
+    expect(rows[0]).toMatchObject({
+      trigger: 'failure',
+      shelf: 'team',
+      action: 'skipped',
+      reason: 'miss',
+      searchId: SEARCH_ID,
+    });
+    expect(rows[0]!.candidate).toBeNull();
+    // The local pairing PR A opens on a file-naming error is still there.
+    expect(await pairings()).toHaveLength(1);
+  });
+
+  it('reads a 404 as keys-off, caches it machine-wide, and builds no streak', async () => {
+    const stub = resolveStub(404);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(stub.bodies).toHaveLength(1);
+    // The SECOND failure, a different signature and a different session, makes
+    // no request at all: the fact is about the deployment, not the session.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm dev', EADDR, { session_id: 'sess-2' }),
+    );
+    expect(stub.bodies).toHaveLength(1);
+    expect(team.hits()).toBe(1);
+    expect(pub.hits()).toBe(0);
+
+    const rows = await ledger();
+    expect(rows.map((r) => [r.session, r.reason])).toEqual([
+      [SESSION, 'keys-off'],
+      ['sess-2', 'keys-off'],
+    ]);
+    expect(rows.every((r) => r.shelf === 'team' && r.action === 'skipped')).toBe(true);
+    // Held under the machine session, keyed by origin, as an expiry ~6h out.
+    const until = sessionState('', `keys_off:${team.baseUrl}`);
+    expect(typeof until).toBe('number');
+    expect(Number(until) - Date.now()).toBeGreaterThan(5 * 60 * 60 * 1000);
+    expect(Number(until) - Date.now()).toBeLessThanOrEqual(6 * 60 * 60 * 1000);
+    // Not an outage: no `no-answer` row, so the brake is untouched.
+    expect(rows.some((r) => r.reason === 'no-answer')).toBe(false);
+  });
+
+  it('asks again once the keys-off hold has expired', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // A hold written by an earlier fire, already in the past.
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.setState, [
+      '',
+      `keys_off:${team.baseUrl}`,
+      JSON.stringify(Date.now() - 1000),
+      Date.now(),
+    ]);
+    store?.close();
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(stub.bodies).toHaveLength(1);
+    expect((await ledger())[0]).toMatchObject({ reason: 'miss' });
+  });
+
+  it('reads a refused bypass as no-answer, which the outage brake counts', async () => {
+    const stub = resolveStub(401);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm dev', EADDR));
+    // Two unanswered in a row is the brake (PUSH_FAILURE_STOP): the third
+    // fire is `quiet` and makes no request.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing(
+        'pnpm test',
+        'Error: EPERM: operation not permitted, unlink\n    at rm (/repo/one/src/clean.ts:3:1)\n',
+      ),
+    );
+    expect(stub.bodies).toHaveLength(2);
+    expect(pub.hits()).toBe(0);
+    expect((await ledger()).map((r) => r.reason)).toEqual(['no-answer', 'no-answer', 'quiet']);
+    // Not cached as keys-off: a 401 is not "keys are off here".
+    expect(sessionState('', `keys_off:${team.baseUrl}`)).toBeNull();
+  });
+
+  it('never asks the shelf when this machine already holds the fix', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // Session 1 closes a pairing locally, in public mode, so the store holds
+    // an unverified fix before the team shelf is ever reachable.
+    await pushOn('http://127.0.0.1:1');
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified' });
+
+    await teamMode(team, pub);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT, { session_id: 'sess-2' }),
+    );
+    expect(injected(run)).toContain('Tenjin sidecar (local)');
+    expect(stub.bodies).toHaveLength(0);
+    expect(team.hits()).toBe(0);
+    expect((await ledger()).map((r) => r.shelf)).toEqual(['local']);
+  });
+
+  it('asks nothing in public mode', async () => {
+    const stub = resolveStub('hit');
+    const shelf = await serve(stub.handler);
+    await pushOn(shelf.baseUrl);
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.stdout).toBe('');
+    expect(shelf.hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
+  });
+
+  /**
+   * The coarse key on the wire is salted with the repo's origin url, read from
+   * `.git/config` by a file read; the local one is not. Without the salt an
+   * `ERR_PNPM_OUTDATED_LOCKFILE`-class message would match a fix from any repo
+   * the team has.
+   */
+  it('salts the coarse key with the origin url, and only on the wire', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const repoA = join(dataDir, 'repo-a');
+    const repoB = join(dataDir, 'repo-b');
+    const repoC = join(dataDir, 'repo-c');
+    for (const [dir, origin] of [
+      [repoA, 'git@github.com:acme/api.git'],
+      [repoB, 'git@github.com:acme/web.git'],
+      [repoC, 'git@github.com:acme/api.git'],
+    ] as const) {
+      await mkdir(join(dir, '.git'), { recursive: true });
+      await writeFile(
+        join(dir, '.git', 'config'),
+        `[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = ${origin}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "main"]\n\tremote = origin\n`,
+      );
+    }
+    // Fired from a subdirectory: the config is found by walking up.
+    await mkdir(join(repoA, 'src'), { recursive: true });
+    const fire = (cwd: string, session: string): Promise<HookRun> =>
+      runScript(
+        pushFailureHookScript(dataDir),
+        failing('pnpm db:migrate', ENOENT, { cwd, session_id: session }),
+      );
+    await fire(join(repoA, 'src'), 's-a');
+    await fire(repoB, 's-b');
+    await fire(repoC, 's-c');
+    expect(stub.bodies).toHaveLength(3);
+    const fine = stub.bodies.map((b) => b.keys[0]!.key);
+    const coarse = stub.bodies.map((b) => b.keys[1]!.key);
+    // Same failure, same fine key everywhere: the fine key carries no salt.
+    expect(new Set(fine).size).toBe(1);
+    // The coarse key differs between repos and agrees between two checkouts
+    // of the same one.
+    expect(coarse[0]).not.toBe(coarse[1]);
+    expect(coarse[0]).toBe(coarse[2]);
+    // And the LOCAL coarse key is unsalted: the same in every checkout, and
+    // never the one that went on the wire.
+    const local = (await pairings()).map((p) => String(p.coarse_key));
+    expect(new Set(local).size).toBe(1);
+    expect(coarse.map((k) => k.slice('sig_v1c:'.length))).not.toContain(local[0]);
+    expect((await pairings()).map((p) => String(p.key))).toEqual(
+      fine.map((k) => k.slice('sig_v1:'.length)),
+    );
+  });
+
+  it('reads a worktree checkout through its gitdir to the shared config', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const main = join(dataDir, 'main');
+    const wt = join(dataDir, 'wt');
+    await mkdir(join(main, '.git', 'worktrees', 'wt'), { recursive: true });
+    await mkdir(wt, { recursive: true });
+    await writeFile(
+      join(main, '.git', 'config'),
+      '[remote "origin"]\n\turl = https://github.com/acme/api.git\n',
+    );
+    await writeFile(join(main, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
+    await writeFile(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'wt')}\n`);
+    // No .git/config at all: an unsalted-by-absence coarse key, to compare.
+    const bare = join(dataDir, 'bare');
+    await mkdir(bare, { recursive: true });
+
+    const fire = (cwd: string, session: string): Promise<HookRun> =>
+      runScript(
+        pushFailureHookScript(dataDir),
+        failing('pnpm db:migrate', ENOENT, { cwd, session_id: session }),
+      );
+    await fire(main, 's-main');
+    await fire(wt, 's-wt');
+    await fire(bare, 's-bare');
+    const coarse = stub.bodies.map((b) => b.keys[1]!.key);
+    expect(coarse[0]).toBe(coarse[1]);
+    expect(coarse[2]).not.toBe(coarse[0]);
+  });
+
+  it("marks the linked post on this machine's own close, for sync to verify", async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    const [opened] = await pairings();
+    const key = `pairing_post:${opened!.id}`;
+    expect(sessionState('', key)).not.toHaveProperty('closedAt');
+
+    // This machine fixes it: the file the error named changes, the head passes.
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+    expect(sessionState('', key)).toMatchObject({
+      postId: TEAM_POST_ID,
+      origin: team.baseUrl,
+      status: 'unverified',
+      fixFiles: ['migrate.ts'],
+    });
+    expect(typeof (sessionState('', key) as { closedAt?: unknown }).closedAt).toBe('number');
+    // The close made no request of its own: the shelf has no close endpoint.
+    expect(stub.bodies).toHaveLength(1);
+  });
+
+  it('does not hand the same post to a session twice', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const first = await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT),
+    );
+    expect(injected(first)).not.toBeNull();
+    // A different signature that resolves to the same post (the coarse key).
+    const second = await runScript(pushFailureHookScript(dataDir), failing('pnpm dev', EADDR));
+    expect(second.stdout).toBe('');
+    expect((await ledger()).map((r) => [r.action, r.reason])).toEqual([
+      ['injected', 'key-match'],
+      ['skipped', 'already-injected'],
+    ]);
   });
 });
 
