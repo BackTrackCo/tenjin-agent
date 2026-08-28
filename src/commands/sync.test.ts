@@ -165,7 +165,7 @@ function shelfServer(
     // 201 for a create, 200 for a merge-update: what the shelf's routes return.
     status: req.method === 'PUT' ? 200 : 201,
     json: {
-      id: 'post-1',
+      id: '11111111-1111-4111-8111-111111111111',
       slug: 'fix-pnpm-test',
       title: 'Fix: pnpm — ENOENT',
       status: 'published',
@@ -328,7 +328,12 @@ describe('tenjin sync: verified after an earlier sync', () => {
     store.run(STORE_SQL.setState, [
       '',
       'pairing_post:' + id,
-      JSON.stringify({ postId: 'post-owned-1', origin: TEAM, at: past, own: true }),
+      JSON.stringify({
+        postId: '44444444-4444-4444-8444-444444444444',
+        origin: TEAM,
+        at: past,
+        own: true,
+      }),
       past,
     ]);
     store.close();
@@ -341,7 +346,7 @@ describe('tenjin sync: verified after an earlier sync', () => {
     expect(result.data).toMatchObject({ synced: 0, verified: 1 });
     expect(sent).toHaveLength(1);
     expect(sent[0]!.method).toBe('PUT');
-    expect(sent[0]!.url).toBe(`${TEAM}/api/posts/post-owned-1`);
+    expect(sent[0]!.url).toBe(`${TEAM}/api/posts/44444444-4444-4444-8444-444444444444`);
     const keys = sent[0]!.body!.keys as Array<{ kind: string; verified?: boolean }>;
     expect(keys.filter((k) => k.kind === 'fingerprint').every((k) => k.verified === true)).toBe(
       true,
@@ -404,7 +409,10 @@ describe("tenjin sync: a pairing closed beside a teammate's post", () => {
     if (store === null) throw new Error('no store');
     const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as { value: string };
     store.close();
-    expect(JSON.parse(link.value)).toMatchObject({ postId: 'post-1', own: true });
+    expect(JSON.parse(link.value)).toMatchObject({
+      postId: '11111111-1111-4111-8111-111111111111',
+      own: true,
+    });
   });
 
   it("is held, and the run continues, when the teammate's post already holds the key verified", async () => {
@@ -439,7 +447,7 @@ describe("tenjin sync: a pairing closed beside a teammate's post", () => {
       return {
         status: 201,
         json: {
-          id: 'post-2',
+          id: '22222222-2222-4222-8222-222222222222',
           slug: 's',
           title: 't',
           status: 'published',
@@ -475,7 +483,12 @@ describe('tenjin sync: a 404 on the update of our own post', () => {
     store.run(STORE_SQL.setState, [
       '',
       'pairing_post:' + gone,
-      JSON.stringify({ postId: 'post-deleted', origin: TEAM, at: past, own: true }),
+      JSON.stringify({
+        postId: '55555555-5555-4555-8555-555555555555',
+        origin: TEAM,
+        at: past,
+        own: true,
+      }),
       past,
     ]);
     store.close();
@@ -487,7 +500,7 @@ describe('tenjin sync: a 404 on the update of our own post', () => {
         : {
             status: 201,
             json: {
-              id: 'post-3',
+              id: '33333333-3333-4333-8333-333333333333',
               slug: 's',
               title: 't',
               status: 'published',

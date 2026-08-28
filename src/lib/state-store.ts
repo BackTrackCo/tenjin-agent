@@ -330,8 +330,8 @@ export const STORE_SQL = {
    */
   claimState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO NOTHING`,
-  /** Rows under one key prefix, newest first. Used for the per-path `edited:`
-   *  rows the close rule reads. */
+  /** Rows under one key prefix, newest first. Used for the per-agent, per-path
+   *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
      WHERE session = ? AND key >= ? AND key < ? AND at >= ? ORDER BY at DESC LIMIT ?`,
   countStatePrefix: `SELECT COUNT(*) AS n FROM session_state
@@ -358,8 +358,23 @@ export const STORE_SQL = {
        paid_browse_count = COALESCE(excluded.paid_browse_count, searches.paid_browse_count)`,
   /** Newest first. `rowid` breaks a tie so two rows stamped the same
    *  millisecond come back write-order-newest-first, which is what "prepend"
-   *  meant when this was a JSON array. */
-  listSearches: 'SELECT * FROM searches ORDER BY at DESC, rowid DESC LIMIT ?',
+   *  meant when this was a JSON array.
+   *
+   *  The LEFT JOIN carries the draft a parked claim rides on: a `session_state`
+   *  row in the machine bucket under `draft-search:<searchId>`, value the RAW
+   *  post id (matched by SQL, so never JSON-quoted). A key-value fact beside the
+   *  `published:` records, not a `searches` column, because adding a column to a
+   *  created table needs the versioned migration #212 introduces. */
+  listSearches: `SELECT s.*, st.value AS draft_post_id FROM searches s
+     LEFT JOIN session_state st
+       ON st.session = '' AND st.key = 'draft-search:' || s.search_id
+     ORDER BY s.at DESC, s.rowid DESC LIMIT ?`,
+  /** The searches whose claims are parked on this draft (see `listSearches` on
+   *  where the links live), newest first. */
+  searchesForDraft: `SELECT s.* FROM searches s
+     JOIN session_state st
+       ON st.session = '' AND st.key = 'draft-search:' || s.search_id
+     WHERE st.value = ? ORDER BY s.at DESC, s.rowid DESC`,
   getSearch: 'SELECT * FROM searches WHERE search_id = ?',
   latestDeliberate: `SELECT * FROM searches
      WHERE source IS NULL OR source = 'cli' ORDER BY at DESC, rowid DESC LIMIT 1`,
@@ -563,9 +578,12 @@ const STATE_EDITS_PREFIX = 'edits:';
 const STATE_EDITED_PREFIX = 'edited:';
 const STATE_PACKAGES_PREFIX = 'package:';
 const STATE_SIGNATURES_PREFIX = 'sig:';
-/** Which pairing this session was SHOWN behind a given command head. It is what
- *  lets the session that was replayed a pairing be its second independent
- *  closer, which is the only route to \`verified\` through the hooks. */
+/** Which pairings ONE AGENT was SHOWN behind a given command head — the key is
+ *  \`replayed:<agent>:<head>\` and the value a JSON array of pairing ids. It is
+ *  what lets the agent that was replayed a pairing be its second independent
+ *  closer, which is the only route to \`verified\` through the hooks. Scoped by
+ *  agent because parallel subagents share their parent's session id, and a list
+ *  because one head answers for a whole build step. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
 /**
  * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
@@ -1231,7 +1249,8 @@ function openPairing(row) {
     storeJson(row.pkgVersions),
     String(row.scope),
   ]);
-  // The ROW ID, which is what \`replayed:<head>\` and \`pairing_post:<id>\`
+  // The ROW ID, which is what \`replayed:<agent>:<head>\` and
+  // \`pairing_post:<id>\`
   // key on and \`pairingById\` reads back; null when nothing was written.
   const rowid = result === null ? null : Number(result.lastInsertRowid);
   return Number.isSafeInteger(rowid) ? rowid : null;

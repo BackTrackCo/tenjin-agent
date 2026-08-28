@@ -35,10 +35,135 @@ describe('fetchJson', () => {
     expect(res).toMatchObject({ ok: false, kind: 'invalid-json', status: 200 });
   });
 
+  /**
+   * An access-protected deployment answers 200 with its own page, so the failure
+   * is indistinguishable from a broken API by status alone. Only this transport
+   * holds the Response, so it is the only place that can tell doctor which one
+   * happened (#218).
+   */
+  describe('gateSuspected on an invalid-json 2xx', () => {
+    /** A Response whose `url` is the FINAL one, as real fetch reports it after redirects. */
+    function landedAt(finalUrl: string, body: string, init: ResponseInit = {}): Response {
+      const res = new Response(body, { status: 200, ...init });
+      Object.defineProperty(res, 'url', { value: finalUrl });
+      return res;
+    }
+
+    it('is set when the body arrives as text/html', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        new Response('<html><body>Authentication Required</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
+    });
+
+    it('is set when a followed redirect landed the probe on another host', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        landedAt('https://vercel.com/sso-api?url=shelf', 'not json{');
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      // The off-host landing is the stronger signal, so it is reported
+      // separately: it licenses the caller to name access protection outright.
+      expect(res).toMatchObject({
+        ok: false,
+        kind: 'invalid-json',
+        gateSuspected: true,
+        gateOffOrigin: true,
+      });
+    });
+
+    it('does not claim the off-origin signal on a same-host HTML page', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        landedAt('https://shelf.example/openapi.json', '<html></html>', {
+          headers: { 'content-type': 'text/html' },
+        });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: true });
+      expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
+    });
+
+    it('is unset for plain bad JSON served by the requested origin', async () => {
+      const fetchImpl: typeof fetch = async () =>
+        landedAt('https://shelf.example/openapi.json', 'not json{', {
+          headers: { 'content-type': 'application/json' },
+        });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: false });
+    });
+
+    // A Response built without a url (every stub in this file, and any non-fetch
+    // impl) must not read as a redirect: an unknown final host is not a foreign one.
+    it('is unset when the response carries no final URL to compare', async () => {
+      const fetchImpl: typeof fetch = async () => new Response('not json{', { status: 200 });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'invalid-json', gateSuspected: false });
+    });
+  });
+
   it('flags a non-2xx status as an http failure carrying the status', async () => {
     const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 500 });
     const res = await fetchJson('https://x.example/api', { timeoutMs: 1000, fetchImpl });
     expect(res).toMatchObject({ ok: false, kind: 'http', status: 500 });
+  });
+
+  /**
+   * A sign-in wall that answers 401/403 with its page is the second of the
+   * three protection shapes (200 HTML, 401/403, 30x interstitial), so the gate
+   * signals ride on those statuses too; a JSON 401 is the API itself refusing,
+   * and any other status stays unmarked (a 404 HTML page is an ordinary broken
+   * deployment, not a credential problem).
+   */
+  describe('gateSuspected on a 401/403 http failure', () => {
+    const htmlPage = (status: number): typeof fetch =>
+      (async () =>
+        new Response('<html><body>Authentication Required</body></html>', {
+          status,
+          headers: { 'content-type': 'text/html; charset=utf-8' },
+        })) as typeof fetch;
+
+    it('is set on a 401 and a 403 that answer with an HTML page', async () => {
+      for (const status of [401, 403]) {
+        const res = await fetchJson('https://shelf.example/openapi.json', {
+          timeoutMs: 1000,
+          fetchImpl: htmlPage(status),
+        });
+        expect(res).toMatchObject({ ok: false, kind: 'http', status, gateSuspected: true });
+      }
+    });
+
+    it('is unset on a JSON 401 from the requested origin', async () => {
+      const fetchImpl: typeof fetch = async () => jsonResponse({ error: {} }, { status: 401 });
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl,
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'http', status: 401, gateSuspected: false });
+    });
+
+    it('is not computed at all for other statuses, an HTML 404 included', async () => {
+      const res = await fetchJson('https://shelf.example/openapi.json', {
+        timeoutMs: 1000,
+        fetchImpl: htmlPage(404),
+      });
+      expect(res).toMatchObject({ ok: false, kind: 'http', status: 404 });
+      expect((res as { gateSuspected?: boolean }).gateSuspected).toBeUndefined();
+    });
   });
 
   it('flags a rejected fetch as a network failure', async () => {
@@ -343,6 +468,56 @@ describe('httpRequest, signed requests never follow redirects', () => {
 
   const redirect = (status: number, location: string): Response =>
     new Response('', { status, headers: { location } });
+
+  /**
+   * `gateOffOrigin` on a blocked redirect is what licenses doctor to say the key
+   * was refused rather than that the base URL is wrong, so each `Location` shape
+   * is pinned at the transport rather than through a caller. The probe carries the
+   * bypass header, which is what makes a 3xx `blocked-redirect` rather than a
+   * plain http error. The relative form is the commonest sign-in shape and must
+   * NOT read as off-host.
+   */
+  it.each([
+    ['an absolute Location on another host', 'https://vercel.com/sso-api?url=x', true],
+    [
+      'a relative Location, which cannot leave the host',
+      '/sign-in?next=%2Fopenapi.json',
+      undefined,
+    ],
+    ['a protocol-relative Location on another host', '//vercel.com/sso-api', true],
+    ['an absolute Location back to the same host', 'https://shelf.example/openapi.json', undefined],
+  ])('reports the off-host signal for %s', async (_label, location, expected) => {
+    const fetchImpl: typeof fetch = async () => redirect(302, location as string);
+    const res = await fetchJson('https://shelf.example/openapi.json', {
+      timeoutMs: 1000,
+      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBe(expected);
+  });
+
+  it('claims nothing about the host when the redirect carries no Location', async () => {
+    const fetchImpl: typeof fetch = async () => new Response('', { status: 302 });
+    const res = await fetchJson('https://shelf.example/openapi.json', {
+      timeoutMs: 1000,
+      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
+  });
+
+  it('claims nothing about the host when the Location cannot be parsed', async () => {
+    const fetchImpl: typeof fetch = async () => redirect(302, 'http://[not a url');
+    const res = await fetchJson('https://shelf.example/openapi.json', {
+      timeoutMs: 1000,
+      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
+  });
 
   it('refuses a cross-origin 3xx carrying a SIWX header, and never re-sends it', async () => {
     const { fetchImpl, calls } = recordingFetch(() =>

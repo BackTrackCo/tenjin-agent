@@ -75,6 +75,13 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
+    // `install --refresh` promises to converge what exists and create nothing.
+    // Under `tenjin update` the child is held to that by TENJIN_NO_UPDATE_CHECK,
+    // but a hand-run refresh arrives here with nothing set, and the nudge below
+    // would materialize `update-check.json` under a data dir this mode was not
+    // allowed to add a single file to. Read here rather than in the command
+    // body: the nudge fires after the body has already thrown its refusal.
+    const refreshRun = command === 'install' && cmd.optsWithGlobals().refresh === true;
     // Read BEFORE the envelope, from the last check's cache only: this is the
     // agent's copy of the nudge, and it must not cost a network call or a delay.
     // `update` is excluded for the same reason the nudge is — its own envelope
@@ -97,8 +104,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // buildContext has no ctx to read one from. Skipped for `update` itself: its
     // envelope has just answered the nudge's question, and this process still
     // runs the OLD build, so a cached "newer exists" would print the nudge in
-    // the same breath as "Updated".
-    if (command !== 'update') {
+    // the same breath as "Updated". Skipped for `install --refresh` because its
+    // cache file is the one thing that mode may not create; see `refreshRun`.
+    if (command !== 'update' && !refreshRun) {
       await maybeUpdate({ dir: dataDir(process.env), io, json });
     }
     // Every command but `install` is a chance to catch up a skill left stale by
@@ -191,6 +199,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.webSearch and hooks.agentDispatch (both auto by default, disjoint)',
     )
     .option('--no-hooks', 'register no harness hooks this run (writes no config)')
+    .option(
+      '--refresh',
+      'non-interactive: re-materialize the skills, hook scripts and hook entries this machine already has, at this build. Asks nothing, creates no wallet, writes no config, and adds no permission rule or hook entry that is not already there. This is what `tenjin update` runs after a successful upgrade',
+    )
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
@@ -216,6 +228,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
               : {}),
             ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
             ...(o.hooks === false ? { noHooks: true } : {}),
+            ...(o.refresh === true ? { refresh: true } : {}),
           },
           ctx,
         );
@@ -638,6 +651,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option('--yes', 'apply the update without the confirmation stop')
     .option('--mode <mode>', 'consent mode for this run: review | auto | full-auto')
+    .option(
+      '--status <status>',
+      'draft to unpublish (reversible), published to put a draft up; gated by the same publish.mode consent as every other change here',
+    )
     .option('--title <text>', 'new post title')
     .option('--price <usd>', 'new post price in decimal USD')
     .option('--body <file>', 'replace the body with this Markdown file (frontmatter ignored)')
@@ -690,6 +707,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             postId,
             ...(o.yes === true ? { yes: true } : {}),
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
+            ...(typeof o.status === 'string' ? { status: o.status } : {}),
             ...(typeof o.title === 'string' ? { title: o.title } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
             ...(typeof o.body === 'string' ? { body: o.body } : {}),
@@ -719,6 +737,23 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           },
           ctx,
         );
+      });
+    });
+
+  // The retraction verb (#221). It CONFIRMS IN EVERY MODE and never reads
+  // publish.mode: the mode is consent to publish, not consent to destroy, so
+  // `full-auto` asks here exactly as `review` does. At a TTY it asks inline;
+  // anywhere else it refuses with the exit-3 payload `--yes` answers.
+  addGlobalFlags(program.command('delete <postId>'))
+    .description(
+      'Remove one of your own pieces from the marketplace (soft-delete, owner-scoped). It prints what would go and confirms EVERY time, whatever publish.mode says, because the mode is consent to publish and not to destroy: at a terminal it asks y/N, and headless it refuses (exit 3) until you pass --yes. To take a piece down reversibly instead, use `tenjin edit <postId> --status draft`',
+    )
+    .option('--yes', 'confirm the removal without the interactive prompt (required when headless)')
+    .action(async function (this: Command, postId: string) {
+      await runCommand('delete', this, async (ctx) => {
+        const o = this.opts();
+        const { runDelete } = await import('./commands/delete');
+        return runDelete({ postId, ...(o.yes === true ? { yes: true } : {}) }, ctx);
       });
     });
 

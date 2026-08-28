@@ -96,6 +96,7 @@ import {
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
+import { HOOK_SCRIPT_MARKER, WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { DoctorChecks } from './doctor';
@@ -1307,13 +1308,13 @@ describe('runInstall: interactive walkthrough', () => {
   });
 
   /**
-   * With the experiment armed the disclosure has to stop promising the hooks are
-   * advisory: the research arm can deny a WebSearch or WebFetch outright and
-   * answer it from the marketplace. It also has to stop reporting the six push
-   * entries inside the search-hook count, which is the number an operator reads
-   * to decide whether the experiment wired anything at all.
+   * With the experiment armed the disclosure has to name the five extra events
+   * the arms fire on and say, in its own words, that none of them can block or
+   * change a tool call. It also has to stop reporting the six push entries
+   * inside the search-hook count, which is the number an operator reads to
+   * decide whether the experiment wired anything at all.
    */
-  it('discloses the deny and counts the push arms apart, once push is on', async () => {
+  it('discloses the arms and counts them apart, once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1321,15 +1322,14 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).not.toContain('They can never block or change the tool call.');
     expect(text).toContain(
-      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+      'Every arm only adds context beside the call; none can block or change it.',
     );
     expect(text).toContain(
       'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
     );
-    // ...and not the old "beside these", which put the entry that carries the
-    // deny outside the set of arms it belongs to.
+    // ...and not the old "beside these", which put the widened WebSearch entry
+    // outside the set of arms it belongs to.
     expect(text).not.toContain('more hook entries run beside these');
     expect(text).toContain('Turn it off: tenjin push off');
     // Three search EVENTS wired (PreToolUse carries two of the four base
@@ -1345,7 +1345,7 @@ describe('runInstall: interactive walkthrough', () => {
    * generated WebSearch script the push lookup runs before the reminder line, so
    * with push armed `remind` makes the same one request `auto` does. The flat
    * "they send nothing off-machine" was therefore false on exactly the arm that
-   * can cancel a tool call — and it is the string `tenjin push on` prints too.
+   * reaches the network — and it is the string `tenjin push on` prints too.
    */
   it('drops the nothing-leaves-the-machine claim on the remind branch once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
@@ -1357,7 +1357,11 @@ describe('runInstall: interactive walkthrough', () => {
     const text = human(res);
     expect(text).not.toContain('they send nothing off-machine');
     expect(text).toContain('the query text does leave the machine');
-    expect(text).toContain('that call may be denied and answered from the shelf instead');
+    // ...and it says so WITHOUT reviving the deny: no script this CLI writes can
+    // cancel a tool call any more, so the sentence has to end on the search
+    // still running.
+    expect(text).toContain('the search itself still runs');
+    expect(text).not.toContain('denied');
   });
 
   it('keeps the remind branch flat when push is NOT armed', async () => {
@@ -4120,5 +4124,222 @@ describe('runInstall: --no-hooks', () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
     expect(hooksOf(res.data).skipped).toBeUndefined();
     expect(existsSync(join(data, 'hooks'))).toBe(true);
+  });
+});
+
+/**
+ * `--refresh`: the non-interactive re-materialize `tenjin update` spawns on the
+ * newly installed binary (tenjin-agent#171).
+ *
+ * Every test here is about a NEGATIVE. The mode's whole value is what it cannot
+ * do, because an unattended upgrade runs it: it must not ask, must not create a
+ * key, must not write config, and must not turn an upgrade into an install by
+ * materializing a surface the machine did not have.
+ */
+describe('runInstall --refresh', () => {
+  const settingsPath = (): string => join(home, '.claude', 'settings.json');
+  const readSettings = async (): Promise<{
+    hooks?: Record<string, unknown[]>;
+    permissions?: { allow?: string[] };
+  }> => JSON.parse(await readFile(settingsPath(), 'utf8'));
+
+  /** A machine that ran a real install: skills, hooks, rules and config. */
+  async function installed(): Promise<void> {
+    await runInstall(
+      { harness: ['claude'], searchHooks: 'auto', allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+  }
+
+  /** Deps whose every prompt, wallet and config seam is a tripwire. */
+  function refreshDeps(over: Partial<InstallDeps> = {}): InstallDeps {
+    const boom = (what: string) => () => {
+      throw new Error(`--refresh must not ${what}`);
+    };
+    return deps({
+      which: (bin) => bin === 'claude',
+      // A TTY with stdin: the state in which every other install path prompts.
+      isInteractive: true,
+      promptPublishMode: boom('ask for a publish mode') as never,
+      promptSearchHooks: boom('ask about hooks') as never,
+      confirmPermissions: boom('ask about permissions') as never,
+      confirmWallet: boom('ask about a wallet') as never,
+      confirmBazaarPay: boom('ask about the Bazaar lane') as never,
+      createWallet: boom('create a wallet') as never,
+      intro: boom('open a prompt sequence') as never,
+      outro: boom('close a prompt sequence') as never,
+      collectChecks: boom('run the doctor probes') as never,
+      ...over,
+    });
+  }
+
+  it('asks nothing and creates nothing, even at an interactive TTY', async () => {
+    await installed();
+    const configBefore = await readFile(join(data, 'config.json'), 'utf8');
+    // Every seam above throws; reaching the end is the assertion.
+    const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
+    expect((result.data as { refresh: boolean }).refresh).toBe(true);
+    expect(existsSync(join(data, 'wallet.json'))).toBe(false);
+    // Config is READ (for hooks.push and publish.mode) and never written.
+    expect(await readFile(join(data, 'config.json'), 'utf8')).toBe(configBefore);
+  });
+
+  it('brings a drifted hook script back to this build', async () => {
+    await installed();
+    const script = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
+    // What an older build left: a different body carrying the header marker,
+    // which is what proves the file is ours to rewrite.
+    const older = `#!/usr/bin/env node\n${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n// older\n`;
+    await writeFile(script, older);
+    const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
+    expect(await readFile(script, 'utf8')).not.toBe(older);
+    expect((result.data as { hooks: { scripts: string[] } }).hooks.scripts).toEqual([script]);
+  });
+
+  /**
+   * The parent reads the EXIT CODE and nothing else, so a no-op that returned
+   * success would reach the operator as "Refreshed the skills and hook scripts
+   * for <dir>" on a machine where nothing was refreshed.
+   */
+  it('exits non-zero on a machine where nothing was ever materialized', async () => {
+    const err = await caught(() => runInstall({ refresh: true }, makeCtx(), refreshDeps()));
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.exitCode).not.toBe(0);
+    expect(err.message).toContain('Nothing to refresh');
+    expect(err.fix).toContain('tenjin install');
+    expect((err.details as { touched: boolean }).touched).toBe(false);
+    // And it materialized none of the things it just declined to refresh.
+    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  /** The other half of the same rule: a refusal to write is not a refresh either. */
+  it('exits non-zero when the hook writer refused, and carries the reason', async () => {
+    await installed();
+    const elsewhere = await mkdtemp(join(tmpdir(), 'tenjin-refresh-elsewhere-'));
+    await rm(join(data, 'hooks'), { recursive: true });
+    await symlink(elsewhere, join(data, 'hooks'));
+
+    const err = await caught(() => runInstall({ refresh: true }, makeCtx(), refreshDeps()));
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.exitCode).not.toBe(0);
+    expect(err.message).toContain('not a directory');
+    expect(err.fix).toContain('tenjin install');
+    await rm(elsewhere, { recursive: true, force: true });
+  });
+
+  /**
+   * The two refusals are ordered, and this is why. A refusal to write leaves
+   * every hook counter at zero, so a machine whose hooks directory is a symlink
+   * reaches `!touched` on the strength of the refusal itself. Reported as the
+   * no-op it would tell the operator nothing is installed on a machine whose
+   * only problem is the link, and `update` would relay exactly that.
+   */
+  it('reports the write refusal, not the no-op, when the refusal is what emptied the run', async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), 'tenjin-refresh-elsewhere-'));
+    await mkdir(data, { recursive: true });
+    await symlink(elsewhere, join(data, 'hooks'));
+
+    const err = await caught(() => runInstall({ refresh: true }, makeCtx(), refreshDeps()));
+    expect(err.exitCode).not.toBe(0);
+    expect(err.message).toContain('not a directory');
+    expect(err.message).not.toContain('Nothing to refresh');
+    await rm(elsewhere, { recursive: true, force: true });
+  });
+
+  /**
+   * `--refresh` dispatches ABOVE the only place `dryRun` is read, so honouring
+   * the pair would write every script and commit settings.json against the
+   * flag's own help text.
+   */
+  it('refuses --dry-run instead of writing through it', async () => {
+    await installed();
+    const settingsBefore = await readFile(settingsPath(), 'utf8');
+    const script = join(data, 'hooks', WEBSEARCH_HOOK_FILE);
+    const older = `#!/usr/bin/env node\n${HOOK_SCRIPT_MARKER} (tenjin-cli/0.0.1).\n// older\n`;
+    await writeFile(script, older);
+
+    const err = await caught(() =>
+      runInstall({ refresh: true, dryRun: true }, makeCtx(), refreshDeps()),
+    );
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('USAGE');
+    expect(await readFile(script, 'utf8')).toBe(older);
+    expect(await readFile(settingsPath(), 'utf8')).toBe(settingsBefore);
+  });
+
+  /**
+   * THE PINNED ADVERSARIAL CASE. An update-triggered refresh runs unattended, so
+   * a version that would grant MORE rules must not take them: converging a
+   * surface is unattended-safe, widening the agent's allowlist is not. The new
+   * rules arrive when an operator runs `tenjin install` on purpose.
+   */
+  it('never widens the allowlist, and names the rules it declined to write', async () => {
+    await installed();
+    const before = (await readSettings()).permissions?.allow ?? [];
+    expect(before.length).toBeGreaterThan(0);
+
+    // A newer version's install would want a rule this machine has never had.
+    const NEW_RULE = 'Bash(tenjin brandnewverb:*)';
+    const result = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      refreshDeps({ inspectPermissions: async () => ({ pending: [NEW_RULE] }) }),
+    );
+
+    const after = (await readSettings()).permissions?.allow ?? [];
+    expect(after).toEqual(before);
+    expect(after).not.toContain(NEW_RULE);
+    // Reported rather than silently skipped: the operator can see what an
+    // explicit install is holding for them.
+    const data_ = result.data as { permissions: { pending: string[] } };
+    expect(data_.permissions.pending).toEqual([NEW_RULE]);
+    expect(result.humanLines?.join(' ')).toContain('tenjin install');
+  });
+
+  it('registers no hook entry the machine does not already have', async () => {
+    await installed();
+    const settings = await readSettings();
+    delete settings.hooks?.SessionStart;
+    await writeFile(settingsPath(), JSON.stringify(settings, null, 2));
+
+    await runInstall({ refresh: true }, makeCtx(), refreshDeps());
+    expect((await readSettings()).hooks?.SessionStart).toBeUndefined();
+    // The events that were there are untouched and still ours.
+    expect((await readSettings()).hooks?.Stop?.length).toBe(1);
+  });
+
+  /**
+   * The skills pass is the existing heal writer, which stands down when this
+   * invocation's data dir is not the machine default: the skills directories are
+   * machine-wide, so a per-profile refresh must not decide their contents.
+   */
+  it('leaves the machine-wide skills alone when the data dir is redirected', async () => {
+    await installed();
+    const skill = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    await writeFile(skill, '# stale\n');
+    const result = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      refreshDeps({ env: { TENJIN_DATA_DIR: data } }),
+    );
+    expect(await readFile(skill, 'utf8')).toBe('# stale\n');
+    const skills = (result.data as { skills: { ran: boolean; reason?: string } }).skills;
+    expect(skills.ran).toBe(false);
+    expect(skills.reason).toContain('TENJIN_DATA_DIR');
+  });
+
+  it('re-renders the wired skills from the default profile', async () => {
+    await installed();
+    const skill = join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
+    // Drift the BODY and keep the frontmatter: the heal writer only rewrites a
+    // file it can still identify as ours, which is what keeps it off a copy
+    // someone replaced with their own.
+    const packaged = await packagedText('tenjin-search');
+    await writeFile(skill, `${packaged}\n<!-- an older version wrote this -->\n`);
+    const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
+    expect(await readFile(skill, 'utf8')).toBe(packaged);
+    expect((result.data as { skills: { ran: boolean } }).skills.ran).toBe(true);
   });
 });

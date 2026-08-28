@@ -58,6 +58,7 @@ import { walletFileExists } from '../lib/wallet/store';
 import { walletPath } from '../lib/paths';
 import { PERMISSIONS_DOC_URL, recommendedPermissions } from '../lib/permissions';
 import {
+  claudeSettingsPath,
   FREE_VERB_RULES,
   inspectFreeVerbRules,
   MODE_GATED_RULES,
@@ -68,7 +69,10 @@ import {
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
-import { hooksSkipped, hooksUndo, wireSearchHooks } from '../lib/harness-hooks';
+import { hooksSkipped, hooksUndo, refreshHooks, wireSearchHooks } from '../lib/harness-hooks';
+import type { HookRefreshResult } from '../lib/harness-hooks';
+import { healWiredSkills } from '../lib/skill-heal';
+import type { HealOutcome } from '../lib/skill-heal';
 import { removeMarkerLines } from '../lib/uninstall';
 import type { HooksResult } from '../lib/harness-hooks';
 import { resolveHermesHome, resolveHermesHomeLenient, wireHermesIntegration } from '../lib/hermes';
@@ -114,6 +118,12 @@ const InstallInputSchema = z.object({
    * `hooks.agentDispatch: off`) to config.
    */
   noHooks: z.boolean().optional(),
+  /**
+   * `--refresh`: re-materialize what this machine ALREADY has, and nothing else.
+   * See {@link runInstallRefresh}. Every other flag is ignored on a refresh run,
+   * because a refresh makes no decision any of them could settle.
+   */
+  refresh: z.boolean().optional(),
 });
 export type InstallInput = z.infer<typeof InstallInputSchema>;
 
@@ -304,7 +314,194 @@ export async function runInstall(
   ctx: CommandContext,
   deps: InstallDeps = {},
 ): Promise<CommandResult> {
+  // Dispatched ABOVE installBody rather than threaded through it as a sixth
+  // flag. A refresh shares none of the five decisions, and the guarantee it
+  // makes — no prompt, no wallet, no config write, no new surface — is one a
+  // reader can only check by there being no path from here into any of them.
+  if (input.refresh === true) return runInstallRefresh(ctx, deps, input.dryRun === true);
   return withInterruptGuard((markPhase) => installBody(input, ctx, deps, markPhase));
+}
+
+/**
+ * `tenjin install --refresh`: bring the surfaces this machine ALREADY has up to
+ * the running build, and add none.
+ *
+ * It exists because `tenjin update` swaps the binary and nothing else, while the
+ * skills, the generated hook scripts and their settings entries are all
+ * materialized copies of a particular version (tenjin-agent#171). The running
+ * process cannot render the NEXT version's copies, so `update` spawns this on
+ * the freshly installed entry once the swap succeeds.
+ *
+ * CONVERGE, NEVER MATERIALIZE. Every step is gated on the surface already
+ * existing: a skill not wired stays unwired, a hook script not on disk stays
+ * absent, an event with no entry of ours gets none, and no permission rule is
+ * written at all. The update nudge is stood down for the same reason (see
+ * `runCommand` in cli.ts): it fires after this body returns or throws, and its
+ * cache file would be the one file this mode created. That is what makes it safe
+ * to run unattended on any machine, including one that never ran
+ * `tenjin install`, where it is a stated no-op.
+ *
+ * PERMISSION RULES ARE REPORTED, NEVER WRITTEN. They carry no version, so there
+ * is nothing in one to bring up to date; the only thing a rules pass could do is
+ * ADD the rules a newer version's install would write, and widening an agent's
+ * allowlist during an unattended upgrade is not a convergence. Those arrive when
+ * an operator runs `tenjin install` on purpose, and the run reports which ones
+ * are waiting so the choice is visible rather than silent.
+ *
+ * THE EXIT CODE CARRIES THE VERDICT. `update` reads the child's outcome and
+ * nothing else, so a run that refused or found nothing to converge exits
+ * non-zero rather than reporting success; see the throw sites below.
+ *
+ * COMPATIBILITY CONTRACT. `--refresh` must keep working, with this name and this
+ * "changes nothing that does not already exist" meaning, from its first release
+ * onward: every OLD `update` invokes it on the NEXT version's binary, so this
+ * flag's stability is what a version this code has never seen depends on. A
+ * rename would not wedge anything (`update` treats a non-zero exit as a warn
+ * naming the manual command), but it would silently strand every machine
+ * upgrading from before the rename on stale hook scripts. Change the behavior
+ * behind it, not the contract.
+ */
+async function runInstallRefresh(
+  ctx: CommandContext,
+  deps: InstallDeps,
+  dryRun: boolean,
+): Promise<CommandResult> {
+  const env = deps.env ?? process.env;
+  // Refused rather than honoured, because this dispatch sits ABOVE the only
+  // place `dryRun` is read: forwarding it would write every script and commit
+  // settings.json against the flag's own help text.
+  if (dryRun) {
+    throw new CliError('USAGE', '`--refresh` and `--dry-run` cannot be combined.', {
+      fix: 'Run `tenjin install --dry-run` to preview a full install, or `tenjin install --refresh` to re-materialize what is already there.',
+    });
+  }
+  const home = deps.homeDir ?? homedir();
+  if (!isAbsolute(home)) {
+    throw new CliError(
+      'INTERNAL',
+      'The home directory did not resolve to an absolute path, so nothing was refreshed.',
+      { fix: 'Set HOME to your home directory (`export HOME=...`), then re-run `tenjin install`.' },
+    );
+  }
+
+  // Read, never written. A refresh is not a decision about this machine, so the
+  // two things it reads out of config are the two that shape what it rewrites:
+  // whether the push arms are armed (the WebSearch matcher follows it) and which
+  // rule set a real install would want.
+  const rawConfig = await loadRawConfig(ctx.dataDir);
+  const pushOn = rawConfig.hooks?.push === 'on';
+  const publishMode = rawConfig.publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
+
+  // The skills pass IS the existing heal writer, not a second one. It already
+  // rewrites only the CLI adapters a harness carries, shapes them by the
+  // machine's mode, and — the part that matters here — STANDS DOWN when this
+  // invocation's data dir is not the machine default. The skills directories are
+  // machine-wide, so a per-profile refresh must not decide their contents; the
+  // default profile's own heal pass converges them, on this machine's next
+  // command. See lib/skill-heal for the full argument.
+  const skills = await healWiredSkills({
+    io: ctx.io,
+    env,
+    homeDir: home,
+    dataDir: ctx.dataDir,
+    ...(deps.skillsSourceDir !== undefined ? { skillsSourceDir: deps.skillsSourceDir } : {}),
+  });
+
+  const hooks = await refreshHooks({ homeDir: home, dataDir: ctx.dataDir, push: pushOn });
+
+  // `pending` is exactly the set a real install WOULD add, which is exactly the
+  // set this run must not. Reported so the operator can see what an explicit
+  // install is holding for them.
+  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
+  const permissions = {
+    path: probe.satisfied?.path ?? claudeSettingsPath(home),
+    alreadyPresent: probe.satisfied?.alreadyPresent ?? [],
+    /**
+     * Rules a `tenjin install` would write. Never written here; see the header.
+     *
+     * KNOWN GAP, deliberately left: this is recomputed from the settings file
+     * alone and nothing persists a decline, so a machine installed with
+     * `--no-allow-free-verbs` reports the full set on every refresh. Answering it
+     * properly needs persisted per-rule state, which is a decision about consent
+     * and not part of a re-materialize. Tracked as tenjin-agent#234.
+     */
+    pending: probe.pending ?? [],
+  };
+
+  const touched =
+    skills.ran ||
+    hooks.scripts.length > 0 ||
+    hooks.updated.length > 0 ||
+    hooks.alreadyPresent.length > 0;
+  const data = { refresh: true, dataDir: ctx.dataDir, skills, hooks, permissions, touched };
+
+  // THE EXIT CODE IS THE REPORT. `update` spawns this and reads nothing but the
+  // outcome, so a refusal that returned success would reach the operator as
+  // "Refreshed the skills and hook scripts for <dir>" over a machine where
+  // nothing was refreshed — the exact reassurance this whole path exists to
+  // remove (tenjin-agent#171). The two non-success shapes:
+  //
+  //  - `warning`: `refreshHooks` declined to write (a link where the hooks dir
+  //    belongs, an unreadable settings file, a file that changed underneath).
+  //  - `!touched`: nothing of ours is materialized here at all.
+  //
+  // Both are REFUSED (exit 3) rather than a failure: nothing went wrong, this
+  // run simply had nothing it was allowed to converge, and `update`'s warn path
+  // already names `tenjin install` and never fails the upgrade.
+  //
+  // ORDER MATTERS, and it is this way round. A refusal to write leaves every
+  // hook counter at zero, so a machine whose hooks directory is a symlink can
+  // reach `!touched` on the strength of the refusal itself and report "nothing
+  // is installed here" over a machine where plenty is. The specific reason wins.
+  if (hooks.warning !== undefined) {
+    throw new CliError('REFUSED', hooks.warning, {
+      fix: 'Run `tenjin install` to bring the skills and hook scripts up to this version.',
+      details: data,
+    });
+  }
+  if (!touched) {
+    throw new CliError(
+      'REFUSED',
+      `Nothing to refresh for ${ctx.dataDir}: no Tenjin skills or hook scripts are materialized here.`,
+      { fix: 'Run `tenjin install` to set this machine up.', details: data },
+    );
+  }
+  return { data, humanLines: refreshLines(hooks, skills, permissions, ctx.dataDir) };
+}
+
+/**
+ * What the refresh did, as lines. Reached only once the run has something to
+ * report: the no-op and the refusals leave through {@link CliError} above, so
+ * this never has to describe a refresh that did not happen.
+ */
+function refreshLines(
+  hooks: HookRefreshResult,
+  skills: HealOutcome,
+  permissions: { pending: string[] },
+  dataDir: string,
+): string[] {
+  const lines = [`Refreshed what is already installed for ${dataDir}.`];
+  lines.push(
+    skills.ran
+      ? '- skills: the wired CLI skills match this build'
+      : `- skills: left alone (${skills.reason ?? 'nothing to heal'})`,
+  );
+  lines.push(
+    hooks.scripts.length > 0
+      ? `- hook scripts: rewrote ${hooks.scripts.length} of them under ${hooks.scriptsDir}`
+      : `- hook scripts: already current under ${hooks.scriptsDir}`,
+  );
+  if (hooks.updated.length > 0) {
+    lines.push(
+      `- hook entries: updated ${hooks.updated.join(', ')} in ${hooks.path ?? 'settings'}`,
+    );
+  }
+  if (permissions.pending.length > 0) {
+    lines.push(
+      `- permissions: ${permissions.pending.length} rule(s) this version would add were NOT written; run \`tenjin install\` to grant them.`,
+    );
+  }
+  return lines;
 }
 
 /** How far the command got, for the interrupt diagnostic. */
@@ -828,12 +1025,11 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
 /**
  * What the hooks do, in one line each, at the moment they are written.
  *
- * THE PUSH SENTENCE IS THE WHOLE POINT OF THE SPLIT. Without the experiment the
- * hooks are advisory and the disclosure says so: they can never block or change
- * the tool call. With it on, the research arm CAN deny a WebSearch or WebFetch
- * and answer it from the marketplace instead, which is the one thing here that
- * changes what the harness does — so a disclosure that still promised otherwise
- * would be false exactly where it matters most.
+ * THE PUSH SENTENCE IS THE WHOLE POINT OF THE SPLIT. The arms are advisory
+ * either way — none of them can block or change a tool call — but with the
+ * experiment on there are five more hook entries reading five more kinds of
+ * event, and an operator wiring them into their own home has to be told what
+ * fires them and how to turn them off.
  *
  * Read off the result rather than a flag, so what is disclosed is what was
  * actually wired.
@@ -848,11 +1044,11 @@ export function hooksDisclosure(
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
   // `pushArms` counts entries wired with `arm: 'push'`. The WebSearch entry is
   // NOT one of them: it keeps `arm: 'search'` and is instead WIDENED in place to
-  // WebSearch|WebFetch when push is planned (harness-hooks.ts, WEBSEARCH_PUSH_MATCHER),
-  // and it is the entry that carries the deny. So it is one of the arms, not
-  // something they run beside, and the count excludes it.
+  // WebSearch|WebFetch when push is planned (harness-hooks.ts, WEBSEARCH_PUSH_MATCHER).
+  // So it is one of the arms, not something they run beside, and the count
+  // excludes it.
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, subagent dispatches, and the files you read and re-edit; a failed build or test is answered from this machine's own record of fixes and its error text is never sent anywhere. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, subagent dispatches, and the files you read and re-edit; a failed build or test is answered from this machine's own record of fixes and its error text is never sent anywhere. Every arm only adds context beside the call; none can block or change it. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same
@@ -861,11 +1057,11 @@ export function hooksDisclosure(
     // return on `off`, then pushDecide, which reads no mode at all, then the
     // remind line). Driven against a stub, `remind` with push on makes the same
     // one request `auto` does. "They send nothing off-machine" would therefore
-    // be false on exactly the arm that can cancel a tool call, and it is the
+    // be false on exactly the arm that reaches the network, and it is the
     // string `tenjin push on` prints too, to an operator who answered a prompt
     // reading "a one-line reminder, nothing sent off-machine".
     const remindBase = pushArmed(h)
-      ? `The WebSearch and dispatch hooks only print a one-line reminder that Tenjin may have an answer, rather than looking one up for you — but the armed push arm shares the WebSearch and WebFetch entry and runs ahead of that reminder, so on a web search the query text does leave the machine for ${shelfHost}, and that call may be denied and answered from the shelf instead.`
+      ? `The WebSearch and dispatch hooks only print a one-line reminder that Tenjin may have an answer, rather than looking one up for you — but the armed push arm shares the WebSearch and WebFetch entry and runs ahead of that reminder, so on a web search the query text does leave the machine for ${shelfHost}. What comes back is added beside the search; the search itself still runs.`
       : 'The WebSearch and dispatch hooks print a one-line reminder that Tenjin may have an answer; they send nothing off-machine.';
     return `${remindBase} ${shared}${push}`;
   }
@@ -911,7 +1107,7 @@ function hooksLine(io: Io, h: HooksResult): string {
   // number an operator would use to decide the experiment did nothing.
   const searchWrote = h.searchWrote ?? wrote;
   // Its own clause, never folded into the count above: the push arms are the
-  // half that can deny a tool call.
+  // half the experiment adds, and the half `tenjin push off` takes away.
   const arms = pushArmed(h)
     ? ` ${paint(io, 'bold', 'Push arms:')} ${h.pushArms}, from tenjin push on (off: tenjin push off).`
     : '';

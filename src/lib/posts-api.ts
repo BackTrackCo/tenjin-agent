@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { httpRequest, type HttpResponse, type HttpResult, type ShelfBypass } from './http';
 import { rateLimitError } from './agent-api';
+import { UUID_RE } from './ids';
 import { sanitizeWireText } from './output';
 import {
   parseScanRejection,
@@ -157,10 +158,11 @@ const HANDLE_RE = /^[a-z0-9-]{2,32}$/;
 export const SEARCH_ID_WIRE_RE =
   /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 /**
- * How many searches one create request may name. The server's cap is stricter in
- * kind, bounding a post's claims across its whole lifetime, so N requests of 10
- * cannot land 10N; the numbers coincide only because the CLI never sends
- * `searchId` on the update path, where an `edit` reusing this would be refused.
+ * How many searches one request may name. The server's cap is stricter in kind,
+ * bounding a post's claims across its whole lifetime, so N requests of 10 cannot
+ * land 10N. The update path sends `searchId` too, but only when `edit --status
+ * published` promotes a draft carrying claims recorded at draft time, which the
+ * create path already capped.
  */
 export const SEARCH_ID_MAX = 10;
 
@@ -393,7 +395,12 @@ export const resourceEchoSchema = z
 
 export const ownPostSchema = z
   .object({
-    id: z.string(),
+    // Shape-checked like agent-api's resourceId, and not only for hygiene: the id
+    // is the one receipt member that skips sanitizeForTerminal, because it is
+    // rendered into copy-pasteable commands (publish's undo line, delete's
+    // confirmCommand). A server answering `"<uuid> --yes"` would otherwise put a
+    // one-shot destructive flag into the exact string this CLI prints as safe.
+    id: z.string().regex(UUID_RE, 'id must be a uuid'),
     slug: z.string(),
     title: z.string(),
     status: z.string(),
@@ -583,6 +590,13 @@ export interface PostUpdateInput {
   priceAtomic?: string;
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
+  /**
+   * The searches a promotion claims: the ids recorded when the draft was saved,
+   * carried on the PUT because a draft claims nobody's demand until it goes
+   * public (see PublishInput.searchId). Sent only by `edit --status published`;
+   * server-side the claims accumulate and are never echoed back.
+   */
+  searchId?: string | string[];
   /** See PublishInput.scanAck; the edit path passes through the same gate. */
   scanAck?: string;
   /** See PublishInput.keys. Applied server-side as a DIFF against the stored
@@ -599,6 +613,7 @@ export interface PostUpdateBody {
   price?: string;
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
+  searchId?: string | string[];
   scanAck?: string;
   keys?: PostKeyWire[];
 }
@@ -670,9 +685,15 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
       fix: 'Pass at least one field flag, or run `tenjin edit <postId>` with no flags to view the post.',
     });
   }
-  // Added AFTER the emptiness check on purpose: an acknowledgement is not a
-  // change, so a PUT carrying only a token is still nothing to update.
-  return input.scanAck !== undefined ? { ...body, scanAck: input.scanAck } : body;
+  // Both added AFTER the emptiness check on purpose: neither an acknowledgement
+  // nor an attribution claim is a change, so a PUT carrying only them is still
+  // nothing to update. `searchId` only ever rides a status promotion.
+  const searchId = toWireSearchId(normalizeSearchIds(input.searchId, 'searchId'));
+  return {
+    ...body,
+    ...(searchId !== undefined ? { searchId } : {}),
+    ...(input.scanAck !== undefined ? { scanAck: input.scanAck } : {}),
+  };
 }
 
 /**
@@ -776,6 +797,66 @@ export async function updatePost(
 
     return parseOwnPost(res.json, 'update');
   }
+}
+
+/**
+ * Soft-delete one of your own posts (`DELETE /api/posts/<id>`). Same signing and
+ * bounded 401-recovery discipline as updatePost, because a DELETE burns a
+ * single-use nonce per attempt exactly as a PUT does.
+ *
+ * It sends no body, so there is nothing for the ingest gate to scan and no
+ * ScanGateError arm here. The server answers 204; 200 and 202 are accepted too
+ * rather than being read as failures, since none of them leaves the caller
+ * anything to reconcile and the route's success shape is not part of what this
+ * command reports. A 404 is exit 1 for updatePost's reason — the post is not
+ * ours or not there, so nothing half-happened — while any other refusal arrives
+ * AFTER the operator confirmed, which is the exit-4 class.
+ */
+export async function deletePost(
+  id: string,
+  auth: WriteAuth,
+  opts: PublishClientOptions,
+): Promise<void> {
+  const url = `${trimSlash(opts.baseUrl)}/api/posts/${encodeURIComponent(id)}`;
+
+  let recoveries = 0;
+  for (;;) {
+    const authHeaders = await auth.headersFor({ method: 'DELETE', url });
+    const res = await httpRequest(url, {
+      method: 'DELETE',
+      timeoutMs: opts.timeoutMs,
+      headers: { accept: 'application/json', ...authHeaders },
+      ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+      ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
+    });
+    if (!res.ok) throw writeTransportError(url, res);
+
+    if (res.status === 401 && recoveries < MAX_RECOVERIES) {
+      const code = auth401Code(res);
+      if (await auth.recover(code)) {
+        recoveries++;
+        continue;
+      }
+      throw authError(code, res);
+    }
+    if (res.status === 401) throw authError(auth401Code(res), res);
+    if (res.status === 404) throw postNotFound(id);
+    if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+    if (res.status !== 204 && res.status !== 200 && res.status !== 202) throw deleteFailed(res);
+    return;
+  }
+}
+
+/** A delete refused after the operator confirmed it (exit 4). */
+function deleteFailed(res: HttpResponse): CliError {
+  return new CliError(
+    'DELETE_FAILED',
+    serverMessage(res.json) ?? `Delete failed (${res.status}).`,
+    {
+      fix: 'The piece is still live. Review the server error, then re-run `tenjin delete`.',
+      details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+    },
+  );
 }
 
 function parseOwnPost(json: unknown, what: 'read' | 'update'): OwnPost {
