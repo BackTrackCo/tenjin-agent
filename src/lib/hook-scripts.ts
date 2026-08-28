@@ -1735,9 +1735,16 @@ function storedAsRich(candidates) {
  * used to exit quiet — which was correct about the network and wrong about the
  * delivery: a fan-out of five children onto one question left four of them with
  * nothing, and the answer was sitting in the store the whole time. Re-judged
- * from the stored candidates rather than trusted, because the stored projection
- * has no excerpt and no answer card, and CLAMPED below, because re-judging a
- * projection is not monotone on its own. Zero network either way.
+ * from the stored candidates rather than trusted. Zero network either way.
+ *
+ * AND CURRENTLY IT DELIVERS NOTHING, which is stated here rather than left to be
+ * found. The verdict is the marketplace's \`corroborated\` + \`confidence\` since
+ * #240, and neither field is on the lean projection the searches table stores,
+ * so every replay judges 'none' and returns below. What restores the delivery is
+ * carrying the ORIGINAL verdict to the replay — those fields onto the stored
+ * projection, or the first dispatch's own decision row — and that changes what
+ * this CLI persists, so it is not done here on the way past a rebase. The lease
+ * half, one lookup per question per session, is unaffected.
  *
  * HALF THE FAN-OUT, AND ONLY HALF. This stops children 2 to 5 re-searching and
  * gives each of them a slot; whether they are SHOWN it is the child arm's
@@ -1752,18 +1759,20 @@ function replayHandoff(args) {
   if (prior === null || prior.decision !== 'CANDIDATES') return;
   const rich = storedAsRich(prior.candidates);
   if (rich.length === 0) return;
-  const judged = judgeLeg(question, { decision: 'CANDIDATES', rich, inspect: null });
+  // \`verdict\`, not the retired local scorer: #240 removed \`judgeLeg\` and this
+  // call outlived it. A generated hook script is not type-checked, so the dead
+  // name was a ReferenceError this path swallowed on every fire.
+  const judged = verdict({ rich });
   if (judged === null || judged.top === null || judged.strength === 'none') return;
-  // NEVER ABOVE 'moderate'. A replay must not stamp a verdict the lookup it
-  // replays never reached, and two things here would let it: the projection has
-  // no \`confidence\`, so judge()'s one-directional 'low' demotion cannot fire and
-  // a hit the server itself called low-confidence comes back 'strong'; and with
-  // both ranks stripped of their excerpts the rank-1-over-rank-2 margin can
-  // WIDEN past a test the original failed. A card's own score can only fall
-  // without its excerpt, so 'moderate' here still implies at least 'moderate'
-  // there. Child delivery is a pointer at either strength, so the clamp costs
-  // the ledger a distinction, never a delivery.
-  const strength = judged.strength === 'strong' ? 'moderate' : judged.strength;
+  // NEVER ABOVE WHAT THE LOOKUP REACHED. A replay must not stamp a verdict the
+  // fire it replays never got, and the local scorer had two routes to one: the
+  // projection carries no \`confidence\`, so the server's one-directional 'low'
+  // demotion could not fire a second time; and with both ranks stripped of their
+  // excerpts the rank-1-over-rank-2 margin could WIDEN past a test the original
+  // failed. Both closed when the verdict became the shelf's own two fields,
+  // which are absent here: this cannot reach 'strong' at all, so there is
+  // nothing left to clamp.
+  const strength = judged.strength;
   // Which shelf ANSWERED, recovered the same way the row was filed: the public
   // leg is the only one that stamps the public shelf's own base.
   const shelf =
