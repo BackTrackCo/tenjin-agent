@@ -412,7 +412,10 @@ async function pushDecide(args) {
           cwd: args.cwd,
           hook: args.trigger,
           tool: args.tool,
-          data: { event: args.event, query: clean(query, 512) },
+          // \`agentId\` on every row this opens, for the same reason the failure
+          // and edit rows carry it: a session id is shared by every subagent
+          // under it, so it cannot say which worker fired.
+          data: { event: args.event, query: clean(query, 512), agentId: eventAgent(args.agentId) },
         });
   const base = {
     session: sessionId,
@@ -775,6 +778,9 @@ async function main() {
   if (prompt.length === 0) return quiet();
 
   const sessionId = sessionIdOf(input);
+  // A prompt can reach a subagent too (its first turn), so this arm is no more
+  // exempt from the shared session id than the others are.
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -797,7 +803,12 @@ async function main() {
     session: sessionId,
     cwd,
     hook: 'prompt',
-    data: { event: 'UserPromptSubmit', query: clean(query, 512), ...(skipped === null ? {} : { skipped }) },
+    data: {
+      event: 'UserPromptSubmit',
+      query: clean(query, 512),
+      agentId: eventAgent(agentId),
+      ...(skipped === null ? {} : { skipped }),
+    },
   });
   if (skipped !== null) return quiet();
   // The arm's own deadline, inside the process watchdog. Whatever is in flight
@@ -1442,7 +1453,7 @@ function stalenessNote(pairing, cwd) {
 }
 
 /**
- * Tracked files this session edited since \`sinceMs\`. Written by the context arm
+ * Tracked files THIS AGENT edited since \`sinceMs\`. Written by the context arm
  * on every Edit/Write/MultiEdit, which is the only way a hook process sees a
  * file change without asking git.
  *
@@ -1453,10 +1464,17 @@ function stalenessNote(pairing, cwd) {
  * re-editing the earliest-touched file (very often the config file the failing
  * command named) deleted the freshest timestamp in the map and the pairing it
  * would have closed stayed open.
+ *
+ * AND SCOPED BY AGENT, because the close rule's whole content is "the thing
+ * that failed here is the thing that was fixed here". Parallel subagents share
+ * one session id, so a session-keyed read answered "did ANY of them edit
+ * something" — and a sibling's unrelated edit plus its own unrelated pass was
+ * then enough to close a pairing it had never been shown, and to be counted as
+ * the second independent close that promotes one to \`verified\`.
  */
-function editedSince(sessionId, sinceMs) {
+function editedSince(sessionId, agentId, sinceMs) {
   const out = [];
-  for (const row of statePrefixSince(sessionId, STATE_EDITED_PREFIX, sinceMs, 200)) {
+  for (const row of statePrefixSince(sessionId, STATE_EDITED_PREFIX + agentId + ':', sinceMs, 200)) {
     if (!isTrackedPath(row.key)) continue;
     const base = row.key.split(/[/\\]/).pop();
     if (typeof base === 'string' && base.length > 0) out.push(base);
@@ -1514,7 +1532,7 @@ function pairingText(pairing, staleNote) {
  * SECOND independent close promotes it to \`verified\`, and only then does it
  * inject as a fix.
  */
-function closeOpenPairings(sessionId, cwd, command, heads) {
+function closeOpenPairings(sessionId, agentId, cwd, command, heads) {
   const passed = safeCommand(command);
   const project = projectId(cwd);
   const closeIf = (pairing) => {
@@ -1524,7 +1542,7 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     // in one checkout must never close a pairing from another, and this is the
     // path that reaches \`verified\`.
     if (pairing.project !== project) return;
-    const changed = editedSince(sessionId, pairing.at);
+    const changed = editedSince(sessionId, agentId, pairing.at);
     if (changed.length === 0) return;
     const named = changed.filter((f) => pairing.errorFiles.includes(f));
     const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
@@ -1553,23 +1571,55 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     // failing command by definition, so the same-command branch is free to it
     // and the suggestion would otherwise be a material cause of its own
     // promotion to the confident wording.
-    const replayed = replayedPairing(sessionId, head);
-    if (replayed !== null) closeIf(pairingById(cwd, replayed));
+    // ALL OF THEM, not the last one. One head answers for a whole build step,
+    // so two different failures behind \`pnpm test\` are two pairings this agent
+    // was shown under one key; storing a single id let the second replay
+    // silently evict the first, and the evicted one then had no closer at all.
+    for (const id of replayedPairings(sessionId, agentId, head)) {
+      closeIf(pairingById(cwd, id));
+    }
   }
 }
 
+/** How many replayed pairings one agent keeps per head. Small on purpose: this
+ *  is a close-rule hint, and an agent that has been shown eight distinct
+ *  failures behind one head has bigger problems than a ninth. */
+const REPLAYED_PER_HEAD_MAX = 8;
+
 /**
- * Remember that this session was shown pairing \`id\` behind \`head\`, so its
- * later success on that head can close it as an independent second closer.
+ * Remember that this agent was shown pairing \`id\` behind \`head\`, so its later
+ * success on that head can close it as an independent second closer.
+ *
+ * SCOPED BY AGENT, LIKE THE EDITS THE CLOSE RULE READS. Parallel subagents
+ * share their parent's session id, so a session-keyed row handed one child the
+ * pairing a sibling had been shown, and the child's own unrelated edit and pass
+ * then closed and promoted it.
+ *
+ * AND A LIST, NOT ONE ID. The read-modify-write here is not atomic, so two
+ * fires in ONE agent under ONE head at the same instant can still lose an
+ * append — but they are already bounded to one per signature per session by
+ * \`claimState\`, and the alternative this replaces dropped the earlier id
+ * unconditionally rather than only under a race.
  */
-function rememberReplay(sessionId, head, id) {
+function rememberReplay(sessionId, agentId, head, id) {
   if (typeof head !== 'string' || head.length === 0) return;
-  setState(sessionId, STATE_REPLAYED_PREFIX + head, id);
+  const prior = replayedPairings(sessionId, agentId, head);
+  if (prior.includes(id)) return;
+  setState(
+    sessionId,
+    STATE_REPLAYED_PREFIX + agentId + ':' + head,
+    [...prior, id].slice(-REPLAYED_PER_HEAD_MAX),
+  );
 }
 
-function replayedPairing(sessionId, head) {
-  const id = getState(sessionId, STATE_REPLAYED_PREFIX + head);
-  return typeof id === 'number' ? id : null;
+/** The pairing ids this agent was shown behind \`head\`, oldest first. */
+function replayedPairings(sessionId, agentId, head) {
+  const stored = getState(sessionId, STATE_REPLAYED_PREFIX + agentId + ':' + head);
+  // A bare number is what a single-id row held; accepted so a store written by
+  // an older build keeps its one closer rather than losing it at upgrade.
+  if (typeof stored === 'number') return [stored];
+  if (!Array.isArray(stored)) return [];
+  return stored.filter((id) => typeof id === 'number').slice(-REPLAYED_PER_HEAD_MAX);
 }
 
 async function main() {
@@ -1588,6 +1638,11 @@ async function main() {
   if (!failureAllowed(command)) return quiet();
 
   const sessionId = sessionIdOf(input);
+  // WHICH AGENT, not just which session. Every subagent of a session carries the
+  // parent's session id, so this is the only field that tells one parallel
+  // child from another — and the close rule, the replay memory and the
+  // importance score all mean the agent, never the session.
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1615,9 +1670,14 @@ async function main() {
       cwd,
       hook: 'pass',
       tool: 'Bash',
-      data: { event, command: safeCommand(command), head: heads.length > 0 ? heads[heads.length - 1] : null },
+      data: {
+        event,
+        command: safeCommand(command),
+        head: heads.length > 0 ? heads[heads.length - 1] : null,
+        agentId: eventAgent(agentId),
+      },
     });
-    closeOpenPairings(sessionId, cwd, command, heads);
+    closeOpenPairings(sessionId, agentId, cwd, command, heads);
     return quiet();
   }
   const line = errorLine(text.slice(-20000));
@@ -1628,7 +1688,27 @@ async function main() {
   // on some harnesses, and parallel subagents share their parent's session id —
   // so the read-modify-write this replaces had a window that two processes both
   // passed, opening duplicate pairings and spending two lookups on one failure.
-  if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) return quiet();
+  //
+  // THE LOSER IS COUNTED, and this is the one thing the claim did not do. A
+  // second agent hitting the SAME wall is the signal the sidecar exists to
+  // notice — it is the strongest evidence there is that a finding would be
+  // worth publishing — and it used to exit here with no row at all, so from the
+  // store the fire had simply never happened. The claim stays per SESSION on
+  // purpose (one problem is one problem, whoever ran into it); what changes is
+  // that the quiet exit now says why it was quiet.
+  if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) {
+    recordInjection({
+      session: sessionId,
+      cwd,
+      hook: 'failure',
+      // LOCAL, like every other row this arm writes: no shelf was asked, and
+      // none would have been.
+      shelf: 'local',
+      action: 'skipped',
+      reason: 'already-claimed',
+    });
+    return quiet();
+  }
 
   // THE ERROR'S PACKAGES FIRST, then the command's. Only the head of this list
   // becomes the \`appliesTo\` filter, and the module an import could not find is
@@ -1652,7 +1732,12 @@ async function main() {
     tool: 'Bash',
     errorHash: sig === null ? undefined : sig.key,
     files: errorFiles,
-    data: { event, command: safeCommand(command), error: clean(scrubbed, 300) },
+    data: {
+      event,
+      command: safeCommand(command),
+      error: clean(scrubbed, 300),
+      agentId: eventAgent(agentId),
+    },
   });
 
   // THE MECHANICAL LANE (04, "Retrieval order": local fine key, then coarse,
@@ -1665,7 +1750,7 @@ async function main() {
       // BEFORE the emit, because emit exits the process: this is what lets this
       // session's later success close the pairing it was shown, which is the
       // only route to \`verified\` through the hooks.
-      rememberReplay(sessionId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
+      rememberReplay(sessionId, agentId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
       const claimed = recordInjection({
         session: sessionId,
         cwd,
@@ -1791,6 +1876,10 @@ async function main() {
       event: 'SubagentStart',
       query: clean(String(cache.query || ''), 512),
       agentType,
+      // THE AGENT THIS ROW IS ABOUT is the one starting, and it is the only
+      // handle the score has on the work that follows: everything that agent
+      // then edits, fails and passes files under the same parent session id.
+      agentId: eventAgent(agentIdOf(input)),
     },
   });
   const base = {
@@ -1890,6 +1979,10 @@ async function main() {
   if (config.push !== 'on') return quiet();
   const sessionId = sessionIdOf(input);
   if (sessionId === null) return quiet();
+  // The agent whose edit this is. The close rule matches a pairing against the
+  // edits of the agent that was shown it, so an edit has to be filed under its
+  // own author rather than under the session every sibling shares.
+  const agentId = agentIdOf(input);
   const cwd = cwdOf(input);
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
   const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
@@ -1920,7 +2013,7 @@ async function main() {
     // re-edit has to move the timestamp and nothing else; the JSON map this
     // replaces lost entries to concurrent writers and evicted by insertion
     // order, which a re-edit does not change.
-    setState(sessionId, STATE_EDITED_PREFIX + filePath.slice(-200), true);
+    setState(sessionId, STATE_EDITED_PREFIX + agentId + ':' + filePath.slice(-200), true);
     // AND ONE EVENT ROW PER EDIT, appended. The upsert above keeps only the
     // last timestamp per path, so "the same file edited before and after a
     // user turn" — a pattern the importance score (#212, CommonTrace
@@ -1934,7 +2027,11 @@ async function main() {
       hook: 'edit',
       tool,
       files: base.length > 0 ? [clean(base, 80)] : [],
-      data: { event },
+      // AND WHO EDITED IT. The score assembles fail → edit → pass out of these
+      // rows, and every parallel subagent files under the parent's session id:
+      // without this field it stitched one agent's failure to another's edit
+      // and a third's pass, and called the result a fix.
+      data: { event, agentId: eventAgent(agentId) },
     });
   }
 
@@ -1968,6 +2065,7 @@ async function main() {
           packageName: pkg,
           config,
           sessionId,
+          agentId,
           cwd,
           tool,
           mode: 'log',
@@ -1981,7 +2079,11 @@ async function main() {
   if (isEdit) {
     // One statement, so two concurrent edit hooks cannot both read N and both
     // write N+1 — which would step over the Nth edit this arm triggers on.
-    const n = bumpState(sessionId, STATE_EDITS_PREFIX + filePath.slice(-200));
+    // Per agent, like the close rule's evidence: "the Nth edit to this file" is
+    // a statement about one worker's churn, and three subagents each touching a
+    // shared config once is not the same thing as one of them touching it three
+    // times.
+    const n = bumpState(sessionId, STATE_EDITS_PREFIX + agentId + ':' + filePath.slice(-200));
     if (n !== CHURN_EDITS) return quiet();
     // SCRUBBED, like every other arm's query. A basename is operator-chosen text
     // going on the wire, and \`clean()\` is not the secret filter — it bounds the
@@ -1999,6 +2101,7 @@ async function main() {
       packageName: packages[0],
       config,
       sessionId,
+      agentId,
       cwd,
       tool,
       mode: 'log',

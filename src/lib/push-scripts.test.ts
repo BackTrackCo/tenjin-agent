@@ -1191,6 +1191,9 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(rows[0]!.data).toEqual({
       event: 'UserPromptSubmit',
       query: 'yes, do that',
+      // The lead's own turn, so the agent field is null rather than absent: a
+      // reader has to tell "the lead" from "a build that recorded nobody".
+      agentId: null,
       skipped: 'short',
     });
     expect(rows[1]!.data).toMatchObject({ event: 'UserPromptSubmit', skipped: 'slash' });
@@ -1505,6 +1508,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
       event: 'PostToolUse',
       command: 'cd /x && pnpm test',
       head: 'pnpm',
+      agentId: null,
     });
   });
 
