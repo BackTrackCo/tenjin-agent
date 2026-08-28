@@ -49,15 +49,19 @@ export function stateDbPath(dir: string): string {
 }
 
 /**
- * The schema version this build creates and expects. The DDL runs exactly once,
- * inside one `BEGIN IMMEDIATE`, gated on `PRAGMA user_version`: a second process
- * racing the first blocks on the transaction, then reads the new version and
- * skips.
+ * The schema version this build creates and expects. The schema step runs
+ * exactly once, inside one `BEGIN IMMEDIATE`, gated on `PRAGMA user_version`: a
+ * second process racing the first blocks on the transaction, then reads the new
+ * version and skips.
  *
- * `#212` adds `error_signatures`/`trigger_stats` under version 2 in the shape it
- * needs. Nothing here is `NOT NULL` that a later issue is supposed to fill.
+ * VERSION 2 ADDS `agent` TO `searches` AND `pairing_closes`. Parallel subagents
+ * share their parent's `session_id`, so a close or a search stamped with the
+ * session alone belongs to every worker in it at once — which let a sibling's
+ * close complete another agent's `error-edit-resolved` in the importance-score
+ * report. See {@link STORE_MIGRATIONS} for the step, and note that a fresh file
+ * is CREATED at this shape by {@link STORE_DDL} rather than migrated up to it.
  */
-export const STORE_USER_VERSION = 1;
+export const STORE_USER_VERSION = 2;
 
 /**
  * How long a colliding writer waits before giving up, in ms.
@@ -227,6 +231,13 @@ CREATE TABLE IF NOT EXISTS searches (
   search_id TEXT PRIMARY KEY,
   at INTEGER NOT NULL,
   session TEXT NOT NULL,
+  -- WHICH WORKER RAN IT, '' for the lead's own turn. A session is a
+  -- conversation and an agent is a worker: parallel subagents all file under
+  -- their parent's session id, so without this the importance-score report let
+  -- one child's search complete a sibling's research-then-edit. '' is a BUCKET
+  -- and not an exemption, exactly as it is for session; readers map it back to
+  -- the null agent that events.data.agentId uses.
+  agent TEXT NOT NULL DEFAULT '',
   question TEXT NOT NULL,
   fingerprint TEXT NOT NULL,
   decision TEXT NOT NULL,
@@ -269,9 +280,17 @@ CREATE TABLE IF NOT EXISTS pairings (
 -- primary key is the enforcement, so a repeat close from the same session is an
 -- INSERT OR IGNORE that changes nothing, and pairings.closes is recomputed from
 -- a COUNT rather than incremented.
+--
+-- THE AGENT IS RECORDED, AND IT IS NOT PART OF THE KEY. Which worker closed a
+-- pairing is what the importance-score report needs, so it is stored; but the
+-- independence the primary key enforces is about MACHINES AND SESSIONS, not
+-- about workers. Two subagents of one conversation are one laptop running one
+-- checkout, so letting them be two closers would hand a pairing the promotion
+-- to 'verified' that 04 reserves for two independent observations.
 CREATE TABLE IF NOT EXISTS pairing_closes (
   pairing_id INTEGER NOT NULL,
   session TEXT NOT NULL,
+  agent TEXT NOT NULL DEFAULT '',
   at INTEGER NOT NULL,
   fix_cmd TEXT,
   fix_files TEXT,
@@ -283,6 +302,30 @@ CREATE INDEX IF NOT EXISTS pairings_key_status ON pairings(key, status);
 CREATE INDEX IF NOT EXISTS pairings_coarse_status ON pairings(coarse_key, status);
 CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';
 `;
+
+/**
+ * The steps that bring an EXISTING file up to {@link STORE_USER_VERSION}.
+ *
+ * INDEXED BY THE VERSION THEY LEAVE BEHIND: `STORE_MIGRATIONS[n]` is what a
+ * database sitting at exactly version `n` runs to reach `n + 1`. Slot 0 is
+ * empty and never executed — version 0 is not migrated, it is CREATED, and
+ * {@link STORE_DDL} creates it at the CURRENT shape rather than at v1, so a
+ * fresh file skips every step here.
+ *
+ * ⚠ `ALTER TABLE ... ADD COLUMN` IS NOT IDEMPOTENT. `STORE_DDL` is all
+ * `IF NOT EXISTS`, so running it twice was harmless and the bootstrap could
+ * afford to be sloppy about it; a second run of one of these throws
+ * `duplicate column name`. That is why the version is re-read INSIDE the
+ * transaction and the branch is exclusive: exactly one of "create" and
+ * "migrate" runs, and only when the version says so.
+ */
+export const STORE_MIGRATIONS: readonly string[] = [
+  '',
+  // 1 -> 2: who ran the search, and who closed the pairing. Backfilled to '',
+  // the lead's own bucket, which is where every row written before this landed.
+  `ALTER TABLE searches ADD COLUMN agent TEXT NOT NULL DEFAULT '';
+ALTER TABLE pairing_closes ADD COLUMN agent TEXT NOT NULL DEFAULT '';`,
+];
 
 /**
  * Every statement either side runs, by name.
@@ -395,11 +438,12 @@ export const STORE_SQL = {
      WHERE session = '' AND key = 'store_journal'`,
 
   recordSearch: `INSERT INTO searches (
-       search_id, at, session, question, fingerprint, decision, candidates,
+       search_id, at, session, agent, question, fingerprint, decision, candidates,
        source, shelf_base_url, paid_browse_count
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(search_id) DO UPDATE SET
-       at = excluded.at, session = excluded.session, question = excluded.question,
+       at = excluded.at, session = excluded.session, agent = excluded.agent,
+       question = excluded.question,
        fingerprint = excluded.fingerprint, decision = excluded.decision,
        candidates = excluded.candidates, source = excluded.source,
        shelf_base_url = excluded.shelf_base_url,
@@ -537,12 +581,16 @@ export const STORE_SQL = {
   pairingByIdUnscoped: 'SELECT status FROM pairings WHERE id = ?',
   /** Claim a close for this session. OR IGNORE, so a session that closes the
    *  same pairing twice changes nothing: independence is the primary key's job,
-   *  not the caller's. */
+   *  not the caller's — and the agent is recorded WITHOUT joining that key, so
+   *  two subagents of one session still count as the one closer they are (see
+   *  the DDL note on `pairing_closes`). */
   claimClose: `INSERT OR IGNORE INTO pairing_closes
-       (pairing_id, session, at, fix_cmd, fix_files, scope)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+       (pairing_id, session, agent, at, fix_cmd, fix_files, scope)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   /** Every closer, oldest first. The first one owns the pairing's scope, and
-   *  the rest are only corroboration if their fix agrees with it. */
+   *  the rest are only corroboration if their fix agrees with it. PER SESSION,
+   *  deliberately: the agent column is report metadata, and reading it here
+   *  would turn one session's two workers into two independent closers. */
   closersOf: `SELECT session, at, fix_cmd, fix_files, scope FROM pairing_closes
      WHERE pairing_id = ? ORDER BY at, session`,
   /**
@@ -610,8 +658,12 @@ export const STORE_SQL = {
    */
   scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
      FROM events WHERE at >= ? ORDER BY session, at, id`,
-  scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
-  scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
+  /** The closes and the searches the report partitions BY WORKER, not by
+   *  session: `agent` is '' for the lead's own turn and the child's id for a
+   *  subagent's, which is the same partition `events.data.agentId` gives after
+   *  the reader maps '' back to null. */
+  scoreCloses: `SELECT session, agent, at FROM pairing_closes WHERE at >= ?`,
+  scoreSearches: `SELECT session, agent, at FROM searches WHERE at >= ?`,
   scoreSessions: `SELECT session, started_at, ended_at FROM sessions
      WHERE started_at >= ? OR ended_at >= ?`,
   scoreState: `SELECT session, key, at FROM session_state
@@ -693,6 +745,7 @@ const STORE_CORE_JS = String.raw`
 const STATE_DB_PATH = join(DATA_DIR, __DB_FILE__);
 const STORE_SQL = __SQL__;
 const STORE_DDL = __DDL__;
+const STORE_MIGRATIONS = __MIGRATIONS__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
@@ -837,6 +890,15 @@ function projectId(cwd) {
  *  names no session falls into, never an exemption from the bounds. */
 function storeSession(sessionId) {
   return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : '';
+}
+
+/** The worker inside a session: Claude Code's \`agent_id\`, or '' for the lead's
+ *  own turn. Bounded exactly like \`storeSession\` and for the same reason —
+ *  '' is the bucket the parent's rows fall into, never an exemption from
+ *  anything. Readers map it back to the null agent \`events.data.agentId\`
+ *  uses (see \`eventAgent\`), so the two partitions line up. */
+function storeAgent(agentId) {
+  return typeof agentId === 'string' && agentId.length > 0 ? agentId : '';
 }
 
 /**
@@ -991,10 +1053,7 @@ function bootstrap(db) {
         continue;
       }
       try {
-        if (storeVersion(db) < STORE_USER_VERSION) {
-          db.exec(STORE_DDL);
-          db.exec(STORE_SQL.setUserVersion);
-        }
+        stepSchema(db);
         db.exec('COMMIT');
         return;
       } catch (err) {
@@ -1015,9 +1074,30 @@ function bootstrap(db) {
   }
 }
 
+/**
+ * Bring the schema to \`STORE_USER_VERSION\`. CALLED INSIDE THE TRANSACTION, and
+ * it re-reads the version there rather than trusting the one the caller read
+ * outside it: the racer that blocked on \`BEGIN IMMEDIATE\` is looking at a
+ * database the winner has just changed.
+ *
+ * ⚠ EXCLUSIVE BRANCHES, because \`ALTER TABLE ADD COLUMN\` is not idempotent.
+ * \`STORE_DDL\` is all IF NOT EXISTS and creates the CURRENT shape, so a fresh
+ * file (or one whose pragma is unreadable, which reads as -1 and sorts below
+ * every version) takes that branch and needs no step at all; only a file at
+ * exactly v1 runs the ALTERs, and running them twice would throw
+ * \`duplicate column name\` and cost the store.
+ */
+function stepSchema(db) {
+  const version = storeVersion(db);
+  if (version >= STORE_USER_VERSION) return;
+  if (version < 1) db.exec(STORE_DDL);
+  else if (version < 2) db.exec(STORE_MIGRATIONS[1]);
+  db.exec(STORE_SQL.setUserVersion);
+}
+
 /** The stored schema version, or -1 when it cannot be read — which sorts BELOW
- *  every real version, so an unreadable pragma still runs the (idempotent) DDL
- *  rather than being mistaken for a newer database and skipped. */
+ *  every real version, so an unreadable pragma still takes the idempotent
+ *  create branch rather than being mistaken for a newer database and skipped. */
 function storeVersion(db) {
   const row = db.prepare(STORE_SQL.userVersion).get();
   return isRecord(row) && typeof row.user_version === 'number' ? row.user_version : -1;
@@ -1386,6 +1466,7 @@ function recordSearchRow(entry) {
     String(entry.searchId),
     typeof entry.at === 'number' ? entry.at : Date.now(),
     storeSession(entry.sessionId),
+    storeAgent(entry.agentId),
     String(entry.question),
     searchFingerprint(entry.question),
     String(entry.decision),
@@ -1522,14 +1603,20 @@ function pairingById(cwd, id) {
  * touched. \`scope\` belongs to the FIRST closer and is never overwritten:
  * it describes the pairing, and the first close is the one whose files are kept.
  *
+ * \`agentId\` IS RECORDED AND COUNTS FOR NOTHING HERE. It is what the
+ * importance-score report partitions on, so the row carries it; the promotion
+ * still counts SESSIONS, because two subagents of one conversation are one
+ * machine in one checkout and not the two independent observations 04 asks for.
+ *
  * Returns the resulting status, so the caller can say what it did.
  */
-function closePairing(id, sessionId, fixCmd, fixFiles, scope) {
+function closePairing(id, sessionId, agentId, fixCmd, fixFiles, scope) {
   const now = Date.now();
   const files = Array.isArray(fixFiles) ? fixFiles : [];
   storeRun(STORE_SQL.claimClose, [
     id,
     storeSession(sessionId),
+    storeAgent(agentId),
     now,
     typeof fixCmd === 'string' ? fixCmd : null,
     storeJson(files),
@@ -1598,6 +1685,7 @@ export function storeSource(): string {
     .replaceAll('__BOOTSTRAP_TRIES__', String(STORE_BOOTSTRAP_TRIES))
     .replaceAll('__SQL__', JSON.stringify(STORE_SQL, null, 2))
     .replaceAll('__DDL__', JSON.stringify(STORE_DDL))
+    .replaceAll('__MIGRATIONS__', JSON.stringify(STORE_MIGRATIONS))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS));
 }
@@ -1638,6 +1726,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function storeVersionOf(db: SqliteDatabase): number {
   const row = db.prepare(STORE_SQL.userVersion).get();
   return isRecord(row) && typeof row.user_version === 'number' ? row.user_version : -1;
+}
+
+/** ⚠ MIRRORED with `stepSchema` in the hook template above, which carries the
+ *  reasoning: the version is re-read INSIDE the transaction, the create and
+ *  migrate branches are exclusive because `ALTER TABLE ADD COLUMN` throws on a
+ *  second run, and an unreadable pragma (-1) takes the idempotent create. */
+function stepSchemaOn(db: SqliteDatabase): void {
+  const version = storeVersionOf(db);
+  if (version >= STORE_USER_VERSION) return;
+  if (version < 1) db.exec(STORE_DDL);
+  else if (version < 2) db.exec(STORE_MIGRATIONS[1]!);
+  db.exec(STORE_SQL.setUserVersion);
 }
 
 /** Switch the file to WAL. Returns whether it is now in WAL; never throws. See
@@ -1753,10 +1853,7 @@ export async function openStore(dataDir: string): Promise<Store | null> {
             continue;
           }
           try {
-            if (storeVersionOf(db) < STORE_USER_VERSION) {
-              db.exec(STORE_DDL);
-              db.exec(STORE_SQL.setUserVersion);
-            }
+            stepSchemaOn(db);
             db.exec('COMMIT');
             break;
           } catch (err) {
@@ -2051,6 +2148,18 @@ export interface StoredSearch {
    */
   sessionId?: string;
   /**
+   * The WORKER inside that session: Claude Code's `agent_id`, present only for
+   * a subagent's fire and absent for the lead's own turn.
+   *
+   * A session is not a worker. Parallel subagents all file under their parent's
+   * `session_id`, so a search attributed to the session alone belongs to every
+   * agent in it at once — which is how `push status --sessions` credited one
+   * child's search to a sibling's `research-then-edit`. Stored as '' when
+   * absent, the same bucket `sessionId` uses, and read back as the null agent
+   * `events.data.agentId` reports.
+   */
+  agentId?: string;
+  /**
    * The DRAFT this search's claim is parked on. A `publish --draft --search-id`
    * withholds the claim from the wire (a draft answers nobody) and records the
    * created post id here instead, so `edit --status published` can send the
@@ -2138,6 +2247,10 @@ function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
     ...(typeof row.session === 'string' && row.session.length > 0
       ? { sessionId: row.session }
       : {}),
+    // '' is the lead's own turn, and it is reported as ABSENT rather than as an
+    // empty agent — the same shape `sessionId` takes, and what keeps a
+    // re-record through `recordSearch` from blanking a child's stamp.
+    ...(typeof row.agent === 'string' && row.agent.length > 0 ? { agentId: row.agent } : {}),
     ...(typeof row.draft_post_id === 'string' && row.draft_post_id.length > 0
       ? { draftPostId: row.draft_post_id }
       : {}),
@@ -2212,6 +2325,8 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
       entry.searchId,
       Number.isFinite(at) ? at : Date.now(),
       storeSession(entry.sessionId),
+      // '' is the lead's own bucket; see `StoredSearch.agentId`.
+      storeSession(entry.agentId),
       entry.question,
       searchFingerprint(entry.question),
       entry.decision,
