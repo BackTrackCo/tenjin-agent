@@ -54,6 +54,8 @@ interface SeedRow {
   tokens?: number;
   uid?: string;
   session?: string;
+  /** The subagent the arm wrote the row inside; absent is the main session. */
+  agentId?: string | null;
   searchId?: string | null;
   title?: string;
   url?: string;
@@ -89,6 +91,7 @@ async function seedRows(dir: string, rows: SeedRow[]): Promise<void> {
         null,
         0,
         row.tokens ?? null,
+        row.agentId ?? null,
       ]);
     });
   } finally {
@@ -547,22 +550,28 @@ describe('runPushGrade', () => {
     return { fetchImpl, calls };
   }
 
-  /** Transcripts keyed by session; `findTranscript` hands the session id back as
-   *  the path, so no home directory is involved. A session in `unreadable` is
-   *  the projects directory this run could not read — which is not the same
-   *  answer as a session that simply has no transcript. */
-  function transcriptDeps(bySession: Record<string, string>, unreadable: string[] = []) {
+  /** Transcripts keyed by session, or by `<session>/<agentId>` for a child's own
+   *  file; `findTranscript` hands the key back as the path, so no home directory
+   *  is involved. A key in `unreadable` is the projects directory this run could
+   *  not read — which is not the same answer as a session that simply has no
+   *  transcript. */
+  function transcriptDeps(byKey: Record<string, string>, unreadable: string[] = []) {
     return {
-      findTranscript: async (_home: string, session: string): Promise<TranscriptLookup> => {
-        if (unreadable.includes(session)) return { kind: 'unreadable', reason: 'EACCES' };
-        return session in bySession ? { kind: 'found', path: session } : { kind: 'absent' };
+      findTranscript: async (
+        _home: string,
+        session: string,
+        agentId: string | null = null,
+      ): Promise<TranscriptLookup> => {
+        const key = agentId === null ? session : `${session}/${agentId}`;
+        if (unreadable.includes(key)) return { kind: 'unreadable', reason: 'EACCES' };
+        return key in byKey ? { kind: 'found', path: key } : { kind: 'absent' };
       },
-      transcriptText: async (path: string): Promise<string> => bySession[path] ?? '',
+      transcriptText: async (path: string): Promise<string> => byKey[path] ?? '',
       transcriptIdle: async (): Promise<boolean> => false,
     };
   }
 
-  it('marks used by read, rejects an ended session, leaves a live one open, and never opens a subagent transcript', async () => {
+  it('marks used by read, rejects an ended session, and leaves a live one open', async () => {
     await seedRows(dir, [
       {
         uid: 'u-used',
@@ -593,16 +602,6 @@ describe('runPushGrade', () => {
         action: 'injected',
         resourceId: 'res-c',
         session: 'live',
-        searchId: null,
-      },
-      {
-        uid: 'u-subagent',
-        at: NOW - 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-d',
-        session: 'ended',
         searchId: null,
       },
       {
@@ -652,7 +651,7 @@ describe('runPushGrade', () => {
 
     expect(result.data).toMatchObject({
       since: '7d',
-      graded: { used: 1, rejected: 1, unobserved: 2, open: 1 },
+      graded: { used: 1, rejected: 1, unobserved: 1, open: 1 },
     });
     const byUid = new Map(
       (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
@@ -663,7 +662,6 @@ describe('runPushGrade', () => {
     expect(byUid.get('u-used')).toMatchObject({ outcome: 'used', by: 'read' });
     expect(byUid.get('u-rejected')).toMatchObject({ outcome: 'rejected', by: 'none' });
     expect(byUid.get('u-open')).toMatchObject({ outcome: 'open' });
-    expect(byUid.get('u-subagent')).toMatchObject({ outcome: 'unobserved' });
     expect(byUid.get('u-notranscript')).toMatchObject({ outcome: 'unobserved' });
     expect(byUid.has('u-skipped')).toBe(false);
 
@@ -673,6 +671,233 @@ describe('runPushGrade', () => {
       outcome: null,
     });
     store?.close();
+  });
+
+  /**
+   * A subagent's tool calls appear in NO parent file, so a row an arm wrote
+   * inside a child is answered by that child's own transcript or by nothing. A
+   * relayed row (`subagent`) has no anchor in either file — the finding is the
+   * child's opening context — so it is judged from the child's first tool call.
+   */
+  it('grades a relayed row against the child transcript: read, title span, rejected when ended, open while it runs', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-child-read',
+        at: NOW - 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 'ended',
+        agentId: 'a1',
+        searchId: null,
+      },
+      {
+        uid: 'u-child-span',
+        at: NOW - 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-span',
+        title: 'Run `pnpm db:generate --force` first',
+        session: 'ended',
+        agentId: 'a2',
+        searchId: null,
+      },
+      {
+        uid: 'u-child-none',
+        at: NOW - 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-none',
+        session: 'ended',
+        agentId: 'a3',
+        searchId: null,
+      },
+      {
+        uid: 'u-child-live',
+        at: NOW - 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-live',
+        session: 'live',
+        agentId: 'a4',
+        searchId: null,
+      },
+    ]);
+    await seedSession(dir, 'ended', true);
+    await seedSession(dir, 'live', false);
+
+    const result = await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        ...transcriptDeps({
+          // The very first call, with no context row before it: a relayed
+          // finding preceded everything the child did.
+          'ended/a1': toolUse({ command: `tenjin read ${RES}` }),
+          'ended/a2': toolUse({ command: 'pnpm db:generate --force' }),
+          'ended/a3': toolUse({ command: 'ls' }),
+          'live/a4': toolUse({ command: 'ls' }),
+        }),
+      },
+    );
+
+    expect(result.data).toMatchObject({ graded: { used: 2, rejected: 1, unobserved: 0, open: 1 } });
+    const byUid = new Map(
+      (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
+        r.uid,
+        r,
+      ]),
+    );
+    expect(byUid.get('u-child-read')).toMatchObject({ outcome: 'used', by: 'read' });
+    expect(byUid.get('u-child-span')).toMatchObject({ outcome: 'used', by: 'span' });
+    expect(byUid.get('u-child-none')).toMatchObject({ outcome: 'rejected' });
+    expect(byUid.get('u-child-live')).toMatchObject({ outcome: 'open' });
+  });
+
+  /** The parent's file is never consulted for a row stamped with an agent id —
+   *  here it holds the very evidence that would have flipped the verdict. */
+  it('reads the child file, not the parent, for a prompt row stamped with an agent id', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-child',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's1',
+        agentId: 'a1',
+        searchId: null,
+      },
+    ]);
+    await seedSession(dir, 's1', true);
+
+    const result = await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          's1/a1': [contextRow(INJECTED), toolUse({ command: 'ls' })].join('\n'),
+        }),
+      },
+    );
+
+    expect(result.data).toMatchObject({ graded: { used: 0, rejected: 1 } });
+  });
+
+  it('leaves a relayed row unobserved when the child file is absent, and untouched when it is unreadable', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-gone',
+        at: NOW - 10 * 60 * 60 * 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-gone',
+        session: 'ended',
+        agentId: 'a1',
+        searchId: null,
+      },
+      {
+        uid: 'u-blocked',
+        at: NOW - 10 * 60 * 60 * 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-blocked',
+        session: 'ended',
+        agentId: 'a2',
+        searchId: null,
+      },
+    ]);
+    await seedSession(dir, 'ended', true);
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      { now: () => NOW, ...transcriptDeps({}, ['ended/a2']) },
+    );
+
+    expect(result.data).toMatchObject({ graded: { unobserved: 1, open: 1 } });
+    expect(result.humanLines?.join('\n')).toContain('transcript unreadable (EACCES)');
+    const store = await openStore(dir);
+    expect(store?.all('SELECT uid, outcome FROM injections ORDER BY uid', [])).toEqual([
+      { uid: 'u-blocked', outcome: null },
+      { uid: 'u-gone', outcome: 'unobserved' },
+    ]);
+    store?.close();
+  });
+
+  /** Rows written before `agent_id` existed name no child, so there is no file
+   *  to open and never will be — the one case that keeps the old blanket
+   *  `unobserved` for a relayed finding. */
+  it('keeps a relayed row without an agent id unobserved', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-premigration',
+        at: NOW - 1000,
+        trigger: 'subagent',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: 'res-old',
+        session: 'ended',
+        searchId: null,
+      },
+    ]);
+    await seedSession(dir, 'ended', true);
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      { now: () => NOW, ...transcriptDeps({ ended: toolUse({ command: 'ls' }) }) },
+    );
+
+    expect(result.data).toMatchObject({ graded: { unobserved: 1 } });
+    expect(result.humanLines?.join('\n')).toContain(
+      'relayed to a subagent whose id was not recorded',
+    );
+  });
+
+  it('--explain prints the agent id and the file that was read', async () => {
+    await seedRows(dir, [
+      {
+        uid: 'u-1',
+        at: NOW - 1000,
+        trigger: 'prompt',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: URL,
+        session: 's1',
+        agentId: 'a1',
+        searchId: null,
+      },
+    ]);
+    await seedSession(dir, 's1', true);
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { explain: true },
+      {
+        now: () => NOW,
+        ...transcriptDeps({
+          's1/a1': [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+        }),
+      },
+    );
+
+    const text = result.humanLines?.join('\n') ?? '';
+    expect(text).toContain('    agent a1');
+    expect(text).toContain('    read s1/a1');
   });
 
   /**
