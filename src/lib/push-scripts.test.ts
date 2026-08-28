@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1958,81 +1958,86 @@ describe('the failure arm (PostToolUse Bash)', () => {
  */
 describe('what the arms put on the wire', () => {
   /**
-   * TWO NEW FIELDS ON EVERY HOOK LOOKUP. `trigger` names the arm, which is the
-   * only way the shelf's per-trigger stats can tell a prompt lookup from a
-   * churn one; `filters.appliesTo.packages` is the package the arm is actually
-   * about, sent as a FILTER instead of pasted in front of the query.
-   *
-   * ONE NAME, NEVER A LIST: the shelf ANDs every value it is given, so two names
-   * ask for a card claiming both.
+   * THE FAILURE ARM PUTS NOTHING ON THE WIRE (tenjin-agent#212). Every other arm
+   * here is checked for the shape of its request; this one is checked for the
+   * absence of one. The fuzzy `/api/search` leg it used to run on the error tail
+   * is gone — on two machines every hit it produced was an unrelated note at
+   * `confidence: low`, and the tail it sent is the string in the sidecar most
+   * likely to carry a credential or a path. So there is no `trigger: 'failure'`
+   * body to assert on, and the arm's own describe block proves the rest of what
+   * it does from local pairings alone. The team leg by fingerprint (`POST
+   * /api/keys/resolve`, two hashes) arrives in the following PR.
    */
-  it('sends trigger failure and the package the error named, not a joined query', async () => {
-    const { baseUrl, bodies, queries } = await serve(echo());
+  it('asks nothing at all on a failure, whatever the error names', async () => {
+    const { baseUrl, bodies, hits } = await serve(echo());
     await pushOn(baseUrl);
 
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm test' },
-        error: "Exit code 1\nError: Cannot find module 'zod' from the vitest resolver",
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({
-      trigger: 'failure',
-      filters: { appliesTo: { packages: ['zod'] } },
-    });
-    // The name is the filter now, so the query is the error line alone.
-    expect(queries()[0]).not.toMatch(/^zod /);
-    expect(queries()[0]).toContain('Cannot find module');
+    for (const error of [
+      "Exit code 1\nError: Cannot find module 'zod' from the vitest resolver",
+      'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
+      'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
+    ]) {
+      const run = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PostToolUseFailure',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test' },
+          error,
+        }),
+      );
+      expect(run.code).toBe(0);
+    }
+    expect(hits()).toBe(0);
+    expect(bodies()).toEqual([]);
   });
 
   /**
-   * NO NAME, NO FILTER — the case the joined query used to make harmless. The
-   * error text names no module and `pnpm test` names no package, so the only
-   * token left is the package manager itself. Sending it would ask the shelf
-   * for a card that claims `pnpm`, and `appliesTo` is a hard AND: the lookup
-   * could only ever miss.
+   * The package manager is not one of the packages. `packagesInCommand` used to
+   * return the head itself whenever the command named nothing else, so
+   * `npm install zod` read as ['npm', 'zod'] with the manager taking the first
+   * slot. On this branch the arm sends no filter, so the surface that shows it
+   * is the pairing's recorded `pkg_versions`: `pkgVersions` reads only the first
+   * two names, and a manager sitting in front would spend one of them on a
+   * version nobody will ever compare against.
    */
-  it('sends no filter when the failure names no package', async () => {
-    const { baseUrl, bodies } = await serve(echo());
-    await pushOn(baseUrl);
+  it('records the installed package on the pairing, never the package manager', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-push-repo-'));
+    try {
+      await mkdir(join(repo, 'node_modules', 'zod'), { recursive: true });
+      await writeFile(
+        join(repo, 'node_modules', 'zod', 'package.json'),
+        JSON.stringify({ name: 'zod', version: '3.24.1' }),
+      );
+      await mkdir(join(repo, 'node_modules', 'npm'), { recursive: true });
+      await writeFile(
+        join(repo, 'node_modules', 'npm', 'package.json'),
+        JSON.stringify({ name: 'npm', version: '10.9.0' }),
+      );
 
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm test' },
-        error: 'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({ trigger: 'failure' });
-    expect(bodies()[0]).not.toHaveProperty('filters');
-  });
+      const { baseUrl } = await serve(echo());
+      await pushOn(baseUrl);
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PostToolUseFailure',
+          tool_name: 'Bash',
+          cwd: repo,
+          tool_input: { command: 'npm install zod' },
+          error:
+            "Exit code 1\nError: Cannot find module 'zod'\n    at Object.<anonymous> (src/index.ts:3:1)",
+        }),
+      );
 
-  /** ...and the package an install names is the filter, not the manager. */
-  it('sends the installed package, not the package manager', async () => {
-    const { baseUrl, bodies } = await serve(echo());
-    await pushOn(baseUrl);
-
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'npm install zod' },
-        error: 'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({
-      trigger: 'failure',
-      filters: { appliesTo: { packages: ['zod'] } },
-    });
+      const rows = await pairings();
+      expect(rows).toHaveLength(1);
+      const versions = JSON.parse(String(rows[0]?.pkg_versions)) as Record<string, string>;
+      expect(versions).toEqual({ zod: '3.24.1' });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 
   it('sends trigger prompt and no filter at all', async () => {
@@ -2161,7 +2166,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     // The research arm is the other arm worth spending on now that the failure
     // arm asks no shelf at all (it answers from local pairings; #212).
     const allowed = await runScript(websearchHookScript(dataDir), webSearch(QUESTION));
-    expect(denied(allowed)).toContain(BODY_MD);
+    expect(injected(allowed)).toContain(BODY_MD);
     const rows = await ledger();
     expect(rows.at(-1)).toMatchObject({ trigger: 'research', action: 'injected' });
   });
