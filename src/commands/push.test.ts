@@ -2,7 +2,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPushOff, runPushOn, runPushStatus } from './push';
+import {
+  runPushOff,
+  runPushOn,
+  runPushStatus,
+  scoreSession,
+  SCORE_RECENCY_MS,
+  type ScoreEvent,
+} from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
 import { hooksDir } from '../lib/paths';
@@ -545,5 +552,323 @@ describe('runPushStatus', () => {
     const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
     expect((result.data as { ledger: { rows: number } }).ledger.rows).toBe(2000);
     expect(result.humanLines?.join('\n')).not.toContain('retained tail');
+  });
+});
+
+/**
+ * The importance score (tenjin-agent#212, CommonTrace `detection.py` /
+ * `scoring.py`), as a report. Pure fixtures per pattern first, then the store
+ * read that puts capture_asked and published beside it.
+ */
+describe('scoreSession', () => {
+  const T0 = Date.parse('2026-08-22T00:00:00Z');
+  const ev = (offsetS: number, hook: string, over: Partial<ScoreEvent> = {}): ScoreEvent => ({
+    at: T0 + offsetS * 1000,
+    hook,
+    tool: null,
+    files: [],
+    command: null,
+    head: null,
+    ...over,
+  });
+  const edit = (offsetS: number, file: string, tool = 'Edit'): ScoreEvent =>
+    ev(offsetS, 'edit', { tool, files: [file] });
+  const score = (events: ScoreEvent[], over: Partial<Parameters<typeof scoreSession>[0]> = {}) =>
+    scoreSession({ events, closes: [], searches: [], endedAt: null, ...over });
+
+  it('scores nothing for a session of prompts and reads', () => {
+    expect(score([ev(0, 'prompt'), ev(10, 'read'), ev(20, 'prompt')])).toEqual({
+      score: 0,
+      patterns: [],
+      bonus: 1,
+    });
+  });
+
+  it('error → edit → pass is 3.0', () => {
+    const s = score(
+      [
+        ev(0, 'failure', { command: 'pnpm test' }),
+        edit(10, 'a.test.ts'),
+        ev(20, 'pass', { head: 'pnpm' }),
+      ],
+      {
+        endedAt: T0 + 3600_000,
+      },
+    );
+    // The pass closes a test-file edit: error-edit-resolved fires, fail-edit-pass
+    // (which wants a non-test edit) does not.
+    expect(s).toEqual({ score: 3, patterns: ['error-edit-resolved'], bonus: 1 });
+  });
+
+  it('a pass with no edit between resolves nothing', () => {
+    expect(
+      score([ev(0, 'failure', { command: 'pnpm test' }), ev(20, 'pass', { head: 'pnpm' })]).score,
+    ).toBe(0);
+  });
+
+  it('a pairing close by this session counts as the resolution', () => {
+    const s = score([ev(0, 'failure', { command: 'pnpm test' }), edit(10, 'a.ts')], {
+      closes: [T0 + 15_000],
+      endedAt: T0 + 3600_000,
+    });
+    expect(s.patterns).toEqual(['error-edit-resolved']);
+  });
+
+  it('the same file edited before and after a prompt is 2.5, markdown excluded', () => {
+    expect(score([edit(0, 'a.ts'), ev(10, 'prompt'), edit(20, 'a.ts')])).toEqual({
+      score: 2.5,
+      patterns: ['edit-across-prompt'],
+      bonus: 1,
+    });
+    expect(score([edit(0, 'notes.md'), ev(10, 'prompt'), edit(20, 'notes.md')]).score).toBe(0);
+    expect(score([edit(0, 'a.ts'), ev(10, 'prompt'), edit(20, 'b.ts')]).score).toBe(0);
+  });
+
+  it('a Write over a file with three prior edits is 2.5; two is not', () => {
+    const three = [edit(0, 'a.ts'), edit(1, 'a.ts'), edit(2, 'a.ts'), edit(3, 'a.ts', 'Write')];
+    expect(score(three, { endedAt: T0 + 3600_000 })).toEqual({
+      score: 2.5,
+      patterns: ['write-over-edited'],
+      bonus: 1,
+    });
+    expect(score(three.slice(1), { endedAt: T0 + 3600_000 }).score).toBe(0);
+    // A fourth Edit is not a reversal.
+    expect(score([...three.slice(0, 3), edit(3, 'a.ts')], { endedAt: T0 + 3600_000 }).score).toBe(
+      0,
+    );
+  });
+
+  it('fail → non-test edit → the same head passes is 2.0 on top of the resolution', () => {
+    const s = score(
+      [
+        ev(0, 'failure', { command: 'pnpm vitest run x' }),
+        edit(10, 'src/x.ts'),
+        ev(20, 'pass', { head: 'pnpm' }),
+      ],
+      { endedAt: T0 + 3600_000 },
+    );
+    expect(s).toEqual({ score: 5, patterns: ['error-edit-resolved', 'fail-edit-pass'], bonus: 1 });
+    // A different head passing is a different story.
+    expect(
+      score(
+        [
+          ev(0, 'failure', { command: 'pnpm test' }),
+          edit(10, 'x.ts'),
+          ev(20, 'pass', { head: 'cargo' }),
+        ],
+        {
+          endedAt: T0 + 3600_000,
+        },
+      ).patterns,
+    ).toEqual(['error-edit-resolved']);
+  });
+
+  it('research then edit with no error between is 2.0; an error between breaks it', () => {
+    expect(score([ev(0, 'research'), edit(10, 'a.ts')])).toEqual({
+      score: 2,
+      patterns: ['research-then-edit'],
+      bonus: 1,
+    });
+    expect(
+      score([ev(0, 'research'), ev(5, 'failure', { command: 'pnpm test' }), edit(10, 'a.ts')])
+        .score,
+    ).toBe(0);
+    // A search on record is the same signal (the research event is written on a hit only).
+    expect(score([edit(10, 'a.ts')], { searches: [T0] }).patterns).toEqual(['research-then-edit']);
+  });
+
+  it('counts each pattern once per session', () => {
+    const twice = [
+      ev(0, 'failure', { command: 'pnpm test' }),
+      edit(1, 'a.ts'),
+      ev(2, 'pass', { head: 'pnpm' }),
+      ev(10, 'failure', { command: 'pnpm test' }),
+      edit(11, 'b.ts'),
+      ev(12, 'pass', { head: 'pnpm' }),
+    ];
+    expect(score(twice, { endedAt: T0 + 3600_000 }).score).toBe(5);
+  });
+
+  it('adds up to 30% when the last resolution was within 300 s of the end', () => {
+    const events = [
+      ev(0, 'failure', { command: 'pnpm test' }),
+      edit(10, 'a.ts'),
+      ev(20, 'pass', { head: 'pnpm' }),
+    ];
+    // Resolved at t=20s, session ended at t=20s: the full bonus.
+    expect(score(events, { endedAt: T0 + 20_000 })).toEqual({
+      score: 6.5,
+      patterns: ['error-edit-resolved', 'fail-edit-pass'],
+      bonus: 1.3,
+    });
+    // Halfway through the window: half of it.
+    expect(score(events, { endedAt: T0 + 20_000 + SCORE_RECENCY_MS / 2 }).bonus).toBe(1.15);
+    // At the edge: none.
+    expect(score(events, { endedAt: T0 + 20_000 + SCORE_RECENCY_MS }).bonus).toBe(1);
+    // No end on record: the last event is the end, which here IS the resolution.
+    expect(score(events).bonus).toBe(1.3);
+  });
+
+  it('a reversal earns the bonus too', () => {
+    const events = [edit(0, 'a.ts'), edit(1, 'a.ts'), edit(2, 'a.ts'), edit(3, 'a.ts', 'Write')];
+    expect(score(events, { endedAt: T0 + 3_000 }).bonus).toBe(1.3);
+  });
+});
+
+describe('runPushStatus --sessions', () => {
+  /** Rows as the hooks write them, for one session. */
+  async function seedSession(
+    dir: string,
+    session: string,
+    startedAt: number,
+    events: Array<{ at: number; hook: string; tool?: string; files?: string[]; data?: unknown }>,
+    extra: { endedAt?: number; captureAskedAt?: number; closesAt?: number[] } = {},
+  ): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      store.run(STORE_SQL.touchSession, [session, 'proj', '/w', startedAt, 'machine']);
+      if (extra.endedAt !== undefined) {
+        store.run(STORE_SQL.endSession, [session, extra.endedAt, extra.endedAt, 'machine']);
+      }
+      events.forEach((e, i) => {
+        store.run(STORE_SQL.insertEvent, [
+          `${session}-ev-${i}`,
+          e.at,
+          session,
+          'proj',
+          'machine',
+          e.hook,
+          e.tool ?? null,
+          null,
+          e.files === undefined ? null : JSON.stringify(e.files),
+          e.data === undefined ? null : JSON.stringify(e.data),
+        ]);
+      });
+      if (extra.captureAskedAt !== undefined) {
+        store.run(STORE_SQL.setState, [
+          session,
+          'capture_asked',
+          JSON.stringify(new Date(extra.captureAskedAt).toISOString()),
+          extra.captureAskedAt,
+        ]);
+      }
+      for (const at of extra.closesAt ?? []) {
+        store.run(STORE_SQL.claimClose, [1, session, at, 'pnpm test', '["a.ts"]', 'code']);
+      }
+    } finally {
+      store.close();
+    }
+  }
+
+  async function seedPublished(dir: string, at: number, hash: string): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      store.run(STORE_SQL.setState, ['', `published:${hash}`, JSON.stringify('https://x/p'), at]);
+    } finally {
+      store.close();
+    }
+  }
+
+  it('is absent without the flag', async () => {
+    const result = await runPushStatus(makeCtx(), { homeDir: home });
+    expect(result.data).not.toHaveProperty('sessions');
+    expect(result.humanLines?.join('\n')).not.toContain('sessions, last');
+  });
+
+  it('scores each session in the window beside capture_asked and published', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    // s1: fail → edit → same head passes, capture asked, a publish while open.
+    await seedSession(
+      dir,
+      'sess-fixed',
+      s1,
+      [
+        { at: s1 + 1000, hook: 'prompt', data: { event: 'UserPromptSubmit', query: 'q' } },
+        { at: s1 + 2000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
+        { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
+        { at: s1 + 4000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
+      ],
+      { endedAt: s1 + 600_000, captureAskedAt: s1 + 600_000 },
+    );
+    await seedPublished(dir, s1 + 500_000, 'abc');
+    // s2: prompts only, capture asked, nothing published.
+    const s2 = now - 1800_000;
+    await seedSession(
+      dir,
+      'sess-chat',
+      s2,
+      [
+        { at: s2 + 1000, hook: 'prompt' },
+        { at: s2 + 2000, hook: 'prompt' },
+      ],
+      { captureAskedAt: s2 + 3000 },
+    );
+    // s3: out of the window.
+    const s3 = now - 8 * 24 * 3600_000;
+    await seedSession(dir, 'sess-old', s3, [{ at: s3 + 1000, hook: 'prompt' }]);
+    // The machine bucket is never a session.
+    await seedSession(dir, '', s2, [{ at: s2 + 1000, hook: 'prompt' }]);
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    expect(result.data).toMatchObject({
+      sessions: [
+        {
+          session: 'sess-fixed',
+          score: 5,
+          patterns: ['error-edit-resolved', 'fail-edit-pass'],
+          bonus: 1,
+          events: 4,
+          captureAsked: true,
+          published: 1,
+        },
+        {
+          session: 'sess-chat',
+          score: 0,
+          patterns: [],
+          events: 2,
+          captureAsked: true,
+          published: 0,
+        },
+      ],
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('sessions, last 7d: 2 scored');
+    expect(human).toContain(
+      'sess-fixed   score=5.0 events=4 capture_asked=yes published=1 [error-edit-resolved, fail-edit-pass]',
+    );
+    expect(human).toContain('sess-chat    score=0.0 events=2 capture_asked=yes published=0');
+  });
+
+  it('reads closes and searches into the score, and the recency bonus from ended_at', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    await seedSession(
+      dir,
+      'sess-closed',
+      s1,
+      [
+        { at: s1 + 2000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
+        { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
+      ],
+      { endedAt: s1 + 4000, closesAt: [s1 + 4000] },
+    );
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    expect(result.data).toMatchObject({
+      sessions: [
+        { session: 'sess-closed', score: 3.9, patterns: ['error-edit-resolved'], bonus: 1.3 },
+      ],
+    });
+    expect(result.humanLines?.join('\n')).toContain('score=3.9 (x1.30 recency)');
   });
 });
