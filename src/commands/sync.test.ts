@@ -352,6 +352,210 @@ describe('tenjin sync: verified after an earlier sync', () => {
   });
 });
 
+describe("tenjin sync: a pairing closed beside a teammate's post", () => {
+  /** The link the failure arm's team leg writes on a hit (no `own`), stamped
+   *  with the close the way closePairing leaves it. */
+  async function seedTeamLink(id: number, closedAt: number): Promise<void> {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, [
+      '',
+      'pairing_post:' + id,
+      JSON.stringify({
+        postId: 'teammate-post-7',
+        origin: TEAM,
+        at: closedAt - 5000,
+        closedAt,
+        status: 'unverified',
+        fixFiles: ['widget.ts'],
+      }),
+      closedAt,
+    ]);
+    store.close();
+  }
+
+  it("POSTs this machine's own record with verified keys and never PUTs on the teammate's post", async () => {
+    await writeTeamConfig();
+    const closedAt = Date.now() - 1000;
+    const id = await seedPairing({
+      cwd: dir,
+      key: 'fine-second-close',
+      status: 'unverified',
+      closedAt,
+    });
+    await seedTeamLink(id, closedAt);
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 0, skipped: 0 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.method).toBe('POST');
+    expect(sent[0]!.url).toBe(`${TEAM}/api/posts`);
+    const keys = sent[0]!.body!.keys as Array<{ kind: string; verified?: boolean }>;
+    expect(keys.filter((k) => k.kind === 'fingerprint').every((k) => k.verified === true)).toBe(
+      true,
+    );
+
+    const row = await pairingRow(id);
+    expect(row.synced_at).not.toBeNull();
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as { value: string };
+    store.close();
+    expect(JSON.parse(link.value)).toMatchObject({ postId: 'post-1', own: true });
+  });
+
+  it("is held, and the run continues, when the teammate's post already holds the key verified", async () => {
+    await writeTeamConfig();
+    const closedAt = Date.now() - 1000;
+    const first = await seedPairing({
+      cwd: dir,
+      key: 'fine-held-second',
+      status: 'unverified',
+      closedAt,
+    });
+    await seedTeamLink(first, closedAt);
+    const second = await seedPairing({ cwd: dir, key: 'fine-behind-it', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer((req) => {
+      const keys = (req.body?.keys ?? []) as Array<{ key: string }>;
+      if (keys.some((k) => k.key === 'sig_v1:fine-held-second')) {
+        return {
+          status: 400,
+          json: {
+            error: {
+              message: 'validation failed',
+              details: {
+                fieldErrors: {
+                  keys: ['fingerprint key is already verified on post teammate-post-7'],
+                },
+              },
+            },
+          },
+        };
+      }
+      return {
+        status: 201,
+        json: {
+          id: 'post-2',
+          slug: 's',
+          title: 't',
+          status: 'published',
+          price: '0',
+          url: `${TEAM}/a/t/s`,
+          tags: [],
+        },
+      };
+    });
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 1 });
+    expect(sent).toHaveLength(2);
+    expect((await pairingRow(first)).synced_at).not.toBeNull();
+    expect((await pairingRow(second)).synced_at).not.toBeNull();
+  });
+});
+
+describe('tenjin sync: a 404 on the update of our own post', () => {
+  it('marks the row synced and skipped, and reaches the rows behind it', async () => {
+    await writeTeamConfig();
+    const past = Date.now() - 120_000;
+    const gone = await seedPairing({
+      cwd: dir,
+      key: 'fine-gone',
+      status: 'verified',
+      syncedAt: past,
+      closedAt: Date.now() - 1000,
+    });
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, [
+      '',
+      'pairing_post:' + gone,
+      JSON.stringify({ postId: 'post-deleted', origin: TEAM, at: past, own: true }),
+      past,
+    ]);
+    store.close();
+    const behind = await seedPairing({ cwd: dir, key: 'fine-behind-404', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer((req) =>
+      req.method === 'PUT'
+        ? { status: 404, json: { error: { code: 'post_not_found', message: 'not found' } } }
+        : {
+            status: 201,
+            json: {
+              id: 'post-3',
+              slug: 's',
+              title: 't',
+              status: 'published',
+              price: '0',
+              url: `${TEAM}/a/t/s`,
+              tags: [],
+            },
+          },
+    );
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 0, skipped: 1, pending: 0 });
+    expect(sent.map((r) => r.method)).toEqual(['PUT', 'POST']);
+    expect((await pairingRow(gone)).synced_at).not.toBe(past);
+    expect((await pairingRow(behind)).synced_at).not.toBeNull();
+  });
+});
+
+describe('tenjin sync: the publish scan', () => {
+  it('keeps a row whose body carries a credential on the machine, marked synced and skipped', async () => {
+    await writeTeamConfig();
+    const leaky = await seedPairing({
+      cwd: dir,
+      key: 'fine-leaky',
+      cmd: 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE pnpm test',
+      status: 'unverified',
+    });
+    const clean = await seedPairing({ cwd: dir, key: 'fine-clean', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1, skipped: 1, pending: 0 });
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0]!.body)).not.toContain('AKIA');
+    expect((await pairingRow(leaky)).synced_at).not.toBeNull();
+    expect((await pairingRow(clean)).synced_at).not.toBeNull();
+  });
+});
+
+describe('tenjin sync: an abort that is not a signing failure', () => {
+  it('rethrows, leaves synced_at NULL, and records the error (not a code) on the events row', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({ cwd: dir, key: 'fine-outage', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch } = shelfServer(() => ({ status: 503, json: { error: 'down' } }));
+
+    await expect(runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch })).rejects.toBeInstanceOf(
+      CliError,
+    );
+
+    expect((await pairingRow(id)).synced_at).toBeNull();
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    const eventRow = store.get(
+      "SELECT data FROM events WHERE hook = 'sync' ORDER BY at DESC LIMIT 1",
+      [],
+    ) as { data: string } | null;
+    store.close();
+    expect(eventRow).not.toBeNull();
+    const data = JSON.parse(eventRow!.data) as Record<string, unknown>;
+    expect(typeof data.error).toBe('string');
+    expect(data.code).toBeUndefined();
+  });
+});
+
 describe('tenjin sync: a verified-holder 400', () => {
   it('marks the row synced (never retried) and records the holder, without throwing', async () => {
     await writeTeamConfig();

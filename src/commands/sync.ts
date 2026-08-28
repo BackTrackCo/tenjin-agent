@@ -15,6 +15,7 @@ import {
   type Store,
 } from '../lib/state-store';
 import { publishPost, updatePost, type PostKeyInput } from '../lib/posts-api';
+import { scan, survivesTeamDrop, type ScanFinding } from '../lib/scan';
 import { resolveWriteAuth } from '../lib/consent';
 import {
   describeWallet,
@@ -104,7 +105,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // Fail open, same as every other store consumer: an unreadable store is not a
     // reason to exit nonzero, there is simply nothing to sync.
     return {
-      data: { synced: 0, verified: 0, held: 0, pending: 0 },
+      data: { synced: 0, verified: 0, held: 0, skipped: 0, pending: 0 },
       humanLines: ['Nothing to sync.'],
     };
   }
@@ -116,7 +117,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
       .filter((r): r is PairingRow => r !== null);
     if (rows.length === 0) {
       return {
-        data: { synced: 0, verified: 0, held: 0, pending: 0 },
+        data: { synced: 0, verified: 0, held: 0, skipped: 0, pending: 0 },
         humanLines: ['Nothing to sync.'],
       };
     }
@@ -157,46 +158,79 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     let synced = 0;
     let verified = 0;
     let held = 0;
+    let skipped = 0;
     const now = () => Date.now();
     try {
       for (const row of rows) {
         // The link row (`pairing_post:<id>`, written by the failure arm's team
         // leg when it opened this pairing beside a teammate's post, or by a
         // previous run of this command when it POSTed the row) says which shelf
-        // post this pairing IS. Three cases:
+        // post this pairing is tied to. Three cases:
+        //  - a HELD row (a 400 named the holder): re-stamp so it is not
+        //    reconsidered until it changes again, and touch nothing on the shelf;
+        //  - OUR post, and the row was promoted to `verified` by a close that
+        //    landed after the last sync: PUT verified:true on it;
         //  - a TEAMMATE's post that this machine has now closed locally: that is
         //    the second, independent close 04 asks for, and the shelf has no
-        //    close endpoint, so PUT verified:true on their post — never a
-        //    duplicate POST;
-        //  - OUR post, and the row was promoted to `verified` by a close that
-        //    landed after the last sync: PUT verified:true;
-        //  - a HELD row (a 400 named the holder): re-stamp so it is not
-        //    reconsidered until it changes again, and touch nothing on the shelf.
+        //    close endpoint. Their post cannot be PUT from this wallet (every
+        //    post route is owner-scoped: a foreign id is a 404), so this
+        //    machine POSTs its OWN record of the fix with the keys `verified`
+        //    — two machines closed it independently, which is exactly what
+        //    verified means. If the teammate's post already holds the key
+        //    verified, the shelf's holder 400 says so and the row is held.
         const link = getLink(store, row.id);
-        if (link !== null) {
-          const promote = link.own ? row.status === 'verified' : true;
-          if (!link.held && promote) {
-            await updatePost(link.postId, { keys: keysFor(row, repo, true) }, auth, client);
-            verified += 1;
-          }
+        if (link !== null && link.held) {
           store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
           continue;
         }
-        if (row.syncedAt !== null) {
+        if (link === null && row.syncedAt !== null) {
           // Synced, promoted, but the link is gone (a store that lost the
           // mapping): nothing of ours to update. Re-stamp and move on.
           store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
           continue;
         }
+        const own = link !== null && link.own === true;
+        // A row synced under our own post with nothing to promote: re-stamp.
+        if (own && row.status !== 'verified') {
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          continue;
+        }
+        // Two independent closes — a teammate's (their post) and ours — read
+        // as verified on the wire whatever the local status says.
+        const verifiedOnWire = row.status === 'verified' || (link !== null && !own);
+
+        // THE SAME SCAN EVERY PUBLISH RUNS, minus the warn tier a team shelf
+        // drops (survivesTeamDrop, as commands/publish.ts filters it). The
+        // fields are scrubbed on the way into the row, so this is the second
+        // look: a credential that survived the scrub in a command line or a
+        // filename stays on this machine. Nobody can --yes an automatic run,
+        // and the body is the same next run, so a finding marks the row synced
+        // (never retried) rather than blocking every row behind it.
+        if (scanFindings(row).length > 0) {
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          skipped += 1;
+          continue;
+        }
 
         try {
+          if (own && link !== null) {
+            await updatePost(
+              link.postId,
+              { keys: keysFor(row, repo, verifiedOnWire) },
+              auth,
+              client,
+            );
+            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+            verified += 1;
+            continue;
+          }
           const result = await publishPost(
             {
               title: titleFor(row),
               bodyMd: bodyFor(row),
               priceAtomic: '0',
               status: 'published',
-              keys: keysFor(row, repo, row.status === 'verified'),
+              keys: keysFor(row, repo, verifiedOnWire),
             },
             auth,
             client,
@@ -216,6 +250,14 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             held += 1;
             continue;
           }
+          if (err instanceof CliError && err.code === 'RESOURCE_NOT_FOUND') {
+            // Our post is gone from the shelf (deleted, or the link is stale):
+            // nothing to promote, and a PUT on it will 404 on every future run
+            // too. Stamp and move on so one dead link cannot block the queue.
+            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+            skipped += 1;
+            continue;
+          }
           if (
             err instanceof CliError &&
             (err.code === 'PUBLISH_BLOCKED' || err.code === 'NEEDS_CONFIRMATION')
@@ -228,6 +270,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             // events row: that field is reserved for a SIGNING failure, which is
             // the one case the Stop hook's fallback line looks for.
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+            skipped += 1;
             continue;
           }
           // Anything else (network, 5xx, rate limit) may well succeed next run:
@@ -243,26 +286,43 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
         // record it so the Stop hook can print the by-hand fallback, leave every
         // remaining row's synced_at NULL, and exit with the code. The next Stop
         // retries.
-        recordSyncEvent(store, project, { code: err.code, synced, verified, held });
+        recordSyncEvent(store, project, { code: err.code, synced, verified, held, skipped });
         throw new CliError(
           'PUBLISH_FAILED',
-          `tenjin sync could not sign (${err.code}); ${synced + verified + held} of ${rows.length} pairings synced before it stopped.`,
+          `tenjin sync could not sign (${err.code}); ${synced + verified + held + skipped} of ${rows.length} pairings synced before it stopped.`,
           {
             fix: 'Run tenjin sync in a terminal where the wallet can unlock (the OS keychain or TENJIN_WALLET_PASSPHRASE), or start a session first.',
           },
         );
       }
+      // Any other abort (network, 5xx, rate limit, a refused bypass) is
+      // recorded too — as `error`, never `code`, because `code` is the signing
+      // failure the Stop hook's fallback line is reserved for and "run it by
+      // hand" is no answer to an outage. The next Stop retries.
+      recordSyncEvent(store, project, {
+        error: err instanceof CliError ? err.code : 'UNKNOWN',
+        synced,
+        verified,
+        held,
+        skipped,
+      });
       throw err;
     }
 
     // A run that finished writes its own `hook: 'sync'` row WITHOUT a code, so
     // the Stop hook's fallback line (which reads the LAST sync row) goes quiet
     // the moment a later run succeeds, rather than outliving the failure.
-    recordSyncEvent(store, project, { synced, verified, held });
+    recordSyncEvent(store, project, { synced, verified, held, skipped });
     return {
-      data: { synced, verified, held, pending: rows.length - synced - verified - held },
+      data: {
+        synced,
+        verified,
+        held,
+        skipped,
+        pending: rows.length - synced - verified - held - skipped,
+      },
       humanLines: [
-        `Synced ${synced} new, updated ${verified} verified, ${held} already held by a teammate.`,
+        `Synced ${synced} new, updated ${verified} verified, ${held} already held by a teammate, ${skipped} skipped.`,
       ],
     };
   } finally {
@@ -318,6 +378,14 @@ function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput
     keys.push({ kind: 'command_head', key: row.cmdHead });
   }
   return keys;
+}
+
+/** The publish scan over what would go on the wire — title and body — with
+ *  the warn tier filtered exactly as `tenjin publish` filters it on a team
+ *  shelf (this command only runs in team mode). No project markers: the row
+ *  holds basenames and a command line, and the shelf is the team's own. */
+function scanFindings(row: PairingRow): ScanFinding[] {
+  return scan(titleFor(row) + '\n' + bodyFor(row)).filter(survivesTeamDrop);
 }
 
 /** `Fix: <cmd_head> — <errno|frame>`. The signature's errno and frame are not
