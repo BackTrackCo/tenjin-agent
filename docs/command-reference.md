@@ -27,8 +27,11 @@ Useful flags:
 | `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register search hooks in this mode.                                                                                              |
 | `--no-hooks`            |                               | Register no hooks this run.                                                                                                      |
 | `--no-wallet`           |                               | Create no wallet.                                                                                                                |
+| `--refresh`             |                               | Re-materialize what this machine already has, at this build. Never prompts, never creates a wallet, never writes config.         |
 
 `install` is idempotent. Re-run it after upgrading the CLI or changing harnesses.
+
+**`--refresh`** is the narrow, non-interactive half, and it is what [`tenjin update`](#tenjin-update) runs for you after a successful upgrade. It re-renders the wired skills, rewrites the generated hook scripts that are already on disk, and updates the settings.json hook entries this CLI already owns. It adds nothing: a skill that is not wired stays unwired, a hook script that is absent stays absent, an event with no entry of ours gets none, no permission rule is written at all, and the update nudge does not run, so its cache file is not created either. Rules a newer version would grant are reported and left for an explicit `tenjin install`, because widening an agent's allowlist during an unattended upgrade is not a refresh. It refuses `--dry-run`, which this mode dispatches above and so could not honour. On a machine where nothing was ever installed there is nothing to converge, and it says so and **exits non-zero** rather than reporting a refresh that did not happen; a refusal to write (a link where the hooks directory belongs, a settings file that is unreadable or changed underneath) exits the same way.
 
 ### Hooks
 
@@ -61,6 +64,8 @@ Installs the newest version npm offers this build, pinned to the exact version t
 | `--check` | Report whether a newer version exists without installing. |
 
 The manager that owns the install performs it: npm, pnpm, and bun are each driven with their own global-add command. What cannot be driven is refused with the instruction that is correct there, rather than writing a global you never had: a source checkout updates by git, an npx run has nothing installed to replace, a project-local copy updates where it is declared, and yarn is refused because `yarn global add` exists only in yarn 1. `--check` answers from all of them.
+
+**The swap is not the whole upgrade.** The wired skills and the generated hook scripts are copies of a particular version, so after a successful swap `update` runs [`tenjin install --refresh`](#tenjin-install) on the newly installed binary and reports what it did. It runs it **once per profile whose hooks this machine has registered**, with `TENJIN_DATA_DIR` set to each, so a machine installed under a redirected data dir gets the scripts the harness actually fires brought up to date rather than only the profile that typed `update`. Those paths are read out of a settings file this CLI does not own, so a profile whose data dir is not already a directory is reported rather than created, and the list is capped. A refresh that fails, times out, or reports nothing to converge is a warning; it never fails the update, because the swap already happened. Each unrefreshed profile is warned about on its own line, carrying the reason the refresh itself gave and the command that repairs THAT profile, which for a non-default data dir is `TENJIN_DATA_DIR=<dir> tenjin install`. Profiles that did converge are reported alongside them.
 
 Deliberately not in the recommended permission allowlist: it replaces the binary your agent then runs. See [agent-permissions.md](./agent-permissions.md).
 

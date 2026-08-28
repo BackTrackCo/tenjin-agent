@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { maybeUpdate, readUpdateSignal, resolveTarget } from './update-check';
@@ -566,6 +567,29 @@ describe('maybeUpdate', () => {
       expect(cap.stderr()).toBe('');
       expect(cap.stdout()).toBe('');
     }
+  });
+
+  /**
+   * The switch `update` sets on the `install --refresh` children it spawns. It
+   * has to reach the CACHE WRITE, not just the printed line: those children are
+   * pointed at data dirs read out of a settings file this CLI does not own, and
+   * `writeCache` mkdirs the whole tree. A separate name from `CI`, which would
+   * also stand the skills heal down and gut the refresh it was set for.
+   */
+  it('makes no request and creates nothing under TENJIN_NO_UPDATE_CHECK=1', async () => {
+    const cap = captureIo(true);
+    await maybeUpdate({
+      dir: join(dir, 'never-created'),
+      io: cap.io,
+      json: false,
+      env: { TENJIN_NO_UPDATE_CHECK: '1' },
+      now: () => NOW,
+      fetchImpl: forbiddenFetch,
+      currentVersion: '0.1.0-alpha.6',
+    });
+    expect(cap.stderr()).toBe('');
+    expect(cap.stdout()).toBe('');
+    expect(existsSync(join(dir, 'never-created'))).toBe(false);
   });
 });
 

@@ -27,6 +27,18 @@ import { updateCheckPath } from './paths';
  * surfaces, including the request to npm.
  */
 
+/**
+ * Silences this check for one process, cache write and registry request
+ * included. Set by `update` on the `install --refresh` children it spawns: their
+ * data dirs come out of a settings file this CLI does not own, and this check is
+ * the one thing in a refresh that would CREATE such a directory — `writeCache`
+ * mkdirs the tree — where the refresh itself only converges what exists.
+ *
+ * A separate switch rather than `CI`, which would also stand the skills heal
+ * down (lib/skill-heal) and so gut the refresh it was set for.
+ */
+export const NUDGE_OPT_OUT = 'TENJIN_NO_UPDATE_CHECK';
+
 const CHECK_INTERVAL_MS = 86_400_000; // 24h
 const FETCH_TIMEOUT_MS = 1500;
 const DIST_TAGS_URL = 'https://registry.npmjs.org/-/package/tenjin-cli/dist-tags';
@@ -92,6 +104,7 @@ export async function maybeUpdate(deps: UpdateCheckDeps): Promise<void> {
     // Never in CI, in either mode: a build log cannot act on a nudge, and a
     // build machine must not silently acquire a different binary mid-pipeline.
     if (env.CI !== undefined && env.CI.length > 0) return;
+    if (env[NUDGE_OPT_OUT] === '1') return;
 
     const mode = deps.mode ?? (await loadConfig(deps.dir)).update.mode;
     if (mode === 'off') return;

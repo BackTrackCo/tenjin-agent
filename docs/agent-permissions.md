@@ -315,7 +315,11 @@ one first.
 
 `tenjin update` replaces the globally installed `tenjin` with whatever npm serves
 next, which is the binary the agent goes on to run for the rest of the session and
-every session after it. Which build an agent executes is an operator decision, so
+every session after it. A successful swap then rewrites the generated hook scripts
+and this CLI's own hook entries in `settings.json`, on each profile whose hooks
+this machine has registered, so the harness fires the new build rather than the
+one just replaced; it writes no permission rule and registers no hook that is not
+already there. Which build an agent executes is an operator decision, so
 no recommended rule pre-clears it. `tenjin update --check` only reports, but a
 prefix rule pins the **verb**, not the flags, so clearing the check would clear
 the install with it. Nothing stops you adding the rule yourself; it stays off the
