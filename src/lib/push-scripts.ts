@@ -16,7 +16,7 @@
  * The bodies are built from {@link pushSource}, the shared core that scores a
  * hit, picks a form, and writes the ledger row. `jsBody` escapes a plain JS
  * string for the surrounding TypeScript template, so the core can be written
- * as ordinary JavaScript with regexes and no `\\` doubling by hand.
+ * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
@@ -63,6 +63,39 @@ export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
  *  that reaches this line is one nobody sized a bucket for, and the safe reading
  *  of an unsized arm is the cheapest one. */
 export const PUSH_LOOKUP_CAP_DEFAULT = 4;
+/**
+ * The adaptive cooldown (tenjin-agent#212; CommonTrace `retrieval.py`): the cap
+ * above scales from EVIDENCE. The SessionStart primer fetches the shelf's
+ * per-trigger use rates (`GET /api/lookups/stats?days=7`) once per session into
+ * `session_state` `trigger_rates`, and `lookupAllowed` reads them: a trigger
+ * whose graded lookups were used at least PUSH_COOLDOWN_HOT_RATE of the time
+ * gets twice its cap; one with PUSH_COOLDOWN_COLD_HITS hits or more and a rate
+ * under PUSH_COOLDOWN_COLD_RATE gets a third of it, with every
+ * PUSH_COOLDOWN_PASS_EVERY-th fire the reduced cap suppressed passing anyway,
+ * so a cold arm keeps producing the rows that could warm it again.
+ *
+ * GUARDED: a trigger's cap changes only when it has at least one graded
+ * outcome (`used + wrong > 0`). Without that, the day-1 shelf (hundreds of
+ * lookups, nothing graded because #210 has not posted an outcome yet) reads as
+ * "hits ≥ 20, rate 0" and throttles every arm to a third. With it the code
+ * ships inert and turns itself on per trigger the day #210's grading writes
+ * the first outcome. A fetch that fails leaves no row, and no row is no
+ * change.
+ *
+ * `rate` is `used / (used + wrong)` — the two words #210 writes to
+ * `injections.outcome` — computed here from the stats row's own counts rather
+ * than read from its `useRate`, which is `used / hits` (the server's number for
+ * the day-7 read, not the cooldown's).
+ */
+export const PUSH_COOLDOWN_HOT_RATE = 0.4;
+export const PUSH_COOLDOWN_HOT_FACTOR = 2;
+export const PUSH_COOLDOWN_COLD_RATE = 0.05;
+export const PUSH_COOLDOWN_COLD_HITS = 20;
+export const PUSH_COOLDOWN_COLD_DIVISOR = 3;
+export const PUSH_COOLDOWN_PASS_EVERY = 10;
+/** The `session_state` keys it reads and bumps — `trigger_rates` (the primer's
+ *  fetch) and `cooldown:<trigger>` (the suppressed-fire counter) — live with
+ *  the other STATE_* names in lib/state-store.ts's store core. */
 /** Consecutive unanswered lookups that silence the public leg, and for how long
  *  — the push core's copy of the dispatch hook's self-healing stop
  *  (DISPATCH_FAILURE_STOP / DISPATCH_QUIET_MS in lib/hook-scripts.ts). A dead
@@ -134,6 +167,7 @@ const PUSH_INJECT_MAX = __INJECT_MAX__;
 const PUSH_LOOKUP_WINDOW_MS = __LOOKUP_WINDOW_MS__;
 const PUSH_LOOKUP_CAPS = __LOOKUP_CAPS__;
 const PUSH_LOOKUP_CAP_DEFAULT = __LOOKUP_CAP_DEFAULT__;
+const PUSH_COOLDOWN = __COOLDOWN__;
 const PUSH_FAILURE_STOP = __FAILURE_STOP__;
 const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
@@ -333,9 +367,46 @@ function lookupCapFor(trigger) {
  * count. The count is now exact, and cheap enough that the per-session "this
  * bucket is full" cache the file version needed is gone with it.
  */
-function lookupAllowed(trigger) {
+function lookupAllowed(trigger, sessionId) {
   const spent = bucketCount(triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
-  return spent < lookupCapFor(trigger);
+  const base = lookupCapFor(trigger);
+  const cap = cooldownCap(trigger, base, sessionId);
+  if (spent < cap) return true;
+  // THE COLD ARM'S ESCAPE. Under the reduced cap, and under the base cap it
+  // replaced, every Nth suppressed fire goes through: an arm nothing grades
+  // never warms, and a cap that only ever shrinks is a switch, not a cooldown.
+  // Counted per session and per trigger, in one statement, so two concurrent
+  // fires cannot both be the Nth.
+  if (cap < base && spent < base) {
+    const n = bumpState(sessionId, STATE_COOLDOWN_PREFIX + triggerKey(trigger));
+    return n > 0 && n % PUSH_COOLDOWN.passEvery === 0;
+  }
+  return false;
+}
+
+/**
+ * The cap the cooldown gives \`trigger\` this session: \`base\` ×2 when its graded
+ * lookups were used ≥ 40% of the time, ÷3 when it has ≥ 20 hits and a use rate
+ * under 5%, and \`base\` itself with no rates on record, no row for this
+ * trigger, or — the guard — nothing graded for it yet (\`used + wrong === 0\`).
+ * See PUSH_COOLDOWN_* in lib/push-scripts.ts for why the guard is the whole
+ * point of shipping this now.
+ */
+function cooldownCap(trigger, base, sessionId) {
+  const rates = getState(sessionId, STATE_TRIGGER_RATES);
+  if (!isRecord(rates) || !isRecord(rates.triggers)) return base;
+  const row = rates.triggers[triggerKey(trigger)];
+  if (!isRecord(row)) return base;
+  const hits = typeof row.hits === 'number' ? row.hits : 0;
+  const used = typeof row.used === 'number' ? row.used : 0;
+  const wrong = typeof row.wrong === 'number' ? row.wrong : 0;
+  if (used + wrong <= 0) return base;
+  const rate = used / (used + wrong);
+  if (rate >= PUSH_COOLDOWN.hotRate) return base * PUSH_COOLDOWN.hotFactor;
+  if (hits >= PUSH_COOLDOWN.coldHits && rate < PUSH_COOLDOWN.coldRate) {
+    return Math.max(1, Math.floor(base / PUSH_COOLDOWN.coldDivisor));
+  }
+  return base;
 }
 
 /** The free body of \`candidate\`, capped, or null. GET of the candidate url is
@@ -603,7 +674,7 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   // flood spends the prompt allowance and leaves the failure arm's untouched.
   // The row already carries \`trigger\`, so \`push status\` shows which bucket
   // filled up without a new field.
-  if (!lookupAllowed(base.trigger)) {
+  if (!lookupAllowed(base.trigger, sessionId)) {
     recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
     return { kind: 'stop' };
   }
@@ -833,6 +904,17 @@ export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string
     .replaceAll('__LOOKUP_WINDOW_MS__', String(PUSH_LOOKUP_WINDOW_MS))
     .replaceAll('__LOOKUP_CAPS__', JSON.stringify(PUSH_LOOKUP_CAPS_PER_WINDOW))
     .replaceAll('__LOOKUP_CAP_DEFAULT__', String(PUSH_LOOKUP_CAP_DEFAULT))
+    .replaceAll(
+      '__COOLDOWN__',
+      JSON.stringify({
+        hotRate: PUSH_COOLDOWN_HOT_RATE,
+        hotFactor: PUSH_COOLDOWN_HOT_FACTOR,
+        coldRate: PUSH_COOLDOWN_COLD_RATE,
+        coldHits: PUSH_COOLDOWN_COLD_HITS,
+        coldDivisor: PUSH_COOLDOWN_COLD_DIVISOR,
+        passEvery: PUSH_COOLDOWN_PASS_EVERY,
+      }),
+    )
     .replaceAll('__FAILURE_STOP__', String(PUSH_FAILURE_STOP))
     .replaceAll('__QUIET_MS__', String(PUSH_QUIET_MS))
     .replaceAll('__BODY_MAX__', String(PUSH_BODY_MAX_CHARS))

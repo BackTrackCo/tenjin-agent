@@ -2234,6 +2234,163 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       expect.objectContaining({ session: 'sess-2', reason: 'lookup-cap' }),
     );
   });
+
+  /**
+   * The adaptive cooldown (tenjin-agent#212, CommonTrace `retrieval.py`): the
+   * cap scales from the shelf's per-trigger use rates the primer stored under
+   * `trigger_rates`. Each branch against the real bytes, and the guard — the
+   * one that makes it safe to ship before anything grades — twice.
+   */
+  describe('the adaptive cooldown', () => {
+    /** What the primer would have stored for this session. */
+    async function seedRates(
+      triggers: Record<string, { hits: number; used: number; wrong: number }>,
+      session = SESSION,
+    ): Promise<void> {
+      const store = await openStore(dataDir);
+      store?.run(STORE_SQL.setState, [
+        session,
+        'trigger_rates',
+        JSON.stringify({ at: Date.now(), days: 7, triggers }),
+        Date.now(),
+      ]);
+      store?.close();
+    }
+
+    it('doubles the cap of an arm whose graded lookups were used at least 40% of the time', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
+      // Full under the base cap of 8, under 16 with the doubling.
+      await seedLookups('prompt', 8, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+    });
+
+    it('still stops at the doubled cap', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
+      await seedLookups('prompt', 16, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+      expect((await ledger()).at(-1)).toMatchObject({ reason: 'lookup-cap' });
+    });
+
+    it('cuts a cold arm (≥ 20 hits, < 5% used) to a third of its cap', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      // 2 spent: under the base cap of 8, at the cooled cap of floor(8/3) = 2.
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+      expect((await ledger()).at(-1)).toMatchObject({
+        session: SESSION,
+        trigger: 'prompt',
+        action: 'skipped',
+        reason: 'lookup-cap',
+      });
+      // The suppressed fire was counted, per session and per trigger.
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBe(1);
+    });
+
+    it('lets every 10th suppressed fire of a cold arm through', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      await seedLookups('prompt', 2, 0);
+
+      for (let i = 1; i <= 9; i += 1) {
+        const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+        expect(run.stdout, `fire ${i}`).toBe('');
+      }
+      expect(hits()).toBe(0);
+      const tenth = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(tenth)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBe(10);
+      expect(
+        (await ledger()).filter((r) => r.session === SESSION && r.reason === 'lookup-cap'),
+      ).toHaveLength(9);
+    });
+
+    it('never passes a suppressed fire past the base cap', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      // Past the BASE cap: the escape is for fires only the cooled cap stops.
+      await seedLookups('prompt', 8, 0);
+
+      for (let i = 1; i <= 10; i += 1) {
+        expect((await runScript(pushPromptHookScript(dataDir), promptInput)).stdout).toBe('');
+      }
+      expect(hits()).toBe(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    /**
+     * THE GUARD. On day 1 the shelf reports hundreds of lookups and nothing
+     * graded — #210 has not posted an outcome yet — which without this reads as
+     * "cold" for every arm at once. A trigger with nothing graded keeps its cap.
+     */
+    it('changes nothing for a trigger with no graded outcome, however many hits', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 867, used: 0, wrong: 0 } });
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('keeps the base cap with no graded outcome: the base cap still stops it', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 867, used: 0, wrong: 0 } });
+      await seedLookups('prompt', 8, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+    });
+
+    it('reads only its own trigger and its own session', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // A cold `research` row does not cool `prompt`, and a cold `prompt` row
+      // under another session does not cool this one.
+      await seedRates({ research: { hits: 30, used: 1, wrong: 29 } });
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } }, 'sess-someone-else');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+    });
+
+    it('is inert with a malformed rates row', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      const store = await openStore(dataDir);
+      store?.run(STORE_SQL.setState, [SESSION, 'trigger_rates', '"not an object"', Date.now()]);
+      store?.close();
+      await seedLookups('prompt', 2, 0);
+
+      expect(injected(await runScript(pushPromptHookScript(dataDir), promptInput))).toContain(
+        BODY_MD,
+      );
+      expect(hits()).toBeGreaterThan(0);
+    });
+  });
 });
 
 describe('the subagent arm (SubagentStart)', () => {
@@ -2524,18 +2681,140 @@ describe('the context arm (log-only)', () => {
 });
 
 describe('the SessionStart primer', () => {
+  const primerInput = JSON.stringify({
+    session_id: SESSION,
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+  });
+
   it('prints the primer and nothing else, and spawns nothing', async () => {
     await writeConfig({});
-    const run = await runScript(
-      sessionPrimerHookScript(dataDir),
-      JSON.stringify({ session_id: SESSION, hook_event_name: 'SessionStart', source: 'startup' }),
-    );
+    const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
     expect(run.code).toBe(0);
     expect(run.stderr).toBe('');
     expect(injected(run)).toBe(PRIMER_TEXT);
     // The team shelf is a deployment now, so there is nothing on disk to refresh
     // and no reason for this script to reach child_process at all.
     expect(sessionPrimerHookScript(dataDir)).not.toContain('child_process');
+  });
+
+  /**
+   * The adaptive cooldown's input (tenjin-agent#212): the shelf's per-trigger
+   * use rates, fetched once at session start into `trigger_rates`. Counts only
+   * are kept; a failed fetch keeps nothing, which is what "caps unchanged" is.
+   */
+  describe('fetches the shelf use rates once per session', () => {
+    const stats = (req: StubRequest): { status: number; json: unknown } =>
+      req.url.startsWith('/api/lookups/stats')
+        ? {
+            status: 200,
+            json: {
+              windowDays: 7,
+              triggers: [
+                {
+                  trigger: 'prompt',
+                  lookups: 40,
+                  hits: 30,
+                  candidates: 90,
+                  used: 1,
+                  wrong: 29,
+                  useRate: 0.033,
+                },
+                {
+                  trigger: 'cli',
+                  lookups: 867,
+                  hits: 600,
+                  candidates: 1,
+                  used: 0,
+                  wrong: 0,
+                  useRate: 0,
+                },
+              ],
+            },
+          }
+        : { status: 404, json: {} };
+
+    it('stores the four counts per trigger under the session, and still prints the primer', async () => {
+      const { baseUrl, hits, headers } = await serve(stats);
+      await pushOn(baseUrl);
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(hits()).toBe(1);
+      expect(headers()[0]?.['user-agent']).toContain('tenjin');
+      expect(sessionState(SESSION, 'trigger_rates')).toMatchObject({
+        days: 7,
+        triggers: {
+          prompt: { lookups: 40, hits: 30, used: 1, wrong: 29 },
+          cli: { lookups: 867, hits: 600, used: 0, wrong: 0 },
+        },
+      });
+      // `useRate` and `candidates` are the shelf's numbers, not the cooldown's;
+      // only what lookupAllowed reads is kept.
+      const row = sessionState(SESSION, 'trigger_rates') as { triggers: Record<string, object> };
+      expect(row.triggers.prompt).not.toHaveProperty('useRate');
+    });
+
+    it('asks for the seven-day window', async () => {
+      const seen: string[] = [];
+      const { baseUrl } = await serve((req) => {
+        seen.push(req.url);
+        return stats(req);
+      });
+      await pushOn(baseUrl);
+      await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(seen).toEqual(['/api/lookups/stats?days=7']);
+    });
+
+    it('spends no request while push is off', async () => {
+      const { baseUrl, hits } = await serve(stats);
+      await writeConfig({ baseUrl, hooks: { push: 'off' } });
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(hits()).toBe(0);
+      expect(sessionState(SESSION, 'trigger_rates')).toBeNull();
+    });
+
+    it('fetches even when the primer text itself is off', async () => {
+      const { baseUrl, hits } = await serve(stats);
+      await pushOn(baseUrl, { sessionPrimer: 'off' });
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(1);
+      expect(sessionState(SESSION, 'trigger_rates')).not.toBeNull();
+    });
+
+    it('keeps nothing on a non-200, so every cap stays what it was', async () => {
+      const { baseUrl } = await serve(() => ({ status: 500, json: { error: 'down' } }));
+      await pushOn(baseUrl);
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(sessionState(SESSION, 'trigger_rates')).toBeNull();
+    });
+
+    it('keeps nothing when the shelf does not answer in time', async () => {
+      const { baseUrl } = await serve(() => 'hang');
+      await pushOn(baseUrl);
+      const started = Date.now();
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(Date.now() - started).toBeLessThan(1600);
+      expect(sessionState(SESSION, 'trigger_rates')).toBeNull();
+    });
+
+    it('carries the team shelf bypass header on the team origin only', async () => {
+      const { baseUrl, headers } = await serve(stats);
+      await writeConfig({
+        baseUrl,
+        publicShelfUrl: 'https://tenjin.blog',
+        shelfBypassSecret: 'door-key',
+        hooks: { push: 'on' },
+      });
+      await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(headers()[0]?.['x-vercel-protection-bypass']).toBe('door-key');
+    });
   });
 });
 

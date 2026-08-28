@@ -111,6 +111,11 @@ const TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
  */
 const SUBAGENT_STALE_MS = 45 * 60 * 1000;
 const PRIMER_WATCHDOG_MS = 1500;
+/** The primer's stats fetch for the adaptive cooldown: the trailing window it
+ *  asks for, and how long it waits. Under the watchdog with room for the store
+ *  write after it; a slow shelf costs the session its rates, not its start. */
+const LOOKUP_STATS_DAYS = 7;
+const PRIMER_STATS_TIMEOUT_MS = 1000;
 
 /** How recent an unresolved MISS has to be for the Stop hook to raise it. */
 const OPEN_LOOP_WINDOW_MS = 8 * 60 * 60 * 1000;
@@ -1586,13 +1591,70 @@ main().catch(quiet);
 /**
  * The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}.
  *
- * Purely local and purely advisory. It used to also `git pull` a cloned team
+ * Advisory, and local but for one request: with push on it also fetches the
+ * shelf's per-trigger use rates for the adaptive cooldown (`fetchTriggerRates`
+ * below), after the paragraph is out. It used to also `git pull` a cloned team
  * notes repo; the team shelf is a Tenjin DEPLOYMENT now (plan of record v3.1),
  * so there is nothing on disk to refresh and a session starts with whatever the
  * shelf serves at the moment a trigger fires.
  */
 export function sessionPrimerHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}${storeSource()}
+  return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}${storeSource()}${userAgentSource()}
+const STATS_DAYS = ${LOOKUP_STATS_DAYS};
+const STATS_TIMEOUT_MS = ${PRIMER_STATS_TIMEOUT_MS};
+
+/**
+ * The adaptive cooldown's one input (tenjin-agent#212; PUSH_COOLDOWN_* in
+ * lib/push-scripts.ts): the configured shelf's per-trigger use rates over the
+ * last week, keyless and server-cached, fetched ONCE PER SESSION here and kept
+ * in \`session_state\` \`trigger_rates\` for \`lookupAllowed\` to scale each
+ * arm's cap from. Only while push is on: the stats have no other reader, and a
+ * primer on a machine that never wired the arms must not spend a request.
+ *
+ * Any failure — no network, a non-200, an unparseable body, the timeout — writes
+ * nothing, and nothing on record means every cap stays what it was. Counts
+ * only are kept: the shelf's row carries no query, post, or requester, and the
+ * session row keeps just the four numbers the cooldown reads.
+ */
+async function fetchTriggerRates(config, sessionId) {
+  let url;
+  try {
+    url = new URL('/api/lookups/stats', config.baseUrl);
+    url.searchParams.set('days', String(STATS_DAYS));
+  } catch {
+    return;
+  }
+  try {
+    const bypass = shelfBypassHeaders(url.href, config);
+    const res = await fetch(url, {
+      headers: { accept: 'application/json', 'user-agent': composedUserAgent(), ...bypass },
+      ...bypassRedirect(bypass),
+      signal: AbortSignal.timeout(STATS_TIMEOUT_MS),
+    });
+    if (res.status !== 200) return;
+    const body = await res.json();
+    if (!isRecord(body) || !Array.isArray(body.triggers)) return;
+    const triggers = {};
+    for (const row of body.triggers) {
+      if (!isRecord(row) || typeof row.trigger !== 'string') continue;
+      const n = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+      triggers[row.trigger.slice(0, 32)] = {
+        lookups: n(row.lookups),
+        hits: n(row.hits),
+        used: n(row.used),
+        wrong: n(row.wrong),
+      };
+    }
+    setState(sessionId, STATE_TRIGGER_RATES, {
+      at: Date.now(),
+      days: typeof body.windowDays === 'number' ? body.windowDays : STATS_DAYS,
+      triggers,
+    });
+  } catch {
+    // Unchanged caps; see above.
+  }
+}
+
 async function main() {
   // Drained even though nothing reads it — an unread stdin can block the writer
   // — but the payload IS parsed for the session id and cwd, because this is
@@ -1606,23 +1668,29 @@ async function main() {
   } catch {
     // Unparseable stdin costs the session row, never the primer.
   }
-  await openStore();
-  touchSession(sessionIdOf(input), cwdOf(input));
-  if (readConfig().sessionPrimer === 'off') return quiet();
-  // fd 1 directly, not emit(), which would append the update signal.
-  try {
-    writeFileSync(
-      1,
-      JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: 'SessionStart',
-          additionalContext: ${JSON.stringify(PRIMER_TEXT)},
-        },
-      }),
-    );
-  } catch {
-    // A closed or full stdout is not this hook's problem to report.
+  const config = readConfig();
+  const sessionId = sessionIdOf(input);
+  const store = await openStore();
+  touchSession(sessionId, cwdOf(input));
+  if (config.sessionPrimer !== 'off') {
+    // fd 1 directly, not emit(), which would append the update signal. Written
+    // BEFORE the stats fetch below, so the paragraph is never held behind a
+    // request.
+    try {
+      writeFileSync(
+        1,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: ${JSON.stringify(PRIMER_TEXT)},
+          },
+        }),
+      );
+    } catch {
+      // A closed or full stdout is not this hook's problem to report.
+    }
   }
+  if (config.push === 'on' && store !== null) await fetchTriggerRates(config, sessionId);
   process.exit(0);
 }
 
