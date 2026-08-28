@@ -499,3 +499,86 @@ export async function postOutcomes(
       : items.length;
   return { accepted: Number.isFinite(accepted) ? accepted : items.length };
 }
+
+/**
+ * One arm's demand and reuse over a window, as the shelf sees it.
+ *
+ * The counts a machine could sum from its own outcome reports, summed across
+ * every caller — which is the whole point: `tenjin push grade` says what THIS
+ * machine's injections did, and this says whether the arm earns its keep at all.
+ * Keyless and aggregate-only on the server side (no query text, no post ids), so
+ * it needs nothing but the base URL and, on a team shelf, the bypass the
+ * transport attaches by origin.
+ */
+export interface TriggerStats {
+  trigger: string;
+  /** Decision-view searches this arm fired in the window, MISS and CANDIDATES. */
+  lookups: number;
+  /** Of those, how many surfaced at least one candidate. */
+  hits: number;
+  /** Candidate rows shown across those lookups. */
+  candidates: number;
+  /** Lookups with at least one used / partially_used outcome. */
+  used: number;
+  /** Lookups with at least one rejected / regenerated outcome. */
+  wrong: number;
+  /** used / hits, or null with no hits. */
+  useRate: number | null;
+}
+
+export interface LookupStats {
+  windowDays: number;
+  triggers: TriggerStats[];
+}
+
+/** Unknown keys are stripped, like every other response this module parses: the
+ *  server may grow a column before this CLI reads it. */
+const lookupStatsSchema = z.object({
+  windowDays: z.number().int().positive(),
+  triggers: z.array(
+    z.object({
+      trigger: z.string(),
+      lookups: z.number().int().nonnegative(),
+      hits: z.number().int().nonnegative(),
+      candidates: z.number().int().nonnegative(),
+      used: z.number().int().nonnegative(),
+      wrong: z.number().int().nonnegative(),
+      useRate: z.number().nullable(),
+    }),
+  ),
+});
+
+/**
+ * GET /api/lookups/stats?days=N.
+ *
+ * NO RETRY, and every failure throws: this is one optional block under `push
+ * status`, and the caller renders "unavailable" rather than failing the command
+ * or making an operator wait out a backoff for a number they were reading in
+ * passing.
+ */
+export async function getLookupStats(days: number, opts: AgentApiOptions): Promise<LookupStats> {
+  const url = `${trimSlash(opts.baseUrl)}/api/lookups/stats?days=${encodeURIComponent(String(days))}`;
+  const res = await httpRequest(url, {
+    method: 'GET',
+    timeoutMs: opts.timeoutMs,
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+    fetchImpl: opts.fetchImpl,
+  });
+  if (!res.ok) throw apiFailure(url, res);
+  if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
+  if (res.status !== 200) {
+    throw new CliError(
+      'API_UNREACHABLE',
+      serverErrorMessage(res.json) ?? `Lookup stats failed (${res.status})`,
+      { fix: 'Check the base URL, then retry.', details: res.json },
+    );
+  }
+  const parsed = lookupStatsSchema.safeParse(res.json);
+  if (!parsed.success) {
+    throw new CliError('CONTRACT_MISMATCH', `${url} answered a shape this CLI cannot read.`, {
+      fix: 'Update tenjin-cli, or point the base URL at a matching deployment.',
+      details: parsed.error.issues,
+    });
+  }
+  return parsed.data;
+}
