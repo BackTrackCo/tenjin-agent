@@ -57,6 +57,37 @@ export interface PublishInput {
    * sees this key on a body its strictObject schema would reject.
    */
   scanAck?: string;
+  /**
+   * Exact-match keys `POST /api/keys/resolve` answers on (tenjin#774): a
+   * failure fingerprint (`sig_v1:<hash>`), a `name@version`, a command head, a
+   * repo. Its own top-level field, not a card field, because a mechanical
+   * pairing carries keys and no card. `verified` is the writer's own claim and
+   * defaults to false; see {@link normalizePostKeys} for the bounds.
+   */
+  keys?: PostKeyInput[];
+}
+
+/** The kinds the server's `post_keys.kind` registry closes on
+ *  (tenjin `lib/resource-metadata.ts` POST_KEY_KINDS). */
+export const POST_KEY_KINDS = ['fingerprint', 'package_version', 'command_head', 'repo'] as const;
+export type PostKeyKind = (typeof POST_KEY_KINDS)[number];
+/** The server's per-key length bound and per-piece count bound. */
+export const POST_KEY_MAX_CHARS = 200;
+export const POST_KEYS_MAX = 32;
+
+/** One key as a caller names it; `verified` omitted reads as false. */
+export interface PostKeyInput {
+  kind: PostKeyKind;
+  key: string;
+  verified?: boolean;
+}
+
+/** One key as the wire carries it: `verified` always spelled out, so the body
+ *  says what it claims rather than leaning on the server default. */
+export interface PostKeyWire {
+  kind: PostKeyKind;
+  key: string;
+  verified: boolean;
 }
 
 /** The exact strictObject body sent to POST /api/posts (defined keys only). */
@@ -71,6 +102,45 @@ export interface PostCreateBody {
   resource?: ResourceCardInput;
   searchId?: string | string[];
   scanAck?: string;
+  keys?: PostKeyWire[];
+}
+
+/**
+ * The keys a write claims, checked against the server's bounds BEFORE the
+ * wallet touch: kind in the closed set, key trimmed and 1 to 200 chars, at most
+ * 32 per piece. Duplicate (kind, key) pairs collapse to one with the LAST
+ * occurrence deciding `verified`, which is the server's own rule, so what is
+ * sent is what would be stored. Never normalised beyond the trim: the client's
+ * versioned signature already produced the key, and a second normalisation
+ * here would make a key that matches on one machine miss on the shelf.
+ */
+export function normalizePostKeys(keys: PostKeyInput[] | undefined, label: string): PostKeyWire[] {
+  if (keys === undefined) return [];
+  const byPair = new Map<string, PostKeyWire>();
+  for (const given of keys) {
+    const kind = given.kind;
+    if (!(POST_KEY_KINDS as readonly string[]).includes(kind)) {
+      throw new CliError('USAGE', `Invalid ${label} kind: ${JSON.stringify(kind)}`, {
+        fix: `A key kind is one of ${POST_KEY_KINDS.join(', ')}.`,
+      });
+    }
+    const key = typeof given.key === 'string' ? given.key.trim() : '';
+    if (key.length === 0 || key.length > POST_KEY_MAX_CHARS) {
+      throw new CliError(
+        'USAGE',
+        `Invalid ${label} value for ${kind}: a key is 1 to ${POST_KEY_MAX_CHARS} characters.`,
+      );
+    }
+    byPair.set(`${kind} ${key}`, { kind, key, verified: given.verified === true });
+  }
+  const out = [...byPair.values()];
+  if (out.length > POST_KEYS_MAX) {
+    throw new CliError(
+      'USAGE',
+      `One piece carries at most ${POST_KEYS_MAX} keys (got ${out.length}).`,
+    );
+  }
+  return out;
 }
 
 const PRICE_RE = /^(0|[1-9]\d{0,12})$/;
@@ -269,6 +339,7 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
   }
 
   const searchId = toWireSearchId(normalizeSearchIds(input.searchId, 'searchId'));
+  const keys = normalizePostKeys(input.keys, 'keys');
 
   return {
     ...(title !== undefined && title.length > 0 ? { title } : {}),
@@ -284,6 +355,10 @@ export function buildPostCreateBody(input: PublishInput): PostCreateBody {
     // already reported on the search is not a fact about who answered it.
     ...(searchId !== undefined ? { searchId } : {}),
     ...(input.scanAck !== undefined ? { scanAck: input.scanAck } : {}),
+    // OMITTED WHEN NONE, never sent as `[]`: on the wire an empty array is a
+    // diff that CLEARS the stored set, and a deployment with KNOWLEDGE_KEYS off
+    // refuses any body that carries the field at all (`keys_disabled`).
+    ...(keys.length > 0 ? { keys } : {}),
   };
 }
 
@@ -415,7 +490,7 @@ export async function publishPost(
     // tier, acknowledge), not an opaque server failure.
     const gate = parseScanRejection(res.status, res.json);
     if (gate !== null) throw new ScanGateError(gate);
-    if (res.status !== 201 && res.status !== 200) throw publishFailed(res);
+    if (res.status !== 201 && res.status !== 200) throw publishFailed(res, body.keys);
 
     const parsed = ownPostSchema.safeParse(res.json);
     if (!parsed.success) {
@@ -510,6 +585,9 @@ export interface PostUpdateInput {
   resource?: ResourceCardUpdate;
   /** See PublishInput.scanAck; the edit path passes through the same gate. */
   scanAck?: string;
+  /** See PublishInput.keys. Applied server-side as a DIFF against the stored
+   *  set: omitted keeps, `[]` clears, so an empty array IS a change here. */
+  keys?: PostKeyInput[];
 }
 
 /** The exact strictObject body sent to PUT /api/posts/<id> (defined keys only). */
@@ -522,6 +600,7 @@ export interface PostUpdateBody {
   status?: PublishStatus;
   resource?: ResourceCardUpdate;
   scanAck?: string;
+  keys?: PostKeyWire[];
 }
 
 /**
@@ -581,6 +660,8 @@ export function buildPostUpdateBody(input: PostUpdateInput): PostUpdateBody {
     ...(input.priceAtomic !== undefined ? { price: input.priceAtomic } : {}),
     ...(input.status !== undefined ? { status: input.status } : {}),
     ...(input.resource !== undefined ? { resource: sanitizeCard(input.resource) } : {}),
+    // `[]` is sent as given: on an update it clears the stored set.
+    ...(input.keys !== undefined ? { keys: normalizePostKeys(input.keys, 'keys') } : {}),
   };
   // An empty PUT would burn a nonce to change nothing; the caller is expected to
   // route "no change flags" to the read path instead.
@@ -691,7 +772,7 @@ export async function updatePost(
     if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
     const gate = parseScanRejection(res.status, res.json);
     if (gate !== null) throw new ScanGateError(gate);
-    if (res.status !== 200) throw updateFailed(res);
+    if (res.status !== 200) throw updateFailed(res, body.keys);
 
     return parseOwnPost(res.json, 'update');
   }
@@ -742,7 +823,9 @@ function readAuthError(code: string | undefined, res: HttpResponse): CliError {
  * field keys (`resource.asOf`, `title`); name them in the message, because the
  * server's own message says only "validation failed".
  */
-function updateFailed(res: HttpResponse): CliError {
+function updateFailed(res: HttpResponse, keys: PostKeyWire[] | undefined): CliError {
+  const refused = keysRefusal(res, keys);
+  if (refused !== null) return refused;
   const fields = fieldErrorKeys(res.json);
   const base = serverMessage(res.json) ?? `Update failed (${res.status}).`;
   return new CliError(
@@ -756,6 +839,66 @@ function updateFailed(res: HttpResponse): CliError {
       details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
     },
   );
+}
+
+/**
+ * The two 400s a body carrying `keys` can draw, named so the operator is not
+ * reading a zod complaint after the wallet has signed. Neither is retried.
+ *
+ *  - `keys_disabled`: the deployment has KNOWLEDGE_KEYS off. The body is fine;
+ *    the shelf is not ready for it.
+ *  - a verified-holder collision, under `fieldErrors.keys`: the server names
+ *    the KIND and the holder's post id (a published holder; a draft holder is
+ *    private and comes back as "another piece"), never the key itself, because
+ *    the request may carry several of that kind. The keys this write sent are
+ *    in hand, so the message names the verified ones of that kind: with one it
+ *    is exact, with several it lists them.
+ */
+function keysRefusal(res: HttpResponse, keys: PostKeyWire[] | undefined): CliError | null {
+  if (res.status !== 400 || keys === undefined || keys.length === 0) return null;
+  const details = { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) };
+  if (bodyErrorCode(res.json) === 'keys_disabled') {
+    return new CliError(
+      'PUBLISH_FAILED',
+      'This deployment has knowledge keys off (keys_disabled), so a piece carrying `keys` is refused.',
+      {
+        fix: 'Publish without --key, or turn KNOWLEDGE_KEYS on for the shelf and redeploy.',
+        details,
+      },
+    );
+  }
+  const complaint = keysFieldError(res.json);
+  if (complaint === null || !/already verified/i.test(complaint)) return null;
+  const kind = /^(\w+) key is already verified/.exec(complaint)?.[1];
+  const holder = /on post ([^\s;]+)/.exec(complaint)?.[1];
+  const named = keys
+    .filter((k) => k.verified && (kind === undefined || k.kind === kind))
+    .map((k) => `\`${k.kind} ${k.key}\``);
+  const what = named.length > 0 ? named.join(', ') : 'A verified key on this piece';
+  const where = holder !== undefined ? `\`${holder}\`` : 'another piece';
+  return new CliError(
+    'PUBLISH_FAILED',
+    `${what} is already verified on ${where}; publish it unverified.`,
+    {
+      fix: 'Publish the key unverified (`--key` never claims verified; the close rule does), or wait until outcomes demote that piece.',
+      details,
+    },
+  );
+}
+
+/** The first message under `error.details.fieldErrors.keys`, when the server sent one. */
+function keysFieldError(json: unknown): string | null {
+  if (typeof json !== 'object' || json === null) return null;
+  const err = (json as { error?: unknown }).error;
+  if (typeof err !== 'object' || err === null) return null;
+  const details = (err as { details?: unknown }).details;
+  if (typeof details !== 'object' || details === null) return null;
+  const fieldErrors = (details as { fieldErrors?: unknown }).fieldErrors;
+  if (typeof fieldErrors !== 'object' || fieldErrors === null) return null;
+  const keys = (fieldErrors as { keys?: unknown }).keys;
+  if (!Array.isArray(keys)) return null;
+  const first = keys.find((m) => typeof m === 'string');
+  return typeof first === 'string' ? first : null;
 }
 
 /** The dotted keys of `error.details.fieldErrors`, when the server sent any. */
@@ -818,7 +961,9 @@ function authError(code: string | undefined, res: HttpResponse): CliError {
 }
 
 /** Any non-recoverable non-2xx after approval is a write failure (exit 4). */
-function publishFailed(res: HttpResponse): CliError {
+function publishFailed(res: HttpResponse, keys: PostKeyWire[] | undefined): CliError {
+  const refused = keysRefusal(res, keys);
+  if (refused !== null) return refused;
   const message = serverMessage(res.json);
   // A 400 naming searchId against a post-create that predates the array is a
   // rollout mismatch, not a bad id, and it lands after the signature, where

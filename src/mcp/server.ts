@@ -175,6 +175,12 @@ const publishInput = {
   temporalMode: z.string().optional().describe('snapshot | maintained | evergreen'),
   provenance: z.string().optional().describe('Provenance summary (card)'),
   methodology: z.string().optional().describe('Methodology summary (card)'),
+  key: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'Exact-match keys this piece answers by-key lookups on, each `<kind>=<value>` with kind fingerprint | package_version | command_head | repo (max 32; needs KNOWLEDGE_KEYS on the shelf)',
+    ),
 } satisfies Record<keyof PublishArgs, z.ZodTypeAny>;
 
 const editInput = {
@@ -459,6 +465,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
             ...(args.temporalMode !== undefined ? { temporalMode: args.temporalMode } : {}),
             ...(args.provenance !== undefined ? { provenance: args.provenance } : {}),
             ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
+            ...(args.key !== undefined ? { key: args.key } : {}),
           },
           ctx,
           { ...deps.publish, searchIdLabel: 'searchId' },

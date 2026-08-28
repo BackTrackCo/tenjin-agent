@@ -944,6 +944,51 @@ describe('runPublish — publish <file> --search-id', () => {
  * thread, not one query of it (#167). The siblings used to be closed as
  * `regenerated`, which reads as failures of a loop that actually converted.
  */
+describe('runPublish — publish <file> --key', () => {
+  it('sends each key on the body, unverified, split on the first `=` only', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), {
+        mode: 'auto',
+        key: ['fingerprint=sig_v1:0f3a9c1d2b4e5f60', 'repo=github.com/a/b?ref=main'],
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.keys).toEqual([
+      { kind: 'fingerprint', key: 'sig_v1:0f3a9c1d2b4e5f60', verified: false },
+      { kind: 'repo', key: 'github.com/a/b?ref=main', verified: false },
+    ]);
+  });
+
+  it('omits keys from the body when the flag was not passed', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()).not.toHaveProperty('keys');
+  });
+
+  it('refuses a bad kind or a bare value at the edge, before anything is signed', async () => {
+    const file = await writeDoc(CLEAN);
+    for (const key of ['errno=ENOENT', 'sig_v1:abc', '=x']) {
+      const { fetch, calls } = stubServer();
+      const { provider, signCount } = spyProvider();
+      await expect(
+        runPublish(
+          baseArgs(file, { mode: 'auto', key: [key] }),
+          makeCtx(),
+          hermetic({ fetchImpl: fetch, provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'USAGE' });
+      expect(calls).toEqual([]);
+      expect(signCount()).toBe(0);
+    }
+  });
+});
+
 describe('runPublish — a piece that answers a whole thread', () => {
   const A = '0197bbbb-cccc-7ddd-8eee-aaaaaaaaaaaa';
   const B = '0197bbbb-cccc-7ddd-8eee-bbbbbbbbbbbb';

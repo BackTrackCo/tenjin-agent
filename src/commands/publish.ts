@@ -26,6 +26,10 @@ import {
   EXCERPT_MAX_LENGTH,
   PUBLISH_STATUSES,
   type PublishInput,
+  type PostKeyInput,
+  type PostKeyKind,
+  POST_KEY_KINDS,
+  normalizePostKeys,
   type PublishStatus,
 } from '../lib/posts-api';
 import {
@@ -80,6 +84,14 @@ export interface PublishArgs {
   temporalMode?: string;
   provenance?: string;
   methodology?: string;
+  /**
+   * Exact-match keys this piece answers resolve-by-key lookups on, each spelled
+   * `<kind>=<value>` (`fingerprint=sig_v1:…`, `package_version=zod@4.1.0`,
+   * `command_head=pnpm`, `repo=owner/name`). Repeatable, up to 32. Always sent
+   * unverified: `verified` is the close rule's claim (two independent fixes),
+   * not a flag a hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
+   */
+  key?: string[];
 }
 
 export interface PublishDeps {
@@ -117,6 +129,9 @@ export async function runPublish(
   // and publish unconfirmed. Mirrors install's --publish-mode edge check.
   if (args.mode !== undefined) parsePublishModeFlag(args.mode, '--mode');
   const searchIds = normalizeSearchIds(args.searchId, deps.searchIdLabel ?? '--search-id');
+  // Parsed and bounded at the edge too (USAGE, exit 2): a bad kind must fail
+  // before the wallet signs, not as a 400 collected after it.
+  const keys = parseKeyFlags(args.key);
 
   // Resolved FIRST because team mode changes what the rest of this function
   // does, not just where the POST goes.
@@ -334,6 +349,9 @@ export async function runPublish(
     // no command promotes a draft, so reaching a public piece means a second
     // publish carrying the same id — with one of them possibly never shipping.
     ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
+    // Keys ride on a draft too: a draft's keys are private to its author and
+    // resolve never returns a draft, so nothing is claimed early by sending them.
+    ...(keys.length > 0 ? { keys } : {}),
   };
 
   const client = {
@@ -395,6 +413,27 @@ export async function runPublish(
  * the whole publish, after the signature. Ordinary, with a 50-entry store against
  * a 90-day sweep. A warning: an id recorded elsewhere is absent here, valid there.
  */
+/**
+ * `--key <kind>=<value>`, split on the FIRST `=` only: a fingerprint key is
+ * `sig_v1:<hash>` and a repo key may carry `=` in a query string, so only the
+ * kind is ever read off the left. Kind and bounds are checked by
+ * {@link normalizePostKeys}, the same function the request builder runs.
+ */
+export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
+  if (flags === undefined || flags.length === 0) return [];
+  const parsed: PostKeyInput[] = [];
+  for (const flag of flags) {
+    const eq = flag.indexOf('=');
+    if (eq <= 0) {
+      throw new CliError('USAGE', `Invalid --key: ${JSON.stringify(flag)}`, {
+        fix: `Spell a key as <kind>=<value>, with kind one of ${POST_KEY_KINDS.join(', ')}.`,
+      });
+    }
+    parsed.push({ kind: flag.slice(0, eq) as PostKeyKind, key: flag.slice(eq + 1) });
+  }
+  return normalizePostKeys(parsed, '--key');
+}
+
 function warnUnrecorded(
   ctx: CommandContext,
   searchIds: string[],

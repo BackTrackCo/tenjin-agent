@@ -449,6 +449,150 @@ function ok200(body: Record<string, unknown>, status = 200): Response {
   });
 }
 
+/**
+ * Keys (tenjin-agent#212, tenjin#774): a top-level field, not a card field,
+ * because a mechanical pairing carries keys and no card. Bounded before the
+ * wallet touch, spelled out on the wire, and the two 400s only a body carrying
+ * keys can draw are named rather than left as a zod complaint after the
+ * signature.
+ */
+describe('keys on the write body', () => {
+  const KEY = 'sig_v1:0f3a9c1d2b4e5f60';
+
+  it('emits each key with verified spelled out, last occurrence deciding', () => {
+    const body = buildPostCreateBody({
+      status: 'published',
+      title: 'T',
+      bodyMd: 'B',
+      keys: [
+        { kind: 'fingerprint', key: `  ${KEY}  ` },
+        { kind: 'command_head', key: 'pnpm', verified: true },
+        { kind: 'fingerprint', key: KEY, verified: true },
+      ],
+    });
+    expect(body.keys).toEqual([
+      { kind: 'fingerprint', key: KEY, verified: true },
+      { kind: 'command_head', key: 'pnpm', verified: true },
+    ]);
+  });
+
+  it('omits the field when no key is named, so a keys-off shelf never sees it', () => {
+    const none = buildPostCreateBody({ status: 'published', title: 'T', bodyMd: 'B' });
+    expect('keys' in none).toBe(false);
+    const empty = buildPostCreateBody({ status: 'published', title: 'T', bodyMd: 'B', keys: [] });
+    expect('keys' in empty).toBe(false);
+  });
+
+  it('sends [] on an update as given: there it clears the stored set', () => {
+    expect(buildPostUpdateBody({ keys: [] }).keys).toEqual([]);
+  });
+
+  it('refuses a kind outside the registry, an empty or over-long key, and more than 32', () => {
+    const base = { status: 'published' as const, title: 'T', bodyMd: 'B' };
+    expect(() =>
+      buildPostCreateBody({ ...base, keys: [{ kind: 'errno' as 'repo', key: 'ENOENT' }] }),
+    ).toThrow(/Invalid keys kind/);
+    expect(() => buildPostCreateBody({ ...base, keys: [{ kind: 'repo', key: '   ' }] })).toThrow(
+      /1 to 200 characters/,
+    );
+    expect(() =>
+      buildPostCreateBody({ ...base, keys: [{ kind: 'repo', key: 'x'.repeat(201) }] }),
+    ).toThrow(/1 to 200 characters/);
+    expect(() =>
+      buildPostCreateBody({
+        ...base,
+        keys: Array.from({ length: 33 }, (_, i) => ({ kind: 'repo' as const, key: `r/${i}` })),
+      }),
+    ).toThrow(/at most 32 keys/);
+  });
+
+  it('names a keys-off deployment on the 400 it sends, and does not retry', async () => {
+    const { fetch, calls } = capturingFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'keys_disabled',
+              message:
+                'knowledge keys are not enabled on this deployment; drop `keys` from the body',
+            },
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    await expect(
+      publishPost(
+        { status: 'published', title: 'T', bodyMd: 'B', keys: [{ kind: 'fingerprint', key: KEY }] },
+        fakeAuth().auth,
+        { ...OPTS, fetchImpl: fetch },
+      ),
+    ).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+      message: expect.stringContaining('keys_disabled'),
+      fix: expect.stringContaining('KNOWLEDGE_KEYS'),
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('names the key and the holder when a verified key is already taken, and does not retry', async () => {
+    const { fetch, calls } = capturingFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'validation_failed',
+              message: 'Invalid request body',
+              details: {
+                formErrors: [],
+                fieldErrors: {
+                  keys: [
+                    'fingerprint key is already verified on post 0197aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee; publish it unverified, or wait until outcomes demote that piece',
+                  ],
+                },
+              },
+            },
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    await expect(
+      publishPost(
+        {
+          status: 'published',
+          title: 'T',
+          bodyMd: 'B',
+          keys: [
+            { kind: 'fingerprint', key: KEY, verified: true },
+            { kind: 'command_head', key: 'pnpm', verified: true },
+          ],
+        },
+        fakeAuth().auth,
+        { ...OPTS, fetchImpl: fetch },
+      ),
+    ).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+      message: `\`fingerprint ${KEY}\` is already verified on \`0197aaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee\`; publish it unverified.`,
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('leaves a keys-less 400 on the ordinary path', async () => {
+    const { fetch } = capturingFetch(
+      () =>
+        new Response(JSON.stringify({ error: { code: 'keys_disabled', message: 'nope' } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+    );
+    await expect(
+      publishPost({ status: 'published', title: 'T', bodyMd: 'B' }, fakeAuth().auth, {
+        ...OPTS,
+        fetchImpl: fetch,
+      }),
+    ).rejects.toMatchObject({ code: 'PUBLISH_FAILED', message: 'nope' });
+  });
+});
+
 describe('buildPostUpdateBody — bounds', () => {
   it('emits only the defined keys, price converted from the atomic input', () => {
     expect(

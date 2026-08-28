@@ -206,25 +206,28 @@ Reports how a search ended.
 
 Publishes Markdown with optional metadata and a local safety scan. Hard blocks cannot be bypassed.
 
-| Flag                       | Effect                                                                   |
-| -------------------------- | ------------------------------------------------------------------------ |
-| `--search-id <uuid>`       | Link the piece to the search it answers. Repeatable, up to 10 per piece. |
-| `--draft`                  | Save privately instead of publishing.                                    |
-| `--price <usd>`            | Set the post price.                                                      |
-| `--excerpt <text>`         | Public preview.                                                          |
-| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.                           |
-| `--yes`                    | Clear warning findings and the review confirmation.                      |
-| `--question <text>`        | Question this piece answers. Repeatable.                                 |
-| `--task <text>`            | Task this piece supports. Repeatable.                                    |
-| `--scope <text>`           | What the piece covers.                                                   |
-| `--exclusions <text>`      | What it does not cover.                                                  |
-| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                                      |
-| `--as-of <time>`           | When evidence was gathered.                                              |
-| `--valid-until <time>`     | When the answer expires.                                                 |
-| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                                       |
-| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.                                |
-| `--provenance <text>`      | How evidence was obtained.                                               |
-| `--methodology <text>`     | How it was established.                                                  |
+| Flag                       | Effect                                                                         |
+| -------------------------- | ------------------------------------------------------------------------------ |
+| `--search-id <uuid>`       | Link the piece to the search it answers. Repeatable, up to 10 per piece.       |
+| `--draft`                  | Save privately instead of publishing.                                          |
+| `--price <usd>`            | Set the post price.                                                            |
+| `--excerpt <text>`         | Public preview.                                                                |
+| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.                                 |
+| `--yes`                    | Clear warning findings and the review confirmation.                            |
+| `--question <text>`        | Question this piece answers. Repeatable.                                       |
+| `--task <text>`            | Task this piece supports. Repeatable.                                          |
+| `--scope <text>`           | What the piece covers.                                                         |
+| `--exclusions <text>`      | What it does not cover.                                                        |
+| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                                            |
+| `--as-of <time>`           | When evidence was gathered.                                                    |
+| `--valid-until <time>`     | When the answer expires.                                                       |
+| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                                             |
+| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.                                      |
+| `--provenance <text>`      | How evidence was obtained.                                                     |
+| `--methodology <text>`     | How it was established.                                                        |
+| `--key <kind=value>`       | An exact-match key this piece answers by-key lookups on. Repeatable, up to 32. |
+
+`--key` names a key `POST /api/keys/resolve` answers on: `fingerprint=sig_v1:<hash>` (a failure signature), `package_version=<name@version>`, `command_head=<head>` or `repo=<owner/name>`, split on the first `=` only. It is a top-level post field, not a card field, so a piece may carry keys and no card. Every key goes out unverified: `verified` is the close rule's claim, made when two independent fixes agreed, and never a flag a hand publish asserts. A shelf with `KNOWLEDGE_KEYS` off refuses any body carrying keys (`keys_disabled`, exit 4, no retry, named as such), and a verified key another published piece already holds comes back as "`<kind> <key>` is already verified on `<id>`; publish it unverified" — also no retry. `tenjin edit` does not take `--key` yet.
 
 On the `--json` envelope, every named search reports under `data.searches`, one entry per id. `data.search` repeats that entry when exactly one id was named and is absent otherwise, so a caller reading only `data.search` sees nothing after a two-id publish: read `data.searches`.
 
