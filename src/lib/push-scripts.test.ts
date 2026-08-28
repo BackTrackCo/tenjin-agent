@@ -2,17 +2,19 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { STATE_DB_FILE, STORE_SQL, openStore } from './state-store';
+import { STATE_DB_FILE, STORE_SQL, openStore, projectId } from './state-store';
 import { loadSearches, recordSearch, type StoredSearch } from './search-store';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,
   PRIMER_TEXT,
+  STOP_SYNC_FALLBACK_LINE,
+  SYNC_CLAIM_KEY,
   dispatchHookScript,
   sessionPrimerHookScript,
   stopHookScript,
@@ -2999,5 +3001,191 @@ describe('the state store the CLI and the scripts each carry', () => {
       expect(source).not.toContain("'capture-asked-'");
       expect(source).not.toContain('LEDGER_TAIL_BYTES');
     }
+  });
+});
+
+/**
+ * The automatic team-shelf sync (docs/command-reference.md, "Automatic sync"):
+ * the Stop hook spawns `node <cli> sync` detached when this project has a
+ * closed code-scoped pairing the shelf has not seen, behind a machine-wide
+ * claim row. The CLI here is a stub that records its argv, so the assertion is
+ * the claim row plus the stub's marker file — never a real publish.
+ */
+describe('automatic sync (Stop)', () => {
+  // A real directory: the child is spawned with the session's cwd, and a cwd
+  // that does not exist is a spawn error the hook swallows (no sync, no crash).
+  let cwd = '';
+  let stopInput = '';
+  beforeEach(async () => {
+    cwd = join(scriptDir, 'project-a');
+    await mkdir(cwd);
+    stopInput = JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd });
+  });
+
+  /** A stub CLI: appends its argv and cwd to a marker file, then exits. */
+  async function stubCli(): Promise<{ cliPath: string; marker: string }> {
+    const marker = join(scriptDir, 'sync-calls.log');
+    const cliPath = join(scriptDir, 'stub-cli.mjs');
+    await writeFile(
+      cliPath,
+      `import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }) + '\\n');
+`,
+    );
+    return { cliPath, marker };
+  }
+
+  async function seedPairing(
+    over: {
+      scope?: string;
+      status?: string;
+      syncedAt?: number | null;
+      project?: string | null;
+    } = {},
+  ): Promise<void> {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    const uid = `pair-${Math.random().toString(36).slice(2)}`;
+    const at = Date.now() - 60_000;
+    store.run(STORE_SQL.insertPairing, [
+      uid,
+      at,
+      SESSION,
+      over.project === undefined ? projectId(cwd) : over.project,
+      'machine-a',
+      'sig_v1',
+      'abc123',
+      'coarse1',
+      'pnpm',
+      'pnpm test',
+      'Error: ENOENT',
+      JSON.stringify(['widget.ts']),
+      JSON.stringify({}),
+      over.scope ?? 'code',
+    ]);
+    store.run(
+      'UPDATE pairings SET status = ?, closes = 1, closed_at = ?, synced_at = ? WHERE uid = ?',
+      [over.status ?? 'unverified', at + 1000, over.syncedAt ?? null, uid],
+    );
+    store.close();
+  }
+
+  async function markerLines(marker: string): Promise<string[]> {
+    // The child is detached; give it a moment to write before reading.
+    for (let i = 0; i < 40; i += 1) {
+      if (existsSync(marker)) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (!existsSync(marker)) return [];
+    return (await readFile(marker, 'utf8')).split('\n').filter((l) => l.length > 0);
+  }
+
+  async function teamOn(): Promise<void> {
+    await writeConfig({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET });
+  }
+
+  it('spawns the baked CLI with `sync` in the session cwd, and takes the claim row', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    const run = await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(run.code).toBe(0);
+    const claim = sessionState('', SYNC_CLAIM_KEY) as { at?: number } | null;
+    expect(claim).not.toBeNull();
+    expect(typeof claim?.at).toBe('number');
+    const calls = await markerLines(marker);
+    expect(calls).toHaveLength(1);
+    const call = JSON.parse(calls[0] ?? '{}') as { argv: string[]; cwd: string };
+    expect(call.argv).toEqual(['sync']);
+    // macOS reports the tmpdir through /private; compare resolved paths.
+    expect(realpathSync(call.cwd)).toBe(realpathSync(cwd));
+  });
+
+  it('runs one sync between Stops inside the claim TTL, not one per Stop', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(await markerLines(marker)).toHaveLength(1);
+  });
+
+  it('never spawns without a baked CLI path', async () => {
+    await teamOn();
+    await seedPairing();
+    const run = await runScript(stopHookScript(dataDir, null), stopInput);
+    expect(run.code).toBe(0);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+  });
+
+  it('never spawns in public mode, even with unsynced code-scoped rows', async () => {
+    await writeConfig({});
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+    expect(await markerLines(marker)).toHaveLength(0);
+  });
+
+  it('spawns nothing for rows that are synced, user-scoped, or another project', async () => {
+    await teamOn();
+    await seedPairing({ syncedAt: Date.now() });
+    await seedPairing({ scope: 'user' });
+    await seedPairing({ scope: 'ambiguous' });
+    await seedPairing({ project: projectId('/tmp/other') });
+    const { cliPath, marker } = await stubCli();
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+    expect(await markerLines(marker)).toHaveLength(0);
+  });
+
+  it('prints the by-hand fallback on the ask only when the last sync could not sign', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { capture: 'block' },
+    });
+    await seedSearch();
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    const event = (at: number, data: Record<string, unknown>) =>
+      store.run(STORE_SQL.insertEvent, [
+        `ev-${at}`,
+        at,
+        '',
+        projectId(cwd),
+        'machine-a',
+        'sync',
+        null,
+        null,
+        null,
+        JSON.stringify(data),
+      ]);
+    event(Date.now() - 2000, { code: 'USAGE', synced: 0, verified: 0, held: 0 });
+    store.close();
+
+    const failed = await runScript(stopHookScript(dataDir, null), stopInput);
+    const reason = (JSON.parse(failed.stdout) as { reason: string }).reason;
+    expect(reason).toContain(STOP_SYNC_FALLBACK_LINE.replace('<code>', 'USAGE'));
+
+    // A later run that finished (no code) silences the line.
+    const again = await openStore(dataDir);
+    if (again === null) throw new Error('no store');
+    again.run(STORE_SQL.insertEvent, [
+      'ev-ok',
+      Date.now(),
+      '',
+      projectId(cwd),
+      'machine-a',
+      'sync',
+      null,
+      null,
+      null,
+      JSON.stringify({ synced: 1, verified: 0, held: 0 }),
+    ]);
+    again.run(STORE_SQL.deleteState, [SESSION, 'capture_asked']);
+    again.close();
+    const ok = await runScript(stopHookScript(dataDir, null), stopInput);
+    expect((JSON.parse(ok.stdout) as { reason: string }).reason).not.toContain('could not sign');
   });
 });
