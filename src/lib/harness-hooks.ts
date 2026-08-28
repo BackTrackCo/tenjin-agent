@@ -1,10 +1,11 @@
 import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir } from './paths';
 import {
   DISPATCH_HOOK_FILE,
+  HOOK_SCRIPT_MARKER,
   SESSIONSTART_HOOK_FILE,
   STOP_HOOK_FILE,
   WEBSEARCH_HOOK_FILE,
@@ -40,13 +41,9 @@ import type { WebSearchMode } from './config';
  *    is no argument, no config key, and no call path that lets a caller point a
  *    hook at some other program, and the scripts themselves are generated from
  *    constants in lib/hook-scripts.ts rather than from anything on the wire.
- *  - Almost no hook can block, deny, or modify a tool call. Every PreToolUse
- *    entry but one emits `additionalContext` and never `permissionDecision`, so
- *    the tool always proceeds; the Stop and SessionStart hooks only ever add a
- *    line. The one exception is the push experiment's abort-and-answer arm
- *    (docs/command-reference.md#push-experimental): on a strong, free hit it may `permissionDecision: 'deny'`
- *    the WebSearch/WebFetch call it fired on and hand the model the finding in
- *    its place, and only that arm ever does.
+ *  - No hook can block, deny, or modify a tool call. Every PreToolUse entry
+ *    emits `additionalContext` and never `permissionDecision`, so the tool
+ *    always proceeds; the Stop and SessionStart hooks only ever add a line.
  *
  * OWNERSHIP IS BY PATH, PER EVENT. An entry is ours when its command mentions one
  * of our script filenames, and each script owns AT MOST ONE ENTRY PER EVENT IT IS
@@ -314,6 +311,34 @@ function ownsEntry(entry: unknown, scriptFile: string): boolean {
   );
 }
 
+/**
+ * Is this entry ours AND already pointed at `dataDir`? The second half is what
+ * {@link refreshHooks} needs and {@link wireSearchHooks} must not have.
+ *
+ * The filename match above is deliberately blind to which directory an entry
+ * names, so the writer recognizes a moved data dir and rewrites it rather than
+ * duplicating it. A refresh runs ONCE PER DETECTED PROFILE over the same
+ * settings file, so that blindness there means every pass claims every other
+ * pass's entries: two profiles leave the last one in map order owning every
+ * event, and a shelf profile with `push: on` would widen the default profile's
+ * WebSearch matcher. Matching on the entry's OWN data dir keeps each pass to the
+ * entries it wrote; a profile whose entry names a dir nobody detected simply has
+ * no pass to converge it, which is the same answer a refresh gives any surface
+ * that is not there.
+ */
+function ownsEntryUnder(entry: unknown, scriptFile: string, dataDir: string): boolean {
+  if (!ownsEntry(entry, scriptFile)) return false;
+  const handlers = (entry as { hooks: unknown[] }).hooks;
+  const want = resolve(dataDir);
+  return handlers.some((h) => {
+    if (!isPlainObject(h) || typeof h.command !== 'string') return false;
+    const owner = hookOwnerOf(h.command);
+    return (
+      owner !== null && basename(owner.script) === scriptFile && resolve(owner.dataDir) === want
+    );
+  });
+}
+
 interface HookSpec {
   event: HookEvent;
   scriptFile: string;
@@ -493,8 +518,11 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   const scriptsDir = hooksDir(dataDir);
   const plan = specs(dataDir, { push });
 
-  const found = await inspectSettings(homeDir, scriptsDir, mode);
-  if ('result' in found) return found.result;
+  const found = await inspectSettings(homeDir);
+  if ('refusal' in found) {
+    const { path, reason, message } = found.refusal;
+    return refuse(path, scriptsDir, mode, reason, message);
+  }
   const { path, raw, settings, hooks } = found;
 
   const nextHooks: Record<string, unknown> = { ...hooks };
@@ -681,6 +709,47 @@ async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<strin
   return written;
 }
 
+/**
+ * {@link writeScripts} for the UNATTENDED writer: rewrite only the scripts that
+ * are already on disk AND already ours.
+ *
+ * `install` is a command a human ran, and it writes to paths this CLI chose. A
+ * refresh is spawned by `update` and rewrites paths it read back out of the
+ * harness's settings.json, which anything on the machine can have written. A
+ * command of the right SHAPE (`node <dir>/hooks/tenjin-stop.mjs`) is therefore
+ * not evidence that the file at the other end is a Tenjin hook, so ownership is
+ * proved from the BYTES instead: an unreadable file, or one without the
+ * generated header, is left exactly as it is.
+ *
+ * `lstat` rather than `stat`, so a symlink standing where a script should be is
+ * skipped rather than written through.
+ *
+ * WHAT BOUNDS THIS IS THE MARKER, NOT THE PATH, and the distinction is worth
+ * stating because a path check cannot do the job. `<dataDir>/hooks` may resolve
+ * through symlinks well above it — `/var` is one on macOS, and a home directory
+ * on another volume is another — so "the resolved leaf sits under the resolved
+ * hooks dir" is true even when the whole directory is a link, and demanding the
+ * resolved path EQUAL the literal one would refuse the ordinary machines above.
+ * The marker is what actually holds: the destination must already contain a
+ * header this CLI wrote, so the worst a redirected path reaches is a Tenjin hook
+ * script, which is the file a refresh exists to rewrite.
+ *
+ * The one component this writer does own is `hooks` itself; see
+ * {@link refreshHooks}, which refuses when that is not a real directory.
+ */
+async function writeOwnedScripts(plan: HookSpec[], scriptsDir: string): Promise<string[]> {
+  const owned: HookSpec[] = [];
+  for (const spec of plan) {
+    const target = join(scriptsDir, spec.scriptFile);
+    const entry = await lstat(target).catch(() => null);
+    if (entry === null || !entry.isFile()) continue;
+    const onDisk = await readFile(target, 'utf8').catch(() => null);
+    if (onDisk === null || !onDisk.includes(HOOK_SCRIPT_MARKER)) continue;
+    owned.push(spec);
+  }
+  return writeScripts(owned, scriptsDir);
+}
+
 function refuse(
   path: string,
   scriptsDir: string,
@@ -780,17 +849,26 @@ interface SettingsInspection {
   hooks: Record<string, unknown>;
 }
 
+/** Why the settings file cannot be written, in the terms {@link refuse} renders. */
+interface SettingsRefusal {
+  reason: HooksSkipReason;
+  message: string;
+  path: string;
+}
+
 /**
  * Resolve and read the settings file. Every refusal lives here, so the shape
  * checks and the write agree by construction. Symlinks are resolved before the
  * write for the same reason lib/harness-permissions.ts resolves them: committing
  * with a rename over a dotfiles-managed link would sever it.
+ *
+ * Returns the refusal as DATA rather than as a rendered `HooksResult`, because
+ * two writers now share it and they report differently: `wireSearchHooks` owes
+ * the operator a mode and a scripts dir, `refreshHooks` owes a warning line.
  */
 async function inspectSettings(
   homeDir: string,
-  scriptsDir: string,
-  mode: WebSearchMode,
-): Promise<SettingsInspection | { result: HooksResult }> {
+): Promise<SettingsInspection | { refusal: SettingsRefusal }> {
   const declaredPath = claudeSettingsPath(homeDir);
   const entry = await lstat(declaredPath).catch(() => null);
 
@@ -800,13 +878,11 @@ async function inspectSettings(
       path = await realpath(declaredPath);
     } catch (err) {
       return {
-        result: refuse(
-          declaredPath,
-          scriptsDir,
-          mode,
-          'unresolvable',
-          `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
-        ),
+        refusal: {
+          reason: 'unresolvable',
+          path: declaredPath,
+          message: `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
+        },
       };
     }
   }
@@ -818,13 +894,11 @@ async function inspectSettings(
       raw = await readFile(path, 'utf8');
     } catch (err) {
       return {
-        result: refuse(
+        refusal: {
+          reason: 'unreadable',
           path,
-          scriptsDir,
-          mode,
-          'unreadable',
-          `${path} could not be read (${(err as Error).message}); no hooks were registered.`,
-        ),
+          message: `${path} could not be read (${(err as Error).message}); no hooks were registered.`,
+        },
       };
     }
     let parsed: unknown;
@@ -832,24 +906,20 @@ async function inspectSettings(
       parsed = JSON.parse(raw);
     } catch (err) {
       return {
-        result: refuse(
+        refusal: {
+          reason: 'unparsable',
           path,
-          scriptsDir,
-          mode,
-          'unparsable',
-          `${path} is not valid JSON (${(err as Error).message}); it was left exactly as it is.`,
-        ),
+          message: `${path} is not valid JSON (${(err as Error).message}); it was left exactly as it is.`,
+        },
       };
     }
     if (!isPlainObject(parsed)) {
       return {
-        result: refuse(
+        refusal: {
+          reason: 'unexpected-shape',
           path,
-          scriptsDir,
-          mode,
-          'unexpected-shape',
-          `${path} is not a JSON object; it was left exactly as it is.`,
-        ),
+          message: `${path} is not a JSON object; it was left exactly as it is.`,
+        },
       };
     }
     settings = parsed;
@@ -858,14 +928,266 @@ async function inspectSettings(
   const hooksValue = settings.hooks;
   if (hooksValue !== undefined && !isPlainObject(hooksValue)) {
     return {
-      result: refuse(
+      refusal: {
+        reason: 'unexpected-shape',
         path,
-        scriptsDir,
-        mode,
-        'unexpected-shape',
-        `${path} has a "hooks" key that is not an object; it was left exactly as it is.`,
-      ),
+        message: `${path} has a "hooks" key that is not an object; it was left exactly as it is.`,
+      },
     };
   }
   return { path, raw, settings, hooks: hooksValue ?? {} };
+}
+
+/**
+ * A Tenjin data dir whose generated hook scripts this machine's harness is
+ * registered to run.
+ *
+ * There can be more than one. `install` bakes its data dir into the scripts it
+ * generates and into the entry that names them, so a machine that ran
+ * `TENJIN_DATA_DIR=~/.tenjin-shelf tenjin install` has hooks belonging to the
+ * shelf profile while a bare `tenjin` still resolves `~/.tenjin`. That split is
+ * a deliberate, supported setup, and it is invisible until something reads the
+ * entries back.
+ */
+export interface HookOwner {
+  /** The data dir the scripts live under: two levels up from the script path. */
+  dataDir: string;
+  /** The registered script paths under it, deduped, in the order first seen. */
+  scripts: string[];
+}
+
+/** Our generated hook scripts are all `tenjin-<something>.mjs`, under `hooks/`. */
+const TENJIN_HOOK_SCRIPT = /^tenjin-[A-Za-z0-9._-]+\.mjs$/;
+
+/**
+ * Undo {@link quoteForShell}. A settings entry's command is written by this
+ * module and nowhere else, so the two forms it can take are the two that
+ * function emits; anything else is read as a bare token and then rejected by the
+ * shape checks in {@link hookOwnerOf}.
+ */
+function unquoteFromShell(token: string): string {
+  if (token.length >= 2 && token.startsWith(`'`) && token.endsWith(`'`)) {
+    return token.slice(1, -1).replaceAll(`'\\''`, `'`);
+  }
+  if (token.length >= 2 && token.startsWith('"') && token.endsWith('"')) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+/**
+ * The data dir behind one settings command, or null when the command is not one
+ * of ours.
+ *
+ * FOUR shape checks, all required, because this answer decides which profile an
+ * unattended `update` re-materializes: the command must be `node <path>`, the
+ * path must be ABSOLUTE, the basename must be one of our generated script names,
+ * and the parent directory must be `hooks`. The last is what makes
+ * `dirname(dirname(path))` the data dir rather than a guess — {@link hooksDir} is
+ * `join(dataDir, 'hooks')`, so any other parent means the path did not come from
+ * this CLI and its grandparent is nothing in particular.
+ *
+ * Absoluteness is its own check because this writer never emits a relative
+ * command, while a hand-edited `node hooks/tenjin-stop.mjs` would answer with the
+ * data dir `.` and be resolved against whatever cwd the reader happens to have —
+ * `homedir()` in the refresh child, which is not a profile anybody registered.
+ */
+function hookOwnerOf(command: string): { dataDir: string; script: string } | null {
+  if (!command.startsWith('node ')) return null;
+  const script = unquoteFromShell(command.slice('node '.length).trim());
+  if (!isAbsolute(script)) return null;
+  if (!TENJIN_HOOK_SCRIPT.test(basename(script))) return null;
+  const dir = dirname(script);
+  if (basename(dir) !== 'hooks') return null;
+  return { dataDir: dirname(dir), script };
+}
+
+/**
+ * Every profile whose hooks this machine's harness actually fires.
+ *
+ * Read-only and best-effort, like {@link countPushHookEntries}: a settings file
+ * that is missing, unreadable, not JSON, or shaped unexpectedly answers "none",
+ * never an error. `update` calls this to decide what to re-materialize, and a
+ * detector that threw would turn a stray edit in someone's settings.json into a
+ * failed upgrade.
+ */
+export async function detectHookOwners(homeDir: string): Promise<HookOwner[]> {
+  let hooks: unknown;
+  try {
+    const parsed: unknown = JSON.parse(await readFile(claudeSettingsPath(homeDir), 'utf8'));
+    hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
+  } catch {
+    return [];
+  }
+  if (!isPlainObject(hooks)) return [];
+  const owners = new Map<string, HookOwner>();
+  for (const list of Object.values(hooks)) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      if (!isPlainObject(entry) || !Array.isArray(entry.hooks)) continue;
+      for (const handler of entry.hooks) {
+        if (!isPlainObject(handler) || typeof handler.command !== 'string') continue;
+        const owner = hookOwnerOf(handler.command);
+        if (owner === null) continue;
+        // Keyed on the RESOLVED dir, and the resolved dir is what a caller gets
+        // back. `ownsEntryUnder` compares resolved paths, so `/x/.tenjin`,
+        // `/x/./.tenjin` and `/x/foo/../.tenjin` are one profile there; deduping
+        // the raw strings here would make them three, each costing a spawn and a
+        // slot under `update`'s refresh cap and so able to crowd out a real one.
+        const dataDir = resolve(owner.dataDir);
+        const script = resolve(owner.script);
+        const found = owners.get(dataDir) ?? { dataDir, scripts: [] };
+        if (!found.scripts.includes(script)) found.scripts.push(script);
+        owners.set(dataDir, found);
+      }
+    }
+  }
+  return [...owners.values()];
+}
+
+/** What one {@link refreshHooks} pass did. Nothing here can be an addition. */
+export interface HookRefreshResult {
+  /** The settings file consulted; null when there is none on this machine. */
+  path: string | null;
+  scriptsDir: string;
+  /** Script bodies this run rewrote. Empty when every one was already current. */
+  scripts: string[];
+  /** Events whose entry of ours this run rewrote in place. */
+  updated: HookEvent[];
+  /** Events carrying an entry of ours that already matched. */
+  alreadyPresent: HookEvent[];
+  /** Why the settings file was left alone, when it was. */
+  warning?: string;
+}
+
+/**
+ * Bring the hook surfaces this machine ALREADY has up to this build, and add
+ * none.
+ *
+ * The difference from {@link wireSearchHooks} is the whole point: that one
+ * materializes the plan, this one converges what exists. A script the plan names
+ * but disk does not carry is left absent, and an event with no entry of ours
+ * gets none. So an unattended caller (`tenjin update`) can run it on any machine
+ * without turning an upgrade into an install.
+ *
+ * ONE PROFILE'S ENTRIES, NEVER ANOTHER'S. `update` runs this once per detected
+ * profile against the SAME settings file, so entries are matched on their own
+ * data dir as well as the script filename (see {@link ownsEntryUnder}). Without
+ * that each pass would claim every pass's entries and the last one would own
+ * every event.
+ *
+ * `push` is read from the machine's own config by the caller rather than
+ * defaulted here, because it decides the WebSearch entry's matcher: planning
+ * `push: true` on a machine with the experiment off would rewrite the existing
+ * entry to the widened `WebSearch|WebFetch` matcher and start firing the hook on
+ * a tool the operator never armed it for.
+ *
+ * `<dataDir>/hooks` must be a REAL DIRECTORY. The data dir arrives from
+ * `detectHookOwners`, which read it out of a settings file this CLI does not
+ * own, and `hooks` is the one component of that path this writer puts there
+ * itself — so a link standing in its place is the one redirection that is never
+ * a machine's own layout, as opposed to the symlinks above it that routinely
+ * are (see {@link writeOwnedScripts}). Refused rather than followed, and
+ * reported: the operator's own `tenjin install` still writes through it.
+ */
+export async function refreshHooks(opts: {
+  homeDir: string;
+  dataDir: string;
+  push: boolean;
+  platform?: string;
+}): Promise<HookRefreshResult> {
+  const { homeDir, dataDir, push, platform } = opts;
+  const scriptsDir = hooksDir(dataDir);
+
+  // Bodies first, and only for files already on disk that are OURS BY CONTENT.
+  // `scriptPlan` is the full writer set (see its own note on why bodies ignore
+  // `push`); this filter is what keeps the refresh from materializing a script
+  // the machine lacks, and from overwriting one it did not write. An absent
+  // `hooks` is nothing to refresh; one that exists but is not a directory is a
+  // redirection this writer refuses to follow (see the header).
+  const dirEntry = await lstat(scriptsDir).catch(() => null);
+  const redirected = dirEntry !== null && !dirEntry.isDirectory();
+  const scriptWarning = redirected
+    ? `${scriptsDir} is not a directory, so no hook script was rewritten. Re-run \`tenjin install\` if that path is yours.`
+    : undefined;
+  const scripts = redirected ? [] : await writeOwnedScripts(scriptPlan(dataDir), scriptsDir);
+  /** The settings half's warning wins the line; the script half's is appended. */
+  const warn = (settingsWarning?: string): { warning?: string } => {
+    const joined = [scriptWarning, settingsWarning].filter((w) => w !== undefined).join(' ');
+    return joined.length > 0 ? { warning: joined } : {};
+  };
+
+  const found = await inspectSettings(homeDir);
+  if ('refusal' in found) {
+    return {
+      path: found.refusal.path,
+      scriptsDir,
+      scripts,
+      updated: [],
+      alreadyPresent: [],
+      ...warn(found.refusal.message),
+    };
+  }
+  const { path, raw, settings, hooks } = found;
+
+  const nextHooks: Record<string, unknown> = { ...hooks };
+  const updatedEvents = new Set<HookEvent>();
+  const currentEvents = new Set<HookEvent>();
+  for (const spec of specs(dataDir, { push })) {
+    const list = nextHooks[spec.event];
+    if (!Array.isArray(list)) continue;
+    // Scoped to entries already under THIS pass's data dir (see
+    // {@link ownsEntryUnder}); the writer's filename-only match would let one
+    // profile's pass repoint another profile's entries at its own hooks dir.
+    const idx = list.findIndex((e) => ownsEntryUnder(e, spec.scriptFile, dataDir));
+    // The one branch that separates this from the writer: no entry means no
+    // entry. An install adds it; a refresh has nothing to converge.
+    if (idx === -1) continue;
+    // ONE HANDLER, deliberately, and inherited from the writer. An entry whose
+    // handlers named two data dirs would satisfy `ownsEntryUnder` for both
+    // passes and be collapsed to a single handler by whichever ran last. Nothing
+    // in this module or `wireSearchHooks` ever emits that shape, so reaching it
+    // takes a hand-merged settings file, and the answer would be the same
+    // question the declined duplicate-entry thread asked: which of the two is
+    // the entry of ours. Kept identical to the writer rather than diverged.
+    const desired = {
+      ...(spec.matcher !== undefined ? { matcher: spec.matcher } : {}),
+      hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform, spec.timeoutSeconds)],
+    };
+    if (JSON.stringify(list[idx]) === JSON.stringify(desired)) {
+      currentEvents.add(spec.event);
+      continue;
+    }
+    nextHooks[spec.event] = list.map((e, i) => (i === idx ? desired : e));
+    updatedEvents.add(spec.event);
+  }
+  const updated = HOOK_EVENTS.filter((e) => updatedEvents.has(e));
+  // An event whose other entry was rewritten reports as `updated`, matching how
+  // the writer collapses a multi-entry event by its strongest outcome.
+  const alreadyPresent = HOOK_EVENTS.filter((e) => currentEvents.has(e) && !updatedEvents.has(e));
+  if (updated.length === 0) {
+    return { path, scriptsDir, scripts, updated, alreadyPresent, ...warn() };
+  }
+
+  // ONE compare, where the writer makes two, and it covers both windows only
+  // because of an ordering this function depends on: `writeOwnedScripts` ran
+  // BEFORE `inspectSettings` read `raw`, so `raw` is already post-script-pass and
+  // a harness that wrote settings.json during that pass shows up here. Move the
+  // script write below the read and this needs the writer's second compare back.
+  const changed = async (): Promise<boolean> =>
+    (await readFile(path, 'utf8').catch(() => null)) !== raw;
+  if (await changed()) {
+    return {
+      path,
+      scriptsDir,
+      scripts,
+      updated: [],
+      alreadyPresent,
+      ...warn(
+        `${path} changed while it was being refreshed, so its hook entries were left alone. Re-run \`tenjin install\`.`,
+      ),
+    };
+  }
+  await writeFileAtomic(path, `${JSON.stringify({ ...settings, hooks: nextHooks }, null, 2)}\n`);
+  return { path, scriptsDir, scripts, updated, alreadyPresent, ...warn() };
 }

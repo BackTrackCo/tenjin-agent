@@ -9,7 +9,16 @@ import { join } from 'node:path';
 export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.TENJIN_DATA_DIR;
   if (override !== undefined && override.length > 0) return override;
-  return join(homedir(), '.tenjin');
+  return defaultDataDir();
+}
+
+/**
+ * The data dir a run with no override resolves. Split out of {@link dataDir} so
+ * a caller holding a home directory can ask whether some other profile IS the
+ * default one, without a second copy of the `.tenjin` literal.
+ */
+export function defaultDataDir(home: string = homedir()): string {
+  return join(home, '.tenjin');
 }
 
 export function configPath(dir: string = dataDir()): string {

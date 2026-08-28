@@ -202,12 +202,11 @@ const hit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
   items: [at(baseUrl, over)],
 });
 
-/** Rank 2. `judge` calls nothing strong without one to beat: with a lone
- *  candidate the margin is measured against zero and proves nothing. */
+/** Rank 2: the candidate a strong rank 1 must not drag in beside it. */
 const SECOND_RESOURCE_ID = '33333333-3333-4333-8333-333333333333';
 
-/** A filler rank 2 that shares no content word with anything asked here, so the
- *  margin is rank 1's whole score. */
+/** A filler rank 2, so the "rank 1 alone" assertions have something to be
+ *  about. */
 const FILLER = (baseUrl: string) => ({
   ...CANDIDATE,
   resourceId: SECOND_RESOURCE_ID,
@@ -218,33 +217,33 @@ const FILLER = (baseUrl: string) => ({
 });
 
 /**
- * A response the dispatch hook judges STRONG: CANDIDATE at rank 1, filler at
- * rank 2. Pair it with {@link STRONG_PROMPT}, whose content words are exactly
- * CANDIDATE's title, which puts rank 1 at overlap 1.0 and rank 2 at 0.
+ * A response the dispatch hook reads as STRONG: rank 1 carries the shelf's own
+ * verdict — `corroborated: true` and a confidence that is not 'low' — with the
+ * filler at rank 2.
  *
- * The dispatch hook only speaks on strong now (tenjin-agent#211), so every case
- * that wants to see a pointer line needs this pair rather than `hit`.
+ * The dispatch hook only speaks on strong (tenjin-agent#211), so every case that
+ * wants to see a pointer line needs this rather than `hit`.
  */
 const strongHit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
   schemaVersion: 3,
   searchId: SEARCH_ID,
   calibration: 'ok',
   matched: 2,
-  items: [at(baseUrl, over), FILLER(baseUrl)],
+  items: [at(baseUrl, { confidence: 'high', corroborated: true, ...over }), FILLER(baseUrl)],
 });
 
-/** Rank 1 shares two of the query's five content words: 0.4, over the moderate
- *  floor and under the strong one. */
-const moderateHit = (baseUrl: string) => ({
+/** The same shape with the shelf's corroboration withheld: a high-confidence,
+ *  dense-only hit, which is 'none'. */
+const weakHit = (baseUrl: string) => ({
   schemaVersion: 3,
   searchId: SEARCH_ID,
   calibration: 'ok',
   matched: 2,
-  items: [at(baseUrl, { title: 'Tailwind dark theming for print stylesheets' }), FILLER(baseUrl)],
+  items: [at(baseUrl, { confidence: 'high', corroborated: false }), FILLER(baseUrl)],
 });
 
-/** A dispatch prompt whose content words are CANDIDATE's title and nothing
- *  else, repeated past the 80-character floor a dispatch prompt has to clear. */
+/** A dispatch prompt past the 80-character floor a dispatch prompt has to
+ *  clear. */
 const STRONG_PROMPT = 'Next Tailwind dark mode tested. '.repeat(3);
 
 /** The additionalContext a run injected, or null when it stayed silent. */
@@ -422,10 +421,13 @@ describe('WebSearch hook: a hit', () => {
       schemaVersion: 3,
       view: 'decision',
       query: 'what changed in ox v0.14',
-      // The arm names itself, so the server's per-trigger use rates (`GET
-      // /api/lookups/stats`) can tell a WebSearch-hook lookup from a manual one.
+      // Every hook lookup names the arm that fired it, so the server's
+      // per-trigger use rates (`GET /api/lookups/stats`) can tell a
+      // WebSearch-hook lookup from a manual one; this one has no package to
+      // narrow on, so it sends no filter at all.
       trigger: 'research',
     });
+    expect(JSON.parse(seen)).not.toHaveProperty('filters');
     // The deprecated alias answers 410 after one release, so the hook must be off
     // it too — a hook still on the alias would go silent everywhere at once.
     expect(paths()).toEqual(['/api/search']);
@@ -2641,15 +2643,12 @@ describe('dispatch hook: it speaks only on a strong hit', () => {
               r.resource_id === null
                 ? null
                 : { resourceId: r.resource_id, title: r.title, price: r.price, url: r.url },
-            score: r.score,
-            second: r.second,
             strength: r.strength,
             confidence: r.confidence,
             corroborated: r.corroborated === null ? null : r.corroborated === 1,
             action: r.action,
             reason: r.reason ?? undefined,
             form: r.form ?? undefined,
-            deny: r.deny === 1,
             tokens: r.tokens ?? undefined,
           };
         });
@@ -2658,10 +2657,10 @@ describe('dispatch hook: it speaks only on a strong hit', () => {
     }
   }
 
-  it('says nothing on a moderate hit, and records it to the push ledger instead', async () => {
+  it('says nothing on an uncorroborated hit, and records it to the push ledger instead', async () => {
     const { baseUrl } = await serveJson((_body, base) => ({
       status: 200,
-      json: moderateHit(base),
+      json: weakHit(base),
     }));
     await writeConfig({ baseUrl });
     const run = await runScript(
@@ -2680,7 +2679,9 @@ describe('dispatch hook: it speaks only on a strong hit', () => {
       event: 'PreToolUse',
       shelf: 'public',
       searchId: SEARCH_ID,
-      strength: 'moderate',
+      strength: 'none',
+      confidence: 'high',
+      corroborated: false,
       action: 'logged',
       form: 'short',
     });
@@ -2698,8 +2699,8 @@ describe('dispatch hook: it speaks only on a strong hit', () => {
       dispatchInput({ prompt: STRONG_PROMPT }),
     );
     const lines = (injected(run) ?? '').split('\n');
-    // One pointer and the disclaimer. Rank 2 lost the margin test, so printing
-    // it beside rank 1 would let it ride in on rank 1's evidence.
+    // One pointer and the disclaimer. The verdict is rank 1's, so printing rank
+    // 2 beside it would let it ride in on rank 1's evidence.
     expect(lines).toHaveLength(2);
     expect(lines[0]).toContain(CANDIDATE.resourceId);
     expect(lines[0]).not.toContain(SECOND_RESOURCE_ID);
@@ -2721,7 +2722,7 @@ describe('dispatch hook: it speaks only on a strong hit', () => {
   it('logs the row with push off, exactly as it does with push on', async () => {
     const { baseUrl } = await serveJson((_body, base) => ({
       status: 200,
-      json: moderateHit(base),
+      json: weakHit(base),
     }));
     await writeConfig({ baseUrl, hooks: { push: 'off' } });
     const run = await runScript(
@@ -3236,17 +3237,21 @@ describe('dispatch hook: two shelves in team mode', () => {
     baseUrl: string;
     hits: () => number;
     keys: () => (string | undefined)[];
+    bodies: () => Array<Record<string, unknown>>;
     close: () => Promise<void>;
   }> {
     let hits = 0;
     let base = '';
     const keys: (string | undefined)[] = [];
+    const bodies: string[] = [];
     const s = createServer((req, res) => {
       hits += 1;
       const key = req.headers[BYPASS_HEADER];
       keys.push(Array.isArray(key) ? key.join(',') : key);
-      req.on('data', () => {});
+      let body = '';
+      req.on('data', (c) => (body += String(c)));
       req.on('end', () => {
+        bodies.push(body);
         const out = handler(base);
         res.writeHead(out.status, { 'content-type': 'application/json' });
         res.end(JSON.stringify(out.json));
@@ -3260,6 +3265,7 @@ describe('dispatch hook: two shelves in team mode', () => {
       baseUrl: base,
       hits: () => hits,
       keys: () => keys,
+      bodies: () => bodies.map((b) => JSON.parse(b) as Record<string, unknown>),
       close: () => new Promise<void>((res) => s.close(() => res())),
     };
   }
@@ -3347,7 +3353,7 @@ describe('dispatch hook: two shelves in team mode', () => {
   it('falls through past a weak team hit to a strong public one (tenjin-agent#211)', async () => {
     const pub = await secondShelf((base) => ({ status: 200, json: strongHit(base) }));
     try {
-      const team = await serveJson((_body, base) => ({ status: 200, json: moderateHit(base) }));
+      const team = await serveJson((_body, base) => ({ status: 200, json: weakHit(base) }));
       await writeConfig({
         baseUrl: team.baseUrl,
         publicShelfUrl: pub.baseUrl,
@@ -3369,10 +3375,12 @@ describe('dispatch hook: two shelves in team mode', () => {
     }
   });
 
-  it('keeps a moderate team hit when the public shelf is no better', async () => {
-    const pub = await secondShelf((base) => ({ status: 200, json: moderateHit(base) }));
+  /** Neither shelf corroborated anything, so there is nothing to show, nothing
+   *  to hand a subagent, and one row filed against the shelf that answered. */
+  it('shows nothing and caches nothing when both shelves are weak', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: weakHit(base) }));
     try {
-      const team = await serveJson((_body, base) => ({ status: 200, json: moderateHit(base) }));
+      const team = await serveJson((_body, base) => ({ status: 200, json: weakHit(base) }));
       await writeConfig({
         baseUrl: team.baseUrl,
         publicShelfUrl: pub.baseUrl,
@@ -3382,13 +3390,42 @@ describe('dispatch hook: two shelves in team mode', () => {
 
       const run = await runScript(
         dispatchHookScript(dataDir),
-        dispatchInput({ sessionId: 'mod-team', prompt: STRONG_PROMPT }),
+        dispatchInput({ sessionId: 'weak-both', prompt: STRONG_PROMPT }),
       );
 
       expect(pub.hits()).toBe(1);
       expect(run.stdout).toBe('');
-      // The SubagentStart cache still carries the team's moderate hit.
-      expect(await cachedShelf('mod-team')).toBe('team');
+      expect(await cachedShelf('weak-both')).toBeUndefined();
+    } finally {
+      await pub.close();
+    }
+  });
+
+  /** Both legs of a two-shelf lookup are the same arm, so both name it. Without
+   *  it the shelf's per-trigger stats file every dispatch fall-through as a
+   *  `cli` lookup. */
+  it('names the dispatch arm on both legs', async () => {
+    const pub = await secondShelf((base) => ({ status: 200, json: strongHit(base) }));
+    try {
+      let teamBody = '';
+      const team = await serveJson((body, base) => {
+        teamBody = body;
+        return { status: 200, json: weakHit(base) };
+      });
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ sessionId: 'both-legs', prompt: STRONG_PROMPT }),
+      );
+
+      expect(JSON.parse(teamBody)).toMatchObject({ trigger: 'dispatch' });
+      expect(pub.bodies()[0]).toMatchObject({ trigger: 'dispatch' });
     } finally {
       await pub.close();
     }

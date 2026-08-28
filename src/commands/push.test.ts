@@ -138,7 +138,7 @@ describe('runPushOn', () => {
   /**
    * Six entries into the operator's home, written by a verb that is not
    * `install`, owe the same disclosure `install` gives — including the sentence
-   * `install` only says with push on: one arm can deny a tool call.
+   * `install` only says with push on.
    */
   it("discloses what the arms do, in install's words, above the undo line", async () => {
     const result = await runPushOn(makeCtx(), { homeDir: home });
@@ -148,7 +148,7 @@ describe('runPushOn', () => {
       'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
     );
     expect(text).toContain(
-      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+      'Every arm only adds context beside the call; none can block or change it.',
     );
     expect(text).not.toContain('They can never block or change the tool call.');
     const disclosure = lines.findIndex((l) => l.includes('The push experiment is on'));
@@ -191,7 +191,6 @@ describe('runPushStatus', () => {
         byShelf: {},
         byReason: {},
         candidates: 0,
-        denies: 0,
         injectedTokens: 0,
         pairings: { opened: 0, closed: 0, verified: 0, scope: {}, byHead: {} },
       },
@@ -286,7 +285,6 @@ describe('runPushStatus', () => {
     action: string;
     reason?: string;
     resourceId?: string;
-    deny?: boolean;
     tokens?: number;
   }
 
@@ -318,7 +316,7 @@ describe('runPushStatus', () => {
           row.action,
           row.reason ?? null,
           null,
-          row.deny === true ? 1 : 0,
+          0,
           row.tokens ?? null,
         ]);
       });
@@ -413,7 +411,7 @@ describe('runPushStatus', () => {
     );
   });
 
-  it('tallies the last 7 days of ledger rows by trigger x action, shelf, denies, and tokens', async () => {
+  it('tallies the last 7 days of ledger rows by trigger x action, shelf, and tokens', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
     const recent = now - 60_000;
     const stale = now - 8 * 24 * 60 * 60 * 1000;
@@ -424,7 +422,6 @@ describe('runPushStatus', () => {
         shelf: 'public',
         action: 'injected',
         resourceId: 'res-1',
-        deny: true,
         tokens: 120,
       },
       {
@@ -462,7 +459,6 @@ describe('runPushStatus', () => {
         // Two rows about the same piece are one finding; the third row reached
         // no candidate at all; the stale row is outside the window.
         candidates: 1,
-        denies: 1,
         injectedTokens: 120,
       },
     });

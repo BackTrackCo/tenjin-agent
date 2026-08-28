@@ -133,10 +133,10 @@ const SEARCH_ID = '22222222-2222-4222-8222-222222222222';
 const RANK_TWO_ID = '33333333-3333-4333-8333-333333333333';
 
 /**
- * A response the judge reads as STRONG: rank 1's title is exactly the query's
- * content words, rank 2 shares none of them so the margin is rank 1's whole
- * score. PAID, so the arm takes the short form and never fetches a body — this
- * suite is about rows, not about rendering.
+ * A response the arms read as STRONG: rank 1 carries the shelf's own verdict,
+ * `corroborated: true` with a confidence that is not 'low'. PAID, so the arm
+ * takes the short form and never fetches a body — this suite is about rows, not
+ * about rendering.
  *
  * Candidate urls are re-homed onto the stub's origin: the hook drops a candidate
  * pointing anywhere but the configured base, because an off-origin url is a
@@ -161,6 +161,8 @@ function strongAnswer(baseUrl: string, resourceId: string, title: string): unkno
         matchReasons: ['exact version match'],
         estimatedTokens: 900,
         creator: { handle: 'a' },
+        confidence: 'high',
+        corroborated: true,
       },
       {
         resourceId: RANK_TWO_ID,
@@ -1121,10 +1123,18 @@ describe('pairings: open, close, replay', () => {
       expect(shelf.hits()).toBe(hitsBefore);
 
       const injected = rows(
-        "SELECT hook, shelf, action, resource_id FROM injections WHERE session = 's2'",
+        "SELECT hook, shelf, action, strength, resource_id FROM injections WHERE session = 's2'",
       );
       expect(injected).toHaveLength(1);
-      expect(injected[0]).toMatchObject({ hook: 'failure', shelf: 'local', action: 'injected' });
+      // `unverified`, not null: one closer is real evidence and it was shown to
+      // this session, so a rollup has to be able to tell this row apart from one
+      // nothing recorded a strength for at all.
+      expect(injected[0]).toMatchObject({
+        hook: 'failure',
+        shelf: 'local',
+        action: 'injected',
+        strength: 'unverified',
+      });
       expect(String(injected[0]?.resource_id)).toMatch(/^pairing:\d+$/);
     } finally {
       await shelf.close();

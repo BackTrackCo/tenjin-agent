@@ -1,5 +1,6 @@
 import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -469,6 +470,54 @@ describe('profile and stats', () => {
   });
 });
 
+/**
+ * `install --refresh` states its no-op absolutely: it converges what exists and
+ * creates nothing. The nudge runs AFTER the command body, from the dispatcher,
+ * so it is outside anything that body can refuse — and left alone it writes
+ * `update-check.json` into a data dir the refresh itself was not allowed to add
+ * one file to. Under `tenjin update` the spawned child is held off by
+ * TENJIN_NO_UPDATE_CHECK; a hand-run refresh arrives with nothing set.
+ */
+describe('the update nudge and `install --refresh`', () => {
+  const cachePath = (): string => join(process.env.TENJIN_DATA_DIR!, 'update-check.json');
+
+  // CI is this file's blanket offline switch and would make every case below
+  // pass for the wrong reason, so it is lifted here and the registry is a stub
+  // that records whether the nudge reached for it at all.
+  let fetched = 0;
+  beforeEach(() => {
+    process.env.CI = '';
+    fetched = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      fetched += 1;
+      return new Response(JSON.stringify({ latest: '99.0.0' }), { status: 200 });
+    });
+  });
+  afterEach(async () => {
+    process.env.CI = '1';
+    vi.restoreAllMocks();
+    await rm(cachePath(), { force: true });
+  });
+
+  it('writes no update-check cache and asks no registry', async () => {
+    const cap = captureIo();
+    // The refusal itself is beside the point here (this sandbox has nothing
+    // materialized); what matters is that nothing appeared on the way out.
+    await main(['install', '--refresh', '--json'], cap.io);
+    expect(existsSync(cachePath())).toBe(false);
+    expect(fetched).toBe(0);
+  });
+
+  // The other half: without it the case above would pass on a nudge that was
+  // already off for some unrelated reason.
+  it('still nudges for a command that is not a refresh', async () => {
+    const cap = captureIo();
+    expect(await main(['config', '--json'], cap.io)).toBe(0);
+    expect(existsSync(cachePath())).toBe(true);
+    expect(fetched).toBe(1);
+  });
+});
+
 describe('skills self-heal', () => {
   const wiredPath = (): string =>
     join(process.env.HOME!, '.claude', 'skills', 'tenjin-search', 'SKILL.md');
@@ -528,5 +577,38 @@ describe('skills self-heal', () => {
     const cap = captureIo();
     expect(await main(['config'], cap.io)).toBe(0);
     expect(await readFile(wiredPath(), 'utf8')).toBe(STALE);
+  });
+});
+
+/**
+ * The retraction verb the CLI simply did not have (#221): an agent asked to take
+ * a publish back got `unknown command 'delete'`. These are dispatcher-level only
+ * — routing and the edge check that fires before any wallet or network touch.
+ */
+describe('the delete verb is registered', () => {
+  it('is no longer an unknown command, and its --help names the every-mode confirm', async () => {
+    const cap = captureIo();
+    const code = await main(['delete', '--help'], cap.io);
+    expect(code).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--yes');
+    expect(help).toMatch(/confirms EVERY time/i);
+    expect(help).toContain('--status draft');
+  });
+
+  it('routes a malformed post id to the delete command as USAGE, offline', async () => {
+    const cap = captureIo();
+    const code = await main(['delete', 'not-a-uuid', '--yes'], cap.io);
+    expect(code).toBe(2);
+    const parsed = JSON.parse(cap.stdout());
+    expect(parsed.command).toBe('delete');
+    expect(parsed.error.code).toBe('USAGE');
+  });
+
+  it('offers --status on edit, the reversible half', async () => {
+    const cap = captureIo();
+    const code = await main(['edit', '--help'], cap.io);
+    expect(code).toBe(0);
+    expect(cap.stdout()).toContain('--status <status>');
   });
 });

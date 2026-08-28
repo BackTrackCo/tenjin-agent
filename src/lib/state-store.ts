@@ -357,8 +357,23 @@ export const STORE_SQL = {
        paid_browse_count = COALESCE(excluded.paid_browse_count, searches.paid_browse_count)`,
   /** Newest first. `rowid` breaks a tie so two rows stamped the same
    *  millisecond come back write-order-newest-first, which is what "prepend"
-   *  meant when this was a JSON array. */
-  listSearches: 'SELECT * FROM searches ORDER BY at DESC, rowid DESC LIMIT ?',
+   *  meant when this was a JSON array.
+   *
+   *  The LEFT JOIN carries the draft a parked claim rides on: a `session_state`
+   *  row in the machine bucket under `draft-search:<searchId>`, value the RAW
+   *  post id (matched by SQL, so never JSON-quoted). A key-value fact beside the
+   *  `published:` records, not a `searches` column, because adding a column to a
+   *  created table needs the versioned migration #212 introduces. */
+  listSearches: `SELECT s.*, st.value AS draft_post_id FROM searches s
+     LEFT JOIN session_state st
+       ON st.session = '' AND st.key = 'draft-search:' || s.search_id
+     ORDER BY s.at DESC, s.rowid DESC LIMIT ?`,
+  /** The searches whose claims are parked on this draft (see `listSearches` on
+   *  where the links live), newest first. */
+  searchesForDraft: `SELECT s.* FROM searches s
+     JOIN session_state st
+       ON st.session = '' AND st.key = 'draft-search:' || s.search_id
+     WHERE st.value = ? ORDER BY s.at DESC, s.rowid DESC`,
   getSearch: 'SELECT * FROM searches WHERE search_id = ?',
   latestDeliberate: `SELECT * FROM searches
      WHERE source IS NULL OR source = 'cli' ORDER BY at DESC, rowid DESC LIMIT 1`,

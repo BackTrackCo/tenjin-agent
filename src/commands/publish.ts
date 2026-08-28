@@ -4,7 +4,12 @@ import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag } from '../lib/config';
-import { loadSearches, markSearchResolved, type StoredSearch } from '../lib/search-store';
+import {
+  linkSearchesToDraft,
+  loadSearches,
+  markSearchResolved,
+  type StoredSearch,
+} from '../lib/search-store';
 import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
@@ -152,9 +157,10 @@ export async function runPublish(
   // turn a clean turn end into a confirm prompt or a keystore unlock, and so no
   // request is made at all.
   //
-  // DRAFTS ARE OUT, both ways: a draft answers nobody and no command promotes
-  // one, so reaching a public piece MEANS publishing the same body a second time.
-  // Deduping that would make the promotion silently do nothing.
+  // DRAFTS ARE OUT, both ways: a draft parks privately, so parking the same text
+  // twice is legitimate and a draft writes no marker to match. The marker is
+  // written wherever the body actually goes public — below on a non-draft
+  // publish, and in edit.ts when `--status published` promotes a draft.
   if (status !== 'draft') {
     const already = await publishedUrlFor(ctx.dataDir, body);
     if (already !== null) {
@@ -345,9 +351,10 @@ export async function runPublish(
     ...(card !== undefined ? { resource: card } : {}),
     // The attribution half of `--search-id`, and it follows the SAME rule the
     // local ledger already follows: a draft answers nobody, so it claims nobody's
-    // demand either. Sending it on a draft put one demand signal on two posts —
-    // no command promotes a draft, so reaching a public piece means a second
-    // publish carrying the same id — with one of them possibly never shipping.
+    // demand either, and a draft that never ships must not hold a claim. The ids
+    // are not lost: they are parked on the draft locally (linkSearchesToDraft
+    // below), and `edit --status published` carries them when the piece actually
+    // goes public.
     ...(claimableIds.length > 0 && status !== 'draft' ? { searchId: claimableIds } : {}),
     // Keys ride on a draft too: a draft's keys are private to its author and
     // resolve never returns a draft, so nothing is claimed early by sending them.
@@ -377,14 +384,22 @@ export async function runPublish(
   });
 
   // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
-  // loop: the draft is still the pending answer, and the later real publish is
-  // what resolves it.
+  // loop: the draft is still the pending answer, and the promotion (`edit
+  // --status published`) is what resolves it.
   const parksPrivately = status === 'draft';
 
   // The post exists: remember it against the body, so the next publish of the
   // same text this machine attempts hands back this url instead of creating a
   // second row. Not for a draft, whose whole purpose is to be published later.
   if (!parksPrivately) await recordPublished(ctx.dataDir, body, result.url);
+  // Park the named claims on the draft (record's own spelling: the store matches
+  // ids by exact string), so the promotion can send what this create withheld.
+  if (parksPrivately) {
+    const parked = claimableIds
+      .map((id) => stored.get(id)?.searchId)
+      .filter((id): id is string => id !== undefined);
+    await linkSearchesToDraft(ctx.dataDir, parked, result.resourceId);
+  }
 
   // One close per id, each reporting for itself: the piece is published and the
   // server has every id, so an unrecorded search warns without costing the rest.
@@ -399,7 +414,7 @@ export async function runPublish(
         ctx,
         id,
         stored.get(id) ?? null,
-        parksPrivately,
+        parksPrivately ? result.resourceId : null,
         id === prefillFrom ? prefill : 'none',
       ),
     );
@@ -554,14 +569,18 @@ async function closeNamedSearch(
   ctx: CommandContext,
   searchId: string,
   stored: StoredSearch | null,
-  parksPrivately: boolean,
+  draftPostId: string | null,
   prefill: PrefillOutcome,
 ): Promise<SearchReceipt> {
   const open = (reason: string): SearchReceipt => {
     ctx.io.stderr.write(`${reason}\n`);
     return { id: searchId, closed: false, prefill };
   };
-  if (parksPrivately) return open(`Saved as a draft, so search ${searchId} stays open.`);
+  if (draftPostId !== null) {
+    return open(
+      `Saved as a draft, so search ${searchId} stays open; \`tenjin edit ${draftPostId} --status published\` claims it when the piece goes up.`,
+    );
+  }
   if (stored === null) {
     return open(`Published, but search ${searchId} is not in the local store.`);
   }
@@ -647,6 +666,7 @@ function receipt(
   const cacheEligible = result.cacheEligible ?? false;
   const deskUrl = `${trimSlash(baseUrl)}/desk`;
   const title = sanitizeForTerminal(result.title);
+  const undo = undoCommands(result.resourceId, result.status);
   // status and url are server-sent open strings (posts-api declares both as bare
   // z.string()), so they get the same treatment as the title beside them: this
   // line is what an author reads to learn where their piece went.
@@ -658,6 +678,7 @@ function receipt(
         ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
         : 'Published without an answer card: ranks below every carded piece in agent search.',
     ...searches.filter((s) => s.closed).map(closeLine),
+    undoLine(undo),
     ...scanNoteLines(result.scan),
     ...result.warnings.map((w) => `warning: ${sanitizeForTerminal(w)}`),
   ];
@@ -670,6 +691,7 @@ function receipt(
       cacheEligible,
       missing,
       deskUrl,
+      undo,
       // `search` repeats a lone result for callers that already read it; a
       // batch has no single one to repeat.
       ...(searches.length === 1 ? { search: searches[0] } : {}),
@@ -679,6 +701,50 @@ function receipt(
     },
     humanLines: human,
   };
+}
+
+/** The two commands that take a fresh publish back, with the real id filled in. */
+interface UndoCommands {
+  /** Removes the piece. Carries NO `--yes`; see {@link undoCommands}. */
+  remove: string;
+  /** Only on a published piece: the reversible half. */
+  unpublish?: string;
+}
+
+/**
+ * THE UNDO LINE, on BOTH surfaces (#221). An agent that has just published is the
+ * one being asked "how do I take that down", and with nothing in the receipt to
+ * answer with it will invent a plausible verb — which is exactly what happened in
+ * the issue that asked for this, before `tenjin delete` existed. So the receipt
+ * carries the real commands with the real id, in `data.undo` for a machine reader
+ * and as a stderr line for a human, rather than leaving either to guess.
+ *
+ * `remove` DELIBERATELY OMITS `--yes`, and the omission is the load-bearing part.
+ * This string is the most authoritative thing in the transcript at the moment it
+ * prints, and it gets copied verbatim — that is the entire reason for printing
+ * it. A `--yes` baked in would hand every reader a one-shot destructive command
+ * and would contradict the rule the skill states in the same breath, that a
+ * delete is run bare first and confirmed only after the user has seen what would
+ * go. Bare, the command is right for both readers: a human pasting it at a
+ * terminal gets the y/N prompt, and an agent running it gets the exit-3 payload
+ * it is supposed to render. `--yes` belongs on the SECOND call, which is why the
+ * refusal payload's own `confirmCommand` (commands/delete.ts) carries it and
+ * this does not: that one answers a question the user has already been shown.
+ *
+ * `unpublish` is offered first in the rendered line and omitted entirely on a
+ * draft: a draft is not up, so demoting it is not an undo of anything.
+ */
+function undoCommands(resourceId: string, status: string): UndoCommands {
+  return {
+    remove: `tenjin delete ${resourceId}`,
+    ...(status === 'published' ? { unpublish: `tenjin edit ${resourceId} --status draft` } : {}),
+  };
+}
+
+function undoLine(undo: UndoCommands): string {
+  return undo.unpublish !== undefined
+    ? `Undo: \`${undo.unpublish}\` unpublishes it (reversible), \`${undo.remove}\` removes it.`
+    : `Undo: \`${undo.remove}\` removes it.`;
 }
 
 function closeLine(search: SearchReceipt): string {
