@@ -653,7 +653,9 @@ describe('already-injected spans two different hooks', () => {
       // showed is not in the queue owed to the shelf.
       store.run(STORE_SQL.setOutcome, ['used', 'hand', 'shown']);
       store.run(STORE_SQL.setOutcome, ['used', 'hand', 'unshown']);
-      expect(store.all(STORE_SQL.unpostedOutcomes, []).map((r) => r.uid)).toEqual(['shown']);
+      expect(store.all(STORE_SQL.unpostedOutcomes, [0]).map((r) => r.uid)).toEqual(['shown']);
+      // A row older than the grading window has aged out of the queue.
+      expect(store.all(STORE_SQL.unpostedOutcomes, [Number.MAX_SAFE_INTEGER])).toEqual([]);
     } finally {
       store.close();
     }

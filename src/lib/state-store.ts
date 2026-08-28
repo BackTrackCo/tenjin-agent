@@ -552,7 +552,10 @@ export const STORE_SQL = {
    * routed by — the shelf that minted the search id, not whatever this machine
    * is configured for today.
    */
-  /** The LEFT JOIN carries the base URL of the shelf that minted the search id,
+  /** Bounded to the grading window (`at >= ?`): a row the shelf keeps refusing
+   *  (rotated key, retired shelf) ages out of the queue with the window instead
+   *  of being re-sent on every run forever.
+   *  The LEFT JOIN carries the base URL of the shelf that minted the search id,
    *  which the injection row itself does not hold. It is CONFIG-DERIVED — the
    *  base the arm asked — where `injections.url` is a candidate url the shelf
    *  chose, so it is the only origin here a credential may be authorized at. */
@@ -562,6 +565,7 @@ export const STORE_SQL = {
      LEFT JOIN searches s ON s.search_id = i.search_id
      WHERE i.action = 'injected' AND i.outcome IN ('used', 'rejected') AND i.outcome_at IS NULL
        AND i.search_id IS NOT NULL AND i.resource_id IS NOT NULL AND i.shelf <> 'local'
+       AND i.at >= ?
      ORDER BY i.at, i.id`,
   markPosted: 'UPDATE injections SET outcome_at = ? WHERE uid = ?',
   sessionEnded: 'SELECT ended_at FROM sessions WHERE session = ?',

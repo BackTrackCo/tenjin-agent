@@ -586,7 +586,7 @@ export async function runPushGrade(
       args.label !== undefined
         ? [labelOne(store, args.label)]
         : await gradeSessions(store, ctx, args, deps, { sinceMs, now });
-    const posted = await postGraded(store, ctx, deps, now);
+    const posted = await postGraded(store, ctx, deps, now, sinceMs);
     return {
       data: buildGradeData(since, graded, posted),
       humanLines: gradeLines(since, graded, posted, args.explain === true),
@@ -901,9 +901,10 @@ async function postGraded(
   ctx: CommandContext,
   deps: PushGradeDeps,
   now: number,
+  sinceMs: number,
 ): Promise<PostTally> {
   const tally: PostTally = { posted: 0, failed: 0, skipped: [] };
-  const rows = store.all(STORE_SQL.unpostedOutcomes, []);
+  const rows = store.all(STORE_SQL.unpostedOutcomes, [now - sinceMs]);
   if (rows.length === 0) return tally;
   const settings = await resolveContextSettings(ctx);
   let halted = false;
