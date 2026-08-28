@@ -1788,19 +1788,44 @@ describe('searches: the typed handle', () => {
    * `json_each` over an unpruned table is cheap while it stops early and
    * unbounded when it does not, and the MISS is the common case: `buy <id>` for
    * a piece no local search surfaced expands every row's candidate array. The
-   * time bound is what keeps that proportional to recent activity — and a
-   * search from two months ago is not the attribution a purchase today belongs
-   * to anyway.
+   * bound that keeps that proportional to recent activity counts ROWS, the same
+   * `RECENT_LIMIT` window `listSearches` reads.
+   *
+   * It counts rows and not days ON PURPOSE. A date floor lived here for a
+   * while, and it made `buy <resourceId>` fail by the calendar: a piece an
+   * agent had deliberately parked stopped resolving a month later, reported as
+   * "No local search knows resource …". Age alone must never cost a
+   * resolution — see resource-ref.test.ts for the same edge at the buy command.
    */
-  it('searchForResource does not reach past its window', async () => {
-    const stale = '0197aaaa-bbbb-cccc-dddd-000000000030';
-    await recordSearch(dataDir, entry({ searchId: stale, at: agoIso(31 * DAY_MS) }));
+  it('searchForResource reaches an ancient row, and stops at the row bound', async () => {
+    const ancient = '0197aaaa-bbbb-cccc-dddd-000000000030';
+    await recordSearch(dataDir, entry({ searchId: ancient, at: agoIso(400 * DAY_MS) }));
+    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(ancient);
+    expect(await findStoredCandidate(dataDir, 'res-1')).not.toBeNull();
+
+    // 500 newer searches carrying nothing push it out of the window.
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    try {
+      for (let i = 0; i < 500; i += 1) {
+        store.run(STORE_SQL.recordSearch, [
+          `0197bbbb-cccc-dddd-eeee-${String(i).padStart(12, '0')}`,
+          Date.now() - 300 * DAY_MS + i,
+          '',
+          'decoy',
+          'decoy',
+          'MISS',
+          '[]',
+          null,
+          null,
+          null,
+        ]);
+      }
+    } finally {
+      store.close();
+    }
     expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBeNull();
     expect(await findStoredCandidate(dataDir, 'res-1')).toBeNull();
-
-    const fresh = '0197aaaa-bbbb-cccc-dddd-000000000031';
-    await recordSearch(dataDir, entry({ searchId: fresh, at: agoIso(29 * DAY_MS) }));
-    expect(await findSearchForResource(dataDir, { resourceId: 'res-1' })).toBe(fresh);
   });
 
   /**

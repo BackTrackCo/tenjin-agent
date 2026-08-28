@@ -419,18 +419,24 @@ export const STORE_SQL = {
    * than pulling 500 rows into JS and scanning their arrays — which is what
    * \`buy <resourceId>\` and read attribution used to do on every call.
    *
-   * TIME-BOUNDED, because `json_each` is a scan and the table never prunes. A
-   * hit stops at the first row; a MISS — a resource no local search surfaced,
-   * which is every `buy <id>` typed from outside a search — expands the
-   * candidate array of every row ever written. The bound is what keeps that
-   * proportional to recent activity rather than to the machine's whole history,
-   * and attribution older than {@link ATTRIBUTION_WINDOW_MS} is not a search
-   * this purchase came out of anyway.
+   * BOUNDED BY ROW COUNT, not by age, because `json_each` is a scan and the
+   * table never prunes. A hit stops at the first row; a MISS — a resource no
+   * local search surfaced, which is every `buy <id>` typed from outside a
+   * search — expands the candidate array of every row the subquery hands over.
+   * The `LIMIT` inside it is what keeps that proportional to recent activity
+   * rather than to the machine's whole history: the same {@link RECENT_LIMIT}
+   * window {@link STORE_SQL.listSearches} reads, and the same window the
+   * file-backed ledger this replaced kept on disk.
+   *
+   * A DATE FLOOR WOULD BE WRONG HERE. `tenjin buy <resourceId>` resolves the
+   * payable URL out of whichever search surfaced the piece, and an agent may
+   * buy weeks after reading the search that named it; a `s.at >= ?` cutoff
+   * turned that into "No local search knows resource …" purely by the calendar.
    */
   searchForResource: `SELECT s.search_id, c.value AS candidate
-     FROM searches s, json_each(s.candidates) c
-     WHERE s.at >= ?
-       AND (json_extract(c.value, '$.resourceId') = ? OR json_extract(c.value, '$.url') = ?)
+     FROM (SELECT rowid, search_id, at, candidates FROM searches
+             ORDER BY at DESC, rowid DESC LIMIT ?) s, json_each(s.candidates) c
+     WHERE json_extract(c.value, '$.resourceId') = ? OR json_extract(c.value, '$.url') = ?
      ORDER BY s.at DESC, s.rowid DESC LIMIT 1`,
   /** Every unresolved row a session may still close, newest first. '' scopes to
    *  every session; a named one keeps the unstamped rows, which belong nowhere
@@ -1706,7 +1712,9 @@ export interface StoredSearch {
 }
 
 /**
- * How many rows a bare {@link loadSearches} returns, newest first.
+ * How many rows the ledger's unkeyed reads look at, newest first: what a bare
+ * {@link loadSearches} returns, and how deep {@link STORE_SQL.searchForResource}
+ * scans for the search a resource came out of.
  *
  * The table is unbounded (plan 03, owner decision 2: no retention, no pruning),
  * so the callers that want "the recent searches" get a bound here instead of one
@@ -1733,17 +1741,6 @@ const MACHINE_SESSION = storeSession(undefined);
 function foldPostId(postId: string): string {
   return postId.toLowerCase();
 }
-
-/**
- * How far back {@link STORE_SQL.searchForResource} looks for the search a
- * purchase came out of.
- *
- * A `json_each` scan over an unpruned table is cheap while it stops early and
- * unbounded when it does not, and the miss is the common case: `buy <id>` for a
- * piece nobody searched for locally reads every row's candidate array. A month
- * covers the searches a purchase could plausibly be attributed to.
- */
-const ATTRIBUTION_WINDOW_MS = 30 * 24 * 60 * 60_000;
 
 function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
   const searchId = typeof row.search_id === 'string' ? row.search_id : '';
@@ -2016,11 +2013,7 @@ export async function findStoredCandidate(
   resourceId: string,
 ): Promise<StoredCandidate | null> {
   return await withStore(dataDir, null as StoredCandidate | null, (store) => {
-    const row = store.get(STORE_SQL.searchForResource, [
-      Date.now() - ATTRIBUTION_WINDOW_MS,
-      resourceId,
-      '',
-    ]);
+    const row = store.get(STORE_SQL.searchForResource, [RECENT_LIMIT, resourceId, '']);
     if (row === null || typeof row.candidate !== 'string') return null;
     try {
       const parsed = StoredCandidateSchema.safeParse(JSON.parse(row.candidate));
@@ -2039,7 +2032,7 @@ export async function findSearchForResource(
 ): Promise<string | null> {
   return await withStore(dataDir, null as string | null, (store) => {
     const row = store.get(STORE_SQL.searchForResource, [
-      Date.now() - ATTRIBUTION_WINDOW_MS,
+      RECENT_LIMIT,
       match.resourceId ?? '',
       match.url ?? '',
     ]);
