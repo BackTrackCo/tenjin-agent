@@ -593,7 +593,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // first ask for the next eight hours.
     .option(
       '--discard',
-      'with --finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again',
+      'with --finding, and never with --dry-run: take that stored finding off the local queue without publishing it, so no capture ask offers it again',
     )
     // ATTRIBUTION, NOT AUTHORITY: it changes no gate, no shelf and no price. The
     // SubagentStop capture ask fills it in so a child that publishes from its own

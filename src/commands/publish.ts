@@ -185,9 +185,18 @@ export async function runPublish(
   // resolves the finding first, so discarding an id that was never captured is
   // the same RESOURCE_NOT_FOUND as publishing one, rather than a silent success.
   if (args.discard === true) {
-    if (args.finding === undefined || args.file !== undefined) {
+    // `--dry-run` IS PART OF THIS GUARD, not a flag this branch may ignore
+    // (round-4 security major). The branch runs above everything, so
+    // `--discard --dry-run` dropped the row permanently and answered
+    // `{discarded: true}` — while `--dry-run` is documented in four places as
+    // the read path that writes nothing, and the capture ask names both flags
+    // one sentence apart, which is exactly how a caller comes to pass both.
+    // REFUSED rather than resolved by precedence, the same rule the file-plus-
+    // finding check above holds to: a caller that passed both meant one of them,
+    // and this is the one outcome on this command that cannot be undone after.
+    if (args.finding === undefined || args.file !== undefined || args.dryRun === true) {
       throw new CliError('USAGE', '--discard takes a stored finding and nothing else.', {
-        fix: 'Pass the id the capture ask printed, on its own: `tenjin publish --finding <id> --discard`. A file is discarded by deleting it.',
+        fix: 'Pass the id the capture ask printed, on its own: `tenjin publish --finding <id> --discard`. Reading it is a separate command, `tenjin publish --finding <id> --dry-run`, which writes nothing and so never discards. A file is discarded by deleting it.',
       });
     }
     const target = await readChildFinding(ctx.dataDir, args.finding, Date.now, projectIdOf(cwd));
@@ -983,6 +992,23 @@ function findingDetail(finding: ChildFinding): Record<string, unknown> {
  * path, and a body cut to fit a terminal is one the reader cannot judge. Each
  * line is sanitized on the way out because a stored finding is a CHILD'S WORDS,
  * and a child can be handed another user's marketplace text at its own start.
+ *
+ * AND WHOLE EVEN WHEN THE SCAN BLOCKS, which is not a hole in the invariant
+ * stated three places above ("never echoes a blocked body") but its other half.
+ * That invariant is about UNREQUESTED echoes — a refusal, a hook's blocking
+ * reason — where the body is restated into a transcript nobody asked to put it
+ * in. This is the one path an operator reaches by naming it, and it is the
+ * remediation the refusal itself prints: a block means scrub missed a live
+ * credential, and the operator cannot act on what they cannot see.
+ *
+ * MASKING THE BLOCK SPANS WAS CONSIDERED AND REFUSED. `ScanFinding` carries
+ * `line` and `span`, but `line` is the START line of a multi-line match and
+ * `span` covers only that line — so masking from them redacts the first line of
+ * a PEM block or a wrapped BIP-39 phrase and prints the remaining lines under a
+ * page that claims to be masked. A partial mask on the one path that exists
+ * because the secret is live is worse than an honest whole body the operator
+ * asked for by name. Masking here needs the scan to carry an end position; until
+ * it does, the honest output is this one plus the `blocking` findings beside it.
  */
 function dryRunReceipt(input: {
   /** The frontmatter-stripped body, the same text the confirm renders. Named

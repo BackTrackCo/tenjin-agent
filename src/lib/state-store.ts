@@ -226,6 +226,45 @@ export const STORE_FINDING_HOOK = 'finding';
 export const STORE_QUEUED_FINDING_PREFIX = 'queued_finding:';
 
 /**
+ * How long a finding's OWN session keeps the exclusive right to be asked about
+ * it, measured from that session's last recorded activity.
+ *
+ * MACHINE SCOPE WITHOUT THIS IS A THEFT, not a safety net. The queue, the gate
+ * and the `listedAt` stamp are all machine-wide, so before this bound a session
+ * in another project could hit a turn end first, be blocked over a row it has no
+ * memory of, stamp it, and leave the one context that actually did the work
+ * never asked — and its block is what drives it to `--dry-run` another
+ * checkout's body into its own transcript, which the cross-project `--yes`
+ * (a publication gate) does nothing about.
+ *
+ * WHAT MACHINE SCOPE WAS EVER FOR IS THE DEAD PARENT: `SubagentStop` fires per
+ * child while the parent `Stop` may never fire at all. A crash writes no
+ * `ended_at`, so an ended session is not the only owner-is-gone signal and this
+ * grace is the other one. An owner that ended cleanly is claimable at once; one
+ * that stopped writing this long ago is claimable too; a live one keeps its own
+ * rows. Below the 8h read window by design, so a stranded finding is delayed by
+ * an hour rather than lost.
+ */
+export const STORE_FINDING_OWNER_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * How long a `queued_finding:`/`agent_published:` row stays under its prefix.
+ *
+ * ⚠ MUST EXCEED EVERY READ WINDOW OVER THOSE PREFIXES (8h today, the capture
+ * ask's) or a prune deletes a row a live ask could still name.
+ *
+ * The two hot-path reads take `NO_ROW_LIMIT` and cap after their filter, which
+ * is what stops a stamped row hiding an unstamped one behind a SQL `LIMIT` —
+ * and which makes the SCAN the whole prefix. `session_state` is keyed
+ * `(session, key)` and indexed on nothing else, so `at >= ?` is a filter and
+ * never a seek: without a prune those two scans grow for the life of the
+ * install and run on every Stop with capture on. Pruning at the writers is what
+ * makes the window an actual bound on the rows in range rather than only on the
+ * rows returned.
+ */
+export const STORE_QUEUE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
+/**
  * The `project` a hook stamps on a row, from the cwd on its payload.
  *
  * ⚠ MIRRORED with `projectId`/`shortHash` in the generated store source below,
@@ -565,6 +604,12 @@ export const STORE_SQL = {
   setState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
   deleteState: 'DELETE FROM session_state WHERE session = ? AND key = ?',
+  /** Drop every row under one prefix older than `at`. The retention half of
+   *  {@link STORE_QUEUE_RETENTION_MS}: the readers of those prefixes scan the
+   *  whole range because `at` is a filter and not an index, so what bounds the
+   *  scan has to be the number of rows that exist, not a `LIMIT`. */
+  deleteStatePrefixBefore: `DELETE FROM session_state
+     WHERE session = ? AND key >= ? AND key < ? AND at < ?`,
   /**
    * Rewrite one existing row's `value` and LEAVE ITS `at` ALONE.
    *
@@ -1012,6 +1057,28 @@ export const STORE_SQL = {
      ORDER BY i.at, i.id`,
   markPosted: 'UPDATE injections SET outcome_at = ? WHERE uid = ?',
   sessionEnded: 'SELECT ended_at FROM sessions WHERE session = ?',
+  /**
+   * Is a session over, and when did it last do anything? The owner-first gate
+   * on the machine-wide finding queue (`findingOwnerGone`).
+   *
+   * TWO SIGNALS BECAUSE ONE OF THEM IS MISSING EXACTLY WHEN IT MATTERS. A clean
+   * end stamps `ended_at`; the case machine scope exists for — a crash, an
+   * interrupt, a session killed from the UI — stamps nothing, so a gate on
+   * `ended_at` alone would strand the rows it was built to rescue. `last_at` is
+   * what covers that: `started_at` for a session that has written no events yet,
+   * and the newest `events` row otherwise, which is an index seek on
+   * `events(session, at)` rather than a scan.
+   *
+   * NO ROW AT ALL READS AS GONE at the caller, not here: a row whose owner this
+   * machine never recorded has nobody to prefer, and preferring an owner that
+   * does not exist is how a finding becomes unreachable everywhere at once.
+   */
+  sessionActivity: `SELECT s.ended_at AS ended_at,
+       MAX(
+         COALESCE(s.started_at, 0),
+         COALESCE((SELECT MAX(e.at) FROM events e WHERE e.session = s.session), 0)
+       ) AS last_at
+     FROM sessions s WHERE s.session = ?`,
   /** `tenjin push status`, the graded rollup per hook x shelf. */
   gradeRows: `SELECT hook, shelf, outcome, outcome_at FROM injections
      WHERE action = 'injected' AND at >= ?`,
@@ -1969,9 +2036,26 @@ function claimState(sessionId, key, value) {
  * this arm's fallback on every other loss path.
  */
 function claimStateFresh(sessionId, key, windowMs, value) {
+  return claimStateFreshOutcome(sessionId, key, windowMs, value) === 'won';
+}
+
+/**
+ * The same claim, saying WHICH loss it was: \`won\`, \`held\` by a live claim, or
+ * \`unavailable\` because the store swallowed the write.
+ *
+ * THE TWO LOSSES ARE NOT THE SAME COST, and collapsing them is right for a claim
+ * that guards a TURN and wrong for one that guards DATA. The budget claims lose
+ * a child's turn when they fail closed on a SQLITE_BUSY, which is the cheaper
+ * mistake than a runaway. The SubagentStop harvest claim loses the child's
+ * finding permanently — the child already spent its turn, the words exist
+ * nowhere else, and the lifecycle row said \`duplicate-finding\` about a
+ * duplicate that never existed. That caller reads this instead and files the
+ * finding anyway, under its own reason.
+ */
+function claimStateFreshOutcome(sessionId, key, windowMs, value) {
   // Same contract as claimState: no store is no dedupe, and the arms return
   // before they reach here, so a caller that somehow did holds nothing.
-  if (STORE === null) return false;
+  if (STORE === null) return 'unavailable';
   const now = Date.now();
   const result = storeRun(STORE_SQL.claimStateFresh, [
     storeSession(sessionId),
@@ -1980,8 +2064,9 @@ function claimStateFresh(sessionId, key, windowMs, value) {
     now,
     now - windowMs,
   ]);
-  if (result === null) return false;
-  return typeof result.changes === 'number' ? result.changes > 0 : true;
+  if (result === null) return 'unavailable';
+  if (typeof result.changes !== 'number') return 'won';
+  return result.changes > 0 ? 'won' : 'held';
 }
 
 /**
@@ -2029,6 +2114,26 @@ function statePrefixSince(sessionId, prefix, sinceMs, limit) {
   }));
 }
 
+/**
+ * Drop the rows under \`prefix\` that fell out of \`retentionMs\`.
+ *
+ * CALLED FROM THE WRITERS, never from the reads. The two capture reads scan the
+ * whole prefix on purpose — a SQL \`LIMIT\` there spends its budget on stamped
+ * rows and hides unstamped ones behind them — so the only honest bound on those
+ * scans is that the prefix stops growing. \`session_state\` is keyed
+ * \`(session, key)\` and \`at\` is a filter, not a seek, so an aged-out row costs
+ * every later read forever. Retention is longer than any window that reads
+ * these prefixes, so this never deletes a row an ask could still name.
+ */
+function pruneStatePrefix(sessionId, prefix, retentionMs) {
+  storeRun(STORE_SQL.deleteStatePrefixBefore, [
+    storeSession(sessionId),
+    prefix,
+    prefix + String.fromCharCode(0xffff),
+    Date.now() - retentionMs,
+  ]);
+}
+
 function countStatePrefix(sessionId, prefix) {
   return storeCount(STORE_SQL.countStatePrefix, [
     storeSession(sessionId),
@@ -2053,9 +2158,49 @@ function openDispatchMiss(sessionId, sinceMs) {
  * only a row a publish can DELETE can answer. The queue is where the parent's
  * capture ask reads from, so a finding whose session ended unread is still named
  * by the next session that is asked.
+ *
+ * AND IT IS WHERE THE PREFIX IS PRUNED. The ask's read of this prefix is an
+ * unlimited scan by design, so the writer is what has to keep the range finite;
+ * doing it here rather than in the read keeps the Stop hook's hot path a reader.
  */
 function enqueueFinding(uid, finding) {
+  pruneStatePrefix(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX, __QUEUE_RETENTION_MS__);
   return setState(MACHINE_SESSION, STATE_QUEUED_FINDING_PREFIX + uid, finding);
+}
+
+/**
+ * Is the session that harvested this row past being asked about it itself?
+ *
+ * PREFER THE OWNER. The queue, the gate and the \`listedAt\` stamp are all
+ * machine-wide, so without this the first session on the machine to end a turn
+ * consumes every unstamped row — including one queued moments ago by a session
+ * still running in another project, which is then blocked over work it has no
+ * memory of, stamps the row, and leaves the one context that could judge it
+ * never asked. The per-session cursor this replaced could not do that, and the
+ * sibling nag arm holds the opposite invariant already.
+ *
+ * THE CRASHED PARENT IS STILL COVERED, which is the only thing machine scope was
+ * ever for: a clean end stamps \`ended_at\` and a crash stamps nothing, so an
+ * owner that has simply stopped writing for \`graceMs\` reads as gone too. An
+ * owner this machine has no \`sessions\` row for is gone by the same rule — there
+ * is nobody to prefer, and preferring nobody strands the row everywhere.
+ *
+ * \`seen\` memoises per call: one ask reads one row per distinct owner, not one
+ * per finding.
+ */
+function findingOwnerGone(owner, mine, graceMs, seen) {
+  if (owner === mine || owner === '') return true;
+  const cached = seen.get(owner);
+  if (cached !== undefined) return cached;
+  const row = storeGet(STORE_SQL.sessionActivity, [owner]);
+  const gone =
+    row === null
+      ? true
+      : typeof row.ended_at === 'number'
+        ? true
+        : Date.now() - (typeof row.last_at === 'number' ? row.last_at : 0) >= graceMs;
+  seen.set(owner, gone);
+  return gone;
 }
 
 /**
@@ -2067,6 +2212,12 @@ function enqueueFinding(uid, finding) {
  * ended session — so a session-scoped list makes a real finding invisible rather
  * than merely late. Bounded by the window and the caller's limit; the caller
  * decides what to do with one from another session, and is told which those are.
+ *
+ * OWNER FIRST, THOUGH. Cross-session is a RESCUE and not a free-for-all: a row
+ * whose own session is still live is left for that session, because the stamp
+ * this list writes is machine-wide and consuming such a row asks the wrong
+ * context and silences the right one. See \`findingOwnerGone\` for what counts as
+ * gone; \`mine\` is the reading session, already store-normalised.
  *
  * UNLISTED IS A PROPERTY OF THE ROW, NOT A POSITION IN AN ORDER. This paged on
  * a high-water cursor — first the newest \`at\`, then the greatest uid, then the
@@ -2087,19 +2238,21 @@ function enqueueFinding(uid, finding) {
  * session on the machine restated the same list for the whole window (measured
  * at ~15k tokens per session at the 200-row cap); a row is now named to one
  * context and not to the next eight. What that costs is stated where the ask
- * composes the list: a finding nobody acted on is not re-offered, and
- * \`tenjin finding list\` is where it stays reachable.
+ * composes the list: a finding nobody acted on is not re-offered, and it stays
+ * reachable by the id that ask printed.
  *
  * \`limit\` BOUNDS THE ROWS RETURNED, NOT THE ROWS READ, which is the difference
  * between a runaway guard and a hole. A stamped row is still under the prefix,
  * so a SQL \`LIMIT\` spends its budget on rows nobody wants: at 400 findings in
  * one window the newest 200 filled it, and once those were stamped the older
- * 200 were unreachable by every later ask. The window is what bounds the scan —
- * the same shape \`liveHandoff\` takes, and for the same reason: no N here is a
- * bound on the rows in range.
+ * 200 were unreachable by every later ask. What bounds the SCAN is that
+ * \`enqueueFinding\` prunes this prefix to its retention bound; the window on
+ * this read is a filter and never a seek, so retention is the only thing that
+ * keeps the range from growing for the life of the install.
  */
-function queuedFindingQueue(sinceMs, limit) {
+function queuedFindingQueue(mine, sinceMs, limit) {
   const out = [];
+  const seen = new Map();
   for (const row of statePrefixSince(
     MACHINE_SESSION,
     STATE_QUEUED_FINDING_PREFIX,
@@ -2110,10 +2263,14 @@ function queuedFindingQueue(sinceMs, limit) {
     const value = isRecord(row.value) ? row.value : {};
     // The one field that decides. A row stamped by any ask is spent.
     if (typeof value.listedAt === 'number') continue;
+    const owner = typeof value.session === 'string' ? value.session : '';
+    // NOT SKIPPED BECAUSE IT IS SPENT — skipped because it is not ours yet. The
+    // owner's own Stop names it; this reader sees it once that session is gone.
+    if (!findingOwnerGone(owner, mine, __FINDING_OWNER_GRACE_MS__, seen)) continue;
     out.push({
       uid: row.key,
       at: row.at,
-      session: typeof value.session === 'string' ? value.session : '',
+      session: owner,
       // Null, not '': a row an older build wrote carries no project at all, and
       // "harvested somewhere unknown" is a different fact from "harvested in the
       // project with the empty id". The publish gate treats null as unknown.
@@ -2142,14 +2299,14 @@ function markFindingListed(row, atMs) {
   );
 }
 
-/** Is there a queued finding inside the window that no ask has named yet?
- *  Machine-wide, like the list it gates: a finding whose own session is gone is
- *  the case the queue exists for, so scoping this read to one session would
- *  strand exactly those rows. Reads the same property the list does, so a gate
- *  that opens is always a list with something in it, and stops at the first
- *  row it finds. */
-function queuedFindingAfter(sinceMs) {
-  return queuedFindingQueue(sinceMs, 1).length > 0;
+/** Is there a queued finding inside the window that no ask has named yet AND
+ *  that this session may claim? Cross-session, like the list it gates, and
+ *  owner-first for the same reason: a finding whose own session is gone is the
+ *  case the queue exists for, while one whose session is still live belongs to
+ *  that session's own turn end. IT IS EXACTLY THE LIST'S OWN READ, so a gate
+ *  that opens is always a list with something in it; stops at the first row. */
+function queuedFindingAfter(sessionId, sinceMs) {
+  return queuedFindingQueue(storeSession(sessionId), sinceMs, 1).length > 0;
 }
 
 /**
@@ -2172,15 +2329,24 @@ function queuedFindingAfter(sinceMs) {
  * visible in, and every cursor shape tried here — \`at + 1\`, then the (at, key)
  * pair — excluded the row that committed late. The ask stamps \`reportedAt\` onto
  * each row it names and this returns the rest.
+ *
+ * AND THE CAP IS SPENT ONLY ON ROWS THE CALLER CAN NAME. \`asks\` is
+ * agentId → the ms this session asked that child, and a row outside it is
+ * skipped before it counts. The queue half drains because every row it reads it
+ * also stamps; this half stamps only what the caller reports, so a publish by a
+ * child of a session whose Stop never fired is a row NOBODY ever stamps — and
+ * counted against the cap, 200 of those sitting newer than a real publish made
+ * that publish invisible to the report and to the re-ask gate alike. Filtering
+ * here is what caps per asked agent rather than per machine.
  */
-function agentPublishes(sinceMs, limit) {
+function agentPublishes(sinceMs, limit, asks) {
   const out = new Map();
   let kept = 0;
   // NO SQL LIMIT, and the cap applied AFTER the filter, the shape the queue read
   // takes and for the same reason: a stamped row is still under the prefix, so a
   // LIMIT spends its budget on reported rows and hides the unreported ones behind
   // them. At 400 publishes in one window the newest 200 filled it and the rest
-  // could never be named.
+  // could never be named. The prefix itself is pruned where it is written.
   for (const row of statePrefixSince(
     MACHINE_SESSION,
     STATE_PUBLISHED_AGENT_PREFIX,
@@ -2194,6 +2360,12 @@ function agentPublishes(sinceMs, limit) {
     const cut = row.key.lastIndexOf('@');
     // A row an older build wrote has no '@' and IS the agent id.
     const agentId = cut === -1 ? row.key : row.key.slice(0, cut);
+    // ONLY WHAT COULD BE OURS. \`agent_id\` is an undocumented probed field and
+    // these rows are machine-wide, so a publish that predates the moment THIS
+    // session asked that id cannot be an answer to this ask, and one by an id it
+    // never asked is another parent's to report.
+    const askedAt = asks.get(agentId);
+    if (askedAt === undefined || row.at < askedAt) continue;
     const hit = { url: value.url, at: row.at, key: row.key, value };
     const list = out.get(agentId);
     if (list === undefined) out.set(agentId, [hit]);
@@ -2222,23 +2394,20 @@ function markPublishReported(hit, atMs) {
  * later one — and visibility is the only mitigation this design has for letting
  * a child publish from a sidechain nobody reads.
  *
- * IT APPLIES THE LINE'S OWN \`hit.at >= ask.at\` FILTER (round-3 nit). Without
- * it a publish by an agent id this session asked LATER opened a gate the line
- * then refused to name, and the turn ended on a block whose reason described
- * nothing.
+ * IT APPLIES THE LINE'S OWN \`hit.at >= ask.at\` FILTER (round-3 nit) — now
+ * inside \`agentPublishes\`, which is what makes the two halves of the gate one
+ * read rather than two predicates that can disagree. Without it a publish by an
+ * agent id this session asked LATER opened a gate the line then refused to name,
+ * and the turn ended on a block whose reason described nothing.
  */
-function childPublishedSince(sessionId, windowStart, sinceMs, limit) {
+function childPublishedSince(sessionId, windowStart, limit) {
   const asked = statePrefixSince(sessionId, STATE_AGENT_ASKED_PREFIX, windowStart, limit);
   if (asked.length === 0) return false;
   // THE SAME READ THE LIST USES. A gate that admitted a row the list then
   // refuses to name fires an ask with nothing in it, at every turn end.
-  const published = agentPublishes(sinceMs, limit);
-  for (const row of asked) {
-    const hits = published.get(row.key);
-    if (hits === undefined) continue;
-    for (const hit of hits) if (hit.at >= row.at) return true;
-  }
-  return false;
+  const asks = new Map();
+  for (const row of asked) asks.set(row.key, row.at);
+  return agentPublishes(windowStart, limit, asks).size > 0;
 }
 
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */
@@ -2497,6 +2666,8 @@ export function storeSource(): string {
     .replaceAll('__CACHE_SLOT_MAX__', String(STORE_CACHE_SLOT_MAX))
     .replaceAll('__FINDING_HOOK__', JSON.stringify(STORE_FINDING_HOOK))
     .replaceAll('__QUEUED_FINDING_PREFIX__', JSON.stringify(STORE_QUEUED_FINDING_PREFIX))
+    .replaceAll('__FINDING_OWNER_GRACE_MS__', String(STORE_FINDING_OWNER_GRACE_MS))
+    .replaceAll('__QUEUE_RETENTION_MS__', String(STORE_QUEUE_RETENTION_MS))
     .replaceAll('__PUBLISHED_AGENT_PREFIX__', JSON.stringify(STORE_PUBLISHED_AGENT_PREFIX));
 }
 

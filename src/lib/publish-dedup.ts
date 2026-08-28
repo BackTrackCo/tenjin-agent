@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import {
   openStore,
   STORE_PUBLISHED_AGENT_PREFIX,
+  STORE_QUEUE_RETENTION_MS,
   STORE_QUEUED_FINDING_PREFIX,
   STORE_SQL,
 } from './state-store';
@@ -140,6 +141,18 @@ export async function recordPublished(
   try {
     store.run(STORE_SQL.setState, [MACHINE_SESSION, publishedKey(bodyMd), JSON.stringify(url), at]);
     if (typeof provenance.agentId === 'string' && provenance.agentId !== '') {
+      // PRUNE BEFORE THE INSERT, this prefix's half of STORE_QUEUE_RETENTION_MS.
+      // The parent's report reads this prefix with no SQL LIMIT — a LIMIT there
+      // spends its budget on already-reported rows and hides unreported ones
+      // behind them — and `at` is a filter rather than an index on
+      // `session_state`, so every row that ages out costs every later Stop
+      // forever unless the writer takes it away.
+      store.run(STORE_SQL.deleteStatePrefixBefore, [
+        MACHINE_SESSION,
+        STORE_PUBLISHED_AGENT_PREFIX,
+        STORE_PUBLISHED_AGENT_PREFIX + String.fromCharCode(0xffff),
+        at - STORE_QUEUE_RETENTION_MS,
+      ]);
       store.run(STORE_SQL.setState, [
         MACHINE_SESSION,
         `${STORE_PUBLISHED_AGENT_PREFIX}${provenance.agentId}@${at}`,
@@ -164,10 +177,13 @@ export async function recordPublished(
  *
  * Two callers assert the outcome to the operator — the already-published short
  * circuit and `--discard`, which both print "it is off the queue" — so a
- * best-effort void was a claim neither of them could stand behind. `changes`
- * distinguishes a delete that happened from a row that was already gone; both
- * leave the queue in the state the caller described, and only an unopenable
- * store does not.
+ * best-effort void was a claim neither of them could stand behind.
+ *
+ * IT ANSWERS "IS THE ROW OFF THE QUEUE", NOT "DID THIS DELETE IT". A row that
+ * was already gone leaves the queue in exactly the state both callers are about
+ * to describe, so it is a true answer — and a `changes > 0` test would turn a
+ * publish followed by a discard into a false failure. The untrue answer is the
+ * other one: a store this could not open, or a statement it could not run.
  */
 export async function dequeueFinding(dataDir: string, findingId: string): Promise<boolean> {
   if (findingId === '') return false;

@@ -2477,6 +2477,16 @@ function fitItems(items, budget) {
  * the open loops take, so a finding and the MISS it answers age out together,
  * and by the runaway guard.
  *
+ * EARLIER, NOT CONCURRENT, and that distinction is load-bearing.
+ * \`queuedFindingQueue\` withholds a row whose own session is still live, so what
+ * reaches this list from elsewhere is a session that ended or went quiet. Before
+ * that gate the first session on the machine to end a turn consumed every
+ * unstamped row: it was blocked over work it had no memory of, stamped the row
+ * machine-wide, and the context that actually did the work was never asked. The
+ * block is also what drove that session to \`--dry-run\` another checkout's body
+ * into its own transcript, which the cross-project \`--yes\` — a gate on
+ * PUBLICATION — does nothing about.
+ *
  * ATTRIBUTED, because a finding whose author is unknowable is one the parent
  * cannot check: the agent type and id name the child, and the search id ties it
  * to the loop that earned the ask.
@@ -2498,22 +2508,33 @@ function fitItems(items, budget) {
  * machine. What that costs, plainly: a finding this ask named and the operator
  * did nothing about is not offered again, where the per-session cursor it
  * replaces re-listed the whole queue to every session for 8h. It stays reachable
- * by id, through \`tenjin finding list\`. The stamp is reported back so the caller
- * can degrade a block it could not record to a nudge.
+ * by the id this line printed, which is what \`--finding\` takes. The stamp is
+ * reported back so the caller can degrade a block it could not record to a nudge.
  */
 function queuedFindingsLine(sessionId, project, windowStart, fresh, budget, atMs) {
-  const rows = queuedFindingQueue(windowStart, ${MAX_LISTED_FINDINGS});
-  if (rows.length === 0) return null;
   const mine = storeSession(sessionId);
+  const rows = queuedFindingQueue(mine, windowStart, ${MAX_LISTED_FINDINGS});
+  if (rows.length === 0) return null;
   const items = rows.map((row) => {
-    const who = row.agentType === '' ? 'a subagent' : row.agentType + ' subagent';
+    // \`clean\` on every free-text field, this one included: it is bounded at
+    // write today, and a bounded-at-write field spliced raw into a blocking
+    // reason is one write away from not being.
+    const who = row.agentType === '' ? 'a subagent' : clean(row.agentType, 64) + ' subagent';
     const agent = row.agentId === null ? '' : ' ' + clean(row.agentId, 64);
     const loop = row.searchId === null ? '' : ', search ' + clean(row.searchId, 64);
     const earlier = row.session === mine ? '' : ', from an earlier session';
     // A ROW HARVESTED IN ANOTHER CHECKOUT IS MARKED, because \`publish.mode\`
     // resolves from THIS directory: an unmarked row is one a full-auto repo
     // would publish out of a private one without anybody deciding to.
-    const elsewhere = row.project !== null && row.project !== project ? ', from another project' : '';
+    //
+    // NULL IS ELSEWHERE ON EITHER SIDE, the same predicate \`isElsewhere\` applies
+    // in publish.ts. A null project is a row nobody can place, and treating it
+    // as local here listed it unmarked and then had \`--finding\` refuse it as
+    // cross-project: the list has to say what the command will do.
+    const elsewhere =
+      row.project === null || project === null || row.project !== project
+        ? ', from another project'
+        : '';
     // THE ID IS WHAT MAKES THE LIST A POINTER, and here it is the ONLY thing
     // that does. \`tenjin publish --finding <id> --dry-run\` is what turns it
     // back into words.
@@ -2551,9 +2572,14 @@ function queuedFindingsLine(sessionId, project, windowStart, fresh, budget, atMs
   // A RE-ASK COUNTS WHAT IS NEW, NOT THE QUEUE. The list holds only rows no ask
   // has named, so an unqualified "3 finding(s) ... held locally" read as the
   // whole queue when it was the three that arrived since.
+  //
+  // "NOT NAMED YET" RATHER THAN "LANDED SINCE": arrival is not the only way a
+  // row reaches a re-ask. One that missed the character budget of the last ask,
+  // and one whose own session has only now gone quiet, are both older than the
+  // ask that did not name them.
   const scope = fresh
     ? ' finding(s) subagents on this machine stated at their own end, held locally and unpublished'
-    : ' further finding(s) landed since the last ask, held locally and unpublished';
+    : ' further finding(s) no ask has named yet, held locally and unpublished';
   return {
     marked,
     text:
@@ -2600,8 +2626,19 @@ function queuedFindingsLine(sessionId, project, windowStart, fresh, budget, atMs
  * this hook read the first — put the second below the mark from the moment it
  * landed, permanently unreported. The stamp is reported back so a report the
  * hook could not record degrades a block to a nudge.
+ *
+ * AND ONLY WHAT COULD BE OURS, INSIDE THE READ. \`agent_id\` is an undocumented
+ * probed field and the publish rows are machine-wide, so a publish that predates
+ * the moment THIS session asked that id cannot be an answer to this ask, and one
+ * by an id this session never asked is another parent's to report.
+ * \`agentPublishes\` takes the ask times and applies both, which is also what
+ * stops rows nobody can claim from filling its cap: this line stamps only what
+ * it reports, so a publish by a child of a session whose Stop never fired is a
+ * row nothing ever stamps. Residual, stated rather than hidden: two LIVE
+ * sessions sharing an agent id still cannot be told apart, which needs a session
+ * on the row and a flag on \`publish\` to carry one.
  */
-function childPublishLine(sessionId, windowStart, since, budget, atMs) {
+function childPublishLine(sessionId, windowStart, budget, atMs) {
   const asked = statePrefixSince(
     sessionId,
     STATE_AGENT_ASKED_PREFIX,
@@ -2610,34 +2647,27 @@ function childPublishLine(sessionId, windowStart, since, budget, atMs) {
   );
   if (asked.length === 0) return null;
   const asks = new Map();
+  const types = new Map();
   for (const row of asked) {
-    asks.set(row.key, {
-      type: isRecord(row.value) && typeof row.value.agentType === 'string' ? row.value.agentType : '',
-      at: row.at,
-    });
+    asks.set(row.key, row.at);
+    types.set(
+      row.key,
+      isRecord(row.value) && typeof row.value.agentType === 'string' ? row.value.agentType : '',
+    );
   }
-  const published = agentPublishes(since, ${MAX_LISTED_FINDINGS});
+  const published = agentPublishes(windowStart, ${MAX_LISTED_FINDINGS}, asks);
   const items = [];
-  for (const [agentId, ask] of asks) {
-    const hits = published.get(agentId);
-    if (hits === undefined) continue;
-    const who = ask.type === '' ? 'a subagent' : ask.type + ' subagent';
+  for (const [agentId, hits] of published) {
+    const type = types.get(agentId) ?? '';
+    // Clipped like every other free-text field on this path: it is bounded at
+    // write today, and this string goes into a blocking reason.
+    const who = type === '' ? 'a subagent' : clean(type, 64) + ' subagent';
     // EVERY PUBLISH, not the child's latest. One line per row is what makes the
     // report an account of what a child did rather than a sample of it.
     for (const hit of hits) {
-      // AND ONLY WHAT COULD BE OURS. \`agent_id\` is an undocumented probed field
-      // and the publish rows are machine-wide, so if the harness ever mints ids
-      // that repeat across concurrent sessions, this parent would otherwise
-      // claim another session's child's publish. A publish that predates the
-      // moment THIS session asked that id cannot be an answer to this ask.
-      // Residual, stated rather than hidden: two live sessions sharing an id
-      // still cannot be told apart, which needs a session on the row and a flag
-      // on \`publish\` to carry one. \`childPublishedSince\` applies the same test,
-      // so the gate cannot open on a row this refuses to name.
-      if (hit.at < ask.at) continue;
-      // The url is the only free-text field here and it goes into a blocking
-      // reason: clipped hard, because a bounded list of long urls is how this
-      // paragraph reached six figures of characters.
+      // The url is the only unbounded free-text field here and it goes into a
+      // blocking reason: clipped hard, because a bounded list of long urls is
+      // how this paragraph reached six figures of characters.
       items.push({
         hit,
         text: '- ' + clean(hit.url, ${PUBLISHED_URL_MAX}) + ' by ' + who + ' ' + clean(agentId, 64),
@@ -2744,7 +2774,11 @@ function didResearch(sessionId) {
   // NOT THE SIDECAR'S OWN TELEMETRY, which is what the rule above is about: a
   // queue row exists only because a child was asked at its own boundary and
   // answered in its own words.
-  if (queuedFindingAfter(Date.now() - ${OPEN_LOOP_WINDOW_MS})) return true;
+  // Owner-first here too, and it has to be: a row this session may not claim is
+  // a row the list will not name, so counting it as research fires a bare ask
+  // with an empty list — the same defect the log-versus-queue split above fixed,
+  // one scope down.
+  if (queuedFindingAfter(sessionId, Date.now() - ${OPEN_LOOP_WINDOW_MS})) return true;
   // \`shelf <> 'local'\` for the same reason 'read'/'churn' and the log-only
   // actions are excluded: a pairing this machine replayed out of its own record
   // is the sidecar's telemetry, not evidence the session researched anything. A
@@ -2958,9 +2992,14 @@ function subagentsRunning(transcriptPath) {
  * mitigation for letting a child publish from a sidechain nobody reads. Both
  * halves of the report re-arm the ask that carries them.
  *
- * MACHINE-WIDE ON PURPOSE, in the gate as in the list. Scoping the re-fire to
- * this session would strand exactly the rows the queue exists for: the parent
- * \`Stop\` of the session that harvested a finding may never fire at all.
+ * MACHINE-WIDE ON PURPOSE, BUT OWNER-FIRST, in the gate as in the list. Scoping
+ * the re-fire to this session would strand exactly the rows the queue exists
+ * for: the parent \`Stop\` of the session that harvested a finding may never fire
+ * at all. Firing on ANY unstamped row went too far the other way — a session in
+ * another project was blocked over a finding a session still running had just
+ * queued, stamped it machine-wide, and that session was then never asked. So the
+ * rescue waits for the owner to be gone: ended, or quiet past the owner grace
+ * (a crash writes no \`ended_at\`, which is why one signal is not enough).
  *
  * AND IT ASKS THE ROWS, NOT A CURSOR (greptile P1 x3, round-3 item 3). Three
  * cursor shapes were tried here — the newest named \`at\` plus a millisecond,
@@ -2985,10 +3024,19 @@ function captureAsk(config, sessionId, transcriptPath) {
   const asked = captureAsked(sessionId);
   // A first ask covers the whole window; a re-ask covers what no ask has named,
   // which is the same read either way. Both are bounded by the window.
+  //
+  // THE GATE TAKES THE SESSION because the list does: a row belonging to a
+  // session still running is not this session's to be blocked over, and a gate
+  // that opened on one would fire an ask the list then refuses to name.
+  //
+  // TWO STOP HOOKS ENDING AT ONCE CAN BOTH NAME ONE ROW. The read and the stamp
+  // are separate statements, so a row unstamped when both read it is listed
+  // twice — a duplicate line in two transcripts, never a lost finding, because
+  // the loss direction is what the stamp is checked for.
   if (
     asked &&
-    !queuedFindingAfter(windowStart) &&
-    !childPublishedSince(sessionId, windowStart, windowStart, ${MAX_LISTED_FINDINGS})
+    !queuedFindingAfter(sessionId, windowStart) &&
+    !childPublishedSince(sessionId, windowStart, ${MAX_LISTED_FINDINGS})
   ) {
     return null;
   }
@@ -3001,9 +3049,11 @@ function captureAsk(config, sessionId, transcriptPath) {
   // the session researched, and re-testing the older signals here would just
   // re-derive an answer this session already gave.
   if (!asked && !didResearch(sessionId)) return null;
+  // ONE WINDOW, not a \`since\` and a \`windowStart\` threaded separately: they were
+  // the same value, and two names for one bound is how the two halves of the
+  // report end up reading different ranges after somebody edits one of them.
   return {
     mode: config.capture,
-    since: windowStart,
     windowStart,
     fresh: !asked,
     at: Date.now(),
@@ -3224,7 +3274,6 @@ async function main() {
     const published = childPublishLine(
       sessionId,
       ask.windowStart,
-      ask.since,
       ${CAPTURE_PUBLISHED_BUDGET},
       ask.at,
     );

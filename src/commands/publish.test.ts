@@ -3069,6 +3069,30 @@ describe('runPublish — publish --finding', () => {
     ).resolves.toMatchObject({ data: { dryRun: true } });
   });
 
+  /**
+   * ROUND-4 SECURITY MAJOR: `--dry-run` WRITES NOTHING, `--discard` INCLUDED.
+   *
+   * The discard branch runs above everything and tested only the id and the
+   * file, so `--discard --dry-run` (and MCP `{finding, discard: true,
+   * dryRun: true}`) permanently dropped the row and answered `{discarded: true}`
+   * — while `--dry-run` is documented in four places as the read path that
+   * writes nothing, and the capture ask names both flags one sentence apart,
+   * which is exactly how a caller comes to pass both. Refused rather than
+   * resolved by precedence, the same rule a file and an id together take.
+   */
+  it('--discard --dry-run refuses, and the row is still on the queue', async () => {
+    const id = await seedFinding({ uid: 'FND-DISCARD-DRY' });
+    await expect(
+      runPublish(
+        { finding: id, discard: true, dryRun: true },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    // The property the refusal exists for.
+    expect(await queuedIds()).toContain(id);
+  });
+
   it('--discard without an id is USAGE, and never a silent success', async () => {
     await expect(
       runPublish(

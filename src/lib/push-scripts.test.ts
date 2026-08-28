@@ -5018,6 +5018,54 @@ describe('the subagent arm (SubagentStop)', () => {
   });
 
   /**
+   * ROUND-4 MINOR 4: THE HARVEST CLAIM GUARDS DATA, NOT A TURN.
+   *
+   * The two budget claims are right to fail closed on a swallowed write: what
+   * they lose is a child's turn, against a runaway that costs many. This one is
+   * not. The child has already spent its turn, its words exist nowhere else, and
+   * a single SQLITE_BUSY during a fan-out — the exact contention the claim
+   * exists for — discarded the finding permanently while the lifecycle row
+   * reported `duplicate-finding` about a duplicate that never happened.
+   *
+   * The refusing store is a real one, narrowed to the claim key so the harvest's
+   * own writes still land: a trigger that ABORTs the claim insert and nothing
+   * else.
+   */
+  it('files the finding when the dedupe claim is swallowed, and names that', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+    const store = await openStore(dataDir);
+    store?.run(
+      'CREATE TRIGGER refuse_claim BEFORE INSERT ON session_state' +
+        " WHEN NEW.key LIKE 'finding:agent:%'" +
+        " BEGIN SELECT RAISE(ABORT, 'database is locked'); END",
+      [],
+    );
+    store?.close();
+
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer(FINDING) }),
+    );
+    expect(run.stdout).toBe('');
+
+    // THE FINDING IS FILED. Fail-closed here dropped it and said nothing was
+    // lost; the log row and the queue row are what the parent's ask reads.
+    const rows = await stopRows();
+    expect(rows.find((r) => r.kind === 'finding')).toBeTruthy();
+    // And the lifecycle row does not call it a duplicate: a guard that could not
+    // be held is a different fact from a twin that was actually refused.
+    const busy = rows.find((r) => r.reason === 'captured-store-busy');
+    expect(busy).toBeTruthy();
+    expect(rows.map((r) => r.reason)).not.toContain('duplicate-finding');
+    // The queue row too, which is what the parent's capture ask actually reads.
+    expect(
+      sessionState('', `${STORE_QUEUED_FINDING_PREFIX}${String(busy?.findingUid ?? '')}`),
+    ).not.toBeNull();
+  });
+
+  /**
    * Every field this arm reads was PROBED, not published (2026-08-27), so each
    * absence has to end in a quiet, enumerable row: a hook that throws on a
    * harness that renames a field is a hook that breaks every child on that
@@ -5862,6 +5910,96 @@ describe('the capture ask (Stop)', () => {
     expect(reason).toContain('from an earlier session');
   });
 
+  /** A `sessions` row for a session other than the stopping one. `endedAt` null
+   *  is a session still running; `startedAt` doubles as its last activity, since
+   *  a session that wrote no `events` has only that. */
+  async function seedSession(
+    session: string,
+    over: { startedAt?: number; endedAt?: number | null } = {},
+  ): Promise<void> {
+    const store = await openStore(dataDir);
+    const startedAt = over.startedAt ?? Date.now();
+    store?.run(STORE_SQL.touchSession, [session, null, null, startedAt, 'machine']);
+    if (typeof over.endedAt === 'number') {
+      store?.run(STORE_SQL.endSession, [session, startedAt, over.endedAt, 'machine']);
+    }
+    store?.close();
+  }
+
+  /**
+   * ROUND-4 MAJOR 1: THE OWNER IS ASKED FIRST, AND A LIVE OWNER IS NOT ROBBED.
+   *
+   * The queue, the gate and the `listedAt` stamp are all machine-wide, so before
+   * the owner-first gate the first session on the machine to end a turn consumed
+   * every unstamped row. Session B's child queues a finding, session A in another
+   * project hits a turn end first, is BLOCKED over work it has no memory of,
+   * stamps the row machine-wide, and B's own Stop then finds nothing: the one
+   * context that could judge the finding is never asked. The sibling nag arm has
+   * held the opposite invariant since its own session-scoping fix ("leaves it
+   * UNNAGGED for its own", hook-scripts.test.ts). Second-order, and the reason
+   * this is a major rather than a nit: A's block is what drives A to `--dry-run`
+   * B's private-repo body into A's transcript, and the cross-project `--yes`
+   * gates PUBLICATION, not disclosure.
+   */
+  it("says nothing about a live session's finding, and leaves it for that session", async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    // A session that started a moment ago and has not ended: still running.
+    await seedSession('a-live-session');
+    await queueFinding('UID-THEIRS', 'settled in a session still running', 'a-live-session');
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    // This session has its own research signal, so it is asked — about nothing.
+    const reason = run.stdout === '' ? '' : (JSON.parse(run.stdout) as { reason: string }).reason;
+    expect(reason).not.toContain('UID-THEIRS');
+    expect(reason).not.toContain('held locally and unpublished');
+
+    // AND IT IS STILL THERE, UNSTAMPED, for the session that owns it. The stamp
+    // is what makes this a loss rather than a delay: a fix that merely dropped
+    // the row from the printed list while still marking it would read the same
+    // from the reason and still silence B forever.
+    const row = sessionState('', `${STORE_QUEUED_FINDING_PREFIX}UID-THEIRS`) as Record<
+      string,
+      unknown
+    >;
+    expect(row.session).toBe('a-live-session');
+    expect(row.listedAt).toBeUndefined();
+  });
+
+  /**
+   * The other side of that gate: preferring the owner must not become a way to
+   * strand a finding. An owner that ENDED is gone, so its rows are claimable at
+   * the next turn end anywhere on the machine.
+   */
+  it('names a finding whose owning session has ended', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    await seedSession('a-session-that-ended', { endedAt: Date.now() });
+    await queueFinding('UID-ENDED', 'settled before that session ended', 'a-session-that-ended');
+
+    const reason = await askReason();
+    expect(reason).toContain('- UID-ENDED');
+    expect(reason).toContain('from an earlier session');
+  });
+
+  /**
+   * And the case machine scope was built for, which `ended_at` alone cannot
+   * cover: a CRASH stamps no end. The grace past the owner's last activity is
+   * the second signal, so a finding stranded by a killed session is delayed by
+   * an hour rather than lost for the whole window.
+   */
+  it('names a finding whose owning session crashed without ending', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    await seedSession('a-session-that-crashed', { startedAt: Date.now() - 3 * 60 * 60 * 1000 });
+    await queueFinding('UID-CRASHED', 'settled before the crash', 'a-session-that-crashed', {
+      at: Date.now() - 3 * 60 * 60 * 1000,
+    });
+
+    const reason = await askReason();
+    expect(reason).toContain('- UID-CRASHED');
+  });
+
   /**
    * MINOR (round 2): the research gate counted the append-only `events` log
    * while the list reads the queue a publish DELETES, so after a child
@@ -5901,6 +6039,35 @@ describe('the capture ask (Stop)', () => {
 
     // And it settles: the watermark moved past the publish it just reported.
     expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
+
+  /**
+   * ROUND-4 MINOR 3: A ROW NOBODY CAN CLAIM MUST NOT SPEND THE CAP.
+   *
+   * The queue half of the report drains because it stamps every row it reads.
+   * The publish half does not: `childPublishLine` stamps only hits by an agent
+   * THIS session asked, so a publish by a child of a session whose Stop never
+   * fired is a row nothing ever stamps. Counted against the 200-row cap, 200 of
+   * those sitting newer than a real publish made that publish invisible to the
+   * report and to the re-ask gate alike, permanently. The read applies the ask
+   * filter itself now, so the cap is per asked agent rather than per machine.
+   */
+  it('reports a child publish sitting under 200 rows no session can claim', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const at = Date.now();
+    await seedChildAsk('mine', at - 60_000);
+    await seedChildPublish('mine', 'https://tenjin.test/p/buried-child-piece', at - 30_000);
+    // 200 publishes by children this session never asked, all NEWER than ours:
+    // unstampable by any live session, and exactly the cap's width.
+    for (let i = 0; i < 200; i += 1) {
+      await seedChildPublish(`orphan${i}`, `https://tenjin.test/p/orphan-${i}`, at - 1000 + i);
+    }
+
+    const reason = await askReason();
+    expect(reason).toContain('buried-child-piece');
+    // And still nobody else's to claim.
+    expect(reason).not.toContain('orphan-');
   });
 
   /**
@@ -6153,9 +6320,12 @@ describe('the capture ask (Stop)', () => {
     expect(second).toContain('UID-LATE');
     // Only what is new. Restating the first would make every re-ask a re-read.
     expect(second).not.toContain('UID-EARLY');
-    // And it says so: a re-ask counts what LANDED SINCE, so an unqualified
-    // "N finding(s) ... held locally" would read as the whole queue.
-    expect(second).toContain('1 further finding(s) landed since the last ask');
+    // And it says so: a re-ask counts what NO ASK HAS NAMED, so an unqualified
+    // "N finding(s) ... held locally" would read as the whole queue. "not named
+    // yet" and not "landed since": a row that missed the last ask's character
+    // budget, and one whose owning session has only now gone quiet, both reach a
+    // re-ask without having arrived since it.
+    expect(second).toContain('1 further finding(s) no ask has named yet');
     expect(first).toContain('1 finding(s) subagents on this machine stated at their own end');
 
     // And it settles: every row the re-ask named carries its stamp.

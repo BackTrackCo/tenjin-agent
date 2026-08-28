@@ -165,7 +165,7 @@ const publishInput = {
     .boolean()
     .optional()
     .describe(
-      'With finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again. Nothing is sent anywhere, and it is permanent: a finding captured in another project takes the same yes:true as publishing one',
+      'With finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again. Nothing is sent anywhere, and it is permanent: a finding captured in another project takes the same yes:true as publishing one. Never send it with dryRun:true, which is a usage error: read the finding in one call, discard it in another',
     ),
   // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
@@ -495,7 +495,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
         'price, findings, card, target, and for a stored finding its whole body and the child that ' +
         'wrote it under details.finding) for you to show the user before re-calling with yes:true. ' +
-        'dryRun:true returns the same body with nothing published or spent, and reports a hard block rather than refusing on it, which makes it the read path for a blocked finding; discard:true drops a stored finding from the local queue so no later ask offers it. A ' +
+        'dryRun:true returns the same body with nothing published or spent, and reports a hard block rather than refusing on it, which makes it the read path for a blocked finding; discard:true drops a stored finding from the local queue so no later ask offers it, and the two are separate calls (sending both is a usage error, since dryRun writes nothing and a discard is permanent). A ' +
         'hard block (a live secret) returns PUBLISH_BLOCKED on a real publish and is NEVER cleared by yes or any mode. ' +
         'The marketplace scans server-side as well, so either refusal can also arrive AFTER the ' +
         'local scan passed, carrying findings marked source:"server" that a yes:true given before ' +

@@ -2872,21 +2872,26 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     }
     // Once per agent, claimed rather than checked: the same child stopping
     // twice, or a second fire racing this one, must not queue the block twice.
+    // Windowed rather than permanent for the same reason the arming signal is:
+    // a claim that outlives the signal it was taken under is a child that cannot
+    // be harvested again in a later hour.
     //
-    // FAIL-CLOSED, and windowed to the signal (round-3 gate 6). \`claimState\`
-    // reports a WIN on a write the store swallowed, so a SQLITE_BUSY during a
-    // fan-out — the exact contention this claim exists for — let two fires both
-    // believe they held it and queue the same body twice. \`claimStateFresh\`
-    // reads that as a loss. Windowed rather than permanent for the same reason
-    // the arming signal is: a claim that outlives the signal it was taken under
-    // is a child that cannot be harvested again in a later hour.
-    if (
-      !claimStateFresh(
-        sessionId,
-        STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''),
-        SIGNAL_WINDOW_MS,
-      )
-    ) {
+    // AND THE TWO LOSSES ARE NOT THE SAME LOSS HERE, which is what separates
+    // this claim from the two budget claims below. Those fail closed because a
+    // swallowed write costs them a child's TURN and the runaway it would
+    // otherwise permit costs many. THIS one guards DATA: the child has already
+    // spent its turn, its words exist nowhere else yet, and one SQLITE_BUSY
+    // during a fan-out — the exact contention the claim exists for — discarded
+    // the finding permanently while the lifecycle row said \`duplicate-finding\`
+    // about a duplicate that never happened. A real duplicate still returns; an
+    // unreachable store files the finding and NAMES that, because a duplicate
+    // queue row is recoverable and a lost finding is not.
+    const claim = claimStateFreshOutcome(
+      sessionId,
+      STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''),
+      SIGNAL_WINDOW_MS,
+    );
+    if (claim === 'held') {
       beat('duplicate-finding');
       return quiet();
     }
@@ -2934,7 +2939,14 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
       searchId,
       body,
     });
-    beat('captured', { searchId, chars: body.length, findingUid });
+    // \`store-busy\` is the SAME harvest with the dedupe claim unheld: the row is
+    // filed, and the reason says the guard against a twin was unavailable rather
+    // than leaving that indistinguishable from a clean capture.
+    beat(claim === 'won' ? 'captured' : 'captured-store-busy', {
+      searchId,
+      chars: body.length,
+      findingUid,
+    });
     return quiet();
   }
 
