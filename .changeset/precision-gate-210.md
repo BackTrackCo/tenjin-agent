@@ -18,11 +18,12 @@ of them `low`. A hook compares forty words of card text; the shelf has the
 embeddings, the body and both legs.
 
 **The WebSearch/WebFetch hook injects beside the search and lets it run.** The
-abort-and-answer path is deleted, along with the fence-and-nonce machinery that
-existed only to make a cancelled call's replacement text safe. No script this CLI
-writes emits `permissionDecision` any more, so the disclosure `install` and
-`push on` print says so plainly: every arm only adds context beside the call.
-`tenjin push status` no longer reports denies.
+abort-and-answer path is deleted. No script this CLI writes emits
+`permissionDecision` any more, so the disclosure `install` and `push on` print
+says so plainly: every arm only adds context beside the call. `tenjin push
+status` no longer reports denies. The fence-and-nonce machinery stays: it guards
+every full-body injection — a free marketplace piece, a teammate's team-shelf
+note — not only the path that is gone.
 
 **Every hook lookup names its arm.** A `trigger` (`prompt`, `failure`,
 `research`, `dispatch`, `subagent`, `read`, `churn`) rides on every search

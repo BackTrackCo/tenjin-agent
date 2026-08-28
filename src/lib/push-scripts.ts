@@ -334,10 +334,42 @@ const TEAM_OPENER =
 const CLOSING_LINE =
   'If this settles it, proceed without re-verifying. If it does not apply, ignore it.';
 
-/** The opener, the header, the body, and the closing line. The opener above the
- *  body is what frames it as third-party data rather than as the hook's voice. */
+/**
+ * The body, capped, between markers the body cannot forge.
+ *
+ * THE FENCE IS THE WHOLE SECURITY BOUNDARY OF THIS FILE. Everything outside it
+ * is ours and reads as the hook's own voice. The body inside it is a stranger's:
+ * anyone may publish a free marketplace piece, and any teammate may publish to
+ * the team shelf. A body containing a bare \`---\` line would otherwise close the
+ * fence early and speak in our voice for the rest of the injection.
+ *
+ * Two locks, because one is cheap: the fence carries a per-injection nonce the
+ * body cannot know, and any body line that looks like a fence or opens with our
+ * own \`[Tenjin]\` prefix is indented so it cannot be read as either.
+ *
+ * THE READER IS A MODEL, NOT A PARSER, so "looks like a fence" is the test, not
+ * "is byte-equal to one". \`---tenjin-body abc ---\` with no space and the
+ * four-dash variants read exactly like the closing fence to the thing actually
+ * reading this, and everything after a line that reads as the close speaks in
+ * our voice. So: indent any dash-leading line that mentions tenjin at all,
+ * whatever the spacing or dash count. Indenting a real prose bullet costs a
+ * nested list item; missing one costs the boundary.
+ */
+function fenceSafeBody(body) {
+  return String(body)
+    .split('\n')
+    .map((line) =>
+      /^\s*(?:-{3,}\s*$|\[Tenjin\]|-+[^\n]*tenjin)/i.test(line) ? '  ' + line : line,
+    )
+    .join('\n');
+}
+
+/** The opener, the header, then the body between two copies of a fence the body
+ *  cannot forge, and the closing line. Everything outside the fence is the
+ *  hook's own voice. */
 function fullForm(opener, header, body) {
-  return [opener, header, String(body), CLOSING_LINE].join('\n');
+  const fence = '--- tenjin-body ' + Math.random().toString(36).slice(2, 10) + ' ---';
+  return [opener, header, fence, fenceSafeBody(String(body)), fence, CLOSING_LINE].join('\n');
 }
 
 /**
