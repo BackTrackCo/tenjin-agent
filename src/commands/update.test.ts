@@ -761,25 +761,42 @@ describe('runUpdate: the post-swap refresh', () => {
   };
 
   /** A spawn seam that answers per call, so the manager can succeed while the
-   *  refresh fails — the case the whole warn path exists for. */
-  function scriptedSpawn(outcomes: SpawnResult[]) {
+   *  refresh fails — the case the whole warn path exists for. `outputs` is what
+   *  each child writes to the merged pipe, indexed the same way. */
+  function scriptedSpawn(outcomes: SpawnResult[], outputs: (string | undefined)[] = []) {
     const calls: {
       cmd: string;
       args: string[];
       env?: Record<string, string>;
       timeoutMs: number;
     }[] = [];
-    const impl: UpdateSpawn = async (cmd, args, spawnOpts) => {
+    const impl: UpdateSpawn = async (cmd, args, spawnOpts, onOutput) => {
       calls.push({
         cmd,
         args,
         timeoutMs: spawnOpts.timeoutMs,
         ...(spawnOpts.env !== undefined ? { env: spawnOpts.env } : {}),
       });
+      const output = outputs[calls.length - 1];
+      if (output !== undefined) onOutput(output);
       return outcomes[calls.length - 1] ?? { kind: 'exit', code: 0 };
     };
     return { impl, calls, refreshes: () => calls.slice(1) };
   }
+
+  /** What `install --refresh` prints when it refuses: one failure envelope on
+   *  stdout, which is the only place its four refusals differ. */
+  const refusalEnvelope = (message: string): string =>
+    `${JSON.stringify({
+      schemaVersion: 1,
+      command: 'install',
+      ok: false,
+      error: { code: 'REFUSED', message },
+    })}\n`;
+
+  type FailureData = {
+    refresh: { profiles: string[]; failed: { dataDir: string; reason: string; fix: string }[] };
+  };
 
   it('runs the new entry once per detected hook-owner profile, each with its own data dir', async () => {
     const { ctx } = makeCtx();
@@ -844,10 +861,13 @@ describe('runUpdate: the post-swap refresh', () => {
     );
     expect(spawned.refreshes().map((c) => c.env?.TENJIN_DATA_DIR)).toEqual([real]);
     expect(existsSync(planted)).toBe(false);
-    const data = result.data as { refresh: { profiles: string[]; failed: string[]; fix?: string } };
+    const data = result.data as FailureData;
     expect(data.refresh.profiles).toEqual([real]);
-    expect(data.refresh.failed).toEqual([planted]);
-    expect(data.refresh.fix).toContain('tenjin install');
+    expect(data.refresh.failed.map((f) => f.dataDir)).toEqual([planted]);
+    // The skip's own reason, not the generic "could not refresh": this profile
+    // was never visited, and why is the operator's next move.
+    expect(data.refresh.failed[0]?.reason).toContain('not a directory');
+    expect(data.refresh.failed[0]?.fix).toContain(`TENJIN_DATA_DIR=${planted} tenjin install`);
   });
 
   /**
@@ -871,10 +891,17 @@ describe('runUpdate: the post-swap refresh', () => {
       }),
     );
     expect(spawned.refreshes().length).toBe(8);
-    const data = result.data as { refresh: { profiles: string[]; failed: string[] } };
+    const data = result.data as FailureData;
     expect(data.refresh.profiles).toEqual(planted.slice(0, 8));
-    // The remainder is named rather than silently dropped.
-    expect(data.refresh.failed).toEqual(planted.slice(8));
+    // The remainder is named rather than silently dropped, and says it was the
+    // cap that shed it rather than anything about those machines.
+    expect(data.refresh.failed.map((f) => f.dataDir)).toEqual(planted.slice(8));
+    expect(data.refresh.failed[0]?.reason).toContain('cap');
+    // Partial success is half the report: 8 of 12 converged, and a line that
+    // named only the 4 would read as an upgrade that converged nothing.
+    const lines = result.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('Refreshed the skills and hook scripts for 8 of 12 profiles');
+    expect(lines).toContain('Could not refresh the skills and hook scripts for 4:');
   });
 
   it('refreshes the invoking profile only when no hooks are registered', async () => {
@@ -938,15 +965,131 @@ describe('runUpdate: the post-swap refresh', () => {
           detectHookOwners: async () => [{ dataDir: shelf, scripts: [] }],
         }),
       );
-      const data = result.data as { updated: boolean; refresh: { failed: string[]; fix?: string } };
+      const data = result.data as { updated: boolean } & FailureData;
       expect(data.updated).toBe(true);
-      expect(data.refresh.failed).toEqual([shelf]);
-      expect(data.refresh.fix).toContain('tenjin install');
+      expect(data.refresh.failed.map((f) => f.dataDir)).toEqual([shelf]);
+      // A bare `tenjin install` converges the DEFAULT profile, so it is not the
+      // command that repairs a shelf; this is the whole point of the per-profile
+      // fix string.
+      expect(data.refresh.failed[0]?.fix).toContain(`TENJIN_DATA_DIR=${shelf} tenjin install`);
       const lines = result.humanLines?.join(' ') ?? '';
       expect(lines).toContain('Could not refresh');
       expect(lines).toContain(shelf);
-      expect(lines).toContain('tenjin install');
+      expect(lines).toContain(`TENJIN_DATA_DIR=${shelf} tenjin install`);
     }
+  });
+
+  /**
+   * Four refusals share one exit code, so without the child's own message the
+   * dir that is not a directory, the settings file that changed underneath and
+   * the machine that never ran `install` all reach the operator as the same
+   * line and none of them as itself.
+   */
+  it("carries the child's own refusal message into the parent's report", async () => {
+    const shelf = await profileDir('.tenjin-shelf');
+    const message = 'The hooks directory changed while it was being refreshed.';
+    const { ctx } = makeCtx();
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: scriptedSpawn(
+          [
+            { kind: 'exit', code: 0 },
+            { kind: 'exit', code: 3 },
+          ],
+          [undefined, refusalEnvelope(message)],
+        ).impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => [{ dataDir: shelf, scripts: [] }],
+      }),
+    );
+    const data = result.data as FailureData;
+    expect(data.refresh.failed[0]?.reason).toBe(message);
+    expect(result.humanLines?.join('\n')).toContain(message);
+  });
+
+  /** A child that died before printing an envelope still has to say something
+   *  the operator can act on, and it must not be the previous child's message. */
+  it('falls back to how the child died when it printed no envelope', async () => {
+    const shelf = await profileDir('.tenjin-shelf');
+    for (const [outcome, expected] of [
+      [{ kind: 'timeout' }, 'did not finish in 60s'],
+      [{ kind: 'start-failed', cause: new Error('ENOENT') }, 'could not be started'],
+      [{ kind: 'exit', code: 1 }, 'exited 1 without reporting a reason'],
+    ] as [SpawnResult, string][]) {
+      const { ctx } = makeCtx();
+      const result = await runUpdate(
+        { check: false },
+        ctx,
+        await deps({
+          spawnImpl: scriptedSpawn(
+            [{ kind: 'exit', code: 0 }, outcome],
+            // An older binary rejecting `--refresh` writes commander's usage
+            // error, which is not an envelope of ours and must not be mined.
+            [undefined, 'error: unknown option --refresh\n'],
+          ).impl,
+          refreshCommand: ENTRY,
+          detectHookOwners: async () => [{ dataDir: shelf, scripts: [] }],
+        }),
+      );
+      expect((result.data as FailureData).refresh.failed[0]?.reason).toContain(expected);
+    }
+  });
+
+  /**
+   * The refresh child's envelope is a report to THIS process, not to the
+   * operator's terminal; the manager's live echo exists because npm's chatter is
+   * minutes of progress a human wants to watch, and this is one JSON line.
+   */
+  it('never echoes the refresh child output to the operator', async () => {
+    const shelf = await profileDir('.tenjin-shelf');
+    const { ctx, stdout, stderr } = makeCtx({}, true);
+    await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        spawnImpl: scriptedSpawn(
+          [
+            { kind: 'exit', code: 0 },
+            { kind: 'exit', code: 3 },
+          ],
+          [undefined, refusalEnvelope('Nothing to refresh.')],
+        ).impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => [{ dataDir: shelf, scripts: [] }],
+      }),
+    );
+    expect(stdout()).not.toContain('schemaVersion');
+    expect(stderr()).not.toContain('schemaVersion');
+  });
+
+  /**
+   * The bare form is right only where a bare `tenjin install` would land, which
+   * is the default dir under this home AND the dir this invocation resolved.
+   */
+  it('names the bare install only for the default profile', async () => {
+    const home = await mkdtemp(join(dir, 'home-'));
+    const def = join(home, '.tenjin');
+    await mkdir(def, { recursive: true });
+    const { ctx } = makeCtx();
+    ctx.dataDir = def;
+    const result = await runUpdate(
+      { check: false },
+      ctx,
+      await deps({
+        homeDir: home,
+        spawnImpl: scriptedSpawn([
+          { kind: 'exit', code: 0 },
+          { kind: 'exit', code: 3 },
+        ]).impl,
+        refreshCommand: ENTRY,
+        detectHookOwners: async () => [{ dataDir: def, scripts: [] }],
+      }),
+    );
+    const fix = (result.data as FailureData).refresh.failed[0]?.fix ?? '';
+    expect(fix).toContain('Run `tenjin install`');
+    expect(fix).not.toContain('TENJIN_DATA_DIR=');
   });
 
   /**
@@ -976,9 +1119,10 @@ describe('runUpdate: the post-swap refresh', () => {
     );
     // Guessing at a command is how a hook script gets rewritten by the wrong binary.
     expect(spawned.refreshes().length).toBe(0);
-    const data = result.data as { updated: boolean; refresh: { failed: string[] } };
+    const data = result.data as { updated: boolean } & FailureData;
     expect(data.updated).toBe(true);
-    expect(data.refresh.failed).toEqual([dir]);
+    expect(data.refresh.failed.map((f) => f.dataDir)).toEqual([dir]);
+    expect(data.refresh.failed[0]?.reason).toContain('re-execute');
   });
 
   it('survives a detector that throws, refreshing the invoking profile', async () => {
@@ -1080,9 +1224,12 @@ describe('versionFreeEntry', () => {
     );
     // The manager ran; nothing else did.
     expect(spawned.calls.length).toBe(1);
-    const data = result.data as { updated: boolean; refresh: { failed: string[]; fix?: string } };
+    const data = result.data as {
+      updated: boolean;
+      refresh: { failed: { dataDir: string; reason: string; fix: string }[] };
+    };
     expect(data.updated).toBe(true);
-    expect(data.refresh.failed).toEqual([dir]);
+    expect(data.refresh.failed.map((f) => f.dataDir)).toEqual([dir]);
     expect(result.humanLines?.join(' ')).toContain('tenjin install');
   });
 });

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { sep } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
 import { CliError } from '../lib/errors';
@@ -17,6 +17,7 @@ import {
 } from '../lib/update-check';
 import { detectHookOwners } from '../lib/harness-hooks';
 import type { HookOwner } from '../lib/harness-hooks';
+import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -267,7 +268,7 @@ export async function runUpdate(
   const refresh = await refreshProfiles(ctx, deps);
   return {
     data: { ...data(true), refresh },
-    humanLines: [`Updated tenjin-cli ${current} -> ${latest}.`, refreshLine(refresh)],
+    humanLines: [`Updated tenjin-cli ${current} -> ${latest}.`, ...refreshLines(refresh)],
   };
 }
 
@@ -284,19 +285,34 @@ const REFRESH_TIMEOUT_MS = 60_000;
  */
 const MAX_REFRESH_PROFILES = 8;
 
+/** One profile this update did not bring up to date, and why. */
+export interface RefreshFailure {
+  /** The profile's data dir. */
+  dataDir: string;
+  /**
+   * Why it is not up to date, in the words of whoever decided that: the child's
+   * own `error.message` when it printed a failure envelope, this pass's own
+   * account when the child was never run or never got that far. Always present,
+   * because a failure whose four causes render identically is the reason this
+   * field exists.
+   */
+  reason: string;
+  /** The command that converges THIS profile; see {@link manualFix}. */
+  fix: string;
+}
+
 /** What the post-swap re-materialize did, per profile. */
 export interface RefreshOutcome {
   /** Data dirs a refresh was run for, whether or not it succeeded. */
   profiles: string[];
   /**
-   * Profiles this update did not bring up to date, with the manual command to
-   * finish them. Both halves land here: a refresh that ran and did not report
-   * success, and one that was never run at all (no entry to re-exec, a data dir
-   * that is not a directory, past the {@link MAX_REFRESH_PROFILES} cap).
+   * Profiles this update did not bring up to date, each with its reason and the
+   * manual command to finish it. Both halves land here: a refresh that ran and
+   * did not report success, and one that was never run at all (no entry to
+   * re-exec, a data dir that is not a directory, past the
+   * {@link MAX_REFRESH_PROFILES} cap).
    */
-  failed: string[];
-  /** Present when at least one profile failed; names `tenjin install`. */
-  fix?: string;
+  failed: RefreshFailure[];
 }
 
 /**
@@ -328,12 +344,20 @@ export interface RefreshOutcome {
  * operator asked for. A refusal, a run with nothing to converge, a crash, a
  * timeout, or an older-binary "unknown option --refresh" all land here as a warn
  * naming the manual command.
+ *
+ * EACH FAILURE CARRIES ITS OWN REASON AND ITS OWN FIX. The four ways a profile
+ * misses are not interchangeable — a dir that is not a directory, a settings
+ * file that changed underneath, a machine that never ran `install`, and a
+ * timeout each want a different next move — so the child's output is collected
+ * and its `error.message` reported per profile rather than collapsed into one
+ * parent line.
  */
 async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<RefreshOutcome> {
   const home = deps.homeDir ?? homedir();
   const detect = deps.detectHookOwners ?? detectHookOwners;
   const owners = await detect(home).catch(() => []);
   const candidates = owners.length > 0 ? owners.map((o) => o.dataDir) : [ctx.dataDir];
+  const fixFor = (dataDir: string): string => manualFix(dataDir, home, ctx.dataDir);
 
   // A detected data dir is a path READ OUT of settings.json, not a directory
   // this CLI put there, and the child would create it: `install --refresh`
@@ -342,12 +366,19 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
   // already a directory is reported unrefreshed instead of visited. The cap is
   // the other half of the same argument (see MAX_REFRESH_PROFILES).
   const present: string[] = [];
-  const unrun: string[] = [];
+  const unrun: RefreshFailure[] = [];
   for (const dataDir of candidates) {
-    (isExistingDir(dataDir) ? present : unrun).push(dataDir);
+    if (isExistingDir(dataDir)) present.push(dataDir);
+    else unrun.push({ dataDir, reason: 'It is not a directory.', fix: fixFor(dataDir) });
   }
   const profiles = present.slice(0, MAX_REFRESH_PROFILES);
-  unrun.push(...present.slice(profiles.length));
+  for (const dataDir of present.slice(profiles.length)) {
+    unrun.push({
+      dataDir,
+      reason: `Past this update's ${MAX_REFRESH_PROFILES}-profile refresh cap.`,
+      fix: fixFor(dataDir),
+    });
+  }
 
   const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);
   // Nothing safe to re-exec: no argv (an embedder, a stripped argv), or a path
@@ -356,11 +387,20 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
   // script gets rewritten by the wrong binary — and a refresh that ran the OLD
   // build would report success while writing the bytes the update just left.
   if (entry === null) {
-    return { profiles: [], failed: candidates, fix: REFRESH_MANUAL_FIX };
+    const reason = 'This build has no entry the update could safely re-execute.';
+    return {
+      profiles: [],
+      failed: candidates.map((d) => ({ dataDir: d, reason, fix: fixFor(d) })),
+    };
   }
 
   const failed = [...unrun];
   for (const dataDir of profiles) {
+    // A BOUNDED COLLECTOR, not the manager's live echo. npm's chatter is minutes
+    // of progress a human wants to see; this child emits one envelope on a pipe,
+    // and painting that JSON into the human's stderr is noise. It is still kept,
+    // because the envelope is where the child says WHICH refusal this was.
+    let tail = '';
     const outcome = await (deps.spawnImpl ?? spawnCapture)(
       process.execPath,
       [entry, 'install', '--refresh'],
@@ -371,26 +411,73 @@ async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<R
         // what keeps it from touching any other file in there (lib/update-check).
         env: { TENJIN_DATA_DIR: dataDir, [NUDGE_OPT_OUT]: '1' },
       },
-      // A collecting sink, not the manager's live echo. npm's chatter is minutes
-      // of progress a human wants to see; this child emits one envelope on a
-      // pipe, and painting that JSON into the human's stderr is noise. Its
-      // OUTCOME is the report, below.
-      dropOutput,
+      (chunk) => {
+        tail = (tail + chunk).slice(-REFRESH_TAIL_LIMIT);
+      },
     );
     // The child's exit code IS the verdict: `install --refresh` exits non-zero
     // when it refused or found nothing to converge, so a machine that never ran
-    // `install` warns here instead of being told its hooks were refreshed.
-    if (outcome.kind !== 'exit' || outcome.code !== 0) failed.push(dataDir);
+    // `install` warns here instead of being told its hooks were refreshed. The
+    // envelope on the pipe is what turns that verdict into a reason.
+    if (outcome.kind !== 'exit' || outcome.code !== 0) {
+      failed.push({ dataDir, reason: refreshReason(outcome, tail), fix: fixFor(dataDir) });
+    }
   }
-  return {
-    profiles,
-    failed,
-    ...(failed.length > 0 ? { fix: REFRESH_MANUAL_FIX } : {}),
-  };
+  return { profiles, failed };
 }
 
-/** Drains the refresh child's pipe without echoing it; see the call site. */
-const dropOutput = (): void => {};
+/** How much of one refresh child's output is kept. It prints a single envelope,
+ *  not a build log, so this is headroom rather than a budget. */
+const REFRESH_TAIL_LIMIT = 4000;
+
+/** How much of a child's own message reaches the parent's report. Long enough
+ *  for every message `install --refresh` can produce, short enough that a child
+ *  which somehow printed prose cannot own the operator's terminal. */
+const REASON_LIMIT = 300;
+
+/**
+ * Why this profile is not up to date, preferring the child's own account.
+ *
+ * The exit code separates success from failure and nothing else, so the four
+ * refusals `install --refresh` can reach would otherwise reach the operator as
+ * one line that names none of them. The envelope on the pipe carries the
+ * distinction; the outcome kind covers the deaths that never printed one.
+ */
+function refreshReason(outcome: SpawnResult, output: string): string {
+  const reported = envelopeMessage(output);
+  if (reported !== undefined) return reported;
+  if (outcome.kind === 'timeout') return `It did not finish in ${REFRESH_TIMEOUT_MS / 1000}s.`;
+  if (outcome.kind === 'start-failed') return 'The refresh could not be started.';
+  // An older binary rejecting `--refresh` is the expected shape here: commander
+  // writes its own usage error and exits without an envelope of ours.
+  return `The refresh exited ${outcome.code} without reporting a reason.`;
+}
+
+/**
+ * The `error.message` out of the one failure envelope the child printed.
+ *
+ * Read from the LAST parseable line because stdout carries exactly one envelope
+ * while stderr may carry notices ahead of it, and the two pipes are merged here.
+ * Sanitized because this text is bound for a human's terminal and the child
+ * relays paths and parse errors it did not author.
+ */
+function envelopeMessage(output: string): string | undefined {
+  const lines = output.split('\n');
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]?.trim();
+    if (line === undefined || !line.startsWith('{')) continue;
+    let parsed: { ok?: unknown; error?: { message?: unknown } };
+    try {
+      parsed = JSON.parse(line) as typeof parsed;
+    } catch {
+      continue;
+    }
+    if (parsed?.ok !== false || typeof parsed.error?.message !== 'string') continue;
+    const message = sanitizeForTerminal(parsed.error.message).trim();
+    if (message.length > 0) return message.slice(0, REASON_LIMIT);
+  }
+  return undefined;
+}
 
 /** A path that already exists AND is a directory. Follows links on purpose: a
  *  data dir behind a symlink is an ordinary machine layout, an absent one is not
@@ -399,8 +486,23 @@ function isExistingDir(path: string): boolean {
   return statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
 }
 
-const REFRESH_MANUAL_FIX =
-  'Run `tenjin install` to bring the skills and hook scripts up to this version.';
+/**
+ * The manual command that converges THIS profile.
+ *
+ * A bare `tenjin install` resolves one data dir, so handing it to an operator
+ * whose failed profile is a shelf — the case the per-profile loop exists for —
+ * is advice that cannot repair the thing it names. The bare form is emitted only
+ * for a dir that is the default under this home AND the one this invocation
+ * itself resolved, so it is right under either reading of "what a bare install
+ * would do next"; every other profile gets the explicit env prefix, which is the
+ * same form the shelf runbook uses and is right unconditionally.
+ */
+function manualFix(dataDir: string, home: string, invoking: string): string {
+  const bare =
+    resolve(dataDir) === resolve(defaultDataDir(home)) && resolve(dataDir) === resolve(invoking);
+  const command = bare ? 'tenjin install' : `TENJIN_DATA_DIR=${dataDir} tenjin install`;
+  return `Run \`${command}\` to bring the skills and hook scripts up to this version.`;
+}
 
 /**
  * The entry to re-exec, or null when there is none this code may trust.
@@ -434,20 +536,37 @@ export function versionFreeEntry(entry: string | undefined): string | null {
 }
 
 /**
- * One line reporting what the refresh actually did.
+ * What the refresh actually did, as lines.
  *
  * It replaces "New builds pick it up immediately", which was true of the binary
  * and false of everything install had written — so it read as reassurance about
  * precisely the thing that was NOT handled (tenjin-agent#171).
+ *
+ * The successes are reported ALONGSIDE the failures rather than instead of them:
+ * a machine where 8 of 12 profiles converged is not a machine where the refresh
+ * did nothing, and one line per failure is what lets its own reason and its own
+ * command travel with it.
  */
-function refreshLine(refresh: RefreshOutcome): string {
-  if (refresh.failed.length > 0) {
-    return `Could not refresh the skills and hook scripts for ${refresh.failed.join(', ')}. ${REFRESH_MANUAL_FIX}`;
+function refreshLines(refresh: RefreshOutcome): string[] {
+  const failedDirs = new Set(refresh.failed.map((f) => f.dataDir));
+  const done = refresh.profiles.filter((p) => !failedDirs.has(p));
+  if (refresh.failed.length === 0) {
+    return [
+      done.length > 1
+        ? `Refreshed the skills and hook scripts for ${done.length} profiles: ${done.join(', ')}.`
+        : `Refreshed the skills and hook scripts for ${done[0]}.`,
+    ];
   }
-  const count = refresh.profiles.length;
-  return count > 1
-    ? `Refreshed the skills and hook scripts for ${count} profiles: ${refresh.profiles.join(', ')}.`
-    : `Refreshed the skills and hook scripts for ${refresh.profiles[0]}.`;
+  const total = done.length + refresh.failed.length;
+  const lines =
+    done.length > 0
+      ? [
+          `Refreshed the skills and hook scripts for ${done.length} of ${total} profiles: ${done.join(', ')}.`,
+        ]
+      : [];
+  lines.push(`Could not refresh the skills and hook scripts for ${refresh.failed.length}:`);
+  lines.push(...refresh.failed.map((f) => `- ${f.dataDir}: ${f.reason} ${f.fix}`));
+  return lines;
 }
 
 /**

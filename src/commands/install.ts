@@ -335,8 +335,11 @@ export async function runInstall(
  * CONVERGE, NEVER MATERIALIZE. Every step is gated on the surface already
  * existing: a skill not wired stays unwired, a hook script not on disk stays
  * absent, an event with no entry of ours gets none, and no permission rule is
- * written at all. That is what makes it safe to run unattended on any machine,
- * including one that never ran `tenjin install`, where it is a stated no-op.
+ * written at all. The update nudge is stood down for the same reason (see
+ * `runCommand` in cli.ts): it fires after this body returns or throws, and its
+ * cache file would be the one file this mode created. That is what makes it safe
+ * to run unattended on any machine, including one that never ran
+ * `tenjin install`, where it is a stated no-op.
  *
  * PERMISSION RULES ARE REPORTED, NEVER WRITTEN. They carry no version, so there
  * is nothing in one to bring up to date; the only thing a rules pass could do is
@@ -445,18 +448,23 @@ async function runInstallRefresh(
   // Both are REFUSED (exit 3) rather than a failure: nothing went wrong, this
   // run simply had nothing it was allowed to converge, and `update`'s warn path
   // already names `tenjin install` and never fails the upgrade.
+  //
+  // ORDER MATTERS, and it is this way round. A refusal to write leaves every
+  // hook counter at zero, so a machine whose hooks directory is a symlink can
+  // reach `!touched` on the strength of the refusal itself and report "nothing
+  // is installed here" over a machine where plenty is. The specific reason wins.
+  if (hooks.warning !== undefined) {
+    throw new CliError('REFUSED', hooks.warning, {
+      fix: 'Run `tenjin install` to bring the skills and hook scripts up to this version.',
+      details: data,
+    });
+  }
   if (!touched) {
     throw new CliError(
       'REFUSED',
       `Nothing to refresh for ${ctx.dataDir}: no Tenjin skills or hook scripts are materialized here.`,
       { fix: 'Run `tenjin install` to set this machine up.', details: data },
     );
-  }
-  if (hooks.warning !== undefined) {
-    throw new CliError('REFUSED', hooks.warning, {
-      fix: 'Run `tenjin install` to bring the skills and hook scripts up to this version.',
-      details: data,
-    });
   }
   return { data, humanLines: refreshLines(hooks, skills, permissions, ctx.dataDir) };
 }

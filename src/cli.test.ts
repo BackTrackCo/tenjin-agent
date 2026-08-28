@@ -1,5 +1,6 @@
 import { describe, it, expect, afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -466,6 +467,54 @@ describe('profile and stats', () => {
     expect(await main(['profile', 'set', '--handle', 'x', '--timeout', 'abc'], cap.io)).toBe(2);
     const cap2 = captureIo();
     expect(await main(['stats', '--timeout', 'abc'], cap2.io)).toBe(2);
+  });
+});
+
+/**
+ * `install --refresh` states its no-op absolutely: it converges what exists and
+ * creates nothing. The nudge runs AFTER the command body, from the dispatcher,
+ * so it is outside anything that body can refuse — and left alone it writes
+ * `update-check.json` into a data dir the refresh itself was not allowed to add
+ * one file to. Under `tenjin update` the spawned child is held off by
+ * TENJIN_NO_UPDATE_CHECK; a hand-run refresh arrives with nothing set.
+ */
+describe('the update nudge and `install --refresh`', () => {
+  const cachePath = (): string => join(process.env.TENJIN_DATA_DIR!, 'update-check.json');
+
+  // CI is this file's blanket offline switch and would make every case below
+  // pass for the wrong reason, so it is lifted here and the registry is a stub
+  // that records whether the nudge reached for it at all.
+  let fetched = 0;
+  beforeEach(() => {
+    process.env.CI = '';
+    fetched = 0;
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      fetched += 1;
+      return new Response(JSON.stringify({ latest: '99.0.0' }), { status: 200 });
+    });
+  });
+  afterEach(async () => {
+    process.env.CI = '1';
+    vi.restoreAllMocks();
+    await rm(cachePath(), { force: true });
+  });
+
+  it('writes no update-check cache and asks no registry', async () => {
+    const cap = captureIo();
+    // The refusal itself is beside the point here (this sandbox has nothing
+    // materialized); what matters is that nothing appeared on the way out.
+    await main(['install', '--refresh', '--json'], cap.io);
+    expect(existsSync(cachePath())).toBe(false);
+    expect(fetched).toBe(0);
+  });
+
+  // The other half: without it the case above would pass on a nudge that was
+  // already off for some unrelated reason.
+  it('still nudges for a command that is not a refresh', async () => {
+    const cap = captureIo();
+    expect(await main(['config', '--json'], cap.io)).toBe(0);
+    expect(existsSync(cachePath())).toBe(true);
+    expect(fetched).toBe(1);
   });
 });
 

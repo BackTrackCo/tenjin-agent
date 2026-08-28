@@ -43,7 +43,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import {
   HOOK_EVENTS,
   detectHookOwners,
@@ -698,6 +698,31 @@ describe('detectHookOwners', () => {
     } finally {
       await rm(shelf, { recursive: true, force: true });
     }
+  });
+
+  /**
+   * `ownsEntryUnder` compares resolved paths, so these three spellings are ONE
+   * profile to the refresh writer. Deduping the raw strings would make them
+   * three: three spawns, three slots under `update`'s refresh cap, and eight
+   * aliases planted in a settings file would shed a real shelf profile.
+   */
+  it('counts path aliases of one data dir as one profile', async () => {
+    // Built as raw strings, because `join` would normalize the aliases away.
+    const alias = (mid: string): string => nodeCmd(`${data}${mid}/hooks/${WEBSEARCH_HOOK_FILE}`);
+    await writeSettings({
+      hooks: {
+        PreToolUse: [
+          { hooks: [{ type: 'command', command: alias('') }] },
+          { hooks: [{ type: 'command', command: alias('/.') }] },
+          { hooks: [{ type: 'command', command: alias('/foo/..') }] },
+        ],
+      },
+    });
+    const owners = await detectHookOwners(home);
+    // One profile, in its canonical spelling: what `update` hands a child as
+    // TENJIN_DATA_DIR must not be somebody's `..`-laden alias either.
+    expect(owners.map((o) => o.dataDir)).toEqual([resolve(data)]);
+    expect(owners[0]?.scripts).toEqual([join(resolve(data), 'hooks', WEBSEARCH_HOOK_FILE)]);
   });
 
   it('claims nothing for entries that are not ours', async () => {

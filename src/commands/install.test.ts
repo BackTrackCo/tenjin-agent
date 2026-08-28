@@ -4227,6 +4227,25 @@ describe('runInstall --refresh', () => {
   });
 
   /**
+   * The two refusals are ordered, and this is why. A refusal to write leaves
+   * every hook counter at zero, so a machine whose hooks directory is a symlink
+   * reaches `!touched` on the strength of the refusal itself. Reported as the
+   * no-op it would tell the operator nothing is installed on a machine whose
+   * only problem is the link, and `update` would relay exactly that.
+   */
+  it('reports the write refusal, not the no-op, when the refusal is what emptied the run', async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), 'tenjin-refresh-elsewhere-'));
+    await mkdir(data, { recursive: true });
+    await symlink(elsewhere, join(data, 'hooks'));
+
+    const err = await caught(() => runInstall({ refresh: true }, makeCtx(), refreshDeps()));
+    expect(err.exitCode).not.toBe(0);
+    expect(err.message).toContain('not a directory');
+    expect(err.message).not.toContain('Nothing to refresh');
+    await rm(elsewhere, { recursive: true, force: true });
+  });
+
+  /**
    * `--refresh` dispatches ABOVE the only place `dryRun` is read, so honouring
    * the pair would write every script and commit settings.json against the
    * flag's own help text.

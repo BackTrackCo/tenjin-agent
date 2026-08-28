@@ -1033,9 +1033,16 @@ export async function detectHookOwners(homeDir: string): Promise<HookOwner[]> {
         if (!isPlainObject(handler) || typeof handler.command !== 'string') continue;
         const owner = hookOwnerOf(handler.command);
         if (owner === null) continue;
-        const found = owners.get(owner.dataDir) ?? { dataDir: owner.dataDir, scripts: [] };
-        if (!found.scripts.includes(owner.script)) found.scripts.push(owner.script);
-        owners.set(owner.dataDir, found);
+        // Keyed on the RESOLVED dir, and the resolved dir is what a caller gets
+        // back. `ownsEntryUnder` compares resolved paths, so `/x/.tenjin`,
+        // `/x/./.tenjin` and `/x/foo/../.tenjin` are one profile there; deduping
+        // the raw strings here would make them three, each costing a spawn and a
+        // slot under `update`'s refresh cap and so able to crowd out a real one.
+        const dataDir = resolve(owner.dataDir);
+        const script = resolve(owner.script);
+        const found = owners.get(dataDir) ?? { dataDir, scripts: [] };
+        if (!found.scripts.includes(script)) found.scripts.push(script);
+        owners.set(dataDir, found);
       }
     }
   }
@@ -1140,6 +1147,13 @@ export async function refreshHooks(opts: {
     // The one branch that separates this from the writer: no entry means no
     // entry. An install adds it; a refresh has nothing to converge.
     if (idx === -1) continue;
+    // ONE HANDLER, deliberately, and inherited from the writer. An entry whose
+    // handlers named two data dirs would satisfy `ownsEntryUnder` for both
+    // passes and be collapsed to a single handler by whichever ran last. Nothing
+    // in this module or `wireSearchHooks` ever emits that shape, so reaching it
+    // takes a hand-merged settings file, and the answer would be the same
+    // question the declined duplicate-entry thread asked: which of the two is
+    // the entry of ours. Kept identical to the writer rather than diverged.
     const desired = {
       ...(spec.matcher !== undefined ? { matcher: spec.matcher } : {}),
       hooks: [handlerFor(join(scriptsDir, spec.scriptFile), platform, spec.timeoutSeconds)],

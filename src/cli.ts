@@ -75,6 +75,13 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
   // suppresses stderr under --json.
   const runCommand = async (command: string, cmd: Command, run: CommandRun): Promise<void> => {
     const json = cmd.optsWithGlobals().json === true;
+    // `install --refresh` promises to converge what exists and create nothing.
+    // Under `tenjin update` the child is held to that by TENJIN_NO_UPDATE_CHECK,
+    // but a hand-run refresh arrives here with nothing set, and the nudge below
+    // would materialize `update-check.json` under a data dir this mode was not
+    // allowed to add a single file to. Read here rather than in the command
+    // body: the nudge fires after the body has already thrown its refusal.
+    const refreshRun = command === 'install' && cmd.optsWithGlobals().refresh === true;
     // Read BEFORE the envelope, from the last check's cache only: this is the
     // agent's copy of the nudge, and it must not cost a network call or a delay.
     // `update` is excluded for the same reason the nudge is — its own envelope
@@ -97,8 +104,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // buildContext has no ctx to read one from. Skipped for `update` itself: its
     // envelope has just answered the nudge's question, and this process still
     // runs the OLD build, so a cached "newer exists" would print the nudge in
-    // the same breath as "Updated".
-    if (command !== 'update') {
+    // the same breath as "Updated". Skipped for `install --refresh` because its
+    // cache file is the one thing that mode may not create; see `refreshRun`.
+    if (command !== 'update' && !refreshRun) {
       await maybeUpdate({ dir: dataDir(process.env), io, json });
     }
     // Every command but `install` is a chance to catch up a skill left stale by
