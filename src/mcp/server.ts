@@ -213,7 +213,6 @@ const publishInput = {
   // made up, and attribution nobody can check is worse than none.
 } satisfies Record<Exclude<keyof PublishArgs, 'agent'>, z.ZodTypeAny>;
 
-
 const editInput = {
   postId: z.string().describe('The uuid of your own post to show or update'),
   yes: z

@@ -211,31 +211,31 @@ Reports how a search ended.
 
 Publishes Markdown with optional metadata and a local safety scan. Hard blocks cannot be bypassed.
 
-| Flag                       | Effect                                                                    |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `--finding <id>`           | Publish a stored subagent finding as the body instead of a file.          |
-| `--dry-run`                | Print what would be published, whole body included, and write nothing.    |
-| `--discard`                | With `--finding`: drop it from the local queue, unpublished, for good.    |
+| Flag             | Effect                                                                 |
+| ---------------- | ---------------------------------------------------------------------- |
+| `--finding <id>` | Publish a stored subagent finding as the body instead of a file.       |
+| `--dry-run`      | Print what would be published, whole body included, and write nothing. |
+| `--discard`      | With `--finding`: drop it from the local queue, unpublished, for good. |
 
-| `--agent <id>`             | Record the publish under the harness agent id that ran it. Gates nothing. |
-| `--search-id <uuid>`       | Link the piece to the search it answers. Repeatable, up to 10 per piece.       |
-| `--draft`                  | Save privately instead of publishing.                                          |
-| `--price <usd>`            | Set the post price.                                                            |
-| `--excerpt <text>`         | Public preview.                                                                |
-| `--mode <mode>`            | `review`, `auto`, or `full-auto` for this run.                                 |
-| `--yes`                    | Clear warning findings and the review confirmation.                            |
-| `--question <text>`        | Question this piece answers. Repeatable.                                       |
-| `--task <text>`            | Task this piece supports. Repeatable.                                          |
-| `--scope <text>`           | What the piece covers.                                                         |
-| `--exclusions <text>`      | What it does not cover.                                                        |
-| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable.                                            |
-| `--as-of <time>`           | When evidence was gathered.                                                    |
-| `--valid-until <time>`     | When the answer expires.                                                       |
-| `--artifact-type <type>`   | `document`, `skill`, or `dataset`.                                             |
-| `--temporal-mode <mode>`   | `snapshot`, `maintained`, or `evergreen`.                                      |
-| `--provenance <text>`      | How evidence was obtained.                                                     |
-| `--methodology <text>`     | How it was established.                                                        |
-| `--key <kind=value>`       | An exact-match key this piece answers by-key lookups on. Repeatable, up to 32. |
+| `--agent <id>` | Record the publish under the harness agent id that ran it. Gates nothing. |
+| `--search-id <uuid>` | Link the piece to the search it answers. Repeatable, up to 10 per piece. |
+| `--draft` | Save privately instead of publishing. |
+| `--price <usd>` | Set the post price. |
+| `--excerpt <text>` | Public preview. |
+| `--mode <mode>` | `review`, `auto`, or `full-auto` for this run. |
+| `--yes` | Clear warning findings and the review confirmation. |
+| `--question <text>` | Question this piece answers. Repeatable. |
+| `--task <text>` | Task this piece supports. Repeatable. |
+| `--scope <text>` | What the piece covers. |
+| `--exclusions <text>` | What it does not cover. |
+| `--applies-to <key=v1,v2>` | Applicability metadata. Repeatable. |
+| `--as-of <time>` | When evidence was gathered. |
+| `--valid-until <time>` | When the answer expires. |
+| `--artifact-type <type>` | `document`, `skill`, or `dataset`. |
+| `--temporal-mode <mode>` | `snapshot`, `maintained`, or `evergreen`. |
+| `--provenance <text>` | How evidence was obtained. |
+| `--methodology <text>` | How it was established. |
+| `--key <kind=value>` | An exact-match key this piece answers by-key lookups on. Repeatable, up to 32. |
 
 `--key` names a key `POST /api/keys/resolve` answers on: `fingerprint=sig_v1:<hash>` (a failure signature), `package_version=<name@version>`, `command_head=<head>` or `repo=<owner/name>`, split on the first `=` only. It is a top-level post field, not a card field, so a piece may carry keys and no card. Every key goes out unverified: `verified` is the close rule's claim, made when two independent fixes agreed, and never a flag a hand publish asserts. A shelf with `KNOWLEDGE_KEYS` off refuses any body carrying keys (`keys_disabled`, exit 4, no retry, named as such), and a verified key another published piece already holds comes back as "`<kind> <key>` is already verified on `<id>`; publish it unverified" — also no retry. `tenjin edit` does not take `--key` yet.
 
@@ -394,13 +394,12 @@ The push experiment flips Tenjin from a tool the agent calls into a sidecar that
 
 Sets `hooks.push` to `on` and immediately wires the four push hook scripts (seven settings entries, across six events) into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe). Two runs do not get that far: with `hooks.webSearch off` the command refuses and leaves `hooks.push` as it was (that key is the wiring switch for every hook this CLI writes), and on a machine whose recorded install harness is set and does not include Claude Code it persists `hooks.push: on` but wires nothing, since these arms are Claude Code hooks — `tenjin install --harness claude` then `tenjin push on` wires them.
 
-| Script                     | Event(s)                                   | Matcher                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -------------------------- | ------------------------------------------ | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tenjin-push-prompt.mjs`   | `UserPromptSubmit`                         | —                                 | Looks the prompt up before the turn starts.                                                                                                                                                                                                                                                                                                                                                                       |
-| `tenjin-push-failure.mjs`  | `PostToolUse`, `PostToolUseFailure`        | `Bash`                            | On a failing build/test/migrate/install/lint command, replays the fix this machine already recorded for that error signature (a local pairing), or, in team mode, asks the team shelf by fingerprint (`POST /api/keys/resolve`, two hashes on the wire) for a fix a teammate's machine recorded. The error text is never searched and never leaves the machine. A later pass on the same head closes the pairing. |
+| Script                     | Event(s)                                   | Matcher                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------------- | ------------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tenjin-push-prompt.mjs`   | `UserPromptSubmit`                         | —                                 | Looks the prompt up before the turn starts.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `tenjin-push-failure.mjs`  | `PostToolUse`, `PostToolUseFailure`        | `Bash`                            | On a failing build/test/migrate/install/lint command, replays the fix this machine already recorded for that error signature (a local pairing), or, in team mode, asks the team shelf by fingerprint (`POST /api/keys/resolve`, two hashes on the wire) for a fix a teammate's machine recorded. The error text is never searched and never leaves the machine. A later pass on the same head closes the pairing.                                                                                                                                                                                                                              |
 | `tenjin-push-subagent.mjs` | `SubagentStart`, `SubagentStop`            | —                                 | Hands a subagent the finding the dispatch hook parked for it seconds earlier, at its first turn, one handoff slot per dispatch; at that subagent's end, records its stop and, on an open loop, asks it once for the finding it settled. Every fire that opens the store leaves one heartbeat event row naming why it ended (`no-cache`, `invalid-shape`, `expired`, `weak`, `already-injected`, `delivered`), which is the denominator for the delivery rate. Nothing reads those rows yet: `tenjin push status` summarizes decisions, not events, so until the reporting arm lands they are a hand-SQL question against `~/.tenjin/state.db`. |
-| `tenjin-push-context.mjs`  | `PostToolUse` (read), `PreToolUse` (churn) | `Read` / `Edit\|Write\|MultiEdit` | Notices packages a file imports, and a stuck edit loop (the same file edited repeatedly).                                                                                                                                                                                                                                                                                                                         |
-
+| `tenjin-push-context.mjs`  | `PostToolUse` (read), `PreToolUse` (churn) | `Read` / `Edit\|Write\|MultiEdit` | Notices packages a file imports, and a stuck edit loop (the same file edited repeatedly).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 A hit is `strong` when the marketplace says so: the top candidate is `corroborated` (both of its retrieval legs agreed on the piece) and its `confidence` is not `low`. Anything else is `none`, is recorded to the ledger as `weak`, and falls through from the team shelf to the public one. Nothing is scored on the machine — the shelf has the embeddings, the full body and both retrieval legs, while a hook has a title and an excerpt. On a strong, free hit the prompt and research arms attach the finding's full body as context (a paid piece is offered as a pointer instead); the subagent arm hands a pointer only, stamped with a delivery marker that also lands in its event row, and a strong free dispatch hit is relayed to that arm rather than injected into the parent, which still reads one line naming the piece and its resource id (a strong paid hit stays with the parent, the only context with buy authority); the failure arm attaches only this machine's own error→fix pairing, never a searched piece, and the context arm is log-only in this phase, recording what it would have said so its precision earns out before it is allowed to speak. No arm can block or change a tool call: the WebSearch/WebFetch hook injects the finding beside the search and lets the search run. Two entries can hold a turn end open instead, each once per session and both behind `hooks.capture`: the Stop hook under `hooks.capture block`, and the subagent arm's finding ask, which returns to the child that is stopping. Every decision, spoken or not, is written to the state store (`~/.tenjin/state.db`) that `tenjin push status` summarizes.
 

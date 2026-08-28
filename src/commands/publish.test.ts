@@ -3021,6 +3021,71 @@ describe('runPublish — publish --finding', () => {
   });
 
   /**
+   * ROUND-4 P1: THE DEDUP SHORT CIRCUIT SAT ABOVE THE CROSS-PROJECT GATE.
+   *
+   * That branch DEQUEUES the machine-wide row and answers `alreadyPublished`
+   * with the url, so `publish --finding <id>` without `--yes` from another
+   * checkout permanently dropped the owning project's queued finding — its
+   * capture ask never offers it again — and told the caller where that project's
+   * work is on a shelf. No confirm anywhere on either.
+   *
+   * The invariant this pins, which is now stated once above the gate rather than
+   * re-derived per branch: on a cross-project finding with no `--yes`, nothing
+   * observable happens first. No publish, no dequeue, no dedup answer, no scan
+   * verdict. Every early return below the gate is safe by position; `--dry-run`
+   * is exempt by CONDITION, because position is what kept failing.
+   */
+  it('refuses a cross-project finding before the dedup can dequeue or answer', async () => {
+    const deps = hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider });
+    // A twin published from HERE, so the machine holds a marker for this body and
+    // the dedup short circuit is the branch a cross-project publish would hit.
+    const twin = await seedFinding({ uid: 'FND-XP-TWIN' });
+    await runPublish({ finding: twin, mode: 'full-auto' }, makeCtx(), deps);
+    const id = await seedFinding({ uid: 'FND-XP-DEDUP', project: 'deadbeefdeadbeef' });
+
+    const err = (await runPublish({ finding: id, mode: 'full-auto' }, makeCtx(), deps).catch(
+      (e: unknown) => e,
+    )) as { code: string; details?: { crossProject?: { finding: string } } };
+    // Authority first: not a success carrying the twin's url.
+    expect(err.code).toBe('NEEDS_CONFIRMATION');
+    expect(err.details?.crossProject?.finding).toBe('deadbeefdeadbeef');
+    // And the owning project still has its row.
+    expect(await queuedIds()).toContain(id);
+
+    // The remediation the refusal names still works, and still writes nothing.
+    const dry = await runPublish({ finding: id, dryRun: true }, makeCtx(), deps);
+    expect((dry.data as { alreadyPublished?: boolean }).alreadyPublished).toBe(true);
+    expect(await queuedIds()).toContain(id);
+
+    // And somebody saying so clears it, dedup answer and dequeue included.
+    const said = await runPublish({ finding: id, mode: 'full-auto', yes: true }, makeCtx(), deps);
+    expect((said.data as { alreadyPublished?: boolean }).alreadyPublished).toBe(true);
+    expect(await queuedIds()).not.toContain(id);
+  });
+
+  /**
+   * The same ordering rule at the scan: a caller with no standing to publish this
+   * row from here is told that rather than handed a verdict about another
+   * project's secret. Nothing is lost by the order, since a block is
+   * non-bypassable and still refuses after the `--yes`.
+   */
+  it('refuses a cross-project finding before the block tier speaks', async () => {
+    const id = await seedFinding({
+      uid: 'FND-XP-BLOCKED',
+      project: 'deadbeefdeadbeef',
+      body: `${FINDING_BODY}\n\n${BLOCK}`,
+    });
+    const deps = hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider });
+    await expect(
+      runPublish({ finding: id, mode: 'full-auto' }, makeCtx(), deps),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    // Said once, and only to somebody who claimed the authority to publish it.
+    await expect(
+      runPublish({ finding: id, mode: 'full-auto', yes: true }, makeCtx(), deps),
+    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+  });
+
+  /**
    * MINOR (round 2): the already-published short circuit called `dequeueFinding`
    * ABOVE the dry-run return, so inspecting an already-published finding
    * silently took it off the queue. The test that covers the promise seeded a

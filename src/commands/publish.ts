@@ -246,6 +246,77 @@ export async function runPublish(
   // does, not just where the POST goes.
   const runtime = await resolveContextSettings(ctx);
   const { raw, finding } = await resolveSource(args, ctx, projectIdOf(cwd));
+
+  // The consent cascade + resolved price (global < project < env < flag), with the
+  // full-auto loosening gate. Pure config reads: no writes, no network, no wallet,
+  // which is what lets it sit above the cross-project gate that needs its `mode`.
+  // Its downgrade warnings are still written where they were, below the dedup, so
+  // a duplicate turn end stays as quiet as it was.
+  const settings = await resolvePublishSettings({
+    dataDir: ctx.dataDir,
+    cwd,
+    ...(args.mode !== undefined ? { flag: args.mode } : {}),
+    env,
+  });
+
+  /**
+   * A FINDING FROM ANOTHER CHECKOUT NEEDS SOMEBODY TO SAY SO, AND NOTHING HAPPENS
+   * BEFORE THAT. The queue is machine-wide and `publish.mode` resolves from the
+   * CURRENT directory, so without this a finding harvested in a private repo
+   * under `review` is publishable from an unrelated `full-auto` repo, inside the
+   * window, with no confirm anywhere: the same cross-project bug class `pairings`
+   * binds `project IS ?` against. `--yes` rather than the consent cascade,
+   * because `full-auto` clears the cascade and this is the one gate that must
+   * survive it.
+   *
+   * IT IS FIRST NOW, AND THAT IS THE POINT (greptile P1, round 4). It used to sit
+   * below the dedup short circuit, which DEQUEUES the row and answers
+   * `alreadyPublished` with the url: running `publish --finding <id>` from
+   * another checkout on a body this machine had already published permanently
+   * dropped the originating project's queued finding, with no confirm, and told
+   * the caller where another project's work is on a shelf. That is the third
+   * defect in this file from a gate placed below an early return, so the rule is
+   * now stated once rather than re-derived per branch:
+   *
+   *   AUTHORITY, THEN VERDICT, THEN CONSENT, THEN SPEND. On a cross-project
+   *   finding with no `--yes`, nothing observable happens first — no publish, no
+   *   dequeue, no dedup answer, no scan verdict. Every early return below this
+   *   line is therefore safe by POSITION, and the one exception is a CONDITION
+   *   rather than a position, right here, because position is what kept failing.
+   *
+   * THE EXCEPTION IS `--dry-run`, deliberately. It is the remediation this
+   * refusal's own `fix` names, the one the capture ask names, and the one
+   * command-reference and the MCP tool description name; gating it would make
+   * every one of those unreachable and leave `--yes` the only way to find out
+   * what a row is. It writes nothing, spends nothing and reaches no shelf, so it
+   * changes no state in the project that owns the finding. What it does disclose
+   * is that project's body to a reader here, which is why the capture ask no
+   * longer blocks a session over a live session's row at all (round-4 major 1):
+   * the pressure that turned this read into a reflex is the half that was worth
+   * removing.
+   *
+   * The `--discard` branch above carries its own copy of this gate rather than
+   * reading this one, because it returns long before here and a discard is the
+   * one outcome on this command that cannot be undone.
+   */
+  if (finding !== undefined && args.yes !== true && args.dryRun !== true) {
+    const here = projectIdOf(cwd);
+    if (isElsewhere(finding.project, here)) {
+      throw new CliError(
+        'NEEDS_CONFIRMATION',
+        `Finding ${finding.id} was captured in ${finding.project === null ? 'an unrecorded project' : 'a different project'}, not this one.`,
+        {
+          fix: 'Read it with `--dry-run`, then re-run with --yes to publish it from here. Its own project may have a stricter publish.mode than this directory does.',
+          details: {
+            mode: settings.mode,
+            crossProject: { finding: finding.project, cwd: here },
+            finding: findingDetail(finding),
+          },
+        },
+      );
+    }
+  }
+
   // THE CHILD'S LOOP IS THE PIECE'S LOOP. A finding was harvested because a
   // subagent stopped on a search this session had left open, so publishing it
   // is what answers that search — but only when the caller named none itself,
@@ -265,6 +336,12 @@ export async function runPublish(
   // consent gate, before the wallet — so a capture ask that fires twice cannot
   // turn a clean turn end into a confirm prompt or a keystore unlock, and so no
   // request is made at all.
+  //
+  // AND BELOW THE CROSS-PROJECT GATE, which is the half that was missing. This
+  // branch DEQUEUES and answers with a url, so reached from another checkout it
+  // dropped the owning project's row and named where its work is, both without a
+  // confirm. It stays above the scan and the cascade; it is only the authority
+  // question that now precedes it.
   //
   // DRAFTS ARE OUT, both ways: a draft parks privately, so parking the same text
   // twice is legitimate and a draft writes no marker to match. The marker is
@@ -334,14 +411,6 @@ export async function runPublish(
   }
   const card = deriveCard(frontmatter, cardFlags);
 
-  // The consent cascade + resolved price (global < project < env < flag), with the
-  // full-auto loosening gate. Its downgrade warnings go to stderr, not the receipt.
-  const settings = await resolvePublishSettings({
-    dataDir: ctx.dataDir,
-    cwd,
-    ...(args.mode !== undefined ? { flag: args.mode } : {}),
-    env,
-  });
   // The resolver's downgrade warnings, a mistyped env mode, and the one-line
   // explainer for an unconfigured mode: all stderr, all invisible to --json. On
   // every shelf, because the cascade below runs on every shelf: in team mode
@@ -421,6 +490,10 @@ export async function runPublish(
   // operator most needs to see. Nothing is published either way: this returns
   // before the confirm, the wallet and the network, and it reports the block
   // rather than hiding it.
+  //
+  // ITS EXEMPTION FROM THE CROSS-PROJECT GATE IS A CONDITION UP THERE, not this
+  // position: the gate now runs above the dedup short circuit, so being below it
+  // would refuse the very read both refusals tell the caller to run.
   if (args.dryRun === true) {
     return dryRunReceipt({ body, finding, title, status, price, warns, blocking, searchIds });
   }
@@ -438,6 +511,12 @@ export async function runPublish(
   // matched secret; the file path honours it and this one now does too. The
   // confirm below keeps the body, where it is the READ GATE rather than a leak,
   // as does `--dry-run` above, which the operator asked for by name.
+  //
+  // BELOW THE CROSS-PROJECT GATE, so a caller with no standing to publish this
+  // row from here is told that rather than handed a scan verdict about another
+  // project's secret: authority precedes verdict. Nothing is lost by the order —
+  // the block is non-bypassable, so it still refuses after a `--yes`, and
+  // `--dry-run` reports it in one read on the path the refusal above names.
   if (blocking.length > 0) {
     throw new CliError('PUBLISH_BLOCKED', blockMessage(blocking, finding), {
       fix:
@@ -451,33 +530,6 @@ export async function runPublish(
         ...(finding === undefined ? {} : { finding: findingRef(finding) }),
       },
     });
-  }
-
-  // A FINDING FROM ANOTHER CHECKOUT NEEDS SOMEBODY TO SAY SO. The queue is
-  // machine-wide and `publish.mode` resolves from the CURRENT directory, so
-  // without this a finding harvested in a private repo under `review` is
-  // publishable from an unrelated `full-auto` repo, inside the window, with no
-  // confirm anywhere: the same cross-project bug class `pairings` binds
-  // `project IS ?` against. `--yes` rather than the consent cascade, because
-  // `full-auto` clears the cascade and this is the one gate that must survive
-  // it. `--dry-run` is above this on purpose: reading a finding locally is how
-  // the operator decides, and it publishes nothing.
-  if (finding !== undefined && args.yes !== true) {
-    const here = projectIdOf(cwd);
-    if (isElsewhere(finding.project, here)) {
-      throw new CliError(
-        'NEEDS_CONFIRMATION',
-        `Finding ${finding.id} was captured in ${finding.project === null ? 'an unrecorded project' : 'a different project'}, not this one.`,
-        {
-          fix: 'Read it with `--dry-run`, then re-run with --yes to publish it from here. Its own project may have a stricter publish.mode than this directory does.',
-          details: {
-            mode: settings.mode,
-            crossProject: { finding: finding.project, cwd: here },
-            finding: findingDetail(finding),
-          },
-        },
-      );
-    }
   }
 
   // --yes clears the soft findings and the review confirm alike, on every shelf.
