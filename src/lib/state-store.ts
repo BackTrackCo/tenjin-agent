@@ -87,8 +87,8 @@ export const STORE_BUSY_TIMEOUT_MS = 250;
  * Code shows the operator, and lost its state for that fire.
  *
  * So the bootstrap gets its own, longer wait, and it is put back immediately
- * afterwards so no ordinary fire ever inherits it. This is a once-per-machine
- * cost (the gate is `user_version < 1`).
+ * afterwards so no ordinary fire ever inherits it. This is a once-per-version
+ * cost (the gate is `user_version < STORE_USER_VERSION`).
  *
  * THE BUDGET IS THE PRODUCT, NOT THE TIMEOUT, and the ceiling is 1500 ms, not
  * 2700. `DatabaseSync` is synchronous, so a `busy_timeout` wait blocks the
@@ -103,7 +103,9 @@ export const STORE_BOOTSTRAP_TIMEOUT_MS = 500;
 export const STORE_BOOTSTRAP_TRIES = 2;
 
 /**
- * The whole schema, run once at `user_version = 0`.
+ * The whole schema, run once at `user_version = 0` and never again: a database
+ * that already has a schema is stepped up by {@link STORE_MIGRATIONS} instead,
+ * so this text is the version 1 shape and stays it.
  *
  * Rules that keep it cheap to extend: JSON `data`/`value` columns carry
  * arm-specific extras, only indexed or filtered columns are typed, and
