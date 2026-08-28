@@ -2976,7 +2976,10 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     return quiet();
   }
   // Without an agent id there is nothing to make the ask once-per-child, and an
-  // ask that repeats is a child that cannot finish.
+  // ask that repeats is a child that cannot finish. NULL IS THE LEAD, which is
+  // exactly the case with no child to ask; \`identityOf\` already refused any id
+  // it could not use, so what survives here is safe both as a key segment and on
+  // the command line the ask hands the child.
   if (agentId === null) {
     beat('no-agent-id');
     return quiet();
