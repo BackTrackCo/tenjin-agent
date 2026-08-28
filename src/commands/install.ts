@@ -828,12 +828,11 @@ function summaryLines(io: Io, s: WalkthroughState): string[] {
 /**
  * What the hooks do, in one line each, at the moment they are written.
  *
- * THE PUSH SENTENCE IS THE WHOLE POINT OF THE SPLIT. Without the experiment the
- * hooks are advisory and the disclosure says so: they can never block or change
- * the tool call. With it on, the research arm CAN deny a WebSearch or WebFetch
- * and answer it from the marketplace instead, which is the one thing here that
- * changes what the harness does — so a disclosure that still promised otherwise
- * would be false exactly where it matters most.
+ * THE PUSH SENTENCE IS THE WHOLE POINT OF THE SPLIT. The arms are advisory
+ * either way — none of them can block or change a tool call — but with the
+ * experiment on there are five more hook entries reading five more kinds of
+ * event, and an operator wiring them into their own home has to be told what
+ * fires them and how to turn them off.
  *
  * Read off the result rather than a flag, so what is disclosed is what was
  * actually wired.
@@ -848,11 +847,11 @@ export function hooksDisclosure(
     'A Stop hook reminds you locally when a MISS you searched for is still unpublished, and a SessionStart hook prints one paragraph on when to search first; neither makes a network call.';
   // `pushArms` counts entries wired with `arm: 'push'`. The WebSearch entry is
   // NOT one of them: it keeps `arm: 'search'` and is instead WIDENED in place to
-  // WebSearch|WebFetch when push is planned (harness-hooks.ts, WEBSEARCH_PUSH_MATCHER),
-  // and it is the entry that carries the deny. So it is one of the arms, not
-  // something they run beside, and the count excludes it.
+  // WebSearch|WebFetch when push is planned (harness-hooks.ts, WEBSEARCH_PUSH_MATCHER).
+  // So it is one of the arms, not something they run beside, and the count
+  // excludes it.
   const push = pushArmed(h)
-    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. On a STRONG hit on a FREE piece, the WebSearch and WebFetch hook may deny that call and hand the finding back instead of letting the search run; every other arm only adds context beside a call that already ran. Turn it off: tenjin push off`
+    ? ` The push experiment is on, so ${h.pushArms} more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself: they look a question up on ${shelfHost} first and then, in team mode, on ${fallthroughHost}, on your prompts, failed commands, subagent dispatches, and the files you read and re-edit. Every arm only adds context beside the call; none can block or change it. Turn it off: tenjin push off`
     : '';
   if (h.mode === 'remind') {
     // `remind` IS OUTRANKED BY THE PUSH ARM, so this branch needs the same
@@ -911,7 +910,7 @@ function hooksLine(io: Io, h: HooksResult): string {
   // number an operator would use to decide the experiment did nothing.
   const searchWrote = h.searchWrote ?? wrote;
   // Its own clause, never folded into the count above: the push arms are the
-  // half that can deny a tool call.
+  // half the experiment adds, and the half `tenjin push off` takes away.
   const arms = pushArmed(h)
     ? ` ${paint(io, 'bold', 'Push arms:')} ${h.pushArms}, from tenjin push on (off: tenjin push off).`
     : '';

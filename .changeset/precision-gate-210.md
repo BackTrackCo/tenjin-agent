@@ -1,0 +1,35 @@
+---
+'tenjin-cli': minor
+---
+
+The push arms trust the marketplace's verdict instead of guessing, and no hook
+can cancel a tool call any more.
+
+**The verdict is two server fields, and nothing is scored on the machine.** A hit
+is `strong` only when the shelf `corroborated` the top candidate (both of its
+retrieval legs agreed) and did not call its `confidence` `low`; everything else
+is `none`, which shows nothing, is recorded as `weak`, and falls through from the
+team shelf to the public one. The local word-overlap scorer is gone whole — the
+stopword list, the ratio and margin thresholds, the whole-word floor, the
+answer-card confirmation pass and the `moderate` strength with them. It was the
+weakest evidence in the system and it behaved like it: probed on one machine,
+12 of 12 real injections were wrong matches, and the shelf had called every one
+of them `low`. A hook compares forty words of card text; the shelf has the
+embeddings, the body and both legs.
+
+**The WebSearch/WebFetch hook injects beside the search and lets it run.** The
+abort-and-answer path is deleted, along with the fence-and-nonce machinery that
+existed only to make a cancelled call's replacement text safe. No script this CLI
+writes emits `permissionDecision` any more, so the disclosure `install` and
+`push on` print says so plainly: every arm only adds context beside the call.
+`tenjin push status` no longer reports denies.
+
+**Every hook lookup names its arm.** A `trigger` (`prompt`, `failure`,
+`research`, `dispatch`, `subagent`, `read`, `churn`) rides on every search
+request, so the marketplace's per-trigger stats can tell one arm's lookups from
+another's. The failure, read and churn arms send the package they are about as an
+`appliesTo` filter instead of pasting its name in front of the query — one name,
+because the marketplace ANDs every value it is given, and the module an import
+could not find beats the package manager that ran.
+
+Reference: tenjin-agent#210.

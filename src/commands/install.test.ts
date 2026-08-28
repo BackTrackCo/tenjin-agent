@@ -1307,13 +1307,13 @@ describe('runInstall: interactive walkthrough', () => {
   });
 
   /**
-   * With the experiment armed the disclosure has to stop promising the hooks are
-   * advisory: the research arm can deny a WebSearch or WebFetch outright and
-   * answer it from the marketplace. It also has to stop reporting the six push
-   * entries inside the search-hook count, which is the number an operator reads
-   * to decide whether the experiment wired anything at all.
+   * With the experiment armed the disclosure has to name the five extra events
+   * the arms fire on and say, in its own words, that none of them can block or
+   * change a tool call. It also has to stop reporting the six push entries
+   * inside the search-hook count, which is the number an operator reads to
+   * decide whether the experiment wired anything at all.
    */
-  it('discloses the deny and counts the push arms apart, once push is on', async () => {
+  it('discloses the arms and counts them apart, once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1321,15 +1321,14 @@ describe('runInstall: interactive walkthrough', () => {
       deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
     );
     const text = human(res);
-    expect(text).not.toContain('They can never block or change the tool call.');
     expect(text).toContain(
-      'the WebSearch and WebFetch hook may deny that call and hand the finding back',
+      'Every arm only adds context beside the call; none can block or change it.',
     );
     expect(text).toContain(
       'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
     );
-    // ...and not the old "beside these", which put the entry that carries the
-    // deny outside the set of arms it belongs to.
+    // ...and not the old "beside these", which put the widened WebSearch entry
+    // outside the set of arms it belongs to.
     expect(text).not.toContain('more hook entries run beside these');
     expect(text).toContain('Turn it off: tenjin push off');
     // Three search EVENTS wired (PreToolUse carries two of the four base

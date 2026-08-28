@@ -133,10 +133,10 @@ const SEARCH_ID = '22222222-2222-4222-8222-222222222222';
 const RANK_TWO_ID = '33333333-3333-4333-8333-333333333333';
 
 /**
- * A response the judge reads as STRONG: rank 1's title is exactly the query's
- * content words, rank 2 shares none of them so the margin is rank 1's whole
- * score. PAID, so the arm takes the short form and never fetches a body — this
- * suite is about rows, not about rendering.
+ * A response the arms read as STRONG: rank 1 carries the shelf's own verdict,
+ * `corroborated: true` with a confidence that is not 'low'. PAID, so the arm
+ * takes the short form and never fetches a body — this suite is about rows, not
+ * about rendering.
  *
  * Candidate urls are re-homed onto the stub's origin: the hook drops a candidate
  * pointing anywhere but the configured base, because an off-origin url is a
@@ -161,6 +161,8 @@ function strongAnswer(baseUrl: string, resourceId: string, title: string): unkno
         matchReasons: ['exact version match'],
         estimatedTokens: 900,
         creator: { handle: 'a' },
+        confidence: 'high',
+        corroborated: true,
       },
       {
         resourceId: RANK_TWO_ID,
