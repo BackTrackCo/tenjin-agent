@@ -1117,10 +1117,18 @@ describe('pairings: open, close, replay', () => {
       expect(shelf.hits()).toBe(hitsBefore);
 
       const injected = rows(
-        "SELECT hook, shelf, action, resource_id FROM injections WHERE session = 's2'",
+        "SELECT hook, shelf, action, strength, resource_id FROM injections WHERE session = 's2'",
       );
       expect(injected).toHaveLength(1);
-      expect(injected[0]).toMatchObject({ hook: 'failure', shelf: 'local', action: 'injected' });
+      // `unverified`, not null: one closer is real evidence and it was shown to
+      // this session, so a rollup has to be able to tell this row apart from one
+      // nothing recorded a strength for at all.
+      expect(injected[0]).toMatchObject({
+        hook: 'failure',
+        shelf: 'local',
+        action: 'injected',
+        strength: 'unverified',
+      });
       expect(String(injected[0]?.resource_id)).toMatch(/^pairing:\d+$/);
     } finally {
       await shelf.close();

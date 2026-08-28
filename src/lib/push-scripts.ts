@@ -1581,7 +1581,10 @@ async function main() {
         // value came from this machine's own record.
         shelf: 'local',
         candidate: { id: 'pairing:' + match.id, title: match.errorLine, price: '0' },
-        strength: match.status === 'verified' ? 'strong' : null,
+        // \`unverified\`, never null: a null strength is what a row carries when
+        // nothing recorded one at all, and a rollup has to be able to tell
+        // "an unverified pairing was injected" from "no strength recorded".
+        strength: match.status === 'verified' ? 'strong' : 'unverified',
         action: 'injected',
         form: 'short',
         tokens: Math.ceil(body.length / 4),

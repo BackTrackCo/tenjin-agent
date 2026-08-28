@@ -35,4 +35,8 @@ could not find beats the package manager that ran — which is never itself the
 filter, so a `pnpm test` failure that names no module asks unfiltered rather than
 asking for a card about `pnpm`.
 
+A pairing this machine closed itself but never re-verified is now recorded with
+strength `unverified` rather than no strength at all, so a rollup can tell an
+unverified pairing apart from a row nothing graded.
+
 Reference: tenjin-agent#210.
