@@ -802,9 +802,16 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]
  * and the value leaked. Dropping the class instead is what restores that shape:
  * the prefix was never the secret, the value is, and the match now starts at the
  * keyword wherever it sits.
+ *
+ * THE SECOND ALTERNATIVE IS THE AUTHORIZATION HEADER, which the first cannot
+ * see: \`bearer abc123def456\` is separated by a space rather than \`=\` or
+ * \`:\`, and a 12-character value sits under the entropy rule's 28-character
+ * floor, so both rules walked past it. Eight characters is the floor here
+ * because a token shorter than that is not one; it costs the prose reading
+ * ("the bearer of bad news" keeps its words, none of which reach eight).
  */
 const SECRET_ASSIGN_RE =
-  /(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+/gi;
+  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
 /** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
  *  rule cannot see because that one starts at a slash. */
 const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
@@ -831,6 +838,14 @@ const SECRET_ENTROPY_RE =
  * no backtracking, so \`.sh\`, \`.xyz\` and the ccTLDs an internal host actually
  * uses leave without making the arm slower. It is a list, so it is not a promise
  * of completeness; the path, userinfo and entropy rules are what catch the rest.
+ *
+ * THE LIST STAYS CASE-INSENSITIVE, over-redaction and all. Widening to ccTLDs
+ * put English words in it, so a missing space eats the next sentence
+ * (\`failed.In the log\` -> \`failed the log\`). Every case-based cure trades
+ * that for a leak: lower-case-only lets \`EU.ACME.DE\` through, and a
+ * Title-case guard lets \`Eu.Acme.De\` through, because no rule can tell a
+ * Title-cased host from a Title-cased word. Redacting a topic word is the
+ * cheaper mistake, so it stands.
  */
 const SECRET_HOST_RE =
   /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b/gi;
@@ -865,15 +880,29 @@ function scrub(text) {
     .replace(SECRET_TOKEN_RE, ' ')
     .replace(SECRET_ENTROPY_RE, ' ')
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
-    // PATHS, ABSOLUTE OR NOT. The leading class is what a path is quoted,
-    // fenced, punctuated or attributed by in a real prompt (\`\`foo\`\`,
-    // \`<src/a/b.ts>\`, \`a/b/c.ts,\`, \`@src/a/b\`), and the second alternative
-    // takes the relative form, which carries exactly as much of a customer's
-    // name as the absolute one does (\`src/customers/acme-bank/keys.ts\`). Two
-    // separators minimum, so \`and/or\` survives. Both alternatives are anchored
-    // on a mandatory \`/\` between two classes that cannot contain one, so
-    // neither adds a backtracking seam.
-    .replace(/(?:^|[\s'"(=:,<\`~@[{])~?(?:(?:\/[\w.@-]+){2,}|[\w.@-]+(?:\/[\w.@-]+){2,})/g, ' ')
+    // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
+    // which carries exactly as much of a customer's name as the absolute one
+    // does (\`src/customers/acme-bank/keys.ts\`). Two separators minimum, so
+    // \`and/or\` survives. Both alternatives are anchored on a mandatory \`/\`
+    // between two classes that cannot contain one, so neither adds a
+    // backtracking seam.
+    //
+    // THE LEADING CLASS IS NEGATED, NOT ENUMERATED. Enumerating what a path is
+    // quoted or punctuated by is a list that is always one character short:
+    // \`**src/customers/acme-bank/keys.ts**\` (markdown bold, ordinary in a Task
+    // description) and \`a.ts;src/customers/…\` both walked past a class holding
+    // \`\s'"(=:,<\`~@[{\`. Anything that is not a path character now opens one.
+    //
+    // THE FIRST SEGMENT TAKES AT MOST THREE DOTS, and that bound is what keeps
+    // the negated class affordable. \`.\` opens a start position, so on 20k of
+    // \`a.a.a\` an unbounded \`[\w.@-]+\` re-scans the tail from every dot: 5 ms
+    // at 5k, 22 ms at 10k, 89 ms at 20k, x4 per doubling. Bounded, each start
+    // dies within four groups — 0.17 ms at 20k, x2 per doubling — and a real
+    // path prefix has nowhere near three dots.
+    .replace(
+      /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
+      ' ',
+    )
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
     .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
     .replace(SECRET_HOST_RE, ' ')

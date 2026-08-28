@@ -2634,8 +2634,24 @@ describe('dispatch hook: a subagent dispatch', () => {
     ['a .sh host', 'jobs.acme-bank.sh', 'acme-bank'],
     ['a .xyz host', 'jobs.acme-bank.xyz', 'acme-bank'],
     ['a .de host', 'jobs.acme-bank.de', 'acme-bank'],
+    ['an upper-case ccTLD host', 'JOBS.ACME-BANK.DE', 'ACME-BANK'],
     // An address with no name at all.
     ['an IPv4 literal', '10.42.7.19', '10.42.7.19'],
+    // ROUND 6, THE DELIMITERS THE ENUMERATED CLASS DID NOT LIST. Markdown bold
+    // is how a Task description writes a file path; the rest are what a shell
+    // line, a list item or a sentence puts in front of one.
+    ['a markdown-bold path', '**src/customers/acme-bank/keys.ts**', 'acme-bank'],
+    ['a semicolon-joined path', 'a.ts;src/customers/acme-bank/keys.ts', 'acme-bank'],
+    ['a brace-closed path', '{a}src/customers/acme-bank/keys.ts', 'acme-bank'],
+    ['a pipe-joined path', 'a|src/customers/acme-bank/keys.ts', 'acme-bank'],
+    ['a hash-prefixed path', 'a#src/customers/acme-bank/keys.ts', 'acme-bank'],
+    // The first segment carries dots too, so the bound on it has to leave the
+    // customer's name inside a dotted host-shaped prefix reachable.
+    ['a dotted first segment', 'acme-bank.internal/keys/prod.ts', 'acme-bank'],
+    // ROUND 6, THE AUTHORIZATION HEADER. Space-separated, so no `=` or `:` for
+    // the assignment rule, and 12 characters is under the entropy floor.
+    ['a space-separated bearer', 'bearer abc123def456', 'abc123def456'],
+    ['an Authorization header', 'Authorization: Bearer abc123def456', 'abc123def456'],
   ])('scrubs %s', async (label, fixture, leak) => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
@@ -2669,6 +2685,105 @@ describe('dispatch hook: a subagent dispatch', () => {
     );
     expect(questionSent(bodies)).toContain('package.json');
     expect(questionSent(bodies)).toContain('tsconfig.json');
+  });
+
+  /**
+   * WHERE THE TWO-SEPARATOR LINE FALLS, pinned so it is a decision rather than
+   * an accident. The relative alternative cannot tell `src/customers/acme-bank`
+   * from `read/write/exec`, so slash-joined prose goes with it. That is the
+   * accepted cost of taking relative paths at all, not a goal: this asserts the
+   * cost, and `and/or` (one separator) asserts the line it stops at.
+   */
+  it('eats slash-joined prose at two separators, and stops at one', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        sessionId: 'scrub-slash-prose',
+        prompt:
+          'Work out why the read/write/exec bits and/or the owner change on every deploy here.',
+      }),
+    );
+    expect(questionSent(bodies)).not.toContain('read/write/exec');
+    expect(questionSent(bodies)).toContain('and/or');
+  });
+
+  /**
+   * The other direction for the bearer alternative: a bearer followed by a short
+   * word is prose, not a header, and eight characters is where the line sits.
+   */
+  it('keeps the prose the bearer rule must not eat', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        sessionId: 'scrub-keeps-prose',
+        prompt:
+          'Work out why the retry loop stalls when the bearer of the bad news is the only caller.',
+      }),
+    );
+    expect(questionSent(bodies)).toContain('the bearer of the bad news');
+  });
+
+  /**
+   * DIFFERENTIAL, AND PROVED NON-VACUOUS, for round 6's path rule: the class the
+   * negated one replaced runs in the same test, and it MUST leak the shape the
+   * emitted scrub redacts. An enumerated leading class is always one character
+   * short of the punctuation a real description uses, and markdown bold is the
+   * character it was short of.
+   */
+  it('redacts a path behind a delimiter the enumerated leading class missed', async () => {
+    const fixture = '**src/customers/acme-bank/keys.ts**';
+
+    // The pattern this replaced. Vacuity guard: if this ever stops leaking, the
+    // case below stopped being differential and no longer covers the bug.
+    const enumerated = /(?:^|[\s'"(=:,<`~@[{])~?(?:(?:\/[\w.@-]+){2,}|[\w.@-]+(?:\/[\w.@-]+){2,})/g;
+    expect(fixture.replace(enumerated, ' ')).toContain('acme-bank');
+
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        sessionId: 'scrub-bold-path',
+        prompt: `Work out why the retry loop stalls at ${fixture} and say what actually breaks.`,
+      }),
+    );
+    expect(questionSent(bodies)).toContain('why the retry loop stalls');
+    expect(bodies[0]).not.toContain('acme-bank');
+  });
+
+  /**
+   * DIFFERENTIAL for round 6's bearer alternative. The Authorization header is
+   * the one credential shape both credential rules walked past: no `=` or `:`
+   * for the assignment rule, and a 12-character value under the entropy rule's
+   * 28-character floor.
+   */
+  it('redacts a space-separated bearer token neither credential rule could see', async () => {
+    const fixture = 'bearer abc123def456';
+
+    // Vacuity guard, both halves: the assignment rule as it stood, and the
+    // entropy floor. Either one matching would make the case below vacuous.
+    const assignOnly =
+      /(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+/gi;
+    const entropyOnly =
+      /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
+    expect(fixture.replace(assignOnly, ' ')).toContain('abc123def456');
+    expect(fixture.replace(entropyOnly, ' ')).toContain('abc123def456');
+
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        sessionId: 'scrub-bearer',
+        prompt: `Work out why the retry loop stalls when ${fixture} is sent, and say what breaks.`,
+      }),
+    );
+    expect(questionSent(bodies)).toContain('why the retry loop stalls');
+    expect(bodies[0]).not.toContain('abc123def456');
   });
 
   /** And the shape the bound could already see still goes: a dotted prefix
@@ -3773,6 +3888,43 @@ describe('dispatch hook: two shelves in team mode', () => {
       expect(pub.hits()).toBe(1);
       expect(run.stdout).toBe('');
       expect(await cachedShelf('weak-both')).toBeUndefined();
+    } finally {
+      await pub.close();
+    }
+  });
+
+  /**
+   * THE COVERAGE LINE #240 DROPPED RATHER THAN RE-POINTED. `keeps a moderate
+   * team hit when the public shelf is no better` pinned `cachedShelf` at `team`
+   * for the one shape where the team's own answer survived a fall-through; the
+   * rewrite replaced the scenario instead of re-pointing it at `weak`, and the
+   * team-answered-but-public-said-nothing case has been unasserted since. Under
+   * the verdict semantics the answer is the other way round — a hit the shelf
+   * did not corroborate is 'none', so the parent parks NOTHING even though the
+   * team was the only leg that returned a candidate — and that is the assertion
+   * worth having, because parking it is what would hand a subagent a pointer
+   * the parent hook itself skipped.
+   */
+  it('parks nothing when the team hit is weak and the public shelf misses', async () => {
+    const pub = await secondShelf(() => ({ status: 200, json: DISPATCH_MISS }));
+    try {
+      const team = await serveJson((_body, base) => ({ status: 200, json: weakHit(base) }));
+      await writeConfig({
+        baseUrl: team.baseUrl,
+        publicShelfUrl: pub.baseUrl,
+        shelfBypassSecret: SECRET,
+        hooks: { push: 'on' },
+      });
+
+      const run = await runScript(
+        dispatchHookScript(dataDir),
+        dispatchInput({ sessionId: 'weak-team-miss-public', prompt: STRONG_PROMPT }),
+      );
+
+      expect(team.hits()).toBe(1);
+      expect(pub.hits()).toBe(1);
+      expect(run.stdout).toBe('');
+      expect(await cachedShelf('weak-team-miss-public')).toBeUndefined();
     } finally {
       await pub.close();
     }
