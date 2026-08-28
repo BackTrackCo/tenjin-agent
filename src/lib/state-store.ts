@@ -366,7 +366,11 @@ export const STORE_SQL = {
   getSearch: 'SELECT * FROM searches WHERE search_id = ? COLLATE NOCASE',
   latestDeliberate: `SELECT * FROM searches
      WHERE source IS NULL OR source = 'cli' ORDER BY at DESC, rowid DESC LIMIT 1`,
-  resolveSearch: 'UPDATE searches SET resolved_by = ?, resolved_at = ? WHERE search_id = ?',
+  /** COLLATE NOCASE for the same reason {@link STORE_SQL.getSearch} carries it,
+   *  and it has to be the SAME predicate: a lookup that finds the row followed
+   *  by an update that matches nothing reports a close that never happened. */
+  resolveSearch: `UPDATE searches SET resolved_by = ?, resolved_at = ?
+     WHERE search_id = ? COLLATE NOCASE`,
   askedFingerprint: `SELECT 1 FROM searches
      WHERE session = ? AND fingerprint = ? LIMIT 1`,
   countBySource: `SELECT COUNT(*) AS n FROM searches
@@ -1744,10 +1748,10 @@ export async function getStoredSearch(
 }
 
 /**
- * Unresolved searches a session may still close, newest first. An empty or
- * absent `sessionId` means every session, and a named one keeps the rows nothing
- * stamped, which is the same rule {@link import('./session').ownedByThisSession}
- * applies — scoping must never make a loop unreachable everywhere at once.
+ * Unresolved searches a session may still close, newest first. SCOPED WHEN
+ * KNOWN, GLOBAL WHEN NOT: an empty or absent `sessionId` means every session,
+ * and a named one still keeps the rows nothing stamped, because those belong to
+ * no session — scoping must never make a loop unreachable everywhere at once.
  */
 export async function openSearches(dataDir: string, sessionId?: string): Promise<StoredSearch[]> {
   const scope = storeSession(sessionId);

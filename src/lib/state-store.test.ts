@@ -1802,6 +1802,20 @@ describe('markSearchResolved', () => {
     expect(stored?.candidates).toEqual(entry().candidates);
   });
 
+  // The lookup and the update have to agree on case, or the receipt lies: the
+  // caller case-folds the id (`normalizeSearchIds`) while the row carries the
+  // server's spelling, so an update matching case-exactly closes nothing and
+  // still reports `resolved` — the Stop hook then keeps raising a loop the
+  // agent was told was closed.
+  it('closes a row recorded under a different case, and drops it from openSearches', async () => {
+    const stored = '0197AAAA-BBBB-CCCC-DDDD-000000000031';
+    const folded = '0197aaaa-bbbb-cccc-dddd-000000000031';
+    await recordSearch(dataDir, entry({ searchId: stored, decision: 'MISS' }));
+    await expect(markSearchResolved(dataDir, folded, 'outcome')).resolves.toBe('resolved');
+    expect((await getStoredSearch(dataDir, folded))?.resolved?.by).toBe('outcome');
+    expect(await openSearches(dataDir)).toEqual([]);
+  });
+
   // A publish after an outcome report is still one closed loop; rewriting who
   // closed it would lose the fact that the reuse signal was already sent.
   it('keeps the first resolution and ignores later ones', async () => {
