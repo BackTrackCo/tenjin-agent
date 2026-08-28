@@ -24,8 +24,8 @@ separately because only the second proves a sign-in redirect), on the 2xx that
 failed to parse and on a 401/403, because the transport is the only place
 holding the response. All three baseUrl probes read that signal and say a page
 answered instead of the API, claiming no more than the signal proves. They point
-at `shelfBypassSecret` only on a machine where that key is a remedy, a
-configured (`file`) base URL on a shelf of the team's own, and the wording
+at `shelfBypassSecret` only on a machine where that key is a remedy, meaning a
+shelf of the team's own that this run actually sends the key to, and the wording
 follows what the probe did: with no secret configured the fix is to set it, and
 when the key was sent and still did not get past (a gate page, a 401/403, or the
 blocked redirect interstitial a rotated key gets) the fix is to update the stale
@@ -35,7 +35,8 @@ gets with a perfectly good key, so that one says the URL redirects and to point
 `baseUrl` at the host it lands on. A same-origin JSON 401 or 403 is still not
 classified as a protection page (an API refusing in its own envelope is an
 honest refusal), but on a shelf of the team's own the fix names the key anyway,
-because a missing or stale secret is the likeliest thing being refused. Against the public marketplace the key is refused anyway, and against an
-override the origin belongs to that one run, so both get a line about a proxy or
-a sign-in wall and no credential to write. No check output carries the secret's
+because a missing or stale secret is the likeliest thing being refused. Against the public marketplace the key is refused anyway, and an override
+pointing anywhere but the configured shelf carries none, so both get a line
+about a proxy or a sign-in wall and no credential to write. An override that
+repeats the configured shelf does send the key, so it is named there too. No check output carries the secret's
 value, only the key's name.

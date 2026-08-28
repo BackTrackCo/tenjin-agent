@@ -469,6 +469,56 @@ describe('httpRequest, signed requests never follow redirects', () => {
   const redirect = (status: number, location: string): Response =>
     new Response('', { status, headers: { location } });
 
+  /**
+   * `gateOffOrigin` on a blocked redirect is what licenses doctor to say the key
+   * was refused rather than that the base URL is wrong, so each `Location` shape
+   * is pinned at the transport rather than through a caller. The probe carries the
+   * bypass header, which is what makes a 3xx `blocked-redirect` rather than a
+   * plain http error. The relative form is the commonest sign-in shape and must
+   * NOT read as off-host.
+   */
+  it.each([
+    ['an absolute Location on another host', 'https://vercel.com/sso-api?url=x', true],
+    [
+      'a relative Location, which cannot leave the host',
+      '/sign-in?next=%2Fopenapi.json',
+      undefined,
+    ],
+    ['a protocol-relative Location on another host', '//vercel.com/sso-api', true],
+    ['an absolute Location back to the same host', 'https://shelf.example/openapi.json', undefined],
+  ])('reports the off-host signal for %s', async (_label, location, expected) => {
+    const fetchImpl: typeof fetch = async () => redirect(302, location as string);
+    const res = await fetchJson('https://shelf.example/openapi.json', {
+      timeoutMs: 1000,
+      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBe(expected);
+  });
+
+  it('claims nothing about the host when the redirect carries no Location', async () => {
+    const fetchImpl: typeof fetch = async () => new Response('', { status: 302 });
+    const res = await fetchJson('https://shelf.example/openapi.json', {
+      timeoutMs: 1000,
+      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
+  });
+
+  it('claims nothing about the host when the Location cannot be parsed', async () => {
+    const fetchImpl: typeof fetch = async () => redirect(302, 'http://[not a url');
+    const res = await fetchJson('https://shelf.example/openapi.json', {
+      timeoutMs: 1000,
+      bypass: { origin: 'https://shelf.example', secret: 'shelf-secret' },
+      fetchImpl,
+    });
+    expect(res).toMatchObject({ ok: false, kind: 'blocked-redirect' });
+    expect((res as { gateOffOrigin?: boolean }).gateOffOrigin).toBeUndefined();
+  });
+
   it('refuses a cross-origin 3xx carrying a SIWX header, and never re-sends it', async () => {
     const { fetchImpl, calls } = recordingFetch(() =>
       redirect(302, 'https://evil.example/collect'),

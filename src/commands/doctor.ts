@@ -494,8 +494,11 @@ async function loadConfigForDoctor(
  * stands. The page is a fact about the response; whether the team key fixes it
  * is a fact about the CONFIG, and only the second one licenses naming the key.
  * On the public marketplace the key is inert (`resolveShelfBypass` refuses it),
- * and on an override the origin belongs to this run, so both get the neutral
- * line instead. Where the key IS the remedy, what the probe DID decides the
+ * and an override pointing anywhere but the configured shelf carries none, so
+ * both get the neutral line instead. An override that REPEATS the configured
+ * shelf does carry the key, so it earns the same wording a configured base URL
+ * does: the pair is issued on the origins matching, not on where the value came
+ * from. Where the key IS the remedy, what the probe DID decides the
  * wording: `bypass` present means the key was sent and did not get past
  * (whether the gate answered 200 HTML, 401/403, or the blocked 30x
  * interstitial), so "set it" would prescribe the config this machine already
