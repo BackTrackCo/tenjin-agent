@@ -2265,7 +2265,7 @@ const CACHE_TTL_MS = __CACHE_TTL__;
  * imperative. A child agent type may lack Bash, the tenjin allowlist, or tools
  * altogether, and a pointer whose only resolution path is a command it cannot
  * run is dead context (tenjin-agent#228), so the rungs descend from a CLI call
- * to an MCP tool to a plain fetch, and every ladder ends in something ANY child
+ * to a plain fetch to an MCP tool, and every ladder ends in something ANY child
  * can do: carry the id back to its parent.
  *
  * EVERY RUNG NAMES A TOOL THAT EXISTS. The MCP rung is the one added for the

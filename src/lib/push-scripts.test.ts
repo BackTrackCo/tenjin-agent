@@ -3475,6 +3475,41 @@ describe('the subagent arm (SubagentStart)', () => {
    * row and says nothing to the lead — which leaves the SubagentStart cache as
    * the only channel this piece has, exactly as the handoff (T5) intends.
    */
+  const soloEcho = (req: StubRequest): { status: number; json: unknown } => {
+    if (!req.url.startsWith('/api/search')) return { status: 200, json: { bodyMd: BODY_MD } };
+    let query: string;
+    try {
+      query = String((JSON.parse(req.body) as { query?: unknown }).query);
+    } catch {
+      query = '';
+    }
+    return {
+      status: 200,
+      json: {
+        schemaVersion: 3,
+        searchId: SEARCH_ID,
+        items: [
+          {
+            resourceId: RESOURCE_ID,
+            url: `${req.base}/@a/p`,
+            title: query.slice(0, 190),
+            price: '0',
+            excerpt: 'the excerpt',
+            creator: { handle: 'vraspar' },
+          },
+        ],
+      },
+    };
+  };
+
+  /** `soloEcho`, priced. The childPointer branch a free stub cannot reach. */
+  const paidSolo = (req: StubRequest): { status: number; json: unknown } => {
+    const out = soloEcho(req);
+    if (!req.url.startsWith('/api/search')) return out;
+    const json = out.json as { items: Array<Record<string, unknown>> };
+    return { ...out, json: { ...json, items: [{ ...json.items[0], price: '150000' }] } };
+  };
+
   it('hands the subagent what the dispatch found, once', async () => {
     const { baseUrl } = await serve(echo({ title: '' }));
     await pushOn(baseUrl);
@@ -3824,12 +3859,44 @@ describe('the subagent arm (SubagentStart)', () => {
     await runScript(dispatchHookScript(dataDir), dispatch());
     const free = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
 
-    for (const name of [...free.matchAll(/tenjin_\w+/g)].map((m) => m[0])) {
-      expect(registered.has(name)).toBe(true);
+    // A second session, because the free delivery above burned this one's
+    // once-per-session claim on the same piece.
+    const paidSession = 'sess-paid';
+    const paid = await serve(paidSolo);
+    await pushOn(paid.baseUrl);
+    await runScript(
+      dispatchHookScript(dataDir),
+      JSON.stringify({
+        session_id: paidSession,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Task',
+        tool_input: { prompt: DISPATCH_PROMPT },
+      }),
+    );
+    const paidText =
+      injected(
+        await runScript(
+          pushSubagentHookScript(dataDir),
+          JSON.stringify({
+            session_id: paidSession,
+            hook_event_name: 'SubagentStart',
+            agent_id: 'a1',
+            agent_type: 'general-purpose',
+          }),
+        ),
+      ) ?? '';
+
+    // Both branches, scanned the same way: nothing the server does not register.
+    for (const text of [free, paidText]) {
+      const named = [...text.matchAll(/tenjin_\w+/g)].map((m) => m[0]);
+      // Sentinel: a render that named no tool at all would pass the loop.
+      expect(named).toContain('tenjin_inspect');
+      for (const name of named) expect(registered.has(name)).toBe(true);
+      // No spend authority in a child, so neither rung sends it to the buy tool.
+      expect(text).not.toContain('tenjin_buy');
     }
     expect(free).toContain('tenjin_inspect MCP tool');
-    // No spend authority in a child, so the rung never sends it to the buy tool.
-    expect(free).not.toContain('tenjin_buy');
+    expect(paidText).toContain('let your parent decide');
   });
 
   /**
@@ -3919,12 +3986,6 @@ describe('the subagent arm (SubagentStart)', () => {
    * context has no authority for, and it never appears.
    */
   it('a paid pointer offers the free preview and defers the purchase to the parent', async () => {
-    const paidSolo = (req: StubRequest): { status: number; json: unknown } => {
-      const out = soloEcho(req);
-      if (!req.url.startsWith('/api/search')) return out;
-      const json = out.json as { items: Array<Record<string, unknown>> };
-      return { ...out, json: { ...json, items: [{ ...json.items[0], price: '150000' }] } };
-    };
     const { baseUrl } = await serve(paidSolo);
     await pushOn(baseUrl);
 

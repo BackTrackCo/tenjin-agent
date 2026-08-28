@@ -1878,7 +1878,8 @@ async function main() {
     }
   }
   // Past every relay path: a paid top, or a lost claim on another piece. The
-  // parent hint below is this hit's delivery, so the handoff goes back.
+  // parent hint below is this hit's delivery, so the winner's handoff goes
+  // back; a loser owns nothing here and \`releaseSlot\` is a no-op for it.
   releaseSlot();
   // RANK 1 ALONE. The verdict is rank 1's, so rank 2 would ride in on rank 1's
   // evidence if it were printed beside it. The fallback covers a projection that
