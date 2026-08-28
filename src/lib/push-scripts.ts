@@ -1844,7 +1844,9 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     // closed on THIS machine: that is the second, independent close 04 asks
     // for before a fix reads as verified, and the shelf has no close endpoint
     // to tell it so. The link row records the close; \`tenjin sync\` reads it
-    // and PUTs the post \`verified\` rather than publishing a duplicate.
+    // and publishes this machine's own record with the keys \`verified\` (the
+    // teammate's post is theirs alone on the shelf: every post route is
+    // owner-scoped, so it cannot be PUT from here).
     const linkKey = STATE_PAIRING_POST_PREFIX + pairing.id;
     const link = getState(MACHINE_SESSION, linkKey);
     if (isRecord(link) && typeof link.postId === 'string') {
@@ -1931,7 +1933,7 @@ async function teamResolve(args) {
     recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
     return null;
   }
-  if (!lookupAllowed('failure')) {
+  if (!lookupAllowed('failure', sessionId)) {
     recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
     return null;
   }
@@ -2167,7 +2169,8 @@ async function main() {
     // the cross-machine \`verified\` — a close on machine B overlapping the fix
     // machine A published — would be unreachable: the shelf has no close
     // endpoint, so B's local close is the only place the second close can be
-    // recorded, and \`tenjin sync\` carries it back as a verified PUT. A hit is
+    // recorded, and \`tenjin sync\` carries it back as this machine's own
+    // verified record (a teammate's post cannot be PUT from here). A hit is
     // evidence the failure is a real, fixable one even when the error named
     // no file: the same-command branch of the close rule still applies.
     if (pairingId === null) pairingId = open();

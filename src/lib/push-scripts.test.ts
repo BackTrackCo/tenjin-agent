@@ -2282,6 +2282,69 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     });
   });
 
+  it('cools like every other arm: a cold `failure` rate stops the team leg as lookup-cap', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // What the primer stored for THIS session: failure is cold (≥ 20 hits,
+    // < 5% used), so its cap is floor(8/3) = 2 — and two failure lookups are
+    // already spent on the machine, by another session.
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.setState, [
+      SESSION,
+      'trigger_rates',
+      JSON.stringify({
+        at: Date.now(),
+        days: 7,
+        triggers: { failure: { hits: 30, used: 1, wrong: 29 } },
+      }),
+      Date.now(),
+    ]);
+    for (let i = 0; i < 2; i += 1) {
+      store?.run(STORE_SQL.insertInjection, [
+        `seed-failure-${i}`,
+        null,
+        Date.now(),
+        'sess-someone-else',
+        null,
+        'machine',
+        'failure',
+        'team',
+        null,
+        null,
+        null,
+        null,
+        SEARCH_ID,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'skipped',
+        'miss',
+        null,
+        0,
+        null,
+      ]);
+    }
+    store?.close();
+
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.stdout).toBe('');
+    expect(stub.bodies).toHaveLength(0);
+    expect(team.hits()).toBe(0);
+    const rows = (await ledger()).filter((r) => r.session === SESSION);
+    expect(rows.at(-1)).toMatchObject({
+      trigger: 'failure',
+      shelf: 'team',
+      action: 'skipped',
+      reason: 'lookup-cap',
+    });
+    // The suppressed fire is counted under THIS session, per trigger.
+    expect(sessionState(SESSION, 'cooldown:failure')).toBe(1);
+  });
+
   it('records a miss with its searchId and asks nothing else', async () => {
     const stub = resolveStub('miss');
     const team = await serve(stub.handler);
