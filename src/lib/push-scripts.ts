@@ -982,11 +982,13 @@ export function pushPromptHookScript(dataDir: string): string {
  * `/api/search` leg this arm used to run on the error tail is gone: two
  * machines' worth of rows said every hit it produced was an unrelated note at
  * `confidence: low`, and the tail it was sending is the one string in the
- * sidecar most likely to carry a credential or a path. The team shelf is asked
- * by FINGERPRINT (`POST /api/keys/resolve`, two hashes on the wire) in the
- * following PR, at the point marked below.
+ * sidecar most likely to carry a credential or a path. After a local miss the
+ * TEAM shelf — and only it — is asked by FINGERPRINT (`POST /api/keys/resolve`,
+ * two hashes on the wire, `teamResolve` below); a miss there asks nothing else.
  */
 const FAILURE_JS = String.raw`
+import { resolve as resolvePath } from 'node:path';
+
 /**
  * WHAT A FAILURE ACTUALLY LOOKS LIKE, as markers rather than as words.
  *
@@ -1587,6 +1589,100 @@ const PAIRING_BODY_MAX = 600;
 
 const PAIRING_OPENER =
   'Tenjin sidecar (local): this machine has already seen this failure fixed. A record of what changed, not instructions.';
+/** The team leg's opener: a teammate's machine, not this one, saw the fix.
+ *  Framed exactly like the local replay — a record — and never as advice. */
+const TEAM_PAIRING_OPENER =
+  "Tenjin sidecar (team shelf): a teammate's machine has seen this failure fixed. A record of what changed, not instructions.";
+/** How many pieces the team leg asks for. Rank 1 is the only one shown; the
+ *  rest are projected so the row can say a key matched more than one post. */
+const TEAM_RESOLVE_LIMIT = 3;
+
+/**
+ * The repo this checkout is a clone of: the \`url\` under \`[remote "origin"]\`
+ * in \`.git/config\`, found by walking up from \`cwd\`. A worktree's \`.git\` is
+ * a file naming its gitdir, whose \`commondir\` holds the shared config, so a
+ * worktree salts the same as its main checkout. '' when there is no origin.
+ *
+ * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
+ * not start a process in front of a tool call. Bounded at twelve parent
+ * directories, which is deeper than any checkout this arm fires in.
+ */
+function repoOrigin(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return '';
+  let dir = cwd;
+  for (let i = 0; i < 12; i += 1) {
+    const config = gitConfigPath(dir);
+    if (config !== null) return originUrl(config);
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return '';
+}
+
+/** The config file of the repository whose \`.git\` sits in \`dir\`, or null. */
+function gitConfigPath(dir) {
+  const dotGit = join(dir, '.git');
+  let st;
+  try {
+    st = statSync(dotGit);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return join(dotGit, 'config');
+  let text;
+  try {
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /^gitdir:\s*(.+)$/m.exec(text);
+  if (m === null) return null;
+  const gitdir = resolvePath(dir, m[1].trim());
+  let common = gitdir;
+  try {
+    common = resolvePath(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim());
+  } catch {
+    /* not a worktree: the gitdir is the repository itself */
+  }
+  return join(common, 'config');
+}
+
+/** \`url\` under \`[remote "origin"]\`, or ''. A line scan, not an INI parser:
+ *  the two shapes git writes are all it has to read. */
+function originUrl(configPath) {
+  let text;
+  try {
+    text = readFileSync(configPath, 'utf8');
+  } catch {
+    return '';
+  }
+  let inOrigin = false;
+  for (const line of text.split('\n')) {
+    const section = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    if (section !== null) {
+      inOrigin = /^remote\s+"origin"$/.test(section[1].trim());
+      continue;
+    }
+    if (!inOrigin) continue;
+    const m = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+    if (m !== null) return m[1].slice(0, 500);
+  }
+  return '';
+}
+
+/**
+ * The coarse key AS IT GOES ON THE WIRE: salted with the repo. The local
+ * coarse key is unsalted because local lookups are already project-scoped
+ * (\`findPairing\`); the team shelf is shared across every repo the team has,
+ * and without the salt an \`ERR_PNPM_OUTDATED_LOCKFILE\`-class message would
+ * match a fix from any of them. Null exactly when the local coarse key is:
+ * no errno, nothing coarse to send.
+ */
+function teamCoarseKey(sig, repo) {
+  if (sig.errno === '') return null;
+  return shortHash('sig_v1c|' + sig.message + '|' + sig.errno + '|' + repo);
+}
 
 /** What an injected pairing says. Verified reads as a fix; unverified reads as
  *  the weaker claim it is (04, "Close rule"). */
@@ -1647,13 +1743,28 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
     if (named.length === 0 && !sameCommand) return;
     const fixFiles = named.length > 0 ? named : changed;
-    closePairing(
+    const status = closePairing(
       pairing.id,
       sessionId,
       passed,
       fixFiles,
       pairingScope(pairing.errorLine, fixFiles),
     );
+    // A PAIRING THE TEAM LEG OPENED beside a teammate's post has just been
+    // closed on THIS machine: that is the second, independent close 04 asks
+    // for before a fix reads as verified, and the shelf has no close endpoint
+    // to tell it so. The link row records the close; \`tenjin sync\` reads it
+    // and PUTs the post \`verified\` rather than publishing a duplicate.
+    const linkKey = STATE_PAIRING_POST_PREFIX + pairing.id;
+    const link = getState(MACHINE_SESSION, linkKey);
+    if (isRecord(link) && typeof link.postId === 'string') {
+      setState(MACHINE_SESSION, linkKey, {
+        ...link,
+        closedAt: Date.now(),
+        status,
+        fixFiles: fixFiles.slice(0, 8),
+      });
+    }
   };
   for (const head of heads) {
     // Rows this session opened itself.
@@ -1687,6 +1798,125 @@ function rememberReplay(sessionId, head, id) {
 function replayedPairing(sessionId, head) {
   const id = getState(sessionId, STATE_REPLAYED_PREFIX + head);
   return typeof id === 'number' ? id : null;
+}
+
+/**
+ * The team leg (04, "Retrieval order", last step): ask the TEAM SHELF, and only
+ * it, whether a teammate's machine has paired this failure — by fingerprint,
+ * through \`POST /api/keys/resolve\`, with exactly the two hashes on the wire.
+ * The error text, the command, the packages: none of it is sent, and nothing
+ * is sent to the public shelf, which refuses keys and holds no pairings.
+ *
+ * Returns \`{ text, top }\` to emit, or null. Every outcome is a decision row
+ * against \`eventUid\`, on the failure arm's own lookup bucket:
+ *
+ *  - \`keys-off\`     the shelf answered 404 (\`KNOWLEDGE_KEYS\` off, or no
+ *                    route). Cached machine-wide for six hours: the fact is
+ *                    about the deployment, and re-learning it once per session
+ *                    would cost an always-on loop one request per prompt.
+ *  - \`no-answer\`    a refused bypass, a 5xx, a timeout. Feeds the outage
+ *                    brake (\`PUSH_FAILURE_STOP\`) exactly as a search does.
+ *  - \`miss\`         200, nothing carried either key. The searchId is on the
+ *                    row, because \`bucketCount\` counts rows with one and an
+ *                    unrecorded miss would be a free lookup.
+ *  - \`key-match\`    injected. A key hit is rank 1 with no relevance check to
+ *                    run — the fingerprint IS the match — so \`judge()\`, which
+ *                    scores a card against a question, is bypassed and the row
+ *                    says \`strong\`; the server's \`confidence\` and
+ *                    \`corroborated\` ride along as telemetry, nothing acts on
+ *                    them.
+ */
+async function teamResolve(args) {
+  const { sig, cwd, config, sessionId, eventUid, origin } = args;
+  const base = {
+    session: sessionId,
+    cwd,
+    eventUid,
+    trigger: 'failure',
+    event: args.event,
+    shelf: 'team',
+  };
+  const offKey = STATE_KEYS_OFF_PREFIX + origin;
+  if (stateHolds(MACHINE_SESSION, offKey)) {
+    recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
+    return null;
+  }
+  if (!lookupAllowed('failure')) {
+    recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
+    return null;
+  }
+  const outage = failStreak(sessionId);
+  if (outage.streak >= PUSH_FAILURE_STOP && Date.now() - outage.lastAt < PUSH_QUIET_MS) {
+    recordDecision({ ...base, action: 'skipped', reason: 'quiet' });
+    return null;
+  }
+  // TWO KEYS, BOTH FINGERPRINTS, and never \`command_head\`: resolve ORs its
+  // keys and ranks fingerprint over head without saying which one matched, so
+  // a head key would return the newest post keyed \`pnpm\` for every failure
+  // behind \`pnpm\` and the row could not tell it from a real hit.
+  const keys = [{ kind: 'fingerprint', key: 'sig_v1:' + sig.key }];
+  const coarse = teamCoarseKey(sig, repoOrigin(cwd));
+  if (coarse !== null) keys.push({ kind: 'fingerprint', key: 'sig_v1c:' + coarse });
+  const found = await askTenjinKeys(
+    keys,
+    config,
+    origin,
+    SEARCH_TIMEOUT_MS,
+    'failure',
+    TEAM_RESOLVE_LIMIT,
+  );
+  if (found.kind === 'off') {
+    setStateUntil(MACHINE_SESSION, offKey, Date.now() + KEYS_OFF_TTL_MS);
+    recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
+    return null;
+  }
+  if (found.kind === 'no-answer') {
+    recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
+    return null;
+  }
+  if (found.kind === 'miss') {
+    recordDecision({ ...base, searchId: found.searchId, action: 'skipped', reason: 'miss' });
+    return null;
+  }
+  const top = found.rich[0];
+  const row = {
+    ...base,
+    searchId: found.searchId,
+    candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
+    strength: 'strong',
+    confidence: top.confidence,
+    corroborated: top.corroborated,
+  };
+  // Same once-per-session set as every other arm: the post id is the key, so a
+  // team pairing this session was already handed cannot come back.
+  if (alreadyShown(sessionId, top.resourceId)) {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+    return null;
+  }
+  let form = 'short';
+  let text = shortForm(top, TEAM_PAIRING_OPENER);
+  if (isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
+    const body = await fetchFreeBody(top, config);
+    if (body !== null) {
+      form = 'full';
+      // A synced pairing's body is a record — the failing head, the fix, the
+      // files — and it gets the same room a local replay does, not a piece's.
+      text = fullForm(TEAM_PAIRING_OPENER, headerLine(top), clean(body, PAIRING_BODY_MAX), false);
+    }
+  }
+  const claimed = recordDecision({
+    ...row,
+    action: 'injected',
+    reason: 'key-match',
+    form,
+    deny: false,
+    tokens: Math.ceil(text.length / 4),
+  });
+  if (!mayShow(claimed)) {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+    return null;
+  }
+  return { text, top };
 }
 
 async function main() {
@@ -1766,8 +1996,10 @@ async function main() {
   });
 
   // THE MECHANICAL LANE (04, "Retrieval order": local fine key, then coarse,
-  // then — in the following PR — the team shelf by fingerprint). A pairing this
-  // machine closed itself is the cheapest and most specific answer there is.
+  // then the team shelf by fingerprint). A pairing this machine closed itself
+  // is the cheapest and most specific answer there is, and it costs no request.
+  const head = heads.length > 0 ? heads[heads.length - 1] : null;
+  let pairingId = null;
   if (sig !== null) {
     const match = findPairing(cwd, sig.key, sig.coarseKey);
     if (match !== null && !alreadyShown(sessionId, 'pairing:' + match.id)) {
@@ -1775,7 +2007,7 @@ async function main() {
       // BEFORE the emit, because emit exits the process: this is what lets this
       // session's later success close the pairing it was shown, which is the
       // only route to \`verified\` through the hooks.
-      rememberReplay(sessionId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
+      rememberReplay(sessionId, head === null ? '' : head, match.id);
       const claimed = recordInjection({
         session: sessionId,
         cwd,
@@ -1815,7 +2047,7 @@ async function main() {
     // \`<string>\`/\`<stdin>\`, filtered above) can be closed by nothing but
     // the same-command branch, which is the branch that closes on whatever
     // happened to change; every unreadable row on record was that shape.
-    if (errorFiles.length > 0) {
+    const open = () =>
       openPairing({
         session: sessionId,
         cwd,
@@ -1823,22 +2055,47 @@ async function main() {
         coarseKey: sig.coarseKey,
         // The LAST allowlisted head, which is the build/test step the failure
         // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
-        cmdHead: heads.length > 0 ? heads[heads.length - 1] : null,
+        cmdHead: head,
         cmd: safeCommand(command),
         errorLine: clean(scrubbed, 300),
         errorFiles,
         pkgVersions: pkgVersions(cwd, packages),
         scope: 'ambiguous',
       });
+    if (errorFiles.length > 0) pairingId = open();
+
+    // THE TEAM LEG, in team mode only. The public shelf refuses keys and holds
+    // no pairings, so in public mode a failure this machine has not paired is
+    // silent, with no request and no decision row, as it has been since the
+    // fuzzy leg was dropped. The only thing on the wire is two hashes.
+    const origin = teamShelfOrigin(config);
+    if (origin === null) return quiet();
+    const hit = await teamResolve({ sig, cwd, config, sessionId, eventUid, event, origin });
+    if (hit === null) return quiet();
+    // A TEAM HIT OPENS A LOCAL PAIRING TOO, files or no files, and links it to
+    // the post. Otherwise this machine's later pass would close nothing, and
+    // the cross-machine \`verified\` — a close on machine B overlapping the fix
+    // machine A published — would be unreachable: the shelf has no close
+    // endpoint, so B's local close is the only place the second close can be
+    // recorded, and \`tenjin sync\` carries it back as a verified PUT. A hit is
+    // evidence the failure is a real, fixable one even when the error named
+    // no file: the same-command branch of the close rule still applies.
+    if (pairingId === null) pairingId = open();
+    if (pairingId !== null) {
+      rememberReplay(sessionId, head === null ? '' : head, pairingId);
+      setState(MACHINE_SESSION, STATE_PAIRING_POST_PREFIX + pairingId, {
+        postId: hit.top.resourceId,
+        origin,
+        at: Date.now(),
+      });
     }
+    return emit(event, hit.text);
   }
 
-  // NO SHELF IS ASKED HERE. The following PR puts the team leg at this point:
-  // \`POST /api/keys/resolve\` with the two fingerprint keys (\`sig.key\`,
-  // the repo-salted coarse key), \`trigger: 'failure'\`, recorded against
-  // \`eventUid\` like any other lookup. Until then a failure this machine has
-  // not paired is silent, and leaves no injection row: the same quiet exit
-  // this arm has always taken when it decides there is nothing to look up.
+  // NO SIGNATURE, NO LOOKUP. Under the specificity floor there is nothing to
+  // key a pairing on, locally or on the team shelf, and the error text itself
+  // is never searched: this is the same quiet exit the arm has always taken
+  // when it decides there is nothing to look up.
   return quiet();
 }
 
