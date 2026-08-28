@@ -2588,7 +2588,7 @@ function queuedFindingsLine(sessionId, project, windowStart, after, fresh) {
  * stops. Any instruction attached to it would be an invitation to re-publish
  * what is already published.
  */
-function childPublishLine(sessionId, windowStart, since) {
+function childPublishLine(sessionId, windowStart, since, afterPublish) {
   const asked = statePrefixSince(
     sessionId,
     STATE_AGENT_ASKED_PREFIX,
@@ -2603,9 +2603,10 @@ function childPublishLine(sessionId, windowStart, since) {
       at: row.at,
     });
   }
-  const published = agentPublishes(since, ${MAX_LISTED_FINDINGS});
+  const published = agentPublishes(since, ${MAX_LISTED_FINDINGS}, afterPublish);
   const items = [];
   let newestAt = 0;
+  let newestKey = '';
   for (const [agentId, ask] of asks) {
     const hits = published.get(agentId);
     if (hits === undefined) continue;
@@ -2622,7 +2623,13 @@ function childPublishLine(sessionId, windowStart, since) {
       // still cannot be told apart, which needs a session on the row and a flag
       // on \`publish\` to carry one.
       if (hit.at < ask.at) continue;
-      if (hit.at > newestAt) newestAt = hit.at;
+      // THE GREATEST PAIR NAMED, not the greatest \`at\`. The next ask pages from
+      // (at, key), so marking a bare max \`at\` beside the wrong key would either
+      // restate a tie-mate or step over one.
+      if (hit.at > newestAt || (hit.at === newestAt && hit.key > newestKey)) {
+        newestAt = hit.at;
+        newestKey = hit.key;
+      }
       // The url is the only free-text field here and it goes into a blocking
       // reason: clipped hard, because a bounded list of long urls is how this
       // paragraph reached six figures of characters.
@@ -2632,6 +2639,7 @@ function childPublishLine(sessionId, windowStart, since) {
   if (items.length === 0) return null;
   return {
     newestAt,
+    newestKey,
     text:
       String(items.length) +
       " finding(s) your subagents published themselves, from their own context, under this machine's publish.mode. Already on the shelf; nothing to do about these.\\n" +
@@ -2658,10 +2666,14 @@ function captureAsked(sessionId) {
  * What the last ask named, as the two cursors a re-ask is measured against, or
  * null when this session was never asked.
  *
- * TWO CURSORS BECAUSE THE ASK CARRIES TWO LISTS. \`finding\` is the last queued
- * finding uid named, and the queue pages on it. \`watermark\` is a timestamp and
- * covers the \`agent_published:\` half only, whose keys carry the agent id first
- * and so cannot be paged in time order.
+ * THREE CURSORS BECAUSE THE ASK CARRIES TWO LISTS. \`finding\` is the last
+ * queued finding uid named, and the queue pages on it: a queue uid is
+ * ULID-shaped, so its key is already a total order on mint time. The
+ * \`agent_published:\` half cannot page on its key alone, because those keys lead
+ * with the agent id, so it carries a PAIR: \`watermark\`, the \`at\` of the last
+ * publish named, and \`publish\`, that row's key. (at, key) is a total order
+ * there too, which is what pages a same-millisecond tie instead of stepping over
+ * it.
  *
  * A ROW WRITTEN BY AN OLDER HOOK CARRIES NO \`finding\` (a bare ISO string, or a
  * record with the timestamp alone), which reads as an empty cursor: the first
@@ -2673,21 +2685,26 @@ function captureAskedMark(sessionId) {
   const value = getState(sessionId, STATE_CAPTURE_ASKED);
   if (value === null) return null;
   const finding = isRecord(value) && typeof value.finding === 'string' ? value.finding : '';
+  // A row written before the pair existed carries no \`publish\`, which reads as
+  // no cursor: its watermark is already one past the last row that ask named, so
+  // an inclusive first read restates nothing and the pair is in force after it.
+  const publish = isRecord(value) && typeof value.publish === 'string' ? value.publish : '';
   if (isRecord(value) && typeof value.watermark === 'number') {
-    return { watermark: value.watermark, finding };
+    return { watermark: value.watermark, finding, publish };
   }
   if (typeof value === 'string') {
     const parsed = Date.parse(value);
-    return { watermark: Number.isFinite(parsed) ? parsed : 0, finding };
+    return { watermark: Number.isFinite(parsed) ? parsed : 0, finding, publish };
   }
-  return { watermark: 0, finding };
+  return { watermark: 0, finding, publish };
 }
 
-function markCaptureAsked(sessionId, watermark, finding) {
+function markCaptureAsked(sessionId, watermark, finding, publish) {
   setState(sessionId, STATE_CAPTURE_ASKED, {
     at: new Date().toISOString(),
     watermark,
     finding,
+    publish,
   });
 }
 
@@ -2985,11 +3002,20 @@ function subagentsRunning(transcriptPath) {
  * mint time with no ties in it, and paging on the key both names every row once
  * and settles.
  *
- * THE PUBLISH HALF STAYS ON THE TIMESTAMP, because \`agent_published:\` keys lead
- * with the agent id and so carry no time order to page on. It marks the newest
- * publish it named plus one millisecond, and an ask that named no publish marks
- * with the read time, which is safe in that direction: a mark that is too EARLY
- * re-lists nothing when nothing was named.
+ * THE PUBLISH HALF PAGES ON A PAIR (greptile P1 on #237). It cannot page on its
+ * key alone: \`agent_published:\` keys lead with the agent id and carry no time
+ * order. It marked the newest publish it named PLUS ONE MILLISECOND, which
+ * stepped over the rest of that millisecond's tie class — two children
+ * publishing together, the second committing after this hook read the first, and
+ * the second row is below the mark from the moment it lands. Never reported, and
+ * the report is the only mitigation there is for letting a child publish from a
+ * sidechain nobody reads. So the mark carries the bare \`at\` AND the row's key,
+ * and the next read takes \`at > mark OR (at = mark AND key > lastKey)\`: a pair
+ * that is total (two rows in one millisecond cannot share an agent id without
+ * being one row), so every row is named exactly once and the gate still settles.
+ * An ask that named no publish marks with the read time and no key, which is
+ * safe in that direction: an inclusive read re-lists nothing when nothing was
+ * named.
  */
 function captureAsk(config, sessionId, transcriptPath) {
   if (config.capture === 'off') return null;
@@ -3007,7 +3033,7 @@ function captureAsk(config, sessionId, transcriptPath) {
   if (
     mark !== null &&
     !queuedFindingAfter(windowStart, after) &&
-    !childPublishedSince(sessionId, windowStart, since, ${MAX_LISTED_FINDINGS})
+    !childPublishedSince(sessionId, windowStart, since, ${MAX_LISTED_FINDINGS}, mark.publish)
   ) {
     return null;
   }
@@ -3020,7 +3046,15 @@ function captureAsk(config, sessionId, transcriptPath) {
   // the session researched, and re-testing the older signals here would just
   // re-derive an answer this session already gave.
   if (mark === null && !didResearch(sessionId)) return null;
-  return { mode: config.capture, since, after, windowStart, fresh: mark === null, at: Date.now() };
+  return {
+    mode: config.capture,
+    since,
+    after,
+    afterPublish: mark === null ? '' : mark.publish,
+    windowStart,
+    fresh: mark === null,
+    at: Date.now(),
+  };
 }
 
 /**
@@ -3041,11 +3075,12 @@ function captureAsk(config, sessionId, transcriptPath) {
  * re-arms the ask on its own), and resetting the cursor there would re-list
  * every finding the last ask named.
  */
-function markCaptureAsk(sessionId, ask, publishedAt, namedUid) {
+function markCaptureAsk(sessionId, ask, publishedAt, publishedKey, namedUid) {
   markCaptureAsked(
     sessionId,
-    publishedAt === 0 ? ask.at : publishedAt + 1,
+    publishedAt === 0 ? ask.at : publishedAt,
     namedUid === '' ? ask.after : namedUid,
+    publishedAt === 0 ? '' : publishedKey,
   );
   if (!captureAsked(sessionId)) return ask.mode === 'block' ? 'nudge' : ask.mode;
   return ask.mode;
@@ -3235,7 +3270,7 @@ async function main() {
       ask.after,
       ask.fresh,
     );
-    const published = childPublishLine(sessionId, ask.windowStart, ask.since);
+    const published = childPublishLine(sessionId, ask.windowStart, ask.since, ask.afterPublish);
     reason = boundReason(
       captureReason(
         config,
@@ -3250,6 +3285,7 @@ async function main() {
       sessionId,
       ask,
       published === null ? 0 : published.newestAt,
+      published === null ? '' : published.newestKey,
       queued === null ? '' : queued.newestUid,
     );
   }

@@ -2088,17 +2088,26 @@ function queuedFindingAfter(sinceMs, afterUid) {
  * Machine-wide by nature (the publishing process knows its agent, not its
  * session), so the caller intersects it with the children IT asked.
  */
-function agentPublishes(sinceMs, limit) {
+function agentPublishes(sinceMs, limit, afterKey) {
   const out = new Map();
+  const cursor = typeof afterKey === 'string' ? afterKey : '';
   for (const row of statePrefixSince(MACHINE_SESSION, STATE_PUBLISHED_AGENT_PREFIX, sinceMs, limit)) {
+    // KEYSET, NOT \`at + 1\`. Two children publishing in the same millisecond
+    // are one tie class, and a watermark of \`at + 1\` steps over the whole of
+    // it: the row that committed after the read was never listed and never
+    // could be. The pair (at, key) is a total order — a key is
+    // \`<agentId>@<at>\`, and two rows sharing an \`at\` cannot share an agent
+    // id without being the same row — so the tie is paged rather than skipped.
+    // With no cursor (a first ask) the range is inclusive, as it was.
+    if (cursor !== '' && (row.at < sinceMs || (row.at === sinceMs && row.key <= cursor))) continue;
     const value = isRecord(row.value) ? row.value : {};
     if (typeof value.url !== 'string' || value.url === '') continue;
     const cut = row.key.lastIndexOf('@');
     // A row an older build wrote has no '@' and IS the agent id.
     const agentId = cut === -1 ? row.key : row.key.slice(0, cut);
     const list = out.get(agentId);
-    if (list === undefined) out.set(agentId, [{ url: value.url, at: row.at }]);
-    else list.push({ url: value.url, at: row.at });
+    if (list === undefined) out.set(agentId, [{ url: value.url, at: row.at, key: row.key }]);
+    else list.push({ url: value.url, at: row.at, key: row.key });
   }
   return out;
 }
@@ -2112,10 +2121,12 @@ function agentPublishes(sinceMs, limit) {
  * later one — and visibility is the only mitigation this design has for letting
  * a child publish from a sidechain nobody reads.
  */
-function childPublishedSince(sessionId, windowStart, sinceMs, limit) {
+function childPublishedSince(sessionId, windowStart, sinceMs, limit, afterKey) {
   const asked = statePrefixSince(sessionId, STATE_AGENT_ASKED_PREFIX, windowStart, limit);
   if (asked.length === 0) return false;
-  const published = agentPublishes(sinceMs, limit);
+  // THE SAME CURSOR THE LIST USES. A gate that admitted a row the list then
+  // refuses to name fires an ask with nothing in it, at every turn end.
+  const published = agentPublishes(sinceMs, limit, afterKey);
   for (const row of asked) {
     if (published.has(row.key)) return true;
   }

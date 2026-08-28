@@ -5884,6 +5884,60 @@ describe('the capture ask (Stop)', () => {
   });
 
   /**
+   * GREPTILE P1 (#237): the publish half of the watermark stepped over a
+   * same-millisecond tie. Two children publish in one millisecond; the Stop hook
+   * reads the first and marks `at + 1`; the second row commits after that read
+   * and is below the mark from the moment it lands, so it is never reported and
+   * never can be. The report is the whole mitigation for letting a child publish
+   * from a sidechain nobody reads, so a dropped one is that mitigation failing.
+   *
+   * DIFFERENTIAL, AND PROVED NON-VACUOUS BELOW IT: the same two rows are read
+   * back through the `at + 1` rule in the second case, which must skip the
+   * tie-mate the ask here reports.
+   */
+  it('reports a child publish that shares a millisecond with one already named', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const at = Date.now();
+    await seedChildAsk('a1', at - 5000);
+    await seedChildAsk('a2', at - 5000);
+    await seedChildPublish('a1', 'https://tenjin.test/p/first-of-the-tie', at);
+
+    const first = await askReason();
+    expect(first).toContain('first-of-the-tie');
+
+    // The tie-mate, committed after that read and stamped the SAME millisecond.
+    await seedChildPublish('a2', 'https://tenjin.test/p/second-of-the-tie', at);
+    const second = await askReason();
+    expect(second).toContain('second-of-the-tie');
+    // Named once, not restated: the pair moved past it.
+    expect(second).not.toContain('first-of-the-tie');
+
+    // And it settles.
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
+
+  /** Vacuity guard for the case above: the rule it replaced, run over the same
+   *  two rows. `at + 1` puts the tie-mate below the mark, so if this ever stops
+   *  skipping it the case above stopped being differential. */
+  it('would have skipped that tie-mate under the old `at + 1` watermark', () => {
+    const at = Date.now();
+    const rows = [
+      { key: 'a1@' + at, at },
+      { key: 'a2@' + at, at },
+    ];
+    const named = rows[0]!;
+
+    // The rule as it was: mark the newest named `at`, plus one.
+    const oldMark = named.at + 1;
+    expect(rows.filter((r) => r.at >= oldMark)).toEqual([]);
+
+    // The rule as it is: the pair (at, key), which pages the tie.
+    const kept = rows.filter((r) => r.at > named.at || (r.at === named.at && r.key > named.key));
+    expect(kept.map((r) => r.key)).toEqual(['a2@' + at]);
+  });
+
+  /**
    * MINOR (round 2): `agent_published:` was keyed on the agent id alone and
    * upserted, so a child that published something objectionable and then
    * anything innocuous left the parent's report showing only the second. The
