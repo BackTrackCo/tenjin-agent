@@ -6216,6 +6216,42 @@ describe('the capture ask (Stop)', () => {
    *
    * `a1@T` sorts BELOW `a2@T`, so it is the row every cursor shape excludes.
    */
+  /**
+   * A REPORTED ROW IS STILL UNDER THE PREFIX, so a SQL LIMIT spends its budget
+   * on rows the ask already named and hides the unreported ones behind them. The
+   * queue read learned this; the publish read had the same shape. Beyond the cap
+   * the older publish is not late, it is unreachable: no later ask can ever name
+   * it, and the report is this design's only mitigation for a child publishing
+   * from a sidechain nobody reads.
+   */
+  it('reports a publish sitting behind a cap-full run of already-reported ones', async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    const at = Date.now();
+    await seedChildAsk('a1', at - 5000);
+    // The oldest publish, which every later read must still be able to reach.
+    await seedChildPublish('a1', 'https://tenjin.test/@x/behind-the-cap', at - 4000);
+    // More than the ask's row cap, all newer, so an unfiltered LIMIT stops here.
+    for (let i = 0; i < 205; i += 1) {
+      await seedChildPublish('a1', 'https://tenjin.test/@x/filler-' + i, at - 3000 + i);
+    }
+
+    // The first ask names the newest run and stamps every row it named.
+    expect(await askReason()).toContain('filler-');
+    // The oldest is REACHABLE: later asks drain what the row cap and the
+    // character bound paced, rather than leaving it behind the reported rows
+    // forever. The count is not the property, so this asserts arrival, not the
+    // ask it arrives in.
+    const later: string[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const run = await runScript(stopHookScript(dataDir), stopInput);
+      // A silent stop means the drain finished; nothing is left to name.
+      if (run.stdout === '') break;
+      later.push((JSON.parse(run.stdout) as { reason: string }).reason);
+    }
+    expect(later.join('\n')).toContain('behind-the-cap');
+  });
+
   it('reports a child publish that commits after the report naming a higher key', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     await writeSearchSignal();

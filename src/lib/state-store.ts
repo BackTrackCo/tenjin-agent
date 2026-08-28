@@ -2175,7 +2175,19 @@ function queuedFindingAfter(sinceMs) {
  */
 function agentPublishes(sinceMs, limit) {
   const out = new Map();
-  for (const row of statePrefixSince(MACHINE_SESSION, STATE_PUBLISHED_AGENT_PREFIX, sinceMs, limit)) {
+  let kept = 0;
+  // NO SQL LIMIT, and the cap applied AFTER the filter, the shape the queue read
+  // takes and for the same reason: a stamped row is still under the prefix, so a
+  // LIMIT spends its budget on reported rows and hides the unreported ones behind
+  // them. At 400 publishes in one window the newest 200 filled it and the rest
+  // could never be named.
+  for (const row of statePrefixSince(
+    MACHINE_SESSION,
+    STATE_PUBLISHED_AGENT_PREFIX,
+    sinceMs,
+    NO_ROW_LIMIT,
+  )) {
+    if (kept >= limit) break;
     const value = isRecord(row.value) ? row.value : {};
     if (typeof value.reportedAt === 'number') continue;
     if (typeof value.url !== 'string' || value.url === '') continue;
@@ -2186,6 +2198,7 @@ function agentPublishes(sinceMs, limit) {
     const list = out.get(agentId);
     if (list === undefined) out.set(agentId, [hit]);
     else list.push(hit);
+    kept += 1;
   }
   return out;
 }
