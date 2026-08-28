@@ -352,7 +352,6 @@ describe('the hot-path queries never scan', () => {
           STORE_SQL.takeStateOldestByPrefix,
           ['s', 's', 'dispatch_cache', 'dispatch_cache￿'],
         ],
-        ['searchByFingerprint', STORE_SQL.searchByFingerprint, ['s', 'f']],
         // The one-shot CLI tally is not a hook path, but it reads the same
         // never-pruned table.
         ['statusRows', STORE_SQL.statusRows, [0]],

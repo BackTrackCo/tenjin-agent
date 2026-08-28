@@ -23,9 +23,9 @@ import {
  * their own throws and exit 0 with empty stdout and empty stderr, which is the
  * same observable behaviour as an arm that legitimately decided to say nothing.
  * Two of those shipped into this stack while it was being rebased onto main
- * (`TEAM_SHORT_OPENER` in the child pointer, `judgeLeg` in the replay), and
- * neither `node --check` nor a test asserting silence could tell either one from
- * correct behaviour.
+ * (`TEAM_SHORT_OPENER` in the child pointer, `judgeLeg` in the dispatch arm's
+ * since-retired replay), and neither `node --check` nor a test asserting silence
+ * could tell either one from correct behaviour.
  *
  * So the guarantee is structural rather than behavioural: every identifier the
  * rendered script reads must be declared in it or be a runtime global. That is

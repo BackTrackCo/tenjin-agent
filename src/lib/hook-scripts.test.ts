@@ -3277,11 +3277,10 @@ describe('dispatch hook: one question per session', () => {
    * `spentThisSession`, `readHealth` and both network legs, and `openStore`
    * alone can spend a second before the fetch deadline starts, so an ordinary
    * slow leg is enough. A PERMANENT claim then stands over an answer that was
-   * never recorded: no `searches` row for `alreadyAskedStore`, nothing for
-   * `replayHandoff` to hand a child, and the question is unaskable for the rest
-   * of the session with no row saying why. The base of this stack was strictly
-   * better here — its gate was a `searches` read, so a killed fire left no
-   * trace — which is why nothing short of expiry will do.
+   * never recorded: no `searches` row for `alreadyAskedStore`, and the question
+   * is unaskable for the rest of the session with no row saying why. The base
+   * of this stack was strictly better here — its gate was a `searches` read, so
+   * a killed fire left no trace — which is why nothing short of expiry will do.
    *
    * Backdated rather than waited out: the window is `DISPATCH_ASK_LEASE_MS` of
    * wall clock and a timer would be a flake.
@@ -3572,70 +3571,6 @@ describe('dispatch hook: the slot cap never drops an announced handoff', () => {
     // costs a delivery nothing. One over the cap is the price, deliberately.
     expect(pieces).toContain(CANDIDATE.resourceId);
     expect(pieces).toHaveLength(STORE_CACHE_SLOT_MAX + 1);
-  });
-
-  /**
-   * A replay ADDS a delivery out of an answer the session already holds, at
-   * zero network cost. Buying its slot with another dispatch's first-and-only
-   * handoff is a straight loss, so at the cap it does not park at all — and a
-   * `replayed` decision row over a park that never landed would claim a
-   * delivery nothing can make. The refusal is a `slots-full` skip instead.
-   *
-   * WHAT THIS RUN ACTUALLY REACHES, stated rather than implied. `replayHandoff`
-   * returns above the park while the verdict is the shelf's `corroborated` +
-   * `confidence` and the lean stored projection carries neither, so this pins
-   * the two OUTCOMES (nothing evicted, no delivery claimed) and not the
-   * no-evict rule that produces them. It becomes a live assertion the day the
-   * replay carries the original verdict, which is the deferred change named in
-   * `replayHandoff`'s own docblock; until then the `slots-full` reason is a
-   * shape the ledger is ready for and not one it has seen.
-   */
-  it('parks nothing and claims nothing when the replay path finds the cap full', async () => {
-    const { baseUrl, hits } = await serveJson((_body, base) => ({
-      status: 200,
-      json: strongHit(base),
-    }));
-    await writeConfig({ baseUrl, hooks: { push: 'on' } });
-
-    // A real fire first, so the session holds a CANDIDATES `searches` row for
-    // this question: that row is what the replay path re-materializes from.
-    await runScript(
-      dispatchHookScript(dataDir),
-      dispatchInput({ sessionId: 'replayer', prompt: STRONG_PROMPT }),
-    );
-    expect(hits()).toBe(1);
-
-    // Now crowd the range, with no relay claim held: nothing here is protected,
-    // so only the no-evict rule can save these slots.
-    await fillSlots('replayer', 'unannounced-piece');
-    const before = await parkedPieces('replayer');
-
-    // The same question again: the lease is held and the answer is recorded, so
-    // this fire takes the replay path.
-    const run = await runScript(
-      dispatchHookScript(dataDir),
-      dispatchInput({ sessionId: 'replayer', prompt: STRONG_PROMPT }),
-    );
-    expect(run.code).toBe(0);
-    // Zero network on a replay, always.
-    expect(hits()).toBe(1);
-
-    // Nothing evicted, and nothing parked.
-    expect(await parkedPieces('replayer')).toEqual(before);
-
-    const store = await openStore(dataDir);
-    if (store === null) throw new Error('no store');
-    try {
-      // No row asserts the delivery this fire could not make. A 'slots-full'
-      // skip would be legitimate here; a 'replayed' row never is.
-      const replayed = store.all(
-        `SELECT id FROM injections WHERE session = ? AND reason = 'replayed'`,
-        ['replayer'],
-      );
-      expect(replayed).toEqual([]);
-    } finally {
-      store.close();
-    }
   });
 });
 

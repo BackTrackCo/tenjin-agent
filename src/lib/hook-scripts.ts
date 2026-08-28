@@ -123,8 +123,8 @@ export const HOOK_TIMEOUT_SECONDS = 5;
  *
  * A LEASE AND NOT A PERMANENT ROW, because both kills run no release. A
  * permanent claim outlives the fire that took it with no `searches` row behind
- * it, so `alreadyAskedStore` finds nothing, the replay finds nothing, and the
- * question is unaskable for the rest of the session with no row saying why.
+ * it, so `alreadyAskedStore` finds nothing and the question is unaskable for the
+ * rest of the session with no row saying why.
  */
 const DISPATCH_ASK_LEASE_MS = HOOK_TIMEOUT_SECONDS * 1000;
 /** The Stop and SessionStart hooks only read local files, so their whole run is
@@ -1653,12 +1653,10 @@ function relayLine(candidate, isTeam) {
  * announced the handoff to the parent and cannot treat a refused write as one.
  *
  * \`opts.protect\` is the resource id of the piece the parent has been told is on
- * its way, and \`opts.evict\` is false for a park that must not cost another one.
- * Both exist because the cap is reachable in a single assistant message: nine
- * parallel Tasks all park before any child drains.
+ * its way. It exists because the cap is reachable in a single assistant message:
+ * nine parallel Tasks all park before any child drains.
  */
 function cacheSlot(sessionId, slotId, entry, opts) {
-  const evict = !isRecord(opts) || opts.evict !== false;
   const protect = isRecord(opts) && typeof opts.protect === 'string' ? opts.protect : '';
   // Evict before writing. WHAT THIS IS AND IS NOT: the count and the write are
   // separate statements, and this is the arm whose premise is N concurrent
@@ -1677,11 +1675,6 @@ function cacheSlot(sessionId, slotId, entry, opts) {
   for (let i = 0; i < CACHE_SLOT_MAX; i += 1) {
     const held = countStatePrefix(sessionId, STATE_CACHE);
     if (!Number.isFinite(held) || held < CACHE_SLOT_MAX) break;
-    // A PARK THAT MAY NOT EVICT DOES NOT PARK. The replay path is the caller:
-    // it announces nothing and delivers a copy of an answer the session already
-    // holds, so dropping another dispatch's first-and-only handoff to make room
-    // for it is a straight loss. It says so with its return value.
-    if (!evict) return false;
     // PEEK, THEN DELETE BY KEY, because the oldest slot may be the one whose
     // fire won the relay claim, told the parent the piece was queued, and wrote
     // a \`relayed\` row suppressing it from every parent arm for the window.
@@ -1702,152 +1695,6 @@ function cacheSlot(sessionId, slotId, entry, opts) {
     if (!clearState(sessionId, oldest.key)) break;
   }
   return setState(sessionId, STATE_CACHE_PREFIX + slotId, entry);
-}
-
-/** The lean stored projection, back in the shape judge() scores. The display
- *  fields it never held read as absent, which is NOT the same as scoring lower:
- *  an absent \`confidence\` also takes judge()'s 'low' demotion off the table.
- *  The caller clamps rather than trusting this to be monotone. */
-function storedAsRich(candidates) {
-  const rich = [];
-  for (const c of Array.isArray(candidates) ? candidates : []) {
-    if (!isRecord(c)) continue;
-    if (typeof c.resourceId !== 'string' || typeof c.url !== 'string') continue;
-    if (typeof c.title !== 'string' || typeof c.price !== 'string') continue;
-    rich.push({
-      resourceId: c.resourceId,
-      url: c.url,
-      title: c.title,
-      price: c.price,
-      excerpt: '',
-      handle: '',
-      confidence: null,
-      corroborated: null,
-    });
-  }
-  return rich;
-}
-
-/**
- * Hand a FRESH child what this session already asked and already paid for.
- *
- * The lease above is the one lookup per question per session, and its loser
- * used to exit quiet — which was correct about the network and wrong about the
- * delivery: a fan-out of five children onto one question left four of them with
- * nothing, and the answer was sitting in the store the whole time. Re-judged
- * from the stored candidates rather than trusted. Zero network either way.
- *
- * AND CURRENTLY IT DELIVERS NOTHING, which is stated here rather than left to be
- * found. The verdict is the marketplace's \`corroborated\` + \`confidence\` since
- * #240, and neither field is on the lean projection the searches table stores,
- * so every replay judges 'none' and returns below. What restores the delivery is
- * carrying the ORIGINAL verdict to the replay — those fields onto the stored
- * projection, or the first dispatch's own decision row — and that changes what
- * this CLI persists, so it is not done here on the way past a rebase. The lease
- * half, one lookup per question per session, is unaffected.
- *
- * HALF THE FAN-OUT, AND ONLY HALF. This stops children 2 to 5 re-searching and
- * gives each of them a slot; whether they are SHOWN it is the child arm's
- * decision, and \`injections_shown_once\` is still keyed \`(session, resource_id)\`,
- * so the first delivery makes the rest 'already-injected'. The context-scoped
- * index that finishes this is PR 4's (tenjin-agent#228).
- */
-function replayHandoff(args) {
-  const { question, sessionId, cwd, config, slotId, tool, agentId } = args;
-  if (config.push !== 'on' || sessionId === null) return;
-  const prior = latestAskedSearch(question, sessionId);
-  if (prior === null || prior.decision !== 'CANDIDATES') return;
-  const rich = storedAsRich(prior.candidates);
-  if (rich.length === 0) return;
-  // \`verdict\`, not the retired local scorer: #240 removed \`judgeLeg\` and this
-  // call outlived it. A generated hook script is not type-checked, so the dead
-  // name was a ReferenceError this path swallowed on every fire.
-  const judged = verdict({ rich });
-  if (judged === null || judged.top === null || judged.strength === 'none') return;
-  // NEVER ABOVE WHAT THE LOOKUP REACHED. A replay must not stamp a verdict the
-  // fire it replays never got, and the local scorer had two routes to one: the
-  // projection carries no \`confidence\`, so the server's one-directional 'low'
-  // demotion could not fire a second time; and with both ranks stripped of their
-  // excerpts the rank-1-over-rank-2 margin could WIDEN past a test the original
-  // failed. Both closed when the verdict became the shelf's own two fields,
-  // which are absent here: this cannot reach 'strong' at all, so there is
-  // nothing left to clamp.
-  const strength = judged.strength;
-  // Which shelf ANSWERED, recovered the same way the row was filed: the public
-  // leg is the only one that stamps the public shelf's own base.
-  const shelf =
-    teamShelfOrigin(config) !== null && prior.shelfBaseUrl !== config.publicShelfUrl
-      ? 'team'
-      : 'public';
-  // NO EVICTION FOR A REPLAY: this path exists to ADD a delivery, so buying its
-  // slot with another dispatch's only handoff is a straight loss.
-  const parked = cacheSlot(
-    sessionId,
-    slotId,
-    {
-      at: new Date().toISOString(),
-      slotId,
-      query: question,
-      shelf,
-      searchId: prior.searchId,
-      top: judged.top,
-      score: judged.score,
-      second: judged.second,
-      strength,
-      confidence: judged.confidence ?? null,
-      corroborated: judged.corroborated ?? null,
-    },
-    { evict: false },
-  );
-  // A REFUSED PARK IS A ROW, NOT A SILENCE. This used to return before both
-  // writes, on the reasoning that a 'replayed' row over a refused park claims a
-  // delivery nothing can make — true of that reason, and it left the refusal
-  // itself invisible: a session under cap pressure showed a replay that simply
-  // never happened, indistinguishable in the ledger from a fire that judged
-  // 'none'. So the reason carries which one it was, and 'slots-full' is a
-  // \`skipped\` row, which asserts no delivery.
-  const reason = parked ? 'replayed' : 'slots-full';
-  const eventUid = recordEvent({
-    session: sessionId,
-    cwd,
-    hook: 'dispatch',
-    tool,
-    data: {
-      event: 'PreToolUse',
-      query: clean(question, ${QUESTION_MAX}),
-      agentId,
-      // WHICH SLOT, so the child's row and this one join on a key rather than on
-      // arrival order. Without it "eight dispatches, three deliveries" is a
-      // ratio and never an attribution.
-      slotId,
-      reason,
-    },
-  });
-  // LOGGED, NOT RELAYED. Nothing reached the parent and nothing was asked of
-  // any shelf; what happened is that a child got a second copy of an answer
-  // this session already holds, and \`push status\` should be able to count that
-  // separately from a lookup that spoke.
-  recordDecision({
-    session: sessionId,
-    cwd,
-    eventUid,
-    trigger: 'dispatch',
-    event: 'PreToolUse',
-    shelf,
-    searchId: prior.searchId,
-    candidate: {
-      resourceId: judged.top.resourceId,
-      title: judged.top.title,
-      price: judged.top.price,
-      url: judged.top.url,
-    },
-    score: judged.score,
-    second: judged.second,
-    strength,
-    action: parked ? 'logged' : 'skipped',
-    reason,
-    form: 'short',
-  });
 }
 
 async function main() {
@@ -1904,26 +1751,16 @@ async function main() {
   // contention costs a lookup instead of granting every contender one — and
   // that same store would have refused the \`searches\` row anyway.
   //
-  // AND THE LOSER STILL DELIVERS. It re-materializes a handoff out of the
-  // answer this session already holds, so the fresh child that lost the race
-  // opens with the finding rather than with nothing, at zero network cost. A
-  // loser whose winner has not recorded its answer YET finds nothing to replay
-  // and exits quiet, exactly as it did before; what it must never do is ask
-  // again.
+  // AND THE LOSER EXITS QUIET. It briefly re-materialized a handoff out of the
+  // answer this session already holds, which #240 ended: the verdict is now the
+  // shelf's \`corroborated\` + \`confidence\` and the lean stored projection carries
+  // neither, so every re-judge landed on 'none' and delivered nothing. The
+  // second child is left to the fan-out work in tenjin-agent#228 PR 4, which
+  // owns what a slot may be keyed on; the lease half, one lookup per question
+  // per session, is what this claim is for and is unaffected.
   const askedKey = STATE_ASKED_PREFIX + searchFingerprint(question);
   const claimedAsk = claimStateFresh(sessionId, askedKey, ${DISPATCH_ASK_LEASE_MS});
-  if (!claimedAsk || alreadyAskedStore(question, sessionId)) {
-    replayHandoff({
-      question,
-      sessionId,
-      cwd,
-      config,
-      slotId,
-      tool: input.tool_name,
-      agentId,
-    });
-    return quiet();
-  }
+  if (!claimedAsk || alreadyAskedStore(question, sessionId)) return quiet();
   // THE FAST PATH BACK, on both pre-lookup aborts and on the failed lookup
   // below. The lease already bounds the damage; giving it back the moment this
   // fire knows it holds no answer turns a \`DISPATCH_ASK_LEASE_MS\` wait into no

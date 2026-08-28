@@ -551,9 +551,9 @@ export const STORE_SQL = {
    * assistant message both pass the check and both write the one session-wide
    * cache key, and a permanent claim would have made an unconsumed handoff
    * suppress the piece forever (`STORE_RELAY_WINDOW_MS`). The asked-claim: a
-   * permanent claim survives a fire the harness kills mid-lookup, and there is
-   * no `searches` row behind it to replay, so the window is the fire's own
-   * budget and doubles as the re-ask window.
+   * permanent claim survives a fire the harness kills mid-lookup with no
+   * `searches` row behind it, so the window is the fire's own budget and
+   * doubles as the re-ask window.
    *
    * Not a job for the `injections` unique index, which covers
    * `action='injected'` only and must keep doing so: widening it would refuse
@@ -646,18 +646,6 @@ export const STORE_SQL = {
      WHERE search_id = ? COLLATE NOCASE`,
   askedFingerprint: `SELECT 1 FROM searches
      WHERE session = ? AND fingerprint = ? LIMIT 1`,
-  /**
-   * The newest answer this session already has for a question, candidates and
-   * all.
-   *
-   * `askedFingerprint` says only THAT the question was asked, which is all a
-   * suppressor needs; the dispatch arm now needs what the answer WAS, so a
-   * second subagent sent after the same thing can be handed the finding the
-   * first lookup already paid for instead of the arm going quiet. Same
-   * (session, fingerprint) key, so the two agree by construction.
-   */
-  searchByFingerprint: `SELECT * FROM searches
-     WHERE session = ? AND fingerprint = ? ORDER BY at DESC, rowid DESC LIMIT 1`,
   countBySource: `SELECT COUNT(*) AS n FROM searches
      WHERE session = ? AND source = ? AND at >= ?`,
   /**
@@ -961,9 +949,9 @@ const STATE_CACHE_PREFIX = STATE_CACHE + ':';
  * A LEASE, NEVER A PERMANENT ROW. The fire holding it can be killed where it
  * stands — its own watchdog and the harness \`timeout\` on the settings entry are
  * both hard kills that run no release — and a permanent claim survives that kill
- * with no \`searches\` row behind it and nothing for the replay to hand a child,
- * so one busy minute becomes the reason this question is never asked again for
- * the rest of the session, with no row saying why. The lease expires instead:
+ * with no \`searches\` row behind it, so one busy minute becomes the reason this
+ * question is never asked again for the rest of the session, with no row saying
+ * why. The lease expires instead:
  * see \`DISPATCH_ASK_LEASE_MS\` in lib/hook-scripts.ts, which is both the window
  * and the re-ask window.
  */
@@ -1909,17 +1897,6 @@ function alreadyAskedStore(question, sessionId) {
       searchFingerprint(question),
     ]) !== null
   );
-}
-
-/** The newest answer this session already holds for this exact question, or
- *  null. What \`alreadyAskedStore\` suppresses on, read back in full so a second
- *  fire can re-use the answer the first one paid for. */
-function latestAskedSearch(question, sessionId) {
-  const row = storeGet(STORE_SQL.searchByFingerprint, [
-    storeSession(sessionId),
-    searchFingerprint(question),
-  ]);
-  return row === null ? null : searchRow(row);
 }
 
 /** How many searches this session has spent on \`source\` since \`sinceMs\`.

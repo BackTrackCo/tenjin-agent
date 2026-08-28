@@ -4593,46 +4593,38 @@ describe('the subagent handoff slots', () => {
   });
 
   /**
-   * The asked-claim (audit finding 8) and its replay.
+   * The asked-claim (audit finding 8), which is a LEASE ON THE LOOKUP and
+   * nothing more.
    *
    * The suppressor used to be a read of the searches table and the row it reads
    * is written only when the answer comes BACK, so identical prompts fired
    * together all passed it and all searched. The claim is one statement, so the
-   * second dispatch spends nothing — and instead of exiting quiet it rebuilds a
-   * handoff out of the answer this session already holds.
+   * second dispatch spends nothing.
    *
-   * THIS PINS THE EXPIRED-SLOT PATH, not a fan-out: the `ageSlots` line below
-   * makes the first handoff unusable, so the second child's slot is one only the
-   * replay could have produced. The concurrent fan-out (five children onto one
-   * question) is the motivating case and is not what this run reproduces; and
-   * the replay only stops the extra children RE-SEARCHING, since
-   * `injections_shown_once` is keyed `(session, resource_id)` until PR 4's
-   * context-scoped index, so the first delivery still makes the rest
-   * 'already-injected'.
+   * IT DELIVERS NOTHING EITHER, and that is the shipped behaviour rather than an
+   * omission this run papers over. The loser exits quiet: the branch that
+   * rebuilt a handoff out of the stored answer is gone, because the verdict is
+   * the shelf's `corroborated` + `confidence` since #240 and the lean stored
+   * projection carries neither, so every re-judge landed on 'none'. Handing the
+   * second child of a fan-out something is tenjin-agent#228 PR 4's, which owns
+   * what a slot may be keyed on (`injections_shown_once` is `(session,
+   * resource_id)` until its context-scoped index, so a second delivery of the
+   * same piece would read 'already-injected' anyway).
    */
-  it('spends one lookup on a repeated question and still hands the second child a slot', async () => {
+  it('spends one lookup on a repeated question and parks nothing the second time', async () => {
     const { baseUrl, queries } = await serve(perQuestion);
     await pushOn(baseUrl);
 
     await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
     expect(queries()).toHaveLength(1);
-    // The first handoff goes stale with no child having taken it.
+    // The first handoff goes stale with no child having taken it, so a second
+    // slot would have to be a new park rather than the first one lingering.
     ageSlots(PUSH_CACHE_TTL_MS + 60_000);
 
     await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
-    // Zero duplicate network: the answer came out of the store.
-    // NO SECOND SLOT, AND THIS IS A REGRESSION FROM main, NOT A DESIGN. The
-    // verdict is the shelf's `corroborated` + `confidence` since #240, and
-    // `storedAsRich` rebuilds the replayed cards with both fields null, so
-    // `replayHandoff` re-judges every stored projection as 'none' and returns
-    // before it parks. The lease still does its half (one lookup, below); the
-    // delivery half needs the original verdict carried to the replay, which is
-    // a change to this layer that has not been reviewed. Pinned as it stands so
-    // the loss is visible rather than silent.
+    // Zero duplicate network, and no second slot.
+    expect(queries()).toHaveLength(1);
     expect(slotKeys()).toHaveLength(1);
-    expect((await ledger()).filter((r) => r.trigger === 'dispatch')).not.toContainEqual(
-      expect.objectContaining({ reason: 'replayed' }),
-    );
   });
 
   /**
@@ -4669,9 +4661,9 @@ describe('the subagent handoff slots', () => {
    * Both are windows on purpose (the burst cap counts a rolling hour, the
    * outage brake expires on its own so a recovered server needs no
    * intervention), and a permanent claim held across either outlives the bound
-   * that caused it. Neither writes a `searches` row, so the replay has nothing
-   * to hand over in the claim's place: the question is simply never asked again
-   * for the rest of the session.
+   * that caused it. Neither writes a `searches` row, so nothing stands behind
+   * the claim: the question is simply never asked again for the rest of the
+   * session.
    */
   it('gives the claim back when the outage brake refused the lookup', async () => {
     let down = true;
@@ -4742,33 +4734,6 @@ describe('the subagent handoff slots', () => {
     ageSearches(2 * 60 * 60 * 1000);
     await runScript(dispatchHookScript(dataDir), dispatchOf(refused));
     expect(queries()).toHaveLength(spent + 1);
-  });
-
-  /**
-   * A replay re-judges the stored projection, and the display fields it never
-   * held do not all lower the verdict: with no `confidence` on the projection,
-   * judge()'s one-directional 'low' demotion cannot fire, so a hit the
-   * marketplace itself called low-confidence came back 'strong' the second time
-   * and that escalation is what the row and the handoff carried.
-   */
-  it('never replays a verdict stronger than the lookup it replays', async () => {
-    const { baseUrl, queries } = await serve(echo({ confidence: 'low' }));
-    await pushOn(baseUrl);
-
-    // Locally strong on the cards, demoted by the server's own bucket.
-    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
-    expect(queries()).toHaveLength(1);
-    ageSlots(PUSH_CACHE_TTL_MS + 60_000);
-
-    await runScript(dispatchHookScript(dataDir), dispatchOf(ZOD_PROMPT));
-    expect(queries()).toHaveLength(1);
-    // The property holds, and now by construction: a 'low' hit is 'none' on the
-    // first fire, so there is nothing to escalate on the second. The route the
-    // clamp guarded (a projection with no `confidence`, judged strong a second
-    // time) closed when the verdict became the shelf's two fields.
-    const rows = (await ledger()).filter((r) => r.trigger === 'dispatch');
-    expect(rows).toMatchObject([{ action: 'logged', strength: 'none' }]);
-    expect(rows.some((r) => r.strength === 'strong')).toBe(false);
   });
 });
 
