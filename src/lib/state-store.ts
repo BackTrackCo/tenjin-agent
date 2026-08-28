@@ -48,15 +48,19 @@ export function stateDbPath(dir: string): string {
 }
 
 /**
- * The schema version this build creates and expects. The DDL runs exactly once,
- * inside one `BEGIN IMMEDIATE`, gated on `PRAGMA user_version`: a second process
- * racing the first blocks on the transaction, then reads the new version and
- * skips.
+ * The schema version this build creates and expects. Both bootstraps run inside
+ * one `BEGIN IMMEDIATE`, gated on `PRAGMA user_version`: a second process racing
+ * the first blocks on the transaction, then reads the new version and skips.
  *
- * `#212` adds `error_signatures`/`trigger_stats` under version 2 in the shape it
+ * Version 1 is {@link STORE_DDL} whole; every version above it is one entry in
+ * {@link STORE_MIGRATIONS}, applied in order. Version 2 adds
+ * `injections.agent_id` — the subagent a finding was relayed to, so `tenjin push
+ * grade` can read that child's own transcript rather than the parent's.
+ *
+ * `#212` adds `error_signatures`/`trigger_stats` under version 3 in the shape it
  * needs. Nothing here is `NOT NULL` that a later issue is supposed to fill.
  */
-export const STORE_USER_VERSION = 1;
+export const STORE_USER_VERSION = 2;
 
 /**
  * How long a colliding writer waits before giving up, in ms.
@@ -262,6 +266,25 @@ CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE st
 `;
 
 /**
+ * What a database BELOW {@link STORE_USER_VERSION} needs run on it, in order.
+ *
+ * One entry per version above 1, applied by both bootstraps inside the same
+ * `BEGIN IMMEDIATE` that creates the schema: a fresh database runs
+ * {@link STORE_DDL} and then every delta, a version 1 database runs only the
+ * deltas above 1, and a database already at or past a version skips it.
+ *
+ * ⚠ NEVER EDITED ONCE SHIPPED, and never made conditional. An `ALTER TABLE ADD
+ * COLUMN` is not idempotent — running it twice throws — which is exactly why it
+ * is gated on the version inside the transaction rather than guarded by a
+ * `PRAGMA table_info` probe. A changed entry would run on the machines that
+ * missed it and be skipped on the machines that already ran the old one, which
+ * is two different schemas under one version number. Add a version instead.
+ */
+export const STORE_MIGRATIONS: readonly { version: number; sql: string }[] = [
+  { version: 2, sql: 'ALTER TABLE injections ADD COLUMN agent_id TEXT' },
+];
+
+/**
  * Every statement either side runs, by name.
  *
  * ⚠ THE ONE COPY. The TS helpers below and the generated hook source both read
@@ -288,8 +311,8 @@ export const STORE_SQL = {
        uid, event_uid, at, session, project, machine, hook, shelf,
        resource_id, title, url, price,
        search_id, score, second, strength, confidence, corroborated,
-       action, reason, form, deny, tokens
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       action, reason, form, deny, tokens, agent_id
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
   /**
    * The 6× fix: one already-shown set for every hook, keyed by session and by
@@ -364,7 +387,7 @@ export const STORE_SQL = {
    *  row in the machine bucket under `draft-search:<searchId>`, value the RAW
    *  post id (matched by SQL, so never JSON-quoted). A key-value fact beside the
    *  `published:` records, not a `searches` column, because adding a column to a
-   *  created table needs the versioned migration #212 introduces. */
+   *  created table needs a STORE_MIGRATIONS entry. */
   listSearches: `SELECT s.*, st.value AS draft_post_id FROM searches s
      LEFT JOIN session_state st
        ON st.session = '' AND st.key = 'draft-search:' || s.search_id
@@ -522,7 +545,7 @@ export const STORE_SQL = {
      FROM injections WHERE at >= ?`,
 
   /** `tenjin push grade`: what was shown and never judged. */
-  ungradedInjections: `SELECT uid, at, session, hook, shelf, resource_id, title, url, search_id, form
+  ungradedInjections: `SELECT uid, at, session, agent_id, hook, shelf, resource_id, title, url, search_id, form
      FROM injections
      WHERE action = 'injected' AND outcome IS NULL AND at >= ? AND (? = '' OR session = ?)
      ORDER BY at, id`,
@@ -535,7 +558,7 @@ export const STORE_SQL = {
    * on a row the arm decided NOT to show would stamp an outcome on it and post
    * "the agent used this" to the shelf about a piece nobody ever saw.
    */
-  injectionByUid: `SELECT uid, at, session, hook, shelf, resource_id, search_id, outcome, outcome_by, outcome_at
+  injectionByUid: `SELECT uid, at, session, agent_id, hook, shelf, resource_id, search_id, outcome, outcome_by, outcome_at
      FROM injections WHERE uid = ? AND action = 'injected'`,
   /** A verdict, and the posted stamp cleared with it: a re-labelled row is owed
    *  to the shelf again. */
@@ -596,6 +619,7 @@ const STORE_CORE_JS = String.raw`
 const STATE_DB_PATH = join(DATA_DIR, __DB_FILE__);
 const STORE_SQL = __SQL__;
 const STORE_DDL = __DDL__;
+const STORE_MIGRATIONS = __MIGRATIONS__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
@@ -732,9 +756,9 @@ async function openStore() {
     // \`tenjin install\`, so a machine can run v1 hooks against a database a
     // newer CLI already migrated. On \`!==\` the stale hook stamps the version
     // back down, the newer side migrates again, and the two ping-pong forever —
-    // and any non-idempotent statement in that later migration (#212 adds one
-    // under version 2) then throws and costs the newer build its store. A
-    // higher version is left exactly as it is.
+    // and the non-idempotent statements in STORE_MIGRATIONS (an ALTER TABLE
+    // throws on the second run) then cost the newer build its store. A higher
+    // version is left exactly as it is.
     if (storeVersion(db) < STORE_USER_VERSION) bootstrap(db);
     try {
       chmodSync(STATE_DB_PATH, 0o600);
@@ -783,8 +807,13 @@ function bootstrap(db) {
         continue;
       }
       try {
-        if (storeVersion(db) < STORE_USER_VERSION) {
-          db.exec(STORE_DDL);
+        // Read ONCE, inside the transaction, and step the database up from
+        // wherever it actually is: the DDL when there is no schema at all, then
+        // every delta above the version on disk.
+        const v = storeVersion(db);
+        if (v < STORE_USER_VERSION) {
+          if (v < 1) db.exec(STORE_DDL);
+          for (const m of STORE_MIGRATIONS) if (v < m.version) db.exec(m.sql);
           db.exec(STORE_SQL.setUserVersion);
         }
         db.exec('COMMIT');
@@ -1003,6 +1032,7 @@ function recordInjection(row) {
     typeof row.form === 'string' ? row.form : null,
     row.deny === true ? 1 : 0,
     typeof row.tokens === 'number' ? row.tokens : null,
+    typeof row.agentId === 'string' ? row.agentId : null,
   ]);
 }
 
@@ -1369,6 +1399,7 @@ export function storeSource(): string {
     .replaceAll('__BOOTSTRAP_TRIES__', String(STORE_BOOTSTRAP_TRIES))
     .replaceAll('__SQL__', JSON.stringify(STORE_SQL, null, 2))
     .replaceAll('__DDL__', JSON.stringify(STORE_DDL))
+    .replaceAll('__MIGRATIONS__', JSON.stringify(STORE_MIGRATIONS))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS));
 }
@@ -1451,8 +1482,14 @@ export async function openStore(dataDir: string): Promise<Store | null> {
             continue;
           }
           try {
-            if (storeVersionOf(db) < STORE_USER_VERSION) {
-              db.exec(STORE_DDL);
+            // Read ONCE, inside the transaction: the DDL only when there is no
+            // schema at all, then every delta above the version on disk. Same
+            // sequence as the hooks' copy, deliberately restated rather than
+            // shared — the drift test is what keeps the two honest.
+            const v = storeVersionOf(db);
+            if (v < STORE_USER_VERSION) {
+              if (v < 1) db.exec(STORE_DDL);
+              for (const m of STORE_MIGRATIONS) if (v < m.version) db.exec(m.sql);
               db.exec(STORE_SQL.setUserVersion);
             }
             db.exec('COMMIT');

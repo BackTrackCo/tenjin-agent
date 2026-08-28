@@ -8,6 +8,7 @@ import {
   RETIRED_STATE_ENTRIES,
   STATE_DB_FILE,
   STORE_DDL,
+  STORE_MIGRATIONS,
   STORE_BUSY_TIMEOUT_MS,
   STORE_SQL,
   STORE_USER_VERSION,
@@ -212,6 +213,9 @@ describe('storeSource stays in sync with the module', () => {
   it('bakes the DDL, the version and every statement into the generated source', () => {
     const source = storeSource();
     expect(source).toContain(JSON.stringify(STORE_DDL));
+    // The deltas travel too, or a hook meeting a v1 database creates the schema
+    // it was compiled against and stamps a version the column is missing from.
+    expect(source).toContain(JSON.stringify(STORE_MIGRATIONS));
     expect(source).toContain(`const STORE_USER_VERSION = ${STORE_USER_VERSION};`);
     for (const [name, sql] of Object.entries(STORE_SQL)) {
       // Interpolated as one JSON object, so each statement appears verbatim as a
@@ -332,7 +336,7 @@ describe('the hot-path queries never scan', () => {
 });
 
 describe('openStore', () => {
-  it('creates the schema at user_version 1 and is idempotent', async () => {
+  it('creates the schema at the current version and is idempotent', async () => {
     const first = await openStore(dataDir);
     expect(first).not.toBeNull();
     first?.close();
@@ -389,6 +393,112 @@ describe('openStore', () => {
     const probe = await probeSqlite();
     expect(probe.ok).toBe(true);
     expect(probe.version).toMatch(/^\d+\.\d+/);
+  });
+});
+
+/**
+ * A database that already exists is the ONLY interesting case for a schema
+ * change: the fresh path is covered by every other test in this file, and a
+ * migration that only works on an empty directory has migrated nothing.
+ *
+ * BOTH BOOTSTRAPS ARE TESTED, because there are two of them: the CLI's
+ * `openStore` and the copy `storeSource()` bakes into every hook. A machine
+ * whose hooks are older than its CLI (they are regenerated only by `tenjin
+ * install`) can have either side meet the old database first.
+ */
+describe('migration', () => {
+  /** A version 1 database with one row in it, written the way the shipped v1
+   *  build wrote it: the DDL verbatim, and the 23-column INSERT spelled out
+   *  here rather than taken from `STORE_SQL`, which now names 24. */
+  function seedV1(): void {
+    const handle = db();
+    try {
+      handle.exec(STORE_DDL);
+      handle.exec('PRAGMA user_version = 1');
+      handle
+        .prepare(
+          `INSERT INTO injections (
+             uid, event_uid, at, session, project, machine, hook, shelf,
+             resource_id, title, url, price,
+             search_id, score, second, strength, confidence, corroborated,
+             action, reason, form, deny, tokens
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'u-old',
+          null,
+          1,
+          'sess-v1',
+          null,
+          'machine',
+          'prompt',
+          'public',
+          'res-1',
+          'an old row',
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          'injected',
+          null,
+          null,
+          0,
+          null,
+        );
+    } finally {
+      handle.close();
+    }
+  }
+
+  function columns(): string[] {
+    return rows('PRAGMA table_info(injections)').map((r) => String(r.name));
+  }
+
+  it('migrates a version 1 database in place and keeps its rows (CLI copy)', async () => {
+    seedV1();
+
+    const store = await openStore(dataDir);
+    expect(store).not.toBeNull();
+    store?.close();
+
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    expect(columns()).toContain('agent_id');
+    // IN PLACE: the row that was there is still there, and reads as a main
+    // session row rather than as one relayed to some agent.
+    expect(rows('SELECT uid, session, agent_id FROM injections')).toEqual([
+      { uid: 'u-old', session: 'sess-v1', agent_id: null },
+    ]);
+  });
+
+  it('migrates a version 1 database in place (hook copy)', async () => {
+    await writeConfig();
+    seedV1();
+
+    const run = await runScript(
+      stopHookScript(dataDir),
+      JSON.stringify({ session_id: 'sess-v1', hook_event_name: 'Stop', cwd: '/repo/one' }),
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    expect(columns()).toContain('agent_id');
+    expect(rows('SELECT uid, agent_id FROM injections')).toEqual([
+      { uid: 'u-old', agent_id: null },
+    ]);
+  });
+
+  /** The fresh path runs the DDL and then every delta, so a new machine lands on
+   *  exactly the schema a migrated one does. */
+  it('a fresh database lands at the current version with the column present', async () => {
+    const store = await openStore(dataDir);
+    store?.close();
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    expect(columns()).toContain('agent_id');
   });
 });
 
