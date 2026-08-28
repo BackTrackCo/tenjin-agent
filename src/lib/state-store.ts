@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -352,8 +353,8 @@ export const STORE_SQL = {
    */
   claimState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO NOTHING`,
-  /** Rows under one key prefix, newest first. Used for the per-path `edited:`
-   *  rows the close rule reads. */
+  /** Rows under one key prefix, newest first. Used for the per-agent, per-path
+   *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
      WHERE session = ? AND key >= ? AND key < ? AND at >= ? ORDER BY at DESC LIMIT ?`,
   countStatePrefix: `SELECT COUNT(*) AS n FROM session_state
@@ -574,6 +575,49 @@ export const STORE_SQL = {
   pairingsStatus: `SELECT status, scope, cmd_head, COUNT(*) AS n
      FROM pairings WHERE at >= ? GROUP BY status, scope, cmd_head`,
 
+  /**
+   * The closed, CODE-scoped pairings of one project that the team shelf has
+   * not seen in their current state: never synced, or promoted to `verified`
+   * by a close that landed AFTER the last sync (`closed_at` moves on every
+   * close, `synced_at` on every sync, so the comparison is the whole test).
+   * `user` and `ambiguous` rows never match: a fix that was somebody's laptop
+   * does not travel. The Stop hook counts these to decide whether to spawn
+   * `tenjin sync`; the command reads them. A scan of a table that grows by one
+   * row per distinct failure, on the one hook whose budget is silent.
+   */
+  unsyncedPairings: `SELECT * FROM pairings
+     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+       AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))
+     ORDER BY at`,
+  countUnsyncedPairings: `SELECT COUNT(*) AS n FROM pairings
+     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+       AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))`,
+  /** Stamp a pairing as synced (or as re-synced after a promotion). */
+  markPairingSynced: 'UPDATE pairings SET synced_at = ? WHERE id = ?',
+  /** What the last `tenjin sync` run reported, for the Stop hook's fallback line. */
+  lastSyncEvent: `SELECT data FROM events WHERE hook = 'sync' ORDER BY at DESC, id DESC LIMIT 1`,
+  /**
+   * `tenjin push status --sessions`, the importance-score report (#212,
+   * CommonTrace `detection.py`): every event row in the window in session
+   * order, the closes the machine's sessions made, the searches they ran, the
+   * sessions' own bounds, and the session_state families the score is compared
+   * against — `capture_asked` (per session) and the publish marks
+   * `published:<hash>` and `agent_published:<...>` (both machine-wide,
+   * attributed to a session by time; the second is a CHILD's own publish, and
+   * `LIKE 'published:%'` is anchored, so it needs naming separately). Report
+   * queries: a window scan over tables that never prune, run by a human, never
+   * by a hook.
+   */
+  scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
+     FROM events WHERE at >= ? ORDER BY session, at, id`,
+  scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
+  scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
+  scoreSessions: `SELECT session, started_at, ended_at FROM sessions
+     WHERE started_at >= ? OR ended_at >= ?`,
+  scoreState: `SELECT session, key, at FROM session_state
+     WHERE (key = 'capture_asked' OR key LIKE 'published:%'
+            OR key LIKE 'agent_published:%') AND at >= ?`,
+
   /** `tenjin push grade`: what was shown and never judged. */
   ungradedInjections: `SELECT uid, at, session, hook, shelf, resource_id, title, url, search_id, form
      FROM injections
@@ -680,12 +724,47 @@ const STATE_EDITS_PREFIX = 'edits:';
 const STATE_EDITED_PREFIX = 'edited:';
 const STATE_PACKAGES_PREFIX = 'package:';
 const STATE_SIGNATURES_PREFIX = 'sig:';
-/** Which pairing this session was SHOWN behind a given command head. It is what
- *  lets the session that was replayed a pairing be its second independent
- *  closer, which is the only route to \`verified\` through the hooks. */
+/** Which pairings ONE AGENT was SHOWN behind a given command head — the key is
+ *  \`replayed:<agent>:<head>\` and the value a JSON array of pairing ids. It is
+ *  what lets the agent that was replayed a pairing be its second independent
+ *  closer, which is the only route to \`verified\` through the hooks. Scoped by
+ *  agent because parallel subagents share their parent's session id, and a list
+ *  because one head answers for a whole build step. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
+/**
+ * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
+ * off, or a deployment too old to have the route), keyed by origin under the
+ * machine session and held for KEYS_OFF_TTL_MS. Machine-wide because the fact
+ * is about the shelf, not the session: an always-on loop session lasts a day,
+ * and a fresh session per prompt would otherwise pay one request each before
+ * learning it (tenjin-agent#212).
+ */
+const STATE_KEYS_OFF_PREFIX = 'keys_off:';
+const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
+/**
+ * The team-shelf post a LOCAL pairing corresponds to, keyed by the pairing's
+ * row id under the machine session. ONE SHAPE, shared with \`tenjin sync\`
+ * (commands/sync.ts, which imports the mirrored STATE_PAIRING_POST_PREFIX):
+ * \`{ postId, origin, at, own?, held?, closedAt?, status?, fixFiles? }\`.
+ * The failure arm's team leg writes \`{ postId, origin, at }\` when it replays
+ * a post and opens a pairing beside it, and stamps \`closedAt\`, \`status\`
+ * and \`fixFiles\` when this machine's later pass closes that pairing — which
+ * is the second, independent close the shelf has no endpoint for, so
+ * \`tenjin sync\` reads it and PUTs the post \`verified\` instead of
+ * publishing a duplicate. Sync itself adds \`own: true\` on a post it
+ * published and \`held: true\` on a holder it lost to. No column: the
+ * pairings table is not versioned for this, and the fact is a join key, not
+ * a row attribute.
+ */
+const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
+/** The shelf's per-trigger use rates, fetched by the SessionStart primer once
+ *  per session for the adaptive cooldown (PUSH_COOLDOWN_* in
+ *  lib/push-scripts.ts), and the per-trigger count of fires the cooled cap
+ *  suppressed. */
+const STATE_TRIGGER_RATES = 'trigger_rates';
+const STATE_COOLDOWN_PREFIX = 'cooldown:';
 const MACHINE_SESSION = '';
 
 /** The open database, or null once we know we cannot have one. */
@@ -1191,6 +1270,23 @@ function clearState(sessionId, key) {
 }
 
 /**
+ * A key that HOLDS until \`untilMs\` and then simply reads as absent. The
+ * expiry is the value, so a reader needs no clock column and no pruner: a
+ * stale row is one more row in a table nothing scans, overwritten the next
+ * time the fact is learned again.
+ */
+function setStateUntil(sessionId, key, untilMs) {
+  setState(sessionId, key, untilMs);
+}
+
+/** Whether \`key\` was set with setStateUntil and has not expired. A value
+ *  that is not a future timestamp reads as not held. */
+function stateHolds(sessionId, key) {
+  const until = getState(sessionId, key);
+  return typeof until === 'number' && until > Date.now();
+}
+
+/**
  * Claim \`key\` for this session: true the FIRST time, false ever after.
  *
  * ONE STATEMENT, because the pattern it replaces was a read-modify-write of a
@@ -1355,12 +1451,12 @@ function searchRow(row) {
 
 /**
  * Open a pairing on an allowlisted failure. Mechanical, no model: the key is the
- * failure's signature and the row is what a later success closes.
+ * failure's signature and the row is what a later success closes. Returns the
+ * new row's id, or null when the store refused the write.
  */
 function openPairing(row) {
-  const id = uid();
-  storeRun(STORE_SQL.insertPairing, [
-    id,
+  const result = storeRun(STORE_SQL.insertPairing, [
+    uid(),
     Date.now(),
     storeSession(row.session),
     projectId(row.cwd),
@@ -1375,7 +1471,11 @@ function openPairing(row) {
     storeJson(row.pkgVersions),
     String(row.scope),
   ]);
-  return id;
+  // The ROW ID, which is what \`replayed:<agent>:<head>\` and
+  // \`pairing_post:<id>\`
+  // key on and \`pairingById\` reads back; null when nothing was written.
+  const rowid = result === null ? null : Number(result.lastInsertRowid);
+  return Number.isSafeInteger(rowid) ? rowid : null;
 }
 
 /** The best local match for a signature: verified first, then most closed, then
@@ -1813,6 +1913,47 @@ export function storeSession(sessionId: string | null | undefined): string {
 /** ⚠ MIRRORED with `searchFingerprint` in the hook core above. */
 export function searchFingerprint(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
+}
+
+/** ⚠ MIRRORED with `shortHash` in the hook core above: a cwd or machine string
+ *  reduced to a stable, non-reversible 16-hex join key. The CLI computes it to
+ *  read the same `pairings.project` the hooks wrote. */
+export function shortHash(text: string): string {
+  return createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
+}
+
+/** ⚠ MIRRORED with `projectId` in the hook core above. The `project` column a
+ *  pairing was stamped with, so the CLI (`tenjin sync`) scopes its read to the
+ *  same checkout the failure happened in; null for a cwd-less payload. */
+export function projectId(cwd: string | null | undefined): string | null {
+  return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;
+}
+
+/** ⚠ MIRRORED with `STATE_PAIRING_POST_PREFIX` in the hook core above: the
+ *  `session_state` row (machine session `''`) linking a local pairing to its
+ *  team-shelf post, `{ postId, origin, at, own?, held?, closedAt?, status?,
+ *  fixFiles? }`. The failure arm writes it; `tenjin sync` reads and extends it. */
+export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
+
+/**
+ * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
+ * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
+ * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is the origin URL
+ * read from `.git/config`. The salt goes over the stored hash, not the raw
+ * message, because a `pairings` row keeps only the hashes and `tenjin sync`
+ * reads rows back long after the failure arm's `sigV1()` call is gone.
+ *
+ * THE ONE DEFINITION. `tenjin sync` (commands/sync.ts) imports it directly; a
+ * hook script cannot import, so the failure arm's resolve leg carries a copy
+ * inside its generated source, and that copy must produce the same bytes for
+ * the same (coarse_key, repo) — a resolve query and a synced post that salted
+ * two different ways would never find each other, and the miss would be
+ * indistinguishable from "no teammate has hit this". The pinned value in
+ * state-store.test.ts is what both sides are held to. The caller adds the wire
+ * prefix: `` `sig_v1c:${teamCoarseKey(coarseKey, repo)}` ``.
+ */
+export function teamCoarseKey(coarseKey: string, repo: string): string {
+  return shortHash(`${coarseKey}|${repo}`);
 }
 
 // ---- searches: the CLI's typed handle ----

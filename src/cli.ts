@@ -796,6 +796,21 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // `tenjin sync` (docs/command-reference.md, "Team shelf"): push this checkout's
+  // closed, code-scoped error→fix pairings to the team shelf. Normally spawned
+  // detached by the Stop hook; exposed as a command so the operator can run it by
+  // hand (the fallback the Stop ask prints when a spawned run could not sign).
+  addGlobalFlags(program.command('sync'))
+    .description(
+      'Publish this checkout’s fixed failures (closed code-scoped pairings) to your team shelf so a teammate hitting the same error sees the fix. Team mode only.',
+    )
+    .action(async function (this: Command) {
+      await runCommand('sync', this, async (ctx) => {
+        const { runSync } = await import('./commands/sync');
+        return runSync(ctx);
+      });
+    });
+
   // `mcp` is NOT routed through runCommand: it hands stdout to the MCP transport
   // and blocks until the client disconnects, so it prints no envelope and sets no
   // exit code on success. buildContext reuses the same flag/dataDir plumbing every
@@ -844,10 +859,14 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       "Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
     )
+    .option(
+      '--sessions',
+      'append the importance-score report: one line per session in the window, score vs capture_asked vs published (report only; no hook reads it)',
+    )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {
         const { runPushStatus } = await import('./commands/push');
-        return runPushStatus(ctx);
+        return runPushStatus(ctx, {}, { sessions: this.opts().sessions === true });
       });
     });
   addGlobalFlags(push.command('grade'))
