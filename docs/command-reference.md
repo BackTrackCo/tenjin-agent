@@ -36,7 +36,7 @@ Useful flags:
 
 `tenjin push on` registers six more settings entries, across four scripts, described in [Push (experimental)](#push-experimental) below. Every `tenjin install` WRITES all four of those script files, whether or not push has ever been on — they read `hooks.push` at the top of their own run and exit in milliseconds when it is not `on` — but a machine that has never run `tenjin push on` has no entry pointing at them, so nothing invokes them and the hooks registered stay at these four.
 
-**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch misses are never raised at all: they are demand data, not questions you asked to be reminded about. They share one budget of 15 of the store's 50 slots with every push-hook lookup, so no amount of fan-out or sidecar activity can evict a search you may still want to buy from.
+**The Stop hook only ever raises a MISS.** A search that returned candidates is not an open loop, so nothing is reminded about it: a silent end-of-turn after a successful search is the hook working, not the hook broken. It also stays silent once a loop is closed (by `tenjin publish --search-id` or `tenjin outcome`), once a MISS ages past the session window, and after it has raised a given search once. `hooks.stopNag deliberate-only` drops the batch about web-search-hook misses and keeps the reminders about searches you ran yourself. Dispatch misses are never raised at all: they are demand data, not questions you asked to be reminded about. The store keeps every row and evicts nothing, so no amount of fan-out or sidecar activity can push a search you may still want to buy from out of reach.
 
 Hooks are read once at session start, so restart Claude Code after registering them.
 
@@ -362,9 +362,31 @@ Reports the push mode, the capture mode (`hooks.capture` — see [Stop-hook capt
 
 Then a tally of the last 7 days of decision rows: total rows, how many distinct findings they touched, how many denied a tool call outright, the total tokens injected, and the breakdowns by trigger x action, by shelf (`public`, `team`, or `local` for a replayed error→fix pairing this machine recorded itself), and by `reason` (why a fire said nothing: `miss`, `weak`, `already-injected`, `lookup-cap`, `quiet`, `no-answer`, `no-time` — the first leg spent the shared deadline — and `watchdog`), sorted by count. The counts are complete for the window: the rows are indexed, so nothing is a floor.
 
+Under that, what `tenjin push grade` has made of the rows that were actually shown, one line per arm and split by shelf: `used`, `rejected`, `unobserved`, `ungraded` (shown but not yet judged) and `posted` (verdicts that reached the shelf). Skipped fires are not counted here — nothing was shown, so there is no verdict anybody owes.
+
+Last, one `GET /api/lookups/stats?days=7` per configured shelf — the base URL always, plus the public marketplace when you are in team mode — rendered as `server <shelf> (7d):` with `lookups`, `hits`, `candidates`, `used`, `wrong` and `useRate` per trigger. That is the same window from the shelf's side, summed across every caller it serves, rather than this machine alone. A shelf that cannot be reached prints `server <shelf>: unavailable` and the local counts are still shown: a shelf that is down and a shelf with no demand are different facts.
+
+### `tenjin push grade [--since 7d] [--session <id>] [--explain] [--label <uid> <status>]`
+
+Decides whether the agent actually used what the arms showed it, and tells the shelf that served each finding. The arms record what they injected and the shelf records what it served; neither can see what happened next, so without this the push experiment has no measure of its own precision.
+
+It reads the session transcript under `~/.claude/projects` (found by session id, so no working-directory guessing), locates the `hook_additional_context` row that carried the injection, and looks at what the agent did after it. **Only tool inputs count.** Prose agreeing with an injection is what an injection makes likely whether or not it helped; a tool call is a decision the agent spent something on. Replayed compaction summaries are skipped, since they carry calls made before the injection existed.
+
+Four verdicts:
+
+- **`used`** — an explicit `tenjin read <id>` / `tenjin inspect <id>`, or the injected URL, in any later tool input. Following the pointer counts whenever it happens, so a piece bought twenty tool calls later is still a piece the injection sold. Reported to the shelf as `used`.
+- **`used`, weakly** — a backtick span of at least two words from the injected text appearing verbatim in a tool input within the next 10 tool calls. One word is what the agent was going to type anyway, and a copied phrase says something was taken from the piece rather than that the piece answered the question, so this is reported as `partially_used`.
+- **`rejected`** — nothing matched _and_ the session is over (`sessions.ended_at`, or a transcript nothing has appended to for 30 minutes). A session still running is left open instead: grading it now would post a verdict its next tool call could contradict, and the shelf keeps the first verdict per lookup and post.
+- **`unobserved`** — no transcript row names the finding. This covers every subagent injection, which reaches no transcript at all, so those rows are closed rather than left open forever.
+
+Verdicts go to the shelf named on the row: `team` to the configured base URL with its bypass header, `public` to the marketplace without it, and a `local` replayed pairing nowhere. Nothing is ever posted twice — the posted stamp is what the queue is drawn from — and a post that fails leaves the row owed, so the next run retries it. Re-running after a session ends re-grades nothing that already has a verdict.
+
+`--explain` prints, per row, the transcript line the injection landed on and the evidence behind the verdict (the matched command or span, or the next three tool inputs when nothing matched) — the first thing to look at when a verdict reads wrong. `--label <uid> <status>` sets one verdict by hand (`used` or `rejected`, recorded as a hand verdict) and posts it, for a row the transcript cannot answer for.
+
 ```bash
 tenjin push on
 tenjin push status --json
+tenjin push grade --explain
 tenjin push off
 ```
 
