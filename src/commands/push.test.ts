@@ -6,7 +6,7 @@ import { runPushGrade, runPushOff, runPushOn, runPushStatus } from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
 import { hooksDir } from '../lib/paths';
-import { openStore, STORE_SQL } from '../lib/state-store';
+import { openStore, recordSearch, STORE_SQL } from '../lib/state-store';
 import {
   PUSH_CONTEXT_HOOK_FILE,
   PUSH_FAILURE_HOOK_FILE,
@@ -94,6 +94,20 @@ async function seedRows(dir: string, rows: SeedRow[]): Promise<void> {
   } finally {
     store.close();
   }
+}
+
+/** The `searches` row an arm writes beside its injection, carrying the base URL
+ *  it asked — the only record of which shelf minted the search id. */
+async function seedSearch(dir: string, searchId: string, shelfBaseUrl: string): Promise<void> {
+  await recordSearch(dir, {
+    searchId,
+    at: new Date().toISOString(),
+    question: 'q',
+    decision: 'CANDIDATES',
+    candidates: [],
+    source: 'push-hook',
+    shelfBaseUrl,
+  });
 }
 
 /** A `sessions` row, so `grade` can tell a session that ended from one that is
@@ -845,7 +859,8 @@ describe('runPushGrade', () => {
   /**
    * A search id is minted by ONE shelf and means nothing on another, and the
    * row's url is the only record of which one served it. The key rides the
-   * origin too: a public-shelf verdict must not carry the team's bypass secret.
+   * row's LABEL: a public-shelf verdict must not carry the team's bypass
+   * secret, whatever origin it is bound for.
    */
   it('posts each verdict to the origin that served it, with the bypass only on the team shelf', async () => {
     await writeFile(
@@ -922,9 +937,14 @@ describe('runPushGrade', () => {
    * team base URL that has moved since then would send the verdict to a shelf
    * that never minted the search id, where it lands as a 202 (no existence
    * oracle, by design) and the row is stamped posted with nothing recorded
-   * anywhere.
+   * anywhere. So the ADDRESS comes from the row.
+   *
+   * The SECRET does not: it belongs to the team, not to an address. Gating it
+   * on the row's origin matching the configured team base URL meant a moved
+   * team shelf retried every unposted team verdict unauthenticated — forever,
+   * since a 401 halts the batch and only a success stamps the row.
    */
-  it('does not reroute a verdict when the configured team shelf has moved', async () => {
+  it('sends a moved team shelf its own url and still its own secret', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://new-team.example', shelfBypassSecret: 'shh' }),
@@ -942,6 +962,7 @@ describe('runPushGrade', () => {
         searchId: SEARCH,
       },
     ]);
+    await seedSearch(dir, SEARCH, 'https://old-team.example');
     await seedSession(dir, 's1', true);
     const { fetchImpl, calls } = acceptingShelf();
 
@@ -960,7 +981,102 @@ describe('runPushGrade', () => {
     expect(calls.map((c) => c.url)).toEqual([
       `https://old-team.example/api/searches/${SEARCH}/outcomes`,
     ]);
-    // The secret belongs to the CONFIGURED team origin, which this is not.
+    // A team row, so the team's secret, authorized at the base the arm asked.
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(true);
+  });
+
+  /**
+   * The key is authorized at the shelf the arm ASKED, never at the candidate
+   * url the shelf answered with. That url is server text, so a shelf that named
+   * a candidate on another origin would otherwise be handed the team's shelf
+   * key — which opens the whole private shelf — just by being answered.
+   */
+  it('never sends the key to an origin the answer named rather than the config', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
+    );
+    await seedRows(dir, [
+      {
+        uid: 'u-team',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'team',
+        action: 'injected',
+        resourceId: RES,
+        url: 'https://evil.example/p/the-collation-trap',
+        session: 's1',
+        searchId: SEARCH,
+      },
+    ]);
+    await seedSearch(dir, SEARCH, 'https://team.example');
+    await seedSession(dir, 's1', true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+        }),
+      },
+    );
+
+    expect(calls.map((c) => c.url)).toEqual([
+      `https://evil.example/api/searches/${SEARCH}/outcomes`,
+    ]);
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(false);
+  });
+
+  /**
+   * The mirror of the case above, and the one an origin rule got right by
+   * accident: a PUBLIC row whose url happens to sit on the configured team
+   * origin — a team shelf re-pointed at the marketplace, or a public piece
+   * surfaced before team mode was switched on. The label is what decides, so
+   * the team's secret stays home.
+   */
+  it('withholds the secret from a public row even on the configured team origin', async () => {
+    await writeFile(
+      join(dir, 'config.json'),
+      JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
+    );
+    await seedRows(dir, [
+      {
+        uid: 'u-public',
+        at: NOW - 1000,
+        trigger: 'failure',
+        shelf: 'public',
+        action: 'injected',
+        resourceId: RES,
+        url: 'https://team.example/p/the-collation-trap',
+        session: 's1',
+        searchId: SEARCH,
+      },
+    ]);
+    await seedSearch(dir, SEARCH, 'https://team.example');
+    await seedSession(dir, 's1', true);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    await runPushGrade(
+      makeCtx(),
+      {},
+      {
+        now: () => NOW,
+        fetchImpl,
+        ...transcriptDeps({
+          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+        }),
+      },
+    );
+
+    expect(calls.map((c) => c.url)).toEqual([
+      `https://team.example/api/searches/${SEARCH}/outcomes`,
+    ]);
     const headers = calls[0]?.init.headers as Record<string, string>;
     expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(false);
   });

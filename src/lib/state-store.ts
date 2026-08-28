@@ -552,11 +552,17 @@ export const STORE_SQL = {
    * routed by — the shelf that minted the search id, not whatever this machine
    * is configured for today.
    */
-  unpostedOutcomes: `SELECT uid, session, hook, shelf, url, resource_id, search_id, outcome, outcome_by
-     FROM injections
-     WHERE action = 'injected' AND outcome IN ('used', 'rejected') AND outcome_at IS NULL
-       AND search_id IS NOT NULL AND resource_id IS NOT NULL AND shelf <> 'local'
-     ORDER BY at, id`,
+  /** The LEFT JOIN carries the base URL of the shelf that minted the search id,
+   *  which the injection row itself does not hold. It is CONFIG-DERIVED — the
+   *  base the arm asked — where `injections.url` is a candidate url the shelf
+   *  chose, so it is the only origin here a credential may be authorized at. */
+  unpostedOutcomes: `SELECT i.uid, i.session, i.hook, i.shelf, i.url, i.resource_id, i.search_id,
+       i.outcome, i.outcome_by, s.shelf_base_url
+     FROM injections i
+     LEFT JOIN searches s ON s.search_id = i.search_id
+     WHERE i.action = 'injected' AND i.outcome IN ('used', 'rejected') AND i.outcome_at IS NULL
+       AND i.search_id IS NOT NULL AND i.resource_id IS NOT NULL AND i.shelf <> 'local'
+     ORDER BY i.at, i.id`,
   markPosted: 'UPDATE injections SET outcome_at = ? WHERE uid = ?',
   sessionEnded: 'SELECT ended_at FROM sessions WHERE session = ?',
   /** `tenjin push status`, the graded rollup per hook x shelf. */

@@ -874,9 +874,22 @@ interface PostTally {
  * nothing anywhere says so. Every injected row carries the read url it was shown
  * with, on the shelf that served it, so that origin is the address.
  *
- * THE BYPASS SECRET RIDES THE ORIGIN, not the row: it is sent only when the
- * row's origin is the configured team shelf's, so a verdict about a public piece
- * never carries the team key even if the label on the row says otherwise.
+ * THE BYPASS SECRET RIDES THE ROW'S SHELF LABEL, not today's config. The secret
+ * belongs to the team — it is what gets a request past the team shelf's
+ * protection — so a `team` row carries it and a `public` row never does.
+ * Requiring the row's origin to equal the CONFIGURED team base URL instead tied
+ * the credential to an address that moves: re-point the team shelf and every
+ * unposted team verdict retries unauthenticated forever, since only a success
+ * stamps the row.
+ *
+ * WHICH ORIGIN THE SECRET IS AUTHORIZED AT is a separate question, and the
+ * answer is never the row's url — that is a candidate url the shelf chose (see
+ * `injections.url`), so authorizing the key there would hand the team's shelf
+ * key to any origin a search response cared to name. It is the search's
+ * recorded `shelf_base_url`: the base the arm actually asked, read out of this
+ * machine's own config at the time. The transport still does the final compare
+ * against the request URL ({@link ShelfBypass}), so a row whose candidate url
+ * wandered off that shelf posts unauthenticated rather than leaking the key.
  *
  * A failure never fails the command — the verdicts are already recorded locally,
  * and the row keeps its NULL stamp so the next run retries it. A rate limit or a
@@ -893,7 +906,6 @@ async function postGraded(
   const rows = store.all(STORE_SQL.unpostedOutcomes, []);
   if (rows.length === 0) return tally;
   const settings = await resolveContextSettings(ctx);
-  const teamOrigin = shelfOrigin(settings.baseUrl);
   let halted = false;
   for (const row of rows) {
     if (halted) break;
@@ -908,7 +920,8 @@ async function postGraded(
       tally.skipped.push(`${uid}: no usable url, so the shelf that served it is unknown`);
       continue;
     }
-    const bypass = origin === teamOrigin ? settings.bypass : undefined;
+    const bypass =
+      row.shelf === 'team' ? teamBypass(row.shelf_base_url, settings.bypass) : undefined;
     const resourceId = typeof row.resource_id === 'string' ? row.resource_id : '';
     try {
       const item = buildOutcomeItem({
@@ -931,6 +944,24 @@ async function postGraded(
     }
   }
   return tally;
+}
+
+/**
+ * The team's shelf key, authorized at the origin the search was actually asked
+ * on rather than at whatever `baseUrl` says today.
+ *
+ * `shelfBaseUrl` is the search row's, which the arm wrote from config; a row
+ * old enough not to carry one keeps the configured pairing, which is what it
+ * has always had. The secret itself never changes — only the one origin it is
+ * allowed to open, and only ever to a base this machine chose.
+ */
+function teamBypass(
+  shelfBaseUrl: unknown,
+  configured: ShelfBypass | undefined,
+): ShelfBypass | undefined {
+  if (configured === undefined) return undefined;
+  const asked = typeof shelfBaseUrl === 'string' ? shelfOrigin(shelfBaseUrl) : null;
+  return asked === null ? configured : { origin: asked, secret: configured.secret };
 }
 
 /** The origin a shelf is reachable at, or null for anything this CLI would not
