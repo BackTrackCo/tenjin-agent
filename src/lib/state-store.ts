@@ -692,6 +692,28 @@ export const STORE_SQL = {
   claimStateFresh: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at
        WHERE session_state.at < ?`,
+  /**
+   * Take a claim whose holder is older than the given instant, WITHOUT being
+   * able to create one. The stale half of a two-ended claim: {@link claimState}
+   * takes it the first time, and once the TTL has passed this takes it over.
+   *
+   * ONE STATEMENT, which is the whole point (tenjin-agent#249). The Stop hook's
+   * sync claim used to be taken over by a `clearState` followed by a
+   * `claimState`, and two Stops that both read the claim as stale both cleared
+   * and both re-claimed — one machine-wide guard, two detached `tenjin sync`
+   * children, which is exactly the fan-out the claim exists to prevent. `at < ?`
+   * inside the UPDATE makes the loser see zero changed rows.
+   *
+   * IT CANNOT INSERT, unlike {@link claimStateFresh}, whose upsert would create
+   * the claim it was asked to take over. Same property {@link markStateValue} is
+   * written for: an UPDATE that misses reports zero changes rather than creating
+   * what it described. (No scenario is cited for it because none exists today —
+   * nothing clears `SYNC_CLAIM_KEY`, the only writers being the two claim calls,
+   * and the claim expires by age. The property is worth keeping so a future
+   * clearing caller cannot be resurrected by this statement.)
+   */
+  takeStaleState: `UPDATE session_state SET value = ?, at = ?
+     WHERE session = ? AND key = ? AND at < ?`,
   /** Rows under one key prefix, newest first. Used for the per-agent, per-path
    *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
@@ -2007,16 +2029,43 @@ function claimState(sessionId, key, value) {
   // they reach here, and a caller that somehow did must not be told it holds a
   // claim nothing recorded.
   if (STORE === null) return false;
+  // A store that refused the write for any OTHER reason must not silence the
+  // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
+  // \`held\` is the only loss; \`unavailable\` reads as a win, which is this
+  // function's whole contract and the reason the outcome form exists beside it.
+  return claimStateOutcome(sessionId, key, value) !== 'held';
+}
+
+/**
+ * The same free-claim insert, saying WHICH loss it was: \`won\`, \`held\` by an
+ * existing row, or \`unavailable\` because there is no store or the write was
+ * swallowed.
+ *
+ * FOR THE CALLERS THAT ARE ARBITERS RATHER THAN DEDUPE AIDS (#256 review).
+ * \`claimState\` above reads \`unavailable\` as a win on purpose: its worst loss
+ * is a duplicate lookup, and going silent because a write was swallowed is the
+ * more expensive mistake. The Stop hook's sync claim is the opposite shape. It
+ * is the machine-wide guard on spawning a detached \`tenjin sync\`, and its
+ * other end (\`takeStaleState\`) already fails closed — so a store that refuses
+ * writes (read-only, full, locked past the busy timeout) had every Stop reading
+ * its own swallowed insert as a win and spawning a child, which is precisely
+ * the fan-out the claim exists to prevent. Failing closed there costs one
+ * skipped sync; the claim expires by age and the next Stop retries.
+ *
+ * Same three-value shape as \`claimStateFreshOutcome\`, and for the same reason:
+ * the two losses do not cost the same, so the caller decides, not this.
+ */
+function claimStateOutcome(sessionId, key, value) {
+  if (STORE === null) return 'unavailable';
   const result = storeRun(STORE_SQL.claimState, [
     storeSession(sessionId),
     key,
     storeJson(value === undefined ? true : value),
     Date.now(),
   ]);
-  // A store that refused the write for any OTHER reason must not silence the
-  // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
-  if (result === null) return true;
-  return typeof result.changes === 'number' ? result.changes > 0 : true;
+  if (result === null) return 'unavailable';
+  if (typeof result.changes !== 'number') return 'won';
+  return result.changes > 0 ? 'won' : 'held';
 }
 
 /**
@@ -2072,6 +2121,37 @@ function claimStateFreshOutcome(sessionId, key, windowMs, value) {
   if (result === null) return 'unavailable';
   if (typeof result.changes !== 'number') return 'won';
   return result.changes > 0 ? 'won' : 'held';
+}
+
+/**
+ * Take a claim already held, but held since before \`staleBefore\`, recording
+ * \`value\` as the new holder's mark. True only for the caller that actually
+ * took it.
+ *
+ * THE OTHER END OF \`claimState\` (tenjin-agent#249). The first fire takes a free
+ * claim with \`INSERT ... DO NOTHING\`; this takes an expired one with an
+ * \`UPDATE ... WHERE at < ?\`. Both are one statement, so the arbitration is
+ * SQLite's at both ends. What this replaced was a \`clearState\` followed by a
+ * \`claimState\`, and two Stop hooks that both saw the claim expired both
+ * cleared it and both re-claimed: one machine-wide sync guard, two detached
+ * children.
+ *
+ * AND IT FAILS CLOSED, like \`claimStateFresh\` and unlike \`claimState\`: this
+ * is an arbiter, not a dedupe aid. A swallowed write read as a win lets every
+ * contender win, which is the failure it exists to stop. The loser's cost is
+ * one skipped takeover; the claim expires again and the next fire retries.
+ */
+function takeStaleState(sessionId, key, staleBefore, value) {
+  if (STORE === null) return false;
+  const result = storeRun(STORE_SQL.takeStaleState, [
+    storeJson(value === undefined ? true : value),
+    Date.now(),
+    storeSession(sessionId),
+    key,
+    staleBefore,
+  ]);
+  if (result === null) return false;
+  return typeof result.changes === 'number' ? result.changes > 0 : false;
 }
 
 /**
@@ -3037,12 +3117,298 @@ export function projectId(cwd: string | null | undefined): string | null {
 export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 
 /**
+ * The repo a coarse key salts with: `host/full/path`, lowercased, from a git
+ * remote URL — or `''` for anything that is not one.
+ *
+ * ⚠ The SAME BODY runs inside the generated failure arm (lib/push-scripts.ts),
+ * which cannot import. The two are not held to byte-identity by a compiler;
+ * they are BEHAVIOURALLY PINNED BY THE SHARED TABLE in lib/repo-slug-cases.ts,
+ * which both test files run against — state-store.test.ts against this export,
+ * push-scripts.test.ts against the copy it lifts out of the generated source.
+ * Same rule as {@link teamCoarseKey} below, and for the same reason: the
+ * resolve leg and `tenjin sync` must reduce one checkout's remote to the SAME
+ * string or a query and the post it should find salt two different ways and
+ * never meet.
+ *
+ * NOT THE URL (tenjin-agent#249). The URL is the same repo spelled four ways —
+ * `git@host:owner/name.git`, `https://host/owner/name`,
+ * `ssh://git@host:2222/owner/name`, with or without `.git` — so two teammates
+ * who cloned the same project over different transports salted differently and
+ * could never match each other's coarse keys. What differs between those
+ * spellings is the scheme, the userinfo and the port, and nothing else; what
+ * they agree on is the host and the path, so those two are the salt. The
+ * userinfo is DROPPED rather than hashed, since a remote url can carry a token.
+ * THE PORT IS STRIPPED ON PURPOSE, and it is load-bearing rather than sloppy
+ * (external thread on the round-3 review of #256, declined as intended): it is
+ * the ONLY thing separating `ssh://git@host:2222/acme/api` from the `git@host:`
+ * and `https://host/` spellings of that same repo, so keeping it re-splits the
+ * transports this whole reduction exists to merge — and two git services on
+ * different ports of one hostname serving one path is not a shape a team shelf
+ * meets.
+ * THE PATH IS LOWERCASED ON PURPOSE, for the same reason (a second external
+ * thread on the round-4 review of #256, declined as intended): `.git/config`
+ * commonly carries a forge's display casing (`GitHub.com/Acme/API`), and
+ * case-preserving would stop one teammate's checkout matching another's; the
+ * collision it would prevent needs one namespace to hold two repos differing
+ * only in case, which GitHub and GitLab both refuse.
+ * A rename or a transfer still breaks continuity; the alternatives that survive
+ * one (the root commit, a committed project-id file) cost a `git` spawn or a
+ * file in every repo, and against zero coarse hits on the shelf as observed on
+ * 2026-08-29 that is not where the needle moves.
+ *
+ * THE HOST STAYS AND THE PATH IS KEPT WHOLE (round-1 review of #256). Dropping
+ * the host pooled `git@github.com:acme/api` with
+ * `git@git.internal.acme.dev:acme/api`, and keeping only the last two segments
+ * pooled every deep path that ended alike — `gitlab.com/a/b/c/api` with
+ * `gitlab.com/x/y/c/api`, and every Azure repo named `api` under the shared
+ * `_git/api`. A GitLab subgroup therefore keeps its full path.
+ *
+ * KNOWN LIMIT, NOT SPECIAL-CASED: Azure DevOps spells one repo as
+ * `https://dev.azure.com/org/proj/_git/api` over https and
+ * `git@ssh.dev.azure.com:v3/org/proj/api` over ssh. Different host, different
+ * path — two salts for one repo, so an Azure team matches coarse keys only
+ * within a transport. Both strings are distinct and specific, which is the
+ * failure mode worth having: a split scope costs a miss that looks like "no
+ * teammate has hit this", while a merged one would hand a neighbouring repo's
+ * fix over as a strong match. Un-splitting it means teaching the salt one
+ * host's URL grammar, and that is a rule per forge forever.
+ *
+ * A bare local path (`/srv/mirrors/api`, `../api`, a `file://` URL) names no
+ * host and reduces to `''`. That is NOT a salt this code publishes or queries
+ * under: `''` means no remote, and both the resolve leg and `tenjin sync` skip
+ * the coarse key entirely rather than pool every origin-less checkout on the
+ * shelf into one bucket (#249, owner decision).
+ */
+export function repoSlug(url: string): string {
+  // THE HOST, THEN THE WHOLE PATH UNDER IT, or no match at all. Two remote
+  // spellings, one alternation: a scheme url whose authority ends at the first
+  // slash — but never a file:// one, which is a local clone and not a repo
+  // anyone else names — or the scp form [user@]host:path, whose host must carry
+  // a dot. THAT DOT is what keeps a Windows drive (C:/src/api) a path and not a
+  // hostname: a drive letter has none. An scp path may be absolute
+  // (git@git.acme.dev:/srv/git/api.git), which self-hosted remotes do spell.
+  // Anything else (a bare path, a relative path, an empty string) is not a
+  // remote and salts as ''.
+  const m =
+    /^(?:(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/]*)\/(.*)|(?:[^@/\\]+@)?([^@/\\:]*\.[^@/\\:]*):(.*))$/i.exec(
+      typeof url === 'string' ? url.trim() : '',
+    );
+  if (m === null) return '';
+  // Userinfo is dropped by the match itself; the port goes here, so
+  // ssh://git@host:2222/acme/api and git@host:acme/api reach the same host.
+  const host = (m[1] ?? m[3] ?? '').replace(/:[0-9]*$/, '').toLowerCase();
+  const parts = (m[2] ?? m[4] ?? '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .split('/')
+    .filter((part) => part.length > 0);
+  if (host.length === 0 || parts.length === 0) return '';
+  return host + '/' + parts.join('/').toLowerCase();
+}
+
+/**
+ * HOW FAR UP EITHER WALK LOOKS for a `.git`, and it must be ONE number
+ * (round-3 review of #256). Two walks answer "does this checkout have a
+ * remote": the generated `originSlug` below, which the Stop hook and the
+ * failure arm read, and `findGitDir` in commands/sync.ts, which `tenjin sync`
+ * reads. They were bounded at 12 and 64, and the gap was not a nicety once
+ * `originSlug(cwd) === ''` became a GATE rather than a salt: a checkout
+ * between the two bounds read "no remote" at the hook and the failure arm —
+ * no sync spawned, `no-remote` in the ledger, no shelf query, silently — while
+ * `tenjin sync`, run by hand, found the origin and published. Both walks now
+ * take this bound, so the disagreement cannot exist rather than being unlikely.
+ *
+ * 64 is the looser of the two and the one kept: the tight bound bought nothing
+ * (a walk is a `statSync` per level, and it stops at the filesystem root
+ * anyway), while the cost of being short is a silent feature-off.
+ */
+export const GIT_WALK_MAX = 64;
+
+const REPO_SLUG_JS = String.raw`
+import { resolve as resolvePath } from 'node:path';
+
+/** Baked in from the exported {@link GIT_WALK_MAX}: the ONE bound the sync's
+ *  own \`findGitDir\` walks too, so neither side can read "no remote" in a
+ *  checkout the other reads an origin in. */
+const GIT_WALK_MAX = ${GIT_WALK_MAX};
+
+/**
+ * THE SLUG for the checkout at \`cwd\`, and a slug is not a URL: the \`url\`
+ * under \`[remote "origin"]\` in \`.git/config\`, found by walking up from
+ * \`cwd\`, reduced to \`host/full/path\` by \`repoSlug\`. A worktree's \`.git\`
+ * is a file naming its gitdir, whose \`commondir\` holds the shared config, so
+ * a worktree salts the same as its main checkout.
+ *
+ * '' WHEN THERE IS NO ORIGIN, and that is not a salt: it means this checkout
+ * has no repo scope, so the resolve leg asks the shelf nothing and
+ * \`tenjin sync\` publishes nothing (#249). The Stop hook reads it for that
+ * question alone — is there a remote at all — before spawning a sync.
+ *
+ * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
+ * not start a process in front of a tool call. Bounded at \`GIT_WALK_MAX\`
+ * parent directories, WHICH IS THE SYNC'S OWN BOUND (round-3 review of #256):
+ * this walk gates the spawn, so a shorter one would read "no remote" — no
+ * sync, \`no-remote\` in the ledger, no shelf query — in a deep checkout that
+ * \`tenjin sync\` would happily publish from.
+ */
+function originSlug(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return '';
+  let dir = cwd;
+  for (let i = 0; i < GIT_WALK_MAX; i += 1) {
+    const config = gitConfigPath(dir);
+    if (config !== null) return repoSlug(originUrl(config));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return '';
+}
+
+/** The config file of the repository whose \`.git\` sits in \`dir\`, or null. */
+function gitConfigPath(dir) {
+  const dotGit = join(dir, '.git');
+  let st;
+  try {
+    st = statSync(dotGit);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return join(dotGit, 'config');
+  let text;
+  try {
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /^gitdir:\s*(.+)$/m.exec(text);
+  if (m === null) return null;
+  const gitdir = resolvePath(dir, m[1].trim());
+  let common = gitdir;
+  try {
+    common = resolvePath(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim());
+  } catch {
+    /* not a worktree: the gitdir is the repository itself */
+  }
+  return join(common, 'config');
+}
+
+/** \`url\` under \`[remote "origin"]\`, or ''. A line scan, not an INI parser:
+ *  the two shapes git writes are all it has to read. */
+function originUrl(configPath) {
+  let text;
+  try {
+    text = readFileSync(configPath, 'utf8');
+  } catch {
+    return '';
+  }
+  let inOrigin = false;
+  for (const line of text.split('\n')) {
+    const section = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    if (section !== null) {
+      inOrigin = /^remote\s+"origin"$/.test(section[1].trim());
+      continue;
+    }
+    if (!inOrigin) continue;
+    const m = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+    if (m !== null) return m[1].slice(0, 500);
+  }
+  return '';
+}
+
+/**
+ * ⚠ THE SAME BODY as \`repoSlug\` in lib/state-store.ts, THE ONE DEFINITION:
+ * the repo a coarse key salts with, \`host/full/path\` lowercased, or '' for
+ * anything that is not a remote (a bare local path, a \`file://\` clone, no
+ * origin at all). \`tenjin sync\` imports the exported copy; this one must
+ * reduce the same remote to the same string or a resolve query and the synced
+ * post it should find would salt two different ways and never meet. Nothing
+ * enforces byte-identity: the two are BEHAVIOURALLY PINNED BY THE SHARED TABLE
+ * in lib/repo-slug-cases.ts, which push-scripts.test.ts runs against the copy
+ * it lifts out of this generated source.
+ *
+ * NOT THE URL (#249): the same repo is spelled \`git@host:owner/name.git\`,
+ * \`https://host/owner/name\` and \`ssh://git@host:2222/owner/name\`, so salting
+ * by URL kept two teammates on different transports from ever matching. Host
+ * and path are what those spellings agree on; scheme, userinfo and port are
+ * what they differ in. The path is kept WHOLE (round-1 review of #256): the
+ * last two segments pooled \`gitlab.com/a/b/c/api\` with \`gitlab.com/x/y/c/api\`
+ * and every Azure repo under \`_git/api\`, and dropping the host pooled one
+ * \`acme/api\` with another host's. Known limit, not special-cased: Azure
+ * DevOps's https and ssh spellings of one repo carry different hosts AND
+ * different paths, so they are two salts.
+ *
+ * '' means NO REMOTE, and the resolve leg does not ask the shelf under it: the
+ * failure arm records \`no-remote\` and spends no lookup, and \`tenjin sync\`
+ * publishes nothing coarse, rather than pooling every origin-less checkout on
+ * the shelf into one bucket (#249, owner decision).
+ */
+// repoSlug:begin — DO NOT MOVE OR DELETE. push-scripts.test.ts slices between
+// these two sentinels to run THIS copy against the shared table, so the test
+// never has to parse JS to find where the function ends (round-1 nit 4 of
+// #256: it used to brace-count, which a brace in a string literal would have
+// silently truncated).
+function repoSlug(url) {
+  // THE HOST, THEN THE WHOLE PATH UNDER IT, or no match at all. Two remote
+  // spellings, one alternation: a scheme url whose authority ends at the first
+  // slash — but never a file:// one, which is a local clone and not a repo
+  // anyone else names — or the scp form [user@]host:path, whose host must carry
+  // a dot. THAT DOT is what keeps a Windows drive (C:/src/api) a path and not a
+  // hostname: a drive letter has none. An scp path may be absolute
+  // (git@git.acme.dev:/srv/git/api.git), which self-hosted remotes do spell.
+  // Anything else (a bare path, a relative path, an empty string) is not a
+  // remote and salts as ''.
+  const m =
+    /^(?:(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/]*)\/(.*)|(?:[^@/\\]+@)?([^@/\\:]*\.[^@/\\:]*):(.*))$/i.exec(
+      typeof url === 'string' ? url.trim() : '',
+    );
+  if (m === null) return '';
+  // Userinfo is dropped by the match itself; the port goes here, so
+  // ssh://git@host:2222/acme/api and git@host:acme/api reach the same host.
+  const host = (m[1] ?? m[3] ?? '').replace(/:[0-9]*$/, '').toLowerCase();
+  const parts = (m[2] ?? m[4] ?? '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .split('/')
+    .filter((part) => part.length > 0);
+  if (host.length === 0 || parts.length === 0) return '';
+  return host + '/' + parts.join('/').toLowerCase();
+}
+// repoSlug:end — DO NOT MOVE OR DELETE. See the sentinel above.
+
+`;
+
+/**
+ * THE SALT READER, AS GENERATED SOURCE — the failure arm's resolve leg and the
+ * Stop hook's sync arbiter both need it, and neither can import.
+ *
+ * IT LIVES HERE, BESIDE THE EXPORT IT MIRRORS, rather than inside one hook
+ * builder that the other reaches into: two generated copies of one reduction is
+ * already the most a reader should have to hold, and the drift between them is
+ * what silently strands every coarse key (#249). One string, spliced into both
+ * scripts, keeps the count at exactly two definitions — this and {@link
+ * repoSlug} above — with lib/repo-slug-cases.ts holding them to the same
+ * answers.
+ *
+ * The Stop hook reads it for a different question than the resolve leg does:
+ * not "what do I salt with" but "is there a remote at all", since a checkout
+ * with none syncs nothing and a `tenjin sync` spawned for it would exit
+ * "Nothing to sync." every turn end (#256, owner decision).
+ */
+export function repoSlugSource(): string {
+  return REPO_SLUG_JS;
+}
+
+/**
  * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
  * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
- * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is the origin URL
- * read from `.git/config`. The salt goes over the stored hash, not the raw
- * message, because a `pairings` row keeps only the hashes and `tenjin sync`
- * reads rows back long after the failure arm's `sigV1()` call is gone.
+ * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is {@link repoSlug}
+ * of the origin URL read from `.git/config`. It is never `''` at a live call
+ * site: a checkout with no origin has no repo scope, and both the resolve leg
+ * and `tenjin sync` return before they reach here rather than pooling every
+ * origin-less checkout into one coarse bucket. The salt goes over
+ * the stored hash, not the raw message, because a `pairings` row keeps only the
+ * hashes and `tenjin sync` reads rows back long after the failure arm's
+ * `sigV1()` call is gone.
  *
  * THE ONE DEFINITION. `tenjin sync` (commands/sync.ts) imports it directly; a
  * hook script cannot import, so the failure arm's resolve leg carries a copy

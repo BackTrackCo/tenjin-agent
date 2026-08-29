@@ -257,7 +257,9 @@ export interface PushLedgerTallies {
    *  signature and the first holds the claim) and `watchdog`
    *  (docs/command-reference.md#push-experimental),
    *  and the team leg by fingerprint adds `keys-off` (the shelf has
-   *  KNOWLEDGE_KEYS off; #212 PR B) — but the values are taken from the rows,
+   *  KNOWLEDGE_KEYS off; #212 PR B) and `no-remote` (the checkout has no
+   *  `origin`, so it has no repo scope to salt a coarse key with and nothing of
+   *  its own on the shelf to find; #249) — but the values are taken from the rows,
    *  never from a list here, so a new reason shows up in `status` the day the
    *  script starts writing it, and a retired one keeps counting out of the rows
    *  that still hold it. */

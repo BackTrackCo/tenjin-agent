@@ -60,7 +60,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
 import { pushSource } from './push-scripts';
-import { storeSource } from './state-store';
+import { repoSlugSource, storeSource } from './state-store';
 
 /**
  * Header stamp naming the CLI build that wrote a script. Informational only: the
@@ -2372,7 +2372,7 @@ main().catch(quiet);
  * nothing but tidiness.
  */
 export function stopHookScript(dataDir: string, cliPath: string | null = defaultCliPath()): string {
-  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}
+  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}${repoSlugSource()}
 import { spawn } from 'node:child_process';
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
 const CLI_PATH = ${JSON.stringify(cliPath)};
@@ -2384,8 +2384,9 @@ const SYNC_FALLBACK_LINE = ${JSON.stringify(STOP_SYNC_FALLBACK_LINE)};
  * Hand this project's closed code-scoped pairings to the team shelf, without
  * spending the hook's budget on it: a detached \`node <cli> sync\` that
  * outlives this process, spawned only when there is something to sync, only
- * in team mode, and only behind a machine-wide claim, so a laptop ending
- * several sessions in the same minute runs one sync and not one per Stop.
+ * in team mode, only in a checkout that HAS a git remote, and only behind a
+ * machine-wide claim, so a laptop ending several sessions in the same minute
+ * runs one sync and not one per Stop.
  * The claim is a \`session_state\` row under the machine bucket that expires
  * by age rather than by the child clearing it: a sync that died could
  * otherwise hold the claim forever.
@@ -2396,20 +2397,58 @@ const SYNC_FALLBACK_LINE = ${JSON.stringify(STOP_SYNC_FALLBACK_LINE)};
  */
 function spawnSyncIfNeeded(config, cwd) {
   if (CLI_PATH === null || teamShelfOrigin(config) === null) return false;
+  // NO REMOTE, NO SPAWN (#256, owner decision). A checkout with no \`origin\` has
+  // no repo scope to salt a coarse key with, so \`tenjin sync\` publishes nothing
+  // from it and leaves every row unsynced — which would leave this count above
+  // zero forever and spawn a detached node process at EVERY turn end, for a run
+  // whose only output is "Nothing to sync." The same reduction the sync itself
+  // reads (\`repoSlug\` of the origin url, a file read and never a git spawn),
+  // AND THE SAME WALK: both sides bound the search for \`.git\` by the one
+  // exported \`GIT_WALK_MAX\` (round-3 review of #256). That is what makes "the
+  // two cannot disagree" true rather than nearly true — while the walks were
+  // 12 here and 64 there, a checkout deeper than 12 read "no remote" on this
+  // gate and an origin in the sync, so nothing was ever handed to the shelf
+  // from it and nothing said so.
+  if (originSlug(cwd) === '') return false;
   const pending = storeCount(STORE_SQL.countUnsyncedPairings, [projectId(cwd)]);
   if (!Number.isFinite(pending) || pending === 0) return false;
   const now = Date.now();
   if (statePrefixSince(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, 1).length > 0) {
     return false;
   }
-  // A stale claim is deleted and re-taken; the atomic claim is the tiebreak
-  // between two Stops that both found it stale.
-  if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) {
-    clearState(MACHINE_SESSION, SYNC_CLAIM_KEY);
-    if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) return false;
+  // ONE STATEMENT AT EACH END (tenjin-agent#249). A free claim is taken by the
+  // INSERT, an EXPIRED one by an UPDATE conditioned on the holder's own age, so
+  // the arbitration is SQLite's either way. What this replaced was
+  // clear-then-claim, and two Stops that both read the claim as stale both
+  // cleared it and both re-claimed: one machine-wide guard, two detached
+  // children, which is the fan-out the claim exists to prevent. The read above
+  // is only an early-out; the takeover below is the decision.
+  // FAIL CLOSED AT BOTH ENDS (#256 review). \`claimState\` reads a swallowed
+  // write as a win, which is right for a dedupe aid and wrong here: this claim
+  // is an ARBITER, and a store that refuses writes — read-only, full, locked
+  // past the busy timeout — would hand every Stop on the machine the same win
+  // and spawn a detached child each, the exact fan-out the claim exists to
+  // prevent. \`takeStaleState\` already treats a swallowed write as a loss; the
+  // outcome form makes the insert end agree. The cost of losing is one skipped
+  // sync, and the claim expires by age, so the next Stop retries.
+  if (
+    claimStateOutcome(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now }) !== 'won' &&
+    !takeStaleState(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, { at: now })
+  ) {
+    return false;
   }
   try {
-    const child = spawn(process.execPath, [CLI_PATH, 'sync'], {
+    // \`--cwd\`, NOT JUST THE CHILD'S WORKING DIRECTORY (tenjin-agent#249). The
+    // rows this sync must find are scoped by \`projectId(cwd)\` over the payload's
+    // cwd STRING, and a child that inherits only the directory computes its own
+    // scope from \`process.cwd()\` — which is the path \`getcwd\` RESOLVED, so a
+    // session whose cwd runs through a symlink hashed one way here and another
+    // way there, and the count that decided to spawn described rows the sync
+    // could not see. Both are set: the flag decides the scope, the directory
+    // keeps the child inside the project.
+    const args = [CLI_PATH, 'sync'];
+    if (typeof cwd === 'string' && cwd.length > 0) args.push('--cwd', cwd);
+    const child = spawn(process.execPath, args, {
       detached: true,
       stdio: 'ignore',
       ...(cwd === null ? {} : { cwd }),
