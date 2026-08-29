@@ -119,6 +119,35 @@ describe('main', () => {
     expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
+  /**
+   * `sync --cwd <path>` is what the Stop hook spawns with (tenjin-agent#249): the
+   * hook payload's cwd STRING, which `projectId` hashed the pairing rows under,
+   * and which `process.cwd()` in the spawned child would have resolved through
+   * any symlink into a different project id. It takes a value, and it is
+   * documented, because an operator running the by-hand fallback from a
+   * different directory needs the same scoping the hook gets.
+   */
+  it('documents sync --cwd and requires a value for it', async () => {
+    const cap = captureIo();
+    expect(await main(['sync', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('--cwd <path>');
+
+    const missing = captureIo();
+    expect(await main(['sync', '--cwd'], missing.io)).toBe(2);
+    expect(JSON.parse(missing.stdout()).error.code).toBe('USAGE');
+
+    // AN EMPTY VALUE IS THE SAME ERROR, not a fallback to `process.cwd()`.
+    // `tenjin sync --cwd "$REPO"` with `REPO` unset reaches commander as `''`,
+    // and syncing whatever directory the shell is in would end in the same
+    // "Nothing to sync." a real miss ends in — the one wrong outcome an
+    // operator cannot tell from a right one.
+    const empty = captureIo();
+    expect(await main(['sync', '--cwd', ''], empty.io)).toBe(2);
+    const err = JSON.parse(empty.stdout()).error as { code: string; fix?: string };
+    expect(err.code).toBe('USAGE');
+    expect(err.fix).toContain('--cwd');
+  });
+
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
     const cap = captureIo(true);
     const code = await main([], cap.io);
@@ -642,5 +671,140 @@ describe('the delete verb is registered', () => {
     const code = await main(['edit', '--help'], cap.io);
     expect(code).toBe(0);
     expect(cap.stdout()).toContain('--status <status>');
+  });
+});
+
+/**
+ * THE ONE LINE THAT JOINS THE THREE HALVES (tenjin-agent#249).
+ *
+ * `--cwd` is proved three ways elsewhere and nowhere together: the hook side
+ * against a stub CLI (push-scripts.test.ts), the receive side below the flag by
+ * passing `deps.cwd` straight into `runSync` (sync.test.ts), and the flag's own
+ * parsing by its help text and its exit codes above. The line in cli.ts that
+ * turns `--cwd <path>` into `deps.cwd` was the one no test executed, so the
+ * end-to-end claim rested on three halves that never met.
+ *
+ * This runs the real dispatcher against a real store, a real keystore and a
+ * stubbed shelf, and asserts the thing the whole change is about: the coarse
+ * key on the wire is salted with the SLUG of the origin in the `--cwd`
+ * checkout's `.git/config`, which is only true if the flag reached `runSync`,
+ * the rows were found under `projectId` of that string, and the salt was read
+ * from that directory rather than from the process's own.
+ */
+describe('sync --cwd, end to end through the dispatcher', () => {
+  const SHELF = 'https://team.example';
+  const POST = {
+    id: '11111111-1111-4111-8111-111111111111',
+    slug: 'fix-pnpm-test',
+    title: 'Fix: pnpm — ENOENT',
+    status: 'published',
+    price: '0',
+    url: `${SHELF}/a/team/fix-pnpm-test`,
+    tags: [],
+  };
+
+  let dataDir: string;
+  let repo: string;
+  const prev: Record<string, string | undefined> = {};
+
+  beforeEach(async () => {
+    dataDir = await mkdtemp(join(sandbox, 'e2e-sync-'));
+    repo = join(dataDir, 'checkout');
+    for (const key of ['TENJIN_DATA_DIR', 'TENJIN_WALLET_PASSPHRASE']) prev[key] = process.env[key];
+    process.env.TENJIN_DATA_DIR = dataDir;
+    process.env.TENJIN_WALLET_PASSPHRASE = 'correct-horse-battery-staple-249';
+    // A real checkout with a real origin, in the two shapes git writes.
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await writeFile(
+      join(repo, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
+    );
+  });
+
+  afterEach(async () => {
+    vi.unstubAllGlobals();
+    for (const [key, value] of Object.entries(prev)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await rm(dataDir, { recursive: true, force: true });
+  });
+
+  it('salts the published coarse key with the --cwd checkout’s own origin', async () => {
+    const { openStore, projectId, teamCoarseKey, STORE_SQL } = await import('./lib/state-store');
+
+    // A wallet the dispatcher can actually sign with, created through the CLI.
+    expect(await main(['wallet', 'create'], captureIo().io)).toBe(0);
+    await writeFile(
+      join(dataDir, 'config.json'),
+      JSON.stringify({
+        baseUrl: SHELF,
+        publicShelfUrl: 'https://public.example',
+        shelfBypassSecret: 'shelf-secret-abc123',
+      }),
+    );
+
+    // One closed, code-scoped pairing, scoped by `projectId` of the cwd STRING
+    // — the same hash the failure arm would have written it under.
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    const at = Date.now() - 60_000;
+    store.run(STORE_SQL.insertPairing, [
+      'pair-e2e-249',
+      at,
+      'sess-e2e',
+      projectId(repo),
+      'machine-e2e',
+      'sig_v1',
+      'fine-hash-abc',
+      'coarse-hash-def',
+      'pnpm',
+      'pnpm test',
+      'Error: ENOENT: no such file or directory',
+      JSON.stringify(['widget.ts']),
+      JSON.stringify({}),
+      'code',
+    ]);
+    store.run(
+      `UPDATE pairings SET status = 'unverified', closes = 1, closed_at = ?, fix_cmd = ?, fix_files = ?
+         WHERE uid = 'pair-e2e-249'`,
+      [at + 1000, 'pnpm test', JSON.stringify(['widget.ts'])],
+    );
+    store.close();
+
+    const sent: Array<{ method?: string; url: string; body?: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', async (url: string | URL, init?: RequestInit) => {
+      sent.push({
+        method: init?.method,
+        url: String(url),
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      });
+      return new Response(JSON.stringify(POST), {
+        status: init?.method === 'PUT' ? 200 : 201,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const cap = captureIo();
+    expect(await main(['sync', '--cwd', repo], cap.io)).toBe(0);
+
+    const post = sent.find((r) => r.method === 'POST' && r.url === `${SHELF}/api/posts`);
+    expect(post).toBeDefined();
+    const keys = post!.body!.keys as Array<{ kind: string; key: string }>;
+    // THE SALT CAME FROM `--cwd`. `github.com/acme/api` is the reduction of the
+    // origin in THAT directory's `.git/config`; the process's own working
+    // directory is this repo's checkout and would salt differently.
+    expect(keys).toContainEqual({
+      kind: 'fingerprint',
+      key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
+      verified: false,
+    });
+    // And the fine key rode along unsalted, as it always does.
+    expect(keys).toContainEqual({
+      kind: 'fingerprint',
+      key: 'sig_v1:fine-hash-abc',
+      verified: false,
+    });
+    expect(JSON.parse(cap.stdout()).data).toMatchObject({ synced: 1 });
   });
 });

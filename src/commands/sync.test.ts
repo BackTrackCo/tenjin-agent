@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSync } from './sync';
-import { openStore, projectId, STORE_SQL } from '../lib/state-store';
-import { teamCoarseKey } from '../lib/state-store';
+import { openStore, projectId, repoSlug, teamCoarseKey, STORE_SQL } from '../lib/state-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import { CliError } from '../lib/errors';
@@ -21,7 +20,21 @@ import type { CommandContext } from '../context';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-sync-'));
+  // EVERY TEST THAT PUBLISHES NEEDS A REMOTE (tenjin-agent#249). A checkout
+  // with no `origin` is local-only — it publishes nothing and stamps nothing —
+  // so the default fixture is a checkout that HAS one, and the tests that mean
+  // to exercise the no-remote path run in a directory of their own.
+  await writeGitOrigin(dir, 'https://github.com/acme/api.git');
 });
+
+/** A `.git/config` naming `origin`, in the two shapes git writes. */
+async function writeGitOrigin(at: string, url: string): Promise<void> {
+  await mkdir(join(at, '.git'), { recursive: true });
+  await writeFile(
+    join(at, '.git', 'config'),
+    `[core]\n\tbare = false\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+  );
+}
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
@@ -237,11 +250,20 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     expect((body.bodyMd as string).length).toBeLessThanOrEqual(300);
     expect(body.bodyMd as string).toContain('pkg: zod@4.1.0');
 
-    // No .git in this tmpdir, so no repo origin: fine key + command_head, no
-    // salted coarse key.
+    // THE COARSE KEY ALWAYS GOES OUT beside the fine one when the checkout has
+    // a remote (tenjin-agent#249), salted with the slug and never with the url.
+    // The guard that used to drop it whenever the salt was falsy is what made a
+    // whole class of pairings fine-key-only; what replaced it is the no-remote
+    // return above, which publishes nothing at all rather than publishing under
+    // a salt that is not one.
     const keys = body.keys as Array<{ kind: string; key: string; verified: boolean }>;
     expect(keys).toEqual([
       { kind: 'fingerprint', key: 'sig_v1:fine-hash-abc', verified: false },
+      {
+        kind: 'fingerprint',
+        key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
+        verified: false,
+      },
       { kind: 'command_head', key: 'pnpm', verified: false },
     ]);
 
@@ -253,7 +275,51 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     expect(row.synced_at).not.toBeNull();
   });
 
-  it('salts the coarse key with the repo origin when the checkout has one', async () => {
+  /**
+   * NO REMOTE, NO SHELF (tenjin-agent#249, owner decision). '' is what stands in
+   * for a repo scope this checkout does not have, and it is not a salt:
+   * publishing under it would put every origin-less checkout on the team's
+   * shelf into ONE coarse bucket, and a coarse hit is rank 1 with no relevance
+   * check to run. So the run publishes NOTHING — not even the fine key, since
+   * the resolve leg does not ask from such a checkout either — and stamps
+   * nothing, so the rows are still there the day the checkout gains an origin.
+   */
+  it('publishes nothing and stamps nothing from a checkout with no origin', async () => {
+    await writeTeamConfig();
+    // A real checkout with no `origin`: its own `.git`, so the walk up stops
+    // here rather than reaching the fixture repo this tmpdir is.
+    const bare = join(dir, 'bare');
+    await mkdir(join(bare, '.git'), { recursive: true });
+    await writeFile(join(bare, '.git', 'config'), '[core]\n\tbare = false\n');
+    const id = await seedPairing({
+      cwd: bare,
+      key: 'fine-hash-abc',
+      coarseKey: 'coarse-hash-def',
+      status: 'unverified',
+    });
+    const { provider, getSignerCount } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: bare, provider, fetchImpl: fetch });
+
+    // Nothing on the wire, and the wallet was never asked to sign.
+    expect(sent).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+    // The rows are counted as local, not as synced, held, skipped or pending.
+    expect(result.data).toMatchObject({
+      synced: 0,
+      verified: 0,
+      held: 0,
+      skipped: 0,
+      local: 1,
+      pending: 0,
+    });
+    // AND UNTOUCHED: `synced_at` is still NULL, so the day this checkout gains
+    // an origin the next run publishes them.
+    expect((await pairingRow(id)).synced_at).toBeNull();
+  });
+
+  it('salts the coarse key with the repo slug when the checkout has an origin', async () => {
     await writeTeamConfig();
     const repoDir = join(dir, 'repo');
     await mkdir(join(repoDir, '.git'), { recursive: true });
@@ -273,9 +339,144 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
 
     const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
-    const expected =
-      'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'https://github.com/acme/widgets.git');
+    const expected = 'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'github.com/acme/widgets');
     expect(keys.some((k) => k.key === expected)).toBe(true);
+    expect(expected).toBe(
+      'sig_v1c:' +
+        teamCoarseKey('coarse-hash-xyz', repoSlug('https://github.com/acme/widgets.git')),
+    );
+    // The SLUG, never the url: a teammate on the ssh remote publishes this key.
+    expect(keys.some((k) => k.key.startsWith('sig_v1c:'))).toBe(true);
+    expect(
+      keys.some(
+        (k) =>
+          k.key ===
+          'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'https://github.com/acme/widgets.git'),
+      ),
+    ).toBe(false);
+  });
+
+  /**
+   * THE SYNC'S OWN WALK, AT THE SHARED BOUND (round-3 review of #256). This is
+   * the other half of the pair: the hook and the failure arm gate on the
+   * generated `originSlug`, and this leg finds the config through
+   * `findGitDir`. The two ran different bounds — 12 there, 64 here — so a
+   * checkout deeper than 12 was local-only to the hook and publishable here,
+   * and both now take the exported `GIT_WALK_MAX`. Twenty deep is past the old
+   * short bound and inside the shared one; the arm's side of the same depth is
+   * pinned in lib/push-scripts.test.ts.
+   */
+  it('publishes from a checkout twenty directories below the repo root', async () => {
+    await writeTeamConfig();
+    const repoDir = join(dir, 'deep');
+    await writeGitOrigin(repoDir, 'https://github.com/acme/deep.git');
+    const deep = join(repoDir, ...Array.from({ length: 20 }, (_, i) => `d${i}`));
+    await mkdir(deep, { recursive: true });
+    await seedPairing({
+      cwd: deep,
+      key: 'fine-hash-deep',
+      coarseKey: 'coarse-hash-deep',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: deep, provider, fetchImpl: fetch });
+
+    // Not local-only: the origin twenty levels up was found and salted with.
+    expect(result.data).toMatchObject({ synced: 1, local: 0 });
+    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
+    expect(
+      keys.some(
+        (k) =>
+          k.key ===
+          'sig_v1c:' +
+            teamCoarseKey('coarse-hash-deep', repoSlug('https://github.com/acme/deep.git')),
+      ),
+    ).toBe(true);
+  });
+
+  /**
+   * ONE KEY FOR THE TWO TRANSPORTS OF ONE REPO (tenjin-agent#249). Before the
+   * slug, a teammate who cloned over ssh and a teammate who cloned over https
+   * published two different coarse keys for one project and never matched.
+   */
+  it('publishes the same coarse key from an ssh clone and an https clone', async () => {
+    await writeTeamConfig();
+    const keyFor = async (origin: string, key: string): Promise<string> => {
+      const repoDir = join(dir, `clone-${key}`);
+      await mkdir(join(repoDir, '.git'), { recursive: true });
+      await writeFile(join(repoDir, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`);
+      await seedPairing({
+        cwd: repoDir,
+        key,
+        coarseKey: 'coarse-shared',
+        status: 'unverified',
+      });
+      const { provider } = spyProvider();
+      const { fetch, sent } = shelfServer();
+      await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
+      const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
+      return keys.find((k) => k.key.startsWith('sig_v1c:'))!.key;
+    };
+    const ssh = await keyFor('git@github.com:acme/widgets.git', 'fine-ssh');
+    const https = await keyFor('https://github.com/acme/widgets', 'fine-https');
+    const fork = await keyFor('git@github.com:fork/widgets.git', 'fine-fork');
+    expect(ssh).toBe(https);
+    expect(fork).not.toBe(ssh);
+  });
+
+  /**
+   * THE CHECKOUT IS THE ONE `--cwd` NAMES (tenjin-agent#249). `pairings.project`
+   * is `projectId(cwd)` over the cwd the hook payload carried, so a sync that
+   * scoped itself by `process.cwd()` read a different project's rows whenever
+   * the two strings differed — and the Stop hook, which counts with the payload
+   * cwd, would go on spawning a sync that saw nothing.
+   */
+  it('reads the rows of the checkout --cwd names, not the process working directory', async () => {
+    await writeTeamConfig();
+    const elsewhere = join(dir, 'elsewhere');
+    await mkdir(elsewhere, { recursive: true });
+    await seedPairing({ cwd: elsewhere, key: 'fine-elsewhere', status: 'unverified' });
+    // A row for the directory the test process itself is in, which must not
+    // travel: it belongs to another checkout entirely.
+    await seedPairing({ cwd: process.cwd(), key: 'fine-process-cwd', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: elsewhere, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1 });
+    expect(sent).toHaveLength(1);
+    const keys = sent[0]!.body!.keys as Array<{ key: string }>;
+    expect(keys[0]!.key).toBe('sig_v1:fine-elsewhere');
+  });
+
+  /**
+   * THE CASE THAT MADE IT MATTER: a checkout reached through a symlink. `getcwd`
+   * returns the RESOLVED path, so a child that inherited only the working
+   * directory hashed the real path while the failure arm had hashed the
+   * symlinked one the payload carried. Two project ids for one checkout, and
+   * every run reported "Nothing to sync."
+   */
+  it('scopes by the symlinked path it was given, not by the path it resolves to', async () => {
+    await writeTeamConfig();
+    const real = join(dir, 'real-checkout');
+    const link = join(dir, 'linked-checkout');
+    await mkdir(real, { recursive: true });
+    await symlink(real, link);
+    // The premise: the two strings are one directory and two project ids.
+    expect(await realpath(link)).toBe(await realpath(real));
+    expect(projectId(link)).not.toBe(projectId(await realpath(link)));
+
+    await seedPairing({ cwd: link, key: 'fine-symlinked', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: link, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1 });
+    expect((sent[0]!.body!.keys as Array<{ key: string }>)[0]!.key).toBe('sig_v1:fine-symlinked');
   });
 
   it('sends verified:true on the keys when the pairing closed as verified', async () => {

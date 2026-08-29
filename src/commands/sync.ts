@@ -7,9 +7,11 @@ import { resolveContextSettings } from '../lib/settings';
 import {
   openStore,
   projectId,
+  repoSlug,
   shortHash,
   storeSession,
   teamCoarseKey,
+  GIT_WALK_MAX,
   STATE_PAIRING_POST_PREFIX,
   STORE_SQL,
   type Store,
@@ -47,9 +49,18 @@ export interface SyncDeps {
   useSession?: boolean;
   /** Environment seam; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
-  /** The checkout whose pairings sync; defaults to process.cwd(). The Stop hook
-   *  spawns the child with the session's cwd, so the project scoping matches the
-   *  rows the failure arm wrote. */
+  /**
+   * The checkout whose pairings sync; defaults to `process.cwd()`. `tenjin sync
+   * --cwd <path>` sets it, and the Stop hook passes the hook payload's own cwd
+   * string there when it spawns the child.
+   *
+   * THE STRING, NOT THE RESOLVED PATH (tenjin-agent#249). `pairings.project` is
+   * `projectId(cwd)` over the cwd the payload carried, and `process.cwd()` is
+   * that path with every symlink resolved, so a session running under a symlinked
+   * checkout hashes one way in the hook and another way here — the hook counted
+   * unsynced rows the sync it spawned then could not see, and the run reported
+   * "Nothing to sync." forever.
+   */
   cwd?: string;
 }
 
@@ -105,7 +116,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // Fail open, same as every other store consumer: an unreadable store is not a
     // reason to exit nonzero, there is simply nothing to sync.
     return {
-      data: { synced: 0, verified: 0, held: 0, skipped: 0, pending: 0 },
+      data: { synced: 0, verified: 0, held: 0, skipped: 0, local: 0, pending: 0 },
       humanLines: ['Nothing to sync.'],
     };
   }
@@ -117,7 +128,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
       .filter((r): r is PairingRow => r !== null);
     if (rows.length === 0) {
       return {
-        data: { synced: 0, verified: 0, held: 0, skipped: 0, pending: 0 },
+        data: { synced: 0, verified: 0, held: 0, skipped: 0, local: 0, pending: 0 },
         humanLines: ['Nothing to sync.'],
       };
     }
@@ -125,7 +136,37 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // The repo the origin salt is read from — a file read of .git/config, never a
     // git spawn (mirrors isTrackedPath's "no git invocation" rule). Read once for
     // the whole run: every row of this checkout salts against the same repo.
-    const repo = readRepoOrigin(cwd) ?? '';
+    const repo = readRepoSlug(cwd) ?? '';
+    // NO REMOTE, NO SHELF (#256, owner decision). '' is what stands in for a
+    // repo scope this checkout does not have — a clone from a local path, a
+    // scratch directory, a mirror under another remote name — and it is not a
+    // salt. Publishing under it would put every origin-less checkout on the
+    // team's shelf into ONE coarse bucket, and a coarse hit is rank 1 with no
+    // relevance check to run, so a scratch directory's fix would come back
+    // beside an unrelated one as a strong teammate match. The failure arm's
+    // resolve leg stops asking under the same condition, for the same reason.
+    //
+    // NOTHING IS STAMPED: `synced_at` stays NULL on every row, because these
+    // pairings are not synced, they are local. If the checkout later gains an
+    // origin, the next run publishes them. The Stop hook does not spawn a sync
+    // here at all (it reads the same slug first), so this path is a hand run.
+    if (repo === '') {
+      return {
+        data: {
+          synced: 0,
+          verified: 0,
+          held: 0,
+          skipped: 0,
+          local: rows.length,
+          pending: 0,
+        },
+        humanLines: [
+          `Nothing to sync: this checkout has no git origin, so its ${rows.length} fixed ${
+            rows.length === 1 ? 'pairing stays' : 'pairings stay'
+          } local.`,
+        ],
+      };
+    }
     // The shelf a link row names: the team shelf, which is the only place a
     // synced pairing ever goes.
     const origin = new URL(runtime.baseUrl).origin;
@@ -338,6 +379,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
         verified,
         held,
         skipped,
+        local: 0,
         pending: rows.length - synced - verified - held - skipped,
       },
       humanLines: [
@@ -373,20 +415,28 @@ function lazySigner(provider: WalletProvider, address: TenjinSigner['address']):
 }
 
 /** The wire keys for one pairing: the fine fingerprint verbatim, the coarse
- *  fingerprint SALTED with the repo (so an ERR_PNPM_OUTDATED_LOCKFILE-class error
- *  does not match across every repo the team has), and the command head for a
- *  future ranking to use — never queried, only stored. `verified` mirrors the
+ *  fingerprint SALTED with the repo slug (so an ERR_PNPM_OUTDATED_LOCKFILE-class
+ *  error does not match across every repo the team has), and the command head for
+ *  a future ranking to use — never queried, only stored. `verified` mirrors the
  *  local close status; a hand publish never claims verified, but sync IS the
- *  close rule's own report and may. */
+ *  close rule's own report and may. `repo` is never '' here: a checkout with no
+ *  remote returns before this is reached, publishing nothing at all (#249). */
 function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput[] {
   const keys: PostKeyInput[] = [{ kind: 'fingerprint', key: 'sig_v1:' + row.key, verified }];
-  if (row.coarseKey !== null && row.coarseKey.length > 0 && repo.length > 0) {
+  if (row.coarseKey !== null && row.coarseKey.length > 0) {
     // Salt the coarse HASH, not the raw message+errno: the CLI has only the
     // stored hashes (message/errno exist only transiently inside the failure
     // arm's sigV1() call, never as columns), so `teamCoarseKey` — shared with
     // the resolve leg via lib/push-scripts.ts — salts what both sides actually
-    // have. No repo, no coarse key: an unsalted coarse hash would match the same
-    // error across every repo the team has (06, "Team-shelf coarse keys").
+    // have (06, "Team-shelf coarse keys").
+    //
+    // NO `repo.length > 0` GUARD, and none is needed (tenjin-agent#249). The
+    // guard that used to live here dropped the coarse key while the resolve leg
+    // went on asking for `sig_v1c:teamCoarseKey(coarse, '')`, so a no-origin
+    // checkout could only ever match on the fine key and the miss looked like
+    // "no teammate has hit this". The asymmetry is closed at the other end now:
+    // a checkout with no remote publishes NOTHING and the resolve leg asks for
+    // nothing, so the two sides agree and '' never reaches this line.
     keys.push({
       kind: 'fingerprint',
       key: 'sig_v1c:' + teamCoarseKey(row.coarseKey, repo),
@@ -622,14 +672,18 @@ function parseJsonRecord(value: unknown): Record<string, string> {
 // ---- repo origin (a file read, never a git spawn) ----------------------------
 
 /**
- * The origin remote URL for the checkout at `start`, read from `.git/config`, or
- * null. NO GIT INVOCATION — a hook (and a sync it spawns) must not run a process
- * in front of its work; a `.git` file (a worktree or submodule) is followed to
- * its real gitdir. Only the salt for the coarse key depends on it, and a null
- * salts to '' — the same across the team, which is the pre-salt behaviour, safe
- * because a missing origin is uncommon and the fine key still discriminates.
+ * The coarse key's repo salt for the checkout at `start`: `repoSlug` of the
+ * origin remote URL read from `.git/config`, or null. NO GIT INVOCATION — a hook
+ * (and a sync it spawns) must not run a process in front of its work; a `.git`
+ * file (a worktree or submodule) is followed to its real gitdir.
+ *
+ * ⚠ THE SAME RULE AS THE RESOLVE LEG (`originSlug`, generated from
+ * `repoSlugSource()` in lib/state-store.ts): the URL is normalised to
+ * `host/full/path` so the two transports of one repo salt alike. A null (no
+ * origin, or a remote that is a bare local path) reads as '' at the call site,
+ * which is NOT a salt: it means no remote, and this checkout syncs nothing.
  */
-function readRepoOrigin(cwd: string): string | null {
+function readRepoSlug(cwd: string): string | null {
   const gitDir = findGitDir(cwd);
   if (gitDir === null) return null;
   let text: string;
@@ -651,16 +705,21 @@ function readRepoOrigin(cwd: string): string | null {
     }
     if (!inOrigin) continue;
     const url = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
-    if (url !== null && url[1] !== undefined) return url[1].slice(0, 500);
+    if (url !== null && url[1] !== undefined) return repoSlug(url[1].slice(0, 500));
   }
   return null;
 }
 
 /** Walk up from `start` for a `.git` directory (or a `.git` file pointing at
- *  one), returning the resolved git directory or null. */
+ *  one), returning the resolved git directory or null.
+ *
+ *  ⚠ {@link GIT_WALK_MAX} IS SHARED WITH THE GENERATED `originSlug` (round-3
+ *  review of #256), which is the walk the Stop hook and the failure arm gate on.
+ *  Two bounds meant a checkout below the shorter one read "no remote" there and
+ *  an origin here — nothing synced, silently, from a repo that had one. */
 function findGitDir(start: string): string | null {
   let dir = start;
-  for (let i = 0; i < 64; i += 1) {
+  for (let i = 0; i < GIT_WALK_MAX; i += 1) {
     const dotGit = join(dir, '.git');
     let stat;
     try {

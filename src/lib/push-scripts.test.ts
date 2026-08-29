@@ -18,15 +18,19 @@ import {
   openStore,
   projectId,
   recordSearch,
+  repoSlug,
+  repoSlugSource,
   teamCoarseKey,
   type StoredSearch,
 } from './state-store';
+import { REPO_SLUG_CASES } from './repo-slug-cases';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,
   PRIMER_TEXT,
   STOP_SYNC_FALLBACK_LINE,
   SYNC_CLAIM_KEY,
+  SYNC_CLAIM_TTL_MS,
   dispatchHookScript,
   sessionPrimerHookScript,
   stopHookScript,
@@ -2217,6 +2221,25 @@ describe('the failure arm (PostToolUse Bash)', () => {
  * never asked" is asserted rather than assumed.
  */
 describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
+  /**
+   * A REAL CHECKOUT WITH A REAL `origin`, because the team leg now needs one
+   * (tenjin-agent#249): a directory with no git remote has no repo scope to
+   * salt a coarse key with, so the arm records `no-remote` and asks the shelf
+   * nothing. Every case in this block is about what happens when it DOES ask;
+   * the no-remote skip has its own case below.
+   */
+  const REPO_ONE = join(tmpdir(), `tenjin-push-team-repo-${process.pid}`);
+  beforeEach(async () => {
+    await mkdir(join(REPO_ONE, '.git'), { recursive: true });
+    await writeFile(
+      join(REPO_ONE, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
+    );
+  });
+  afterEach(async () => {
+    await rm(REPO_ONE, { recursive: true, force: true });
+  });
+
   const TEAM_POST_ID = '55555555-5555-4555-8555-555555555555';
   const TEAM_FIX_MD =
     'Fix: pnpm — ENOENT. Edited drizzle.config.ts, passed on pnpm db:migrate. pkg: drizzle-kit@0.31.0';
@@ -2229,7 +2252,7 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   const failing = (command: string, stderr: string, over: Record<string, unknown> = {}): string =>
     JSON.stringify({
       session_id: SESSION,
-      cwd: '/repo/one',
+      cwd: REPO_ONE,
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command },
@@ -2239,7 +2262,7 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   const passing = (command: string, over: Record<string, unknown> = {}): string =>
     JSON.stringify({
       session_id: SESSION,
-      cwd: '/repo/one',
+      cwd: REPO_ONE,
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command },
@@ -2249,7 +2272,7 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   const edit = (path: string, over: Record<string, unknown> = {}): string =>
     JSON.stringify({
       session_id: SESSION,
-      cwd: '/repo/one',
+      cwd: REPO_ONE,
       hook_event_name: 'PreToolUse',
       tool_name: 'Edit',
       tool_input: { file_path: path },
@@ -2627,12 +2650,13 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   });
 
   /**
-   * The coarse key on the wire is salted with the repo's origin url, read from
-   * `.git/config` by a file read; the local one is not. Without the salt an
+   * The coarse key on the wire is salted with the repo SLUG — `owner/name`,
+   * reduced from the origin url read out of `.git/config` by a file read; the
+   * local one is not salted at all. Without the salt an
    * `ERR_PNPM_OUTDATED_LOCKFILE`-class message would match a fix from any repo
    * the team has.
    */
-  it('salts the coarse key with the origin url, and only on the wire', async () => {
+  it('salts the coarse key with the repo slug, and only on the wire', async () => {
     const stub = resolveStub('miss');
     const team = await serve(stub.handler);
     const pub = await serve(echo());
@@ -2679,8 +2703,17 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     // THE HOOK'S INLINE COPY EQUALS THE TS EXPORT `tenjin sync` publishes with:
     // salt over the stored coarse hash, not the raw message. A drift here would
     // make every resolve query miss every synced post, silently.
-    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'));
-    expect(coarse[1]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/web.git'));
+    expect(coarse[0]).toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/api.git')),
+    );
+    expect(coarse[1]).toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/web.git')),
+    );
+    // And the salt is the SLUG, never the url it was read from.
+    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'github.com/acme/api'));
+    expect(coarse[0]).not.toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'),
+    );
     expect((await pairings()).map((p) => String(p.key))).toEqual(
       fine.map((k) => k.slice('sig_v1:'.length)),
     );
@@ -2701,7 +2734,9 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     );
     await writeFile(join(main, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
     await writeFile(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'wt')}\n`);
-    // No .git/config at all: an unsalted-by-absence coarse key, to compare.
+    // No .git/config at all: nothing to salt with, so this one asks NOTHING
+    // (#249) — the contrast that says the worktree agreement above is the
+    // config being found rather than both sides falling back alike.
     const bare = join(dataDir, 'bare');
     await mkdir(bare, { recursive: true });
 
@@ -2713,9 +2748,180 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     await fire(main, 's-main');
     await fire(wt, 's-wt');
     await fire(bare, 's-bare');
+    // Two requests, not three: the worktree and its main checkout each asked,
+    // under the same salt; the origin-less directory asked nothing at all.
+    expect(stub.bodies).toHaveLength(2);
     const coarse = stub.bodies.map((b) => b.keys[1]!.key);
     expect(coarse[0]).toBe(coarse[1]);
+    expect((await ledger()).filter((r) => r.reason === 'no-remote')).toHaveLength(1);
+  });
+
+  /**
+   * A DEEP CHECKOUT IS STILL A CHECKOUT (round-3 review of #256).
+   *
+   * `originSlug(cwd) === ''` is a GATE, not just a salt: it stops the Stop hook
+   * spawning a sync and makes the failure arm record `no-remote` and ask the
+   * shelf nothing. So the walk's depth bound decides whether a feature is on,
+   * and it used to be 12 here against `tenjin sync`'s own 64 — a checkout below
+   * 12 read "no remote" on this side while the sync read the origin and would
+   * have published, silently, with nothing on any surface saying so. Both walks
+   * now take the one exported `GIT_WALK_MAX`.
+   *
+   * Twenty deep: comfortably past the old 12 and well inside the shared 64.
+   * Reverting `GIT_WALK_MAX` to 12 turns the assertion below into `no-remote`
+   * and zero requests, which is the bug this pins.
+   */
+  it('finds the origin from a checkout twenty directories below the repo root', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const repo = join(dataDir, 'deep-repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await writeFile(
+      join(repo, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/deep.git\n',
+    );
+    const deep = join(repo, ...Array.from({ length: 20 }, (_, i) => `d${i}`));
+    await mkdir(deep, { recursive: true });
+
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT, { cwd: deep, session_id: 's-deep' }),
+    );
+
+    // It ASKED, and under the deep checkout's own origin — not `no-remote`.
+    expect(stub.bodies).toHaveLength(1);
+    expect((await ledger()).filter((r) => r.reason === 'no-remote')).toHaveLength(0);
+    const local = (await pairings()).map((p) => String(p.coarse_key));
+    // THE SAME KEY `tenjin sync` WOULD PUBLISH from this directory: the sync's
+    // `findGitDir` walks the identical bound, so the two legs agree at a depth
+    // where they used to disagree.
+    expect(stub.bodies[0]!.keys[1]!.key).toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/deep.git')),
+    );
+  });
+
+  /**
+   * THE GENERATED COPY OF `repoSlug`, RUN AGAINST THE EXPORT'S OWN TABLE
+   * (tenjin-agent#249).
+   *
+   * A hook script cannot import, so the failure arm carries its own copy of the
+   * salt reduction, and `tenjin sync` publishes with the exported one. A drift
+   * between them makes every resolve query miss every synced post SILENTLY —
+   * the shelf answers "no match", which is indistinguishable from "no teammate
+   * has hit this". Firing the hook once per row would be twenty-odd node
+   * processes, so the copy is lifted out of the generated source and called
+   * directly; the fire below then proves the lifted function is the one the arm
+   * actually salts with.
+   *
+   * BY SENTINEL, NOT BY BRACE-COUNTING (round-1 nit 4 of #256). The lift used
+   * to scan for a balanced `}` without skipping string literals, so a brace
+   * inside a regex or a quoted string in a future edit of `repoSlug` would have
+   * truncated the body and evaluated whatever compiled — a test that grades a
+   * fragment. `repoSlugSource()` is the exported text itself, and the
+   * `repoSlug:begin`/`repoSlug:end` markers bound the function in it exactly;
+   * the `includes` below is what keeps this the ARM'S copy rather than a
+   * neighbouring string that merely looks like it.
+   */
+  it('carries a repoSlug that agrees with the exported one on every shape', () => {
+    const source = pushFailureHookScript(dataDir);
+    // The generated script splices the exported text in whole and unedited, so
+    // what the sentinels bound below IS what the failure arm runs.
+    expect(source).toContain(repoSlugSource());
+    const shared = repoSlugSource();
+    const start = shared.indexOf('// repoSlug:begin');
+    const end = shared.indexOf('// repoSlug:end');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = shared.slice(start, end);
+    expect(body).toContain('function repoSlug(url) {');
+    const generated = new Function(`${body}; return repoSlug;`)() as (url: string) => string;
+    for (const [url, slug] of REPO_SLUG_CASES) {
+      expect(generated(url), `generated repoSlug(${JSON.stringify(url)})`).toBe(slug);
+      expect(generated(url), `drift on ${JSON.stringify(url)}`).toBe(repoSlug(url));
+    }
+  });
+
+  /**
+   * TWO TRANSPORTS, ONE SALT. The ssh and https urls of one repo are one
+   * project, and before #249 they were two salts: a teammate who cloned over
+   * ssh could never match a coarse key a teammate who cloned over https
+   * published.
+   */
+  it('gives the ssh and https clones of one repo the same coarse key', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const dirs = [
+      [join(dataDir, 'clone-ssh'), 'git@github.com:acme/api.git'],
+      [join(dataDir, 'clone-https'), 'https://github.com/acme/api'],
+      [join(dataDir, 'clone-fork'), 'git@github.com:fork/api.git'],
+    ] as const;
+    for (const [dir, origin] of dirs) {
+      await mkdir(join(dir, '.git'), { recursive: true });
+      await writeFile(join(dir, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`);
+    }
+    let i = 0;
+    for (const [dir] of dirs) {
+      i += 1;
+      await runScript(
+        pushFailureHookScript(dataDir),
+        failing('pnpm db:migrate', ENOENT, { cwd: dir, session_id: `s-clone-${i}` }),
+      );
+    }
+    const coarse = stub.bodies.map((b) => b.keys[1]!.key);
+    expect(coarse[0]).toBe(coarse[1]);
+    // A fork is a different owner, so it stays a different scope.
     expect(coarse[2]).not.toBe(coarse[0]);
+  });
+
+  /**
+   * THE NO-ORIGIN ASYMMETRY, CLOSED (tenjin-agent#249). A checkout with no
+   * `origin` remote used to have the resolve leg ask under `teamCoarseKey(c,
+   * '')` while `tenjin sync` published no coarse key at all, so such pairings
+   * could only ever match on the fine key. Both sides now send it; this is the
+   * resolve half, and sync.test.ts holds the publish half to the same value.
+   */
+  /**
+   * NO REMOTE, NO SHELF (tenjin-agent#249, owner decision). A checkout with no
+   * `origin` has no repo scope to salt a coarse key with, and '' is not a salt:
+   * asking under it pools every origin-less checkout on the team's shelf into
+   * ONE coarse bucket, and a coarse hit is rank 1 with no relevance check to
+   * run, so a scratch directory's failure could be answered with an unrelated
+   * repo's fix as a strong teammate match. `tenjin sync` publishes nothing from
+   * such a checkout for the same reason, so there is nothing there to find.
+   *
+   * AND IT COSTS NO LOOKUP. The skip is recorded ahead of every other gate,
+   * because it is a fact about this directory and not about the shelf: the
+   * failure bucket is untouched, so a machine that works mostly in scratch
+   * directories still has its full allowance in the checkouts that matter.
+   */
+  it('asks the shelf nothing from a checkout with no origin, and spends no lookup', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const noOrigin = join(dataDir, 'no-origin');
+    await mkdir(join(noOrigin, '.git'), { recursive: true });
+    // A real config, with every remote but `origin`.
+    await writeFile(
+      join(noOrigin, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "upstream"]\n\turl = git@github.com:acme/api.git\n',
+    );
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT, { cwd: noOrigin, session_id: 's-no-origin' }),
+    );
+    // NOTHING on the wire — not the coarse key, and not the fine one either.
+    expect(stub.bodies).toHaveLength(0);
+    // One row, naming why, and carrying no searchId: `bucketCount` counts rows
+    // with one, so a skip that spent nothing must not look like a lookup.
+    const rows = (await ledger()).filter((r) => r.shelf === 'team');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'skipped', reason: 'no-remote', trigger: 'failure' });
+    expect(rows[0]!.searchId).toBeUndefined();
   });
 
   /**
@@ -7144,7 +7350,15 @@ describe('automatic sync (Stop)', () => {
   let stopInput = '';
   beforeEach(async () => {
     cwd = join(scriptDir, 'project-a');
-    await mkdir(cwd);
+    // WITH A REAL `origin`: a checkout that has none syncs nothing, so the hook
+    // does not spawn for it at all (tenjin-agent#249). That case has its own
+    // test at the end of this block; every other case here is about a checkout
+    // whose rows can actually reach the shelf.
+    await mkdir(join(cwd, '.git'), { recursive: true });
+    await writeFile(
+      join(cwd, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
+    );
     stopInput = JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd });
   });
 
@@ -7222,9 +7436,88 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
     const calls = await markerLines(marker);
     expect(calls).toHaveLength(1);
     const call = JSON.parse(calls[0] ?? '{}') as { argv: string[]; cwd: string };
-    expect(call.argv).toEqual(['sync']);
-    // macOS reports the tmpdir through /private; compare resolved paths.
+    // `--cwd` CARRIES THE PAYLOAD'S OWN STRING (tenjin-agent#249). The child's
+    // working directory is set too, but `process.cwd()` inside it is that path
+    // RESOLVED (on macOS the tmpdir shows it: the payload says /var/... and the
+    // child reads /private/var/...; on Linux CI /tmp is not a symlink, so the
+    // two are equal there — which is why only the resolved-equality is pinned,
+    // never the inequality). A `projectId` over the resolved path would scope
+    // to a project whose rows the failure arm never wrote; the flag prevents it.
+    expect(call.argv).toEqual(['sync', '--cwd', cwd]);
     expect(realpathSync(call.cwd)).toBe(realpathSync(cwd));
+  });
+
+  /**
+   * NO REMOTE, NO SPAWN (tenjin-agent#249, owner decision).
+   *
+   * A checkout with no `origin` publishes nothing — `tenjin sync` returns
+   * having stamped no row — so its unsynced count never falls, and a hook that
+   * spawned on the count alone would fork a detached node process at EVERY turn
+   * end for a run whose only output is "Nothing to sync." The hook reads the
+   * same reduction the sync itself does, so the two cannot disagree about
+   * whether this directory has a remote. The claim row is not taken either: a
+   * Stop that is not going to sync must not hold the machine-wide guard against
+   * the Stop in the next window that is.
+   */
+  it('does not spawn a sync in a checkout with no origin, and takes no claim', async () => {
+    await teamOn();
+    const bare = join(scriptDir, 'project-bare');
+    await mkdir(join(bare, '.git'), { recursive: true });
+    // A real config, with every remote but `origin`.
+    await writeFile(join(bare, '.git', 'config'), '[core]\n\tbare = false\n');
+    await seedPairing({ project: projectId(bare) });
+    const { cliPath, marker } = await stubCli();
+
+    const run = await runScript(
+      stopHookScript(dataDir, cliPath),
+      JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd: bare }),
+    );
+
+    expect(run.code).toBe(0);
+    expect(await markerLines(marker)).toHaveLength(0);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+  });
+
+  /**
+   * A STORE THAT REFUSES WRITES IS A LOSS, NOT A WIN (#256 review).
+   *
+   * The claim is an ARBITER, not a dedupe aid: it is the machine-wide guard on
+   * spawning a detached `tenjin sync`. `claimState` reads a swallowed write as
+   * a win by contract — right for a claim whose worst loss is a duplicate
+   * lookup, wrong here, because a store that cannot be written to hands EVERY
+   * Stop on the machine the same win, and each spawns a child. That is the
+   * exact fan-out the claim exists to prevent, and it arrives on a read-only or
+   * full disk rather than under contention.
+   *
+   * `takeStaleState` already fails closed. The outcome form makes the insert
+   * end agree, so both ends of the arbitration lose when the write does not
+   * land. A trigger standing in for the refusal keeps reads working, which is
+   * what a read-only store looks like from inside `storeRun`: the SELECTs above
+   * still answer, and only the write is swallowed.
+   */
+  it('spawns nothing when the store swallows the claim write', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    // Every `session_state` INSERT now throws, which `storeRun` catches and
+    // reports as a null result — the swallowed write the old code read as a win.
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      db.exec(
+        `CREATE TRIGGER refuse_state BEFORE INSERT ON session_state
+           BEGIN SELECT RAISE(ABORT, 'attempt to write a readonly database'); END`,
+      );
+    } finally {
+      db.close();
+    }
+
+    const run = await runScript(stopHookScript(dataDir, cliPath), stopInput);
+
+    expect(run.code).toBe(0);
+    expect(await markerLines(marker)).toHaveLength(0);
+    // And no claim row either: the insert never landed, and the update end
+    // cannot create one.
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
   });
 
   it('runs one sync between Stops inside the claim TTL, not one per Stop', async () => {
@@ -7234,6 +7527,48 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
     await runScript(stopHookScript(dataDir, cliPath), stopInput);
     await runScript(stopHookScript(dataDir, cliPath), stopInput);
     expect(await markerLines(marker)).toHaveLength(1);
+  });
+
+  /**
+   * A STALE CLAIM IS TAKEN OVER BY ONE STOP, NOT BY ALL OF THEM
+   * (tenjin-agent#249).
+   *
+   * A sync that died mid-run leaves its claim behind, and the claim expires by
+   * age so the work is not stranded. Takeover used to be `clearState` then
+   * `claimState`: every Stop that read the claim as expired cleared it and
+   * re-claimed it unconditionally, so a laptop ending several sessions at once
+   * spawned a detached `tenjin sync` per Stop — the fan-out the guard exists to
+   * prevent, at its worst moment, since the machine is already busy.
+   *
+   * Eight Stops started together against an expired claim. The takeover is now
+   * one `UPDATE ... WHERE at < ?`, so seven of them change no rows and return.
+   * (state-store.test.ts holds the statement itself to that property without
+   * depending on process timing; this is the arm actually using it.)
+   */
+  it('spawns one sync when several Stops find the same expired claim', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    const staleAt = Date.now() - SYNC_CLAIM_TTL_MS - 60_000;
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, ['', SYNC_CLAIM_KEY, JSON.stringify({ at: staleAt }), staleAt]);
+    store.close();
+
+    const runs = await Promise.all(
+      Array.from({ length: 8 }, () => runScript(stopHookScript(dataDir, cliPath), stopInput)),
+    );
+    expect(runs.map((r) => r.code)).toEqual(Array.from({ length: 8 }, () => 0));
+
+    // The stub CLI is detached: wait past the first write for a second one.
+    await markerLines(marker);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(await markerLines(marker)).toHaveLength(1);
+
+    // And the claim was TAKEN, not merely read: its mark is the winner's `at`,
+    // not the dead holder's.
+    const claim = sessionState('', SYNC_CLAIM_KEY) as { at?: number } | null;
+    expect(claim?.at).toBeGreaterThan(staleAt);
   });
 
   it('never spawns without a baked CLI path', async () => {
