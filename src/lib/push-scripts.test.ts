@@ -19,6 +19,7 @@ import {
   projectId,
   recordSearch,
   repoSlug,
+  repoSlugSource,
   teamCoarseKey,
   type StoredSearch,
 } from './state-store';
@@ -2744,6 +2745,52 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   });
 
   /**
+   * A DEEP CHECKOUT IS STILL A CHECKOUT (round-3 review of #256).
+   *
+   * `originSlug(cwd) === ''` is a GATE, not just a salt: it stops the Stop hook
+   * spawning a sync and makes the failure arm record `no-remote` and ask the
+   * shelf nothing. So the walk's depth bound decides whether a feature is on,
+   * and it used to be 12 here against `tenjin sync`'s own 64 — a checkout below
+   * 12 read "no remote" on this side while the sync read the origin and would
+   * have published, silently, with nothing on any surface saying so. Both walks
+   * now take the one exported `GIT_WALK_MAX`.
+   *
+   * Twenty deep: comfortably past the old 12 and well inside the shared 64.
+   * Reverting `GIT_WALK_MAX` to 12 turns the assertion below into `no-remote`
+   * and zero requests, which is the bug this pins.
+   */
+  it('finds the origin from a checkout twenty directories below the repo root', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const repo = join(dataDir, 'deep-repo');
+    await mkdir(join(repo, '.git'), { recursive: true });
+    await writeFile(
+      join(repo, '.git', 'config'),
+      '[remote "origin"]\n\turl = git@github.com:acme/deep.git\n',
+    );
+    const deep = join(repo, ...Array.from({ length: 20 }, (_, i) => `d${i}`));
+    await mkdir(deep, { recursive: true });
+
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT, { cwd: deep, session_id: 's-deep' }),
+    );
+
+    // It ASKED, and under the deep checkout's own origin — not `no-remote`.
+    expect(stub.bodies).toHaveLength(1);
+    expect((await ledger()).filter((r) => r.reason === 'no-remote')).toHaveLength(0);
+    const local = (await pairings()).map((p) => String(p.coarse_key));
+    // THE SAME KEY `tenjin sync` WOULD PUBLISH from this directory: the sync's
+    // `findGitDir` walks the identical bound, so the two legs agree at a depth
+    // where they used to disagree.
+    expect(stub.bodies[0]!.keys[1]!.key).toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/deep.git')),
+    );
+  });
+
+  /**
    * THE GENERATED COPY OF `repoSlug`, RUN AGAINST THE EXPORT'S OWN TABLE
    * (tenjin-agent#249).
    *
@@ -2755,27 +2802,29 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
    * processes, so the copy is lifted out of the generated source and called
    * directly; the fire below then proves the lifted function is the one the arm
    * actually salts with.
+   *
+   * BY SENTINEL, NOT BY BRACE-COUNTING (round-1 nit 4 of #256). The lift used
+   * to scan for a balanced `}` without skipping string literals, so a brace
+   * inside a regex or a quoted string in a future edit of `repoSlug` would have
+   * truncated the body and evaluated whatever compiled — a test that grades a
+   * fragment. `repoSlugSource()` is the exported text itself, and the
+   * `repoSlug:begin`/`repoSlug:end` markers bound the function in it exactly;
+   * the `includes` below is what keeps this the ARM'S copy rather than a
+   * neighbouring string that merely looks like it.
    */
   it('carries a repoSlug that agrees with the exported one on every shape', () => {
     const source = pushFailureHookScript(dataDir);
-    const start = source.indexOf('function repoSlug(url) {');
+    // The generated script splices the exported text in whole and unedited, so
+    // what the sentinels bound below IS what the failure arm runs.
+    expect(source).toContain(repoSlugSource());
+    const shared = repoSlugSource();
+    const start = shared.indexOf('// repoSlug:begin');
+    const end = shared.indexOf('// repoSlug:end');
     expect(start).toBeGreaterThan(-1);
-    let depth = 0;
-    let end = -1;
-    for (let i = source.indexOf('{', start); i < source.length; i += 1) {
-      if (source[i] === '{') depth += 1;
-      else if (source[i] === '}') {
-        depth -= 1;
-        if (depth === 0) {
-          end = i + 1;
-          break;
-        }
-      }
-    }
     expect(end).toBeGreaterThan(start);
-    const generated = new Function(`${source.slice(start, end)}; return repoSlug;`)() as (
-      url: string,
-    ) => string;
+    const body = shared.slice(start, end);
+    expect(body).toContain('function repoSlug(url) {');
+    const generated = new Function(`${body}; return repoSlug;`)() as (url: string) => string;
     for (const [url, slug] of REPO_SLUG_CASES) {
       expect(generated(url), `generated repoSlug(${JSON.stringify(url)})`).toBe(slug);
       expect(generated(url), `drift on ${JSON.stringify(url)}`).toBe(repoSlug(url));

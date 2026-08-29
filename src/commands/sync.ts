@@ -11,6 +11,7 @@ import {
   shortHash,
   storeSession,
   teamCoarseKey,
+  GIT_WALK_MAX,
   STATE_PAIRING_POST_PREFIX,
   STORE_SQL,
   type Store,
@@ -710,10 +711,15 @@ function readRepoSlug(cwd: string): string | null {
 }
 
 /** Walk up from `start` for a `.git` directory (or a `.git` file pointing at
- *  one), returning the resolved git directory or null. */
+ *  one), returning the resolved git directory or null.
+ *
+ *  ⚠ {@link GIT_WALK_MAX} IS SHARED WITH THE GENERATED `originSlug` (round-3
+ *  review of #256), which is the walk the Stop hook and the failure arm gate on.
+ *  Two bounds meant a checkout below the shorter one read "no remote" there and
+ *  an origin here — nothing synced, silently, from a repo that had one. */
 function findGitDir(start: string): string | null {
   let dir = start;
-  for (let i = 0; i < 64; i += 1) {
+  for (let i = 0; i < GIT_WALK_MAX; i += 1) {
     const dotGit = join(dir, '.git');
     let stat;
     try {

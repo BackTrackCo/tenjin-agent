@@ -30,10 +30,13 @@ the Stop hook does not spawn a sync at all. Local pairings replay exactly as
 before; if the checkout later gains an origin, the next run publishes its rows.
 
 **Note for existing team shelves:** coarse keys already published under the old
-url salt are simply not republished. Nothing resets `synced_at`, so those rows
-stay as they are and no re-sync is available or needed; the keys on the shelf
-keep working for anyone still salting the old way, and match nothing after this
-release. Fine fingerprints are unaffected — they carry no salt, and they are
+url salt are simply not republished. Nothing resets `synced_at`, so no bulk
+re-sync runs and none is offered. There is a partial recovery path, though, and
+it is automatic: a row whose pairing is later promoted to `verified` is picked
+up again on `closed_at > synced_at` and PUT back, and the PUT carries freshly
+computed keys — so that row's coarse key IS rewritten under the new salt. Rows
+that never change again keep their old key, which keeps working for anyone
+still salting the old way and matches nothing after this release. Fine fingerprints are unaffected — they carry no salt, and they are
 what has been doing the matching.
 
 **A stale sync claim is taken over in one statement.** The Stop hook runs one

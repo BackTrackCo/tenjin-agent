@@ -357,6 +357,46 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
   });
 
   /**
+   * THE SYNC'S OWN WALK, AT THE SHARED BOUND (round-3 review of #256). This is
+   * the other half of the pair: the hook and the failure arm gate on the
+   * generated `originSlug`, and this leg finds the config through
+   * `findGitDir`. The two ran different bounds — 12 there, 64 here — so a
+   * checkout deeper than 12 was local-only to the hook and publishable here,
+   * and both now take the exported `GIT_WALK_MAX`. Twenty deep is past the old
+   * short bound and inside the shared one; the arm's side of the same depth is
+   * pinned in lib/push-scripts.test.ts.
+   */
+  it('publishes from a checkout twenty directories below the repo root', async () => {
+    await writeTeamConfig();
+    const repoDir = join(dir, 'deep');
+    await writeGitOrigin(repoDir, 'https://github.com/acme/deep.git');
+    const deep = join(repoDir, ...Array.from({ length: 20 }, (_, i) => `d${i}`));
+    await mkdir(deep, { recursive: true });
+    await seedPairing({
+      cwd: deep,
+      key: 'fine-hash-deep',
+      coarseKey: 'coarse-hash-deep',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: deep, provider, fetchImpl: fetch });
+
+    // Not local-only: the origin twenty levels up was found and salted with.
+    expect(result.data).toMatchObject({ synced: 1, local: 0 });
+    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
+    expect(
+      keys.some(
+        (k) =>
+          k.key ===
+          'sig_v1c:' +
+            teamCoarseKey('coarse-hash-deep', repoSlug('https://github.com/acme/deep.git')),
+      ),
+    ).toBe(true);
+  });
+
+  /**
    * ONE KEY FOR THE TWO TRANSPORTS OF ONE REPO (tenjin-agent#249). Before the
    * slug, a teammate who cloned over ssh and a teammate who cloned over https
    * published two different coarse keys for one project and never matched.

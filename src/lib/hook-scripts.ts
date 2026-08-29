@@ -2403,7 +2403,12 @@ function spawnSyncIfNeeded(config, cwd) {
   // zero forever and spawn a detached node process at EVERY turn end, for a run
   // whose only output is "Nothing to sync." The same reduction the sync itself
   // reads (\`repoSlug\` of the origin url, a file read and never a git spawn),
-  // so the two cannot disagree about whether this directory has a remote.
+  // AND THE SAME WALK: both sides bound the search for \`.git\` by the one
+  // exported \`GIT_WALK_MAX\` (round-3 review of #256). That is what makes "the
+  // two cannot disagree" true rather than nearly true — while the walks were
+  // 12 here and 64 there, a checkout deeper than 12 read "no remote" on this
+  // gate and an origin in the sync, so nothing was ever handed to the shelf
+  // from it and nothing said so.
   if (originSlug(cwd) === '') return false;
   const pending = storeCount(STORE_SQL.countUnsyncedPairings, [projectId(cwd)]);
   if (!Number.isFinite(pending) || pending === 0) return false;

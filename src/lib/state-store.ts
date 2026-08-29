@@ -3138,6 +3138,13 @@ export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
  * spellings is the scheme, the userinfo and the port, and nothing else; what
  * they agree on is the host and the path, so those two are the salt. The
  * userinfo is DROPPED rather than hashed, since a remote url can carry a token.
+ * THE PORT IS STRIPPED ON PURPOSE, and it is load-bearing rather than sloppy
+ * (external thread on the round-3 review of #256, declined as intended): it is
+ * the ONLY thing separating `ssh://git@host:2222/acme/api` from the `git@host:`
+ * and `https://host/` spellings of that same repo, so keeping it re-splits the
+ * transports this whole reduction exists to merge — and two git services on
+ * different ports of one hostname serving one path is not a shape a team shelf
+ * meets.
  * A rename or a transfer still breaks continuity; the alternatives that survive
  * one (the root commit, a committed project-id file) cost a `git` spawn or a
  * file in every repo, and against zero coarse hits on the shelf as observed on
@@ -3193,8 +3200,31 @@ export function repoSlug(url: string): string {
   return host + '/' + parts.join('/').toLowerCase();
 }
 
+/**
+ * HOW FAR UP EITHER WALK LOOKS for a `.git`, and it must be ONE number
+ * (round-3 review of #256). Two walks answer "does this checkout have a
+ * remote": the generated `originSlug` below, which the Stop hook and the
+ * failure arm read, and `findGitDir` in commands/sync.ts, which `tenjin sync`
+ * reads. They were bounded at 12 and 64, and the gap was not a nicety once
+ * `originSlug(cwd) === ''` became a GATE rather than a salt: a checkout
+ * between the two bounds read "no remote" at the hook and the failure arm —
+ * no sync spawned, `no-remote` in the ledger, no shelf query, silently — while
+ * `tenjin sync`, run by hand, found the origin and published. Both walks now
+ * take this bound, so the disagreement cannot exist rather than being unlikely.
+ *
+ * 64 is the looser of the two and the one kept: the tight bound bought nothing
+ * (a walk is a `statSync` per level, and it stops at the filesystem root
+ * anyway), while the cost of being short is a silent feature-off.
+ */
+export const GIT_WALK_MAX = 64;
+
 const REPO_SLUG_JS = String.raw`
 import { resolve as resolvePath } from 'node:path';
+
+/** Baked in from the exported {@link GIT_WALK_MAX}: the ONE bound the sync's
+ *  own \`findGitDir\` walks too, so neither side can read "no remote" in a
+ *  checkout the other reads an origin in. */
+const GIT_WALK_MAX = ${GIT_WALK_MAX};
 
 /**
  * THE SLUG for the checkout at \`cwd\`, and a slug is not a URL: the \`url\`
@@ -3209,13 +3239,16 @@ import { resolve as resolvePath } from 'node:path';
  * question alone — is there a remote at all — before spawning a sync.
  *
  * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
- * not start a process in front of a tool call. Bounded at twelve parent
- * directories, which is deeper than any checkout this arm fires in.
+ * not start a process in front of a tool call. Bounded at \`GIT_WALK_MAX\`
+ * parent directories, WHICH IS THE SYNC'S OWN BOUND (round-3 review of #256):
+ * this walk gates the spawn, so a shorter one would read "no remote" — no
+ * sync, \`no-remote\` in the ledger, no shelf query — in a deep checkout that
+ * \`tenjin sync\` would happily publish from.
  */
 function originSlug(cwd) {
   if (typeof cwd !== 'string' || cwd.length === 0) return '';
   let dir = cwd;
-  for (let i = 0; i < 12; i += 1) {
+  for (let i = 0; i < GIT_WALK_MAX; i += 1) {
     const config = gitConfigPath(dir);
     if (config !== null) return repoSlug(originUrl(config));
     const parent = dirname(dir);
@@ -3303,6 +3336,11 @@ function originUrl(configPath) {
  * publishes nothing coarse, rather than pooling every origin-less checkout on
  * the shelf into one bucket (#249, owner decision).
  */
+// repoSlug:begin — DO NOT MOVE OR DELETE. push-scripts.test.ts slices between
+// these two sentinels to run THIS copy against the shared table, so the test
+// never has to parse JS to find where the function ends (round-1 nit 4 of
+// #256: it used to brace-count, which a brace in a string literal would have
+// silently truncated).
 function repoSlug(url) {
   // THE HOST, THEN THE WHOLE PATH UNDER IT, or no match at all. Two remote
   // spellings, one alternation: a scheme url whose authority ends at the first
@@ -3329,6 +3367,7 @@ function repoSlug(url) {
   if (host.length === 0 || parts.length === 0) return '';
   return host + '/' + parts.join('/').toLowerCase();
 }
+// repoSlug:end — DO NOT MOVE OR DELETE. See the sentinel above.
 
 `;
 
