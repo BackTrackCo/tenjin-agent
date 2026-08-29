@@ -405,11 +405,14 @@ async function eventRows(): Promise<Record<string, unknown>[]> {
   const db = new DatabaseSync(path);
   try {
     const rows = db
-      .prepare('SELECT hook, tool, data FROM events ORDER BY id')
+      .prepare('SELECT hook, tool, agent_id, data FROM events ORDER BY id')
       .all() as unknown as Record<string, unknown>[];
     return rows.map((r) => ({
       hook: r.hook,
       tool: r.tool,
+      // THE COLUMN, not a `data` field (tenjin-agent#247's store v2). Flattened
+      // under the name the writer uses so an assertion reads the same either way.
+      agentId: r.agent_id ?? null,
       ...(typeof r.data === 'string' ? (JSON.parse(r.data) as Record<string, unknown>) : {}),
     }));
   } finally {
@@ -4629,10 +4632,9 @@ describe('the subagent handoff slots', () => {
 
   /**
    * The identity stamp, on the arms whose payload names no agent as well.
-   * `events.data` is the store's designated extension point, so this costs no
-   * column and no migration; a parent fire records the field as absent rather
-   * than omitting it, which is what makes "no agent" and "an older hook" two
-   * different answers in the rows.
+   * It rides the `agent_id` COLUMN that tenjin-agent#247's store v2 added, off
+   * the prelude's one `identityOf`; a parent fire records NULL, which is a
+   * first-class "the lead did this" and never "this build wrote no agent".
    */
   it('stamps the executing agent onto a parent arm row, absent as null', async () => {
     const { baseUrl } = await serve(perQuestion);
