@@ -20,6 +20,7 @@
 
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
+import { condenseSource } from './query-condense';
 import { repoSlugSource, storeSource } from './state-store';
 
 export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
@@ -809,6 +810,7 @@ async function shelfAsk(args, outerBase, shelf, shelfBaseUrl, deadline) {
       timeoutMs: leg,
       trigger: base.trigger,
       packageName: args.packageName,
+      identifiers: args.identifiers,
       limit: PUSH_SEARCH_LIMIT,
     });
   } catch {
@@ -1026,9 +1028,12 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]
  */
 const SECRET_ASSIGN_RE =
   /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
-/** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
- *  rule cannot see because that one starts at a slash. */
-const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
+/** \`postgres://user:hunter2@host/db\`: the userinfo half of a url, which the
+ *  path rule cannot see because that one starts at a slash. The host and path
+ *  after the \`@\` go with it: a one-label host (\`h\`) is under the host
+ *  rule's reach, and \`h/db\` left behind reads as an identifier to the
+ *  prompt arm. */
+const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'"]*/gi;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
@@ -1041,6 +1046,9 @@ const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
  *  which is still under any real key's length. */
 const SECRET_ENTROPY_RE =
   /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
+/** The env-var-name exception to the rule above: all caps and digits, at least
+ *  one underscore, at most 64 characters. Bounded again in the replacer. */
+const SECRET_ENV_NAME_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
 /**
  * Hostnames, and the addresses that are not names.
  *
@@ -1060,17 +1068,41 @@ const SECRET_ENTROPY_RE =
  * Title-case guard lets \`Eu.Acme.De\` through, because no rule can tell a
  * Title-cased host from a Title-cased word. Redacting a topic word is the
  * cheaper mistake, so it stands.
+ *
+ * A HOST FOLLOWED BY AN EXTENSION IS STILL A HOST, AND THE EXTENSION GOES
+ * WITH IT. \`api.acme.com.json\`, \`values.prod.acme.io.yaml\` and
+ * \`internal.corp.md\` are per-host config files, exactly the shape an nginx
+ * sites directory or a cert bundle takes, so the trailing dotted labels are
+ * consumed into the match (\`api.acme.com.tsx-beta\` included: the class runs
+ * to the next non-label character) and the whole run is blanked. A negative
+ * lookahead on the extension was tried first and did the opposite: the engine
+ * found no shorter label run to match, so the host survived WHOLE.
+ *
+ * THE ONE FILE NAME KEPT is \`<name>.test.<source ext>\`: \`test\` is on the
+ * TLD list, so \`push-scripts.test.ts\` used to leave \`.ts\` behind, and it
+ * is the file most questions about a failing suite name. A single label
+ * before \`.test\` and a source extension after it is not a host anybody
+ * runs; \`docker-compose.dev.yml\` and \`settings.local.json\` still go,
+ * which is the cheaper mistake.
  */
 const SECRET_HOST_RE =
-  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b/gi;
+  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b(?:\.[a-z0-9-]+)*/gi;
+/** The one host-shaped file name the host rule hands back: see above. */
+const SECRET_HOST_KEEP_RE = /^[a-z0-9-]+\.test\.(?:ts|tsx|js|mjs|cjs)$/i;
+/** A basename stem the path rule must not hand back whatever its extension:
+ *  the words a credential file is named with, matched as whole \`-\`/\`_\`/\`.\`
+ *  separated pieces so \`keys.ts\` (a source file) is not \`key\`. */
+const SECRET_STEM_RE =
+  /(?:^|[-_.])(?:secrets?|credentials?|service[-_]?account|tokens?|passwords?|passwd|private|certs?|certificate|keyfile|id_[a-z0-9]+)(?:[-_.]|$)/i;
 /** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
  *  so no TLD. Bounded repetition, so it adds no backtracking. */
 const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 /**
- * Drop every credential, scheme-less path, hostname, hex id and number: what
+ * Drop every credential, path, hostname, address, email and hex id: what
  * leaves the machine is the shape of the problem, never the address of it and
- * never the key to it.
+ * never the key to it. A path leaves its basename behind when the extension is
+ * a source or config one; an ALL_CAPS env-var name survives the entropy rule.
  *
  * THE CREDENTIAL RULES RUN FIRST, and they run on every arm, because the arm
  * most likely to be handed a secret is the failure arm and the failure it fires
@@ -1092,7 +1124,17 @@ function scrub(text) {
     .replace(SECRET_USERINFO_RE, ' ')
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
-    .replace(SECRET_ENTROPY_RE, ' ')
+    // AN ENV-VAR NAME IS NOT A KEY. All caps with at least one underscore
+    // (\`NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1\`) is a name somebody typed,
+    // never a base64 secret, and it is the exact token a shelf lookup keys on;
+    // anything else the floor catches still goes. BOUNDED: at most 64
+    // characters and no piece of 16+ between the underscores, because
+    // \`GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890\` is a name glued to its
+    // value, and a hex-style key is all caps and digits too. The longest
+    // piece of a real env-var name is a word.
+    .replace(SECRET_ENTROPY_RE, (m) =>
+      m.length <= 64 && SECRET_ENV_NAME_RE.test(m) && !/[A-Z0-9]{16}/.test(m) ? m : ' ',
+    )
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
     // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
     // which carries exactly as much of a customer's name as the absolute one
@@ -1118,13 +1160,32 @@ function scrub(text) {
     // inside the segment, so the HEAD of a longer one survives
     // (\`acmebank.a.b.c.d/keys/prod.ts\` -> \`acmebank\`). Narrow, and paid for
     // deliberately: widening the bound is what brings the quadratic back.
+    //
+    // THE BASENAME STAYS WHEN ITS EXTENSION IS ON THE ALLOWLIST AND ITS STEM
+    // IS NOT CREDENTIAL-SHAPED. The basename is the one exact token a shelf can
+    // match a finding on (\`migrate.yml\`, \`keys.ts\`), and dropping the
+    // whole path left the failure and dispatch arms blind to the file the
+    // question was about. The extension list is source and config only, so
+    // \`.env.production\`, \`id_rsa.pem\`, \`.key\` and \`.p12\` go with their
+    // path; the stem list catches the credential files that sit behind an
+    // innocent extension (\`prod-service-account.json\`, \`secrets.yml\`,
+    // \`id_rsa.md\`).
+    //
+    // WHAT THIS DOES NOT DO is read the stem for a customer's name: no rule can
+    // tell \`acme-bank.ts\` from \`push-scripts.ts\`, so a file NAMED for a
+    // customer travels the same way it would typed bare with no path in front
+    // of it, and only its directories are blanked. The docs say so.
     .replace(
       /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
-      ' ',
+      (m) => {
+        const base =
+          /\/(([\w-]+(?:\.[\w-]+)*)\.(?:ts|tsx|js|mjs|cjs|json|yml|yaml|md|sql|py|toml))$/.exec(m);
+        return base === null || SECRET_STEM_RE.test(base[2]) ? ' ' : ' ' + base[1] + ' ';
+      },
     )
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
     .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
-    .replace(SECRET_HOST_RE, ' ')
+    .replace(SECRET_HOST_RE, (m) => (SECRET_HOST_KEEP_RE.test(m) ? m : ' '))
     .replace(SECRET_IPV4_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -1178,6 +1239,8 @@ export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string
 const PROMPT_JS = String.raw`
 const PROMPT_MIN_CHARS = 80;
 const PROMPT_MAX_CHARS = 4000;
+// The same figure as CONDENSE_MAX_CHARS: condense() already cuts at a whole
+// token under it, so the clean() below only sees the fallback.
 const PROMPT_QUERY_CHARS = 400;
 
 async function main() {
@@ -1195,16 +1258,35 @@ async function main() {
       ? input.prompt
       : (typeof input.user_input === 'string' ? input.user_input : '');
   const prompt = raw.trim();
-  // Scrubbed BEFORE the slice, so a path at character 380 cannot survive by
-  // being cut in half, and what the ledger records is what was sent.
-  const query = clean(scrub(prompt).slice(0, PROMPT_QUERY_CHARS), PROMPT_QUERY_CHARS);
+  // Scrubbed first, then CONDENSED rather than sliced (tenjin-agent#255): the
+  // prompt is under 4,000 characters by the \`long\` gate below, so the whole
+  // of it is read for identifiers — a file name at character 500 used to be
+  // cut off by a 400-character slice — and the query the shelf sees is the
+  // identifiers first, then the prompt's own words with the filler out, at
+  // most 24 tokens and 400 characters, cut at a whole token. \`identifiers\`
+  // rides beside it on the wire in the \`pr-751\` spelling. What the ledger
+  // records is what was sent.
+  //
+  // WHEN CONDENSING LEAVES NOTHING the scrubbed head goes instead. A prompt of
+  // seven three-word questions ("does it build? does it lint? ...") has no
+  // identifier and no clause of four words, so condense() returns '' — and an
+  // empty query still spends a request on both shelves and writes a row that
+  // says nothing. The 400-character head is what this arm sent before #255.
+  const scrubbed = scrub(prompt);
+  const identifiers = identifiersOf(scrubbed);
+  const condensed = condense(scrubbed);
+  const query = clean(
+    condensed.length > 0 ? condensed : scrubbed.slice(0, PROMPT_QUERY_CHARS),
+    PROMPT_QUERY_CHARS,
+  );
   // Why this prompt will not be looked up, or null. Decided BEFORE the store is
   // opened, so the row below can say so, and applied after it, so the row is
   // written either way.
   //  - short/long: outside the size window.
   //  - slash: a harness command, not a question.
   //  - words: under three real words there is no question here, only "keep
-  //    going" — not worth a request.
+  //    going" — not worth a request. Read off the SCRUBBED prompt, not the
+  //    condensed query: three identifiers and no prose is a question.
   const skipped =
     prompt.length < PROMPT_MIN_CHARS
       ? 'short'
@@ -1212,7 +1294,7 @@ async function main() {
         ? 'long'
         : prompt.startsWith('/')
           ? 'slash'
-          : wordCount(query) < 3
+          : wordCount(scrubbed) < 3
             ? 'words'
             : null;
   if (prompt.length === 0) return quiet();
@@ -1239,8 +1321,9 @@ async function main() {
   // a "/clear" and a one-line correction all turned over the turn and none of
   // them was on record. The row is what pushDecide would have opened — it is
   // handed the uid so the lookup does not open a second one — plus \`skipped\`
-  // when this arm went no further. A skipped prompt's query is the same
-  // scrubbed, capped text a looked-up one records.
+  // when this arm went no further. A looked-up prompt records the condensed
+  // query it sent; a skipped one sent nothing, so its row keeps the scrubbed
+  // prompt text — a "yes" is on record as "yes", not as an empty query.
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
@@ -1248,7 +1331,7 @@ async function main() {
     agentId,
     data: {
       event: 'UserPromptSubmit',
-      query: clean(query, 512),
+      query: clean(skipped === null ? query : scrubbed, 512),
       ...(skipped === null ? {} : { skipped }),
     },
   });
@@ -1276,6 +1359,7 @@ async function main() {
     trigger: 'prompt',
     event: 'UserPromptSubmit',
     query,
+    identifiers,
     config,
     sessionId,
     agentId,
@@ -1294,7 +1378,7 @@ main().catch(quiet);
 `;
 
 export function pushPromptHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource(PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
+  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource(PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${condenseSource()}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
 }
 
 /**
