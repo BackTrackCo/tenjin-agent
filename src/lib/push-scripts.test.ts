@@ -7259,12 +7259,12 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
     const call = JSON.parse(calls[0] ?? '{}') as { argv: string[]; cwd: string };
     // `--cwd` CARRIES THE PAYLOAD'S OWN STRING (tenjin-agent#249). The child's
     // working directory is set too, but `process.cwd()` inside it is that path
-    // RESOLVED — on macOS the tmpdir alone proves the difference, since the
-    // payload says /var/... and the child reads /private/var/... — and a
-    // `projectId` over the resolved path scopes to a project whose rows the
-    // failure arm never wrote.
+    // RESOLVED (on macOS the tmpdir shows it: the payload says /var/... and the
+    // child reads /private/var/...; on Linux CI /tmp is not a symlink, so the
+    // two are equal there — which is why only the resolved-equality is pinned,
+    // never the inequality). A `projectId` over the resolved path would scope
+    // to a project whose rows the failure arm never wrote; the flag prevents it.
     expect(call.argv).toEqual(['sync', '--cwd', cwd]);
-    expect(call.cwd).not.toBe(cwd);
     expect(realpathSync(call.cwd)).toBe(realpathSync(cwd));
   });
 
