@@ -36,33 +36,48 @@ export const PUSH_INJECT_MAX_PER_SESSION = 5;
  * case this sidecar exists for: an always-on loop session keeps one session id
  * for hours, so its opening minutes spend the whole allowance on whatever fires
  * most often — ordinary prompts — and every later failure or research lookup is
- * skipped for the rest of the run. A live run measured 62% of fires skipped on
- * `lookup-cap`, prompts and failures between them accounting for all of it.
- * Nothing refilled it either: the only thing that ever gave a long session its
- * budget back was the 256 KB ledger tail scrolling its own early rows out of
- * view — a refill keyed on write volume rather than on elapsed time.
+ * skipped for the rest of the run. So: a rolling window that recovers on its
+ * own, and one bucket per trigger so a prompt flood cannot spend the failure
+ * arm's allowance. The buckets are counted MACHINE-WIDE rather than per
+ * session: concurrent sessions on one laptop are one machine's worth of
+ * requests however many session ids they carry. The per-session `seen` set is
+ * untouched: once-per-piece is a property of the conversation being injected
+ * into, not of the machine.
  *
- * So: a rolling window that recovers on its own, and one bucket per trigger so a
- * prompt flood cannot spend the failure arm's allowance. The buckets ARE the
- * reserve — there is no shared pool left for a busy arm to drain — and they are
- * counted MACHINE-WIDE rather than per session, because concurrent sessions on
- * one laptop are one machine's worth of requests however many session ids they
- * carry. The per-session `seen` set is untouched: once-per-piece is a property
- * of the conversation being injected into, not of the machine.
+ * THE NUMBER IS A RUNAWAY GUARD, NOT A BUDGET (tenjin-agent#258). At 8 an hour
+ * machine-wide, four or five concurrent sessions left each one ~2 prompt
+ * lookups an hour: 65 `lookup-cap` skips in a week on one machine, eleven in a
+ * row inside the one confusion a teammate's note would have answered
+ * (tenjin-agent#255). A lookup is one ~0.4 s search and one embedding call, so
+ * fifteen an hour is noise for a shelf, and while the team experiment is being
+ * measured every skipped lookup is a data point lost. 60 an hour still stops a
+ * stuck loop from hammering a shelf, and the adaptive cooldown below still
+ * scales it on evidence once anything is graded.
+ *
+ * THE MACHINE-WIDE CEILING, so the next reader decides on the same number: six
+ * arms at 60 is 360 lookups an hour, 720 with the hot rule doubling every arm
+ * — about 1,440 shelf requests an hour at one search plus one embedding each,
+ * nine times the 80 this shipped with. It is a guard against a runaway loop,
+ * not against a merely chatty one; the shelf's own rate limit is the bound on
+ * that, and this constant is the only client-side bound on shelf egress. An
+ * arm added to this table raises the ceiling by 60; the test that pins the
+ * band (push-scripts.test.ts, "keeps the machine-wide ceiling") is what makes
+ * that a decision rather than a drift.
  */
 export const PUSH_LOOKUP_WINDOW_MS = 60 * 60 * 1000;
 export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
-  prompt: 8,
-  failure: 8,
-  research: 8,
-  subagent: 8,
-  read: 4,
-  churn: 4,
+  prompt: 60,
+  failure: 60,
+  research: 60,
+  subagent: 60,
+  read: 60,
+  churn: 60,
 };
-/** What a trigger not named above may spend. The floor, not the ceiling: an arm
- *  that reaches this line is one nobody sized a bucket for, and the safe reading
- *  of an unsized arm is the cheapest one. */
-export const PUSH_LOOKUP_CAP_DEFAULT = 4;
+/** What a trigger not named above may spend: the same guard, since the guard
+ *  is about a stuck loop, not about which arm is worth the spend. Note that
+ *  it also means an unsized arm raises the machine-wide ceiling by 60; size
+ *  a new arm in the table above deliberately rather than falling through. */
+export const PUSH_LOOKUP_CAP_DEFAULT = 60;
 /**
  * The adaptive cooldown (tenjin-agent#212; CommonTrace `retrieval.py`): the cap
  * above scales from EVIDENCE. The SessionStart primer fetches the shelf's

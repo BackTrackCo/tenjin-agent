@@ -39,6 +39,8 @@ import {
   pushFailureHookScript,
   pushPromptHookScript,
   pushSubagentHookScript,
+  PUSH_LOOKUP_CAPS_PER_WINDOW,
+  PUSH_LOOKUP_CAP_DEFAULT,
 } from './push-scripts';
 import {
   dispatchHookScript,
@@ -1284,8 +1286,9 @@ describe('the lookup bucket is read from the database', () => {
   it('counts attempts machine-wide and stops the arm at the cap', async () => {
     const store = await openStore(dataDir);
     const now = Date.now();
-    // Eight prompt lookups from a DIFFERENT session: the bucket is machine-wide.
-    for (let i = 0; i < 8; i += 1) {
+    // A full prompt bucket from a DIFFERENT session: the bucket is machine-wide.
+    const cap = PUSH_LOOKUP_CAPS_PER_WINDOW.prompt ?? PUSH_LOOKUP_CAP_DEFAULT;
+    for (let i = 0; i < cap; i += 1) {
       store?.run(STORE_SQL.insertInjection, [
         `uid-${i}`,
         null,
@@ -1312,7 +1315,7 @@ describe('the lookup bucket is read from the database', () => {
         null,
       ]);
     }
-    expect(store?.get(STORE_SQL.bucketCount, ['prompt', now - 1000])).toEqual({ n: 8 });
+    expect(store?.get(STORE_SQL.bucketCount, ['prompt', now - 1000])).toEqual({ n: cap });
     // A window that starts after the rows sees nothing.
     expect(store?.get(STORE_SQL.bucketCount, ['prompt', now + 1000])).toEqual({ n: 0 });
     // Another arm's bucket is untouched.

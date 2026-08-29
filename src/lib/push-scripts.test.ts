@@ -38,8 +38,12 @@ import {
 } from './hook-scripts';
 import {
   PUSH_CACHE_TTL_MS,
+  PUSH_COOLDOWN_COLD_DIVISOR,
+  PUSH_COOLDOWN_HOT_FACTOR,
   PUSH_FINDING_MAX_CHARS,
   PUSH_FINDING_TAG,
+  PUSH_LOOKUP_CAPS_PER_WINDOW,
+  PUSH_LOOKUP_CAP_DEFAULT,
   PUSH_PROMPT_BODY_TIMEOUT_MS,
   PUSH_PROMPT_BUDGET_MS,
   PUSH_PROMPT_SEARCH_TIMEOUT_MS,
@@ -184,6 +188,14 @@ const RESOURCE_ID = '11111111-1111-4111-8111-111111111111';
 /** Rank 2: the candidate a strong rank 1 must not drag in beside it. */
 const SECOND_RESOURCE_ID = '33333333-3333-4333-8333-333333333333';
 const BODY_MD = 'Pin the resolver to 4.1 and the parse stops throwing. Verified 2026-08-20.';
+/** The failure arm's cap under a cold cooldown (≥ 20 graded, < 5% used). */
+const FAILURE_COLD_CAP = Math.max(
+  1,
+  Math.floor(
+    (PUSH_LOOKUP_CAPS_PER_WINDOW.failure ?? PUSH_LOOKUP_CAP_DEFAULT) / PUSH_COOLDOWN_COLD_DIVISOR,
+  ),
+);
+
 const SESSION = 'sess-1';
 
 /**
@@ -2444,9 +2456,9 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     const team = await serve(stub.handler);
     const pub = await serve(echo());
     await teamMode(team, pub);
-    // What the primer stored for THIS session: failure is cold (≥ 20 hits,
-    // < 5% used), so its cap is floor(8/3) = 2 — and two failure lookups are
-    // already spent on the machine, by another session.
+    // What the primer stored for THIS session: failure is cold (≥ 20 graded,
+    // < 5% used), so its cap is floor(cap/3) — and that many failure lookups
+    // are already spent on the machine, by another session.
     const store = await openStore(dataDir);
     store?.run(STORE_SQL.setState, [
       SESSION,
@@ -2458,7 +2470,7 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
       }),
       Date.now(),
     ]);
-    for (let i = 0; i < 2; i += 1) {
+    for (let i = 0; i < FAILURE_COLD_CAP; i += 1) {
       store?.run(STORE_SQL.insertInjection, [
         `seed-failure-${i}`,
         null,
@@ -3257,7 +3269,33 @@ describe('what the arms put on the wire', () => {
   });
 });
 
+/** The prompt arm's base cap, and what the cooldown makes of it: the tests
+ *  read the constants rather than restating them, so a change to the guard
+ *  value changes nothing here. */
+const PROMPT_CAP = PUSH_LOOKUP_CAPS_PER_WINDOW.prompt ?? PUSH_LOOKUP_CAP_DEFAULT;
+const HOT_CAP = PROMPT_CAP * PUSH_COOLDOWN_HOT_FACTOR;
+const COLD_CAP = Math.max(1, Math.floor(PROMPT_CAP / PUSH_COOLDOWN_COLD_DIVISOR));
+
 describe('the lookup budget (rolling window, per trigger)', () => {
+  /**
+   * THE GUARD IS THE NUMBER. Every other assertion in this block reads the
+   * constants, so it agrees with any value — including one that removes the
+   * guard in practice. This one pins the band, over the machine-wide total
+   * rather than one bucket, so raising a single arm or adding a seventh
+   * cannot slip past it: six arms at 60 is 360 lookups an hour, 720 with the
+   * hot rule doubling every arm, and that is the ceiling this shipped with.
+   */
+  it('keeps the machine-wide ceiling inside the band the guard was sized for', () => {
+    const caps = Object.values(PUSH_LOOKUP_CAPS_PER_WINDOW);
+    const total = caps.reduce((sum, cap) => sum + cap, 0);
+    expect(caps).toHaveLength(6);
+    expect(total).toBe(360);
+    expect(total * PUSH_COOLDOWN_HOT_FACTOR).toBe(720);
+    // An unnamed arm is the same guard, not a smaller one and not a bigger one.
+    expect(PUSH_LOOKUP_CAP_DEFAULT).toBe(60);
+    for (const cap of caps) expect(cap).toBe(60);
+  });
+
   const OTHER_SESSION = 'sess-someone-else';
   const QUESTION =
     'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps';
@@ -3307,7 +3345,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
   it('stops the arm whose bucket is full, without asking anything', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    await seedLookups('prompt', 8, 0);
+    await seedLookups('prompt', PROMPT_CAP, 0);
 
     const run = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(run.code).toBe(0);
@@ -3334,7 +3372,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     await pushOn(baseUrl);
     // Well past the prompt cap, and not by one: a flood does not get to bleed
     // into a neighbouring bucket at any depth.
-    await seedLookups('prompt', 40, 0);
+    await seedLookups('prompt', PROMPT_CAP * 5, 0);
 
     const blocked = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(blocked.stdout).toBe('');
@@ -3352,7 +3390,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     await pushOn(baseUrl);
     // The same flood, an hour and a minute ago. A long-lived session recovers on
     // the clock; nothing has to restart, and no file has to grow.
-    await seedLookups('prompt', 40, 61 * 60 * 1000);
+    await seedLookups('prompt', PROMPT_CAP * 5, 61 * 60 * 1000);
 
     const run = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(injected(run)).toContain(BODY_MD);
@@ -3376,7 +3414,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
   it('counts every capped fire, with nothing cached and nothing re-parsed', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    await seedLookups('prompt', 8, 0);
+    await seedLookups('prompt', PROMPT_CAP, 0);
 
     for (let i = 0; i < 3; i += 1) {
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
@@ -3401,7 +3439,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
   it('is machine-wide: a second session sees the same exhausted bucket', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    await seedLookups('prompt', 8, 0);
+    await seedLookups('prompt', PROMPT_CAP, 0);
     await runScript(pushPromptHookScript(dataDir), promptInput);
 
     const other = await runScript(
@@ -3460,7 +3498,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
       // Full under the base cap of 8, under 16 with the doubling.
-      await seedLookups('prompt', 8, 0);
+      await seedLookups('prompt', PROMPT_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3471,7 +3509,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
-      await seedLookups('prompt', 16, 0);
+      await seedLookups('prompt', HOT_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(run.stdout).toBe('');
@@ -3483,8 +3521,8 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
-      // 2 spent: under the base cap of 8, at the cooled cap of floor(8/3) = 2.
-      await seedLookups('prompt', 2, 0);
+      // 2 spent: under the base cap of 8, at the cooled cap of floor(cap/3).
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(run.stdout).toBe('');
@@ -3503,7 +3541,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       for (let i = 1; i <= 9; i += 1) {
         const run = await runScript(pushPromptHookScript(dataDir), promptInput);
@@ -3524,7 +3562,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
       // Past the BASE cap: the escape is for fires only the cooled cap stops.
-      await seedLookups('prompt', 8, 0);
+      await seedLookups('prompt', PROMPT_CAP, 0);
 
       for (let i = 1; i <= 10; i += 1) {
         expect((await runScript(pushPromptHookScript(dataDir), promptInput)).stdout).toBe('');
@@ -3544,11 +3582,11 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       // 40 hits, 19 graded, none used: rate 0, under the 5% cold rate. The old
-      // floor read 40 and cut the cap to floor(8/3) = 2, suppressing the fire
+      // floor read 40 and cut the cap to floor(cap/3), suppressing the fire
       // below; the graded floor reads 19, one short of 20. With the cut case
       // below at exactly 20, the pair pins the boundary from both sides.
       await seedRates({ prompt: { hits: 40, used: 0, wrong: 19 } });
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3562,7 +3600,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       // The same 40 hits, now with 20 graded and none used: at the floor, and
       // the rate of 0 is under 5%.
       await seedRates({ prompt: { hits: 40, used: 0, wrong: 20 } });
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(run.stdout).toBe('');
@@ -3585,7 +3623,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 867, used: 0, wrong: 0 } });
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3597,7 +3635,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 867, used: 0, wrong: 0 } });
-      await seedLookups('prompt', 8, 0);
+      await seedLookups('prompt', PROMPT_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(run.stdout).toBe('');
@@ -3611,7 +3649,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       // under another session does not cool this one.
       await seedRates({ research: { hits: 30, used: 1, wrong: 29 } });
       await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } }, 'sess-someone-else');
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3634,11 +3672,11 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       // 1e999 parses to Infinity: uncoerced, `used + wrong` clears the 20-graded
-      // floor forever and the rate is 0, which cools the cap to floor(8/3) = 2
+      // floor forever and the rate is 0, which cools the cap to floor(cap/3)
       // and suppresses the fire below. Coerced, both counts are 0 and the guard
       // returns the base cap.
       await seedRawRates('{"hits":30,"used":0,"wrong":1e999}');
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3654,7 +3692,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       // reason. The cap must be base because the counts are not counts, not
       // because NaN loses every comparison.
       await seedRawRates('{"hits":30,"used":1e999,"wrong":-1e999}');
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3666,7 +3704,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRawRates('{"hits":-1,"used":-1,"wrong":-1}');
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(run)).toContain(BODY_MD);
@@ -3680,7 +3718,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const store = await openStore(dataDir);
       store?.run(STORE_SQL.setState, [SESSION, 'trigger_rates', '"not an object"', Date.now()]);
       store?.close();
-      await seedLookups('prompt', 2, 0);
+      await seedLookups('prompt', COLD_CAP, 0);
 
       expect(injected(await runScript(pushPromptHookScript(dataDir), promptInput))).toContain(
         BODY_MD,
