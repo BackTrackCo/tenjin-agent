@@ -71,11 +71,20 @@ const EVIDENCE_CHARS = 200;
 /** A session id is used as a filename, so it is checked like one. */
 const SESSION_ID_RE = /^[A-Za-z0-9-]{1,80}$/;
 
-/** An agent id becomes a filename too (`agent-<id>.jsonl`), so it gets the same
- *  treatment. This is the SAME bound the hook prelude's `identityOf` applies
- *  before it records one; a test in grade.test.ts pins the two together, because
- *  an id one side accepts and the other refuses is a row that can never be
- *  graded. */
+/**
+ * An agent id becomes a filename too (`agent-<id>.jsonl`), so it gets the same
+ * treatment as a session id.
+ *
+ * THE ONLY DEFINITION, and every other reader takes it from here rather than
+ * restating it: `prelude` interpolates it into the rendered scripts, where
+ * `identityOf` and the capture ask's flag splice both read that one declaration,
+ * and `publish --agent` tests against this constant directly. The splice and
+ * `--agent` used to share a wider `shell-safe` copy admitting `.` and `:` on the
+ * reasoning that only shell metacharacters matter in a command line: `:` is the
+ * separator `agentKey` joins on, so an id carrying one keys a child's rows into
+ * another child's range, and an id one reader accepts and another refuses is a
+ * row that can never be graded or reported.
+ */
 export const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** The only two row kinds that decide anything; see the module note. */

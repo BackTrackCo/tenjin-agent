@@ -146,6 +146,27 @@ const outcomeInput = {
 
 const publishInput = {
   file: z.string().optional().describe('Path to the Markdown file to publish'),
+  // A SOURCE, not a second publish path: the same scan, consent cascade, confirm
+  // and pricing govern it. The ONE gate that is its own is the cross-project
+  // confirm, and it is described because `full-auto` clears the consent cascade
+  // and does not clear this: a client that never sees it named meets an
+  // unexplained refusal carrying `details.crossProject`.
+  finding: z
+    .string()
+    .optional()
+    .describe(
+      'Publish a stored subagent finding as the body instead of a file, by the id the capture ask printed; pass a file or this, never both. The queue is machine-wide, so a finding captured in another project returns NEEDS_CONFIRMATION with details.crossProject until you pass yes:true, in every mode including full-auto',
+    ),
+  dryRun: z
+    .boolean()
+    .optional()
+    .describe('Report what would be published, whole body included, and write and spend nothing'),
+  discard: z
+    .boolean()
+    .optional()
+    .describe(
+      'With finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again. Nothing is sent anywhere, and it is permanent: a finding captured in another project takes the same yes:true as publishing one. Never send it with dryRun:true, which is a usage error: read the finding in one call, discard it in another',
+    ),
   // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
     .union([z.string(), z.array(z.string())])
@@ -185,7 +206,12 @@ const publishInput = {
     .describe(
       'Exact-match keys this piece answers by-key lookups on, each `<kind>=<value>` with kind fingerprint | package_version | command_head | repo (max 32; needs KNOWLEDGE_KEYS on the shelf)',
     ),
-} satisfies Record<keyof PublishArgs, z.ZodTypeAny>;
+  // `agent` is deliberately NOT exposed here. It records which harness agent ran
+  // a publish, and the only thing that knows that is the SubagentStop capture
+  // ask, which hands the child a CLI command (tenjin-agent#228). An MCP caller
+  // has no id of its own to pass, so the field could only carry a value somebody
+  // made up, and attribution nobody can check is worse than none.
+} satisfies Record<Exclude<keyof PublishArgs, 'agent'>, z.ZodTypeAny>;
 
 const editInput = {
   postId: z.string().describe('The uuid of your own post to show or update'),
@@ -462,23 +488,33 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Publish a piece',
       description:
-        'Publish a Markdown file as a paid or free piece with an optional ' +
+        "Publish a Markdown file, or a finding one of this session's subagents stated at its own " +
+        'end (finding:"<id>", the id the capture ask printed), as a paid or free piece with an optional ' +
         'answer card. Gated by a deterministic local scan and your publish.mode consent: in review ' +
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +
-        'price, findings, card, target) for you to show the user before re-calling with yes:true. A ' +
-        'hard block (a live secret) returns PUBLISH_BLOCKED and is NEVER cleared by yes or any mode. ' +
+        'price, findings, card, target, and for a stored finding its whole body and the child that ' +
+        'wrote it under details.finding) for you to show the user before re-calling with yes:true. ' +
+        'dryRun:true returns the same body with nothing published or spent, and reports a hard block rather than refusing on it, which makes it the read path for a blocked finding; discard:true drops a stored finding from the local queue so no later ask offers it, and the two are separate calls (sending both is a usage error, since dryRun writes nothing and a discard is permanent). A ' +
+        'hard block (a live secret) returns PUBLISH_BLOCKED on a real publish and is NEVER cleared by yes or any mode. ' +
         'The marketplace scans server-side as well, so either refusal can also arrive AFTER the ' +
         'local scan passed, carrying findings marked source:"server" that a yes:true given before ' +
         'them does not clear; render those and ask again. ' +
         'The wallet signs the write locally; the key never leaves this machine.',
       inputSchema: publishInput,
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+      // DESTRUCTIVE, because `discard` is: it drops a stored finding
+      // permanently and no capture ask offers it again. The publish half alone
+      // would not be, but one tool carries one annotation and the honest one is
+      // the stronger.
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
     },
     async (args) =>
       runCore('publish', (ctx) =>
         runPublish(
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
+            ...(args.finding !== undefined ? { finding: args.finding } : {}),
+            ...(args.dryRun !== undefined ? { dryRun: args.dryRun } : {}),
+            ...(args.discard !== undefined ? { discard: args.discard } : {}),
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),

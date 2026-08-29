@@ -183,10 +183,15 @@ export function parsePushModeFlag(value: string, flagName: string): PushMode {
 
 /**
  * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
- * notes half): `block` raises a blocking reason, once per session, when the
- * session carried a research signal (a search it asked for, or a row showing an
- * arm actually surfaced something) and nothing has captured it yet; `nudge` says the same thing as additionalContext
- * with no block; `off` is silent. Default `off`.
+ * notes half): `block` raises a blocking reason when the
+ * session carried a research signal (a search it asked for, a row showing an
+ * arm actually surfaced something, or a subagent finding on the queue) and
+ * nothing has captured it yet, and it is also the one mode in which a subagent
+ * is asked at its own end; `nudge` says the same thing to the parent as
+ * additionalContext, blocks nobody, and never spends a child a turn, which
+ * makes it the "parent asks, child never blocked" switch; `off` is silent
+ * everywhere. Default `off`. The parent's ask fires once per session plus once
+ * for anything that arrives afterwards and has not been named.
  */
 export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);
 export type CaptureMode = z.infer<typeof CaptureModeSchema>;

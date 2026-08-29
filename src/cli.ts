@@ -575,7 +575,32 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('publish [file]'))
     .description(
-      'Publish a Markdown file as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the file hard-blocks, and soft findings need --yes',
+      "Publish a Markdown file, or a finding one of this session's subagents stated at its own end (--finding <id>), as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the body hard-blocks, and soft findings need --yes",
+    )
+    // The queued child finding named by the capture ask, published as the body
+    // through this same pipeline (tenjin-agent#228). It is a SOURCE, not a second
+    // publish path: consent, the confirm, the scan and pricing are the ones above.
+    .option(
+      '--finding <id>',
+      'publish a stored subagent finding instead of a file, by the id the capture ask printed; in review mode the confirm prints the whole stored body, and --dry-run prints it without publishing',
+    )
+    .option(
+      '--dry-run',
+      'print what would be published, whole body included, and exit without writing or spending',
+    )
+    // NO IS FINAL. Without a discard the only thing that took a finding off the
+    // queue was a publish, so a declined one was re-offered by every session's
+    // first ask for the next eight hours.
+    .option(
+      '--discard',
+      'with --finding, and never with --dry-run: take that stored finding off the local queue without publishing it, so no capture ask offers it again',
+    )
+    // ATTRIBUTION, NOT AUTHORITY: it changes no gate, no shelf and no price. The
+    // SubagentStop capture ask fills it in so a child that publishes from its own
+    // sidechain is visible to the session that dispatched it (tenjin-agent#228).
+    .option(
+      '--agent <id>',
+      "record this publish under the harness agent id that ran it, so the dispatching session's turn end can report it; it changes nothing about consent, the scan, the price or the shelf",
     )
     .option(
       '--search-id <id>',
@@ -615,6 +640,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
+            ...(typeof o.finding === 'string' ? { finding: o.finding } : {}),
+            ...(o.dryRun === true ? { dryRun: true } : {}),
+            ...(o.discard === true ? { discard: true } : {}),
+            ...(typeof o.agent === 'string' ? { agent: o.agent } : {}),
             ...(Array.isArray(o.searchId) && o.searchId.length > 0
               ? { searchId: o.searchId as string[] }
               : {}),

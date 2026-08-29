@@ -1308,11 +1308,12 @@ describe('runInstall: interactive walkthrough', () => {
   });
 
   /**
-   * With the experiment armed the disclosure has to name the five extra events
-   * the arms fire on and say, in its own words, that none of them can block or
-   * change a tool call. It also has to stop reporting the six push entries
-   * inside the search-hook count, which is the number an operator reads to
-   * decide whether the experiment wired anything at all.
+   * With the experiment armed the disclosure has to name the extra events the
+   * arms fire on and say, in its own words, that none of them can block or change
+   * a tool call, while naming the one arm that holds a stopping child open for a
+   * turn (tenjin-agent#228). It also has to stop reporting the seven push entries
+   * inside the search-hook count, which is the number an operator reads to decide
+   * whether the experiment wired anything at all.
    */
   it('discloses the arms and counts them apart, once push is on', async () => {
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
@@ -1326,18 +1327,35 @@ describe('runInstall: interactive walkthrough', () => {
       'Every arm only adds context beside the call; none can block or change it.',
     );
     expect(text).toContain(
-      'The push experiment is on, so 6 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
+      'The push experiment is on, so 7 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
     );
     // ...and not the old "beside these", which put the widened WebSearch entry
     // outside the set of arms it belongs to.
     expect(text).not.toContain('more hook entries run beside these');
-    expect(text).toContain('Turn it off: tenjin push off');
+    // The second thing an armed sidecar does to the harness, disclosed in the
+    // same breath as the deny: it costs a subagent one more turn, and that turn
+    // can end in a PUBLISH with nothing further asked of the operator. The
+    // disclosure said the opposite ("nothing is sent anywhere") after the design
+    // moved from fencing to the parent to asking the child to publish, which is
+    // the one line where an operator decides whether to arm any of this.
+    expect(text).toContain(
+      'the SubagentStop arm spends one more turn of that subagent asking it to PUBLISH its durable finding itself',
+    );
+    expect(text).toContain(
+      "under this machine's publish.mode, so under auto with a clean scan, or full-auto, a piece goes to your shelf with nothing further asked of you",
+    );
+    expect(text).toContain(
+      'Only when that publish refuses, or the subagent cannot run it, is the finding recorded on this machine, unpublished',
+    );
+    // The claim the old text made, which was false at this head.
+    expect(text).not.toContain('nothing is sent anywhere');
+    expect(text).toContain('Turn it all off: tenjin push off');
     // Three search EVENTS wired (PreToolUse carries two of the four base
-    // entries), and the six push entries reported as their own count rather than
-    // folded into that number — which is what the combined count used to do.
-    // Without the split this line reads 'auto mode, 7 hook event(s)'.
+    // entries), and the seven push entries reported as their own count rather
+    // than folded into that number — which is what the combined count used to
+    // do. Without the split this line reads 'auto mode, 8 hook event(s)'.
     expect(text).toContain('auto mode, 3 hook event(s) registered');
-    expect(text).toContain('Push arms: 6');
+    expect(text).toContain('Push arms: 7');
   });
 
   /**
@@ -1434,7 +1452,7 @@ describe('runInstall: interactive walkthrough', () => {
     const text = human(res);
     expect(text).not.toContain('0 hook event(s)');
     expect(text).toContain('already registered');
-    expect(text).toContain('Push arms: 6');
+    expect(text).toContain('Push arms: 7');
   });
 
   // The disclosure names the count, the file and the undo. It does NOT recite the

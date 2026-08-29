@@ -434,6 +434,38 @@ describe('session command group', () => {
 });
 
 /**
+ * The stored-finding source on `publish`, at the dispatcher.
+ *
+ * There is no `finding` COMMAND GROUP to reach the queue with: the id the
+ * capture ask prints is an argument to the command the ask already names, so
+ * what has to hold here is that the flag exists and that a wrong id fails the
+ * way every other missing resource in this CLI does — before any wallet touch.
+ */
+describe('publish --finding', () => {
+  it('is registered on publish rather than as a command group of its own', async () => {
+    const help = captureIo();
+    expect(await main(['publish', '--help'], help.io)).toBe(0);
+    expect(help.stdout()).toContain('--finding <id>');
+    expect(help.stdout()).toContain('--dry-run');
+
+    const gone = captureIo();
+    expect(await main(['finding', 'list'], gone.io)).toBe(2);
+  });
+
+  it('reports an unknown id as not found', async () => {
+    const cap = captureIo();
+    expect(await main(['publish', '--finding', 'no-such-id', '--json'], cap.io)).toBe(1);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('RESOURCE_NOT_FOUND');
+  });
+
+  it('refuses a file and an id together rather than picking one', async () => {
+    const cap = captureIo();
+    expect(await main(['publish', 'post.md', '--finding', 'abc', '--json'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});
+
+/**
  * The post-command skills self-heal, at the dispatcher. It runs after the
  * envelope, so what matters here is that a command's contract is untouched by it;
  * the heal's own behavior is covered in lib/skill-heal.test.ts, and the packed

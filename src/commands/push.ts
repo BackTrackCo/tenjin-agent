@@ -75,7 +75,7 @@ export interface PushOnDeps {
  * command used to call `wireSearchHooks` straight past both of them:
  *
  *  - `hooks.webSearch: off` is the kill switch for this whole bundle, and
- *    `install` on that setting writes NOTHING into settings.json. Wiring six
+ *    `install` on that setting writes NOTHING into settings.json. Wiring seven
  *    more entries there because a different verb was typed would make `off` mean
  *    something different depending on which command you reached for, so this
  *    refuses and names the command that lifts it. Refused BEFORE the config
@@ -86,8 +86,9 @@ export interface PushOnDeps {
  *    that statement: it only means no past install passed `--harness`, which is
  *    the common case and wires as before.
  *
- * And a run that does wire six entries into the operator's home has to disclose
- * what they do, in the same words `install` uses.
+ * And a run that does wire seven entries into the operator's home has to disclose
+ * what they do, in the same words `install` uses, including the one arm that can
+ * hold a stopping subagent open for a turn.
  */
 export async function runPushOn(
   ctx: CommandContext,

@@ -398,10 +398,21 @@ human can pay.
 
 Everything that mutates stays in a mutation-capable, human-gated context:
 `publish`, `edit`, `delete`, `buy`, `send`,
-`session start`, `wallet create`, `config set`, `install`. In particular, do not
-delegate publishing what a subagent just derived: bring the finding back and
-publish it from the context that can ask the user, and never delegate `delete` at
-all: it is irreversible, and a subagent has no one to ask.
+`session start`, `wallet create`, `config set`, `install`. Never delegate
+`delete` at all: it is irreversible, and a subagent has no one to ask.
+
+Publishing what a subagent derived is the one exception, and it is a narrow one.
+Do not hand a subagent a publish as a task. What the SubagentStop capture arm does
+is different: at that subagent's own end, with `hooks.capture` on, the arm asks it
+once to publish the finding it just settled, and that publish runs the same local
+scan and the same `publish.mode` consent as any other, in the same directory. So
+under `review` it refuses and the subagent states the finding instead, for you to
+publish; under `auto` with a clean scan, or `full-auto`, it publishes. Your own
+turn end then reports what your subagents published.
+
+That arm runs only under `hooks.capture block`. `nudge` asks you at your own turn
+end and blocks nothing, subagents included, which is the setting to pick if you
+want the prompt without a subagent ever losing a turn; `off` asks nobody.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
 repo, not the network: `search` and `outcome` POST off-machine (a question, a

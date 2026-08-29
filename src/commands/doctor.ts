@@ -1246,10 +1246,18 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
  * The push experiment's TWO halves, asked separately, because either one alone
  * reports a healthy sidecar that does nothing: the generated scripts on disk
  * with no settings.json entries pointing at them (a `push on` whose settings
- * write refused), or six entries pointing at scripts that are gone (a
- * half-finished uninstall, a moved data dir). Six entries across five events,
+ * write refused), or seven entries pointing at scripts that are gone (a
+ * half-finished uninstall, a moved data dir). Seven entries across six events,
  * so "half-wired" is a state with several ways in. Both counts are read from
  * the writer's own plan rather than stated here.
+ *
+ * ONE OF THOSE WAYS IN IS AN UPGRADE, and it needs its own sentence. `tenjin
+ * update` refreshes hook BODIES and materializes no new surface
+ * (tenjin-agent#224), so a machine that was wired before `SubagentStop` existed
+ * runs the new subagent body under the old entries: every other arm works, the
+ * child-capture half is simply never fired, and the generic "half wired" line
+ * would send the operator hunting. The fix is `tenjin install`, once, which is
+ * also what the release note says.
  *
  * Never required and never a fail: an experiment that is off-by-default cannot
  * take down the verb an operator runs when something else is broken.
@@ -1266,6 +1274,20 @@ async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCh
         status: 'ok',
         required: false,
         detail: `hooks.push is on: all ${PUSH_SCRIPT_FILES.length} push scripts written, ${registered}`,
+      },
+    };
+  }
+  // The upgrade shape: everything else is registered and only the newest event
+  // is not. Named before the generic warn, because the remedy is a different
+  // command.
+  if (scripts && entries.missing.length === 1 && entries.missing[0] === 'SubagentStop') {
+    return {
+      result: {
+        name: 'push hooks',
+        status: 'warn',
+        required: false,
+        detail: `hooks.push is on and ${registered}, but the SubagentStop entry is missing: this machine was wired before that arm existed, so a subagent's finding is never captured at the end of the child that settled it. tenjin update refreshes hook bodies and adds no new entry`,
+        fix: 'tenjin install',
       },
     };
   }

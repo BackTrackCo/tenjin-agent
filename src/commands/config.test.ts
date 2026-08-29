@@ -1081,7 +1081,7 @@ describe('the hooks block is set through config, which stays human-gated', () =>
 
   /**
    * `hooks.push` is the one hooks key whose value is not the whole switch: the
-   * six settings entries are written by `tenjin push on`, and `config set` only
+   * seven settings entries are written by `tenjin push on`, and `config set` only
    * persists the key — so it echoed as effective while no arm fired.
    * command-reference.md already gave the guidance; the CLI accepted it silently.
    */

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { mkdtemp, rm, writeFile, chmod, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,6 +11,7 @@ import {
   STORE_DDL,
   STORE_MIGRATIONS,
   STORE_BUSY_TIMEOUT_MS,
+  STORE_QUEUED_FINDING_PREFIX,
   STORE_SQL,
   STORE_USER_VERSION,
   findSearchForResource,
@@ -24,6 +26,7 @@ import {
   probeSqlite,
   recordSearch,
   removeRetiredState,
+  projectIdOf,
   searchesForDraft,
   shortHash,
   teamCoarseKey,
@@ -258,6 +261,30 @@ describe('storeSource stays in sync with the module', () => {
   it('leaves no unsubstituted placeholder', () => {
     expect(storeSource()).not.toMatch(/__[A-Z_]+__/);
   });
+
+  /**
+   * `projectIdOf` is the CLI's copy of the `project` a hook stamps on a row, and
+   * `publish --finding` compares one against the other to decide whether a
+   * finding was captured in the checkout it is being published from. Two
+   * implementations of that value that drift make every finding cross-project,
+   * or none, and neither failure announces itself. The generated function cannot
+   * import the exported one, so the pin is its own text.
+   */
+  it('mirrors the project id the generated store stamps on a row', () => {
+    const source = storeSource();
+    expect(source).toContain(
+      "return createHash('sha256').update(String(text)).digest('hex').slice(0, 16);",
+    );
+    expect(source).toContain(
+      "return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;",
+    );
+    expect(projectIdOf('/repo/one')).toBe(
+      createHash('sha256').update('/repo/one').digest('hex').slice(0, 16),
+    );
+    expect(projectIdOf('/repo/one')).not.toBe(projectIdOf('/repo/two'));
+    expect(projectIdOf(null)).toBeNull();
+    expect(projectIdOf('')).toBeNull();
+  });
 });
 
 /**
@@ -351,6 +378,19 @@ describe('the hot-path queries never scan', () => {
           'takeStateOldestByPrefix',
           STORE_SQL.takeStateOldestByPrefix,
           ['s', 's', 'dispatch_cache', 'dispatch_cache￿'],
+        ],
+        // The SubagentStop capture gate runs before a child may be held open for
+        // one more turn, so it may not be the read that scans a table that never
+        // shrinks (tenjin-agent#228). The finding half of that gate now reads the
+        // queue prefix below, not `events`.
+        ['openDispatchMiss', STORE_SQL.openDispatchMiss, ['s', 0]],
+        // The finding queue is read ACROSS sessions at every capture ask, which
+        // `events` has no index for: under one `session_state` prefix it is a
+        // primary-key range seek instead of a scan of a table that never shrinks.
+        [
+          'statePrefixSince (finding queue)',
+          STORE_SQL.statePrefixSince,
+          ['', STORE_QUEUED_FINDING_PREFIX, STORE_QUEUED_FINDING_PREFIX + '\uffff', 0, 200],
         ],
         // The one-shot CLI tally is not a hook path, but it reads the same
         // never-pruned table.

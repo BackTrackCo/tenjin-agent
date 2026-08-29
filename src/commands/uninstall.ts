@@ -19,7 +19,7 @@ import type { CommandContext, CommandResult } from '../context';
  * hook scripts, our hook entries and permission rules in the harness's
  * settings.json, and the legacy pointer line older versions wrote into
  * CLAUDE.md/AGENTS.md. "The hook scripts" INCLUDES the push experiment's four
- * arms (prompt, failure, subagent, context) and all six of their settings.json
+ * arms (prompt, failure, subagent, context) and all seven of their settings.json
  * entries, whatever `hooks.push` currently says: `tenjin push off` leaves the
  * files on disk on purpose, so uninstall is the only thing that takes them away.
  * It does NOT remove the wallet, the config (the team shelf's shared

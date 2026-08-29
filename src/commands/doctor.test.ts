@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, symlink, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -20,6 +20,7 @@ import { sessionPath } from '../lib/paths';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 import { wireHermesIntegration } from '../lib/hermes';
+import { wireSearchHooks } from '../lib/harness-hooks';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -2717,5 +2718,76 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
     expect(check.status).toBe('warn');
     expect(check.detail).toMatch(/not an http\(s\) origin/i);
     expect(check.fix).toMatch(/config set baseUrl/);
+  });
+});
+
+/**
+ * The push sidecar's wiring, and the ONE half-wired state an upgrade produces.
+ *
+ * `tenjin update` refreshes hook bodies and materializes no new surface
+ * (tenjin-agent#224), so a machine wired before `SubagentStop` existed runs the
+ * new subagent body under the old entries: every other arm fires and the
+ * child-capture half never does. The generic "half wired" line would send the
+ * operator to `tenjin push on`; the fix here is `tenjin install`, which is what
+ * the release note says too.
+ */
+describe('runDoctor — push hook wiring', () => {
+  async function wirePush(): Promise<void> {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
+    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
+  }
+
+  async function pushCheck(): Promise<CheckResult> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return find((res.data as { checks: CheckResult[] }).checks, 'push hooks');
+  }
+
+  it('is ok when both halves agree', async () => {
+    await wirePush();
+    const check = await pushCheck();
+    expect(check.status).toBe('ok');
+    expect(check.detail).toContain('7/7 hook entries registered');
+  });
+
+  it('names the missing SubagentStop entry, and sends the operator to install', async () => {
+    await wirePush();
+    // The upgraded machine: every entry the previous release wrote, and not the
+    // one this release added.
+    const path = claudeSettingsPath(skillHome);
+    const settings = JSON.parse(await readFile(path, 'utf8')) as {
+      hooks: Record<string, unknown>;
+    };
+    delete settings.hooks.SubagentStop;
+    await writeFile(path, JSON.stringify(settings, null, 2));
+
+    const check = await pushCheck();
+    expect(check.status).toBe('warn');
+    expect(check.required).toBe(false);
+    expect(check.detail).toContain('6/7 hook entries registered');
+    expect(check.detail).toContain('the SubagentStop entry is missing');
+    expect(check.detail).toContain('tenjin update refreshes hook bodies and adds no new entry');
+    expect(check.fix).toBe('tenjin install');
+  });
+
+  it('falls back to the generic half-wired line when more than that is missing', async () => {
+    await wirePush();
+    const path = claudeSettingsPath(skillHome);
+    const settings = JSON.parse(await readFile(path, 'utf8')) as {
+      hooks: Record<string, unknown>;
+    };
+    delete settings.hooks.SubagentStop;
+    delete settings.hooks.SubagentStart;
+    await writeFile(path, JSON.stringify(settings, null, 2));
+
+    const check = await pushCheck();
+    expect(check.status).toBe('warn');
+    expect(check.detail).toContain('only half wired');
+    expect(check.fix).toBe('tenjin push on');
   });
 });
