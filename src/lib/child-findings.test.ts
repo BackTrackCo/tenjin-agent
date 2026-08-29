@@ -24,6 +24,7 @@ async function seed(over: {
   uid: string;
   at?: number;
   hook?: string;
+  agentId?: string | null;
   data?: string;
 }): Promise<void> {
   const store = await openStore(dir);
@@ -33,6 +34,10 @@ async function seed(over: {
       over.uid,
       over.at ?? Date.now(),
       'parent',
+      // `agent_id` is a COLUMN since tenjin-agent#247's store v2, and it is
+      // where the child's identity lives; `data` carries only what nothing
+      // joins on.
+      over.agentId === undefined ? 'child-1' : over.agentId,
       null,
       'machine',
       over.hook ?? STORE_FINDING_HOOK,
@@ -42,7 +47,6 @@ async function seed(over: {
       over.data ??
         JSON.stringify({
           kind: 'finding',
-          agentId: 'child-1',
           agentType: 'fork',
           searchId: 'search-1',
           body: 'ox 0.14 still exports Bytes.from.',
@@ -64,7 +68,7 @@ describe('readChildFinding', () => {
   });
 
   it('reads a row missing every optional field rather than failing', async () => {
-    await seed({ uid: 'SPARSE', data: JSON.stringify({ body: 'a bare body' }) });
+    await seed({ uid: 'SPARSE', agentId: null, data: JSON.stringify({ body: 'a bare body' }) });
     const finding = await readChildFinding(dir, 'SPARSE');
     expect(finding).toMatchObject({ agentId: null, agentType: null, searchId: null });
     expect(finding.body).toBe('a bare body');

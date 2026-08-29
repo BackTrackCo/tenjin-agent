@@ -3036,7 +3036,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // asked for is never parsed and the harvest is lost. The parent's Stop
   // degrades on the same read (lib/hook-scripts.ts, the unrecordable ask); here
   // there is no weaker tier to fall to, so the ask is dropped instead.
-  if (getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentId) === null) {
+  if (getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, '')) === null) {
     beat('ask-unrecorded');
     return quiet();
   }

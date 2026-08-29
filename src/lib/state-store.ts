@@ -832,7 +832,7 @@ export const STORE_SQL = {
    * wrong. `project IS ?` rather than `= ?` so a null argument matches the rows
    * that carry no project, which is the same binding `pairings` uses.
    */
-  findingsRecent: `SELECT uid, at, session, project, data FROM events
+  findingsRecent: `SELECT uid, at, session, agent_id, project, data FROM events
      WHERE hook = '${STORE_FINDING_HOOK}' AND at >= ? AND project IS ?
      ORDER BY at DESC, id DESC LIMIT ?`,
   /** One finding, whole, by the id the capture ask printed. `events.uid`
@@ -840,7 +840,7 @@ export const STORE_SQL = {
    *  uid minted by another arm from resolving as a finding. `project` rides
    *  along because the publish path has to know whether the checkout it is
    *  running in is the one the finding was harvested in. */
-  findingByUid: `SELECT uid, at, session, project, data FROM events
+  findingByUid: `SELECT uid, at, session, agent_id, project, data FROM events
      WHERE uid = ? AND hook = '${STORE_FINDING_HOOK}'`,
   /** Did this session ask for a search ITSELF? The push arms search on their own
    *  initiative, so their rows are not evidence the session researched anything
@@ -2180,10 +2180,20 @@ function enqueueFinding(uid, finding) {
  * sibling nag arm holds the opposite invariant already.
  *
  * THE CRASHED PARENT IS STILL COVERED, which is the only thing machine scope was
- * ever for: a clean end stamps \`ended_at\` and a crash stamps nothing, so an
- * owner that has simply stopped writing for \`graceMs\` reads as gone too. An
- * owner this machine has no \`sessions\` row for is gone by the same rule — there
- * is nobody to prefer, and preferring nobody strands the row everywhere.
+ * ever for: an owner that has stopped writing for \`graceMs\` reads as gone,
+ * whether it ended cleanly or died mid-turn. An owner this machine has no
+ * \`sessions\` row for is gone by the same rule — there is nobody to prefer, and
+ * preferring nobody strands the row everywhere.
+ *
+ * ⚠ \`ended_at\` IS ACTIVITY, NOT PROOF, and reading it as proof made this whole
+ * gate a no-op. There is no SessionEnd hook: \`endSession\` runs from the Stop
+ * hook's main() at EVERY turn end and \`touchSession\` never clears it, so a
+ * session is stamped "ended" from its first turn onward and stays stamped while
+ * it runs for hours. A short circuit on that field therefore called every live
+ * owner gone, which is exactly the theft the owner-first preference exists to
+ * stop. It counts as a WRITE instead, folded into the same recency test as the
+ * rest — the stamp is the last thing the owner did, so a real close ages out of
+ * the grace on its own.
  *
  * \`seen\` memoises per call: one ask reads one row per distinct owner, not one
  * per finding.
@@ -2193,12 +2203,14 @@ function findingOwnerGone(owner, mine, graceMs, seen) {
   const cached = seen.get(owner);
   if (cached !== undefined) return cached;
   const row = storeGet(STORE_SQL.sessionActivity, [owner]);
-  const gone =
+  const lastAt =
     row === null
-      ? true
-      : typeof row.ended_at === 'number'
-        ? true
-        : Date.now() - (typeof row.last_at === 'number' ? row.last_at : 0) >= graceMs;
+      ? 0
+      : Math.max(
+          typeof row.last_at === 'number' ? row.last_at : 0,
+          typeof row.ended_at === 'number' ? row.ended_at : 0,
+        );
+  const gone = row === null ? true : Date.now() - lastAt >= graceMs;
   seen.set(owner, gone);
   return gone;
 }

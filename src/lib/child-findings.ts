@@ -90,7 +90,10 @@ function rowToFinding(row: Record<string, unknown>): ChildFinding | null {
     project: typeof row.project === 'string' && row.project !== '' ? row.project : null,
     agentType:
       typeof fields.agentType === 'string' && fields.agentType !== '' ? fields.agentType : null,
-    agentId: typeof fields.agentId === 'string' ? fields.agentId : null,
+    // THE COLUMN (tenjin-agent#247's store v2), not a `data` field. A row a
+    // pre-v2 build wrote carries NULL here, which is the same "no agent named"
+    // this parse has always reported.
+    agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
     searchId: typeof fields.searchId === 'string' ? fields.searchId : null,
     body: typeof fields.body === 'string' ? fields.body : '',
   };

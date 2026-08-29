@@ -2702,6 +2702,8 @@ describe('runPublish — publish --finding', () => {
         over.uid,
         Date.now(),
         'parent',
+        // The child's identity is a COLUMN since tenjin-agent#247's store v2.
+        over.agentId === null ? null : (over.agentId ?? 'child-1'),
         project,
         'machine',
         over.hook ?? STORE_FINDING_HOOK,
@@ -2710,7 +2712,6 @@ describe('runPublish — publish --finding', () => {
         null,
         JSON.stringify({
           kind: 'finding',
-          agentId: over.agentId ?? 'child-1',
           agentType: over.agentType ?? 'fork',
           searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
           body: over.body ?? FINDING_BODY,

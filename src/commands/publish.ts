@@ -219,7 +219,11 @@ export async function runPublish(
             fix: 'Read it with `--dry-run`, then re-run with --yes to discard it from here. A discard is permanent and the project it came from is not asked.',
             details: {
               crossProject: { finding: target.project, cwd: here },
-              finding: findingDetail(target),
+              // REF, NOT DETAIL. This is a refusal nobody asked a body of, and
+              // the finding belongs to ANOTHER project: echoing its text here
+              // is the unrequested echo `dryRunReceipt` forbids, and `--json`
+              // relays details intact. The fix line already names the read path.
+              finding: findingRef(target),
             },
           },
         );
@@ -310,7 +314,9 @@ export async function runPublish(
           details: {
             mode: settings.mode,
             crossProject: { finding: finding.project, cwd: here },
-            finding: findingDetail(finding),
+            // REF, NOT DETAIL: see the `--discard` twin above. A cross-project
+            // refusal must not carry another project's private body.
+            finding: findingRef(finding),
           },
         },
       );

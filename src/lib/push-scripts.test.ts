@@ -4892,18 +4892,55 @@ describe('the subagent arm (SubagentStop)', () => {
    * an agent is invited to run. An id outside the safe set costs the publish its
    * attribution, which is worth strictly less than the metacharacter it carries.
    */
-  it('drops the agent flag rather than splicing an unsafe id into the command', async () => {
+  /**
+   * ROUND-5 MAJOR 2: ONE READER, ONE BOUND, REJECTED WHOLE.
+   *
+   * This arm used to hold two readers that disagreed — one stripping to
+   * `[A-Za-z0-9_-]` at 64 characters to key rows, one verbatim to 128 to splice
+   * the flag — so `agent.1` and `ns:worker-3` were keyed under one name and
+   * reported under another, and an id of 65 to 128 characters stripped to '' and
+   * filed a child's claims in the LEAD's bucket. tenjin-agent#247's `identityOf`
+   * is the cure and its rule is REJECTION, not repair: an id outside
+   * `^[A-Za-z0-9_-]{1,128}$` drops the whole fire, because a rewritten id spells
+   * some other agent's name exactly and the ask's own claim would then be keyed
+   * on a child that does not exist.
+   *
+   * Dropping the fire is STRONGER than dropping the flag, which is what this
+   * used to do: no row, no block, no turn spent, and nothing of the id reaches
+   * the transcript.
+   */
+  it.each([
+    ['a shell metacharacter', 'a1; rm -rf /'],
+    ['a dot', 'agent.1'],
+    ['a namespace colon', 'ns:worker-3'],
+    ['a path separator', '../../etc/passwd'],
+    ['over the 128-character bound', 'a'.repeat(129)],
+  ])('refuses an agent id whole when it carries %s', async (_label, agentId) => {
     await captureOn();
     await seedDispatchMiss();
-    const reason =
-      blocked(
-        await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: 'a1; rm -rf /' })),
-      ) ?? '';
-    expect(reason).toContain('`tenjin publish <file> --search-id ' + SEARCH_ID + '`');
-    expect(reason).not.toContain('--agent');
-    expect(reason).not.toContain('rm -rf');
-    // The ask itself still fires: the finding is the point, the flag is not.
-    expect(reason).toContain('```' + PUSH_FINDING_TAG);
+    const run = await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: agentId }));
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    // Not even a lifecycle row: the refusal is above the store, because filing
+    // the fire at all would have to file it under some session's name.
+    expect(await stopRows()).toEqual([]);
+  });
+
+  /**
+   * The bound is 128 and not 64, which is the half of major 2 that silently
+   * misfiled work rather than dropping it: the old reader capped at 64, so a
+   * longer id sanitised to '' and every claim the child made landed in the
+   * lead's bucket.
+   */
+  it('asks a child whose id is long but inside the bound', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    const long = 'a'.repeat(100);
+    const reason = blocked(
+      await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: long })),
+    );
+    expect(reason).toContain('--agent ' + long);
+    expect(sessionState(SESSION, 'capture:agent:' + long + ':')).not.toBeNull();
   });
 
   /**
@@ -4973,7 +5010,9 @@ describe('the subagent arm (SubagentStop)', () => {
     expect(['session-asked', 'ask-claimed', 'no-message']).toContain(
       reasons.find((r) => r !== 'asked'),
     );
-    expect(sessionState(SESSION, 'capture:agent:a1')).not.toBeNull();
+    // `agentKey(agent, name)` is the one place the segment is spelled, so the
+    // claim key carries its separator (tenjin-agent#247).
+    expect(sessionState(SESSION, 'capture:agent:a1:')).not.toBeNull();
   });
 
   it('harvests the fenced block from the next fire, scrubbed and bounded', async () => {
@@ -5968,18 +6007,63 @@ describe('the capture ask (Stop)', () => {
 
   /**
    * The other side of that gate: preferring the owner must not become a way to
-   * strand a finding. An owner that ENDED is gone, so its rows are claimable at
-   * the next turn end anywhere on the machine.
+   * strand a finding. An owner whose LAST WRITE, `ended_at` included, is past
+   * the grace is gone, so its rows are claimable at the next turn end anywhere
+   * on the machine.
    */
-  it('names a finding whose owning session has ended', async () => {
+  it('names a finding whose owning session ended past the grace', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
     await writeSearchSignal();
-    await seedSession('a-session-that-ended', { endedAt: Date.now() });
-    await queueFinding('UID-ENDED', 'settled before that session ended', 'a-session-that-ended');
+    const longAgo = Date.now() - 3 * 60 * 60 * 1000;
+    await seedSession('a-session-that-ended', { startedAt: longAgo, endedAt: longAgo });
+    await queueFinding('UID-ENDED', 'settled before that session ended', 'a-session-that-ended', {
+      at: longAgo,
+    });
 
     const reason = await askReason();
     expect(reason).toContain('- UID-ENDED');
     expect(reason).toContain('from an earlier session');
+  });
+
+  /**
+   * ROUND-5 MAJOR 1: `ended_at` IS NOT PROOF THE OWNER IS GONE.
+   *
+   * There is no SessionEnd hook. `endSession` runs from the Stop hook's main()
+   * at EVERY turn end and `touchSession` never clears it, so a session carries
+   * an `ended_at` from its first turn onward and carries it for as long as it
+   * runs. A short circuit on that field called every live owner gone, which made
+   * the whole owner-first gate a no-op past a session's first turn and reopened
+   * the theft above. The stamp counts as ACTIVITY now, so a session that ended a
+   * moment ago is treated exactly like one that wrote a moment ago.
+   *
+   * The gate's other test passes without this one because its live fixture never
+   * sets `endedAt` at all, which no real session past its first turn matches.
+   */
+  it("says nothing about a live session's finding when that session has an ended_at", async () => {
+    await writeConfig({ hooks: { capture: 'block' } });
+    await writeSearchSignal();
+    // Running for hours, and stamped "ended" at its last turn end a moment ago:
+    // what every live session looks like in the store.
+    await seedSession('a-live-session-mid-turn', {
+      startedAt: Date.now() - 3 * 60 * 60 * 1000,
+      endedAt: Date.now(),
+    });
+    await queueFinding(
+      'UID-MID-TURN',
+      'settled in a session still running',
+      'a-live-session-mid-turn',
+    );
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    const reason = run.stdout === '' ? '' : (JSON.parse(run.stdout) as { reason: string }).reason;
+    expect(reason).not.toContain('UID-MID-TURN');
+
+    const row = sessionState('', `${STORE_QUEUED_FINDING_PREFIX}UID-MID-TURN`) as Record<
+      string,
+      unknown
+    >;
+    expect(row.session).toBe('a-live-session-mid-turn');
+    expect(row.listedAt).toBeUndefined();
   });
 
   /**
