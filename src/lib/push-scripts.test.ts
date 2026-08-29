@@ -3249,7 +3249,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       store?.close();
     }
 
-    it('doubles the cap of an arm whose graded lookups were used at least 40% of the time', async () => {
+    it('doubles the cap of an arm whose graded verdicts were used at least 40% of the time', async () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
@@ -3334,13 +3334,14 @@ describe('the lookup budget (rolling window, per trigger)', () => {
      * computed from a handful of outcomes cut the arm — which is the one thing
      * a floor exists to prevent.
      */
-    it('leaves the cap alone for an arm with many hits but few grades', async () => {
+    it('leaves the cap alone one grade under the floor, however many hits', async () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
-      // 40 hits, 5 graded, none used: rate 0, under the 5% cold rate. The old
+      // 40 hits, 19 graded, none used: rate 0, under the 5% cold rate. The old
       // floor read 40 and cut the cap to floor(8/3) = 2, suppressing the fire
-      // below; the graded floor reads 5, which is under 20.
-      await seedRates({ prompt: { hits: 40, used: 0, wrong: 5 } });
+      // below; the graded floor reads 19, one short of 20. With the cut case
+      // below at exactly 20, the pair pins the boundary from both sides.
+      await seedRates({ prompt: { hits: 40, used: 0, wrong: 19 } });
       await seedLookups('prompt', 2, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);
