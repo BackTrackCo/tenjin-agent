@@ -561,6 +561,9 @@ function recordSyncEvent(
     eventUid(),
     Date.now(),
     storeSession(null),
+    // `tenjin sync` is a command a person runs, never a hook firing inside a
+    // subagent, so there is no agent to name.
+    null,
     project,
     shortHash(hostId()),
     'sync',

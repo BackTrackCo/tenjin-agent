@@ -54,9 +54,12 @@ export function stateDbPath(dir: string): string {
  * the first blocks on the transaction, then reads the new version and skips.
  *
  * Version 1 is {@link STORE_DDL} whole; every version above it is one entry in
- * {@link STORE_MIGRATIONS}, applied in order. Version 2 adds
- * `injections.agent_id` — the subagent a finding was relayed to, so `tenjin push
- * grade` can read that child's own transcript rather than the parent's.
+ * {@link STORE_MIGRATIONS}, applied in order. Version 2 adds `agent_id` to
+ * `injections` and to `events`: THE SAME IDENTITY IN BOTH, off the prelude's one
+ * `identityOf`, so a finding relayed to a child and the work that child then did
+ * are joinable. `tenjin push grade` reads that child's own transcript rather
+ * than the parent's, and the importance score partitions rows by worker instead
+ * of stitching one subagent's failure to a sibling's fix.
  *
  * `#212` adds `error_signatures`/`trigger_stats` under version 3 in the shape it
  * needs. Nothing here is `NOT NULL` that a later issue is supposed to fill.
@@ -306,7 +309,14 @@ CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE st
  * is two different schemas under one version number. Add a version instead.
  */
 export const STORE_MIGRATIONS: readonly { version: number; sql: string }[] = [
-  { version: 2, sql: 'ALTER TABLE injections ADD COLUMN agent_id TEXT' },
+  {
+    version: 2,
+    // One version, one entry, both columns — `db.exec` runs the pair as a unit
+    // inside the bootstrap's transaction, so a database can never come out of
+    // this holding one of them.
+    sql: `ALTER TABLE injections ADD COLUMN agent_id TEXT;
+          ALTER TABLE events ADD COLUMN agent_id TEXT`,
+  },
 ];
 
 /**
@@ -329,8 +339,8 @@ export const STORE_SQL = {
      VALUES (?, NULL, NULL, ?, ?, ?)
      ON CONFLICT(session) DO UPDATE SET ended_at = excluded.ended_at`,
 
-  insertEvent: `INSERT INTO events (uid, at, session, project, machine, hook, tool, error_hash, files, data)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  insertEvent: `INSERT INTO events (uid, at, session, agent_id, project, machine, hook, tool, error_hash, files, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
   insertInjection: `INSERT INTO injections (
        uid, event_uid, at, session, project, machine, hook, shelf,
@@ -633,7 +643,7 @@ export const STORE_SQL = {
    * queries: a window scan over tables that never prune, run by a human, never
    * by a hook.
    */
-  scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
+  scoreEvents: `SELECT session, agent_id, at, hook, tool, error_hash, files, data
      FROM events WHERE at >= ? ORDER BY session, at, id`,
   scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
   scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
@@ -1181,6 +1191,10 @@ function recordEvent(row) {
     id,
     Date.now(),
     storeSession(row.session),
+    // A COLUMN, not a \`data\` field. \`session\` is the parent's on every fire a
+    // subagent makes, so this is the only thing telling two parallel children
+    // apart, and every reader of it either partitions or joins on it.
+    row.agentId === undefined ? null : row.agentId,
     projectId(row.cwd),
     machineId(),
     String(row.hook),

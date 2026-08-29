@@ -1271,11 +1271,11 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(rows[0]!.data).toEqual({
       event: 'UserPromptSubmit',
       query: 'yes, do that',
-      // The lead's own turn, so the agent field is null rather than absent: a
-      // reader has to tell "the lead" from "a build that recorded nobody".
-      agentId: null,
       skipped: 'short',
     });
+    // The main session, so the agent column is NULL rather than '': the score
+    // has to tell "the lead" from "an agent named nothing".
+    expect(rows[0]!.agent_id).toBeNull();
     expect(rows[1]!.data).toMatchObject({ event: 'UserPromptSubmit', skipped: 'slash' });
   });
 
@@ -1512,7 +1512,8 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(run.code).toBe(0);
     expect(hits()).toBe(0);
     const row = (await events()).find((e) => e.hook === 'failure');
-    expect(row?.data).toMatchObject({ event: 'PostToolUseFailure', agentId: 'agent-7' });
+    expect(row?.data).toMatchObject({ event: 'PostToolUseFailure' });
+    expect(row?.agent_id).toBe('agent-7');
     expect(String(row?.data.error)).toContain('left-pad');
   });
 
@@ -1591,8 +1592,8 @@ describe('the failure arm (PostToolUse Bash)', () => {
       event: 'PostToolUse',
       command: 'cd /x && pnpm test',
       head: 'pnpm',
-      agentId: null,
     });
+    expect(rows[0]!.agent_id).toBeNull();
   });
 
   /**
@@ -2661,21 +2662,22 @@ describe('the arms tell an agent from a session', () => {
     const rows = await events();
     expect(rows.map((r) => r.hook)).toEqual(['edit', 'failure', 'pass']);
     // The session is the PARENT's on all three — that is the whole problem —
-    // so `agentId` is the only field that says who did the work.
+    // so `agent_id` is the only field that says who did the work.
     expect(rows.map((r) => r.session)).toEqual([SESSION, SESSION, SESSION]);
-    for (const row of rows) expect(row.data).toMatchObject({ agentId: AGENT });
+    expect(rows.map((r) => r.agent_id)).toEqual([AGENT, AGENT, AGENT]);
   });
 
-  /** The lead's own turn carries no `agent_id`, and records `null` rather than
-   *  dropping the field: a reader has to tell "the lead did this" from "this
-   *  build wrote no agent at all". */
-  it('records the lead as null, not as a missing field', async () => {
+  /** The main session carries no `agent_id`, and the column holds SQL NULL for
+   *  it — the same answer a row written before version 2 gives, and the bucket
+   *  the score reads as the lead's. */
+  it('records the main session as a null column, never as an empty string', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
     await runScript(pushFailureHookScript(dataDir), failing());
     const row = (await events()).find((e) => e.hook === 'failure');
-    expect(row?.data).toMatchObject({ agentId: null });
-    expect(Object.keys(row?.data ?? {})).toContain('agentId');
+    expect(row?.agent_id).toBeNull();
+    // Not in `data` at all any more: one identity, one column.
+    expect(Object.keys(row?.data ?? {})).not.toContain('agentId');
   });
 
   /**
@@ -4244,6 +4246,7 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
         `ev-${at}`,
         at,
         '',
+        null,
         projectId(cwd),
         'machine-a',
         'sync',
@@ -4266,6 +4269,7 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
       'ev-ok',
       Date.now(),
       '',
+      null,
       projectId(cwd),
       'machine-a',
       'sync',

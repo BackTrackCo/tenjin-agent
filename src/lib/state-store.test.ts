@@ -428,14 +428,21 @@ describe('openStore', () => {
  * install`) can have either side meet the old database first.
  */
 describe('migration', () => {
-  /** A version 1 database with one row in it, written the way the shipped v1
-   *  build wrote it: the DDL verbatim, and the 23-column INSERT spelled out
-   *  here rather than taken from `STORE_SQL`, which now names 24. */
+  /** A version 1 database with one row in each table version 2 alters, written
+   *  the way the shipped v1 build wrote them: the DDL verbatim, and the INSERTs
+   *  spelled out at their v1 widths rather than taken from `STORE_SQL`, which
+   *  now names one column more on each. */
   function seedV1(): void {
     const handle = db();
     try {
       handle.exec(STORE_DDL);
       handle.exec('PRAGMA user_version = 1');
+      handle
+        .prepare(
+          `INSERT INTO events (uid, at, session, project, machine, hook, tool, error_hash, files, data)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run('e-old', 1, 'sess-v1', null, 'machine', 'edit', 'Edit', null, null, null);
       handle
         .prepare(
           `INSERT INTO injections (
@@ -475,8 +482,8 @@ describe('migration', () => {
     }
   }
 
-  function columns(): string[] {
-    return rows('PRAGMA table_info(injections)').map((r) => String(r.name));
+  function columns(table: 'injections' | 'events' = 'injections'): string[] {
+    return rows(`PRAGMA table_info(${table})`).map((r) => String(r.name));
   }
 
   it('migrates a version 1 database in place and keeps its rows (CLI copy)', async () => {
@@ -487,11 +494,17 @@ describe('migration', () => {
     store?.close();
 
     expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
-    expect(columns()).toContain('agent_id');
-    // IN PLACE: the row that was there is still there, and reads as a main
-    // session row rather than as one relayed to some agent.
+    // BOTH TABLES, or the identity is only half migrated: one version, one
+    // entry, two ALTERs.
+    expect(columns('injections')).toContain('agent_id');
+    expect(columns('events')).toContain('agent_id');
+    // IN PLACE: the rows that were there are still there, and read as main
+    // session rows rather than as work relayed to, or done by, some agent.
     expect(rows('SELECT uid, session, agent_id FROM injections')).toEqual([
       { uid: 'u-old', session: 'sess-v1', agent_id: null },
+    ]);
+    expect(rows('SELECT uid, session, agent_id FROM events')).toEqual([
+      { uid: 'e-old', session: 'sess-v1', agent_id: null },
     ]);
   });
 
@@ -507,19 +520,22 @@ describe('migration', () => {
     expect(run.stderr).toBe('');
 
     expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
-    expect(columns()).toContain('agent_id');
+    expect(columns('injections')).toContain('agent_id');
+    expect(columns('events')).toContain('agent_id');
     expect(rows('SELECT uid, agent_id FROM injections')).toEqual([
       { uid: 'u-old', agent_id: null },
     ]);
+    expect(rows('SELECT uid, agent_id FROM events')).toEqual([{ uid: 'e-old', agent_id: null }]);
   });
 
   /** The fresh path runs the DDL and then every delta, so a new machine lands on
    *  exactly the schema a migrated one does. */
-  it('a fresh database lands at the current version with the column present', async () => {
+  it('a fresh database lands at the current version with the columns present', async () => {
     const store = await openStore(dataDir);
     store?.close();
     expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
-    expect(columns()).toContain('agent_id');
+    expect(columns('injections')).toContain('agent_id');
+    expect(columns('events')).toContain('agent_id');
   });
 });
 

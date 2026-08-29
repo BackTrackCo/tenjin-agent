@@ -494,7 +494,8 @@ async function pushDecide(args) {
           // \`agentId\` on every row this opens, for the same reason the failure
           // and edit rows carry it: a session id is shared by every subagent
           // under it, so it cannot say which worker fired.
-          data: { event: args.event, query: clean(query, 512), agentId: args.agentId },
+          agentId: args.agentId === undefined ? null : args.agentId,
+          data: { event: args.event, query: clean(query, 512) },
         });
   const base = {
     session: sessionId,
@@ -899,10 +900,10 @@ async function main() {
     session: sessionId,
     cwd,
     hook: 'prompt',
+    agentId,
     data: {
       event: 'UserPromptSubmit',
       query: clean(query, 512),
-      agentId: agentId,
       ...(skipped === null ? {} : { skipped }),
     },
   });
@@ -2005,11 +2006,11 @@ async function main() {
       cwd,
       hook: 'pass',
       tool: 'Bash',
+      agentId,
       data: {
         event,
         command: safeCommand(command),
         head: heads.length > 0 ? heads[heads.length - 1] : null,
-        agentId: agentId,
       },
     });
     closeOpenPairings(sessionId, agentId, cwd, command, heads);
@@ -2067,11 +2068,11 @@ async function main() {
     tool: 'Bash',
     errorHash: sig === null ? undefined : sig.key,
     files: errorFiles,
+    agentId,
     data: {
       event,
       command: safeCommand(command),
       error: clean(scrubbed, 300),
-      agentId: agentId,
     },
   });
 
@@ -2242,14 +2243,15 @@ async function main() {
     cwd,
     hook: 'subagent',
     tool: 'SubagentStart',
+    // THE AGENT THIS ROW IS ABOUT is the one starting, and it is the only
+    // handle the score has on the work that follows: everything that agent
+    // then edits, fails and passes files under the same parent session id.
+    // The TYPE stays in \`data\` — it is a label nothing joins on.
+    agentId,
     data: {
       event: 'SubagentStart',
       query: clean(String(cache.query || ''), 512),
       agentType,
-      // THE AGENT THIS ROW IS ABOUT is the one starting, and it is the only
-      // handle the score has on the work that follows: everything that agent
-      // then edits, fails and passes files under the same parent session id.
-      agentId,
     },
   });
   const base = {
@@ -2405,7 +2407,8 @@ async function main() {
       // rows, and every parallel subagent files under the parent's session id:
       // without this field it stitched one agent's failure to another's edit
       // and a third's pass, and called the result a fix.
-      data: { event, agentId: agentId },
+      agentId,
+      data: { event },
     });
   }
 

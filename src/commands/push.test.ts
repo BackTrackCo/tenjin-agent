@@ -780,7 +780,14 @@ describe('runPushStatus --sessions', () => {
     dir: string,
     session: string,
     startedAt: number,
-    events: Array<{ at: number; hook: string; tool?: string; files?: string[]; data?: unknown }>,
+    events: Array<{
+      at: number;
+      hook: string;
+      tool?: string;
+      agentId?: string;
+      files?: string[];
+      data?: unknown;
+    }>,
     extra: { endedAt?: number; captureAskedAt?: number; closesAt?: number[] } = {},
   ): Promise<void> {
     const store = await openStore(dir);
@@ -795,6 +802,7 @@ describe('runPushStatus --sessions', () => {
           `${session}-ev-${i}`,
           e.at,
           session,
+          e.agentId ?? null,
           'proj',
           'machine',
           e.hook,
@@ -911,7 +919,7 @@ describe('runPushStatus --sessions', () => {
 
   /**
    * THE PARTITION, against the store (audit fix 2). Parallel subagents share
-   * their parent's session id and are told apart only by `data.agentId`, so
+   * their parent's session id and are told apart only by `events.agent_id`, so
    * a session-wide scan stitched a failure, an edit and a pass that belonged to
    * three different workers into one "fix". Both halves are asserted here: the
    * spliced sequence must not fire, and the identical sequence within one
@@ -924,7 +932,7 @@ describe('runPushStatus --sessions', () => {
       // The parent fails and later passes; the only edit between them belongs
       // to a child that was working on something else.
       { at: s1 + 1000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
-      { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+      { at: s1 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
       { at: s1 + 3000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
     ]);
 
@@ -987,14 +995,16 @@ describe('runPushStatus --sessions', () => {
           at: s1 + 2000,
           hook: 'failure',
           tool: 'Bash',
-          data: { command: 'pnpm test', agentId: 'a1' },
+          agentId: 'a1',
+          data: { command: 'pnpm test' },
         },
-        { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'], data: { agentId: 'a1' } },
+        { at: s1 + 3000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
         {
           at: s1 + 4000,
           hook: 'pass',
           tool: 'Bash',
-          data: { command: 'pnpm test', head: 'pnpm', agentId: 'a1' },
+          agentId: 'a1',
+          data: { command: 'pnpm test', head: 'pnpm' },
         },
       ],
       { endedAt: s1 + 600_000, captureAskedAt: s1 + 600_000 },

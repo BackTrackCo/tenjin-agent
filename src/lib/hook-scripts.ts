@@ -1383,7 +1383,8 @@ async function main() {
     cwd,
     hook: 'research',
     tool: input.tool_name,
-    data: { event: 'PreToolUse', query: clean(question, 512), agentId: agentId },
+    agentId,
+    data: { event: 'PreToolUse', query: clean(question, 512) },
   });
   const lines = hintLines(found.stored, isTeam, {
     sessionId,
@@ -1657,10 +1658,10 @@ async function main() {
     cwd,
     hook: 'dispatch',
     tool: input.tool_name,
+    agentId,
     data: {
       event: 'PreToolUse',
       query: clean(question, ${QUESTION_MAX}),
-      agentId: agentId,
     },
   });
   const row = {

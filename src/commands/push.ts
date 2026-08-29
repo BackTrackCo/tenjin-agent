@@ -409,7 +409,7 @@ export interface ScoreEvent {
   at: number;
   hook: string;
   tool: string | null;
-  /** The agent that fired it (`data.agentId`), or null for the lead's own
+  /** The agent that fired it (`events.agent_id`), or null for the lead's own
    *  turn. The unit the score is scanned over: see {@link ScoreInput}. */
   agentId: string | null;
   /** The basenames the row names (`files`), or none. */
@@ -423,7 +423,7 @@ export interface ScoreEvent {
 export interface ScoreInput {
   /**
    * ONE AGENT'S ROWS, not one session's. Parallel subagents share their
-   * parent's `session_id` and are told apart only by `data.agentId`, so a
+   * parent's `session_id` and are told apart only by `events.agent_id`, so a
    * session-wide scan stitched one agent's failure to another's edit and a
    * third's pass and called the result a fix. {@link readSessionScores}
    * partitions before it calls this, and every pattern below is therefore
@@ -663,7 +663,7 @@ export async function readSessionScores(
   if (store === null) return [];
   try {
     const since = nowMs - LEDGER_WINDOW_MS;
-    // KEYED BY (session, agent), not by session. `data.agentId` is null for the
+    // KEYED BY (session, agent), not by session. `agent_id` is null for the
     // lead's own turn and the child's id for a subagent's, and the two are
     // scored apart: a session is the conversation, an agent is the worker, and
     // fail -> edit -> pass is a claim about one worker.
@@ -675,11 +675,11 @@ export async function readSessionScores(
       const session = typeof row.session === 'string' ? row.session : '';
       if (session === '') continue;
       const data = parseData(row.data);
-      // '' is not an agent: the arms write null for a parent fire, and a row
-      // from a build that predates the field has no `agentId` at all. Both are
-      // the lead's own bucket.
+      // A COLUMN, the one the prelude's `identityOf` fills. '' is not an agent:
+      // the arms write null for a main-session fire, and a row written before
+      // version 2 has SQL NULL in the column. Both are the lead's own bucket.
       const agent =
-        typeof data.agentId === 'string' && data.agentId.length > 0 ? data.agentId : null;
+        typeof row.agent_id === 'string' && row.agent_id.length > 0 ? row.agent_id : null;
       const key = session + '\u0000' + (agent ?? '');
       const bucket =
         byWorker.get(key) ?? byWorker.set(key, { session, agent, events: [] }).get(key)!;

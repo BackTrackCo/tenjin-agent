@@ -2620,11 +2620,19 @@ describe('dispatch hook: a subagent dispatch', () => {
  * only thing that tells them apart.
  */
 describe('dispatch hook: the rows carry the agent they were written inside', () => {
-  async function agentIds(): Promise<unknown[]> {
+  /** BOTH TABLES, because both columns are filled from the one `identityOf`:
+   *  an event the score partitions by and an injection `push grade` reads a
+   *  transcript by have to name the same worker or neither is joinable. */
+  async function agentIds(): Promise<{ events: unknown[]; injections: unknown[] }> {
     const store = await openStore(dataDir);
-    if (store === null) return [];
+    if (store === null) return { events: [], injections: [] };
     try {
-      return store.all('SELECT agent_id FROM injections ORDER BY id', []).map((r) => r.agent_id);
+      return {
+        events: store.all('SELECT agent_id FROM events ORDER BY id', []).map((r) => r.agent_id),
+        injections: store
+          .all('SELECT agent_id FROM injections ORDER BY id', [])
+          .map((r) => r.agent_id),
+      };
     } finally {
       store.close();
     }
@@ -2639,7 +2647,7 @@ describe('dispatch hook: the rows carry the agent they were written inside', () 
       dispatchInput({ prompt: STRONG_PROMPT, agentId: 'a1' }),
     );
     expect(injected(run) ?? '').toContain('Tenjin lists');
-    expect(await agentIds()).toEqual(['a1']);
+    expect(await agentIds()).toEqual({ events: ['a1'], injections: ['a1'] });
   });
 
   it('leaves it NULL in the main session', async () => {
@@ -2651,7 +2659,7 @@ describe('dispatch hook: the rows carry the agent they were written inside', () 
       dispatchInput({ prompt: STRONG_PROMPT }),
     );
     expect(injected(run) ?? '').toContain('Tenjin lists');
-    expect(await agentIds()).toEqual([null]);
+    expect(await agentIds()).toEqual({ events: [null], injections: [null] });
   });
 });
 
