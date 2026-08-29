@@ -18,9 +18,11 @@ import {
   openStore,
   projectId,
   recordSearch,
+  repoSlug,
   teamCoarseKey,
   type StoredSearch,
 } from './state-store';
+import { REPO_SLUG_CASES } from './repo-slug-cases';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,
@@ -2615,12 +2617,13 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   });
 
   /**
-   * The coarse key on the wire is salted with the repo's origin url, read from
-   * `.git/config` by a file read; the local one is not. Without the salt an
+   * The coarse key on the wire is salted with the repo SLUG — `owner/name`,
+   * reduced from the origin url read out of `.git/config` by a file read; the
+   * local one is not salted at all. Without the salt an
    * `ERR_PNPM_OUTDATED_LOCKFILE`-class message would match a fix from any repo
    * the team has.
    */
-  it('salts the coarse key with the origin url, and only on the wire', async () => {
+  it('salts the coarse key with the repo slug, and only on the wire', async () => {
     const stub = resolveStub('miss');
     const team = await serve(stub.handler);
     const pub = await serve(echo());
@@ -2667,8 +2670,17 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     // THE HOOK'S INLINE COPY EQUALS THE TS EXPORT `tenjin sync` publishes with:
     // salt over the stored coarse hash, not the raw message. A drift here would
     // make every resolve query miss every synced post, silently.
-    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'));
-    expect(coarse[1]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/web.git'));
+    expect(coarse[0]).toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/api.git')),
+    );
+    expect(coarse[1]).toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/web.git')),
+    );
+    // And the salt is the SLUG, never the url it was read from.
+    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'acme/api'));
+    expect(coarse[0]).not.toBe(
+      'sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'),
+    );
     expect((await pairings()).map((p) => String(p.key))).toEqual(
       fine.map((k) => k.slice('sig_v1:'.length)),
     );
@@ -2689,7 +2701,8 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     );
     await writeFile(join(main, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
     await writeFile(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'wt')}\n`);
-    // No .git/config at all: an unsalted-by-absence coarse key, to compare.
+    // No .git/config at all: the '' salt, to compare — a key that still goes on
+    // the wire (#249), just under a different salt than the named repo's.
     const bare = join(dataDir, 'bare');
     await mkdir(bare, { recursive: true });
 
@@ -2704,6 +2717,109 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     const coarse = stub.bodies.map((b) => b.keys[1]!.key);
     expect(coarse[0]).toBe(coarse[1]);
     expect(coarse[2]).not.toBe(coarse[0]);
+  });
+
+  /**
+   * THE GENERATED COPY OF `repoSlug`, RUN AGAINST THE EXPORT'S OWN TABLE
+   * (tenjin-agent#249).
+   *
+   * A hook script cannot import, so the failure arm carries its own copy of the
+   * salt reduction, and `tenjin sync` publishes with the exported one. A drift
+   * between them makes every resolve query miss every synced post SILENTLY —
+   * the shelf answers "no match", which is indistinguishable from "no teammate
+   * has hit this". Firing the hook once per row would be twenty-odd node
+   * processes, so the copy is lifted out of the generated source and called
+   * directly; the fire below then proves the lifted function is the one the arm
+   * actually salts with.
+   */
+  it('carries a repoSlug that agrees with the exported one on every shape', () => {
+    const source = pushFailureHookScript(dataDir);
+    const start = source.indexOf('function repoSlug(url) {');
+    expect(start).toBeGreaterThan(-1);
+    let depth = 0;
+    let end = -1;
+    for (let i = source.indexOf('{', start); i < source.length; i += 1) {
+      if (source[i] === '{') depth += 1;
+      else if (source[i] === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i + 1;
+          break;
+        }
+      }
+    }
+    expect(end).toBeGreaterThan(start);
+    const generated = new Function(`${source.slice(start, end)}; return repoSlug;`)() as (
+      url: string,
+    ) => string;
+    for (const [url, slug] of REPO_SLUG_CASES) {
+      expect(generated(url), `generated repoSlug(${JSON.stringify(url)})`).toBe(slug);
+      expect(generated(url), `drift on ${JSON.stringify(url)}`).toBe(repoSlug(url));
+    }
+  });
+
+  /**
+   * TWO TRANSPORTS, ONE SALT. The ssh and https urls of one repo are one
+   * project, and before #249 they were two salts: a teammate who cloned over
+   * ssh could never match a coarse key a teammate who cloned over https
+   * published.
+   */
+  it('gives the ssh and https clones of one repo the same coarse key', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const dirs = [
+      [join(dataDir, 'clone-ssh'), 'git@github.com:acme/api.git'],
+      [join(dataDir, 'clone-https'), 'https://github.com/acme/api'],
+      [join(dataDir, 'clone-fork'), 'git@github.com:fork/api.git'],
+    ] as const;
+    for (const [dir, origin] of dirs) {
+      await mkdir(join(dir, '.git'), { recursive: true });
+      await writeFile(join(dir, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`);
+    }
+    let i = 0;
+    for (const [dir] of dirs) {
+      i += 1;
+      await runScript(
+        pushFailureHookScript(dataDir),
+        failing('pnpm db:migrate', ENOENT, { cwd: dir, session_id: `s-clone-${i}` }),
+      );
+    }
+    const coarse = stub.bodies.map((b) => b.keys[1]!.key);
+    expect(coarse[0]).toBe(coarse[1]);
+    // A fork is a different owner, so it stays a different scope.
+    expect(coarse[2]).not.toBe(coarse[0]);
+  });
+
+  /**
+   * THE NO-ORIGIN ASYMMETRY, CLOSED (tenjin-agent#249). A checkout with no
+   * `origin` remote used to have the resolve leg ask under `teamCoarseKey(c,
+   * '')` while `tenjin sync` published no coarse key at all, so such pairings
+   * could only ever match on the fine key. Both sides now send it; this is the
+   * resolve half, and sync.test.ts holds the publish half to the same value.
+   */
+  it("still asks for the coarse key in a checkout with no origin, salted ''", async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const noOrigin = join(dataDir, 'no-origin');
+    await mkdir(join(noOrigin, '.git'), { recursive: true });
+    // A real config, with every remote but `origin`.
+    await writeFile(
+      join(noOrigin, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "upstream"]\n\turl = git@github.com:acme/api.git\n',
+    );
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT, { cwd: noOrigin, session_id: 's-no-origin' }),
+    );
+    expect(stub.bodies).toHaveLength(1);
+    const keys = stub.bodies[0]!.keys;
+    expect(keys).toHaveLength(2);
+    const local = (await pairings()).map((p) => String(p.coarse_key));
+    expect(keys[1]!.key).toBe('sig_v1c:' + teamCoarseKey(local[0]!, ''));
   });
 
   /**

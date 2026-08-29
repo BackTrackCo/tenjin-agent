@@ -7,6 +7,7 @@ import { resolveContextSettings } from '../lib/settings';
 import {
   openStore,
   projectId,
+  repoSlug,
   shortHash,
   storeSession,
   teamCoarseKey,
@@ -373,20 +374,26 @@ function lazySigner(provider: WalletProvider, address: TenjinSigner['address']):
 }
 
 /** The wire keys for one pairing: the fine fingerprint verbatim, the coarse
- *  fingerprint SALTED with the repo (so an ERR_PNPM_OUTDATED_LOCKFILE-class error
- *  does not match across every repo the team has), and the command head for a
- *  future ranking to use — never queried, only stored. `verified` mirrors the
+ *  fingerprint SALTED with the repo slug (so an ERR_PNPM_OUTDATED_LOCKFILE-class
+ *  error does not match across every repo the team has), and the command head for
+ *  a future ranking to use — never queried, only stored. `verified` mirrors the
  *  local close status; a hand publish never claims verified, but sync IS the
- *  close rule's own report and may. */
+ *  close rule's own report and may. The coarse key goes out ALWAYS, `repo` of ''
+ *  included: the resolve leg asks for it either way (#249). */
 function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput[] {
   const keys: PostKeyInput[] = [{ kind: 'fingerprint', key: 'sig_v1:' + row.key, verified }];
-  if (row.coarseKey !== null && row.coarseKey.length > 0 && repo.length > 0) {
+  if (row.coarseKey !== null && row.coarseKey.length > 0) {
     // Salt the coarse HASH, not the raw message+errno: the CLI has only the
     // stored hashes (message/errno exist only transiently inside the failure
     // arm's sigV1() call, never as columns), so `teamCoarseKey` — shared with
     // the resolve leg via lib/push-scripts.ts — salts what both sides actually
-    // have. No repo, no coarse key: an unsalted coarse hash would match the same
-    // error across every repo the team has (06, "Team-shelf coarse keys").
+    // have (06, "Team-shelf coarse keys").
+    //
+    // NO `repo.length > 0` GUARD (tenjin-agent#249). It used to skip the coarse
+    // key in a checkout with no origin, while the resolve leg went on asking for
+    // `sig_v1c:teamCoarseKey(coarse, '')` — so a no-origin checkout could only
+    // ever match on the fine key, and the miss was indistinguishable from "no
+    // teammate has hit this". '' IS the salt for such a checkout, on both sides.
     keys.push({
       kind: 'fingerprint',
       key: 'sig_v1c:' + teamCoarseKey(row.coarseKey, repo),
@@ -622,12 +629,15 @@ function parseJsonRecord(value: unknown): Record<string, string> {
 // ---- repo origin (a file read, never a git spawn) ----------------------------
 
 /**
- * The origin remote URL for the checkout at `start`, read from `.git/config`, or
- * null. NO GIT INVOCATION — a hook (and a sync it spawns) must not run a process
- * in front of its work; a `.git` file (a worktree or submodule) is followed to
- * its real gitdir. Only the salt for the coarse key depends on it, and a null
- * salts to '' — the same across the team, which is the pre-salt behaviour, safe
- * because a missing origin is uncommon and the fine key still discriminates.
+ * The coarse key's repo salt for the checkout at `start`: `repoSlug` of the
+ * origin remote URL read from `.git/config`, or null. NO GIT INVOCATION — a hook
+ * (and a sync it spawns) must not run a process in front of its work; a `.git`
+ * file (a worktree or submodule) is followed to its real gitdir.
+ *
+ * ⚠ THE SAME RULE AS THE RESOLVE LEG (`repoOrigin` in lib/push-scripts.ts): the
+ * URL is normalised to `owner/name` so the two transports of one repo salt
+ * alike, and a null (no origin, or a remote that is a bare local path) salts to
+ * '' — a salt like any other, which the coarse key still goes out under.
  */
 function readRepoOrigin(cwd: string): string | null {
   const gitDir = findGitDir(cwd);
@@ -651,7 +661,7 @@ function readRepoOrigin(cwd: string): string | null {
     }
     if (!inOrigin) continue;
     const url = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
-    if (url !== null && url[1] !== undefined) return url[1].slice(0, 500);
+    if (url !== null && url[1] !== undefined) return repoSlug(url[1].slice(0, 500));
   }
   return null;
 }

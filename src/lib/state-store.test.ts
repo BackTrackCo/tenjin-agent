@@ -29,6 +29,7 @@ import {
   projectIdOf,
   searchesForDraft,
   shortHash,
+  repoSlug,
   teamCoarseKey,
   storeSource,
   type StoredSearch,
@@ -46,6 +47,7 @@ import {
   stopHookScript,
   websearchHookScript,
 } from './hook-scripts';
+import { REPO_SLUG_CASES } from './repo-slug-cases';
 
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -3267,6 +3269,48 @@ describe('retired files', () => {
 
   it('is a no-op on a machine that never had them', async () => {
     expect(await removeRetiredState(dataDir)).toEqual([]);
+  });
+});
+
+/**
+ * The `owner/name` the coarse key is salted with (tenjin-agent#249). The table
+ * is shared with push-scripts.test.ts, which runs the generated failure arm's
+ * inline copy against exactly these rows: two implementations, one table, so a
+ * shape either holds on both sides or the suite is red.
+ */
+describe('repoSlug', () => {
+  it.each(REPO_SLUG_CASES)('reduces %j to %j', (url, slug) => {
+    expect(repoSlug(url)).toBe(slug);
+  });
+
+  /** The point of the whole change: transport is not identity. */
+  it('gives one salt to every spelling of one repo', () => {
+    const spellings = [
+      'git@github.com:acme/api.git',
+      'https://github.com/acme/api.git',
+      'https://github.com/acme/api',
+      'ssh://git@github.com:2222/acme/api',
+    ];
+    expect(new Set(spellings.map((u) => teamCoarseKey('abc123', repoSlug(u)))).size).toBe(1);
+  });
+
+  /** And a fork is still a different shelf scope than its upstream. */
+  it('keeps two repos, and a fork of one, on different salts', () => {
+    const upstream = teamCoarseKey('abc123', repoSlug('git@github.com:acme/api.git'));
+    expect(upstream).not.toBe(teamCoarseKey('abc123', repoSlug('git@github.com:other/api.git')));
+    expect(upstream).not.toBe(teamCoarseKey('abc123', repoSlug('git@github.com:acme/web.git')));
+  });
+
+  /**
+   * A no-origin checkout salts with '' ON BOTH SIDES, so two of them match each
+   * other. Before #249 the resolve leg asked under this key and `tenjin sync`
+   * published nothing under it.
+   */
+  it("salts a checkout with no remote as '', which is a key like any other", () => {
+    expect(repoSlug('/srv/mirrors/api')).toBe('');
+    expect(teamCoarseKey('abc123', repoSlug('/srv/mirrors/api'))).toBe(
+      teamCoarseKey('abc123', repoSlug('')),
+    );
   });
 });
 

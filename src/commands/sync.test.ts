@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSync } from './sync';
 import { openStore, projectId, STORE_SQL } from '../lib/state-store';
-import { teamCoarseKey } from '../lib/state-store';
+import { repoSlug, teamCoarseKey } from '../lib/state-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import { CliError } from '../lib/errors';
@@ -237,11 +237,18 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     expect((body.bodyMd as string).length).toBeLessThanOrEqual(300);
     expect(body.bodyMd as string).toContain('pkg: zod@4.1.0');
 
-    // No .git in this tmpdir, so no repo origin: fine key + command_head, no
-    // salted coarse key.
+    // No .git in this tmpdir, so the repo salt is '' — WHICH IS STILL A SALT
+    // (tenjin-agent#249). The coarse key goes out under it, because the resolve
+    // leg asks under exactly this key in a checkout with no origin; the arm that
+    // used to drop it here is what made those pairings fine-key-only.
     const keys = body.keys as Array<{ kind: string; key: string; verified: boolean }>;
     expect(keys).toEqual([
       { kind: 'fingerprint', key: 'sig_v1:fine-hash-abc', verified: false },
+      {
+        kind: 'fingerprint',
+        key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', ''),
+        verified: false,
+      },
       { kind: 'command_head', key: 'pnpm', verified: false },
     ]);
 
@@ -253,7 +260,7 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     expect(row.synced_at).not.toBeNull();
   });
 
-  it('salts the coarse key with the repo origin when the checkout has one', async () => {
+  it('salts the coarse key with the repo slug when the checkout has an origin', async () => {
     await writeTeamConfig();
     const repoDir = join(dir, 'repo');
     await mkdir(join(repoDir, '.git'), { recursive: true });
@@ -273,9 +280,51 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
 
     const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
-    const expected =
-      'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'https://github.com/acme/widgets.git');
+    const expected = 'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'acme/widgets');
     expect(keys.some((k) => k.key === expected)).toBe(true);
+    expect(expected).toBe(
+      'sig_v1c:' +
+        teamCoarseKey('coarse-hash-xyz', repoSlug('https://github.com/acme/widgets.git')),
+    );
+    // The SLUG, never the url: a teammate on the ssh remote publishes this key.
+    expect(keys.some((k) => k.key.startsWith('sig_v1c:'))).toBe(true);
+    expect(
+      keys.some(
+        (k) =>
+          k.key ===
+          'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'https://github.com/acme/widgets.git'),
+      ),
+    ).toBe(false);
+  });
+
+  /**
+   * ONE KEY FOR THE TWO TRANSPORTS OF ONE REPO (tenjin-agent#249). Before the
+   * slug, a teammate who cloned over ssh and a teammate who cloned over https
+   * published two different coarse keys for one project and never matched.
+   */
+  it('publishes the same coarse key from an ssh clone and an https clone', async () => {
+    await writeTeamConfig();
+    const keyFor = async (origin: string, key: string): Promise<string> => {
+      const repoDir = join(dir, `clone-${key}`);
+      await mkdir(join(repoDir, '.git'), { recursive: true });
+      await writeFile(join(repoDir, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`);
+      await seedPairing({
+        cwd: repoDir,
+        key,
+        coarseKey: 'coarse-shared',
+        status: 'unverified',
+      });
+      const { provider } = spyProvider();
+      const { fetch, sent } = shelfServer();
+      await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
+      const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
+      return keys.find((k) => k.key.startsWith('sig_v1c:'))!.key;
+    };
+    const ssh = await keyFor('git@github.com:acme/widgets.git', 'fine-ssh');
+    const https = await keyFor('https://github.com/acme/widgets', 'fine-https');
+    const fork = await keyFor('git@github.com:fork/widgets.git', 'fine-fork');
+    expect(ssh).toBe(https);
+    expect(fork).not.toBe(ssh);
   });
 
   it('sends verified:true on the keys when the pairing closed as verified', async () => {

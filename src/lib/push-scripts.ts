@@ -1843,7 +1843,10 @@ const TEAM_RESOLVE_LIMIT = 3;
  * The repo this checkout is a clone of: the \`url\` under \`[remote "origin"]\`
  * in \`.git/config\`, found by walking up from \`cwd\`. A worktree's \`.git\` is
  * a file naming its gitdir, whose \`commondir\` holds the shared config, so a
- * worktree salts the same as its main checkout. '' when there is no origin.
+ * worktree salts the same as its main checkout, NORMALISED to \`owner/name\`
+ * by \`repoSlug\`. '' when there is no origin, which is a salt like any other:
+ * the resolve leg still sends the coarse key, and \`tenjin sync\` still publishes
+ * it, so two no-origin checkouts match each other (#249).
  *
  * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
  * not start a process in front of a tool call. Bounded at twelve parent
@@ -1854,7 +1857,7 @@ function repoOrigin(cwd) {
   let dir = cwd;
   for (let i = 0; i < 12; i += 1) {
     const config = gitConfigPath(dir);
-    if (config !== null) return originUrl(config);
+    if (config !== null) return repoSlug(originUrl(config));
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -1914,6 +1917,42 @@ function originUrl(configPath) {
 }
 
 /**
+ * ⚠ MIRRORED with \`repoSlug\` in lib/state-store.ts, THE ONE DEFINITION: the
+ * repo a coarse key salts with, \`owner/name\` lowercased, or '' for anything
+ * that is not a remote (a bare local path, a \`file://\` clone, no origin at
+ * all). \`tenjin sync\` imports the exported copy; this one must reduce the same
+ * remote to the same string or a resolve query and the synced post it should
+ * find would salt two different ways and never meet.
+ *
+ * NOT THE URL (#249): the same repo is spelled \`git@host:owner/name.git\`,
+ * \`https://host/owner/name\` and \`ssh://git@host:2222/owner/name\`, so salting
+ * by URL kept two teammates on different transports from ever matching. Last
+ * TWO segments, so a GitLab subgroup is \`subgroup/name\` and not \`name\`.
+ */
+function repoSlug(url) {
+  // WHAT FOLLOWS THE HOST, or no match at all. Two remote spellings, one
+  // alternation: a scheme url whose authority ends at the first slash — but
+  // never a file:// one, which is a local clone and not a repo anyone else
+  // names — or the scp form [user@]host:path, whose host must carry a dot,
+  // which is what keeps a Windows drive (C:/src/api) a path and not a hostname.
+  // Anything else (a bare path, a relative path, an empty string) is not a
+  // remote and salts as ''.
+  const path =
+    /^(?:(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]*\/|(?:[^@/\\]+@)?[^@/\\:]*\.[^@/\\:]*:(?![/\\]))(.*)$/i.exec(
+      typeof url === 'string' ? url.trim() : '',
+    );
+  if (path === null) return '';
+  return (path[1] ?? '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .split('/')
+    .filter((part) => part.length > 0)
+    .slice(-2)
+    .join('/')
+    .toLowerCase();
+}
+
+/**
  * ⚠ MIRRORED with \`teamCoarseKey\` in lib/state-store.ts, THE ONE DEFINITION
  * (plan 06, "The naming, fixed once"): the coarse key AS IT GOES ON THE WIRE,
  * \`shortHash(coarse_key + '|' + repo)\` over the STORED, unsalted \`sig_v1c\`
@@ -1926,7 +1965,8 @@ function originUrl(configPath) {
  * The local coarse key stays unsalted because local lookups are already
  * project-scoped (\`findPairing\`); the team shelf is shared across every repo
  * the team has, and without the salt an \`ERR_PNPM_OUTDATED_LOCKFILE\`-class
- * message would match a fix from any of them. Null exactly when the local
+ * message would match a fix from any of them. \`repo\` is \`repoSlug\`'s
+ * \`owner/name\` (or ''), never the raw URL (#249). Null exactly when the local
  * coarse key is: no errno, nothing coarse to send.
  */
 function teamCoarseKey(sig, repo) {

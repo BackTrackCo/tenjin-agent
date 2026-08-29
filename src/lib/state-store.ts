@@ -3037,12 +3037,64 @@ export function projectId(cwd: string | null | undefined): string | null {
 export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 
 /**
+ * The repo a coarse key salts with: `owner/name`, lowercased, from a git remote
+ * URL — or `''` for anything that is not one.
+ *
+ * ⚠ MIRRORED verbatim as `repoSlug` inside the generated failure arm
+ * (lib/push-scripts.ts). Same rule as {@link teamCoarseKey} below, and for the
+ * same reason: the resolve leg and `tenjin sync` must reduce one checkout's
+ * remote to the SAME string or a query and the post it should find salt two
+ * different ways and never meet. push-scripts.test.ts runs this table against
+ * the generated copy.
+ *
+ * `owner/name` AND NOT THE URL (tenjin-agent#249). The URL is the same repo
+ * spelled four ways — `git@host:owner/name.git`, `https://host/owner/name`,
+ * `ssh://git@host:2222/owner/name`, with or without `.git` — so two teammates
+ * who cloned the same project over different transports salted differently and
+ * could never match each other's coarse keys. It can also carry a credential in
+ * its userinfo, which this drops rather than hashes. A rename or a transfer
+ * still breaks continuity; the alternatives that survive one (the root commit,
+ * a committed project-id file) cost a `git` spawn or a file in every repo, and
+ * with zero coarse hits on the shelf today that is not where the needle moves.
+ *
+ * The last TWO path segments, so a GitLab subgroup reduces to `subgroup/name`
+ * rather than colliding on `name`. A bare local path (`/srv/mirrors/api`,
+ * `../api`, a `file://` URL) has no owner to name and reduces to `''` — which
+ * is a real salt, not a missing one: BOTH sides send the coarse key salted with
+ * `''`, so two no-origin checkouts still match each other.
+ */
+export function repoSlug(url: string): string {
+  // WHAT FOLLOWS THE HOST, or no match at all. Two remote spellings, one
+  // alternation: a scheme url whose authority ends at the first slash — but
+  // never a file:// one, which is a local clone and not a repo anyone else
+  // names — or the scp form [user@]host:path, whose host must carry a dot,
+  // which is what keeps a Windows drive (C:/src/api) a path and not a hostname.
+  // Anything else (a bare path, a relative path, an empty string) is not a
+  // remote and salts as ''.
+  const path =
+    /^(?:(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/]*\/|(?:[^@/\\]+@)?[^@/\\:]*\.[^@/\\:]*:(?![/\\]))(.*)$/i.exec(
+      typeof url === 'string' ? url.trim() : '',
+    );
+  if (path === null) return '';
+  return (path[1] ?? '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .split('/')
+    .filter((part) => part.length > 0)
+    .slice(-2)
+    .join('/')
+    .toLowerCase();
+}
+
+/**
  * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
  * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
- * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is the origin URL
- * read from `.git/config`. The salt goes over the stored hash, not the raw
- * message, because a `pairings` row keeps only the hashes and `tenjin sync`
- * reads rows back long after the failure arm's `sigV1()` call is gone.
+ * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is {@link repoSlug}
+ * of the origin URL read from `.git/config` — `''` when there is no origin, which
+ * is a salt like any other and not a reason to drop the key. The salt goes over
+ * the stored hash, not the raw message, because a `pairings` row keeps only the
+ * hashes and `tenjin sync` reads rows back long after the failure arm's
+ * `sigV1()` call is gone.
  *
  * THE ONE DEFINITION. `tenjin sync` (commands/sync.ts) imports it directly; a
  * hook script cannot import, so the failure arm's resolve leg carries a copy
