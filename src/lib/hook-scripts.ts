@@ -2418,8 +2418,16 @@ function spawnSyncIfNeeded(config, cwd) {
   // cleared it and both re-claimed: one machine-wide guard, two detached
   // children, which is the fan-out the claim exists to prevent. The read above
   // is only an early-out; the takeover below is the decision.
+  // FAIL CLOSED AT BOTH ENDS (#256 review). \`claimState\` reads a swallowed
+  // write as a win, which is right for a dedupe aid and wrong here: this claim
+  // is an ARBITER, and a store that refuses writes — read-only, full, locked
+  // past the busy timeout — would hand every Stop on the machine the same win
+  // and spawn a detached child each, the exact fan-out the claim exists to
+  // prevent. \`takeStaleState\` already treats a swallowed write as a loss; the
+  // outcome form makes the insert end agree. The cost of losing is one skipped
+  // sync, and the claim expires by age, so the next Stop retries.
   if (
-    !claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now }) &&
+    claimStateOutcome(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now }) !== 'won' &&
     !takeStaleState(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, { at: now })
   ) {
     return false;

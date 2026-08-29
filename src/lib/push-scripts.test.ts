@@ -7347,6 +7347,48 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
     expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
   });
 
+  /**
+   * A STORE THAT REFUSES WRITES IS A LOSS, NOT A WIN (#256 review).
+   *
+   * The claim is an ARBITER, not a dedupe aid: it is the machine-wide guard on
+   * spawning a detached `tenjin sync`. `claimState` reads a swallowed write as
+   * a win by contract — right for a claim whose worst loss is a duplicate
+   * lookup, wrong here, because a store that cannot be written to hands EVERY
+   * Stop on the machine the same win, and each spawns a child. That is the
+   * exact fan-out the claim exists to prevent, and it arrives on a read-only or
+   * full disk rather than under contention.
+   *
+   * `takeStaleState` already fails closed. The outcome form makes the insert
+   * end agree, so both ends of the arbitration lose when the write does not
+   * land. A trigger standing in for the refusal keeps reads working, which is
+   * what a read-only store looks like from inside `storeRun`: the SELECTs above
+   * still answer, and only the write is swallowed.
+   */
+  it('spawns nothing when the store swallows the claim write', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    // Every `session_state` INSERT now throws, which `storeRun` catches and
+    // reports as a null result — the swallowed write the old code read as a win.
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      db.exec(
+        `CREATE TRIGGER refuse_state BEFORE INSERT ON session_state
+           BEGIN SELECT RAISE(ABORT, 'attempt to write a readonly database'); END`,
+      );
+    } finally {
+      db.close();
+    }
+
+    const run = await runScript(stopHookScript(dataDir, cliPath), stopInput);
+
+    expect(run.code).toBe(0);
+    expect(await markerLines(marker)).toHaveLength(0);
+    // And no claim row either: the insert never landed, and the update end
+    // cannot create one.
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+  });
+
   it('runs one sync between Stops inside the claim TTL, not one per Stop', async () => {
     await teamOn();
     await seedPairing();

@@ -2029,16 +2029,43 @@ function claimState(sessionId, key, value) {
   // they reach here, and a caller that somehow did must not be told it holds a
   // claim nothing recorded.
   if (STORE === null) return false;
+  // A store that refused the write for any OTHER reason must not silence the
+  // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
+  // \`held\` is the only loss; \`unavailable\` reads as a win, which is this
+  // function's whole contract and the reason the outcome form exists beside it.
+  return claimStateOutcome(sessionId, key, value) !== 'held';
+}
+
+/**
+ * The same free-claim insert, saying WHICH loss it was: \`won\`, \`held\` by an
+ * existing row, or \`unavailable\` because there is no store or the write was
+ * swallowed.
+ *
+ * FOR THE CALLERS THAT ARE ARBITERS RATHER THAN DEDUPE AIDS (#256 review).
+ * \`claimState\` above reads \`unavailable\` as a win on purpose: its worst loss
+ * is a duplicate lookup, and going silent because a write was swallowed is the
+ * more expensive mistake. The Stop hook's sync claim is the opposite shape. It
+ * is the machine-wide guard on spawning a detached \`tenjin sync\`, and its
+ * other end (\`takeStaleState\`) already fails closed — so a store that refuses
+ * writes (read-only, full, locked past the busy timeout) had every Stop reading
+ * its own swallowed insert as a win and spawning a child, which is precisely
+ * the fan-out the claim exists to prevent. Failing closed there costs one
+ * skipped sync; the claim expires by age and the next Stop retries.
+ *
+ * Same three-value shape as \`claimStateFreshOutcome\`, and for the same reason:
+ * the two losses do not cost the same, so the caller decides, not this.
+ */
+function claimStateOutcome(sessionId, key, value) {
+  if (STORE === null) return 'unavailable';
   const result = storeRun(STORE_SQL.claimState, [
     storeSession(sessionId),
     key,
     storeJson(value === undefined ? true : value),
     Date.now(),
   ]);
-  // A store that refused the write for any OTHER reason must not silence the
-  // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
-  if (result === null) return true;
-  return typeof result.changes === 'number' ? result.changes > 0 : true;
+  if (result === null) return 'unavailable';
+  if (typeof result.changes !== 'number') return 'won';
+  return result.changes > 0 ? 'won' : 'held';
 }
 
 /**
