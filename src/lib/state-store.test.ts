@@ -345,6 +345,13 @@ describe('the hot-path queries never scan', () => {
         ['openLoops', STORE_SQL.openLoops, [0, '', '', 25]],
         ['researchedBySession', STORE_SQL.researchedBySession, ['s']],
         ['getState', STORE_SQL.getState, ['s', 'k']],
+        // The subagent handoff: one take per fire, and the range it seeks on is
+        // the primary key's own.
+        [
+          'takeStateOldestByPrefix',
+          STORE_SQL.takeStateOldestByPrefix,
+          ['s', 's', 'dispatch_cache', 'dispatch_cache￿'],
+        ],
         // The one-shot CLI tally is not a hook path, but it reads the same
         // never-pruned table.
         ['statusRows', STORE_SQL.statusRows, [0]],
@@ -1495,6 +1502,100 @@ main().catch((err) => process.stdout.write('threw: ' + err.message));
     const run = await runScript(probe, '');
     expect(run.code).toBe(0);
     expect(JSON.parse(run.stdout)).toEqual({ fresh: false, plain: true });
+  });
+});
+
+/**
+ * The peek an evictor uses, at the SQL level.
+ *
+ * `cacheSlot` may not drop the slot whose piece the parent was already told is
+ * queued for a child, so it has to see the row before deleting it. The peek is
+ * only safe while it names the SAME row the take would take: an ordering that
+ * drifted from `takeStateOldestByPrefix` would protect one slot and evict a
+ * different one, which is the announced-delivery loss with extra steps.
+ */
+describe('oldestStateByPrefix names the row the take would take', () => {
+  it('agrees with takeStateOldestByPrefix, row for row, and takes nothing', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    try {
+      const range = ['sess', 'dispatch_cache', 'dispatch_cache￿'];
+      const put = (key: string, at: number): void => {
+        store.run(STORE_SQL.setState, ['sess', key, JSON.stringify({ k: key }), at]);
+      };
+      // Out of insertion order, and with a same-millisecond pair, so `at` and
+      // the `key` tie-break are both exercised.
+      put('dispatch_cache:c', 300);
+      put('dispatch_cache:a', 100);
+      put('dispatch_cache:b2', 200);
+      put('dispatch_cache:b1', 200);
+
+      const drained: unknown[] = [];
+      for (let i = 0; i < 4; i += 1) {
+        const peeked = store.get(STORE_SQL.oldestStateByPrefix, range) as { key: string };
+        // The peek leaves the row where it is: asking twice answers the same.
+        expect((store.get(STORE_SQL.oldestStateByPrefix, range) as { key: string }).key).toBe(
+          peeked.key,
+        );
+        const taken = store.get(STORE_SQL.takeStateOldestByPrefix, ['sess', ...range]) as {
+          key: string;
+        };
+        expect(taken.key).toBe(peeked.key);
+        drained.push(taken.key);
+      }
+      expect(drained).toEqual([
+        'dispatch_cache:a',
+        'dispatch_cache:b1',
+        'dispatch_cache:b2',
+        'dispatch_cache:c',
+      ]);
+      expect(store.get(STORE_SQL.oldestStateByPrefix, range)).toBe(null);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+/**
+ * The statement behind the subagent handoff, at the SQL level.
+ *
+ * The arm's behaviour is pinned in `push-scripts.test.ts`; this pins the
+ * statement itself, because the delete IS the read and an ORDER BY or a range
+ * bound lost in an edit would put that back to a race nothing else catches.
+ */
+describe('takeStateOldestByPrefix', () => {
+  const take = (store: { get: (sql: string, params: unknown[]) => unknown }): unknown =>
+    store.get(STORE_SQL.takeStateOldestByPrefix, [
+      'sess',
+      'sess',
+      'dispatch_cache',
+      'dispatch_cache￿',
+    ]);
+
+  it('hands each caller a different slot, oldest first, and empties the range', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    try {
+      // The legacy single key a stale hook still writes, then two keyed slots.
+      store.run(STORE_SQL.setState, ['sess', 'dispatch_cache', '"legacy"', 1]);
+      store.run(STORE_SQL.setState, ['sess', 'dispatch_cache:b', '"second"', 3]);
+      store.run(STORE_SQL.setState, ['sess', 'dispatch_cache:a', '"first"', 2]);
+      // A key under another prefix, which the range must not reach.
+      store.run(STORE_SQL.setState, ['sess', 'edits:src/a.ts', '"3"', 0]);
+      // Another session's slot, which is not this consumer's to take.
+      store.run(STORE_SQL.setState, ['other', 'dispatch_cache:a', '"theirs"', 0]);
+
+      expect(take(store)).toMatchObject({ key: 'dispatch_cache', value: '"legacy"' });
+      expect(take(store)).toMatchObject({ key: 'dispatch_cache:a', value: '"first"' });
+      expect(take(store)).toMatchObject({ key: 'dispatch_cache:b', value: '"second"' });
+      expect(take(store)).toBeNull();
+    } finally {
+      store.close();
+    }
+    expect(rows('SELECT key, session FROM session_state ORDER BY key')).toEqual([
+      { key: 'dispatch_cache:a', session: 'other' },
+      { key: 'edits:src/a.ts', session: 'sess' },
+    ]);
   });
 });
 

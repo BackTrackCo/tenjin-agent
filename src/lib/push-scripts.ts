@@ -1067,6 +1067,7 @@ async function main() {
     agentId,
     cwd,
     eventUid,
+    agentId,
     mode: 'inject',
     source: 'push-hook',
   });
@@ -2335,15 +2336,22 @@ export function pushFailureHookScript(dataDir: string): string {
 }
 
 /**
- * The subagent arm (T5): SubagentStart carries no prompt, only the type, so
- * it reads what the dispatch hook found seconds earlier for this session (the
- * cache the dispatch hook writes when push is on) and hands the subagent the
- * finding at its first turn, where the lead's transcript would have hidden it.
+ * The subagent arm (T5): SubagentStart carries no prompt, only an agent id and
+ * a type, so it takes what the dispatch hook found seconds earlier and parked
+ * for it, and hands the subagent that finding at its first turn, where the
+ * lead's transcript would have hidden it.
  *
  * The row it writes is stamped with the CHILD it was relayed to (\`agent_id\` on
  * this event), not just the parent session, because that is the only handle on
  * the transcript the answer to "was it used" lives in: the relayed text reaches
  * no file at all, and the child's tool calls reach the child's file alone.
+ *
+ * ONE SLOT PER DISPATCH, TAKEN OLDEST-FIRST. The payload names no dispatch
+ * (SubagentStart carries \`agent_type\` and \`agent_id\`, not \`tool_use_id\`), so
+ * arrival order is still what pairs a child to a finding; what the keyed slots
+ * fix is the one shared row two dispatches used to overwrite and two children
+ * used to both read. Every fire that gets as far as opening the store leaves a
+ * heartbeat row naming why it ended, delivered or not.
  */
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
@@ -2418,6 +2426,62 @@ function childPointer(candidate, opener, marker, shelf, searchId) {
   return lines.join('\n');
 }
 
+/**
+ * Take the oldest handoff slot this session still holds that a child can
+ * actually use, and say why the others were not it.
+ *
+ * EVERY TAKE IS A DELETE. A slot the loop rejects is already gone, which is the
+ * fix for the expired case: a stale handoff used to sit in the one cache key
+ * and be re-read, re-rejected and left in place by every later subagent in the
+ * session, so one dead row silenced the arm until a new dispatch overwrote it.
+ * Bounded by the same cap the writer evicts against, so a fire's work is
+ * bounded even if a session somehow accumulated more.
+ *
+ * EVERY GATE IS IN THIS LOOP, so a reason is terminal for a SLOT and not for the
+ * fire. \`already-injected\` is the case that forced it: the dispatch arm parks
+ * before it runs its own already-shown check, so a parent arm injecting the
+ * piece between that park and the child's start leaves a slot the child is
+ * guaranteed to refuse — and with the gate below the loop, a deliverable slot
+ * behind it was never reached. A rejected slot still gets its decision row
+ * through \`onReject\`, so the only thing that changes is which fire ends.
+ */
+function takeUsableSlot(sessionId, onReject) {
+  let reason = 'no-cache';
+  for (let i = 0; i < CACHE_SLOT_MAX; i += 1) {
+    const taken = takeStateOldestByPrefix(sessionId, STATE_CACHE);
+    if (taken === null) return { slot: null, reason };
+    const value = taken.value;
+    if (!isRecord(value) || !isRecord(value.top) || typeof value.top.resourceId !== 'string') {
+      // No candidate here, so no decision row: nothing in this slot describes a
+      // hit, which is why 'invalid-shape' is a heartbeat reason and not a skip.
+      reason = 'invalid-shape';
+      continue;
+    }
+    const at = Date.parse(String(value.at));
+    if (!Number.isFinite(at) || Date.now() - at > CACHE_TTL_MS) {
+      reason = 'expired';
+      continue;
+    }
+    // The same gate pushDecide applies to its own judgement, applied to a cached
+    // one: a stale cache from an older build, or a dispatch hook that cached
+    // before this check existed, must not turn into an injection here.
+    if (value.strength !== 'strong' && value.strength !== 'moderate') {
+      reason = 'weak';
+      onReject(value, reason);
+      continue;
+    }
+    // Some context already got the whole piece; this slot would be the second
+    // delivery, not the first.
+    if (alreadyShown(sessionId, value.top.resourceId)) {
+      reason = 'already-injected';
+      onReject(value, reason);
+      continue;
+    }
+    return { slot: value, reason: null };
+  }
+  return { slot: null, reason };
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -2431,6 +2495,7 @@ async function main() {
   if (invalid) return quiet();
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
+  const agentType = typeof input.agent_type === 'string' ? clean(input.agent_type, 60) : '';
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
   // stderr line already written at open. Returning here rather than carrying on
@@ -2440,77 +2505,106 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
-  const cache = getState(sessionId, STATE_CACHE);
-  if (!isRecord(cache)) return quiet();
-  const at = Date.parse(String(cache.at));
-  if (!Number.isFinite(at) || Date.now() - at > CACHE_TTL_MS) return quiet();
-  if (!isRecord(cache.top) || typeof cache.top.resourceId !== 'string') return quiet();
-  // Once per dispatch: the cache is consumed by the first subagent it reaches.
-  clearState(sessionId, STATE_CACHE);
-
-  const top = cache.top;
-  const agentType = typeof input.agent_type === 'string' ? clean(input.agent_type, 60) : '';
-  // Whichever shelf the dispatch hook actually asked. A cache written before
-  // that field existed reads as 'public', which is what it was.
-  const shelf = cache.shelf === 'team' ? 'team' : 'public';
-  // One uid per fire, stamped into the event row here and into the emitted
-  // text below. What it does NOT prove: Claude Code does not persist hook
+  // THE UID IS MINTED FIRST so the heartbeat can be written LAST. Every path
+  // below ends in exactly one event row carrying the reason this fire ended the
+  // way it did, and the decision rows have to point at that row, so the id
+  // exists before either is written.
+  const eventUid = uid();
+  // One uid per fire, stamped into the delivery heartbeat below and into the
+  // emitted text. What it does NOT prove: Claude Code does not persist hook
   // context fired inside a subagent to either transcript (probed 2.1.247), so
   // no grep can confirm a child delivery. This correlates a row with the text
-  // that was emitted, and an 'injected' row stays a database claim. Skip rows
-  // inherit the marker through the ledger join, which is misleading; moving it
-  // onto the delivery row needs a store column and lands with the heartbeat
-  // work in the next layer (tenjin-agent#228 PR 2).
+  // that was emitted, and an 'injected' row stays a database claim. Only the
+  // 'delivered' heartbeat carries it, so a skip row can no longer read as a
+  // delivery.
   const marker = uid();
-  // ANCHORED, not just typed. The projection already refuses a non-UUID
-  // searchId before anything is cached, but this arm reads back out of the
-  // store and the value goes into a command line the child may run.
-  const searchId =
-    typeof cache.searchId === 'string' && UUID_RE.test(cache.searchId) ? cache.searchId : '';
-  const eventUid = recordEvent({
-    session: sessionId,
-    cwd,
-    hook: 'subagent',
-    tool: 'SubagentStart',
-    // THE AGENT THIS ROW IS ABOUT is the one starting, and it is the only
-    // handle the score has on the work that follows: everything that agent
-    // then edits, fails and passes files under the same parent session id.
-    // The TYPE stays in \`data\` — it is a label nothing joins on.
-    agentId,
-    data: {
-      event: 'SubagentStart',
+  /**
+   * ONE ROW PER FIRE THAT GETS THIS FAR (tenjin-agent#228). This arm used to
+   * exit before recording anything on four of its paths, so a session with no
+   * subagent rows could mean no cache, an expired one, a malformed one, or a
+   * hook that never ran at all — and the delivery rate had no denominator. The
+   * reason is terminal: whatever a path ends with is what the row says.
+   *
+   * THE DENOMINATOR STARTS AT \`openStore\`. The five exits above it — a
+   * non-record payload, the wrong event, push off, a null session, a store that
+   * would not open — leave no row, and cannot: four of them cannot tell which
+   * session they belonged to and the fifth has nowhere to write. So this counts
+   * fires that reached the cache, not fires that happened.
+   */
+  const heartbeat = (reason, extra) =>
+    recordEvent({
+      uid: eventUid,
+      session: sessionId,
+      cwd,
+      hook: 'subagent',
+      tool: 'SubagentStart',
+      // THE AGENT THIS ROW IS ABOUT is the child that is starting, and it rides
+      // the COLUMN rather than \`data\`: everything that child then edits, fails
+      // and passes files under the same parent session id, so the column is what
+      // partitions it. The TYPE stays in \`data\` — it is a label nothing joins on.
+      agentId,
+      data: { event: 'SubagentStart', reason, agentType, ...extra },
+    });
+
+  // Everything this arm reads back off a slot, in one place: the take loop's
+  // gates and the delivery path below describe a slot the same way, so a
+  // rejected one is recorded exactly as it was when the gates sat in main.
+  const readSlot = (cache) => {
+    const top = cache.top;
+    // ANCHORED, not just typed. The projection already refuses a non-UUID
+    // searchId before anything is cached, but this arm reads back out of the
+    // store and the value goes into a command line the child may run.
+    const searchId =
+      typeof cache.searchId === 'string' && UUID_RE.test(cache.searchId) ? cache.searchId : '';
+    return {
+      top,
       query: clean(String(cache.query || ''), 512),
-      agentType,
-      marker,
-    },
-  });
-  const base = {
-    session: sessionId,
-    // THE CHILD'S OWN ID, off this SubagentStart payload: the row records the
-    // subagent the finding was relayed TO, which is the transcript \`push grade\`
-    // then judges it against. \`session_id\` is the parent's on this event, and
-    // the parent's file never carries a word of what the child did.
-    agentId,
-    cwd,
-    eventUid,
-    trigger: 'subagent',
-    event: 'SubagentStart',
-    shelf,
-    searchId: searchId === '' ? undefined : searchId,
-    candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
-    strength: cache.strength,
+      slotId: typeof cache.slotId === 'string' ? cache.slotId : null,
+      searchId,
+      // Whichever shelf the dispatch hook actually asked. A cache written before
+      // that field existed reads as 'public', which is what it was.
+      shelf: cache.shelf === 'team' ? 'team' : 'public',
+      base: {
+        session: sessionId,
+        // THE CHILD'S OWN ID, off this SubagentStart payload: the row records the
+        // subagent the finding was relayed TO, which is the transcript \`push grade\`
+        // then judges it against. \`session_id\` is the parent's on this event, and
+        // the parent's file never carries a word of what the child did.
+        agentId,
+        cwd,
+        eventUid,
+        trigger: 'subagent',
+        event: 'SubagentStart',
+        shelf: cache.shelf === 'team' ? 'team' : 'public',
+        searchId: searchId === '' ? undefined : searchId,
+        candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
+        strength: cache.strength,
+        // Carried through the handoff now, so the row the CHILD writes describes
+        // the same hit the parent's dispatch row described.
+        confidence: typeof cache.confidence === 'string' ? cache.confidence : null,
+        corroborated: typeof cache.corroborated === 'boolean' ? cache.corroborated : null,
+      },
+    };
   };
-  // The same gate pushDecide applies to its own verdict, applied to a cached
-  // one: a stale cache from an older build, or a dispatch hook that cached
-  // before this check existed, must not turn into an injection here.
-  if (cache.strength !== 'strong') {
-    recordDecision({ ...base, action: 'skipped', reason: 'weak' });
+  // The LAST slot rejected, which is the one the terminal heartbeat is about.
+  // The fire's reason is whatever it ended on; naming the slot that produced it
+  // keeps the heartbeat joinable even when the fire delivered nothing.
+  let lastReject = null;
+  const { slot: cache, reason: emptyReason } = takeUsableSlot(sessionId, (value, reason) => {
+    const read = readSlot(value);
+    lastReject = read;
+    recordDecision({ ...read.base, action: 'skipped', reason });
+  });
+  if (cache === null) {
+    heartbeat(
+      emptyReason,
+      lastReject === null ? undefined : { query: lastReject.query, slotId: lastReject.slotId },
+    );
     return quiet();
   }
-  if (alreadyShown(sessionId, top.resourceId)) {
-    recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
-    return quiet();
-  }
+
+  const { top, query, slotId, searchId, shelf, base } = readSlot(cache);
+
   // POINTER ONLY, whatever the strength (tenjin-agent#228). The full-body
   // upgrade this arm ran on a strong free hit had zero confirmed uses in the
   // 19 sampled injections, at up to 6k chars each, while the one verified win
@@ -2537,8 +2631,11 @@ async function main() {
   // concurrent fire already claimed is recorded as a skip and not shown twice.
   if (!mayShow(claimed)) {
     recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
+    heartbeat('already-injected', { query, slotId });
     return quiet();
   }
+  // BEFORE the emit, because emit exits the process.
+  heartbeat('delivered', { query, slotId, marker });
   emit('SubagentStart', text);
 }
 
@@ -2683,6 +2780,7 @@ async function main() {
           sessionId,
           agentId,
           cwd,
+          agentId,
           tool,
           mode: 'log',
           source: 'push-hook',
@@ -2719,6 +2817,7 @@ async function main() {
       sessionId,
       agentId,
       cwd,
+      agentId,
       tool,
       mode: 'log',
       source: 'push-hook',
