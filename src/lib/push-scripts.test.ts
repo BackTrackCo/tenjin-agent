@@ -3071,6 +3071,25 @@ const HOT_CAP = PROMPT_CAP * PUSH_COOLDOWN_HOT_FACTOR;
 const COLD_CAP = Math.max(1, Math.floor(PROMPT_CAP / PUSH_COOLDOWN_COLD_DIVISOR));
 
 describe('the lookup budget (rolling window, per trigger)', () => {
+  /**
+   * THE GUARD IS THE NUMBER. Every other assertion in this block reads the
+   * constants, so it agrees with any value — including one that removes the
+   * guard in practice. This one pins the band, over the machine-wide total
+   * rather than one bucket, so raising a single arm or adding a seventh
+   * cannot slip past it: six arms at 60 is 360 lookups an hour, 720 with the
+   * hot rule doubling every arm, and that is the ceiling this shipped with.
+   */
+  it('keeps the machine-wide ceiling inside the band the guard was sized for', () => {
+    const caps = Object.values(PUSH_LOOKUP_CAPS_PER_WINDOW);
+    const total = caps.reduce((sum, cap) => sum + cap, 0);
+    expect(caps).toHaveLength(6);
+    expect(total).toBe(360);
+    expect(total * PUSH_COOLDOWN_HOT_FACTOR).toBe(720);
+    // An unnamed arm is the same guard, not a smaller one and not a bigger one.
+    expect(PUSH_LOOKUP_CAP_DEFAULT).toBe(60);
+    for (const cap of caps) expect(cap).toBe(60);
+  });
+
   const OTHER_SESSION = 'sess-someone-else';
   const QUESTION =
     'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps';

@@ -53,6 +53,16 @@ export const PUSH_INJECT_MAX_PER_SESSION = 5;
  * measured every skipped lookup is a data point lost. 60 an hour still stops a
  * stuck loop from hammering a shelf, and the adaptive cooldown below still
  * scales it on evidence once anything is graded.
+ *
+ * THE MACHINE-WIDE CEILING, so the next reader decides on the same number: six
+ * arms at 60 is 360 lookups an hour, 720 with the hot rule doubling every arm
+ * — about 1,440 shelf requests an hour at one search plus one embedding each,
+ * nine times the 80 this shipped with. It is a guard against a runaway loop,
+ * not against a merely chatty one; the shelf's own rate limit is the bound on
+ * that, and this constant is the only client-side bound on shelf egress. An
+ * arm added to this table raises the ceiling by 60; the test that pins the
+ * band (push-scripts.test.ts, "keeps the machine-wide ceiling") is what makes
+ * that a decision rather than a drift.
  */
 export const PUSH_LOOKUP_WINDOW_MS = 60 * 60 * 1000;
 export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
@@ -64,7 +74,9 @@ export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
   churn: 60,
 };
 /** What a trigger not named above may spend: the same guard, since the guard
- *  is about a stuck loop, not about which arm is worth the spend. */
+ *  is about a stuck loop, not about which arm is worth the spend. Note that
+ *  it also means an unsized arm raises the machine-wide ceiling by 60; size
+ *  a new arm in the table above deliberately rather than falling through. */
 export const PUSH_LOOKUP_CAP_DEFAULT = 60;
 /**
  * The adaptive cooldown (tenjin-agent#212; CommonTrace `retrieval.py`): the cap
