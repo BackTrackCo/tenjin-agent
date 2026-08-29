@@ -21,7 +21,9 @@ import {
   errorReason,
   findAnchor,
   findTranscript,
+  firstToolCall,
   gradeInjection,
+  gradeRelayed,
   parseSince,
   parseTranscript,
   transcriptIdle,
@@ -407,7 +409,7 @@ export interface ScoreEvent {
   at: number;
   hook: string;
   tool: string | null;
-  /** The agent that fired it (`data.agentId`), or null for the lead's own
+  /** The agent that fired it (`events.agent_id`), or null for the lead's own
    *  turn. The unit the score is scanned over: see {@link ScoreInput}. */
   agentId: string | null;
   /** The basenames the row names (`files`), or none. */
@@ -421,7 +423,7 @@ export interface ScoreEvent {
 export interface ScoreInput {
   /**
    * ONE AGENT'S ROWS, not one session's. Parallel subagents share their
-   * parent's `session_id` and are told apart only by `data.agentId`, so a
+   * parent's `session_id` and are told apart only by `events.agent_id`, so a
    * session-wide scan stitched one agent's failure to another's edit and a
    * third's pass and called the result a fix. {@link readSessionScores}
    * partitions before it calls this, and every pattern below is therefore
@@ -661,7 +663,7 @@ export async function readSessionScores(
   if (store === null) return [];
   try {
     const since = nowMs - LEDGER_WINDOW_MS;
-    // KEYED BY (session, agent), not by session. `data.agentId` is null for the
+    // KEYED BY (session, agent), not by session. `agent_id` is null for the
     // lead's own turn and the child's id for a subagent's, and the two are
     // scored apart: a session is the conversation, an agent is the worker, and
     // fail -> edit -> pass is a claim about one worker.
@@ -673,11 +675,11 @@ export async function readSessionScores(
       const session = typeof row.session === 'string' ? row.session : '';
       if (session === '') continue;
       const data = parseData(row.data);
-      // '' is not an agent: the arms write null for a parent fire, and a row
-      // from a build that predates the field has no `agentId` at all. Both are
-      // the lead's own bucket.
+      // A COLUMN, the one the prelude's `identityOf` fills. '' is not an agent:
+      // the arms write null for a main-session fire, and a row written before
+      // version 2 has SQL NULL in the column. Both are the lead's own bucket.
       const agent =
-        typeof data.agentId === 'string' && data.agentId.length > 0 ? data.agentId : null;
+        typeof row.agent_id === 'string' && row.agent_id.length > 0 ? row.agent_id : null;
       const key = session + '\u0000' + (agent ?? '');
       const bucket =
         byWorker.get(key) ?? byWorker.set(key, { session, agent, events: [] }).get(key)!;
@@ -1074,9 +1076,14 @@ interface GradedRow {
   hook: string;
   shelf: string;
   resourceId: string | null;
+  /** The subagent the row was written inside, or null for the main session. It
+   *  is what decided WHICH transcript answered for the row. */
+  agentId: string | null;
   outcome: string;
   by: string;
   anchorLine: number | null;
+  /** The file this run actually read, for `--explain`; null when none was. */
+  transcript?: string | null;
   evidence?: string[];
   /** Why a row was left ungraded, for `--explain`. A verdict explains itself
    *  through its evidence; "nothing was written" does not. */
@@ -1150,19 +1157,29 @@ function labelOne(store: Store, label: string[]): GradedRow {
     hook: String(row.hook ?? 'unknown'),
     shelf: String(row.shelf ?? 'unknown'),
     resourceId: typeof row.resource_id === 'string' ? row.resource_id : null,
+    agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
     outcome: status,
     by: 'hand',
     anchorLine: null,
+    transcript: null,
   };
 }
 
 /**
- * Every ungraded injection in the window, judged against its session transcript.
+ * Every ungraded injection in the window, judged against the transcript it
+ * actually landed in.
  *
- * The transcript is parsed ONCE PER SESSION, not once per row: a busy session
- * has several injections and the file is the same file. A `subagent` row skips
- * the read entirely — a subagent's injections are written to no transcript at
- * all, so opening one could only ever produce a false `rejected`.
+ * The transcript is parsed ONCE PER (SESSION, AGENT), not once per row: a busy
+ * session has several injections and the file is the same file — but a row
+ * written inside a subagent belongs to that CHILD's file, and the parent's holds
+ * no word of what the child did, so the two are different reads under one
+ * session id.
+ *
+ * A row whose hook is `subagent` is a finding RELAYED to a child, which has no
+ * anchor row in any transcript; it is judged from the child's first tool call
+ * onward. Only a relayed row with no agent id recorded — written before this
+ * version, or by an arm that could not read one — has nothing to open, and
+ * those stay `unobserved` as every subagent row used to.
  */
 async function gradeSessions(
   store: Store,
@@ -1185,29 +1202,40 @@ async function gradeSessions(
     const hook = String(row.hook ?? 'unknown');
     const shelf = String(row.shelf ?? 'unknown');
     const session = typeof row.session === 'string' ? row.session : '';
+    const agentId = typeof row.agent_id === 'string' ? row.agent_id : null;
     const target: GradeTarget = {
       resourceId: typeof row.resource_id === 'string' ? row.resource_id : null,
       url: typeof row.url === 'string' ? row.url : null,
       title: typeof row.title === 'string' ? row.title : null,
     };
-    // A subagent injection reaches no transcript, so there is nothing to read
-    // and never will be; the row is closed rather than left open forever.
-    if (hook === 'subagent' || session === '') {
+    // Nothing names a file to open, and nothing ever will, so the row is closed
+    // rather than left open forever: a payload with no session at all, and a
+    // relayed finding whose child was never recorded (a row written before
+    // `agent_id` existed, or an arm that could read no id off its input).
+    if (session === '' || (hook === 'subagent' && agentId === null)) {
       out.push(
         record(store, {
           uid,
           hook,
           shelf,
           target,
+          agentId,
           verdict: { outcome: 'unobserved', by: 'none' },
           anchorLine: null,
+          note:
+            session === ''
+              ? undefined
+              : 'relayed to a subagent whose id was not recorded, so no transcript names it',
         }),
       );
       continue;
     }
-    let state = parsed.get(session);
+    // Keyed by BOTH, because one session id covers the parent's file and one
+    // file per child, and they answer for different rows.
+    const key = `${session} ${agentId ?? ''}`;
+    let state = parsed.get(key);
     if (state === undefined) {
-      state = await readSession(session, {
+      state = await readSession(session, agentId, {
         homeDir,
         locate,
         readText,
@@ -1215,7 +1243,7 @@ async function gradeSessions(
         store,
         now: window.now,
       });
-      parsed.set(session, state);
+      parsed.set(key, state);
     }
     // NOT A FACT ABOUT THE SESSION. A projects directory that is missing or
     // unreadable says nothing about whether this row was ever shown, and
@@ -1223,20 +1251,34 @@ async function gradeSessions(
     // would close every open row on the machine as never-seen.
     if (state.kind === 'unreadable') {
       out.push(
-        ungraded({ uid, hook, shelf, target, note: `transcript unreadable (${state.reason})` }),
+        ungraded({
+          uid,
+          hook,
+          shelf,
+          target,
+          agentId,
+          note: `transcript unreadable (${state.reason})`,
+        }),
       );
       continue;
     }
     if (state.kind === 'absent') {
       // The transcript IS absent — the projects directory was read and holds no
-      // file for this session. That is only `unobserved` once a transcript
-      // would have appeared by now: the harness writes the file as the session
-      // runs, so a row minted seconds ago whose session is still starting up
-      // has simply not been written yet.
+      // file for this session (or for this child of it). That is only
+      // `unobserved` once a transcript would have appeared by now: the harness
+      // writes the file as the session runs, so a row minted seconds ago whose
+      // session is still starting up has simply not been written yet.
       const at = typeof row.at === 'number' ? row.at : window.now;
       if (!state.ended && at > window.now - ENDED_AFTER_MS) {
         out.push(
-          ungraded({ uid, hook, shelf, target, note: 'no transcript for this session yet' }),
+          ungraded({
+            uid,
+            hook,
+            shelf,
+            target,
+            agentId,
+            note: 'no transcript for this session yet',
+          }),
         );
         continue;
       }
@@ -1246,22 +1288,32 @@ async function gradeSessions(
           hook,
           shelf,
           target,
+          agentId,
           verdict: { outcome: 'unobserved', by: 'none' },
           anchorLine: null,
         }),
       );
       continue;
     }
-    const anchor = findAnchor(state.rows, target);
-    const verdict = gradeInjection(state.rows, anchor, target, { ended: state.ended });
+    // A relayed finding has no anchor row anywhere — it was handed to the child
+    // as its opening context — so the child's first tool call is where its
+    // evidence starts. Everything else is anchored on the context row that
+    // carried it.
+    const relayed = hook === 'subagent';
+    const anchor = relayed ? firstToolCall(state.rows) : findAnchor(state.rows, target);
+    const verdict = relayed
+      ? gradeRelayed(state.rows, target, { ended: state.ended })
+      : gradeInjection(state.rows, anchor, target, { ended: state.ended });
     out.push(
       record(store, {
         uid,
         hook,
         shelf,
         target,
+        agentId,
         verdict,
         anchorLine: anchor === -1 ? null : (state.rows[anchor]?.line ?? null),
+        transcript: state.path,
       }),
     );
   }
@@ -1275,6 +1327,7 @@ function ungraded(input: {
   hook: string;
   shelf: string;
   target: GradeTarget;
+  agentId: string | null;
   note: string;
 }): GradedRow {
   return {
@@ -1282,9 +1335,11 @@ function ungraded(input: {
     hook: input.hook,
     shelf: input.shelf,
     resourceId: input.target.resourceId,
+    agentId: input.agentId,
     outcome: 'open',
     by: 'none',
     anchorLine: null,
+    transcript: null,
     evidence: [],
     note: input.note,
   };
@@ -1298,12 +1353,13 @@ function ungraded(input: {
  * `unreadable` is a fact about this run and must not.
  */
 type SessionState =
-  | { kind: 'read'; rows: TranscriptRow[]; ended: boolean }
+  | { kind: 'read'; rows: TranscriptRow[]; ended: boolean; path: string }
   | { kind: 'absent'; ended: boolean }
   | { kind: 'unreadable'; reason: string };
 
 async function readSession(
   session: string,
+  agentId: string | null,
   ctx: {
     homeDir: string;
     locate: typeof findTranscript;
@@ -1313,7 +1369,9 @@ async function readSession(
     now: number;
   },
 ): Promise<SessionState> {
-  const found = await ctx.locate(ctx.homeDir, session);
+  // With an agent id this is the CHILD's own file; the parent's is never
+  // consulted for it, because it holds none of the child's tool calls.
+  const found = await ctx.locate(ctx.homeDir, session, agentId);
   const stamped = ctx.store.get(STORE_SQL.sessionEnded, [session]);
   const endedAt = stamped !== null && typeof stamped.ended_at === 'number';
   if (found.kind === 'unreadable') return { kind: 'unreadable', reason: found.reason };
@@ -1332,7 +1390,7 @@ async function readSession(
   // has touched for half an hour is the harness that was killed and never
   // stamped one.
   const ended = endedAt || (await ctx.idle(found.path, ctx.now));
-  return { kind: 'read', rows: parseTranscript(text), ended };
+  return { kind: 'read', rows: parseTranscript(text), ended, path: found.path };
 }
 
 /** Write the verdict, unless there is none yet: a row the session may still
@@ -1344,8 +1402,11 @@ function record(
     hook: string;
     shelf: string;
     target: GradeTarget;
+    agentId: string | null;
     verdict: Verdict;
     anchorLine: number | null;
+    transcript?: string | null;
+    note?: string;
   },
 ): GradedRow {
   const { verdict } = input;
@@ -1363,10 +1424,13 @@ function record(
     hook: input.hook,
     shelf: input.shelf,
     resourceId: input.target.resourceId,
+    agentId: input.agentId,
     outcome: verdict.outcome ?? 'open',
     by: verdict.outcome === null ? 'none' : verdict.by,
     anchorLine: input.anchorLine,
+    transcript: input.transcript ?? null,
     evidence,
+    ...(input.note === undefined ? {} : { note: input.note }),
   };
 }
 
@@ -1530,6 +1594,7 @@ function buildGradeData(
       hook: row.hook,
       shelf: row.shelf,
       resourceId: row.resourceId,
+      agentId: row.agentId,
       outcome: row.outcome,
       by: row.by,
       anchorLine: row.anchorLine,
@@ -1562,6 +1627,12 @@ function gradeLines(
     lines.push(
       `${row.uid} ${row.hook}/${row.shelf} ${row.resourceId ?? '(no resource)'}: ${row.outcome} (${row.by}) ${anchor}`,
     );
+    // Which child the row belongs to, and which file answered for it: the two
+    // facts that say why a verdict was read out of the transcript it was.
+    if (row.agentId !== null) lines.push(`    agent ${row.agentId}`);
+    if (row.transcript !== null && row.transcript !== undefined) {
+      lines.push(`    read ${row.transcript}`);
+    }
     // Why nothing was written, for the rows where that is the whole story.
     if (row.note !== undefined) lines.push(`    ${row.note}`);
     for (const line of row.evidence ?? []) lines.push(`    ${line}`);

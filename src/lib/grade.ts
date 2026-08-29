@@ -35,6 +35,22 @@ import { CliError } from './errors';
  * becomes `rejected` only once the session has ended — `sessions.ended_at`, or a
  * transcript nothing has written to for {@link ENDED_AFTER_MS}.
  *
+ * RELAYED ROWS ANCHOR ON THE FIRST TOOL CALL. The subagent arm hands its finding
+ * to a child at SubagentStart, and that text reaches no transcript at all: the
+ * child is given it as its opening context, and neither the parent's file nor
+ * the child's records a `hook_additional_context` row for it. So there is no
+ * anchor to find, and there does not need to be — the pointer preceded every
+ * call the child ever made, which makes the child's FIRST tool call evidence
+ * rather than the row after the anchor. {@link gradeRelayed} judges from there,
+ * inclusively, while {@link gradeInjection} keeps its exclusive `anchor + 1`.
+ *
+ * A relayed row also has no injected text on disk to take spans from — the arm
+ * renders a title, a price and possibly a fetched body, and stores none of it —
+ * so its span evidence comes from the piece's TITLE alone, which is usually no
+ * spans at all. Relayed findings are therefore judged almost entirely on the
+ * strong evidence (an explicit read, or the url), which is the right way round.
+ * Storing the injected text is a second schema change and is not this one.
+ *
  * The functions here are pure over parsed rows, except the two that touch the
  * filesystem at the bottom; the command in commands/push.ts owns the store.
  */
@@ -54,6 +70,13 @@ const EVIDENCE_CHARS = 200;
 
 /** A session id is used as a filename, so it is checked like one. */
 const SESSION_ID_RE = /^[A-Za-z0-9-]{1,80}$/;
+
+/** An agent id becomes a filename too (`agent-<id>.jsonl`), so it gets the same
+ *  treatment. This is the SAME bound the hook prelude's `identityOf` applies
+ *  before it records one; a test in grade.test.ts pins the two together, because
+ *  an id one side accepts and the other refuses is a row that can never be
+ *  graded. */
+export const AGENT_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** The only two row kinds that decide anything; see the module note. */
 export interface TranscriptRow {
@@ -170,7 +193,57 @@ export function gradeInjection(
   opts: { ended: boolean },
 ): Verdict {
   if (anchor < 0 || anchor >= rows.length) return { outcome: 'unobserved', by: 'none' };
+  // EXCLUSIVE: the anchor row IS the injection, so the calls that can answer for
+  // it are the ones after it.
   const after = rows.slice(anchor + 1).filter((row) => row.kind === 'tool_use');
+  return judge(after, backtickSpans(rows[anchor]?.text ?? ''), target, opts.ended);
+}
+
+/**
+ * Where a relayed finding's evidence starts: the first `tool_use` row, or -1.
+ *
+ * The caller reports it as the anchor line under `--explain`, so a verdict on a
+ * child still names the row it was read from.
+ */
+export function firstToolCall(rows: TranscriptRow[]): number {
+  return rows.findIndex((row) => row.kind === 'tool_use');
+}
+
+/**
+ * The verdict for a finding RELAYED to a subagent, given that child's own
+ * transcript.
+ *
+ * INCLUSIVE OF THE FIRST CALL, and with no anchor at all — see the module note.
+ * A child that made no tool calls has done nothing that could be evidence, so it
+ * is `rejected` once it is over and open while it runs, exactly as an
+ * unanswered main-session row is.
+ */
+export function gradeRelayed(
+  rows: TranscriptRow[],
+  target: GradeTarget,
+  opts: { ended: boolean },
+): Verdict {
+  const calls = rows.filter((row) => row.kind === 'tool_use');
+  // The title is the only injected text this row left on disk; usually it holds
+  // no two-word backtick span at all, and that is the documented limit of what
+  // a relayed row can be judged `span` on.
+  return judge(calls, backtickSpans(target.title ?? ''), target, opts.ended);
+}
+
+/**
+ * The evidence rules themselves, over whichever tool calls the caller decided
+ * are eligible. Shared byte-for-byte by both verdict functions, so a relayed row
+ * and a main-session row can never drift into being judged by different rules.
+ *
+ * Read beats span: both may be present, and "the agent went and read the piece"
+ * is the stronger claim, so it is the one reported.
+ */
+function judge(
+  after: TranscriptRow[],
+  spans: string[],
+  target: GradeTarget,
+  ended: boolean,
+): Verdict {
   const readRe = target.resourceId === null ? null : readCommandRe(target.resourceId);
   for (const row of after) {
     if (readRe !== null && readRe.test(row.text)) {
@@ -180,7 +253,6 @@ export function gradeInjection(
       return { outcome: 'used', by: 'read', evidence: cap(row.text) };
     }
   }
-  const spans = backtickSpans(rows[anchor]?.text ?? '');
   for (const row of after.slice(0, SPAN_WINDOW)) {
     const hit = spans.find((span) => row.text.includes(span));
     // Capped like every other evidence string here: the span is copied out of
@@ -188,7 +260,7 @@ export function gradeInjection(
     if (hit !== undefined) return { outcome: 'used', by: 'span', evidence: cap(hit) };
   }
   const evidence = after.slice(0, EVIDENCE_ROWS).map(cap);
-  return opts.ended ? { outcome: 'rejected', by: 'none', evidence } : { outcome: null, evidence };
+  return ended ? { outcome: 'rejected', by: 'none', evidence } : { outcome: null, evidence };
 }
 
 /** `7d`, `24h`, `30m` as milliseconds. Anything else is a usage error rather
@@ -217,13 +289,20 @@ export type TranscriptLookup =
   { kind: 'found'; path: string } | { kind: 'absent' } | { kind: 'unreadable'; reason: string };
 
 /**
- * The transcript for a session, or why it was not found.
+ * The transcript for a session, or for one subagent of it, or why it was not
+ * found.
  *
  * BY READDIR, not by mangling the cwd into a directory name. Claude Code names
  * the project directory from the working directory with a substitution this CLI
  * would have to reimplement and keep in step (and which a worktree, a symlinked
  * home or a renamed checkout each break differently); the session id is a uuid
  * and is unique across them, so one listing finds it wherever it landed.
+ *
+ * WITH AN AGENT ID IT IS A DIFFERENT FILE, not a different search: a subagent
+ * writes to `<session>/subagents/agent-<id>.jsonl` beside the parent's
+ * `<session>.jsonl`, under the same project directory. The child's tool calls
+ * appear in NO parent file, so a row stamped with an agent id is answered only
+ * here.
  *
  * THE TWO NEGATIVE ANSWERS ARE NOT THE SAME ANSWER, and collapsing them to
  * `null` is how a transient fault becomes permanent: the caller turns "no
@@ -234,10 +313,12 @@ export type TranscriptLookup =
 export async function findTranscript(
   homeDir: string,
   sessionId: string,
+  agentId: string | null = null,
 ): Promise<TranscriptLookup> {
   // An id that cannot be a filename names no transcript in any project
   // directory, now or ever: that is absence, and it is permanent.
   if (!SESSION_ID_RE.test(sessionId)) return { kind: 'absent' };
+  if (agentId !== null && !AGENT_ID_RE.test(agentId)) return { kind: 'absent' };
   const { readdir, stat } = await import('node:fs/promises');
   const { join } = await import('node:path');
   const projects = join(homeDir, '.claude', 'projects');
@@ -253,12 +334,17 @@ export async function findTranscript(
   }
   let blocked: string | null = null;
   for (const dir of dirs) {
-    const path = join(projects, dir, `${sessionId}.jsonl`);
+    const path =
+      agentId === null
+        ? join(projects, dir, `${sessionId}.jsonl`)
+        : join(projects, dir, sessionId, 'subagents', `agent-${agentId}.jsonl`);
     try {
       if ((await stat(path)).isFile()) return { kind: 'found', path };
     } catch (err) {
       // ENOENT is the ordinary answer — the session is simply not in THIS
-      // project directory. Anything else is a directory that could be hiding
+      // project directory, and on the child path its `<session>/` directory may
+      // not exist at all (ENOENT, or ENOTDIR where a plain file sits where the
+      // directory would be). Anything else is a directory that could be hiding
       // it, so the sweep can no longer claim the file is absent.
       const code = errorCode(err);
       if (code !== 'ENOENT' && code !== 'ENOTDIR') blocked ??= errorReason(err);

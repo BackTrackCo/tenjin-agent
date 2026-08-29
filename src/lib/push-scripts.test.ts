@@ -242,6 +242,7 @@ async function pushOn(baseUrl: string, hooks: Record<string, unknown> = {}): Pro
 
 interface LedgerRow {
   [key: string]: unknown;
+  agentId?: string | null;
   trigger?: string;
   shelf?: string;
   action?: string;
@@ -278,6 +279,7 @@ async function ledger(): Promise<LedgerRow[]> {
       return {
         at: new Date(Number(r.at)).toISOString(),
         session: r.session === '' ? null : r.session,
+        agentId: r.agent_id as string | null,
         trigger: r.hook as string,
         event: event.event,
         query: event.query,
@@ -334,6 +336,20 @@ async function events(): Promise<EventRow[]> {
 }
 
 /** Every pairing row, oldest first, `error_files` parsed. */
+/** Every close on record, oldest first. */
+async function closes(): Promise<Record<string, unknown>[]> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return db
+      .prepare('SELECT pairing_id, session, agent_id FROM pairing_closes ORDER BY at')
+      .all() as unknown as Record<string, unknown>[];
+  } finally {
+    db.close();
+  }
+}
+
 async function pairings(): Promise<Array<Record<string, unknown> & { error_files: string[] }>> {
   const path = join(dataDir, STATE_DB_FILE);
   if (!existsSync(path)) return [];
@@ -1156,6 +1172,85 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   });
 
   /**
+   * `session_id` is the PARENT's inside a subagent, so without the child's own
+   * id there is no way back to the transcript that holds what the child did —
+   * a subagent's tool calls appear in no parent file. The arm stamps it, and
+   * the main session writes NULL, which is the row's way of saying "the
+   * parent".
+   */
+  it('stamps the subagent id when the arm fires inside a child, and null in the main session', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const child = await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'UserPromptSubmit',
+        agent_id: 'agent-abc_1',
+        agent_type: 'general-purpose',
+        prompt: QUESTION,
+      }),
+    );
+    expect(injected(child)).toContain(BODY_MD);
+    expect((await ledger())[0]).toMatchObject({
+      trigger: 'prompt',
+      action: 'injected',
+      session: SESSION,
+      agentId: 'agent-abc_1',
+    });
+
+    // A second session, so the piece is not already-shown; no agent id this
+    // time, which is the main session.
+    const parent = await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'sess-2',
+        hook_event_name: 'UserPromptSubmit',
+        prompt: QUESTION,
+      }),
+    );
+    expect(injected(parent)).toContain(BODY_MD);
+    expect((await ledger())[1]).toMatchObject({ session: 'sess-2', agentId: null });
+  });
+
+  /**
+   * A REFUSED ID IS NOT THE LEAD. The id becomes a path segment in the child
+   * transcript `grade` reads and a partition key for the score, so a value that
+   * could not be one names a worker this build cannot use — and recording the
+   * fire as the main session's would file a child's prompt, and everything the
+   * score then stitches to it, under its parent. The fire is dropped whole:
+   * nothing on the wire, no event row, no decision row, and no new reason
+   * bucket to explain a row that does not exist.
+   */
+  it('drops the fire when the agent id is not one', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    for (const [session, agentId] of [
+      ['sess-a', '../../x'],
+      ['sess-b', 'a'.repeat(200)],
+    ]) {
+      const run = await runScript(
+        pushPromptHookScript(dataDir),
+        JSON.stringify({
+          session_id: session,
+          hook_event_name: 'UserPromptSubmit',
+          agent_id: agentId,
+          prompt: QUESTION,
+        }),
+      );
+      // Quiet, not failed: a payload this arm will not act on costs the tool
+      // call nothing, exactly as an `off` config does.
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+    }
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
+    expect(await events()).toEqual([]);
+  });
+
+  /**
    * A payload with no `session_id` used to get its bounds for free: the row
    * filter matched nothing, so the seen-set was empty, the lookup cap read
    * zero, and the outage brake never engaged. Null means "do not scope", so
@@ -1201,11 +1296,11 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(rows[0]!.data).toEqual({
       event: 'UserPromptSubmit',
       query: 'yes, do that',
-      // The lead's own turn, so the agent field is null rather than absent: a
-      // reader has to tell "the lead" from "a build that recorded nobody".
-      agentId: null,
       skipped: 'short',
     });
+    // The main session, so the agent column is NULL rather than '': the score
+    // has to tell "the lead" from "an agent named nothing".
+    expect(rows[0]!.agent_id).toBeNull();
     expect(rows[1]!.data).toMatchObject({ event: 'UserPromptSubmit', skipped: 'slash' });
   });
 
@@ -1433,6 +1528,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
         hook_event_name: 'PostToolUseFailure',
         tool_name: 'Bash',
         tool_input: { command: 'pnpm test' },
+        // This fire happened inside a subagent, so the row carries the child's
+        // id beside the parent's session.
+        agent_id: 'agent-7',
         error: "Exit code 1\nTypeError: Cannot find module 'left-pad' from the vitest resolver",
       }),
     );
@@ -1440,6 +1538,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(hits()).toBe(0);
     const row = (await events()).find((e) => e.hook === 'failure');
     expect(row?.data).toMatchObject({ event: 'PostToolUseFailure' });
+    expect(row?.agent_id).toBe('agent-7');
     expect(String(row?.data.error)).toContain('left-pad');
   });
 
@@ -1518,8 +1617,8 @@ describe('the failure arm (PostToolUse Bash)', () => {
       event: 'PostToolUse',
       command: 'cd /x && pnpm test',
       head: 'pnpm',
-      agentId: null,
     });
+    expect(rows[0]!.agent_id).toBeNull();
   });
 
   /**
@@ -1998,13 +2097,14 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
       tool_response: { stdout: 'ok\n', stderr: '', interrupted: false, isImage: false },
       ...over,
     });
-  const edit = (path: string): string =>
+  const edit = (path: string, over: Record<string, unknown> = {}): string =>
     JSON.stringify({
       session_id: SESSION,
       cwd: '/repo/one',
       hook_event_name: 'PreToolUse',
       tool_name: 'Edit',
       tool_input: { file_path: path },
+      ...over,
     });
 
   interface ResolveBody {
@@ -2469,6 +2569,48 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     expect(coarse[2]).not.toBe(coarse[0]);
   });
 
+  /**
+   * THE CLOSER IS A WORKER. `pairing_closes` carries `agent_id` so the score can
+   * partition on it, and the whole round trip — the failure that opened the
+   * pairing, the edit the close rule matches, the pass that closes it — has to
+   * be one agent's. The lead's own turn writes NULL, which is what a close by
+   * nobody in particular means and what every row on disk before version 2 says.
+   *
+   * IT IS NOT PART OF THE KEY, and the second half of this asserts that: two
+   * subagents of one conversation are one laptop in one checkout, so the
+   * promotion to `verified` still counts SESSIONS. A sibling closing the same
+   * pairing must leave `closes` at 1.
+   */
+  it('stamps the close with the agent that made it, without making it a closer', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    // The lead: an unstamped close, exactly as before the column existed.
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+    expect(await closes()).toEqual([{ pairing_id: 1, session: SESSION, agent_id: null }]);
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+
+    // A subagent of the SAME session fixes a different failure: its own rows
+    // throughout, and its close names it.
+    const child = { agent_id: 'a1' };
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm dev', EADDR, child));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/server.ts', child));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm dev', child));
+    expect(await closes()).toEqual([
+      { pairing_id: 1, session: SESSION, agent_id: null },
+      { pairing_id: 2, session: SESSION, agent_id: 'a1' },
+    ]);
+
+    // A SIBLING closes the first pairing too. The row records who; the count
+    // does not move, because independence is per session and these two share
+    // one.
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts', child));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate', child));
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+  });
+
   it("marks the linked post on this machine's own close, for sync to verify", async () => {
     const stub = resolveStub('hit');
     const team = await serve(stub.handler);
@@ -2588,21 +2730,22 @@ describe('the arms tell an agent from a session', () => {
     const rows = await events();
     expect(rows.map((r) => r.hook)).toEqual(['edit', 'failure', 'pass']);
     // The session is the PARENT's on all three — that is the whole problem —
-    // so `agentId` is the only field that says who did the work.
+    // so `agent_id` is the only field that says who did the work.
     expect(rows.map((r) => r.session)).toEqual([SESSION, SESSION, SESSION]);
-    for (const row of rows) expect(row.data).toMatchObject({ agentId: AGENT });
+    expect(rows.map((r) => r.agent_id)).toEqual([AGENT, AGENT, AGENT]);
   });
 
-  /** The lead's own turn carries no `agent_id`, and records `null` rather than
-   *  dropping the field: a reader has to tell "the lead did this" from "this
-   *  build wrote no agent at all". */
-  it('records the lead as null, not as a missing field', async () => {
+  /** The main session carries no `agent_id`, and the column holds SQL NULL for
+   *  it — the same answer a row written before version 2 gives, and the bucket
+   *  the score reads as the lead's. */
+  it('records the main session as a null column, never as an empty string', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
     await runScript(pushFailureHookScript(dataDir), failing());
     const row = (await events()).find((e) => e.hook === 'failure');
-    expect(row?.data).toMatchObject({ agentId: null });
-    expect(Object.keys(row?.data ?? {})).toContain('agentId');
+    expect(row?.agent_id).toBeNull();
+    // Not in `data` at all any more: one identity, one column.
+    expect(Object.keys(row?.data ?? {})).not.toContain('agentId');
   });
 
   /**
@@ -2634,6 +2777,10 @@ describe('the arms tell an agent from a session', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       session: SESSION,
+      // THE LOSER, named. The claim is per session, so the session on this row
+      // is the same one the winner wrote under; the agent is what makes it a
+      // count of two workers rather than of one session twice.
+      agentId: 'a2',
       trigger: 'failure',
       shelf: 'local',
       action: 'skipped',
@@ -3197,6 +3344,9 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(rows.find((r) => r.trigger === 'subagent')).toMatchObject({
       event: 'SubagentStart',
       agentType: 'general-purpose',
+      // The CHILD this was relayed to, which is the transcript `push grade`
+      // will read it against.
+      agentId: 'a1',
       candidate: { resourceId: RESOURCE_ID },
       action: 'injected',
       form: 'full',
@@ -3321,6 +3471,12 @@ describe('the context arm (log-only)', () => {
       expect(row).toMatchObject({ hook: 'edit', files: ['drizzle.config.ts'], error_hash: null });
       expect(JSON.stringify(row)).not.toContain('nested');
     }
+    // THE LEAD'S KEY SHAPE, UNCHANGED. `agentKey` is the one place a null agent
+    // becomes the '' a key segment needs, so a main-session fire has to land on
+    // exactly the `edited::<path>` and `edits::<path>` rows written before the
+    // agent existed — a shifted key is a state row nothing on disk can read.
+    expect(sessionState(SESSION, `edited::${file.slice(-200)}`)).toBe(true);
+    expect(sessionState(SESSION, `edits::${file.slice(-200)}`)).toBe(2);
   });
 
   it('logs the packages a Read named and says nothing to the model', async () => {
@@ -4168,6 +4324,7 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
         `ev-${at}`,
         at,
         '',
+        null,
         projectId(cwd),
         'machine-a',
         'sync',
@@ -4190,6 +4347,7 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
       'ev-ok',
       Date.now(),
       '',
+      null,
       projectId(cwd),
       'machine-a',
       'sync',

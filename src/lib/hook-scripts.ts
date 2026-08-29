@@ -341,36 +341,59 @@ function sessionIdOf(input) {
 }
 
 /**
- * The SUBAGENT this fire happened inside, or '' for the lead's own turn.
+ * WHO this fire belongs to: the harness \`session\`, and the \`agent\` it
+ * happened inside — null for the main session.
+ *
+ * ONE READER, because these same two values become a \`session_state\` key
+ * segment, the \`agent_id\` column on \`injections\` and on \`events\`, and a
+ * transcript FILENAME. An identity parsed twice by two rules is two identities,
+ * and the row written under one is then unreadable by the other.
  *
  * A SESSION IS NOT AN AGENT. Claude Code hands every child of a session the
- * PARENT's \`session_id\` and adds \`agent_id\`; only a parent fire has no
+ * PARENT's \`session_id\` and adds \`agent_id\`; only a main-session fire has no
  * \`agent_id\` at all. So two subagents running in parallel are one session id
  * to every query in this file, and any per-session key they both write is a key
  * they overwrite for each other — which is how one subagent's unrelated edit
  * came to close, and verify, a pairing a sibling had been shown.
  *
- * '' IS THE LEAD'S BUCKET, and the answer for any harness that names no agent,
- * so a single-agent session's keys land exactly where they always did.
+ * NULL IS THE MAIN SESSION, a first-class answer and never "unknown". The one
+ * place null becomes the '' that a key segment needs is \`agentKey\` below.
+ *
+ * REJECTED, NEVER STRIPPED, and bounded like a filename, because that is what
+ * it becomes: \`push grade\` reads the child's transcript at
+ * \`<session>/subagents/agent-<agentId>.jsonl\`, so an id carrying a separator
+ * names a path the harness never wrote — and stripping the separator out would
+ * spell a DIFFERENT agent's id exactly, filing one agent's work under another.
+ * The same bound is spelled out as AGENT_ID_RE in lib/grade.ts, and a test pins
+ * the two together.
+ *
+ * A REFUSED ID IS NOT THE MAIN SESSION, which is why \`invalid\` is reported
+ * separately from an \`agent\` of null. The harness named a worker this build
+ * cannot use; recording the fire anyway would file a child's search, edit or
+ * close under the lead, and the score would then hand that work to the parent.
+ * Every arm drops the fire instead — no lookup, no row — so the caller reads
+ * \`invalid\` and exits quiet.
  */
-function agentIdOf(input) {
-  if (!isRecord(input)) return '';
+function identityOf(input) {
+  const session = sessionIdOf(input);
+  if (!isRecord(input)) return { session, agent: null, invalid: false };
   const id = input.agent_id;
-  if (typeof id !== 'string' || id.length === 0 || id.length > 64) return '';
-  // BOUNDED AND SEPARATOR-FREE, because this becomes the middle segment of a
-  // \`session_state\` key: a value carrying ':' could spell another agent's key
-  // exactly, and the prefix scans below read a range, not an equality.
-  return id.replace(/[^A-Za-z0-9_-]/g, '');
+  if (id === undefined || id === null) return { session, agent: null, invalid: false };
+  const agent = typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+  return { session, agent, invalid: agent === null };
 }
 
 /**
- * The same value as an \`events.data\` field: the agent's id, or null for a
- * parent fire. NULL AND NOT '', because the score reads these rows back and
- * has to tell "the lead did this" from "this build wrote no agent at all";
- * '' is a key segment, and a key segment is not a datum.
+ * One agent's \`session_state\` key segment: \`<agent-or-empty>:<name>\`, and the
+ * ONLY place an agent of null is spelled ''. The main session's rows therefore
+ * keep the keys they have always had, and a prefix scan for one agent — these
+ * scans read a range, not an equality — cannot reach into another's, because
+ * \`identityOf\` has already refused any id carrying the ':' that separates them.
+ *
+ * Pass '' as the name for the prefix itself.
  */
-function eventAgent(agentId) {
-  return typeof agentId === 'string' && agentId.length > 0 ? agentId : null;
+function agentKey(agent, name) {
+  return (agent ?? '') + ':' + name;
 }
 
 /**
@@ -840,11 +863,15 @@ const SEARCH_MIN_LEG_MS = 150;
  * Best-effort in every direction, and it NEVER throws: a failed record costs one
  * reminder, while a hook that fails costs the tool call.
  */
-function recordSearch(searchId, question, decision, candidates, sessionId, source, shelfBaseUrl) {
+function recordSearch(searchId, question, decision, candidates, sessionId, agentId, source, shelfBaseUrl) {
   if (typeof searchId !== 'string' || searchId.length === 0) return;
   // The session stamp is what later lets the Stop hook raise this loop in the
   // session that opened it and nowhere else; '' is the machine-global bucket,
   // which is the safe direction for a reminder.
+  //
+  // The agent stamp is the WORKER inside that session, null for the main one.
+  // Every subagent of a session searches under the parent's id, so without it
+  // the score credited one child's search to a sibling's research-then-edit.
   //
   // The shelf stamp is what lets \`tenjin outcome --search-id <id>\` — the
   // command the Stop hook's own nag prints — reach the shelf that MINTED the
@@ -857,6 +884,7 @@ function recordSearch(searchId, question, decision, candidates, sessionId, sourc
     decision,
     candidates,
     sessionId,
+    agentId,
     source,
     shelfBaseUrl,
   });
@@ -1308,10 +1336,12 @@ async function main() {
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   if (config.webSearch === 'off') return quiet();
-  const sessionId = sessionIdOf(input);
   // A subagent researches under its parent's session id, so the row has to name
   // the agent or it names nobody.
-  const agentId = agentIdOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: filing the fire under the main
+  // session would credit a child's research to its parent.
+  if (invalid) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1356,6 +1386,7 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
+    agentId,
     'websearch-hook',
     // This arm asks one shelf, the configured base, whichever mode it is in.
     config.baseUrl,
@@ -1369,10 +1400,12 @@ async function main() {
     cwd,
     hook: 'research',
     tool: input.tool_name,
-    data: { event: 'PreToolUse', query: clean(question, 512), agentId: eventAgent(agentId) },
+    agentId,
+    data: { event: 'PreToolUse', query: clean(question, 512) },
   });
   const lines = hintLines(found.stored, isTeam, {
     sessionId,
+    agentId,
     cwd,
     eventUid,
     hook: 'research',
@@ -1486,10 +1519,12 @@ async function main() {
   if (mode === 'off') return quiet();
   if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
-  const sessionId = sessionIdOf(input);
   // The DISPATCHER's agent id — a subagent that itself launches one is not the
   // lead, and the row that says which fan-out this came from is this one.
-  const agentId = agentIdOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: filing the fire under the main
+  // session would credit a child's dispatch to its parent.
+  if (invalid) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1586,6 +1621,7 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
+    agentId,
     'dispatch-hook',
     shelfBase,
   );
@@ -1643,14 +1679,15 @@ async function main() {
     cwd,
     hook: 'dispatch',
     tool: input.tool_name,
+    agentId,
     data: {
       event: 'PreToolUse',
       query: clean(question, ${QUESTION_MAX}),
-      agentId: eventAgent(agentId),
     },
   });
   const row = {
     session: sessionId,
+    agentId,
     cwd,
     eventUid,
     trigger: 'dispatch',
@@ -1687,6 +1724,7 @@ async function main() {
   // \`push status\`.
   const lines = hintLines(top.length > 0 ? top : found.stored, shelf === 'team', {
     sessionId,
+    agentId,
     cwd,
     eventUid,
     hook: 'dispatch',

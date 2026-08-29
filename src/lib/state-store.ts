@@ -49,15 +49,30 @@ export function stateDbPath(dir: string): string {
 }
 
 /**
- * The schema version this build creates and expects. The DDL runs exactly once,
- * inside one `BEGIN IMMEDIATE`, gated on `PRAGMA user_version`: a second process
- * racing the first blocks on the transaction, then reads the new version and
- * skips.
+ * The schema version this build creates and expects. Both bootstraps run inside
+ * one `BEGIN IMMEDIATE`, gated on `PRAGMA user_version`: a second process racing
+ * the first blocks on the transaction, then reads the new version and skips.
  *
- * `#212` adds `error_signatures`/`trigger_stats` under version 2 in the shape it
- * needs. Nothing here is `NOT NULL` that a later issue is supposed to fill.
+ * VERSION 2 ADDS `agent_id` TO FOUR TABLES — `events`, `injections`, `searches`
+ * and `pairing_closes` — in ONE step, all four off the prelude's single
+ * `identityOf`, and all four nullable with NULL meaning the main session. A
+ * session is a conversation and an agent is a worker: parallel subagents all
+ * file under their parent's `session_id`, so a row stamped with the session
+ * alone belongs to every worker in it at once. That is how a sibling's search
+ * completed another agent's `research-then-edit`, how a sibling's close
+ * completed its `error-edit-resolved`, and why `tenjin push grade` had no
+ * transcript to open for a relayed finding.
+ *
+ * A FRESH FILE IS CREATED AT THIS SHAPE, never migrated up to it: {@link
+ * STORE_DDL} carries all four columns and {@link STORE_MIGRATIONS} is only for
+ * a file that already exists. The two branches are exclusive — see
+ * {@link STORE_MIGRATIONS} for why that is not a style choice.
+ *
+ * tenjin-agent#247 IS user_version 2. Anything after it takes 3, including the
+ * `error_signatures`/`trigger_stats` tables `#212` wants. Nothing here is
+ * `NOT NULL` that a later issue is supposed to fill.
  */
-export const STORE_USER_VERSION = 1;
+export const STORE_USER_VERSION = 2;
 
 /**
  * How long a colliding writer waits before giving up, in ms.
@@ -96,8 +111,8 @@ export const STORE_BUSY_TIMEOUT_MS = 250;
  * Code shows the operator, and lost its state for that fire.
  *
  * So the bootstrap gets its own, longer wait, and it is put back immediately
- * afterwards so no ordinary fire ever inherits it. This is a once-per-machine
- * cost (the gate is `user_version < 1`).
+ * afterwards so no ordinary fire ever inherits it. This is a once-per-version
+ * cost (the gate is `user_version < STORE_USER_VERSION`).
  *
  * WHAT THE WAL SWITCH ADDS TO THE BUDGET, AND WHEN. In the case that matters —
  * another opener holding the write lock through its DDL — both of its attempts
@@ -122,7 +137,9 @@ export const STORE_BOOTSTRAP_TIMEOUT_MS = 500;
 export const STORE_BOOTSTRAP_TRIES = 2;
 
 /**
- * The whole schema, run once at `user_version = 0`.
+ * The whole schema, run once at `user_version = 0` and never again: a database
+ * that already has a schema is stepped up by {@link STORE_MIGRATIONS} instead,
+ * so this text is the version 1 shape and stays it.
  *
  * Rules that keep it cheap to extend: JSON `data`/`value` columns carry
  * arm-specific extras, only indexed or filtered columns are typed, and
@@ -133,7 +150,16 @@ export const STORE_BOOTSTRAP_TRIES = 2;
  *
  * `session` is `NOT NULL` and a payload that names no session writes `''`: a
  * null session is a BUCKET, not an exemption, and treating it as "no rows"
- * zeroed every per-session bound at once.
+ * zeroed every per-session bound at once. `agent_id` is the opposite and
+ * deliberately so — it is NULLABLE, and NULL is the main session. An agent is a
+ * worker rather than a scope: there is no "all agents" query to accidentally
+ * zero, and a reader has to tell "the lead did this" from "this build recorded
+ * nobody", which one sentinel string cannot do.
+ *
+ * ⚠ THIS TEXT IS THE CURRENT SHAPE, not the version 1 shape. A file at version 0
+ * is CREATED here and runs no migration at all; only a file that already exists
+ * is stepped up by {@link STORE_MIGRATIONS}. Adding a column means adding it in
+ * BOTH places.
  */
 export const STORE_DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
@@ -150,6 +176,7 @@ CREATE TABLE IF NOT EXISTS events (
   uid TEXT NOT NULL UNIQUE,
   at INTEGER NOT NULL,
   session TEXT NOT NULL,
+  agent_id TEXT,
   project TEXT,
   machine TEXT NOT NULL,
   hook TEXT NOT NULL,
@@ -167,6 +194,7 @@ CREATE TABLE IF NOT EXISTS injections (
   event_uid TEXT,
   at INTEGER NOT NULL,
   session TEXT NOT NULL,
+  agent_id TEXT,
   project TEXT,
   machine TEXT NOT NULL,
   hook TEXT NOT NULL,
@@ -227,6 +255,7 @@ CREATE TABLE IF NOT EXISTS searches (
   search_id TEXT PRIMARY KEY,
   at INTEGER NOT NULL,
   session TEXT NOT NULL,
+  agent_id TEXT,
   question TEXT NOT NULL,
   fingerprint TEXT NOT NULL,
   decision TEXT NOT NULL,
@@ -272,6 +301,13 @@ CREATE TABLE IF NOT EXISTS pairings (
 CREATE TABLE IF NOT EXISTS pairing_closes (
   pairing_id INTEGER NOT NULL,
   session TEXT NOT NULL,
+  -- RECORDED, AND NOT PART OF THE KEY. Which worker closed a pairing is what
+  -- the importance-score report needs, so the row carries it; the independence
+  -- the primary key enforces is about MACHINES AND SESSIONS, not workers. Two
+  -- subagents of one conversation are one laptop running one checkout, so
+  -- letting them be two closers would hand a pairing the promotion to
+  -- 'verified' that 04 reserves for two independent observations.
+  agent_id TEXT,
   at INTEGER NOT NULL,
   fix_cmd TEXT,
   fix_files TEXT,
@@ -283,6 +319,49 @@ CREATE INDEX IF NOT EXISTS pairings_key_status ON pairings(key, status);
 CREATE INDEX IF NOT EXISTS pairings_coarse_status ON pairings(coarse_key, status);
 CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';
 `;
+
+/**
+ * What a database that ALREADY EXISTS needs run on it to reach
+ * {@link STORE_USER_VERSION}. One entry per version above 1, applied in order by
+ * both bootstraps inside the same `BEGIN IMMEDIATE` the schema step runs in.
+ *
+ * ⚠ A FRESH FILE NEVER COMES THROUGH HERE. {@link STORE_DDL} creates the
+ * CURRENT shape, so the create and migrate branches are EXCLUSIVE: a file at
+ * version 0 (or one whose pragma will not read, which is -1 and sorts below
+ * every version) is created and steps nothing, and only a file at a real
+ * version below the current one runs deltas. That is not tidiness. `ALTER TABLE
+ * ADD COLUMN` is NOT idempotent — a second run throws `duplicate column name`
+ * and costs the store — whereas `STORE_DDL` is all `IF NOT EXISTS` and can be
+ * re-run harmlessly, which is what let the old non-exclusive bootstrap get away
+ * with running both.
+ *
+ * ⚠ NEVER EDITED ONCE SHIPPED, and never made conditional. A changed entry
+ * would run on the machines that missed it and be skipped on the machines that
+ * already ran the old one, which is two different schemas under one version
+ * number. Add a version instead.
+ */
+export const STORE_MIGRATIONS: readonly { version: number; sql: string }[] = [
+  {
+    version: 2,
+    // ONE VERSION, ONE ENTRY, FOUR COLUMNS AND A BACKFILL. `db.exec` runs the
+    // whole script as a unit inside the bootstrap's transaction, so no database
+    // can come out of this holding some of them.
+    //
+    // The backfill reads what tenjin-agent#242 has been writing into
+    // `events.data` since 2026-08-28 and lifts it into the column the score now
+    // partitions on; without it, every row from that window reads as the lead's
+    // and the fix a subagent made goes back to being its parent's. NULLIF
+    // because '' was never an agent, and `WHERE agent_id IS NULL` because the
+    // column is brand new on this path and a later re-run must never overwrite
+    // a stamp a writer put there.
+    sql: `ALTER TABLE events ADD COLUMN agent_id TEXT;
+          ALTER TABLE injections ADD COLUMN agent_id TEXT;
+          ALTER TABLE searches ADD COLUMN agent_id TEXT;
+          ALTER TABLE pairing_closes ADD COLUMN agent_id TEXT;
+          UPDATE events SET agent_id = NULLIF(json_extract(data, '$.agentId'), '')
+            WHERE agent_id IS NULL`,
+  },
+];
 
 /**
  * Every statement either side runs, by name.
@@ -304,15 +383,15 @@ export const STORE_SQL = {
      VALUES (?, NULL, NULL, ?, ?, ?)
      ON CONFLICT(session) DO UPDATE SET ended_at = excluded.ended_at`,
 
-  insertEvent: `INSERT INTO events (uid, at, session, project, machine, hook, tool, error_hash, files, data)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  insertEvent: `INSERT INTO events (uid, at, session, agent_id, project, machine, hook, tool, error_hash, files, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
   insertInjection: `INSERT INTO injections (
        uid, event_uid, at, session, project, machine, hook, shelf,
        resource_id, title, url, price,
        search_id, score, second, strength, confidence, corroborated,
-       action, reason, form, deny, tokens
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       action, reason, form, deny, tokens, agent_id
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
   /**
    * The 6× fix: one already-shown set for every hook, keyed by session and by
@@ -395,14 +474,15 @@ export const STORE_SQL = {
      WHERE session = '' AND key = 'store_journal'`,
 
   recordSearch: `INSERT INTO searches (
-       search_id, at, session, question, fingerprint, decision, candidates,
+       search_id, at, session, agent_id, question, fingerprint, decision, candidates,
        source, shelf_base_url, paid_browse_count
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(search_id) DO UPDATE SET
        at = excluded.at, session = excluded.session, question = excluded.question,
        fingerprint = excluded.fingerprint, decision = excluded.decision,
        candidates = excluded.candidates, source = excluded.source,
        shelf_base_url = excluded.shelf_base_url,
+       agent_id = COALESCE(excluded.agent_id, searches.agent_id),
        paid_browse_count = COALESCE(excluded.paid_browse_count, searches.paid_browse_count)`,
   /** Newest first. `rowid` breaks a tie so two rows stamped the same
    *  millisecond come back write-order-newest-first, which is what "prepend"
@@ -412,7 +492,7 @@ export const STORE_SQL = {
    *  row in the machine bucket under `draft-search:<searchId>`, value the RAW
    *  post id (matched by SQL, so never JSON-quoted). A key-value fact beside the
    *  `published:` records, not a `searches` column, because adding a column to a
-   *  created table needs the versioned migration #212 introduces. */
+   *  created table needs a STORE_MIGRATIONS entry. */
   listSearches: `SELECT s.*, st.value AS draft_post_id FROM searches s
      LEFT JOIN session_state st
        ON st.session = '' AND st.key = 'draft-search:' || s.search_id
@@ -539,10 +619,12 @@ export const STORE_SQL = {
    *  same pairing twice changes nothing: independence is the primary key's job,
    *  not the caller's. */
   claimClose: `INSERT OR IGNORE INTO pairing_closes
-       (pairing_id, session, at, fix_cmd, fix_files, scope)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+       (pairing_id, session, agent_id, at, fix_cmd, fix_files, scope)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
   /** Every closer, oldest first. The first one owns the pairing's scope, and
-   *  the rest are only corroboration if their fix agrees with it. */
+   *  the rest are only corroboration if their fix agrees with it. PER SESSION,
+   *  deliberately: `agent_id` is report metadata, and reading it here would turn
+   *  one session's two workers into two independent closers. */
   closersOf: `SELECT session, at, fix_cmd, fix_files, scope FROM pairing_closes
      WHERE pairing_id = ? ORDER BY at, session`,
   /**
@@ -608,7 +690,7 @@ export const STORE_SQL = {
    * queries: a window scan over tables that never prune, run by a human, never
    * by a hook.
    */
-  scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
+  scoreEvents: `SELECT session, agent_id, at, hook, tool, error_hash, files, data
      FROM events WHERE at >= ? ORDER BY session, at, id`,
   scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
   scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
@@ -619,7 +701,7 @@ export const STORE_SQL = {
             OR key LIKE 'agent_published:%') AND at >= ?`,
 
   /** `tenjin push grade`: what was shown and never judged. */
-  ungradedInjections: `SELECT uid, at, session, hook, shelf, resource_id, title, url, search_id, form
+  ungradedInjections: `SELECT uid, at, session, agent_id, hook, shelf, resource_id, title, url, search_id, form
      FROM injections
      WHERE action = 'injected' AND outcome IS NULL AND at >= ? AND (? = '' OR session = ?)
      ORDER BY at, id`,
@@ -632,7 +714,7 @@ export const STORE_SQL = {
    * on a row the arm decided NOT to show would stamp an outcome on it and post
    * "the agent used this" to the shelf about a piece nobody ever saw.
    */
-  injectionByUid: `SELECT uid, at, session, hook, shelf, resource_id, search_id, outcome, outcome_by, outcome_at
+  injectionByUid: `SELECT uid, at, session, agent_id, hook, shelf, resource_id, search_id, outcome, outcome_by, outcome_at
      FROM injections WHERE uid = ? AND action = 'injected'`,
   /** A verdict, and the posted stamp cleared with it: a re-labelled row is owed
    *  to the shelf again. */
@@ -693,6 +775,7 @@ const STORE_CORE_JS = String.raw`
 const STATE_DB_PATH = join(DATA_DIR, __DB_FILE__);
 const STORE_SQL = __SQL__;
 const STORE_DDL = __DDL__;
+const STORE_MIGRATIONS = __MIGRATIONS__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
@@ -839,6 +922,16 @@ function storeSession(sessionId) {
   return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : '';
 }
 
+/** The worker inside a session, for an \`agent_id\` column: the id the prelude's
+ *  \`identityOf\` handed back, or NULL. THE OPPOSITE OF \`storeSession\` on
+ *  purpose — '' is a bucket a scope can fall into, and an agent is not a scope.
+ *  NULL is the main session, and it has to stay distinguishable from a row a
+ *  build wrote before the column existed, which is also NULL and means the same
+ *  thing. Four tables bind through here so they cannot disagree. */
+function storeAgent(agentId) {
+  return typeof agentId === 'string' && agentId.length > 0 ? agentId : null;
+}
+
 /**
  * Switch the file to WAL. Returns whether it is now in WAL; NEVER throws.
  *
@@ -932,9 +1025,9 @@ async function openStore() {
     // \`tenjin install\`, so a machine can run v1 hooks against a database a
     // newer CLI already migrated. On \`!==\` the stale hook stamps the version
     // back down, the newer side migrates again, and the two ping-pong forever —
-    // and any non-idempotent statement in that later migration (#212 adds one
-    // under version 2) then throws and costs the newer build its store. A
-    // higher version is left exactly as it is.
+    // and the non-idempotent statements in STORE_MIGRATIONS (an ALTER TABLE
+    // throws on the second run) then cost the newer build its store. A higher
+    // version is left exactly as it is.
     if (storeVersion(db) < STORE_USER_VERSION) bootstrap(db);
     // Second and last attempt, now that the cold start this lost to has
     // committed: on a file another opener has already switched, this is a 1 ms
@@ -991,10 +1084,7 @@ function bootstrap(db) {
         continue;
       }
       try {
-        if (storeVersion(db) < STORE_USER_VERSION) {
-          db.exec(STORE_DDL);
-          db.exec(STORE_SQL.setUserVersion);
-        }
+        stepSchema(db);
         db.exec('COMMIT');
         return;
       } catch (err) {
@@ -1013,6 +1103,31 @@ function bootstrap(db) {
       // The open is about to fail anyway; the pragma is not what to report.
     }
   }
+}
+
+/**
+ * Bring the schema to \`STORE_USER_VERSION\`. CALLED INSIDE THE TRANSACTION, and
+ * it re-reads the version THERE rather than trusting one read outside it: a
+ * racer that blocked on \`BEGIN IMMEDIATE\` is looking at a database the winner
+ * has just changed, and acting on the stale number is how both processes come
+ * to run the same non-idempotent ALTER.
+ *
+ * ⚠ EXCLUSIVE BRANCHES. \`STORE_DDL\` is all IF NOT EXISTS and creates the
+ * CURRENT shape, so a file at version 0 — or one whose pragma will not read,
+ * which is -1 and sorts below every version — is CREATED and needs no delta at
+ * all. Only a file at a real version below the current one steps, and it steps
+ * each delta exactly once, because \`ALTER TABLE ADD COLUMN\` throws
+ * \`duplicate column name\` on a second run.
+ *
+ * ⚠ MIRRORED by \`stepSchemaOn\` in the TS half. The drift test is what keeps
+ * the two the same shape.
+ */
+function stepSchema(db) {
+  const v = storeVersion(db);
+  if (v >= STORE_USER_VERSION) return;
+  if (v < 1) db.exec(STORE_DDL);
+  else for (const m of STORE_MIGRATIONS) if (v < m.version) db.exec(m.sql);
+  db.exec(STORE_SQL.setUserVersion);
 }
 
 /** The stored schema version, or -1 when it cannot be read — which sorts BELOW
@@ -1150,6 +1265,10 @@ function recordEvent(row) {
     id,
     Date.now(),
     storeSession(row.session),
+    // A COLUMN, not a \`data\` field. \`session\` is the parent's on every fire a
+    // subagent makes, so this is the only thing telling two parallel children
+    // apart, and every reader of it either partitions or joins on it.
+    storeAgent(row.agentId),
     projectId(row.cwd),
     machineId(),
     String(row.hook),
@@ -1211,6 +1330,7 @@ function recordInjection(row) {
     typeof row.form === 'string' ? row.form : null,
     row.deny === true ? 1 : 0,
     typeof row.tokens === 'number' ? row.tokens : null,
+    storeAgent(row.agentId),
   ]);
 }
 
@@ -1386,6 +1506,7 @@ function recordSearchRow(entry) {
     String(entry.searchId),
     typeof entry.at === 'number' ? entry.at : Date.now(),
     storeSession(entry.sessionId),
+    storeAgent(entry.agentId),
     String(entry.question),
     searchFingerprint(entry.question),
     String(entry.decision),
@@ -1522,14 +1643,20 @@ function pairingById(cwd, id) {
  * touched. \`scope\` belongs to the FIRST closer and is never overwritten:
  * it describes the pairing, and the first close is the one whose files are kept.
  *
+ * \`agentId\` IS RECORDED AND COUNTS FOR NOTHING HERE. It is what the
+ * importance-score report partitions on, so the row carries it; the promotion
+ * still counts SESSIONS, because two subagents of one conversation are one
+ * machine in one checkout and not the two independent observations 04 asks for.
+ *
  * Returns the resulting status, so the caller can say what it did.
  */
-function closePairing(id, sessionId, fixCmd, fixFiles, scope) {
+function closePairing(id, sessionId, agentId, fixCmd, fixFiles, scope) {
   const now = Date.now();
   const files = Array.isArray(fixFiles) ? fixFiles : [];
   storeRun(STORE_SQL.claimClose, [
     id,
     storeSession(sessionId),
+    storeAgent(agentId),
     now,
     typeof fixCmd === 'string' ? fixCmd : null,
     storeJson(files),
@@ -1598,6 +1725,7 @@ export function storeSource(): string {
     .replaceAll('__BOOTSTRAP_TRIES__', String(STORE_BOOTSTRAP_TRIES))
     .replaceAll('__SQL__', JSON.stringify(STORE_SQL, null, 2))
     .replaceAll('__DDL__', JSON.stringify(STORE_DDL))
+    .replaceAll('__MIGRATIONS__', JSON.stringify(STORE_MIGRATIONS))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
     .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS));
 }
@@ -1638,6 +1766,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function storeVersionOf(db: SqliteDatabase): number {
   const row = db.prepare(STORE_SQL.userVersion).get();
   return isRecord(row) && typeof row.user_version === 'number' ? row.user_version : -1;
+}
+
+/** ⚠ MIRRORED with `stepSchema` in the hook template above, which carries the
+ *  reasoning: the version is re-read INSIDE the transaction, the create and
+ *  migrate branches are exclusive because `ALTER TABLE ADD COLUMN` throws on a
+ *  second run, and an unreadable pragma (-1) takes the idempotent create. */
+function stepSchemaOn(db: SqliteDatabase): void {
+  const v = storeVersionOf(db);
+  if (v >= STORE_USER_VERSION) return;
+  if (v < 1) db.exec(STORE_DDL);
+  else for (const m of STORE_MIGRATIONS) if (v < m.version) db.exec(m.sql);
+  db.exec(STORE_SQL.setUserVersion);
 }
 
 /** Switch the file to WAL. Returns whether it is now in WAL; never throws. See
@@ -1753,10 +1893,7 @@ export async function openStore(dataDir: string): Promise<Store | null> {
             continue;
           }
           try {
-            if (storeVersionOf(db) < STORE_USER_VERSION) {
-              db.exec(STORE_DDL);
-              db.exec(STORE_SQL.setUserVersion);
-            }
+            stepSchemaOn(db);
             db.exec('COMMIT');
             break;
           } catch (err) {
@@ -1910,6 +2047,12 @@ export function storeSession(sessionId: string | null | undefined): string {
   return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : '';
 }
 
+/** ⚠ MIRRORED with `storeAgent` in the hook core above, which carries the
+ *  reasoning: NULL is the main session and never ''. */
+export function storeAgent(agentId: string | null | undefined): string | null {
+  return typeof agentId === 'string' && agentId.length > 0 ? agentId : null;
+}
+
 /** ⚠ MIRRORED with `searchFingerprint` in the hook core above. */
 export function searchFingerprint(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
@@ -2025,6 +2168,18 @@ export interface StoredSearch {
   /** Absent on rows written before sources existed; see {@link SearchSourceSchema}. */
   source?: SearchSource;
   /**
+   * The WORKER inside that session: the subagent the search fired inside, absent
+   * for the main session and for every row written before `user_version` 2.
+   *
+   * A session is not a worker. Parallel subagents all file under their parent's
+   * `session_id`, so a search attributed to the session alone belongs to every
+   * agent in it at once — which is how `push status --sessions` came to credit
+   * one child's search to a sibling's `research-then-edit`. Same value, same
+   * reader (`identityOf`) and same NULL-is-the-main-session rule as
+   * `events.agent_id` and `injections.agent_id`.
+   */
+  agentId?: string;
+  /**
    * WHICH SHELF ANSWERED, as a base URL. A team-mode search asks the team shelf
    * and falls through to `publicShelfUrl`, and the two shelves have separate
    * databases: a searchId minted by one means nothing to the other. Without this
@@ -2138,6 +2293,13 @@ function rowToSearch(row: Record<string, unknown>): StoredSearch | null {
     ...(typeof row.session === 'string' && row.session.length > 0
       ? { sessionId: row.session }
       : {}),
+    // SURFACED so a round trip cannot blank it: `recordSearch` re-records a row
+    // it was handed, and a caller that read this one back has to be able to hand
+    // the stamp straight back. (The upsert COALESCEs as well, so a caller that
+    // never saw the column is safe too.)
+    ...(typeof row.agent_id === 'string' && row.agent_id.length > 0
+      ? { agentId: row.agent_id }
+      : {}),
     ...(typeof row.draft_post_id === 'string' && row.draft_post_id.length > 0
       ? { draftPostId: row.draft_post_id }
       : {}),
@@ -2212,6 +2374,7 @@ export async function recordSearch(dataDir: string, entry: StoredSearch): Promis
       entry.searchId,
       Number.isFinite(at) ? at : Date.now(),
       storeSession(entry.sessionId),
+      storeAgent(entry.agentId),
       entry.question,
       searchFingerprint(entry.question),
       entry.decision,

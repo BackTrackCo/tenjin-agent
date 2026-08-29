@@ -8,6 +8,7 @@ import {
   RETIRED_STATE_ENTRIES,
   STATE_DB_FILE,
   STORE_DDL,
+  STORE_MIGRATIONS,
   STORE_BUSY_TIMEOUT_MS,
   STORE_SQL,
   STORE_USER_VERSION,
@@ -233,6 +234,9 @@ describe('storeSource stays in sync with the module', () => {
   it('bakes the DDL, the version and every statement into the generated source', () => {
     const source = storeSource();
     expect(source).toContain(JSON.stringify(STORE_DDL));
+    // The deltas travel too, or a hook meeting a v1 database creates the schema
+    // it was compiled against and stamps a version the column is missing from.
+    expect(source).toContain(JSON.stringify(STORE_MIGRATIONS));
     expect(source).toContain(`const STORE_USER_VERSION = ${STORE_USER_VERSION};`);
     for (const [name, sql] of Object.entries(STORE_SQL)) {
       // Interpolated as one JSON object, so each statement appears verbatim as a
@@ -353,7 +357,7 @@ describe('the hot-path queries never scan', () => {
 });
 
 describe('openStore', () => {
-  it('creates the schema at user_version 1 and is idempotent', async () => {
+  it('creates the schema at the current version and is idempotent', async () => {
     const first = await openStore(dataDir);
     expect(first).not.toBeNull();
     first?.close();
@@ -410,6 +414,378 @@ describe('openStore', () => {
     const probe = await probeSqlite();
     expect(probe.ok).toBe(true);
     expect(probe.version).toMatch(/^\d+\.\d+/);
+  });
+});
+
+/**
+ * VERSION 1, FROZEN. The four tables version 2 alters, exactly as the build that
+ * shipped them wrote them — a copy, never an import, because the point of every
+ * case below is a file THIS BUILD DID NOT CREATE. Reading the live `STORE_DDL`
+ * here would make these tests assert that today's schema migrates to today's
+ * schema, which is true of any schema and proves nothing.
+ *
+ * Only the columns the step touches are spelled out; the rest of a v1 file is
+ * identical to a v2 one, so the fixture lays these down FIRST and lets
+ * `STORE_DDL`'s `IF NOT EXISTS` fill in everything else around them.
+ */
+const V1_DDL = `
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE,
+  at INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  project TEXT,
+  machine TEXT NOT NULL,
+  hook TEXT NOT NULL,
+  tool TEXT,
+  error_hash TEXT,
+  files TEXT,
+  data TEXT
+);
+CREATE TABLE IF NOT EXISTS injections (
+  id INTEGER PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE,
+  event_uid TEXT,
+  at INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  project TEXT,
+  machine TEXT NOT NULL,
+  hook TEXT NOT NULL,
+  shelf TEXT NOT NULL,
+  resource_id TEXT,
+  title TEXT,
+  url TEXT,
+  price TEXT,
+  search_id TEXT,
+  score REAL,
+  second REAL,
+  strength TEXT,
+  confidence TEXT,
+  corroborated INTEGER,
+  action TEXT NOT NULL,
+  reason TEXT,
+  form TEXT,
+  deny INTEGER DEFAULT 0,
+  tokens INTEGER,
+  outcome TEXT,
+  outcome_at INTEGER,
+  outcome_by TEXT,
+  posted_at INTEGER,
+  synced_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS searches (
+  search_id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  question TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  candidates TEXT NOT NULL,
+  source TEXT,
+  shelf_base_url TEXT,
+  paid_browse_count INTEGER,
+  resolved_by TEXT,
+  resolved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS pairing_closes (
+  pairing_id INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  fix_cmd TEXT,
+  fix_files TEXT,
+  scope TEXT,
+  PRIMARY KEY (pairing_id, session)
+);
+`;
+
+/** The statements a v1 hook script carries for those tables, frozen for the same
+ *  reason `V1_DDL` is: an installed hook is regenerated only by `tenjin
+ *  install`, so v1 scripts go on writing to a file a newer CLI has migrated. */
+const V1_SQL = {
+  insertEvent: `INSERT INTO events (uid, at, session, project, machine, hook, tool, error_hash, files, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  recordSearch: `INSERT INTO searches (
+       search_id, at, session, question, fingerprint, decision, candidates,
+       source, shelf_base_url, paid_browse_count
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  claimClose: `INSERT OR IGNORE INTO pairing_closes
+       (pairing_id, session, at, fix_cmd, fix_files, scope)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+} as const;
+
+/**
+ * A state.db at version 1 with one row in each of the four tables the step
+ * touches, so a migration that drops and recreates rather than altering is
+ * caught by the rows going missing and not only by the column list.
+ *
+ * The `events` row carries the `data.agentId` tenjin-agent#242 has been writing
+ * since 2026-08-28, because lifting that into the column is half of what the
+ * step does.
+ */
+function seedV1(): void {
+  const handle = db();
+  try {
+    handle.exec(V1_DDL);
+    // Everything else at its current shape; the four above are already there,
+    // and every statement in STORE_DDL is IF NOT EXISTS.
+    handle.exec(STORE_DDL);
+    handle
+      .prepare(V1_SQL.insertEvent)
+      .run('e-lead', 1, 'sess-v1', null, 'machine', 'edit', 'Edit', null, null, '{"event":"x"}');
+    handle
+      .prepare(V1_SQL.insertEvent)
+      .run(
+        'e-child',
+        2,
+        'sess-v1',
+        null,
+        'machine',
+        'edit',
+        'Edit',
+        null,
+        null,
+        '{"event":"x","agentId":"a1"}',
+      );
+    handle
+      .prepare(
+        `INSERT INTO injections (
+           uid, event_uid, at, session, project, machine, hook, shelf,
+           resource_id, title, url, price,
+           search_id, score, second, strength, confidence, corroborated,
+           action, reason, form, deny, tokens
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'u-old',
+        null,
+        1,
+        'sess-v1',
+        null,
+        'machine',
+        'prompt',
+        'public',
+        'res-1',
+        'an old row',
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'injected',
+        null,
+        null,
+        0,
+        null,
+      );
+    handle
+      .prepare(V1_SQL.recordSearch)
+      .run(
+        'v1-search',
+        1,
+        'sess-v1',
+        'why does it fail',
+        'why does it fail',
+        'MISS',
+        '[]',
+        'cli',
+        null,
+        null,
+      );
+    handle.prepare(V1_SQL.claimClose).run(1, 'sess-v1', 1, 'pnpm test', '["a.ts"]', 'code');
+    handle.exec('PRAGMA user_version = 1');
+  } finally {
+    handle.close();
+  }
+}
+
+/** The column names of `table`, in declaration order. */
+function columns(table: string): string[] {
+  return rows(`PRAGMA table_info(${table})`).map((r) => String(r.name));
+}
+
+/** The four tables version 2 puts `agent_id` on. */
+const V2_TABLES = ['events', 'injections', 'searches', 'pairing_closes'] as const;
+
+/**
+ * A database that already exists is the ONLY interesting case for a schema
+ * change: the fresh path is covered by every other test in this file, and a
+ * migration that only works on an empty directory has migrated nothing.
+ *
+ * BOTH BOOTSTRAPS ARE TESTED, because there are two of them: the CLI's
+ * `openStore` and the copy `storeSource()` bakes into every hook. A machine
+ * whose hooks are older than its CLI (they are regenerated only by `tenjin
+ * install`) can have either side meet the old database first.
+ */
+describe('migration', () => {
+  /**
+   * THE STEP, ON A FILE THIS BUILD DID NOT CREATE.
+   *
+   * `STORE_DDL` is all `IF NOT EXISTS`, so for one version the bootstrap could
+   * afford to be careless: running it twice was a no-op. Version 2 is `ALTER
+   * TABLE ADD COLUMN`, which is NOT idempotent — a second run throws `duplicate
+   * column name` and, inside the bootstrap, costs that process its whole store.
+   * So the branch is exclusive and gated on a version re-read inside the
+   * transaction, and this is the case that says the migrating half works.
+   */
+  it('migrates a version 1 database in place and keeps its rows (CLI copy)', async () => {
+    seedV1();
+    // The premise, checked rather than assumed: without it a schema bug would
+    // read as "the migration worked" on a file that was already v2.
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: 1 });
+    for (const table of V2_TABLES) expect(columns(table)).not.toContain('agent_id');
+
+    const store = await openStore(dataDir);
+    expect(store).not.toBeNull();
+    store?.close();
+
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    // ALL FOUR, or the identity is only part migrated: one version, one entry.
+    for (const table of V2_TABLES) expect(columns(table)).toContain('agent_id');
+    // ALTERED, NOT REBUILT. The rows a machine already had are the whole reason
+    // this is a migration rather than a fresh file.
+    expect(rows('SELECT uid, session, agent_id FROM injections')).toEqual([
+      { uid: 'u-old', session: 'sess-v1', agent_id: null },
+    ]);
+    expect(rows('SELECT search_id, session, agent_id FROM searches')).toEqual([
+      { search_id: 'v1-search', session: 'sess-v1', agent_id: null },
+    ]);
+    expect(rows('SELECT pairing_id, session, agent_id FROM pairing_closes')).toEqual([
+      { pairing_id: 1, session: 'sess-v1', agent_id: null },
+    ]);
+    // BACKFILLED. #242 wrote the agent into `events.data` for the fortnight
+    // before this column existed; a step that only added the column would hand
+    // every one of those rows back to the lead, and the score would credit a
+    // child's fix to its parent.
+    expect(rows('SELECT uid, agent_id FROM events ORDER BY uid')).toEqual([
+      { uid: 'e-child', agent_id: 'a1' },
+      { uid: 'e-lead', agent_id: null },
+    ]);
+
+    // ...and a second open steps nothing: the version gate is what keeps the
+    // non-idempotent ALTER from running twice.
+    const again = await openStore(dataDir);
+    expect(again).not.toBeNull();
+    again?.close();
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    expect(columns('events').filter((c) => c === 'agent_id')).toHaveLength(1);
+  });
+
+  it('migrates a version 1 database in place (hook copy)', async () => {
+    await writeConfig();
+    seedV1();
+
+    const run = await runScript(
+      stopHookScript(dataDir),
+      JSON.stringify({ session_id: 'sess-v1', hook_event_name: 'Stop', cwd: '/repo/one' }),
+    );
+    expect(run.code).toBe(0);
+    expect(run.stderr).toBe('');
+
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    for (const table of V2_TABLES) expect(columns(table)).toContain('agent_id');
+    expect(rows('SELECT uid, agent_id FROM events ORDER BY uid')).toEqual([
+      { uid: 'e-child', agent_id: 'a1' },
+      { uid: 'e-lead', agent_id: null },
+    ]);
+    expect(rows('SELECT uid, agent_id FROM injections')).toEqual([
+      { uid: 'u-old', agent_id: null },
+    ]);
+  });
+
+  /**
+   * THE COLD START, BUT ON A MIGRATION — the case the fresh-database race
+   * elsewhere in this file cannot cover.
+   *
+   * Twelve hook processes meeting a v1 file all take `BEGIN IMMEDIATE`, and
+   * eleven of them come back to a database the winner has just altered. With an
+   * idempotent DDL that was survivable however the gate behaved; with `ALTER
+   * TABLE ADD COLUMN` the loser that re-runs the step throws `duplicate column
+   * name`, and the bootstrap turns that into a null store — one fire's whole
+   * state, with `state store unavailable (duplicate column name: agent_id)` on
+   * the stderr Claude Code shows the operator.
+   *
+   * THROUGH THE SPAWNED SCRIPTS, so it is the JS copy of the stepper under test
+   * and not the TS one: the hooks are where twelve concurrent openers actually
+   * happen, and the two copies are separate source.
+   */
+  it('survives a dozen hook processes racing a version 1 database', async () => {
+    await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    seedV1();
+    const payload = JSON.stringify({
+      session_id: 'v1-race',
+      hook_event_name: 'Stop',
+      cwd: '/repo/one',
+    });
+
+    const runs = await Promise.all(
+      Array.from({ length: 12 }, () => runScript(stopHookScript(dataDir), payload)),
+    );
+    for (const run of runs) {
+      expect(run.code).toBe(0);
+      // Every byte of stderr reaches the operator, and this is the exact
+      // sentence a re-run ALTER would put there.
+      expect(run.stderr).not.toContain('duplicate column');
+      expect(run.stderr).toBe('');
+    }
+
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    // ONCE. Twelve openers, one column each: a stepper that ran the ALTER per
+    // process would have thrown rather than added a second, so the count says
+    // the gate held and not merely that SQLite refused.
+    for (const table of V2_TABLES) {
+      expect(columns(table).filter((c) => c === 'agent_id')).toHaveLength(1);
+    }
+    expect(rows('SELECT COUNT(*) AS n FROM searches')[0]).toEqual({ n: 1 });
+  }, 30_000);
+
+  /**
+   * THE OTHER DIRECTION: a version 1 hook script against a file a newer CLI has
+   * migrated. Hook scripts are regenerated only by `tenjin install`, so this is
+   * the ordinary state of a machine that upgraded the CLI and has not
+   * re-installed — the same asymmetry the `<` version gate exists for. A v1
+   * statement names its columns explicitly and the new one is nullable, so the
+   * write lands, unstamped, which is exactly what it means.
+   */
+  it('takes a version 1 hook core writing to a version 2 database', async () => {
+    const store = await openStore(dataDir);
+    expect(store).not.toBeNull();
+    store?.close();
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+
+    const handle = db();
+    try {
+      expect(() =>
+        handle
+          .prepare(V1_SQL.insertEvent)
+          .run('old-hook', 1, 'sess-old', null, 'machine', 'edit', 'Edit', null, null, null),
+      ).not.toThrow();
+      expect(() =>
+        handle
+          .prepare(V1_SQL.recordSearch)
+          .run('old-search', 1, 'sess-old', 'q', 'q', 'MISS', '[]', 'cli', null, null),
+      ).not.toThrow();
+      expect(() =>
+        handle.prepare(V1_SQL.claimClose).run(7, 'sess-old', 1, 'pnpm test', '["a.ts"]', 'code'),
+      ).not.toThrow();
+    } finally {
+      handle.close();
+    }
+
+    expect(rows('SELECT agent_id FROM events')).toEqual([{ agent_id: null }]);
+    expect(rows('SELECT agent_id FROM searches')).toEqual([{ agent_id: null }]);
+    expect(rows('SELECT agent_id FROM pairing_closes')).toEqual([{ agent_id: null }]);
+  });
+
+  /** The fresh path CREATES the current shape rather than stepping up to it, so
+   *  a new machine must never need the migration to catch up. */
+  it('a fresh database lands at the current version with the columns present', async () => {
+    const store = await openStore(dataDir);
+    store?.close();
+    expect(rows('PRAGMA user_version')[0]).toEqual({ user_version: STORE_USER_VERSION });
+    for (const table of V2_TABLES) expect(columns(table)).toContain('agent_id');
   });
 });
 
@@ -2203,6 +2579,7 @@ describe('searches: the typed handle', () => {
           `0197bbbb-cccc-dddd-eeee-${String(i).padStart(12, '0')}`,
           Date.now() - 300 * DAY_MS + i,
           '',
+          null,
           'decoy',
           'decoy',
           'MISS',
@@ -2234,6 +2611,7 @@ describe('searches: the typed handle', () => {
           `0197aaaa-bbbb-cccc-dddd-${String(i).padStart(12, '0')}`,
           Date.now() - i * 1000,
           's1',
+          null,
           'q',
           'fp',
           'MISS',
