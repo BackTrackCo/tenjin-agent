@@ -434,19 +434,17 @@ export interface ScoreInput {
    */
   events: ScoreEvent[];
   /**
-   * When this SESSION closed a pairing (`pairing_closes.at`).
-   *
-   * SESSION-WIDE, AND THE PARTITION DOES NOT REACH IT: `pairing_closes` has no
-   * agent column, so every agent in the session sees every close. The one
-   * pattern this feeds — `error-edit-resolved`, whose resolution may be a close
-   * — can still be completed by a sibling's close. Narrowing it needs a column
-   * on that table, which is DDL and not this change.
+   * When THIS WORKER closed a pairing (`pairing_closes.at`), same partition as
+   * `events` and for the same reason: `error-edit-resolved` may be completed by
+   * a close, and a sibling's close is not this worker's fix. `pairing_closes`
+   * carries `agent_id` since store version 2, so the report reads it per
+   * (session, agent) rather than per session.
    */
   closes: number[];
-  /** When this SESSION ran a search (`searches.at`): the research signal the
+  /** When THIS WORKER ran a search (`searches.at`): the research signal the
    *  `research` event under-reports, since that row is written on a hit only.
-   *  Session-wide for the same reason `closes` is, and feeding
-   *  `research-then-edit` with the same caveat. */
+   *  Partitioned like `closes`, so `research-then-edit` cannot pair one agent's
+   *  search with a sibling's edit. */
   searches: number[];
   /** The session's end, or the last thing on record when it has none. */
   endedAt: number | null;
@@ -621,6 +619,24 @@ function commandNamesHead(command: string, head: string): boolean {
   });
 }
 
+/**
+ * THE ONE PARTITION KEY the `--sessions` report uses, for every input it scores:
+ * a session id and the worker inside it. `agent_id` is SQL NULL for the lead's
+ * own turn (and on every row written before store version 2), and the arms write
+ * null rather than '' for a main-session fire, so both collapse to the same
+ * empty bucket here. `\u0000` cannot occur in either half, so the join is
+ * unambiguous.
+ */
+function workerKey(session: string, agent: string | null): string {
+  return session + '\u0000' + (agent ?? '');
+}
+
+/** The `agent_id` column as the partition reads it: a non-empty string is a
+ *  subagent, and NULL, '' or a non-string is the lead's own turn. */
+function parseAgent(raw: unknown): string | null {
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
 function parseFiles(raw: unknown): string[] {
   if (typeof raw !== 'string') return [];
   try {
@@ -651,8 +667,11 @@ function parseData(raw: unknown): Record<string, unknown> {
  * PER AGENT, because a session is not a worker. Every subagent files under its
  * parent's session id, so a session-wide scan read one child's failure, a
  * sibling's edit and the parent's pass as one fix and scored a session nobody
- * had fixed anything in. The parent's own turn is the null agent, and it is the
- * row that carries the session-wide `capture_asked`.
+ * had fixed anything in. EVERY input is partitioned this way — the events, the
+ * pairing closes and the searches, all three on {@link workerKey} — so no
+ * pattern can pair one worker's row with a sibling's. The parent's own turn is
+ * the null agent, and it is the row that carries the session-wide
+ * `capture_asked`; the publish markers stay machine-wide, attributed by time.
  *
  * Sessions with the '' (machine) id are skipped: that bucket is where a payload
  * naming no session lands, and it is not a conversation anything could have
@@ -678,12 +697,9 @@ export async function readSessionScores(
       const session = typeof row.session === 'string' ? row.session : '';
       if (session === '') continue;
       const data = parseData(row.data);
-      // A COLUMN, the one the prelude's `identityOf` fills. '' is not an agent:
-      // the arms write null for a main-session fire, and a row written before
-      // version 2 has SQL NULL in the column. Both are the lead's own bucket.
-      const agent =
-        typeof row.agent_id === 'string' && row.agent_id.length > 0 ? row.agent_id : null;
-      const key = session + '\u0000' + (agent ?? '');
+      // A COLUMN, the one the prelude's `identityOf` fills; see `workerKey`.
+      const agent = parseAgent(row.agent_id);
+      const key = workerKey(session, agent);
       const bucket =
         byWorker.get(key) ?? byWorker.set(key, { session, agent, events: [] }).get(key)!;
       bucket.events.push({
@@ -696,15 +712,22 @@ export async function readSessionScores(
         head: typeof data.head === 'string' ? data.head : null,
       });
     }
+    // KEYED THE SAME WAY THE EVENTS ARE. Both tables carry `agent_id` (store
+    // version 2), so the two patterns they feed — `error-edit-resolved`, whose
+    // resolution may be a close, and `research-then-edit` — no longer credit
+    // one worker with a sibling's close or search. `closersOf` is deliberately
+    // untouched: independence for a promotion is still per session.
     const closes = new Map<string, number[]>();
     for (const row of store.all(STORE_SQL.scoreCloses, [since])) {
       if (typeof row.session !== 'string' || typeof row.at !== 'number') continue;
-      (closes.get(row.session) ?? closes.set(row.session, []).get(row.session)!).push(row.at);
+      const key = workerKey(row.session, parseAgent(row.agent_id));
+      (closes.get(key) ?? closes.set(key, []).get(key)!).push(row.at);
     }
     const searches = new Map<string, number[]>();
     for (const row of store.all(STORE_SQL.scoreSearches, [since])) {
       if (typeof row.session !== 'string' || typeof row.at !== 'number') continue;
-      (searches.get(row.session) ?? searches.set(row.session, []).get(row.session)!).push(row.at);
+      const key = workerKey(row.session, parseAgent(row.agent_id));
+      (searches.get(key) ?? searches.set(key, []).get(key)!).push(row.at);
     }
     const bounds = new Map<string, { started: number | null; ended: number | null }>();
     for (const row of store.all(STORE_SQL.scoreSessions, [since, since])) {
@@ -722,14 +745,15 @@ export async function readSessionScores(
     }
     const out: PushSessionScore[] = [];
     for (const { session, agent, events } of byWorker.values()) {
+      const key = workerKey(session, agent);
       const bound = bounds.get(session);
       const started = bound?.started ?? events[0]!.at;
       const endedAt = bound?.ended ?? null;
       const endForPublish = endedAt ?? nowMs;
       const scored = scoreSession({
         events,
-        closes: closes.get(session) ?? [],
-        searches: searches.get(session) ?? [],
+        closes: closes.get(key) ?? [],
+        searches: searches.get(key) ?? [],
         endedAt,
       });
       out.push({

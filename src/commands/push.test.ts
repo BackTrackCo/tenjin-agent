@@ -804,7 +804,14 @@ describe('runPushStatus --sessions', () => {
       files?: string[];
       data?: unknown;
     }>,
-    extra: { endedAt?: number; captureAskedAt?: number; closesAt?: number[] } = {},
+    extra: {
+      endedAt?: number;
+      captureAskedAt?: number;
+      /** A close per entry. `agentId` absent is the lead's own close. */
+      closesAt?: Array<number | { at: number; agentId?: string }>;
+      /** A `searches` row per entry, same shape. */
+      searchesAt?: Array<number | { at: number; agentId?: string }>;
+    } = {},
   ): Promise<void> {
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
@@ -836,8 +843,46 @@ describe('runPushStatus --sessions', () => {
           extra.captureAskedAt,
         ]);
       }
-      for (const at of extra.closesAt ?? []) {
-        store.run(STORE_SQL.claimClose, [1, session, null, at, 'pnpm test', '["a.ts"]', 'code']);
+      const stamps = (
+        rows: Array<number | { at: number; agentId?: string }>,
+      ): Array<{ at: number; agentId: string | null }> =>
+        rows.map((r) =>
+          typeof r === 'number'
+            ? { at: r, agentId: null }
+            : { at: r.at, agentId: r.agentId ?? null },
+        );
+      let closeId = 0;
+      for (const { at, agentId } of stamps(extra.closesAt ?? [])) {
+        // A distinct `pairing_id` per row: the claim is OR IGNORE on
+        // (pairing_id, session), so two agents in one session closing "the same"
+        // pairing would collapse into one row and hide the partition.
+        closeId += 1;
+        store.run(STORE_SQL.claimClose, [
+          closeId,
+          session,
+          agentId,
+          at,
+          'pnpm test',
+          '["a.ts"]',
+          'code',
+        ]);
+      }
+      let searchId = 0;
+      for (const { at, agentId } of stamps(extra.searchesAt ?? [])) {
+        searchId += 1;
+        store.run(STORE_SQL.recordSearch, [
+          `${session}-search-${searchId}`,
+          at,
+          session,
+          agentId,
+          'q',
+          'fp',
+          'CANDIDATES',
+          '[]',
+          'push-hook',
+          null,
+          null,
+        ]);
       }
     } finally {
       store.close();
@@ -995,6 +1040,112 @@ describe('runPushStatus --sessions', () => {
       agent: null,
       patterns: ['error-edit-resolved', 'fail-edit-pass'],
       events: 3,
+    });
+  });
+
+  /**
+   * THE OTHER TWO INPUTS. `events` was partitioned first; `pairing_closes` and
+   * `searches` were still read per session, so a sibling's close completed a
+   * worker's `error-edit-resolved` and a sibling's search completed its
+   * `research-then-edit` — the same "a session is not a worker" defect, one
+   * table over. Both tables carry `agent_id`, so both are now keyed by
+   * (session, agent) like the events are.
+   */
+  it("never spans agents: a sibling's close or search completes nothing", async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    // a1 fails and edits; the only close in the window is a SIBLING's.
+    await seedSession(
+      dir,
+      'sess-close-split',
+      s1,
+      [
+        {
+          at: s1 + 1000,
+          hook: 'failure',
+          tool: 'Bash',
+          agentId: 'a1',
+          data: { command: 'pnpm test' },
+        },
+        { at: s1 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
+        { at: s1 + 2500, hook: 'edit', tool: 'Edit', agentId: 'a2', files: ['y.ts'] },
+      ],
+      { closesAt: [{ at: s1 + 3000, agentId: 'a2' }] },
+    );
+    // a2 searches; the only edit after it is a SIBLING's.
+    const s2 = now - 1800_000;
+    await seedSession(
+      dir,
+      'sess-search-split',
+      s2,
+      [
+        { at: s2 + 1500, hook: 'prompt', agentId: 'a2' },
+        { at: s2 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
+      ],
+      { searchesAt: [{ at: s2 + 1000, agentId: 'a2' }] },
+    );
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+
+    // Four workers, and not one pattern between them.
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => `${r.session}/${String(r.agent)}`).sort()).toEqual([
+      'sess-close-split/a1',
+      'sess-close-split/a2',
+      'sess-search-split/a1',
+      'sess-search-split/a2',
+    ]);
+    for (const row of rows) {
+      expect(row.patterns, `${row.session} agent ${String(row.agent)}`).toEqual([]);
+      expect(row.score, `${row.session} agent ${String(row.agent)}`).toBe(0);
+    }
+  });
+
+  it("scores a worker's own close and own search", async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    const s1 = now - 3600_000;
+    // Byte for byte the rows above, with the close and the search stamped with
+    // the same agent that did the work.
+    await seedSession(
+      dir,
+      'sess-own',
+      s1,
+      [
+        {
+          at: s1 + 1000,
+          hook: 'failure',
+          tool: 'Bash',
+          agentId: 'a1',
+          data: { command: 'pnpm test' },
+        },
+        { at: s1 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
+      ],
+      {
+        endedAt: s1 + 600_000,
+        closesAt: [{ at: s1 + 3000, agentId: 'a1' }],
+        searchesAt: [{ at: s1 + 1500, agentId: 'a1' }],
+      },
+    );
+
+    const result = await runPushStatus(
+      makeCtx(),
+      { homeDir: home, now: () => now },
+      { sessions: true },
+    );
+    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session: 'sess-own',
+      agent: 'a1',
+      patterns: ['error-edit-resolved', 'research-then-edit'],
+      score: 5,
+      events: 2,
     });
   });
 
