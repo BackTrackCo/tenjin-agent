@@ -60,7 +60,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
 import { pushSource } from './push-scripts';
-import { repoOriginSource, storeSource } from './state-store';
+import { repoSlugSource, storeSource } from './state-store';
 
 /**
  * Header stamp naming the CLI build that wrote a script. Informational only: the
@@ -2372,7 +2372,7 @@ main().catch(quiet);
  * nothing but tidiness.
  */
 export function stopHookScript(dataDir: string, cliPath: string | null = defaultCliPath()): string {
-  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}${repoOriginSource()}
+  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}${repoSlugSource()}
 import { spawn } from 'node:child_process';
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
 const CLI_PATH = ${JSON.stringify(cliPath)};
@@ -2404,7 +2404,7 @@ function spawnSyncIfNeeded(config, cwd) {
   // whose only output is "Nothing to sync." The same reduction the sync itself
   // reads (\`repoSlug\` of the origin url, a file read and never a git spawn),
   // so the two cannot disagree about whether this directory has a remote.
-  if (repoOrigin(cwd) === '') return false;
+  if (originSlug(cwd) === '') return false;
   const pending = storeCount(STORE_SQL.countUnsyncedPairings, [projectId(cwd)]);
   if (!Number.isFinite(pending) || pending === 0) return false;
   const now = Date.now();

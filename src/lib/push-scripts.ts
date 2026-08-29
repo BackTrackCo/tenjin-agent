@@ -20,7 +20,7 @@
 
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
-import { repoOriginSource, storeSource } from './state-store';
+import { repoSlugSource, storeSource } from './state-store';
 
 export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
 export const PUSH_FAILURE_HOOK_FILE = 'tenjin-push-failure.mjs';
@@ -2061,7 +2061,7 @@ async function teamResolve(args) {
   // reason, so there is nothing there to find either. FIRST, ahead of every
   // other gate, so the skip costs no lookup out of the failure bucket — it is a
   // fact about this directory, not about the shelf.
-  const repo = repoOrigin(cwd);
+  const repo = originSlug(cwd);
   if (repo === '') {
     recordDecision({ ...base, action: 'skipped', reason: 'no-remote' });
     return null;
@@ -2385,7 +2385,7 @@ main().catch(quiet);
 `;
 
 export function pushFailureHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${repoOriginSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${FAILURE_JS}`;
+  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${repoSlugSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${FAILURE_JS}`;
 }
 
 /**

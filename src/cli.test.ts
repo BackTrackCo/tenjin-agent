@@ -135,6 +135,17 @@ describe('main', () => {
     const missing = captureIo();
     expect(await main(['sync', '--cwd'], missing.io)).toBe(2);
     expect(JSON.parse(missing.stdout()).error.code).toBe('USAGE');
+
+    // AN EMPTY VALUE IS THE SAME ERROR, not a fallback to `process.cwd()`.
+    // `tenjin sync --cwd "$REPO"` with `REPO` unset reaches commander as `''`,
+    // and syncing whatever directory the shell is in would end in the same
+    // "Nothing to sync." a real miss ends in — the one wrong outcome an
+    // operator cannot tell from a right one.
+    const empty = captureIo();
+    expect(await main(['sync', '--cwd', ''], empty.io)).toBe(2);
+    const err = JSON.parse(empty.stdout()).error as { code: string; fix?: string };
+    expect(err.code).toBe('USAGE');
+    expect(err.fix).toContain('--cwd');
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {

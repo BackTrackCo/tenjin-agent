@@ -135,7 +135,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // The repo the origin salt is read from — a file read of .git/config, never a
     // git spawn (mirrors isTrackedPath's "no git invocation" rule). Read once for
     // the whole run: every row of this checkout salts against the same repo.
-    const repo = readRepoOrigin(cwd) ?? '';
+    const repo = readRepoSlug(cwd) ?? '';
     // NO REMOTE, NO SHELF (#256, owner decision). '' is what stands in for a
     // repo scope this checkout does not have — a clone from a local path, a
     // scratch directory, a mirror under another remote name — and it is not a
@@ -676,13 +676,13 @@ function parseJsonRecord(value: unknown): Record<string, string> {
  * (and a sync it spawns) must not run a process in front of its work; a `.git`
  * file (a worktree or submodule) is followed to its real gitdir.
  *
- * ⚠ THE SAME RULE AS THE RESOLVE LEG (`repoOrigin`, generated from
- * `repoOriginSource()` in lib/state-store.ts): the URL is normalised to
+ * ⚠ THE SAME RULE AS THE RESOLVE LEG (`originSlug`, generated from
+ * `repoSlugSource()` in lib/state-store.ts): the URL is normalised to
  * `host/full/path` so the two transports of one repo salt alike. A null (no
  * origin, or a remote that is a bare local path) reads as '' at the call site,
  * which is NOT a salt: it means no remote, and this checkout syncs nothing.
  */
-function readRepoOrigin(cwd: string): string | null {
+function readRepoSlug(cwd: string): string | null {
   const gitDir = findGitDir(cwd);
   if (gitDir === null) return null;
   let text: string;

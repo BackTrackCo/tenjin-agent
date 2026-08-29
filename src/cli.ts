@@ -843,6 +843,17 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .action(async function (this: Command) {
       await runCommand('sync', this, async (ctx) => {
         const o = this.opts();
+        // AN EMPTY VALUE IS A USAGE ERROR, not a fallback to the process's own
+        // directory. `tenjin sync --cwd "$REPO"` with `REPO` unset reaches
+        // commander as `--cwd ''`, and silently syncing whatever directory the
+        // shell happens to be in is the one wrong outcome an operator cannot
+        // tell from a right one: both end in "Nothing to sync." Exit 2, the
+        // same as omitting the value altogether.
+        if (typeof o.cwd === 'string' && o.cwd.length === 0) {
+          throw new CliError('USAGE', "option '--cwd <path>' argument must not be empty", {
+            fix: 'Pass the checkout to sync, or omit --cwd to use the working directory.',
+          });
+        }
         const { runSync } = await import('./commands/sync');
         return runSync(ctx, typeof o.cwd === 'string' && o.cwd.length > 0 ? { cwd: o.cwd } : {});
       });

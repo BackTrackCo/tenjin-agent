@@ -704,10 +704,13 @@ export const STORE_SQL = {
    * children, which is exactly the fan-out the claim exists to prevent. `at < ?`
    * inside the UPDATE makes the loser see zero changed rows.
    *
-   * IT CANNOT INSERT, unlike {@link claimStateFresh}, whose upsert would also
-   * resurrect a claim a concurrent hand `tenjin sync` had just finished and
-   * cleared. Same property {@link markStateValue} is written for: an UPDATE that
-   * misses reports zero changes rather than creating what it described.
+   * IT CANNOT INSERT, unlike {@link claimStateFresh}, whose upsert would create
+   * the claim it was asked to take over. Same property {@link markStateValue} is
+   * written for: an UPDATE that misses reports zero changes rather than creating
+   * what it described. (No scenario is cited for it because none exists today —
+   * nothing clears `SYNC_CLAIM_KEY`, the only writers being the two claim calls,
+   * and the claim expires by age. The property is worth keeping so a future
+   * clearing caller cannot be resurrected by this statement.)
    */
   takeStaleState: `UPDATE session_state SET value = ?, at = ?
      WHERE session = ? AND key = ? AND at < ?`,
@@ -3163,23 +3166,26 @@ export function repoSlug(url: string): string {
   return host + '/' + parts.join('/').toLowerCase();
 }
 
-const REPO_ORIGIN_JS = String.raw`
+const REPO_SLUG_JS = String.raw`
 import { resolve as resolvePath } from 'node:path';
 
 /**
- * The repo this checkout is a clone of: the \`url\` under \`[remote "origin"]\`
- * in \`.git/config\`, found by walking up from \`cwd\`. A worktree's \`.git\` is
- * a file naming its gitdir, whose \`commondir\` holds the shared config, so a
- * worktree salts the same as its main checkout, NORMALISED to
- * \`host/full/path\` by \`repoSlug\`. '' when there is no origin, which is a salt like any other:
- * the resolve leg still sends the coarse key, and \`tenjin sync\` still publishes
- * it, so two no-origin checkouts match each other (#249).
+ * THE SLUG for the checkout at \`cwd\`, and a slug is not a URL: the \`url\`
+ * under \`[remote "origin"]\` in \`.git/config\`, found by walking up from
+ * \`cwd\`, reduced to \`host/full/path\` by \`repoSlug\`. A worktree's \`.git\`
+ * is a file naming its gitdir, whose \`commondir\` holds the shared config, so
+ * a worktree salts the same as its main checkout.
+ *
+ * '' WHEN THERE IS NO ORIGIN, and that is not a salt: it means this checkout
+ * has no repo scope, so the resolve leg asks the shelf nothing and
+ * \`tenjin sync\` publishes nothing (#249). The Stop hook reads it for that
+ * question alone — is there a remote at all — before spawning a sync.
  *
  * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
  * not start a process in front of a tool call. Bounded at twelve parent
  * directories, which is deeper than any checkout this arm fires in.
  */
-function repoOrigin(cwd) {
+function originSlug(cwd) {
   if (typeof cwd !== 'string' || cwd.length === 0) return '';
   let dir = cwd;
   for (let i = 0; i < 12; i += 1) {
@@ -3316,8 +3322,8 @@ function repoSlug(url) {
  * with none syncs nothing and a `tenjin sync` spawned for it would exit
  * "Nothing to sync." every turn end (#256, owner decision).
  */
-export function repoOriginSource(): string {
-  return REPO_ORIGIN_JS;
+export function repoSlugSource(): string {
+  return REPO_SLUG_JS;
 }
 
 /**
