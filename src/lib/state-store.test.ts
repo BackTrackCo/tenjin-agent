@@ -3430,15 +3430,19 @@ describe('repoSlug', () => {
   });
 
   /**
-   * A no-origin checkout salts with '' ON BOTH SIDES, so two of them match each
-   * other. Before #249 the resolve leg asked under this key and `tenjin sync`
-   * published nothing under it.
+   * '' MEANS NO REMOTE, AND IT IS NOT A SALT (#249, owner decision). Every
+   * origin-less checkout reduces to the same empty string, so publishing and
+   * querying under it would pool all of them into one coarse bucket on a shared
+   * shelf — and a coarse hit is rank 1 with no relevance check to run. The
+   * pooling is a property of the reduction and cannot be fixed here; what
+   * changed is that both callers now treat '' as "local only" and neither
+   * publishes nor asks under it (sync.test.ts and push-scripts.test.ts pin
+   * that end).
    */
-  it("salts a checkout with no remote as '', which is a key like any other", () => {
+  it("reduces every checkout with no remote to the same '', which is why neither side uses it", () => {
     expect(repoSlug('/srv/mirrors/api')).toBe('');
-    expect(teamCoarseKey('abc123', repoSlug('/srv/mirrors/api'))).toBe(
-      teamCoarseKey('abc123', repoSlug('')),
-    );
+    expect(repoSlug('../scratch')).toBe('');
+    expect(repoSlug('')).toBe('');
   });
 });
 

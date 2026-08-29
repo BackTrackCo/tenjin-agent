@@ -60,7 +60,7 @@ import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // the two modules are a CYCLE; it is safe because neither one calls into the
 // other at module scope, only from inside a generator that runs later.
 import { pushSource } from './push-scripts';
-import { storeSource } from './state-store';
+import { repoOriginSource, storeSource } from './state-store';
 
 /**
  * Header stamp naming the CLI build that wrote a script. Informational only: the
@@ -2372,7 +2372,7 @@ main().catch(quiet);
  * nothing but tidiness.
  */
 export function stopHookScript(dataDir: string, cliPath: string | null = defaultCliPath()): string {
-  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}
+  return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}${repoOriginSource()}
 import { spawn } from 'node:child_process';
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
 const CLI_PATH = ${JSON.stringify(cliPath)};
@@ -2384,8 +2384,9 @@ const SYNC_FALLBACK_LINE = ${JSON.stringify(STOP_SYNC_FALLBACK_LINE)};
  * Hand this project's closed code-scoped pairings to the team shelf, without
  * spending the hook's budget on it: a detached \`node <cli> sync\` that
  * outlives this process, spawned only when there is something to sync, only
- * in team mode, and only behind a machine-wide claim, so a laptop ending
- * several sessions in the same minute runs one sync and not one per Stop.
+ * in team mode, only in a checkout that HAS a git remote, and only behind a
+ * machine-wide claim, so a laptop ending several sessions in the same minute
+ * runs one sync and not one per Stop.
  * The claim is a \`session_state\` row under the machine bucket that expires
  * by age rather than by the child clearing it: a sync that died could
  * otherwise hold the claim forever.
@@ -2396,6 +2397,14 @@ const SYNC_FALLBACK_LINE = ${JSON.stringify(STOP_SYNC_FALLBACK_LINE)};
  */
 function spawnSyncIfNeeded(config, cwd) {
   if (CLI_PATH === null || teamShelfOrigin(config) === null) return false;
+  // NO REMOTE, NO SPAWN (#256, owner decision). A checkout with no \`origin\` has
+  // no repo scope to salt a coarse key with, so \`tenjin sync\` publishes nothing
+  // from it and leaves every row unsynced — which would leave this count above
+  // zero forever and spawn a detached node process at EVERY turn end, for a run
+  // whose only output is "Nothing to sync." The same reduction the sync itself
+  // reads (\`repoSlug\` of the origin url, a file read and never a git spawn),
+  // so the two cannot disagree about whether this directory has a remote.
+  if (repoOrigin(cwd) === '') return false;
   const pending = storeCount(STORE_SQL.countUnsyncedPairings, [projectId(cwd)]);
   if (!Number.isFinite(pending) || pending === 0) return false;
   const now = Date.now();

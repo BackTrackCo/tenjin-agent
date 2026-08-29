@@ -3163,12 +3163,171 @@ export function repoSlug(url: string): string {
   return host + '/' + parts.join('/').toLowerCase();
 }
 
+const REPO_ORIGIN_JS = String.raw`
+import { resolve as resolvePath } from 'node:path';
+
+/**
+ * The repo this checkout is a clone of: the \`url\` under \`[remote "origin"]\`
+ * in \`.git/config\`, found by walking up from \`cwd\`. A worktree's \`.git\` is
+ * a file naming its gitdir, whose \`commondir\` holds the shared config, so a
+ * worktree salts the same as its main checkout, NORMALISED to
+ * \`host/full/path\` by \`repoSlug\`. '' when there is no origin, which is a salt like any other:
+ * the resolve leg still sends the coarse key, and \`tenjin sync\` still publishes
+ * it, so two no-origin checkouts match each other (#249).
+ *
+ * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
+ * not start a process in front of a tool call. Bounded at twelve parent
+ * directories, which is deeper than any checkout this arm fires in.
+ */
+function repoOrigin(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return '';
+  let dir = cwd;
+  for (let i = 0; i < 12; i += 1) {
+    const config = gitConfigPath(dir);
+    if (config !== null) return repoSlug(originUrl(config));
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return '';
+}
+
+/** The config file of the repository whose \`.git\` sits in \`dir\`, or null. */
+function gitConfigPath(dir) {
+  const dotGit = join(dir, '.git');
+  let st;
+  try {
+    st = statSync(dotGit);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return join(dotGit, 'config');
+  let text;
+  try {
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /^gitdir:\s*(.+)$/m.exec(text);
+  if (m === null) return null;
+  const gitdir = resolvePath(dir, m[1].trim());
+  let common = gitdir;
+  try {
+    common = resolvePath(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim());
+  } catch {
+    /* not a worktree: the gitdir is the repository itself */
+  }
+  return join(common, 'config');
+}
+
+/** \`url\` under \`[remote "origin"]\`, or ''. A line scan, not an INI parser:
+ *  the two shapes git writes are all it has to read. */
+function originUrl(configPath) {
+  let text;
+  try {
+    text = readFileSync(configPath, 'utf8');
+  } catch {
+    return '';
+  }
+  let inOrigin = false;
+  for (const line of text.split('\n')) {
+    const section = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    if (section !== null) {
+      inOrigin = /^remote\s+"origin"$/.test(section[1].trim());
+      continue;
+    }
+    if (!inOrigin) continue;
+    const m = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+    if (m !== null) return m[1].slice(0, 500);
+  }
+  return '';
+}
+
+/**
+ * ⚠ THE SAME BODY as \`repoSlug\` in lib/state-store.ts, THE ONE DEFINITION:
+ * the repo a coarse key salts with, \`host/full/path\` lowercased, or '' for
+ * anything that is not a remote (a bare local path, a \`file://\` clone, no
+ * origin at all). \`tenjin sync\` imports the exported copy; this one must
+ * reduce the same remote to the same string or a resolve query and the synced
+ * post it should find would salt two different ways and never meet. Nothing
+ * enforces byte-identity: the two are BEHAVIOURALLY PINNED BY THE SHARED TABLE
+ * in lib/repo-slug-cases.ts, which push-scripts.test.ts runs against the copy
+ * it lifts out of this generated source.
+ *
+ * NOT THE URL (#249): the same repo is spelled \`git@host:owner/name.git\`,
+ * \`https://host/owner/name\` and \`ssh://git@host:2222/owner/name\`, so salting
+ * by URL kept two teammates on different transports from ever matching. Host
+ * and path are what those spellings agree on; scheme, userinfo and port are
+ * what they differ in. The path is kept WHOLE (round-1 review of #256): the
+ * last two segments pooled \`gitlab.com/a/b/c/api\` with \`gitlab.com/x/y/c/api\`
+ * and every Azure repo under \`_git/api\`, and dropping the host pooled one
+ * \`acme/api\` with another host's. Known limit, not special-cased: Azure
+ * DevOps's https and ssh spellings of one repo carry different hosts AND
+ * different paths, so they are two salts.
+ *
+ * '' means NO REMOTE, and the resolve leg does not ask the shelf under it: the
+ * failure arm records \`no-remote\` and spends no lookup, and \`tenjin sync\`
+ * publishes nothing coarse, rather than pooling every origin-less checkout on
+ * the shelf into one bucket (#249, owner decision).
+ */
+function repoSlug(url) {
+  // THE HOST, THEN THE WHOLE PATH UNDER IT, or no match at all. Two remote
+  // spellings, one alternation: a scheme url whose authority ends at the first
+  // slash — but never a file:// one, which is a local clone and not a repo
+  // anyone else names — or the scp form [user@]host:path, whose host must carry
+  // a dot. THAT DOT is what keeps a Windows drive (C:/src/api) a path and not a
+  // hostname: a drive letter has none. An scp path may be absolute
+  // (git@git.acme.dev:/srv/git/api.git), which self-hosted remotes do spell.
+  // Anything else (a bare path, a relative path, an empty string) is not a
+  // remote and salts as ''.
+  const m =
+    /^(?:(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/]*)\/(.*)|(?:[^@/\\]+@)?([^@/\\:]*\.[^@/\\:]*):(.*))$/i.exec(
+      typeof url === 'string' ? url.trim() : '',
+    );
+  if (m === null) return '';
+  // Userinfo is dropped by the match itself; the port goes here, so
+  // ssh://git@host:2222/acme/api and git@host:acme/api reach the same host.
+  const host = (m[1] ?? m[3] ?? '').replace(/:[0-9]*$/, '').toLowerCase();
+  const parts = (m[2] ?? m[4] ?? '')
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .split('/')
+    .filter((part) => part.length > 0);
+  if (host.length === 0 || parts.length === 0) return '';
+  return host + '/' + parts.join('/').toLowerCase();
+}
+
+`;
+
+/**
+ * THE SALT READER, AS GENERATED SOURCE — the failure arm's resolve leg and the
+ * Stop hook's sync arbiter both need it, and neither can import.
+ *
+ * IT LIVES HERE, BESIDE THE EXPORT IT MIRRORS, rather than inside one hook
+ * builder that the other reaches into: two generated copies of one reduction is
+ * already the most a reader should have to hold, and the drift between them is
+ * what silently strands every coarse key (#249). One string, spliced into both
+ * scripts, keeps the count at exactly two definitions — this and {@link
+ * repoSlug} above — with lib/repo-slug-cases.ts holding them to the same
+ * answers.
+ *
+ * The Stop hook reads it for a different question than the resolve leg does:
+ * not "what do I salt with" but "is there a remote at all", since a checkout
+ * with none syncs nothing and a `tenjin sync` spawned for it would exit
+ * "Nothing to sync." every turn end (#256, owner decision).
+ */
+export function repoOriginSource(): string {
+  return REPO_ORIGIN_JS;
+}
+
 /**
  * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
  * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
  * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is {@link repoSlug}
- * of the origin URL read from `.git/config` — `''` when there is no origin, which
- * is a salt like any other and not a reason to drop the key. The salt goes over
+ * of the origin URL read from `.git/config`. It is never `''` at a live call
+ * site: a checkout with no origin has no repo scope, and both the resolve leg
+ * and `tenjin sync` return before they reach here rather than pooling every
+ * origin-less checkout into one coarse bucket. The salt goes over
  * the stored hash, not the raw message, because a `pairings` row keeps only the
  * hashes and `tenjin sync` reads rows back long after the failure arm's
  * `sigV1()` call is gone.

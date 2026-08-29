@@ -20,7 +20,21 @@ import type { CommandContext } from '../context';
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), 'tenjin-sync-'));
+  // EVERY TEST THAT PUBLISHES NEEDS A REMOTE (tenjin-agent#249). A checkout
+  // with no `origin` is local-only — it publishes nothing and stamps nothing —
+  // so the default fixture is a checkout that HAS one, and the tests that mean
+  // to exercise the no-remote path run in a directory of their own.
+  await writeGitOrigin(dir, 'https://github.com/acme/api.git');
 });
+
+/** A `.git/config` naming `origin`, in the two shapes git writes. */
+async function writeGitOrigin(at: string, url: string): Promise<void> {
+  await mkdir(join(at, '.git'), { recursive: true });
+  await writeFile(
+    join(at, '.git', 'config'),
+    `[core]\n\tbare = false\n[remote "origin"]\n\turl = ${url}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`,
+  );
+}
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
@@ -236,16 +250,18 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     expect((body.bodyMd as string).length).toBeLessThanOrEqual(300);
     expect(body.bodyMd as string).toContain('pkg: zod@4.1.0');
 
-    // No .git in this tmpdir, so the repo salt is '' — WHICH IS STILL A SALT
-    // (tenjin-agent#249). The coarse key goes out under it, because the resolve
-    // leg asks under exactly this key in a checkout with no origin; the arm that
-    // used to drop it here is what made those pairings fine-key-only.
+    // THE COARSE KEY ALWAYS GOES OUT beside the fine one when the checkout has
+    // a remote (tenjin-agent#249), salted with the slug and never with the url.
+    // The guard that used to drop it whenever the salt was falsy is what made a
+    // whole class of pairings fine-key-only; what replaced it is the no-remote
+    // return above, which publishes nothing at all rather than publishing under
+    // a salt that is not one.
     const keys = body.keys as Array<{ kind: string; key: string; verified: boolean }>;
     expect(keys).toEqual([
       { kind: 'fingerprint', key: 'sig_v1:fine-hash-abc', verified: false },
       {
         kind: 'fingerprint',
-        key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', ''),
+        key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
         verified: false,
       },
       { kind: 'command_head', key: 'pnpm', verified: false },
@@ -257,6 +273,50 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     const row = await pairingRow(id);
     expect(row.synced_at).not.toBeNull();
+  });
+
+  /**
+   * NO REMOTE, NO SHELF (tenjin-agent#249, owner decision). '' is what stands in
+   * for a repo scope this checkout does not have, and it is not a salt:
+   * publishing under it would put every origin-less checkout on the team's
+   * shelf into ONE coarse bucket, and a coarse hit is rank 1 with no relevance
+   * check to run. So the run publishes NOTHING — not even the fine key, since
+   * the resolve leg does not ask from such a checkout either — and stamps
+   * nothing, so the rows are still there the day the checkout gains an origin.
+   */
+  it('publishes nothing and stamps nothing from a checkout with no origin', async () => {
+    await writeTeamConfig();
+    // A real checkout with no `origin`: its own `.git`, so the walk up stops
+    // here rather than reaching the fixture repo this tmpdir is.
+    const bare = join(dir, 'bare');
+    await mkdir(join(bare, '.git'), { recursive: true });
+    await writeFile(join(bare, '.git', 'config'), '[core]\n\tbare = false\n');
+    const id = await seedPairing({
+      cwd: bare,
+      key: 'fine-hash-abc',
+      coarseKey: 'coarse-hash-def',
+      status: 'unverified',
+    });
+    const { provider, getSignerCount } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: bare, provider, fetchImpl: fetch });
+
+    // Nothing on the wire, and the wallet was never asked to sign.
+    expect(sent).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+    // The rows are counted as local, not as synced, held, skipped or pending.
+    expect(result.data).toMatchObject({
+      synced: 0,
+      verified: 0,
+      held: 0,
+      skipped: 0,
+      local: 1,
+      pending: 0,
+    });
+    // AND UNTOUCHED: `synced_at` is still NULL, so the day this checkout gains
+    // an origin the next run publishes them.
+    expect((await pairingRow(id)).synced_at).toBeNull();
   });
 
   it('salts the coarse key with the repo slug when the checkout has an origin', async () => {

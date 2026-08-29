@@ -20,7 +20,7 @@
 
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
-import { storeSource } from './state-store';
+import { repoOriginSource, storeSource } from './state-store';
 
 export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
 export const PUSH_FAILURE_HOOK_FILE = 'tenjin-push-failure.mjs';
@@ -1210,8 +1210,6 @@ export function pushPromptHookScript(dataDir: string): string {
  * two hashes on the wire, `teamResolve` below); a miss there asks nothing else.
  */
 const FAILURE_JS = String.raw`
-import { resolve as resolvePath } from 'node:path';
-
 /**
  * WHAT A FAILURE ACTUALLY LOOKS LIKE, as markers rather than as words.
  *
@@ -1840,137 +1838,6 @@ const TEAM_PAIRING_OPENER =
 const TEAM_RESOLVE_LIMIT = 3;
 
 /**
- * The repo this checkout is a clone of: the \`url\` under \`[remote "origin"]\`
- * in \`.git/config\`, found by walking up from \`cwd\`. A worktree's \`.git\` is
- * a file naming its gitdir, whose \`commondir\` holds the shared config, so a
- * worktree salts the same as its main checkout, NORMALISED to
- * \`host/full/path\` by \`repoSlug\`. '' when there is no origin, which is a salt like any other:
- * the resolve leg still sends the coarse key, and \`tenjin sync\` still publishes
- * it, so two no-origin checkouts match each other (#249).
- *
- * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
- * not start a process in front of a tool call. Bounded at twelve parent
- * directories, which is deeper than any checkout this arm fires in.
- */
-function repoOrigin(cwd) {
-  if (typeof cwd !== 'string' || cwd.length === 0) return '';
-  let dir = cwd;
-  for (let i = 0; i < 12; i += 1) {
-    const config = gitConfigPath(dir);
-    if (config !== null) return repoSlug(originUrl(config));
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return '';
-}
-
-/** The config file of the repository whose \`.git\` sits in \`dir\`, or null. */
-function gitConfigPath(dir) {
-  const dotGit = join(dir, '.git');
-  let st;
-  try {
-    st = statSync(dotGit);
-  } catch {
-    return null;
-  }
-  if (st.isDirectory()) return join(dotGit, 'config');
-  let text;
-  try {
-    text = readFileSync(dotGit, 'utf8');
-  } catch {
-    return null;
-  }
-  const m = /^gitdir:\s*(.+)$/m.exec(text);
-  if (m === null) return null;
-  const gitdir = resolvePath(dir, m[1].trim());
-  let common = gitdir;
-  try {
-    common = resolvePath(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim());
-  } catch {
-    /* not a worktree: the gitdir is the repository itself */
-  }
-  return join(common, 'config');
-}
-
-/** \`url\` under \`[remote "origin"]\`, or ''. A line scan, not an INI parser:
- *  the two shapes git writes are all it has to read. */
-function originUrl(configPath) {
-  let text;
-  try {
-    text = readFileSync(configPath, 'utf8');
-  } catch {
-    return '';
-  }
-  let inOrigin = false;
-  for (const line of text.split('\n')) {
-    const section = /^\s*\[([^\]]+)\]\s*$/.exec(line);
-    if (section !== null) {
-      inOrigin = /^remote\s+"origin"$/.test(section[1].trim());
-      continue;
-    }
-    if (!inOrigin) continue;
-    const m = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
-    if (m !== null) return m[1].slice(0, 500);
-  }
-  return '';
-}
-
-/**
- * ⚠ THE SAME BODY as \`repoSlug\` in lib/state-store.ts, THE ONE DEFINITION:
- * the repo a coarse key salts with, \`host/full/path\` lowercased, or '' for
- * anything that is not a remote (a bare local path, a \`file://\` clone, no
- * origin at all). \`tenjin sync\` imports the exported copy; this one must
- * reduce the same remote to the same string or a resolve query and the synced
- * post it should find would salt two different ways and never meet. Nothing
- * enforces byte-identity: the two are BEHAVIOURALLY PINNED BY THE SHARED TABLE
- * in lib/repo-slug-cases.ts, which push-scripts.test.ts runs against the copy
- * it lifts out of this generated source.
- *
- * NOT THE URL (#249): the same repo is spelled \`git@host:owner/name.git\`,
- * \`https://host/owner/name\` and \`ssh://git@host:2222/owner/name\`, so salting
- * by URL kept two teammates on different transports from ever matching. Host
- * and path are what those spellings agree on; scheme, userinfo and port are
- * what they differ in. The path is kept WHOLE (round-1 review of #256): the
- * last two segments pooled \`gitlab.com/a/b/c/api\` with \`gitlab.com/x/y/c/api\`
- * and every Azure repo under \`_git/api\`, and dropping the host pooled one
- * \`acme/api\` with another host's. Known limit, not special-cased: Azure
- * DevOps's https and ssh spellings of one repo carry different hosts AND
- * different paths, so they are two salts.
- *
- * '' means NO REMOTE, and the resolve leg does not ask the shelf under it: the
- * failure arm records \`no-remote\` and spends no lookup, and \`tenjin sync\`
- * publishes nothing coarse, rather than pooling every origin-less checkout on
- * the shelf into one bucket (#249, owner decision).
- */
-function repoSlug(url) {
-  // THE HOST, THEN THE WHOLE PATH UNDER IT, or no match at all. Two remote
-  // spellings, one alternation: a scheme url whose authority ends at the first
-  // slash — but never a file:// one, which is a local clone and not a repo
-  // anyone else names — or the scp form [user@]host:path, whose host must carry
-  // a dot. THAT DOT is what keeps a Windows drive (C:/src/api) a path and not a
-  // hostname: a drive letter has none. An scp path may be absolute
-  // (git@git.acme.dev:/srv/git/api.git), which self-hosted remotes do spell.
-  // Anything else (a bare path, a relative path, an empty string) is not a
-  // remote and salts as ''.
-  const m =
-    /^(?:(?!file:)[A-Za-z][A-Za-z0-9+.-]*:\/\/(?:[^@/]*@)?([^/]*)\/(.*)|(?:[^@/\\]+@)?([^@/\\:]*\.[^@/\\:]*):(.*))$/i.exec(
-      typeof url === 'string' ? url.trim() : '',
-    );
-  if (m === null) return '';
-  // Userinfo is dropped by the match itself; the port goes here, so
-  // ssh://git@host:2222/acme/api and git@host:acme/api reach the same host.
-  const host = (m[1] ?? m[3] ?? '').replace(/:[0-9]*$/, '').toLowerCase();
-  const parts = (m[2] ?? m[4] ?? '')
-    .replace(/\/+$/, '')
-    .replace(/\.git$/i, '')
-    .split('/')
-    .filter((part) => part.length > 0);
-  if (host.length === 0 || parts.length === 0) return '';
-  return host + '/' + parts.join('/').toLowerCase();
-}
-
-/**
  * ⚠ MIRRORED with \`teamCoarseKey\` in lib/state-store.ts, THE ONE DEFINITION
  * (plan 06, "The naming, fixed once"): the coarse key AS IT GOES ON THE WIRE,
  * \`shortHash(coarse_key + '|' + repo)\` over the STORED, unsalted \`sig_v1c\`
@@ -1984,8 +1851,9 @@ function repoSlug(url) {
  * project-scoped (\`findPairing\`); the team shelf is shared across every repo
  * the team has, and without the salt an \`ERR_PNPM_OUTDATED_LOCKFILE\`-class
  * message would match a fix from any of them. \`repo\` is \`repoSlug\`'s
- * \`host/full/path\` (or ''), never the raw URL (#249). Null exactly when the
- * local coarse key is: no errno, nothing coarse to send.
+ * \`host/full/path\`, never the raw URL (#249), and never '': a checkout with no
+ * remote returns before this is called. Null exactly when the local coarse key
+ * is: no errno, nothing coarse to send.
  */
 function teamCoarseKey(sig, repo) {
   if (sig.coarseKey === null) return null;
@@ -2155,6 +2023,10 @@ function replayedPairings(sessionId, agentId, head) {
  * Returns \`{ text, top }\` to emit, or null. Every outcome is a decision row
  * against \`eventUid\`, on the failure arm's own lookup bucket:
  *
+ *  - \`no-remote\`   this checkout has no \`origin\`, so it has no repo scope to
+ *                    salt a coarse key with and \`tenjin sync\` publishes
+ *                    nothing from it either: local pairings only. Recorded
+ *                    before any budget check, so it costs no lookup.
  *  - \`keys-off\`     the shelf answered 404 (\`KNOWLEDGE_KEYS\` off, or no
  *                    route). Cached machine-wide for six hours: the fact is
  *                    about the deployment, and re-learning it once per session
@@ -2181,6 +2053,19 @@ async function teamResolve(args) {
     event: args.event,
     shelf: 'team',
   };
+  // NO REMOTE, NO SHELF (#256, owner decision). A checkout with no \`origin\`
+  // has no repo scope to salt with, and the '' that stands for one is not a
+  // salt: asking under it pools every origin-less checkout on the shelf into
+  // one coarse bucket, and a coarse hit is rank 1 with no relevance check to
+  // run. \`tenjin sync\` publishes nothing from such a checkout for the same
+  // reason, so there is nothing there to find either. FIRST, ahead of every
+  // other gate, so the skip costs no lookup out of the failure bucket — it is a
+  // fact about this directory, not about the shelf.
+  const repo = repoOrigin(cwd);
+  if (repo === '') {
+    recordDecision({ ...base, action: 'skipped', reason: 'no-remote' });
+    return null;
+  }
   const offKey = STATE_KEYS_OFF_PREFIX + origin;
   if (stateHolds(MACHINE_SESSION, offKey)) {
     recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
@@ -2200,7 +2085,7 @@ async function teamResolve(args) {
   // a head key would return the newest post keyed \`pnpm\` for every failure
   // behind \`pnpm\` and the row could not tell it from a real hit.
   const keys = [{ kind: 'fingerprint', key: 'sig_v1:' + sig.key }];
-  const coarse = teamCoarseKey(sig, repoOrigin(cwd));
+  const coarse = teamCoarseKey(sig, repo);
   if (coarse !== null) keys.push({ kind: 'fingerprint', key: 'sig_v1c:' + coarse });
   const found = await askTenjinKeys(keys, config, {
     shelfBaseUrl: origin,
@@ -2500,7 +2385,7 @@ main().catch(quiet);
 `;
 
 export function pushFailureHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${FAILURE_JS}`;
+  return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${repoOriginSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${FAILURE_JS}`;
 }
 
 /**
