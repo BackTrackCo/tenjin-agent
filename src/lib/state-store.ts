@@ -3145,6 +3145,12 @@ export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
  * transports this whole reduction exists to merge — and two git services on
  * different ports of one hostname serving one path is not a shape a team shelf
  * meets.
+ * THE PATH IS LOWERCASED ON PURPOSE, for the same reason (a second external
+ * thread on the round-4 review of #256, declined as intended): `.git/config`
+ * commonly carries a forge's display casing (`GitHub.com/Acme/API`), and
+ * case-preserving would stop one teammate's checkout matching another's; the
+ * collision it would prevent needs one namespace to hold two repos differing
+ * only in case, which GitHub and GitLab both refuse.
  * A rename or a transfer still breaks continuity; the alternatives that survive
  * one (the root commit, a committed project-id file) cost a `git` spawn or a
  * file in every repo, and against zero coarse hits on the shelf as observed on
