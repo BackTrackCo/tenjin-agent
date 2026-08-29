@@ -413,6 +413,7 @@ describe('runPushStatus', () => {
         store.run(STORE_SQL.claimClose, [
           id,
           session,
+          null,
           at + 1,
           `${head} test`,
           '["a.ts"]',
@@ -821,7 +822,7 @@ describe('runPushStatus --sessions', () => {
         ]);
       }
       for (const at of extra.closesAt ?? []) {
-        store.run(STORE_SQL.claimClose, [1, session, at, 'pnpm test', '["a.ts"]', 'code']);
+        store.run(STORE_SQL.claimClose, [1, session, null, at, 'pnpm test', '["a.ts"]', 'code']);
       }
     } finally {
       store.close();

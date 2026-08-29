@@ -2620,18 +2620,24 @@ describe('dispatch hook: a subagent dispatch', () => {
  * only thing that tells them apart.
  */
 describe('dispatch hook: the rows carry the agent they were written inside', () => {
-  /** BOTH TABLES, because both columns are filled from the one `identityOf`:
-   *  an event the score partitions by and an injection `push grade` reads a
-   *  transcript by have to name the same worker or neither is joinable. */
-  async function agentIds(): Promise<{ events: unknown[]; injections: unknown[] }> {
+  /** EVERY TABLE THE FIRE WRITES, because all three columns are filled from the
+   *  one `identityOf`: an event the score partitions by, an injection `push
+   *  grade` reads a transcript by, and the search a close is attributed to have
+   *  to name the same worker or none of them is joinable. */
+  async function agentIds(): Promise<{
+    events: unknown[];
+    injections: unknown[];
+    searches: unknown[];
+  }> {
     const store = await openStore(dataDir);
-    if (store === null) return { events: [], injections: [] };
+    if (store === null) return { events: [], injections: [], searches: [] };
     try {
       return {
         events: store.all('SELECT agent_id FROM events ORDER BY id', []).map((r) => r.agent_id),
         injections: store
           .all('SELECT agent_id FROM injections ORDER BY id', [])
           .map((r) => r.agent_id),
+        searches: store.all('SELECT agent_id FROM searches ORDER BY at', []).map((r) => r.agent_id),
       };
     } finally {
       store.close();
@@ -2647,7 +2653,11 @@ describe('dispatch hook: the rows carry the agent they were written inside', () 
       dispatchInput({ prompt: STRONG_PROMPT, agentId: 'a1' }),
     );
     expect(injected(run) ?? '').toContain('Tenjin lists');
-    expect(await agentIds()).toEqual({ events: ['a1'], injections: ['a1'] });
+    expect(await agentIds()).toEqual({
+      events: ['a1'],
+      injections: ['a1'],
+      searches: ['a1'],
+    });
   });
 
   it('leaves it NULL in the main session', async () => {
@@ -2659,7 +2669,35 @@ describe('dispatch hook: the rows carry the agent they were written inside', () 
       dispatchInput({ prompt: STRONG_PROMPT }),
     );
     expect(injected(run) ?? '').toContain('Tenjin lists');
-    expect(await agentIds()).toEqual({ events: [null], injections: [null] });
+    expect(await agentIds()).toEqual({
+      events: [null],
+      injections: [null],
+      searches: [null],
+    });
+  });
+
+  /**
+   * A REFUSED ID IS NOT THE LEAD. The stamp becomes a path segment in the child
+   * transcript `grade` reads and a partition key for the score, so an id this
+   * build cannot use names a worker it cannot file work under — and recording
+   * the fire as the main session's would hand a child's research to its parent.
+   * The dispatch is left alone entirely: nothing injected, and no row anywhere.
+   */
+  it('drops the fire when the agent id is not one', async () => {
+    const { baseUrl, hits } = await serveJson((_body, base) => ({
+      status: 200,
+      json: strongHit(base),
+    }));
+    await writeConfig({ baseUrl });
+
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: STRONG_PROMPT, agentId: 'a/../b' }),
+    );
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await agentIds()).toEqual({ events: [], injections: [], searches: [] });
   });
 });
 

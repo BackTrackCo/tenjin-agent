@@ -366,13 +366,21 @@ function sessionIdOf(input) {
  * spell a DIFFERENT agent's id exactly, filing one agent's work under another.
  * The same bound is spelled out as AGENT_ID_RE in lib/grade.ts, and a test pins
  * the two together.
+ *
+ * A REFUSED ID IS NOT THE MAIN SESSION, which is why \`invalid\` is reported
+ * separately from an \`agent\` of null. The harness named a worker this build
+ * cannot use; recording the fire anyway would file a child's search, edit or
+ * close under the lead, and the score would then hand that work to the parent.
+ * Every arm drops the fire instead — no lookup, no row — so the caller reads
+ * \`invalid\` and exits quiet.
  */
 function identityOf(input) {
   const session = sessionIdOf(input);
-  if (!isRecord(input)) return { session, agent: null };
+  if (!isRecord(input)) return { session, agent: null, invalid: false };
   const id = input.agent_id;
+  if (id === undefined || id === null) return { session, agent: null, invalid: false };
   const agent = typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
-  return { session, agent };
+  return { session, agent, invalid: agent === null };
 }
 
 /**
@@ -855,11 +863,15 @@ const SEARCH_MIN_LEG_MS = 150;
  * Best-effort in every direction, and it NEVER throws: a failed record costs one
  * reminder, while a hook that fails costs the tool call.
  */
-function recordSearch(searchId, question, decision, candidates, sessionId, source, shelfBaseUrl) {
+function recordSearch(searchId, question, decision, candidates, sessionId, agentId, source, shelfBaseUrl) {
   if (typeof searchId !== 'string' || searchId.length === 0) return;
   // The session stamp is what later lets the Stop hook raise this loop in the
   // session that opened it and nowhere else; '' is the machine-global bucket,
   // which is the safe direction for a reminder.
+  //
+  // The agent stamp is the WORKER inside that session, null for the main one.
+  // Every subagent of a session searches under the parent's id, so without it
+  // the score credited one child's search to a sibling's research-then-edit.
   //
   // The shelf stamp is what lets \`tenjin outcome --search-id <id>\` — the
   // command the Stop hook's own nag prints — reach the shelf that MINTED the
@@ -872,6 +884,7 @@ function recordSearch(searchId, question, decision, candidates, sessionId, sourc
     decision,
     candidates,
     sessionId,
+    agentId,
     source,
     shelfBaseUrl,
   });
@@ -1325,7 +1338,10 @@ async function main() {
   if (config.webSearch === 'off') return quiet();
   // A subagent researches under its parent's session id, so the row has to name
   // the agent or it names nobody.
-  const { session: sessionId, agent: agentId } = identityOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: filing the fire under the main
+  // session would credit a child's research to its parent.
+  if (invalid) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1370,6 +1386,7 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
+    agentId,
     'websearch-hook',
     // This arm asks one shelf, the configured base, whichever mode it is in.
     config.baseUrl,
@@ -1504,7 +1521,10 @@ async function main() {
 
   // The DISPATCHER's agent id — a subagent that itself launches one is not the
   // lead, and the row that says which fan-out this came from is this one.
-  const { session: sessionId, agent: agentId } = identityOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: filing the fire under the main
+  // session would credit a child's dispatch to its parent.
+  if (invalid) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1601,6 +1621,7 @@ async function main() {
     found.decision,
     found.stored,
     sessionId,
+    agentId,
     'dispatch-hook',
     shelfBase,
   );

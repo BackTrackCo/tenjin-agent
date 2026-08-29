@@ -612,7 +612,16 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
     recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
     return { kind: 'miss' };
   }
-  recordSearch(found.searchId, query, found.decision, found.stored, sessionId, source, shelfBaseUrl);
+  recordSearch(
+    found.searchId,
+    query,
+    found.decision,
+    found.stored,
+    sessionId,
+    base.agentId,
+    source,
+    shelfBaseUrl,
+  );
   const v = verdict(found);
   const row = {
     ...base,
@@ -877,7 +886,10 @@ async function main() {
 
   // A prompt can reach a subagent too (its first turn), so this arm is no more
   // exempt from the shared session id than the others are.
-  const { session: sessionId, agent: agentId } = identityOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: filing the fire under the main
+  // session would credit a child's prompt to its parent.
+  if (invalid) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1754,6 +1766,9 @@ function closeOpenPairings(sessionId, agentId, cwd, command, heads) {
     const status = closePairing(
       pairing.id,
       sessionId,
+      // The worker that closed it. Recorded, and counted for nothing: the
+      // promotion to \`verified\` still asks for two independent SESSIONS.
+      agentId,
       passed,
       fixFiles,
       pairingScope(pairing.errorLine, fixFiles),
@@ -1978,7 +1993,10 @@ async function main() {
   // parent's session id, so this is the only field that tells one parallel
   // child from another — and the close rule, the replay memory and the
   // importance score all mean the agent, never the session.
-  const { session: sessionId, agent: agentId } = identityOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: a close filed under the main
+  // session would let a child's fix verify a pairing its parent was shown.
+  if (invalid) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -2217,7 +2235,11 @@ async function main() {
   if (input.hook_event_name !== 'SubagentStart') return quiet();
   const config = readConfig();
   if (config.push !== 'on') return quiet();
-  const { session: sessionId, agent: agentId } = identityOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead, and on THIS arm it is the id of
+  // the child the finding is being relayed to — the one transcript that could
+  // ever answer for it.
+  if (invalid) return quiet();
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
@@ -2361,7 +2383,10 @@ async function main() {
   // The agent whose edit this is. The close rule matches a pairing against the
   // edits of the agent that was shown it, so an edit has to be filed under its
   // own author rather than under the session every sibling shares.
-  const { session: sessionId, agent: agentId } = identityOf(input);
+  const { session: sessionId, agent: agentId, invalid } = identityOf(input);
+  // An id this build cannot use is not the lead: an edit filed under the main
+  // session would close a pairing a sibling was shown.
+  if (invalid) return quiet();
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
