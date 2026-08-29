@@ -692,6 +692,25 @@ export const STORE_SQL = {
   claimStateFresh: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at
        WHERE session_state.at < ?`,
+  /**
+   * Take a claim whose holder is older than the given instant, WITHOUT being
+   * able to create one. The stale half of a two-ended claim: {@link claimState}
+   * takes it the first time, and once the TTL has passed this takes it over.
+   *
+   * ONE STATEMENT, which is the whole point (tenjin-agent#249). The Stop hook's
+   * sync claim used to be taken over by a `clearState` followed by a
+   * `claimState`, and two Stops that both read the claim as stale both cleared
+   * and both re-claimed — one machine-wide guard, two detached `tenjin sync`
+   * children, which is exactly the fan-out the claim exists to prevent. `at < ?`
+   * inside the UPDATE makes the loser see zero changed rows.
+   *
+   * IT CANNOT INSERT, unlike {@link claimStateFresh}, whose upsert would also
+   * resurrect a claim a concurrent hand `tenjin sync` had just finished and
+   * cleared. Same property {@link markStateValue} is written for: an UPDATE that
+   * misses reports zero changes rather than creating what it described.
+   */
+  takeStaleState: `UPDATE session_state SET value = ?, at = ?
+     WHERE session = ? AND key = ? AND at < ?`,
   /** Rows under one key prefix, newest first. Used for the per-agent, per-path
    *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
@@ -2072,6 +2091,37 @@ function claimStateFreshOutcome(sessionId, key, windowMs, value) {
   if (result === null) return 'unavailable';
   if (typeof result.changes !== 'number') return 'won';
   return result.changes > 0 ? 'won' : 'held';
+}
+
+/**
+ * Take a claim already held, but held since before \`staleBefore\`, recording
+ * \`value\` as the new holder's mark. True only for the caller that actually
+ * took it.
+ *
+ * THE OTHER END OF \`claimState\` (tenjin-agent#249). The first fire takes a free
+ * claim with \`INSERT ... DO NOTHING\`; this takes an expired one with an
+ * \`UPDATE ... WHERE at < ?\`. Both are one statement, so the arbitration is
+ * SQLite's at both ends. What this replaced was a \`clearState\` followed by a
+ * \`claimState\`, and two Stop hooks that both saw the claim expired both
+ * cleared it and both re-claimed: one machine-wide sync guard, two detached
+ * children.
+ *
+ * AND IT FAILS CLOSED, like \`claimStateFresh\` and unlike \`claimState\`: this
+ * is an arbiter, not a dedupe aid. A swallowed write read as a win lets every
+ * contender win, which is the failure it exists to stop. The loser's cost is
+ * one skipped takeover; the claim expires again and the next fire retries.
+ */
+function takeStaleState(sessionId, key, staleBefore, value) {
+  if (STORE === null) return false;
+  const result = storeRun(STORE_SQL.takeStaleState, [
+    storeJson(value === undefined ? true : value),
+    Date.now(),
+    storeSession(sessionId),
+    key,
+    staleBefore,
+  ]);
+  if (result === null) return false;
+  return typeof result.changes === 'number' ? result.changes > 0 : false;
 }
 
 /**

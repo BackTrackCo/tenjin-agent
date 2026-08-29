@@ -29,6 +29,7 @@ import {
   PRIMER_TEXT,
   STOP_SYNC_FALLBACK_LINE,
   SYNC_CLAIM_KEY,
+  SYNC_CLAIM_TTL_MS,
   dispatchHookScript,
   sessionPrimerHookScript,
   stopHookScript,
@@ -7268,6 +7269,48 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
     await runScript(stopHookScript(dataDir, cliPath), stopInput);
     await runScript(stopHookScript(dataDir, cliPath), stopInput);
     expect(await markerLines(marker)).toHaveLength(1);
+  });
+
+  /**
+   * A STALE CLAIM IS TAKEN OVER BY ONE STOP, NOT BY ALL OF THEM
+   * (tenjin-agent#249).
+   *
+   * A sync that died mid-run leaves its claim behind, and the claim expires by
+   * age so the work is not stranded. Takeover used to be `clearState` then
+   * `claimState`: every Stop that read the claim as expired cleared it and
+   * re-claimed it unconditionally, so a laptop ending several sessions at once
+   * spawned a detached `tenjin sync` per Stop — the fan-out the guard exists to
+   * prevent, at its worst moment, since the machine is already busy.
+   *
+   * Eight Stops started together against an expired claim. The takeover is now
+   * one `UPDATE ... WHERE at < ?`, so seven of them change no rows and return.
+   * (state-store.test.ts holds the statement itself to that property without
+   * depending on process timing; this is the arm actually using it.)
+   */
+  it('spawns one sync when several Stops find the same expired claim', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    const staleAt = Date.now() - SYNC_CLAIM_TTL_MS - 60_000;
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, ['', SYNC_CLAIM_KEY, JSON.stringify({ at: staleAt }), staleAt]);
+    store.close();
+
+    const runs = await Promise.all(
+      Array.from({ length: 8 }, () => runScript(stopHookScript(dataDir, cliPath), stopInput)),
+    );
+    expect(runs.map((r) => r.code)).toEqual(Array.from({ length: 8 }, () => 0));
+
+    // The stub CLI is detached: wait past the first write for a second one.
+    await markerLines(marker);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(await markerLines(marker)).toHaveLength(1);
+
+    // And the claim was TAKEN, not merely read: its mark is the winner's `at`,
+    // not the dead holder's.
+    const claim = sessionState('', SYNC_CLAIM_KEY) as { at?: number } | null;
+    expect(claim?.at).toBeGreaterThan(staleAt);
   });
 
   it('never spawns without a baked CLI path', async () => {

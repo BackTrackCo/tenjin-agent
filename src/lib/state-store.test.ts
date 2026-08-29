@@ -3273,6 +3273,112 @@ describe('retired files', () => {
 });
 
 /**
+ * THE STALE END OF A CLAIM, IN ONE STATEMENT (tenjin-agent#249).
+ *
+ * The Stop hook's machine-wide sync claim expires by age, and taking an expired
+ * one over used to be `clearState` then `claimState` — two statements with a
+ * window between them that two Stop hooks could both be inside, so both cleared,
+ * both re-claimed, and both spawned a detached `tenjin sync`. The guard existed
+ * precisely to make that one child.
+ *
+ * The property asserted here is the one the pair could not have: a SECOND
+ * takeover computing the same `staleBefore` finds nothing to take, because the
+ * first takeover's own write moved the row out of range. Clear-then-claim would
+ * have handed the row to both callers, since `clearState` asks nothing about
+ * what it deletes.
+ */
+describe('takeStaleState', () => {
+  const KEY = 'sync:claim';
+  const TTL = 2 * 60 * 1000;
+
+  async function db(): Promise<DatabaseSync> {
+    const store = await openStore(dataDir);
+    store?.close();
+    return new DatabaseSync(join(dataDir, STATE_DB_FILE));
+  }
+
+  function claim(handle: DatabaseSync, at: number): void {
+    handle.prepare(STORE_SQL.setState).run('', KEY, JSON.stringify({ at }), at);
+  }
+
+  function take(handle: DatabaseSync, now: number): number {
+    return Number(
+      handle
+        .prepare(STORE_SQL.takeStaleState)
+        .run(JSON.stringify({ at: now }), now, '', KEY, now - TTL).changes,
+    );
+  }
+
+  it('is taken by exactly one of two callers that both see it stale', async () => {
+    const handle = await db();
+    try {
+      const now = Date.now();
+      claim(handle, now - TTL - 60_000);
+      // Both callers computed their cutoff before either wrote — the state two
+      // racing Stop hooks are in when they have both read the claim as expired.
+      expect(take(handle, now)).toBe(1);
+      expect(take(handle, now)).toBe(0);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('leaves a claim younger than the cutoff to its holder', async () => {
+    const handle = await db();
+    try {
+      const now = Date.now();
+      claim(handle, now - 1_000);
+      expect(take(handle, now)).toBe(0);
+      const row = handle.prepare(STORE_SQL.getState).get('', KEY) as unknown as { value: string };
+      expect(JSON.parse(row.value)).toEqual({ at: now - 1_000 });
+    } finally {
+      handle.close();
+    }
+  });
+
+  /**
+   * THE PAIR THIS REPLACED, RUN THE SAME WAY, so the difference is on the record
+   * rather than argued: `clearState` asks nothing about what it deletes, so the
+   * second caller's DELETE removes the claim the first caller had just taken and
+   * its INSERT walks straight in. Two winners, two detached syncs.
+   *
+   * A process-level race is not what proves this. Eight Stop hooks started
+   * together are separated by node's own startup, which is milliseconds against
+   * a window of microseconds, so the old shape passes that test most of the
+   * time. The statement is where the property lives.
+   */
+  it('is a takeover the clearState + claimState pair could not be', async () => {
+    const handle = await db();
+    try {
+      const now = Date.now();
+      claim(handle, now - TTL - 60_000);
+      const clearThenClaim = (): number => {
+        handle.prepare(STORE_SQL.deleteState).run('', KEY);
+        return Number(
+          handle.prepare(STORE_SQL.claimState).run('', KEY, JSON.stringify({ at: now }), now)
+            .changes,
+        );
+      };
+      expect(clearThenClaim()).toBe(1);
+      expect(clearThenClaim()).toBe(1);
+    } finally {
+      handle.close();
+    }
+  });
+
+  /** It cannot INSERT, so it can never resurrect a claim someone just cleared. */
+  it('creates nothing when there is no claim to take', async () => {
+    const handle = await db();
+    try {
+      expect(take(handle, Date.now())).toBe(0);
+      expect(handle.prepare(STORE_SQL.getState).get('', KEY)).toBeUndefined();
+    } finally {
+      handle.close();
+    }
+  });
+});
+
+/**
  * The `owner/name` the coarse key is salted with (tenjin-agent#249). The table
  * is shared with push-scripts.test.ts, which runs the generated failure arm's
  * inline copy against exactly these rows: two implementations, one table, so a

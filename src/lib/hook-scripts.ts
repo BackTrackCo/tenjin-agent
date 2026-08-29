@@ -2402,11 +2402,18 @@ function spawnSyncIfNeeded(config, cwd) {
   if (statePrefixSince(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, 1).length > 0) {
     return false;
   }
-  // A stale claim is deleted and re-taken; the atomic claim is the tiebreak
-  // between two Stops that both found it stale.
-  if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) {
-    clearState(MACHINE_SESSION, SYNC_CLAIM_KEY);
-    if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) return false;
+  // ONE STATEMENT AT EACH END (tenjin-agent#249). A free claim is taken by the
+  // INSERT, an EXPIRED one by an UPDATE conditioned on the holder's own age, so
+  // the arbitration is SQLite's either way. What this replaced was
+  // clear-then-claim, and two Stops that both read the claim as stale both
+  // cleared it and both re-claimed: one machine-wide guard, two detached
+  // children, which is the fan-out the claim exists to prevent. The read above
+  // is only an early-out; the takeover below is the decision.
+  if (
+    !claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now }) &&
+    !takeStaleState(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, { at: now })
+  ) {
+    return false;
   }
   try {
     const child = spawn(process.execPath, [CLI_PATH, 'sync'], {
