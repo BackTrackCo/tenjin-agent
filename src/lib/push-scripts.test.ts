@@ -3273,7 +3273,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       expect((await ledger()).at(-1)).toMatchObject({ reason: 'lookup-cap' });
     });
 
-    it('cuts a cold arm (≥ 20 hits, < 5% used) to a third of its cap', async () => {
+    it('cuts a cold arm (≥ 20 graded, < 5% used) to a third of its cap', async () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
       await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
@@ -3325,6 +3325,48 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       }
       expect(hits()).toBe(0);
       expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    /**
+     * THE FLOOR COUNTS GRADES. `hits` is every lookup that returned a
+     * candidate; the rate is drawn from the graded ones alone. A floor on
+     * `hits` therefore cleared on lookups nobody had judged, and let a rate
+     * computed from a handful of outcomes cut the arm — which is the one thing
+     * a floor exists to prevent.
+     */
+    it('leaves the cap alone for an arm with many hits but few grades', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // 40 hits, 5 graded, none used: rate 0, under the 5% cold rate. The old
+      // floor read 40 and cut the cap to floor(8/3) = 2, suppressing the fire
+      // below; the graded floor reads 5, which is under 20.
+      await seedRates({ prompt: { hits: 40, used: 0, wrong: 5 } });
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('cuts the cap once the grades themselves reach the floor', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // The same 40 hits, now with 20 graded and none used: at the floor, and
+      // the rate of 0 is under 5%.
+      await seedRates({ prompt: { hits: 40, used: 0, wrong: 20 } });
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+      expect((await ledger()).at(-1)).toMatchObject({
+        session: SESSION,
+        trigger: 'prompt',
+        action: 'skipped',
+        reason: 'lookup-cap',
+      });
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBe(1);
     });
 
     /**
@@ -3381,13 +3423,14 @@ describe('the lookup budget (rolling window, per trigger)', () => {
      * accident happened to give the right answer for NaN and the WRONG one for
      * Infinity, which read as a permanently cold arm.
      */
-    it('reads an Infinity hit count as no count, not as a cold arm', async () => {
+    it('reads an Infinity graded count as no count, not as a cold arm', async () => {
       const { baseUrl, hits } = await serve(echo());
       await pushOn(baseUrl);
-      // 1e999 parses to Infinity, which is >= the 20-hit cold threshold, and
-      // the rate is 0: uncoerced this cools the cap to floor(8/3) = 2 and the
-      // fire below is suppressed.
-      await seedRawRates('{"hits":1e999,"used":0,"wrong":1}');
+      // 1e999 parses to Infinity: uncoerced, `used + wrong` clears the 20-graded
+      // floor forever and the rate is 0, which cools the cap to floor(8/3) = 2
+      // and suppresses the fire below. Coerced, both counts are 0 and the guard
+      // returns the base cap.
+      await seedRawRates('{"hits":30,"used":0,"wrong":1e999}');
       await seedLookups('prompt', 2, 0);
 
       const run = await runScript(pushPromptHookScript(dataDir), promptInput);

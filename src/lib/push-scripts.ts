@@ -69,18 +69,30 @@ export const PUSH_LOOKUP_CAP_DEFAULT = 4;
  * per-trigger use rates (`GET /api/lookups/stats?days=7`) once per session into
  * `session_state` `trigger_rates`, and `lookupAllowed` reads them: a trigger
  * whose graded lookups were used at least PUSH_COOLDOWN_HOT_RATE of the time
- * gets twice its cap; one with PUSH_COOLDOWN_COLD_HITS hits or more and a rate
- * under PUSH_COOLDOWN_COLD_RATE gets a third of it, with every
+ * gets twice its cap; one with PUSH_COOLDOWN_COLD_HITS GRADED lookups or more
+ * and a rate under PUSH_COOLDOWN_COLD_RATE gets a third of it, with every
  * PUSH_COOLDOWN_PASS_EVERY-th fire the reduced cap suppressed passing anyway,
  * so a cold arm keeps producing the rows that could warm it again.
+ *
+ * THE COLD FLOOR COUNTS GRADED LOOKUPS (`used + wrong`), NOT `hits`. It read
+ * `hits` — every lookup that returned a candidate — while `rate` was computed
+ * from the graded ones alone, so the floor and the rate measured two different
+ * populations and the floor was no floor at all: an arm with 40 hits and five
+ * grades cleared a floor meant to say "we have seen enough of this arm to judge
+ * it" on 35 lookups nobody had judged, and — none of the five being `used` —
+ * lost its cap 8 → 2 on a rate drawn from those five. The
+ * floor exists so a rate is only acted on once enough OUTCOMES back it, which
+ * makes `used + wrong` the only count it can be. `hits` stays in the stored row
+ * as telemetry; nothing here reads it.
  *
  * GUARDED: a trigger's cap changes only when it has at least one graded
  * outcome (`used + wrong > 0`). Without that, the day-1 shelf (hundreds of
  * lookups, nothing graded because #210 has not posted an outcome yet) reads as
- * "hits ≥ 20, rate 0" and throttles every arm to a third. With it the code
- * ships inert and turns itself on per trigger the day #210's grading writes
- * the first outcome. A fetch that fails leaves no row, and no row is no
- * change.
+ * rate 0 for every arm. With it the code ships inert and turns itself on per
+ * trigger the day #210's grading writes the first outcome. A fetch that fails
+ * leaves no row, and no row is no change. The graded floor makes that guard a
+ * floor's first step rather than a separate rule: nothing graded is zero
+ * graded, which is below PUSH_COOLDOWN_COLD_HITS either way.
  *
  * `rate` is `used / (used + wrong)` — the two words #210 writes to
  * `injections.outcome` — computed here from the stats row's own counts rather
@@ -90,6 +102,7 @@ export const PUSH_LOOKUP_CAP_DEFAULT = 4;
 export const PUSH_COOLDOWN_HOT_RATE = 0.4;
 export const PUSH_COOLDOWN_HOT_FACTOR = 2;
 export const PUSH_COOLDOWN_COLD_RATE = 0.05;
+/** The cold rule's floor, in GRADED lookups (`used + wrong`) — see above. */
 export const PUSH_COOLDOWN_COLD_HITS = 20;
 export const PUSH_COOLDOWN_COLD_DIVISOR = 3;
 export const PUSH_COOLDOWN_PASS_EVERY = 10;
@@ -401,11 +414,12 @@ function lookupAllowed(trigger, sessionId) {
 
 /**
  * The cap the cooldown gives \`trigger\` this session: \`base\` ×2 when its graded
- * lookups were used ≥ 40% of the time, ÷3 when it has ≥ 20 hits and a use rate
- * under 5%, and \`base\` itself with no rates on record, no row for this
- * trigger, or — the guard — nothing graded for it yet (\`used + wrong === 0\`).
- * See PUSH_COOLDOWN_* in lib/push-scripts.ts for why the guard is the whole
- * point of shipping this now.
+ * lookups were used ≥ 40% of the time, ÷3 when it has ≥ 20 GRADED lookups
+ * (\`used + wrong\`, never the ungraded \`hits\`) and a use rate under 5%, and
+ * \`base\` itself with no rates on record, no row for this trigger, or — the
+ * guard — nothing graded for it yet (\`used + wrong === 0\`).
+ * See PUSH_COOLDOWN_* in lib/push-scripts.ts for why the floor counts grades
+ * and why the guard is the whole point of shipping this now.
  */
 function cooldownCap(trigger, base, sessionId) {
   const rates = getState(sessionId, STATE_TRIGGER_RATES);
@@ -419,13 +433,15 @@ function cooldownCap(trigger, base, sessionId) {
   // can push \`used + wrong\` past the guard with a rate above 1. Coerced to 0,
   // which is the same answer a missing field gets.
   const count = (value) => (Number.isFinite(value) && value >= 0 ? value : 0);
-  const hits = count(row.hits);
   const used = count(row.used);
   const wrong = count(row.wrong);
-  if (used + wrong <= 0) return base;
-  const rate = used / (used + wrong);
+  const graded = used + wrong;
+  if (graded <= 0) return base;
+  const rate = used / graded;
   if (rate >= PUSH_COOLDOWN.hotRate) return base * PUSH_COOLDOWN.hotFactor;
-  if (hits >= PUSH_COOLDOWN.coldHits && rate < PUSH_COOLDOWN.coldRate) {
+  // GRADED, not \`row.hits\`: the floor is "enough outcomes to judge this arm on",
+  // and \`hits\` counts lookups nobody judged. Same population as \`rate\`.
+  if (graded >= PUSH_COOLDOWN.coldHits && rate < PUSH_COOLDOWN.coldRate) {
     return Math.max(1, Math.floor(base / PUSH_COOLDOWN.coldDivisor));
   }
   return base;
