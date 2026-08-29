@@ -899,6 +899,11 @@ function scrub(text) {
     // at 5k, 22 ms at 10k, 89 ms at 20k, x4 per doubling. Bounded, each start
     // dies within four groups — 0.17 ms at 20k, x2 per doubling — and a real
     // path prefix has nowhere near three dots.
+    //
+    // THE BOUND'S RESIDUE, PRICED AND KEPT: past three dots the match restarts
+    // inside the segment, so the HEAD of a longer one survives
+    // (\`acmebank.a.b.c.d/keys/prod.ts\` -> \`acmebank\`). Narrow, and paid for
+    // deliberately: widening the bound is what brings the quadratic back.
     .replace(
       /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
       ' ',
