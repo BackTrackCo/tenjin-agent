@@ -51,6 +51,7 @@ import {
   WEBSEARCH_HOOK_PRODUCT,
   WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
+import { isAbsolute } from 'node:path';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // The push core, embedded in the three scripts here that grew a push arm (the
 // research arm injects beside the search, the dispatch arm caches, and both need
@@ -99,6 +100,29 @@ const WATCHDOG_MS = 2500;
  *  the watchdog. */
 const STOP_WATCHDOG_MS = 1500;
 /**
+ * How long one Stop's claim on the automatic team-shelf sync holds off every
+ * other Stop on the machine. Longer than a sync takes (a handful of signed
+ * POSTs) and short enough that a sync that died is retried at the next turn
+ * end after it.
+ */
+export const SYNC_CLAIM_TTL_MS = 2 * 60 * 1000;
+/** The machine-wide `session_state` key the claim lives under (session `''`). */
+export const SYNC_CLAIM_KEY = 'sync:claim';
+/** Appended to the Stop ask when the last `tenjin sync` could not sign. */
+export const STOP_SYNC_FALLBACK_LINE =
+  'Tenjin sidecar: the automatic team-shelf sync of fixed failures could not sign (<code>); run `tenjin sync` in a terminal where the wallet can unlock.';
+
+/**
+ * The CLI entry the Stop hook spawns for `tenjin sync`: the script this
+ * process was started from, when that is an absolute path (the installed
+ * `dist/index.js`, through whatever symlink the package manager wrote).
+ * Null under anything else, and null means the hook never spawns.
+ */
+export function defaultCliPath(): string | null {
+  const entry = process.argv[1];
+  return typeof entry === 'string' && isAbsolute(entry) ? entry : null;
+}
+/**
  * How much of the session transcript the Stop hook reads to decide whether a
  * background subagent is still running. The TAIL only, on the same terms and for
  * the same reason as the push ledger's: a long session's JSONL runs to hundreds
@@ -124,6 +148,11 @@ const TRANSCRIPT_TAIL_BYTES = 4 * 1024 * 1024;
  */
 const SUBAGENT_STALE_MS = 45 * 60 * 1000;
 const PRIMER_WATCHDOG_MS = 1500;
+/** The primer's stats fetch for the adaptive cooldown: the trailing window it
+ *  asks for, and how long it waits. Under the watchdog with room for the store
+ *  write after it; a slow shelf costs the session its rates, not its start. */
+const LOOKUP_STATS_DAYS = 7;
+const PRIMER_STATS_TIMEOUT_MS = 1000;
 
 /** How recent an unresolved MISS has to be for the Stop hook to raise it. */
 const OPEN_LOOP_WINDOW_MS = 8 * 60 * 60 * 1000;
@@ -312,23 +341,51 @@ function sessionIdOf(input) {
 }
 
 /**
- * The SUBAGENT this event fired inside, or null for the main session.
+ * WHO this fire belongs to: the harness \`session\`, and the \`agent\` it
+ * happened inside — null for the main session.
  *
- * The harness stamps \`agent_id\` (with \`agent_type\`) on every hook input that
- * fires inside a subagent call, and leaves it off in the main session — while
- * \`session_id\` stays the PARENT's either way. Null is a first-class answer
- * meaning "the parent", never "unknown".
+ * ONE READER, because these same two values become a \`session_state\` key
+ * segment, the \`agent_id\` column on \`injections\` and on \`events\`, and a
+ * transcript FILENAME. An identity parsed twice by two rules is two identities,
+ * and the row written under one is then unreadable by the other.
  *
- * BOUNDED LIKE A FILENAME, because that is what it becomes: \`push grade\` reads
- * the child's transcript at \`<session>/subagents/agent-<agentId>.jsonl\`, so an
- * id carrying a separator would name a path the harness never wrote. The same
- * bound is spelled out as AGENT_ID_RE in lib/grade.ts, and a test pins the two
- * together.
+ * A SESSION IS NOT AN AGENT. Claude Code hands every child of a session the
+ * PARENT's \`session_id\` and adds \`agent_id\`; only a main-session fire has no
+ * \`agent_id\` at all. So two subagents running in parallel are one session id
+ * to every query in this file, and any per-session key they both write is a key
+ * they overwrite for each other — which is how one subagent's unrelated edit
+ * came to close, and verify, a pairing a sibling had been shown.
+ *
+ * NULL IS THE MAIN SESSION, a first-class answer and never "unknown". The one
+ * place null becomes the '' that a key segment needs is \`agentKey\` below.
+ *
+ * REJECTED, NEVER STRIPPED, and bounded like a filename, because that is what
+ * it becomes: \`push grade\` reads the child's transcript at
+ * \`<session>/subagents/agent-<agentId>.jsonl\`, so an id carrying a separator
+ * names a path the harness never wrote — and stripping the separator out would
+ * spell a DIFFERENT agent's id exactly, filing one agent's work under another.
+ * The same bound is spelled out as AGENT_ID_RE in lib/grade.ts, and a test pins
+ * the two together.
  */
-function agentIdOf(input) {
-  if (!isRecord(input)) return null;
+function identityOf(input) {
+  const session = sessionIdOf(input);
+  if (!isRecord(input)) return { session, agent: null };
   const id = input.agent_id;
-  return typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+  const agent = typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+  return { session, agent };
+}
+
+/**
+ * One agent's \`session_state\` key segment: \`<agent-or-empty>:<name>\`, and the
+ * ONLY place an agent of null is spelled ''. The main session's rows therefore
+ * keep the keys they have always had, and a prefix scan for one agent — these
+ * scans read a range, not an equality — cannot reach into another's, because
+ * \`identityOf\` has already refused any id carrying the ':' that separates them.
+ *
+ * Pass '' as the name for the prefix itself.
+ */
+function agentKey(agent, name) {
+  return (agent ?? '') + ':' + name;
 }
 
 /**
@@ -904,7 +961,88 @@ async function askTenjin(question, config, opts) {
   if (res.status !== 200) return null;
   const body = await res.json();
   if (!isRecord(body)) return null;
+  return parseSearchBody(body, url, limit);
+}
 
+/**
+ * Ask a shelf by EXACT KEY (\`POST /api/keys/resolve\`, tenjin#774): no
+ * question, no text legs, no fuzzy fallback. The push failure arm's team leg
+ * sends the two fingerprint hashes of a failure and nothing else about it.
+ *
+ * The answer is the same envelope \`/api/search\` returns, field \`items\`,
+ * so it goes through the same fail-closed validation as a search. What differs
+ * is the STATUS CODES A CALLER HAS TO TELL APART, which askTenjin folds into
+ * one null: a shelf with \`KNOWLEDGE_KEYS\` off answers 404 \`not_enabled\`,
+ * and a deployment too old to have the route answers 404 too — both mean
+ * "stop asking this shelf for a while", not "the shelf is down". Everything
+ * else that is not a 200 (a refused bypass, a 5xx, a timeout) is \`no-answer\`,
+ * which feeds the outage brake exactly as a failed search does. Never throws.
+ *
+ *  - \`{ kind: 'hit', searchId, rich, stored }\`  at least one piece carries a key
+ *  - \`{ kind: 'miss', searchId }\`                 200, nothing carried any key
+ *  - \`{ kind: 'off' }\`                            404: keys are not on here
+ *  - \`{ kind: 'no-answer' }\`                      anything else
+ *
+ * \`opts\` IS THE SAME BAG \`askTenjin\` TAKES — \`shelfBaseUrl\`,
+ * \`timeoutMs\`, \`trigger\`, \`limit\` — because these two are the only two
+ * legs a hook can spend its deadline on and a caller should not have to
+ * remember which one wants them positionally.
+ */
+async function askTenjinKeys(keys, config, opts) {
+  const o = isRecord(opts) ? opts : {};
+  const shelfBaseUrl = o.shelfBaseUrl;
+  const timeoutMs = o.timeoutMs;
+  const trigger = o.trigger;
+  const limit = o.limit;
+  const target =
+    typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0 ? shelfBaseUrl : config.baseUrl;
+  let url;
+  try {
+    url = new URL('/api/keys/resolve', target);
+  } catch {
+    return { kind: 'no-answer' };
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return { kind: 'no-answer' };
+  const want = typeof limit === 'number' && limit > 0 ? limit : ${SEARCH_LIMIT};
+  try {
+    const bypass = shelfBypassHeaders(url.href, config);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'user-agent': composedUserAgent(),
+        ...bypass,
+      },
+      ...bypassRedirect(bypass),
+      body: JSON.stringify({
+        keys,
+        limit: want,
+        ...(typeof trigger === 'string' && trigger.length > 0 ? { trigger } : {}),
+      }),
+      signal: AbortSignal.timeout(
+        typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : SEARCH_TIMEOUT_MS,
+      ),
+    });
+    if (res.status === 404) return { kind: 'off' };
+    if (res.status !== 200) return { kind: 'no-answer' };
+    const body = await res.json();
+    if (!isRecord(body)) return { kind: 'no-answer' };
+    const parsed = parseSearchBody(body, url, want);
+    if (parsed === null) return { kind: 'no-answer' };
+    if (parsed.rich.length === 0) return { kind: 'miss', searchId: parsed.searchId };
+    return { kind: 'hit', searchId: parsed.searchId, rich: parsed.rich, stored: parsed.stored };
+  } catch {
+    return { kind: 'no-answer' };
+  }
+}
+
+/**
+ * The v3 discovery envelope, validated. Shared by the search and the key
+ * resolve, which answer in the same shape. \`url\` is the request url the
+ * candidates must sit on; \`limit\` bounds how many are projected. Null when
+ * the envelope is not one this hook can read.
+ */
+function parseSearchBody(body, url, limit) {
   // FAIL-CLOSED, mirroring src/lib/agent-api.ts. This script talks to whatever
   // origin baseUrl names, so the response is untrusted input, and the fields it
   // carries are ACTIONABLE: a resourceId is interpolated into a command the agent
@@ -1185,8 +1323,9 @@ async function main() {
   if (question.length === 0 || question.length > ${QUESTION_MAX}) return quiet();
 
   if (config.webSearch === 'off') return quiet();
-  const sessionId = sessionIdOf(input);
-  const agentId = agentIdOf(input);
+  // A subagent researches under its parent's session id, so the row has to name
+  // the agent or it names nobody.
+  const { session: sessionId, agent: agentId } = identityOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1244,7 +1383,7 @@ async function main() {
     cwd,
     hook: 'research',
     tool: input.tool_name,
-    data: { event: 'PreToolUse', query: clean(question, 512) },
+    data: { event: 'PreToolUse', query: clean(question, 512), agentId: agentId },
   });
   const lines = hintLines(found.stored, isTeam, {
     sessionId,
@@ -1362,8 +1501,9 @@ async function main() {
   if (mode === 'off') return quiet();
   if (mode === 'remind') return emit('PreToolUse', ${JSON.stringify(REMIND_LINE)});
 
-  const sessionId = sessionIdOf(input);
-  const agentId = agentIdOf(input);
+  // The DISPATCHER's agent id — a subagent that itself launches one is not the
+  // lead, and the row that says which fan-out this came from is this one.
+  const { session: sessionId, agent: agentId } = identityOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1517,7 +1657,11 @@ async function main() {
     cwd,
     hook: 'dispatch',
     tool: input.tool_name,
-    data: { event: 'PreToolUse', query: clean(question, ${QUESTION_MAX}) },
+    data: {
+      event: 'PreToolUse',
+      query: clean(question, ${QUESTION_MAX}),
+      agentId: agentId,
+    },
   });
   const row = {
     session: sessionId,
@@ -1591,13 +1735,70 @@ main().catch(quiet);
 /**
  * The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}.
  *
- * Purely local and purely advisory. It used to also `git pull` a cloned team
+ * Advisory, and local but for one request: with push on it also fetches the
+ * shelf's per-trigger use rates for the adaptive cooldown (`fetchTriggerRates`
+ * below), after the paragraph is out. It used to also `git pull` a cloned team
  * notes repo; the team shelf is a Tenjin DEPLOYMENT now (plan of record v3.1),
  * so there is nothing on disk to refresh and a session starts with whatever the
  * shelf serves at the moment a trigger fires.
  */
 export function sessionPrimerHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}${storeSource()}
+  return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}${storeSource()}${userAgentSource()}
+const STATS_DAYS = ${LOOKUP_STATS_DAYS};
+const STATS_TIMEOUT_MS = ${PRIMER_STATS_TIMEOUT_MS};
+
+/**
+ * The adaptive cooldown's one input (tenjin-agent#212; PUSH_COOLDOWN_* in
+ * lib/push-scripts.ts): the configured shelf's per-trigger use rates over the
+ * last week, keyless and server-cached, fetched ONCE PER SESSION here and kept
+ * in \`session_state\` \`trigger_rates\` for \`lookupAllowed\` to scale each
+ * arm's cap from. Only while push is on: the stats have no other reader, and a
+ * primer on a machine that never wired the arms must not spend a request.
+ *
+ * Any failure — no network, a non-200, an unparseable body, the timeout — writes
+ * nothing, and nothing on record means every cap stays what it was. Counts
+ * only are kept: the shelf's row carries no query, post, or requester, and the
+ * session row keeps just the four numbers the cooldown reads.
+ */
+async function fetchTriggerRates(config, sessionId) {
+  let url;
+  try {
+    url = new URL('/api/lookups/stats', config.baseUrl);
+    url.searchParams.set('days', String(STATS_DAYS));
+  } catch {
+    return;
+  }
+  try {
+    const bypass = shelfBypassHeaders(url.href, config);
+    const res = await fetch(url, {
+      headers: { accept: 'application/json', 'user-agent': composedUserAgent(), ...bypass },
+      ...bypassRedirect(bypass),
+      signal: AbortSignal.timeout(STATS_TIMEOUT_MS),
+    });
+    if (res.status !== 200) return;
+    const body = await res.json();
+    if (!isRecord(body) || !Array.isArray(body.triggers)) return;
+    const triggers = {};
+    for (const row of body.triggers) {
+      if (!isRecord(row) || typeof row.trigger !== 'string') continue;
+      const n = (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+      triggers[row.trigger.slice(0, 32)] = {
+        lookups: n(row.lookups),
+        hits: n(row.hits),
+        used: n(row.used),
+        wrong: n(row.wrong),
+      };
+    }
+    setState(sessionId, STATE_TRIGGER_RATES, {
+      at: Date.now(),
+      days: typeof body.windowDays === 'number' ? body.windowDays : STATS_DAYS,
+      triggers,
+    });
+  } catch {
+    // Unchanged caps; see above.
+  }
+}
+
 async function main() {
   // Drained even though nothing reads it — an unread stdin can block the writer
   // — but the payload IS parsed for the session id and cwd, because this is
@@ -1611,23 +1812,29 @@ async function main() {
   } catch {
     // Unparseable stdin costs the session row, never the primer.
   }
-  await openStore();
-  touchSession(sessionIdOf(input), cwdOf(input));
-  if (readConfig().sessionPrimer === 'off') return quiet();
-  // fd 1 directly, not emit(), which would append the update signal.
-  try {
-    writeFileSync(
-      1,
-      JSON.stringify({
-        hookSpecificOutput: {
-          hookEventName: 'SessionStart',
-          additionalContext: ${JSON.stringify(PRIMER_TEXT)},
-        },
-      }),
-    );
-  } catch {
-    // A closed or full stdout is not this hook's problem to report.
+  const config = readConfig();
+  const sessionId = sessionIdOf(input);
+  const store = await openStore();
+  touchSession(sessionId, cwdOf(input));
+  if (config.sessionPrimer !== 'off') {
+    // fd 1 directly, not emit(), which would append the update signal. Written
+    // BEFORE the stats fetch below, so the paragraph is never held behind a
+    // request.
+    try {
+      writeFileSync(
+        1,
+        JSON.stringify({
+          hookSpecificOutput: {
+            hookEventName: 'SessionStart',
+            additionalContext: ${JSON.stringify(PRIMER_TEXT)},
+          },
+        }),
+      );
+    } catch {
+      // A closed or full stdout is not this hook's problem to report.
+    }
   }
+  if (config.push === 'on' && store !== null) await fetchTriggerRates(config, sessionId);
   process.exit(0);
 }
 
@@ -1675,9 +1882,70 @@ main().catch(quiet);
  * store's lock here would put a cross-process wait on the end of every turn to buy
  * nothing but tidiness.
  */
-export function stopHookScript(dataDir: string): string {
+export function stopHookScript(dataDir: string, cliPath: string | null = defaultCliPath()): string {
   return `${prelude(dataDir, STOP_WATCHDOG_MS)}${storeSource()}
+import { spawn } from 'node:child_process';
 const NAGS_PATH = join(DATA_DIR, 'hook-nags.json');
+const CLI_PATH = ${JSON.stringify(cliPath)};
+const SYNC_CLAIM_TTL_MS = ${SYNC_CLAIM_TTL_MS};
+const SYNC_CLAIM_KEY = ${JSON.stringify(SYNC_CLAIM_KEY)};
+const SYNC_FALLBACK_LINE = ${JSON.stringify(STOP_SYNC_FALLBACK_LINE)};
+
+/**
+ * Hand this project's closed code-scoped pairings to the team shelf, without
+ * spending the hook's budget on it: a detached \`node <cli> sync\` that
+ * outlives this process, spawned only when there is something to sync, only
+ * in team mode, and only behind a machine-wide claim, so a laptop ending
+ * several sessions in the same minute runs one sync and not one per Stop.
+ * The claim is a \`session_state\` row under the machine bucket that expires
+ * by age rather than by the child clearing it: a sync that died could
+ * otherwise hold the claim forever.
+ *
+ * The CLI path is baked in at install (\`process.argv[1]\` of the install that
+ * wrote this file), never looked up on PATH, because a hook runs under the
+ * harness's environment and not the operator's shell. No path, no sync.
+ */
+function spawnSyncIfNeeded(config, cwd) {
+  if (CLI_PATH === null || teamShelfOrigin(config) === null) return false;
+  const pending = storeCount(STORE_SQL.countUnsyncedPairings, [projectId(cwd)]);
+  if (!Number.isFinite(pending) || pending === 0) return false;
+  const now = Date.now();
+  if (statePrefixSince(MACHINE_SESSION, SYNC_CLAIM_KEY, now - SYNC_CLAIM_TTL_MS, 1).length > 0) {
+    return false;
+  }
+  // A stale claim is deleted and re-taken; the atomic claim is the tiebreak
+  // between two Stops that both found it stale.
+  if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) {
+    clearState(MACHINE_SESSION, SYNC_CLAIM_KEY);
+    if (!claimState(MACHINE_SESSION, SYNC_CLAIM_KEY, { at: now })) return false;
+  }
+  try {
+    const child = spawn(process.execPath, [CLI_PATH, 'sync'], {
+      detached: true,
+      stdio: 'ignore',
+      ...(cwd === null ? {} : { cwd }),
+    });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The one case the automatic sync cannot recover on its own: the last
+ * \`tenjin sync\` could not sign (a session key that expired while the OS
+ * keychain was locked) and left its rows unsynced. The next Stop retries,
+ * and the operator is told how to do it by hand. Any other last outcome —
+ * a success, or no sync yet — says nothing.
+ */
+function syncFallbackLine() {
+  const row = storeGet(STORE_SQL.lastSyncEvent, []);
+  const data = row === null ? null : storeParse(row.data);
+  if (!isRecord(data) || typeof data.code !== 'string') return null;
+  return SYNC_FALLBACK_LINE.replace('<code>', data.code);
+}
 const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
 const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
 const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
@@ -2113,6 +2381,10 @@ async function main() {
   // The session is over: stamp \`ended_at\` so the judge's per-session windows
   // and the importance score (#212) have a close as well as an open.
   endSession(sessionId);
+  // AFTER the session is closed and BEFORE anything that can exit: the sync
+  // child is detached, so nothing below waits on it.
+  spawnSyncIfNeeded(config, cwd);
+  const syncLine = syncFallbackLine();
   // SCOPED IN THE QUERY. The loop below discards sources this hook never nags
   // about and sessions that are not its own, and doing that AFTER a LIMIT let a
   // push-on machine bury a deliberate \`tenjin search\` MISS under its own
@@ -2134,7 +2406,11 @@ async function main() {
   // that will still be there next time. \`nudge\` says the same words as context
   // and rides along with whatever else this turn had to say.
   const ask = captureAsk(config, sessionId, transcriptPath);
-  const reason = captureReason(config, publishMode);
+  // The sync fallback rides on the ask, and only on the ask: it is a line for
+  // the operator about this machine's wallet, and the ask is the one Stop
+  // output that already speaks to the operator about publishing.
+  const reason =
+    captureReason(config, publishMode) + (syncLine === null ? '' : '\\n' + syncLine);
   if (ask === 'block') emitBlock(reason);
   const nudge = ask === 'nudge' ? reason : null;
 

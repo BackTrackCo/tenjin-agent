@@ -74,6 +74,7 @@ describe('buildSearchRequest', () => {
       view: 'decision',
       query: 'hi',
       limit: 5,
+      trigger: 'cli',
     });
   });
   it('trims the question and carries the optional gates', () => {
@@ -98,6 +99,7 @@ describe('buildSearchRequest', () => {
         appliesTo: { products: ['Vercel'] },
       },
       limit: 3,
+      trigger: 'cli',
     });
   });
   it('rejects an empty question', () => {
@@ -193,6 +195,7 @@ describe('postSearch', () => {
       view: 'decision',
       query: 'q',
       limit: 5,
+      trigger: 'cli',
     });
   });
 

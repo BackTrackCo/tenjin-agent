@@ -15,7 +15,7 @@
  * The bodies are built from {@link pushSource}, the shared core that reads the
  * shelf's verdict, picks a form, and writes the ledger row. `jsBody` escapes a plain JS
  * string for the surrounding TypeScript template, so the core can be written
- * as ordinary JavaScript with regexes and no `\\` doubling by hand.
+ * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
@@ -62,6 +62,39 @@ export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
  *  that reaches this line is one nobody sized a bucket for, and the safe reading
  *  of an unsized arm is the cheapest one. */
 export const PUSH_LOOKUP_CAP_DEFAULT = 4;
+/**
+ * The adaptive cooldown (tenjin-agent#212; CommonTrace `retrieval.py`): the cap
+ * above scales from EVIDENCE. The SessionStart primer fetches the shelf's
+ * per-trigger use rates (`GET /api/lookups/stats?days=7`) once per session into
+ * `session_state` `trigger_rates`, and `lookupAllowed` reads them: a trigger
+ * whose graded lookups were used at least PUSH_COOLDOWN_HOT_RATE of the time
+ * gets twice its cap; one with PUSH_COOLDOWN_COLD_HITS hits or more and a rate
+ * under PUSH_COOLDOWN_COLD_RATE gets a third of it, with every
+ * PUSH_COOLDOWN_PASS_EVERY-th fire the reduced cap suppressed passing anyway,
+ * so a cold arm keeps producing the rows that could warm it again.
+ *
+ * GUARDED: a trigger's cap changes only when it has at least one graded
+ * outcome (`used + wrong > 0`). Without that, the day-1 shelf (hundreds of
+ * lookups, nothing graded because #210 has not posted an outcome yet) reads as
+ * "hits ≥ 20, rate 0" and throttles every arm to a third. With it the code
+ * ships inert and turns itself on per trigger the day #210's grading writes
+ * the first outcome. A fetch that fails leaves no row, and no row is no
+ * change.
+ *
+ * `rate` is `used / (used + wrong)` — the two words #210 writes to
+ * `injections.outcome` — computed here from the stats row's own counts rather
+ * than read from its `useRate`, which is `used / hits` (the server's number for
+ * the day-7 read, not the cooldown's).
+ */
+export const PUSH_COOLDOWN_HOT_RATE = 0.4;
+export const PUSH_COOLDOWN_HOT_FACTOR = 2;
+export const PUSH_COOLDOWN_COLD_RATE = 0.05;
+export const PUSH_COOLDOWN_COLD_HITS = 20;
+export const PUSH_COOLDOWN_COLD_DIVISOR = 3;
+export const PUSH_COOLDOWN_PASS_EVERY = 10;
+/** The `session_state` keys it reads and bumps — `trigger_rates` (the primer's
+ *  fetch) and `cooldown:<trigger>` (the suppressed-fire counter) — live with
+ *  the other STATE_* names in lib/state-store.ts's store core. */
 /** Consecutive unanswered lookups that silence the public leg, and for how long
  *  — the push core's copy of the dispatch hook's self-healing stop
  *  (DISPATCH_FAILURE_STOP / DISPATCH_QUIET_MS in lib/hook-scripts.ts). A dead
@@ -124,6 +157,7 @@ const PUSH_INJECT_MAX = __INJECT_MAX__;
 const PUSH_LOOKUP_WINDOW_MS = __LOOKUP_WINDOW_MS__;
 const PUSH_LOOKUP_CAPS = __LOOKUP_CAPS__;
 const PUSH_LOOKUP_CAP_DEFAULT = __LOOKUP_CAP_DEFAULT__;
+const PUSH_COOLDOWN = __COOLDOWN__;
 const PUSH_FAILURE_STOP = __FAILURE_STOP__;
 const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
@@ -238,9 +272,53 @@ function lookupCapFor(trigger) {
  * count. The count is now exact, and cheap enough that the per-session "this
  * bucket is full" cache the file version needed is gone with it.
  */
-function lookupAllowed(trigger) {
+function lookupAllowed(trigger, sessionId) {
   const spent = bucketCount(triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
-  return spent < lookupCapFor(trigger);
+  const base = lookupCapFor(trigger);
+  const cap = cooldownCap(trigger, base, sessionId);
+  if (spent < cap) return true;
+  // THE COLD ARM'S ESCAPE. Under the reduced cap, and under the base cap it
+  // replaced, every Nth suppressed fire goes through: an arm nothing grades
+  // never warms, and a cap that only ever shrinks is a switch, not a cooldown.
+  // Counted per session and per trigger, in one statement, so two concurrent
+  // fires cannot both be the Nth.
+  if (cap < base && spent < base) {
+    const n = bumpState(sessionId, STATE_COOLDOWN_PREFIX + triggerKey(trigger));
+    return n > 0 && n % PUSH_COOLDOWN.passEvery === 0;
+  }
+  return false;
+}
+
+/**
+ * The cap the cooldown gives \`trigger\` this session: \`base\` ×2 when its graded
+ * lookups were used ≥ 40% of the time, ÷3 when it has ≥ 20 hits and a use rate
+ * under 5%, and \`base\` itself with no rates on record, no row for this
+ * trigger, or — the guard — nothing graded for it yet (\`used + wrong === 0\`).
+ * See PUSH_COOLDOWN_* in lib/push-scripts.ts for why the guard is the whole
+ * point of shipping this now.
+ */
+function cooldownCap(trigger, base, sessionId) {
+  const rates = getState(sessionId, STATE_TRIGGER_RATES);
+  if (!isRecord(rates) || !isRecord(rates.triggers)) return base;
+  const row = rates.triggers[triggerKey(trigger)];
+  if (!isRecord(row)) return base;
+  // FINITE AND NON-NEGATIVE, not merely \`typeof 'number'\`. These come off a
+  // shelf's JSON over the wire, and NaN, Infinity and -1 are all numbers: NaN
+  // made every comparison below false and reached \`return base\` by accident,
+  // Infinity would have read as a permanently cold arm, and a negative \`wrong\`
+  // can push \`used + wrong\` past the guard with a rate above 1. Coerced to 0,
+  // which is the same answer a missing field gets.
+  const count = (value) => (Number.isFinite(value) && value >= 0 ? value : 0);
+  const hits = count(row.hits);
+  const used = count(row.used);
+  const wrong = count(row.wrong);
+  if (used + wrong <= 0) return base;
+  const rate = used / (used + wrong);
+  if (rate >= PUSH_COOLDOWN.hotRate) return base * PUSH_COOLDOWN.hotFactor;
+  if (hits >= PUSH_COOLDOWN.coldHits && rate < PUSH_COOLDOWN.coldRate) {
+    return Math.max(1, Math.floor(base / PUSH_COOLDOWN.coldDivisor));
+  }
+  return base;
 }
 
 /** The free body of \`candidate\`, capped, or null. GET of the candidate url is
@@ -413,7 +491,10 @@ async function pushDecide(args) {
           cwd: args.cwd,
           hook: args.trigger,
           tool: args.tool,
-          data: { event: args.event, query: clean(query, 512) },
+          // \`agentId\` on every row this opens, for the same reason the failure
+          // and edit rows carry it: a session id is shared by every subagent
+          // under it, so it cannot say which worker fired.
+          data: { event: args.event, query: clean(query, 512), agentId: args.agentId },
         });
   const base = {
     session: sessionId,
@@ -488,7 +569,7 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   // flood spends the prompt allowance and leaves the failure arm's untouched.
   // The row already carries \`trigger\`, so \`push status\` shows which bucket
   // filled up without a new field.
-  if (!lookupAllowed(base.trigger)) {
+  if (!lookupAllowed(base.trigger, sessionId)) {
     recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
     return { kind: 'stop' };
   }
@@ -596,8 +677,11 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
 
 // ---- per-session state (edits seen, packages seen, error signatures seen) ----
 //
-// One row per MEMBER in \`session_state\` — \`edited:<path>\`, \`sig:<hash>\`,
-// \`package:<name>\`, \`edits:<path>\` — each written by a single statement.
+// One row per MEMBER in \`session_state\` — \`edited:<agent>:<path>\`,
+// \`sig:<hash>\`, \`package:<name>\`, \`edits:<agent>:<path>\` — each written by
+// a single statement. The two per-path families carry the AGENT that wrote them
+// because the close rule means one agent, never the session every subagent of
+// it shares; \`sig:\` and \`package:\` stay per session on purpose.
 //
 // This used to be a whole-file JSON read-modify-write per session under the push
 // directory, with last-writer-wins as its documented contract, and the first cut
@@ -713,6 +797,17 @@ export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string
     .replaceAll('__LOOKUP_WINDOW_MS__', String(PUSH_LOOKUP_WINDOW_MS))
     .replaceAll('__LOOKUP_CAPS__', JSON.stringify(PUSH_LOOKUP_CAPS_PER_WINDOW))
     .replaceAll('__LOOKUP_CAP_DEFAULT__', String(PUSH_LOOKUP_CAP_DEFAULT))
+    .replaceAll(
+      '__COOLDOWN__',
+      JSON.stringify({
+        hotRate: PUSH_COOLDOWN_HOT_RATE,
+        hotFactor: PUSH_COOLDOWN_HOT_FACTOR,
+        coldRate: PUSH_COOLDOWN_COLD_RATE,
+        coldHits: PUSH_COOLDOWN_COLD_HITS,
+        coldDivisor: PUSH_COOLDOWN_COLD_DIVISOR,
+        passEvery: PUSH_COOLDOWN_PASS_EVERY,
+      }),
+    )
     .replaceAll('__FAILURE_STOP__', String(PUSH_FAILURE_STOP))
     .replaceAll('__QUIET_MS__', String(PUSH_QUIET_MS))
     .replaceAll('__BODY_MAX__', String(PUSH_BODY_MAX_CHARS))
@@ -757,18 +852,31 @@ async function main() {
       ? input.prompt
       : (typeof input.user_input === 'string' ? input.user_input : '');
   const prompt = raw.trim();
-  if (prompt.length < PROMPT_MIN_CHARS || prompt.length > PROMPT_MAX_CHARS) return quiet();
-  if (prompt.startsWith('/')) return quiet();
-
   // Scrubbed BEFORE the slice, so a path at character 380 cannot survive by
   // being cut in half, and what the ledger records is what was sent.
   const query = clean(scrub(prompt).slice(0, PROMPT_QUERY_CHARS), PROMPT_QUERY_CHARS);
-  // Under three real words there is no question here, only "keep going" — not
-  // worth a request.
-  if (wordCount(query) < 3) return quiet();
+  // Why this prompt will not be looked up, or null. Decided BEFORE the store is
+  // opened, so the row below can say so, and applied after it, so the row is
+  // written either way.
+  //  - short/long: outside the size window.
+  //  - slash: a harness command, not a question.
+  //  - words: under three real words there is no question here, only "keep
+  //    going" — not worth a request.
+  const skipped =
+    prompt.length < PROMPT_MIN_CHARS
+      ? 'short'
+      : prompt.length > PROMPT_MAX_CHARS
+        ? 'long'
+        : prompt.startsWith('/')
+          ? 'slash'
+          : wordCount(query) < 3
+            ? 'words'
+            : null;
+  if (prompt.length === 0) return quiet();
 
-  const sessionId = sessionIdOf(input);
-  const agentId = agentIdOf(input);
+  // A prompt can reach a subagent too (its first turn), so this arm is no more
+  // exempt from the shared session id than the others are.
+  const { session: sessionId, agent: agentId } = identityOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -779,6 +887,26 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+  // ONE ROW PER PROMPT, INCLUDING THE ONES NOTHING IS ASKED ABOUT. Only prompts
+  // that reached pushDecide used to leave a row, so the user-turn timestamps
+  // the importance score (#212) splits a session on were partial: a "yes",
+  // a "/clear" and a one-line correction all turned over the turn and none of
+  // them was on record. The row is what pushDecide would have opened — it is
+  // handed the uid so the lookup does not open a second one — plus \`skipped\`
+  // when this arm went no further. A skipped prompt's query is the same
+  // scrubbed, capped text a looked-up one records.
+  const eventUid = recordEvent({
+    session: sessionId,
+    cwd,
+    hook: 'prompt',
+    data: {
+      event: 'UserPromptSubmit',
+      query: clean(query, 512),
+      agentId: agentId,
+      ...(skipped === null ? {} : { skipped }),
+    },
+  });
+  if (skipped !== null) return quiet();
   // The arm's own deadline, inside the process watchdog. Whatever is in flight
   // when it fires is abandoned, but the store LEARNS THAT IT WAS: a run killed
   // by the bare watchdog left a paid-for search recorded and no decision row at
@@ -788,6 +916,7 @@ async function main() {
       session: sessionId,
       agentId,
       cwd,
+      eventUid,
       trigger: 'prompt',
       event: 'UserPromptSubmit',
       action: 'skipped',
@@ -805,6 +934,7 @@ async function main() {
     sessionId,
     agentId,
     cwd,
+    eventUid,
     mode: 'inject',
     source: 'push-hook',
   });
@@ -823,11 +953,22 @@ export function pushPromptHookScript(dataDir: string): string {
 /**
  * The failure arm (T3): PostToolUse on a Bash command that exited non-zero, and
  * PostToolUseFailure on any Bash failure. Normalizes the error into a signature
- * (the first error-shaped line, scrubbed) plus the packages the command and the
- * error name, looks it up once per signature per session, and attaches a known
- * finding BESIDE the error. It never denies anything; the command already ran.
+ * (the first error-shaped line, scrubbed) and answers it from THIS MACHINE'S
+ * OWN RECORD: a pairing an earlier session closed replays beside the error, and
+ * an unknown failure opens a pairing for the next success to close. It never
+ * denies anything; the command already ran.
+ *
+ * NOTHING ABOUT THE ERROR LEAVES THE MACHINE (tenjin-agent#212). The fuzzy
+ * `/api/search` leg this arm used to run on the error tail is gone: two
+ * machines' worth of rows said every hit it produced was an unrelated note at
+ * `confidence: low`, and the tail it was sending is the one string in the
+ * sidecar most likely to carry a credential or a path. After a local miss the
+ * TEAM shelf — and only it — is asked by FINGERPRINT (`POST /api/keys/resolve`,
+ * two hashes on the wire, `teamResolve` below); a miss there asks nothing else.
  */
 const FAILURE_JS = String.raw`
+import { resolve as resolvePath } from 'node:path';
+
 /**
  * WHAT A FAILURE ACTUALLY LOOKS LIKE, as markers rather than as words.
  *
@@ -917,19 +1058,51 @@ const FAILURE_HEADS = new Set([
   // build systems
   'make', 'cmake', 'ninja', 'mvn', 'gradle', 'gradlew', 'dotnet', 'swift', 'xcodebuild',
   // compilers, test runners, linters, type checkers
-  'tsc', 'vitest', 'jest', 'mocha', 'pytest', 'tox', 'nox', 'eslint', 'prettier', 'ruff', 'mypy',
-  'pyright', 'flake8', 'black', 'biome', 'oxlint',
+  'tsc', 'vitest', 'jest', 'mocha', 'pytest', 'unittest', 'tox', 'nox', 'eslint', 'prettier',
+  'ruff', 'mypy', 'pyright', 'flake8', 'black', 'biome', 'oxlint',
   // bundlers and app frameworks
   'next', 'vite', 'turbo', 'nx', 'webpack', 'esbuild', 'rollup',
   // migrations
   'drizzle-kit', 'prisma', 'alembic', 'knex', 'sequelize', 'flyway', 'liquibase',
   // infrastructure
   'docker', 'docker-compose', 'terraform', 'pulumi',
-  // compilers and git, so every marker above is reachable behind a head that
-  // emits it: rustc's \`error[E…]\`, gcc/clang's \`error:\`, git's \`fatal:\`.
-  // \`git diff --exit-code\` stays quiet: it exits 1 with no marker at all.
-  'git', 'rustc', 'gcc', 'clang', 'cc', 'g++', 'clang++', 'zig',
+  // compilers, so every marker above is reachable behind a head that emits it:
+  // rustc's \`error[E…]\`, gcc/clang's \`error:\`.
+  //
+  // NOT GIT. It was here for \`fatal:\`, and what it actually fired on was
+  // \`git show … | grep ENOENT\` and \`git log -p | sed -n\`: source that
+  // MENTIONS an errno, read through a pipe, is indistinguishable from output
+  // that raises one, and every pairing on record (14 of 14, two machines,
+  // tenjin-agent#212) had been opened that way. A git failure that matters
+  // surfaces behind the head that ran it — \`pnpm publish\`'s preflight, a
+  // release script — and those are still here.
+  'rustc', 'gcc', 'clang', 'cc', 'g++', 'clang++', 'zig',
 ]);
+/**
+ * Runtimes that are only a build/test step when they RUN A FILE. \`node x.js\`
+ * and \`python3 script.py\` fail the way a test does; \`python3 -c "…"\`,
+ * \`node -e\`, \`node -\` and \`python3 < file\` are the agent evaluating an
+ * expression, whose traceback names \`<string>\` or \`<stdin>\` and whose
+ * "fix" is a different expression, not a change to the repo. A pairing keyed
+ * on one would replay a one-off at every later probe.
+ */
+const RUNTIME_HEADS = new Set(['node', 'deno', 'python', 'python3']);
+/** The first argument is a file: not a flag, not a bare \`-\`, and named with
+ *  an extension, which is how a script is spelled and a subcommand is not. */
+function runsAFile(sub) {
+  return sub.length > 0 && !sub.startsWith('-') && sub !== '<stdin>' && /\.[A-Za-z0-9]+$/.test(sub);
+}
+/** The runtime's own test runner: \`node --test\` and \`deno test\` fail the way
+ *  \`vitest\` does. (\`python3 -m pytest\` is resolved to \`pytest\` by
+ *  commandHeads instead, so the pairing keys on the runner a later \`pytest\`
+ *  pass will close.) */
+const RUNTIME_TEST_SUBS = new Set(['--test', 'test']);
+/** Interpreters whose \`-m <module>\` runs the module as the program. */
+const MODULE_RUNNERS = new Set(['python', 'python3']);
+/** Traceback locations that are not files in the repo: an evaluated string or
+ *  a piped stdin. A pairing whose error names only these has nothing a tracked
+ *  edit could ever be matched against, so it is never opened. */
+const NOT_A_FILE = new Set(['<string>', '<stdin>']);
 /** Package managers whose SUBCOMMAND decides: \`pnpm build\` can fail a build,
  *  \`npm ls\` reports a fact and exits 1 to mean "no". */
 const PM_HEADS = new Set(['npm', 'pnpm', 'yarn', 'bun']);
@@ -995,7 +1168,8 @@ function skipWrapper(words, i, valueOpts, name) {
  * about AND the \`pnpm test\` that matters. The head is a basename, so
  * \`/usr/local/bin/pnpm\` and \`./node_modules/.bin/vitest\` land on their
  * program names; leading \`FOO=bar\` assignments and wrappers are stepped over,
- * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`).
+ * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`),
+ * and \`python3 -m <module>\` lands on the module.
  */
 function commandHeads(command) {
   const out = [];
@@ -1015,6 +1189,13 @@ function commandHeads(command) {
       }
       if (HEAD_RUNNERS.has(name)) { i += 1; continue; }
       if (PM_HEADS.has(name) && i + 1 < words.length && PM_RUN_SUBS.has(words[i + 1])) {
+        i += 2;
+        continue;
+      }
+      // \`python3 -m pytest\` IS a pytest invocation: the module is the head, so
+      // the most common Python test spelling fires, and the pairing it opens
+      // keys on \`pytest\`, which a later bare \`pytest\` pass closes.
+      if (MODULE_RUNNERS.has(name) && words[i + 1] === '-m' && i + 2 < words.length) {
         i += 2;
         continue;
       }
@@ -1038,6 +1219,7 @@ function allowedHeads(command) {
   for (const { head, sub } of commandHeads(command)) {
     if (!FAILURE_HEADS.has(head)) continue;
     if (PM_HEADS.has(head) && PM_QUIET_SUBS.has(sub)) continue;
+    if (RUNTIME_HEADS.has(head) && !runsAFile(sub) && !RUNTIME_TEST_SUBS.has(sub)) continue;
     out.push(head);
   }
   return out;
@@ -1254,7 +1436,7 @@ function filesInError(text) {
     const base = m[1].split(/[/\\]/).pop();
     if (typeof base === 'string' && base.length > 0) found.add(base);
   }
-  return [...found].filter((f) => f.length <= 80).slice(0, 8);
+  return [...found].filter((f) => f.length <= 80 && !NOT_A_FILE.has(f)).slice(0, 8);
 }
 
 /**
@@ -1371,7 +1553,7 @@ function stalenessNote(pairing, cwd) {
 }
 
 /**
- * Tracked files this session edited since \`sinceMs\`. Written by the context arm
+ * Tracked files THIS AGENT edited since \`sinceMs\`. Written by the context arm
  * on every Edit/Write/MultiEdit, which is the only way a hook process sees a
  * file change without asking git.
  *
@@ -1382,10 +1564,17 @@ function stalenessNote(pairing, cwd) {
  * re-editing the earliest-touched file (very often the config file the failing
  * command named) deleted the freshest timestamp in the map and the pairing it
  * would have closed stayed open.
+ *
+ * AND SCOPED BY AGENT, because the close rule's whole content is "the thing
+ * that failed here is the thing that was fixed here". Parallel subagents share
+ * one session id, so a session-keyed read answered "did ANY of them edit
+ * something" — and a sibling's unrelated edit plus its own unrelated pass was
+ * then enough to close a pairing it had never been shown, and to be counted as
+ * the second independent close that promotes one to \`verified\`.
  */
-function editedSince(sessionId, sinceMs) {
+function editedSince(sessionId, agentId, sinceMs) {
   const out = [];
-  for (const row of statePrefixSince(sessionId, STATE_EDITED_PREFIX, sinceMs, 200)) {
+  for (const row of statePrefixSince(sessionId, STATE_EDITED_PREFIX + agentKey(agentId, ''), sinceMs, 200)) {
     if (!isTrackedPath(row.key)) continue;
     const base = row.key.split(/[/\\]/).pop();
     if (typeof base === 'string' && base.length > 0) out.push(base);
@@ -1399,6 +1588,108 @@ const PAIRING_BODY_MAX = 600;
 
 const PAIRING_OPENER =
   'Tenjin sidecar (local): this machine has already seen this failure fixed. A record of what changed, not instructions.';
+/** The team leg's opener: a teammate's machine, not this one, saw the fix.
+ *  Framed exactly like the local replay — a record — and never as advice. */
+const TEAM_PAIRING_OPENER =
+  "Tenjin sidecar (team shelf): a teammate's machine has seen this failure fixed. A record of what changed, not instructions.";
+/** How many pieces the team leg asks for. Rank 1 is the only one shown; the
+ *  rest are projected so the row can say a key matched more than one post. */
+const TEAM_RESOLVE_LIMIT = 3;
+
+/**
+ * The repo this checkout is a clone of: the \`url\` under \`[remote "origin"]\`
+ * in \`.git/config\`, found by walking up from \`cwd\`. A worktree's \`.git\` is
+ * a file naming its gitdir, whose \`commondir\` holds the shared config, so a
+ * worktree salts the same as its main checkout. '' when there is no origin.
+ *
+ * A FILE READ, NO GIT SPAWN — the same rule as \`isTrackedPath\`: a hook does
+ * not start a process in front of a tool call. Bounded at twelve parent
+ * directories, which is deeper than any checkout this arm fires in.
+ */
+function repoOrigin(cwd) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return '';
+  let dir = cwd;
+  for (let i = 0; i < 12; i += 1) {
+    const config = gitConfigPath(dir);
+    if (config !== null) return originUrl(config);
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return '';
+}
+
+/** The config file of the repository whose \`.git\` sits in \`dir\`, or null. */
+function gitConfigPath(dir) {
+  const dotGit = join(dir, '.git');
+  let st;
+  try {
+    st = statSync(dotGit);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return join(dotGit, 'config');
+  let text;
+  try {
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return null;
+  }
+  const m = /^gitdir:\s*(.+)$/m.exec(text);
+  if (m === null) return null;
+  const gitdir = resolvePath(dir, m[1].trim());
+  let common = gitdir;
+  try {
+    common = resolvePath(gitdir, readFileSync(join(gitdir, 'commondir'), 'utf8').trim());
+  } catch {
+    /* not a worktree: the gitdir is the repository itself */
+  }
+  return join(common, 'config');
+}
+
+/** \`url\` under \`[remote "origin"]\`, or ''. A line scan, not an INI parser:
+ *  the two shapes git writes are all it has to read. */
+function originUrl(configPath) {
+  let text;
+  try {
+    text = readFileSync(configPath, 'utf8');
+  } catch {
+    return '';
+  }
+  let inOrigin = false;
+  for (const line of text.split('\n')) {
+    const section = /^\s*\[([^\]]+)\]\s*$/.exec(line);
+    if (section !== null) {
+      inOrigin = /^remote\s+"origin"$/.test(section[1].trim());
+      continue;
+    }
+    if (!inOrigin) continue;
+    const m = /^\s*url\s*=\s*(.+?)\s*$/.exec(line);
+    if (m !== null) return m[1].slice(0, 500);
+  }
+  return '';
+}
+
+/**
+ * ⚠ MIRRORED with \`teamCoarseKey\` in lib/state-store.ts, THE ONE DEFINITION
+ * (plan 06, "The naming, fixed once"): the coarse key AS IT GOES ON THE WIRE,
+ * \`shortHash(coarse_key + '|' + repo)\` over the STORED, unsalted \`sig_v1c\`
+ * hash — never over the raw message and errno, which \`tenjin sync\` does not
+ * have when it publishes the row back. The two sides must produce the same
+ * bytes for the same (coarse_key, repo) or a resolve query and a synced post
+ * would never find each other; state-store.test.ts pins the value and
+ * push-scripts.test.ts holds this copy to the export.
+ *
+ * The local coarse key stays unsalted because local lookups are already
+ * project-scoped (\`findPairing\`); the team shelf is shared across every repo
+ * the team has, and without the salt an \`ERR_PNPM_OUTDATED_LOCKFILE\`-class
+ * message would match a fix from any of them. Null exactly when the local
+ * coarse key is: no errno, nothing coarse to send.
+ */
+function teamCoarseKey(sig, repo) {
+  if (sig.coarseKey === null) return null;
+  return shortHash(sig.coarseKey + '|' + repo);
+}
 
 /** What an injected pairing says. Verified reads as a fix; unverified reads as
  *  the weaker claim it is (04, "Close rule"). */
@@ -1443,7 +1734,7 @@ function pairingText(pairing, staleNote) {
  * SECOND independent close promotes it to \`verified\`, and only then does it
  * inject as a fix.
  */
-function closeOpenPairings(sessionId, cwd, command, heads) {
+function closeOpenPairings(sessionId, agentId, cwd, command, heads) {
   const passed = safeCommand(command);
   const project = projectId(cwd);
   const closeIf = (pairing) => {
@@ -1453,19 +1744,36 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     // in one checkout must never close a pairing from another, and this is the
     // path that reaches \`verified\`.
     if (pairing.project !== project) return;
-    const changed = editedSince(sessionId, pairing.at);
+    const changed = editedSince(sessionId, agentId, pairing.at);
     if (changed.length === 0) return;
     const named = changed.filter((f) => pairing.errorFiles.includes(f));
     const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
     if (named.length === 0 && !sameCommand) return;
     const fixFiles = named.length > 0 ? named : changed;
-    closePairing(
+    const status = closePairing(
       pairing.id,
       sessionId,
       passed,
       fixFiles,
       pairingScope(pairing.errorLine, fixFiles),
     );
+    // A PAIRING THE TEAM LEG OPENED beside a teammate's post has just been
+    // closed on THIS machine: that is the second, independent close 04 asks
+    // for before a fix reads as verified, and the shelf has no close endpoint
+    // to tell it so. The link row records the close; \`tenjin sync\` reads it
+    // and publishes this machine's own record with the keys \`verified\` (the
+    // teammate's post is theirs alone on the shelf: every post route is
+    // owner-scoped, so it cannot be PUT from here).
+    const linkKey = STATE_PAIRING_POST_PREFIX + pairing.id;
+    const link = getState(MACHINE_SESSION, linkKey);
+    if (isRecord(link) && typeof link.postId === 'string') {
+      setState(MACHINE_SESSION, linkKey, {
+        ...link,
+        closedAt: Date.now(),
+        status,
+        fixFiles: fixFiles.slice(0, 8),
+      });
+    }
   };
   for (const head of heads) {
     // Rows this session opened itself.
@@ -1482,23 +1790,172 @@ function closeOpenPairings(sessionId, cwd, command, heads) {
     // failing command by definition, so the same-command branch is free to it
     // and the suggestion would otherwise be a material cause of its own
     // promotion to the confident wording.
-    const replayed = replayedPairing(sessionId, head);
-    if (replayed !== null) closeIf(pairingById(cwd, replayed));
+    // ALL OF THEM, not the last one. One head answers for a whole build step,
+    // so two different failures behind \`pnpm test\` are two pairings this agent
+    // was shown under one key; storing a single id let the second replay
+    // silently evict the first, and the evicted one then had no closer at all.
+    for (const id of replayedPairings(sessionId, agentId, head)) {
+      closeIf(pairingById(cwd, id));
+    }
   }
 }
 
+/** How many replayed pairings one agent keeps per head. Small on purpose: this
+ *  is a close-rule hint, and an agent that has been shown eight distinct
+ *  failures behind one head has bigger problems than a ninth. */
+const REPLAYED_PER_HEAD_MAX = 8;
+
 /**
- * Remember that this session was shown pairing \`id\` behind \`head\`, so its
- * later success on that head can close it as an independent second closer.
+ * Remember that this agent was shown pairing \`id\` behind \`head\`, so its later
+ * success on that head can close it as an independent second closer.
+ *
+ * SCOPED BY AGENT, LIKE THE EDITS THE CLOSE RULE READS. Parallel subagents
+ * share their parent's session id, so a session-keyed row handed one child the
+ * pairing a sibling had been shown, and the child's own unrelated edit and pass
+ * then closed and promoted it.
+ *
+ * AND A LIST, NOT ONE ID. The read-modify-write here is not atomic, so two
+ * fires in ONE agent under ONE head at the same instant can still lose an
+ * append — but they are already bounded to one per signature per session by
+ * \`claimState\`, and the alternative this replaces dropped the earlier id
+ * unconditionally rather than only under a race.
  */
-function rememberReplay(sessionId, head, id) {
+function rememberReplay(sessionId, agentId, head, id) {
   if (typeof head !== 'string' || head.length === 0) return;
-  setState(sessionId, STATE_REPLAYED_PREFIX + head, id);
+  const prior = replayedPairings(sessionId, agentId, head);
+  if (prior.includes(id)) return;
+  setState(
+    sessionId,
+    STATE_REPLAYED_PREFIX + agentKey(agentId, head),
+    [...prior, id].slice(-REPLAYED_PER_HEAD_MAX),
+  );
 }
 
-function replayedPairing(sessionId, head) {
-  const id = getState(sessionId, STATE_REPLAYED_PREFIX + head);
-  return typeof id === 'number' ? id : null;
+/** The pairing ids this agent was shown behind \`head\`, oldest first. */
+function replayedPairings(sessionId, agentId, head) {
+  const stored = getState(sessionId, STATE_REPLAYED_PREFIX + agentKey(agentId, head));
+  // A bare number is what a single-id row held; accepted so a store written by
+  // an older build keeps its one closer rather than losing it at upgrade.
+  if (typeof stored === 'number') return [stored];
+  if (!Array.isArray(stored)) return [];
+  return stored.filter((id) => typeof id === 'number').slice(-REPLAYED_PER_HEAD_MAX);
+}
+
+/**
+ * The team leg (04, "Retrieval order", last step): ask the TEAM SHELF, and only
+ * it, whether a teammate's machine has paired this failure — by fingerprint,
+ * through \`POST /api/keys/resolve\`, with exactly the two hashes on the wire.
+ * The error text, the command, the packages: none of it is sent, and nothing
+ * is sent to the public shelf, which refuses keys and holds no pairings.
+ *
+ * Returns \`{ text, top }\` to emit, or null. Every outcome is a decision row
+ * against \`eventUid\`, on the failure arm's own lookup bucket:
+ *
+ *  - \`keys-off\`     the shelf answered 404 (\`KNOWLEDGE_KEYS\` off, or no
+ *                    route). Cached machine-wide for six hours: the fact is
+ *                    about the deployment, and re-learning it once per session
+ *                    would cost an always-on loop one request per prompt.
+ *  - \`no-answer\`    a refused bypass, a 5xx, a timeout. Feeds the outage
+ *                    brake (\`PUSH_FAILURE_STOP\`) exactly as a search does.
+ *  - \`miss\`         200, nothing carried either key. The searchId is on the
+ *                    row, because \`bucketCount\` counts rows with one and an
+ *                    unrecorded miss would be a free lookup.
+ *  - \`key-match\`    injected. A key hit is rank 1 with no relevance check to
+ *                    run — the fingerprint IS the match — so \`judge()\`, which
+ *                    scores a card against a question, is bypassed and the row
+ *                    says \`strong\`; the server's \`confidence\` and
+ *                    \`corroborated\` ride along as telemetry, nothing acts on
+ *                    them.
+ */
+async function teamResolve(args) {
+  const { sig, cwd, config, sessionId, eventUid, origin } = args;
+  const base = {
+    session: sessionId,
+    cwd,
+    eventUid,
+    trigger: 'failure',
+    event: args.event,
+    shelf: 'team',
+  };
+  const offKey = STATE_KEYS_OFF_PREFIX + origin;
+  if (stateHolds(MACHINE_SESSION, offKey)) {
+    recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
+    return null;
+  }
+  if (!lookupAllowed('failure', sessionId)) {
+    recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
+    return null;
+  }
+  const outage = failStreak(sessionId);
+  if (outage.streak >= PUSH_FAILURE_STOP && Date.now() - outage.lastAt < PUSH_QUIET_MS) {
+    recordDecision({ ...base, action: 'skipped', reason: 'quiet' });
+    return null;
+  }
+  // TWO KEYS, BOTH FINGERPRINTS, and never \`command_head\`: resolve ORs its
+  // keys and ranks fingerprint over head without saying which one matched, so
+  // a head key would return the newest post keyed \`pnpm\` for every failure
+  // behind \`pnpm\` and the row could not tell it from a real hit.
+  const keys = [{ kind: 'fingerprint', key: 'sig_v1:' + sig.key }];
+  const coarse = teamCoarseKey(sig, repoOrigin(cwd));
+  if (coarse !== null) keys.push({ kind: 'fingerprint', key: 'sig_v1c:' + coarse });
+  const found = await askTenjinKeys(keys, config, {
+    shelfBaseUrl: origin,
+    timeoutMs: SEARCH_TIMEOUT_MS,
+    trigger: 'failure',
+    limit: TEAM_RESOLVE_LIMIT,
+  });
+  if (found.kind === 'off') {
+    setStateUntil(MACHINE_SESSION, offKey, Date.now() + KEYS_OFF_TTL_MS);
+    recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
+    return null;
+  }
+  if (found.kind === 'no-answer') {
+    recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
+    return null;
+  }
+  if (found.kind === 'miss') {
+    recordDecision({ ...base, searchId: found.searchId, action: 'skipped', reason: 'miss' });
+    return null;
+  }
+  const top = found.rich[0];
+  const row = {
+    ...base,
+    searchId: found.searchId,
+    candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
+    strength: 'strong',
+    confidence: top.confidence,
+    corroborated: top.corroborated,
+  };
+  // Same once-per-session set as every other arm: the post id is the key, so a
+  // team pairing this session was already handed cannot come back.
+  if (alreadyShown(sessionId, top.resourceId)) {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+    return null;
+  }
+  let form = 'short';
+  let text = shortForm(top, TEAM_PAIRING_OPENER);
+  if (isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
+    const body = await fetchFreeBody(top, config);
+    if (body !== null) {
+      form = 'full';
+      // A synced pairing's body is a record — the failing head, the fix, the
+      // files — and it gets the same room a local replay does, not a piece's.
+      text = fullForm(TEAM_PAIRING_OPENER, headerLine(top), clean(body, PAIRING_BODY_MAX), false);
+    }
+  }
+  const claimed = recordDecision({
+    ...row,
+    action: 'injected',
+    reason: 'key-match',
+    form,
+    deny: false,
+    tokens: Math.ceil(text.length / 4),
+  });
+  if (!mayShow(claimed)) {
+    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+    return null;
+  }
+  return { text, top };
 }
 
 async function main() {
@@ -1516,8 +1973,11 @@ async function main() {
   // opinion about, however its output reads.
   if (!failureAllowed(command)) return quiet();
 
-  const sessionId = sessionIdOf(input);
-  const agentId = agentIdOf(input);
+  // WHICH AGENT, not just which session. Every subagent of a session carries the
+  // parent's session id, so this is the only field that tells one parallel
+  // child from another — and the close rule, the replay memory and the
+  // importance score all mean the agent, never the session.
+  const { session: sessionId, agent: agentId } = identityOf(input);
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
@@ -1534,8 +1994,25 @@ async function main() {
   // same allowlisted head succeeding is what CLOSES a pairing this machine
   // opened earlier (04, "Close rule"). Nothing is emitted and no network is
   // touched — one indexed query and at most one UPDATE.
+  //
+  // AND ONE EVENT ROW, always. A pass used to leave no trace unless it closed
+  // something, so "fail → edit → same head passes" — the sequence the
+  // importance score (#212, CommonTrace \`detection.py\`) is built on — was
+  // unreadable from the store whenever the close rule did not fire.
   if (text.length === 0) {
-    closeOpenPairings(sessionId, cwd, command, heads);
+    recordEvent({
+      session: sessionId,
+      cwd,
+      hook: 'pass',
+      tool: 'Bash',
+      data: {
+        event,
+        command: safeCommand(command),
+        head: heads.length > 0 ? heads[heads.length - 1] : null,
+        agentId: agentId,
+      },
+    });
+    closeOpenPairings(sessionId, agentId, cwd, command, heads);
     return quiet();
   }
   const line = errorLine(text.slice(-20000));
@@ -1546,7 +2023,27 @@ async function main() {
   // on some harnesses, and parallel subagents share their parent's session id —
   // so the read-modify-write this replaces had a window that two processes both
   // passed, opening duplicate pairings and spending two lookups on one failure.
-  if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) return quiet();
+  //
+  // THE LOSER IS COUNTED, and this is the one thing the claim did not do. A
+  // second agent hitting the SAME wall is the signal the sidecar exists to
+  // notice — it is the strongest evidence there is that a finding would be
+  // worth publishing — and it used to exit here with no row at all, so from the
+  // store the fire had simply never happened. The claim stays per SESSION on
+  // purpose (one problem is one problem, whoever ran into it); what changes is
+  // that the quiet exit now says why it was quiet.
+  if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) {
+    recordInjection({
+      session: sessionId,
+      cwd,
+      hook: 'failure',
+      // LOCAL, like every other row this arm writes: no shelf was asked, and
+      // none would have been.
+      shelf: 'local',
+      action: 'skipped',
+      reason: 'already-claimed',
+    });
+    return quiet();
+  }
 
   // THE ERROR'S PACKAGES FIRST, then the command's. Only the head of this list
   // becomes the \`appliesTo\` filter, and the module an import could not find is
@@ -1557,21 +2054,32 @@ async function main() {
     ...new Set([...packagesInError(text), ...packagesInCommand(command)].map(bareName)),
   ];
   const scrubbed = scrub(line);
+  const sig = sigV1(line, text);
+  const errorFiles = filesInError(text);
+  // The failure row carries the signature's fine key as \`error_hash\` (the
+  // column has existed since #219 and was never written) and the SCRUBBED
+  // error line: the same string the pairing stores, and the only place the
+  // error text is kept at all now that it no longer goes on the wire.
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
     hook: 'failure',
     tool: 'Bash',
-    data: { event, command: safeCommand(command) },
+    errorHash: sig === null ? undefined : sig.key,
+    files: errorFiles,
+    data: {
+      event,
+      command: safeCommand(command),
+      error: clean(scrubbed, 300),
+      agentId: agentId,
+    },
   });
 
-  // THE MECHANICAL LANE, AND IT RUNS FIRST — before the query is built and
-  // before any shelf is asked (04, "Retrieval order": local fine key, then
-  // coarse, then the shelves). A pairing this machine closed itself is the
-  // cheapest and most specific answer there is, and paying ~15ms per shelf to
-  // maybe find something weaker is exactly the waste the local lane exists to
-  // avoid.
-  const sig = sigV1(line, text);
+  // THE MECHANICAL LANE (04, "Retrieval order": local fine key, then coarse,
+  // then the team shelf by fingerprint). A pairing this machine closed itself
+  // is the cheapest and most specific answer there is, and it costs no request.
+  const head = heads.length > 0 ? heads[heads.length - 1] : null;
+  let pairingId = null;
   if (sig !== null) {
     const match = findPairing(cwd, sig.key, sig.coarseKey);
     if (match !== null && !alreadyShown(sessionId, 'pairing:' + match.id)) {
@@ -1579,7 +2087,7 @@ async function main() {
       // BEFORE the emit, because emit exits the process: this is what lets this
       // session's later success close the pairing it was shown, which is the
       // only route to \`verified\` through the hooks.
-      rememberReplay(sessionId, heads.length > 0 ? heads[heads.length - 1] : '', match.id);
+      rememberReplay(sessionId, agentId, head === null ? '' : head, match.id);
       const claimed = recordInjection({
         session: sessionId,
         agentId,
@@ -1619,45 +2127,62 @@ async function main() {
       return emit(event, body);
     }
     // Nothing local yet. Open a pairing so the NEXT success on this head can
-    // close it, then fall through to the shelves.
-    openPairing({
-      session: sessionId,
-      cwd,
-      key: sig.key,
-      coarseKey: sig.coarseKey,
-      // The LAST allowlisted head, which is the build/test step the failure
-      // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
-      cmdHead: heads.length > 0 ? heads[heads.length - 1] : null,
-      cmd: safeCommand(command),
-      errorLine: clean(scrubbed, 300),
-      errorFiles: filesInError(text),
-      pkgVersions: pkgVersions(cwd, packages),
-      scope: 'ambiguous',
-    });
+    // close it — but ONLY when the error named a file. The close rule matches
+    // a later edit against \`error_files\`, so a row with none (or with only
+    // \`<string>\`/\`<stdin>\`, filtered above) can be closed by nothing but
+    // the same-command branch, which is the branch that closes on whatever
+    // happened to change; every unreadable row on record was that shape.
+    const open = () =>
+      openPairing({
+        session: sessionId,
+        cwd,
+        key: sig.key,
+        coarseKey: sig.coarseKey,
+        // The LAST allowlisted head, which is the build/test step the failure
+        // belongs to; \`echo\` and \`cd\` around it are not heads this arm keys on.
+        cmdHead: head,
+        cmd: safeCommand(command),
+        errorLine: clean(scrubbed, 300),
+        errorFiles,
+        pkgVersions: pkgVersions(cwd, packages),
+        scope: 'ambiguous',
+      });
+    if (errorFiles.length > 0) pairingId = open();
+
+    // THE TEAM LEG, in team mode only. The public shelf refuses keys and holds
+    // no pairings, so in public mode a failure this machine has not paired is
+    // silent, with no request and no decision row, as it has been since the
+    // fuzzy leg was dropped. The only thing on the wire is two hashes.
+    const origin = teamShelfOrigin(config);
+    if (origin === null) return quiet();
+    const hit = await teamResolve({ sig, cwd, config, sessionId, eventUid, event, origin });
+    if (hit === null) return quiet();
+    // A TEAM HIT OPENS A LOCAL PAIRING TOO, files or no files, and links it to
+    // the post. Otherwise this machine's later pass would close nothing, and
+    // the cross-machine \`verified\` — a close on machine B overlapping the fix
+    // machine A published — would be unreachable: the shelf has no close
+    // endpoint, so B's local close is the only place the second close can be
+    // recorded, and \`tenjin sync\` carries it back as this machine's own
+    // verified record (a teammate's post cannot be PUT from here). A hit is
+    // evidence the failure is a real, fixable one even when the error named
+    // no file: the same-command branch of the close rule still applies.
+    if (pairingId === null) pairingId = open();
+    if (pairingId !== null) {
+      rememberReplay(sessionId, agentId, head === null ? '' : head, pairingId);
+      setState(MACHINE_SESSION, STATE_PAIRING_POST_PREFIX + pairingId, {
+        postId: hit.top.resourceId,
+        origin,
+        at: Date.now(),
+      });
+    }
+    return emit(event, hit.text);
   }
 
-  // The packages travel as a FILTER, not as query words. Pasting them in front
-  // of the error line spent the query's own weight on names the shelf can match
-  // exactly, and it matched them loosely instead.
-  const query = clean(scrubbed, 300);
-  if (wordCount(query) < 2) return quiet();
-
-  const decided = await pushDecide({
-    trigger: 'failure',
-    event,
-    query,
-    packageName: packages[0],
-    config,
-    sessionId,
-    agentId,
-    cwd,
-    eventUid,
-    tool: 'Bash',
-    mode: 'inject',
-    source: 'push-hook',
-  });
-  if (decided === null) return quiet();
-  emit(event, decided.text);
+  // NO SIGNATURE, NO LOOKUP. Under the specificity floor there is nothing to
+  // key a pairing on, locally or on the team shelf, and the error text itself
+  // is never searched: this is the same quiet exit the arm has always taken
+  // when it decides there is nothing to look up.
+  return quiet();
 }
 
 main().catch(quiet);
@@ -1687,8 +2212,7 @@ async function main() {
   if (input.hook_event_name !== 'SubagentStart') return quiet();
   const config = readConfig();
   if (config.push !== 'on') return quiet();
-  const sessionId = sessionIdOf(input);
-  const agentId = agentIdOf(input);
+  const { session: sessionId, agent: agentId } = identityOf(input);
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
@@ -1722,6 +2246,10 @@ async function main() {
       event: 'SubagentStart',
       query: clean(String(cache.query || ''), 512),
       agentType,
+      // THE AGENT THIS ROW IS ABOUT is the one starting, and it is the only
+      // handle the score has on the work that follows: everything that agent
+      // then edits, fails and passes files under the same parent session id.
+      agentId,
     },
   });
   const base = {
@@ -1824,8 +2352,10 @@ async function main() {
   if (!isRecord(input)) return quiet();
   const config = readConfig();
   if (config.push !== 'on') return quiet();
-  const sessionId = sessionIdOf(input);
-  const agentId = agentIdOf(input);
+  // The agent whose edit this is. The close rule matches a pairing against the
+  // edits of the agent that was shown it, so an edit has to be filed under its
+  // own author rather than under the session every sibling shares.
+  const { session: sessionId, agent: agentId } = identityOf(input);
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
@@ -1857,7 +2387,26 @@ async function main() {
     // re-edit has to move the timestamp and nothing else; the JSON map this
     // replaces lost entries to concurrent writers and evicted by insertion
     // order, which a re-edit does not change.
-    setState(sessionId, STATE_EDITED_PREFIX + filePath.slice(-200), true);
+    setState(sessionId, STATE_EDITED_PREFIX + agentKey(agentId, filePath.slice(-200)), true);
+    // AND ONE EVENT ROW PER EDIT, appended. The upsert above keeps only the
+    // last timestamp per path, so "the same file edited before and after a
+    // user turn" — a pattern the importance score (#212, CommonTrace
+    // \`detection.py\`) weights — was uncomputable from it. The basename and
+    // the tool, nothing else: a path is operator-chosen text, and the score
+    // only ever compares names.
+    const base = filePath.split(/[/\\]/).pop() || '';
+    recordEvent({
+      session: sessionId,
+      cwd,
+      hook: 'edit',
+      tool,
+      files: base.length > 0 ? [clean(base, 80)] : [],
+      // AND WHO EDITED IT. The score assembles fail → edit → pass out of these
+      // rows, and every parallel subagent files under the parent's session id:
+      // without this field it stitched one agent's failure to another's edit
+      // and a third's pass, and called the result a fix.
+      data: { event, agentId: agentId },
+    });
   }
 
   if (!/\.(m?[jt]sx?|cjs|py)$/.test(filePath)) return quiet();
@@ -1904,7 +2453,11 @@ async function main() {
   if (isEdit) {
     // One statement, so two concurrent edit hooks cannot both read N and both
     // write N+1 — which would step over the Nth edit this arm triggers on.
-    const n = bumpState(sessionId, STATE_EDITS_PREFIX + filePath.slice(-200));
+    // Per agent, like the close rule's evidence: "the Nth edit to this file" is
+    // a statement about one worker's churn, and three subagents each touching a
+    // shared config once is not the same thing as one of them touching it three
+    // times.
+    const n = bumpState(sessionId, STATE_EDITS_PREFIX + agentKey(agentId, filePath.slice(-200)));
     if (n !== CHURN_EDITS) return quiet();
     // SCRUBBED, like every other arm's query. A basename is operator-chosen text
     // going on the wire, and \`clean()\` is not the secret filter — it bounds the

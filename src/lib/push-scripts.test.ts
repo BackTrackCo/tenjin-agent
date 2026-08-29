@@ -2,17 +2,27 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { STATE_DB_FILE, STORE_SQL, openStore } from './state-store';
-import { loadSearches, recordSearch, type StoredSearch } from './state-store';
+import {
+  STATE_DB_FILE,
+  STORE_SQL,
+  loadSearches,
+  openStore,
+  projectId,
+  recordSearch,
+  teamCoarseKey,
+  type StoredSearch,
+} from './state-store';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,
   PRIMER_TEXT,
+  STOP_SYNC_FALLBACK_LINE,
+  SYNC_CLAIM_KEY,
   dispatchHookScript,
   sessionPrimerHookScript,
   stopHookScript,
@@ -289,6 +299,54 @@ async function ledger(): Promise<LedgerRow[]> {
         agentType: event.agentType,
       } as LedgerRow;
     });
+  } finally {
+    db.close();
+  }
+}
+
+interface EventRow {
+  [key: string]: unknown;
+  session: string;
+  hook: string;
+  tool: string | null;
+  error_hash: string | null;
+  files: string[];
+  data: Record<string, unknown>;
+}
+
+/** Every event row a run wrote, oldest first, with the JSON columns parsed. */
+async function events(): Promise<EventRow[]> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db.prepare('SELECT * FROM events ORDER BY id').all() as unknown as Record<string, unknown>[]
+    ).map(
+      (r) =>
+        ({
+          ...r,
+          files: typeof r.files === 'string' ? (JSON.parse(r.files) as string[]) : [],
+          data: typeof r.data === 'string' ? (JSON.parse(r.data) as Record<string, unknown>) : {},
+        }) as EventRow,
+    );
+  } finally {
+    db.close();
+  }
+}
+
+/** Every pairing row, oldest first, `error_files` parsed. */
+async function pairings(): Promise<Array<Record<string, unknown> & { error_files: string[] }>> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    return (
+      db.prepare('SELECT * FROM pairings ORDER BY id').all() as unknown as Record<string, unknown>[]
+    ).map((r) => ({
+      ...r,
+      error_files: typeof r.error_files === 'string' ? (JSON.parse(r.error_files) as string[]) : [],
+    }));
   } finally {
     db.close();
   }
@@ -1021,6 +1079,59 @@ describe('the two shelves', () => {
   });
 });
 
+/**
+ * Every search leaves the machine labelled with the arm that fired it. The
+ * server tallies use rates per trigger (`GET /api/lookups/stats`) and, until
+ * this, every lookup this CLI made was filed as `cli`: 867 rows, one bucket,
+ * nothing for an adaptive cooldown to read. Telemetry only; a server that does
+ * not know the field records `cli` as before.
+ */
+describe('the trigger on the wire', () => {
+  it('each arm names itself on the search body', async () => {
+    const triggers: unknown[] = [];
+    const { baseUrl } = await serve((req) => {
+      if (req.url.startsWith('/api/search')) {
+        triggers.push((JSON.parse(req.body) as { trigger?: unknown }).trigger);
+      }
+      return miss(req);
+    });
+    await pushOn(baseUrl);
+    await runScript(
+      pushPromptHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'UserPromptSubmit',
+        prompt:
+          'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps',
+      }),
+    );
+    const file = join(scriptDir, 'thing.ts');
+    await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Read',
+        tool_input: { file_path: file },
+      }),
+    );
+    for (let i = 0; i < 4; i += 1) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: file },
+        }),
+      );
+    }
+    await runScript(websearchHookScript(dataDir), webSearch('zod resolver optional chain parse'));
+    expect(triggers).toEqual(['prompt', 'read', 'churn', 'research']);
+  });
+});
+
 describe('the prompt arm (UserPromptSubmit)', () => {
   const prompt = (text: string): string =>
     JSON.stringify({ session_id: SESSION, hook_event_name: 'UserPromptSubmit', prompt: text });
@@ -1152,6 +1263,30 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(slash.stdout).toBe('');
     expect(hits()).toBe(0);
     expect(await ledger()).toEqual([]);
+    // BUT EVERY PROMPT IS ON RECORD (#212): a "yes" turns the user turn over
+    // as surely as a research question does, and the importance score splits a
+    // session on those turns. Skipped rows say why, and carry no decision.
+    const rows = await events();
+    expect(rows.map((r) => r.hook)).toEqual(['prompt', 'prompt']);
+    expect(rows[0]!.data).toEqual({
+      event: 'UserPromptSubmit',
+      query: 'yes, do that',
+      // The lead's own turn, so the agent field is null rather than absent: a
+      // reader has to tell "the lead" from "a build that recorded nobody".
+      agentId: null,
+      skipped: 'short',
+    });
+    expect(rows[1]!.data).toMatchObject({ event: 'UserPromptSubmit', skipped: 'slash' });
+  });
+
+  it('opens one event row for a looked-up prompt, not two', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).not.toHaveProperty('skipped');
+    expect((await ledger())[0]).toMatchObject({ trigger: 'prompt', action: 'injected' });
   });
 
   it('reads the older user_input spelling too', async () => {
@@ -1329,25 +1464,37 @@ describe('the failure arm (PostToolUse Bash)', () => {
       },
     });
 
-  it('names the package the failure was about, then never asks twice', async () => {
-    const { baseUrl, hits, queries } = await serve(echo());
+  /**
+   * THE ERROR NEVER LEAVES THE MACHINE (tenjin-agent#212). This arm used to
+   * send the scrubbed error tail to `/api/search`; two machines' worth of rows
+   * said every hit was an unrelated note at `confidence: low`. Now a failure
+   * this machine has not paired writes its event row — signature, files, the
+   * scrubbed line — and exits, with no request and no injection row. The team
+   * shelf is asked by fingerprint in the following PR.
+   */
+  it('records the failure once, on the machine, and asks nothing', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
 
     const first = await runScript(pushFailureHookScript(dataDir), failure());
-    expect(injected(first)).toContain(BODY_MD);
-    expect(queries()[0]).toContain('left-pad');
-    const askedOnce = hits();
+    expect(first.code).toBe(0);
+    expect(first.stdout).toBe('');
+    expect(hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
 
     // The same command re-run is the same problem. Both PostToolUse and
     // PostToolUseFailure can fire for one failure, too.
     const second = await runScript(pushFailureHookScript(dataDir), failure());
     expect(second.stdout).toBe('');
-    expect(hits()).toBe(askedOnce);
-    expect(await ledger()).toHaveLength(1);
+    expect(hits()).toBe(0);
+    const rows = (await events()).filter((e) => e.hook === 'failure');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.data).toMatchObject({ event: 'PostToolUse', command: 'pnpm install left-pad' });
+    expect(String(rows[0]!.data.error)).toContain('left-pad');
   });
 
   it('reads the top-level error string of a PostToolUseFailure', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1362,14 +1509,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
         error: "Exit code 1\nTypeError: Cannot find module 'left-pad' from the vitest resolver",
       }),
     );
-    expect(queries()[0]).toContain('left-pad');
-    expect((await ledger())[0]).toMatchObject({
-      trigger: 'failure',
-      event: 'PostToolUseFailure',
-      action: 'injected',
-      agentId: 'agent-7',
-    });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(run.code).toBe(0);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.data).toMatchObject({ event: 'PostToolUseFailure', agentId: 'agent-7' });
+    expect(String(row?.data.error)).toContain('left-pad');
   });
 
   /**
@@ -1379,7 +1523,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * harness it ships against.
    */
   it('reads a failure the runner printed to stdout with no exit code', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1397,8 +1541,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    expect(queries()[0] ?? '').toContain('left-pad');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('left-pad');
   });
 
   it('stays out of the way of a command that printed nothing wrong', async () => {
@@ -1420,16 +1565,47 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   /**
+   * A pass is the other half of the mechanical lane, and it now leaves a row of
+   * its own: "fail → edit → the same head passes" is the sequence the
+   * importance score reads, and a pass that closed nothing used to be
+   * invisible to it.
+   */
+  it('writes a pass row, with the head, when an allowlisted command succeeds', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'cd /x && pnpm test' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(hits()).toBe(0);
+    const rows = await events();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ hook: 'pass', tool: 'Bash', error_hash: null });
+    expect(rows[0]!.data).toEqual({
+      event: 'PostToolUse',
+      command: 'cd /x && pnpm test',
+      head: 'pnpm',
+      agentId: null,
+    });
+  });
+
+  /**
    * An auth failure is the failure this arm fires on most often, so the token in
    * it is the common case and not the edge. Nothing credential-shaped may reach
-   * the wire, and nothing credential-shaped may reach the ledger either: the
-   * ledger row carries the same string the request did.
+   * the store: the event row is read back into a later session's context by the
+   * status and score reports, and a pairing's error line is replayed verbatim.
    *
    * Behind `pnpm publish`, whose git preflight is where this wording comes from:
-   * a bare `git push` is no longer a head this arm fires behind at all.
+   * a bare `git push` is not a head this arm fires behind at all.
    */
-  it('strips the credential out of an auth failure before it leaves the machine', async () => {
-    const { baseUrl, queries } = await serve(echo());
+  it('strips the credential out of an auth failure before it is stored', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1443,12 +1619,11 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    const sent = queries()[0] ?? '';
-    expect(sent).toContain('Authentication');
-    expect(sent).not.toContain('ghp_');
-    expect(sent).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
-    const rows = await ledger();
-    expect(String(rows[0]!.query)).not.toContain('ghp_');
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('Authentication');
+    expect(stored).not.toContain('ghp_');
+    expect(stored).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
   });
 
   /**
@@ -1462,7 +1637,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
    * where the sidecar would actually meet this string.
    */
   it('strips a standard-base64 secret, slashes and all', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
     const run = await runScript(
@@ -1476,13 +1651,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    const sent = queries()[0] ?? '';
-    expect(sent).toContain('SignatureDoesNotMatch');
-    expect(sent).not.toContain(secret);
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('SignatureDoesNotMatch');
+    expect(stored).not.toContain(secret);
     // Not merely split on the slashes: no run of it survives either.
-    expect(sent).not.toContain('wJalrXUtnFEMI');
-    expect(sent).not.toContain('bPxRfiCYEXAMPLEKEY');
-    expect(String((await ledger())[0]!.query)).not.toContain('wJalrXUtnFEMI');
+    expect(stored).not.toContain('wJalrXUtnFEMI');
+    expect(stored).not.toContain('bPxRfiCYEXAMPLEKEY');
   });
 
   /**
@@ -1514,6 +1689,18 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(await ledger()).toEqual([]);
   }
 
+  /** Silent before the store is even opened: the head check ran and refused. */
+  async function expectNoStore(stdin: string): Promise<void> {
+    const run = await runScript(pushFailureHookScript(dataDir), stdin);
+    expect(run.code).toBe(0);
+    expect(run.stdout).toBe('');
+    expect(existsSync(join(dataDir, STATE_DB_FILE))).toBe(false);
+  }
+
+  /** A traceback with a real frame, so the signature clears the floor. */
+  const TRACEBACK =
+    "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+
   /**
    * The fire that started this: `which codex` says "codex not found" on stderr,
    * which is the command working, and the old word-bag rule injected an
@@ -1531,8 +1718,115 @@ describe('the failure arm (PostToolUse Bash)', () => {
     await expectQuiet(bash('grep -r foo src', { stdout: '', stderr: '', exit_code: 1 }), hits);
   });
 
+  /**
+   * THE ALLOWLIST TABLE (tenjin-agent#212). Every pairing on record — 14 rows,
+   * two machines — had been opened by `git show … | grep ENOENT` or
+   * `sed -n` over source that MENTIONS an errno, because `git` was a head.
+   * `python3 -c` and `node -e` are the other shape: the agent evaluating an
+   * expression, whose traceback names `<string>` and whose fix is a different
+   * expression, never a repo file.
+   */
+  it('no longer fires behind git, however fatal the output', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await expectNoStore(
+      bash('git push origin main', { stdout: '', stderr: 'fatal: Authentication failed' }),
+    );
+    await expectNoStore(
+      bash('git show HEAD:src/a.ts | grep ENOENT', { stdout: TRACEBACK, stderr: '' }),
+    );
+  });
+
+  it('fires behind a runtime only when it runs a file', async () => {
+    await pushOn('http://127.0.0.1:1');
+    for (const command of [
+      'python3 -c "import x"',
+      'node -e "require(1)"',
+      'python3 -',
+      'node',
+      'python3 -m',
+      'python3 -m http.server',
+      'node --version',
+    ]) {
+      await expectNoStore(bash(command, { stdout: '', stderr: TRACEBACK }));
+    }
+    // ... or its own test runner: `python3 -m pytest` is the most common
+    // Python test spelling, and it is a pytest invocation, so the pairing keys
+    // on `pytest` and a later bare `pytest` pass closes it.
+    for (const command of [
+      'python3 script.py',
+      'node dist/index.js',
+      'python3 -m pytest tests/',
+      'python -m unittest discover',
+      'node --test',
+      'deno test',
+    ]) {
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: `runtime-${command.length}`,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command },
+          tool_response: { stdout: '', stderr: TRACEBACK, interrupted: false },
+        }),
+      );
+    }
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(6);
+    expect((await pairings()).map((p) => p.cmd_head)).toEqual([
+      'python3',
+      'node',
+      'pytest',
+      'unittest',
+      'node',
+      'deno',
+    ]);
+  });
+
+  it('never opens a pairing whose error named no file, or only <string>/<stdin>', async () => {
+    await pushOn('http://127.0.0.1:1');
+    const evaluated =
+      'Traceback (most recent call last):\n  File "<string>", line 1, in <module>\nModuleNotFoundError: No module named \'httpx\'';
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 run.py', { stdout: '', stderr: evaluated }),
+    );
+    const piped =
+      'Traceback (most recent call last):\n  File "<stdin>", line 1, in <module>\nModuleNotFoundError: No module named \'requests\'';
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('python3 other.py', { stdout: '', stderr: piped }),
+    );
+    // An errno with no frame: over the floor for a signature, but nothing a
+    // later edit could ever be matched against.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm db:migrate', { stdout: '', stderr: 'Error: ECONNREFUSED 127.0.0.1:5432' }),
+    );
+    const rows = (await events()).filter((e) => e.hook === 'failure');
+    expect(rows).toHaveLength(3);
+    // The rows still carry the signature: the failure happened, and the score
+    // and the team leg (following PR) both key on it.
+    for (const row of rows) expect(row.error_hash).toMatch(/^[0-9a-f]+$/);
+    expect(rows.map((r) => r.files)).toEqual([[], [], []]);
+    expect(await pairings()).toEqual([]);
+  });
+
+  it('stamps the pairing key on the failure row as error_hash', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash('pnpm db:migrate', { stdout: '', stderr: TRACEBACK }),
+    );
+    const row = (await events()).find((e) => e.hook === 'failure');
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(row?.error_hash).toBe(opened[0]!.key);
+    expect(row?.files).toEqual(['migrate.ts']);
+    expect(opened[0]!.error_files).toEqual(['migrate.ts']);
+  });
+
   it('reaches the command behind a wrapper with options', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     for (const command of [
       'sudo -u builder pnpm test',
@@ -1558,9 +1852,9 @@ describe('the failure arm (PostToolUse Bash)', () => {
         }),
       );
       expect(run.code).toBe(0);
-      expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
     }
-    expect(queries().length).toBe(6);
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(6);
+    expect(hits()).toBe(0);
   });
 
   it('does not let an argument authorize a command behind a wrapper either', async () => {
@@ -1589,6 +1883,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
     }
     expect(hits()).toBe(0);
     expect(await ledger()).toEqual([]);
+    expect(await events()).toEqual([]);
   });
 
   it('does not let an argument authorize an ordinary command', async () => {
@@ -1609,7 +1904,7 @@ describe('the failure arm (PostToolUse Bash)', () => {
   });
 
   it('fires on a rustc diagnostic, which only rustc emits', async () => {
-    const { baseUrl } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const run = await runScript(
       pushFailureHookScript(dataDir),
@@ -1626,9 +1921,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       }),
     );
     expect(run.code).toBe(0);
-    expect((await ledger()).at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.error_hash).toMatch(/^[0-9a-f]+$/);
+    expect((await pairings())[0]).toMatchObject({ cmd_head: 'rustc', error_files: ['main.rs'] });
   });
 
+  /** Not a head at all any more, so the exit code is never even read. */
   it('says nothing about `git diff --exit-code` reporting a difference', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
@@ -1676,12 +1975,13 @@ describe('the failure arm (PostToolUse Bash)', () => {
       'ok\n'.repeat(2000) +
       'Test Files  12 passed (12)\nTests  204 passed (204)\n';
     await expectQuiet(bash('pnpm vitest run', { stdout: noisy, stderr: '' }), hits);
+    expect((await events()).map((e) => e.hook)).toEqual(['pass']);
   });
 
   it('fires on a chained head, reading the failure from the second command', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('cd /x && pnpm test', {
         stdout:
@@ -1689,30 +1989,32 @@ describe('the failure arm (PostToolUse Bash)', () => {
         stderr: '',
       }),
     );
-    expect(queries()[0] ?? '').toContain('AssertionError');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('AssertionError');
+    expect(row?.data.command).toBe('cd /x && pnpm test');
   });
 
   it('fires on a tsc diagnostic run through `pnpm exec`', async () => {
-    const { baseUrl, queries } = await serve(echo());
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('pnpm exec tsc --noEmit', {
         stdout: "src/a.ts(3,1): error TS2322: Type 'string' is not assignable to type 'number'",
         stderr: '',
       }),
     );
-    expect(queries()[0] ?? '').toContain('TS2322');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('TS2322');
+    expect((await pairings())[0]).toMatchObject({ cmd_head: 'tsc', error_files: ['a.ts'] });
   });
 
-  it('fires on a python traceback and names the module it could not import', async () => {
-    const { baseUrl, queries } = await serve(echo());
+  it('fires on a python traceback and keys the pairing on the script', async () => {
+    const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
-    const run = await runScript(
+    await runScript(
       pushFailureHookScript(dataDir),
       bash('python3 script.py', {
         stdout: '',
@@ -1720,9 +2022,568 @@ describe('the failure arm (PostToolUse Bash)', () => {
           'Traceback (most recent call last):\n  File "script.py", line 3, in <module>\n    import httpx\nModuleNotFoundError: No module named \'httpx\'',
       }),
     );
-    expect(queries()[0] ?? '').toContain('httpx');
-    expect((await ledger())[0]).toMatchObject({ trigger: 'failure', action: 'injected' });
-    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBe(0);
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(String(row?.data.error)).toContain('httpx');
+    expect((await pairings())[0]).toMatchObject({
+      cmd_head: 'python3',
+      error_files: ['script.py'],
+    });
+  });
+});
+
+/**
+ * THE TEAM LEG (tenjin-agent#212, PR B): after a local miss the failure arm asks
+ * the TEAM shelf, and only it, by fingerprint through `POST /api/keys/resolve`.
+ * Two hashes on the wire and nothing else about the error; a miss asks nothing
+ * further; the response is the search envelope (`items`, not `candidates`).
+ *
+ * Every case runs in team mode against two stubs, so "the public shelf was
+ * never asked" is asserted rather than assumed.
+ */
+describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
+  const TEAM_POST_ID = '55555555-5555-4555-8555-555555555555';
+  const TEAM_FIX_MD =
+    'Fix: pnpm — ENOENT. Edited drizzle.config.ts, passed on pnpm db:migrate. pkg: drizzle-kit@0.31.0';
+  const ENOENT =
+    "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+  /** A different signature, so the once-per-session claim does not swallow it. */
+  const EADDR =
+    'Error: listen EADDRINUSE: address already in use :::3000\n    at Server.setupListenHandle (/repo/one/src/server.ts:40:8)\n';
+
+  const failing = (command: string, stderr: string, over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/one',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_response: { stdout: '', stderr, interrupted: false, isImage: false },
+      ...over,
+    });
+  const passing = (command: string, over: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/one',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command },
+      tool_response: { stdout: 'ok\n', stderr: '', interrupted: false, isImage: false },
+      ...over,
+    });
+  const edit = (path: string): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/one',
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: path },
+    });
+
+  interface ResolveBody {
+    keys: { kind: string; key: string }[];
+    trigger?: string;
+    limit?: number;
+  }
+
+  /**
+   * A team shelf whose resolve answers by status: 200 with one post (rank 1
+   * carries the server's own descriptive fields), 200 with nothing, or an
+   * error code. The free-body GET answers `bodyMd`. Every resolve body is kept.
+   */
+  function resolveStub(
+    answer: 'hit' | 'miss' | number,
+    bodyMd = TEAM_FIX_MD,
+  ): { bodies: ResolveBody[]; handler: (req: StubRequest) => { status: number; json: unknown } } {
+    const bodies: ResolveBody[] = [];
+    return {
+      bodies,
+      handler: (req) => {
+        if (req.url.startsWith('/api/keys/resolve')) {
+          bodies.push(JSON.parse(req.body) as ResolveBody);
+          if (typeof answer === 'number') return { status: answer, json: { error: 'not_enabled' } };
+          if (answer === 'miss') {
+            return {
+              status: 200,
+              json: {
+                schemaVersion: 3,
+                searchId: SEARCH_ID,
+                calibration: 'key-v1',
+                items: [],
+                matched: 0,
+                hint: 'No piece carries any of these keys.',
+              },
+            };
+          }
+          return {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              calibration: 'key-v1',
+              items: [
+                {
+                  resourceId: TEAM_POST_ID,
+                  url: `${req.base}/@team/fix`,
+                  title: 'Fix: pnpm — ENOENT',
+                  price: '0',
+                  excerpt: '',
+                  creator: { handle: 'teammate' },
+                  confidence: 'high',
+                  corroborated: true,
+                },
+              ],
+              matched: 1,
+            },
+          };
+        }
+        if (req.url.startsWith('/api/search')) {
+          return { status: 200, json: { schemaVersion: 3, searchId: SEARCH_ID, items: [] } };
+        }
+        return { status: 200, json: { bodyMd } };
+      },
+    };
+  }
+
+  /** The body between the fences of a full-form injection. */
+  function fenced(text: string): string {
+    const m = /--- tenjin-body \S+ ---\n([\s\S]*?)\n--- tenjin-body \S+ ---/.exec(text);
+    return m === null ? '' : m[1]!;
+  }
+
+  it('sends exactly two fingerprint keys, and shows the teammate record on a hit', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.code).toBe(0);
+    const text = injected(run);
+    expect(text).not.toBeNull();
+    expect(text).toContain(
+      "Tenjin sidecar (team shelf): a teammate's machine has seen this failure fixed",
+    );
+    expect(text).toContain('not instructions');
+    expect(fenced(text ?? '')).toBe(TEAM_FIX_MD);
+
+    // THE WIRE: two keys, both fingerprints, the failure's own trigger, limit
+    // 3. No command_head, no repo, no error text, no package anywhere in it.
+    expect(stub.bodies).toHaveLength(1);
+    const body = stub.bodies[0]!;
+    expect(body.trigger).toBe('failure');
+    expect(body.limit).toBe(3);
+    expect(body.keys.map((k) => k.kind)).toEqual(['fingerprint', 'fingerprint']);
+    expect(body.keys[0]!.key).toMatch(/^sig_v1:[0-9a-f]{16}$/);
+    expect(body.keys[1]!.key).toMatch(/^sig_v1c:[0-9a-f]{16}$/);
+    expect(JSON.stringify(body)).not.toMatch(/command_head|ENOENT|drizzle|migrate|pnpm/);
+    // No text search ran on either shelf, and the public one was never touched.
+    expect(team.queries()).toEqual([]);
+    expect(pub.hits()).toBe(0);
+    // The body GET carried the door key: same origin as the team shelf.
+    expect(team.headers().every((h) => h['x-vercel-protection-bypass'] === SECRET)).toBe(true);
+
+    // The row: shelf team, reason key-match, strong without judge(), the
+    // server's own fields recorded as telemetry, the searchId on the row.
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      trigger: 'failure',
+      shelf: 'team',
+      action: 'injected',
+      reason: 'key-match',
+      strength: 'strong',
+      form: 'full',
+      searchId: SEARCH_ID,
+      confidence: 'high',
+      corroborated: true,
+      candidate: { resourceId: TEAM_POST_ID },
+    });
+
+    // AND A LOCAL PAIRING, linked to the post, remembered behind the head, so
+    // this machine's later pass can close it as the second independent close.
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(opened[0]).toMatchObject({ status: 'open', cmd_head: 'pnpm' });
+    expect(opened[0]!.key).toBe(body.keys[0]!.key.slice('sig_v1:'.length));
+    // AGENT-SCOPED AND A LIST (#242): no `agent_id` on the fire is the lead's
+    // own bucket, '', so the key is `replayed:<agent>:<head>` with an empty
+    // middle segment, and the value is the array of ids shown behind that head.
+    expect(sessionState(SESSION, 'replayed::pnpm')).toEqual([opened[0]!.id]);
+    expect(sessionState('', `pairing_post:${opened[0]!.id}`)).toMatchObject({
+      postId: TEAM_POST_ID,
+      origin: team.baseUrl,
+    });
+  });
+
+  it('caps the record at the pairing body size, whatever the post holds', async () => {
+    const long = 'x'.repeat(50) + ' ' + 'edited many files. '.repeat(200);
+    const stub = resolveStub('hit', long);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    const body = fenced(injected(run) ?? '');
+    expect(body.length).toBeGreaterThan(0);
+    expect(body.length).toBeLessThanOrEqual(600);
+  });
+
+  it('opens a pairing on a team hit even when the error named no file', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // An errno with no frame: over the floor for a signature, but nothing a
+    // later edit could match — locally that opens nothing (PR A). A team hit
+    // is evidence enough: the same-command branch of the close rule remains.
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', 'Error: ECONNREFUSED 127.0.0.1:5432'),
+    );
+    expect(injected(run)).not.toBeNull();
+    // Both keys still go: what this error lacks is a frame, and the coarse
+    // key needs only the errno.
+    expect(stub.bodies[0]!.keys).toHaveLength(2);
+    const opened = await pairings();
+    expect(opened).toHaveLength(1);
+    expect(opened[0]!.error_files).toEqual([]);
+    expect(sessionState('', `pairing_post:${opened[0]!.id}`)).toMatchObject({
+      postId: TEAM_POST_ID,
+    });
+  });
+
+  it('cools like every other arm: a cold `failure` rate stops the team leg as lookup-cap', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // What the primer stored for THIS session: failure is cold (≥ 20 hits,
+    // < 5% used), so its cap is floor(8/3) = 2 — and two failure lookups are
+    // already spent on the machine, by another session.
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.setState, [
+      SESSION,
+      'trigger_rates',
+      JSON.stringify({
+        at: Date.now(),
+        days: 7,
+        triggers: { failure: { hits: 30, used: 1, wrong: 29 } },
+      }),
+      Date.now(),
+    ]);
+    for (let i = 0; i < 2; i += 1) {
+      store?.run(STORE_SQL.insertInjection, [
+        `seed-failure-${i}`,
+        null,
+        Date.now(),
+        'sess-someone-else',
+        null,
+        'machine',
+        'failure',
+        'team',
+        null,
+        null,
+        null,
+        null,
+        SEARCH_ID,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'skipped',
+        'miss',
+        null,
+        0,
+        null,
+      ]);
+    }
+    store?.close();
+
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.stdout).toBe('');
+    expect(stub.bodies).toHaveLength(0);
+    expect(team.hits()).toBe(0);
+    const rows = (await ledger()).filter((r) => r.session === SESSION);
+    expect(rows.at(-1)).toMatchObject({
+      trigger: 'failure',
+      shelf: 'team',
+      action: 'skipped',
+      reason: 'lookup-cap',
+    });
+    // The suppressed fire is counted under THIS session, per trigger.
+    expect(sessionState(SESSION, 'cooldown:failure')).toBe(1);
+  });
+
+  it('records a miss with its searchId and asks nothing else', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.stdout).toBe('');
+    expect(stub.bodies).toHaveLength(1);
+    // ONE request: the resolve. No text search, no body, no public leg.
+    expect(team.hits()).toBe(1);
+    expect(pub.hits()).toBe(0);
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    // The searchId is on the miss: bucketCount counts rows that carry one, so
+    // a miss without it would be a free lookup.
+    expect(rows[0]).toMatchObject({
+      trigger: 'failure',
+      shelf: 'team',
+      action: 'skipped',
+      reason: 'miss',
+      searchId: SEARCH_ID,
+    });
+    expect(rows[0]!.candidate).toBeNull();
+    // The local pairing PR A opens on a file-naming error is still there.
+    expect(await pairings()).toHaveLength(1);
+  });
+
+  it('reads a 404 as keys-off, caches it machine-wide, and builds no streak', async () => {
+    const stub = resolveStub(404);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(stub.bodies).toHaveLength(1);
+    // The SECOND failure, a different signature and a different session, makes
+    // no request at all: the fact is about the deployment, not the session.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm dev', EADDR, { session_id: 'sess-2' }),
+    );
+    expect(stub.bodies).toHaveLength(1);
+    expect(team.hits()).toBe(1);
+    expect(pub.hits()).toBe(0);
+
+    const rows = await ledger();
+    expect(rows.map((r) => [r.session, r.reason])).toEqual([
+      [SESSION, 'keys-off'],
+      ['sess-2', 'keys-off'],
+    ]);
+    expect(rows.every((r) => r.shelf === 'team' && r.action === 'skipped')).toBe(true);
+    // Held under the machine session, keyed by origin, as an expiry ~6h out.
+    const until = sessionState('', `keys_off:${team.baseUrl}`);
+    expect(typeof until).toBe('number');
+    expect(Number(until) - Date.now()).toBeGreaterThan(5 * 60 * 60 * 1000);
+    expect(Number(until) - Date.now()).toBeLessThanOrEqual(6 * 60 * 60 * 1000);
+    // Not an outage: no `no-answer` row, so the brake is untouched.
+    expect(rows.some((r) => r.reason === 'no-answer')).toBe(false);
+  });
+
+  it('asks again once the keys-off hold has expired', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // A hold written by an earlier fire, already in the past.
+    const store = await openStore(dataDir);
+    store?.run(STORE_SQL.setState, [
+      '',
+      `keys_off:${team.baseUrl}`,
+      JSON.stringify(Date.now() - 1000),
+      Date.now(),
+    ]);
+    store?.close();
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(stub.bodies).toHaveLength(1);
+    expect((await ledger())[0]).toMatchObject({ reason: 'miss' });
+  });
+
+  it('reads a refused bypass as no-answer, which the outage brake counts', async () => {
+    const stub = resolveStub(401);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm dev', EADDR));
+    // Two unanswered in a row is the brake (PUSH_FAILURE_STOP): the third
+    // fire is `quiet` and makes no request.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failing(
+        'pnpm test',
+        'Error: EPERM: operation not permitted, unlink\n    at rm (/repo/one/src/clean.ts:3:1)\n',
+      ),
+    );
+    expect(stub.bodies).toHaveLength(2);
+    expect(pub.hits()).toBe(0);
+    expect((await ledger()).map((r) => r.reason)).toEqual(['no-answer', 'no-answer', 'quiet']);
+    // Not cached as keys-off: a 401 is not "keys are off here".
+    expect(sessionState('', `keys_off:${team.baseUrl}`)).toBeNull();
+  });
+
+  it('never asks the shelf when this machine already holds the fix', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    // Session 1 closes a pairing locally, in public mode, so the store holds
+    // an unverified fix before the team shelf is ever reachable.
+    await pushOn('http://127.0.0.1:1');
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified' });
+
+    await teamMode(team, pub);
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT, { session_id: 'sess-2' }),
+    );
+    expect(injected(run)).toContain('Tenjin sidecar (local)');
+    expect(stub.bodies).toHaveLength(0);
+    expect(team.hits()).toBe(0);
+    expect((await ledger()).map((r) => r.shelf)).toEqual(['local']);
+  });
+
+  it('asks nothing in public mode', async () => {
+    const stub = resolveStub('hit');
+    const shelf = await serve(stub.handler);
+    await pushOn(shelf.baseUrl);
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    expect(run.stdout).toBe('');
+    expect(shelf.hits()).toBe(0);
+    expect(await ledger()).toEqual([]);
+  });
+
+  /**
+   * The coarse key on the wire is salted with the repo's origin url, read from
+   * `.git/config` by a file read; the local one is not. Without the salt an
+   * `ERR_PNPM_OUTDATED_LOCKFILE`-class message would match a fix from any repo
+   * the team has.
+   */
+  it('salts the coarse key with the origin url, and only on the wire', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const repoA = join(dataDir, 'repo-a');
+    const repoB = join(dataDir, 'repo-b');
+    const repoC = join(dataDir, 'repo-c');
+    for (const [dir, origin] of [
+      [repoA, 'git@github.com:acme/api.git'],
+      [repoB, 'git@github.com:acme/web.git'],
+      [repoC, 'git@github.com:acme/api.git'],
+    ] as const) {
+      await mkdir(join(dir, '.git'), { recursive: true });
+      await writeFile(
+        join(dir, '.git', 'config'),
+        `[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = ${origin}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "main"]\n\tremote = origin\n`,
+      );
+    }
+    // Fired from a subdirectory: the config is found by walking up.
+    await mkdir(join(repoA, 'src'), { recursive: true });
+    const fire = (cwd: string, session: string): Promise<HookRun> =>
+      runScript(
+        pushFailureHookScript(dataDir),
+        failing('pnpm db:migrate', ENOENT, { cwd, session_id: session }),
+      );
+    await fire(join(repoA, 'src'), 's-a');
+    await fire(repoB, 's-b');
+    await fire(repoC, 's-c');
+    expect(stub.bodies).toHaveLength(3);
+    const fine = stub.bodies.map((b) => b.keys[0]!.key);
+    const coarse = stub.bodies.map((b) => b.keys[1]!.key);
+    // Same failure, same fine key everywhere: the fine key carries no salt.
+    expect(new Set(fine).size).toBe(1);
+    // The coarse key differs between repos and agrees between two checkouts
+    // of the same one.
+    expect(coarse[0]).not.toBe(coarse[1]);
+    expect(coarse[0]).toBe(coarse[2]);
+    // And the LOCAL coarse key is unsalted: the same in every checkout, and
+    // never the one that went on the wire.
+    const local = (await pairings()).map((p) => String(p.coarse_key));
+    expect(new Set(local).size).toBe(1);
+    expect(coarse.map((k) => k.slice('sig_v1c:'.length))).not.toContain(local[0]);
+    // THE HOOK'S INLINE COPY EQUALS THE TS EXPORT `tenjin sync` publishes with:
+    // salt over the stored coarse hash, not the raw message. A drift here would
+    // make every resolve query miss every synced post, silently.
+    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'));
+    expect(coarse[1]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/web.git'));
+    expect((await pairings()).map((p) => String(p.key))).toEqual(
+      fine.map((k) => k.slice('sig_v1:'.length)),
+    );
+  });
+
+  it('reads a worktree checkout through its gitdir to the shared config', async () => {
+    const stub = resolveStub('miss');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const main = join(dataDir, 'main');
+    const wt = join(dataDir, 'wt');
+    await mkdir(join(main, '.git', 'worktrees', 'wt'), { recursive: true });
+    await mkdir(wt, { recursive: true });
+    await writeFile(
+      join(main, '.git', 'config'),
+      '[remote "origin"]\n\turl = https://github.com/acme/api.git\n',
+    );
+    await writeFile(join(main, '.git', 'worktrees', 'wt', 'commondir'), '../..\n');
+    await writeFile(join(wt, '.git'), `gitdir: ${join(main, '.git', 'worktrees', 'wt')}\n`);
+    // No .git/config at all: an unsalted-by-absence coarse key, to compare.
+    const bare = join(dataDir, 'bare');
+    await mkdir(bare, { recursive: true });
+
+    const fire = (cwd: string, session: string): Promise<HookRun> =>
+      runScript(
+        pushFailureHookScript(dataDir),
+        failing('pnpm db:migrate', ENOENT, { cwd, session_id: session }),
+      );
+    await fire(main, 's-main');
+    await fire(wt, 's-wt');
+    await fire(bare, 's-bare');
+    const coarse = stub.bodies.map((b) => b.keys[1]!.key);
+    expect(coarse[0]).toBe(coarse[1]);
+    expect(coarse[2]).not.toBe(coarse[0]);
+  });
+
+  it("marks the linked post on this machine's own close, for sync to verify", async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    const [opened] = await pairings();
+    const key = `pairing_post:${opened!.id}`;
+    expect(sessionState('', key)).not.toHaveProperty('closedAt');
+
+    // This machine fixes it: the file the error named changes, the head passes.
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+    expect(sessionState('', key)).toMatchObject({
+      postId: TEAM_POST_ID,
+      origin: team.baseUrl,
+      status: 'unverified',
+      fixFiles: ['migrate.ts'],
+    });
+    expect(typeof (sessionState('', key) as { closedAt?: unknown }).closedAt).toBe('number');
+    // The close made no request of its own: the shelf has no close endpoint.
+    expect(stub.bodies).toHaveLength(1);
+  });
+
+  it('does not hand the same post to a session twice', async () => {
+    const stub = resolveStub('hit');
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const first = await runScript(
+      pushFailureHookScript(dataDir),
+      failing('pnpm db:migrate', ENOENT),
+    );
+    expect(injected(first)).not.toBeNull();
+    // A different signature that resolves to the same post (the coarse key).
+    const second = await runScript(pushFailureHookScript(dataDir), failing('pnpm dev', EADDR));
+    expect(second.stdout).toBe('');
+    expect((await ledger()).map((r) => [r.action, r.reason])).toEqual([
+      ['injected', 'key-match'],
+      ['skipped', 'already-injected'],
+    ]);
   });
 });
 
@@ -1737,83 +2598,205 @@ describe('the failure arm (PostToolUse Bash)', () => {
  * with. That is the point of the machine-wide count: the arm under test has
  * spent nothing of its own, and must still be stopped by what the machine spent.
  */
+/**
+ * PARALLEL SUBAGENTS ARE ONE SESSION ID. Claude Code hands every child of a
+ * session the parent's `session_id` and tells them apart only by `agent_id`, so
+ * anything the store keys by session alone answers "did SOMEBODY in this fan-out
+ * do this" when the question was always "did THIS worker do this".
+ */
+describe('the arms tell an agent from a session', () => {
+  const AGENT = 'a1';
+
+  const bash = (over: Record<string, unknown>): string =>
+    JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      ...over,
+    });
+
+  const failing = (agent?: string): string =>
+    bash({
+      ...(agent === undefined ? {} : { agent_id: agent }),
+      tool_input: { command: 'pnpm install left-pad' },
+      tool_response: {
+        stdout: '',
+        stderr: "Error: Cannot find module 'left-pad' required by the vitest resolver",
+        exit_code: 1,
+        interrupted: false,
+      },
+    });
+
+  /**
+   * The importance score (#212, CommonTrace `detection.py`) reads fail → edit →
+   * pass out of these rows, and that sequence is a claim about ONE agent: with
+   * nothing but a shared session id on the row it stitched one subagent's
+   * failure to a second's edit and a third's pass and called the result a fix.
+   */
+  it('stamps the firing agent on the edit, failure and pass rows', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        agent_id: AGENT,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: join(scriptDir, 'resolver.ts') },
+      }),
+    );
+    await runScript(pushFailureHookScript(dataDir), failing(AGENT));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      bash({
+        agent_id: AGENT,
+        tool_input: { command: 'pnpm test' },
+        tool_response: { stdout: 'Tests  204 passed (204)', stderr: '', interrupted: false },
+      }),
+    );
+    expect(hits()).toBe(0);
+
+    const rows = await events();
+    expect(rows.map((r) => r.hook)).toEqual(['edit', 'failure', 'pass']);
+    // The session is the PARENT's on all three — that is the whole problem —
+    // so `agentId` is the only field that says who did the work.
+    expect(rows.map((r) => r.session)).toEqual([SESSION, SESSION, SESSION]);
+    for (const row of rows) expect(row.data).toMatchObject({ agentId: AGENT });
+  });
+
+  /** The lead's own turn carries no `agent_id`, and records `null` rather than
+   *  dropping the field: a reader has to tell "the lead did this" from "this
+   *  build wrote no agent at all". */
+  it('records the lead as null, not as a missing field', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(pushFailureHookScript(dataDir), failing());
+    const row = (await events()).find((e) => e.hook === 'failure');
+    expect(row?.data).toMatchObject({ agentId: null });
+    expect(Object.keys(row?.data ?? {})).toContain('agentId');
+  });
+
+  /**
+   * THE QUIET CHILD. A signature is claimed once per SESSION — one problem is
+   * one problem, whoever ran into it — so the second agent to hit the same wall
+   * loses the claim and does no work. It used to exit with no row at all, which
+   * made the fire invisible: from the store it had never happened. But two
+   * agents hitting one wall is the strongest evidence there is that a finding
+   * would be worth publishing, so the loser records why it was quiet.
+   */
+  it('counts the second agent that hits the same failure signature', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const first = await runScript(pushFailureHookScript(dataDir), failing('a1'));
+    expect(first.stdout).toBe('');
+    // No row for the winner: it did the work, and found nothing to say.
+    expect(await ledger()).toEqual([]);
+
+    const second = await runScript(pushFailureHookScript(dataDir), failing('a2'));
+    expect(second.code).toBe(0);
+    expect(second.stdout).toBe('');
+    expect(hits()).toBe(0);
+
+    // One failure event row, because it is one failure...
+    expect((await events()).filter((e) => e.hook === 'failure')).toHaveLength(1);
+    // ...and one countable skip, on the shape `tenjin push status` tallies.
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      session: SESSION,
+      trigger: 'failure',
+      shelf: 'local',
+      action: 'skipped',
+      reason: 'already-claimed',
+    });
+  });
+});
+
 describe('what the arms put on the wire', () => {
   /**
-   * TWO NEW FIELDS ON EVERY HOOK LOOKUP. `trigger` names the arm, which is the
-   * only way the shelf's per-trigger stats can tell a prompt lookup from a
-   * churn one; `filters.appliesTo.packages` is the package the arm is actually
-   * about, sent as a FILTER instead of pasted in front of the query.
-   *
-   * ONE NAME, NEVER A LIST: the shelf ANDs every value it is given, so two names
-   * ask for a card claiming both.
+   * THE FAILURE ARM PUTS NOTHING ON THE WIRE (tenjin-agent#212). Every other arm
+   * here is checked for the shape of its request; this one is checked for the
+   * absence of one. The fuzzy `/api/search` leg it used to run on the error tail
+   * is gone — on two machines every hit it produced was an unrelated note at
+   * `confidence: low`, and the tail it sent is the string in the sidecar most
+   * likely to carry a credential or a path. So there is no `trigger: 'failure'`
+   * body to assert on, and the arm's own describe block proves the rest of what
+   * it does from local pairings alone. The team leg by fingerprint (`POST
+   * /api/keys/resolve`, two hashes) arrives in the following PR.
    */
-  it('sends trigger failure and the package the error named, not a joined query', async () => {
-    const { baseUrl, bodies, queries } = await serve(echo());
+  it('asks nothing at all on a failure, whatever the error names', async () => {
+    const { baseUrl, bodies, hits } = await serve(echo());
     await pushOn(baseUrl);
 
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm test' },
-        error: "Exit code 1\nError: Cannot find module 'zod' from the vitest resolver",
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({
-      trigger: 'failure',
-      filters: { appliesTo: { packages: ['zod'] } },
-    });
-    // The name is the filter now, so the query is the error line alone.
-    expect(queries()[0]).not.toMatch(/^zod /);
-    expect(queries()[0]).toContain('Cannot find module');
+    for (const error of [
+      "Exit code 1\nError: Cannot find module 'zod' from the vitest resolver",
+      'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
+      'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
+    ]) {
+      const run = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PostToolUseFailure',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test' },
+          error,
+        }),
+      );
+      expect(run.code).toBe(0);
+    }
+    expect(hits()).toBe(0);
+    expect(bodies()).toEqual([]);
   });
 
   /**
-   * NO NAME, NO FILTER — the case the joined query used to make harmless. The
-   * error text names no module and `pnpm test` names no package, so the only
-   * token left is the package manager itself. Sending it would ask the shelf
-   * for a card that claims `pnpm`, and `appliesTo` is a hard AND: the lookup
-   * could only ever miss.
+   * The package manager is not one of the packages. `packagesInCommand` used to
+   * return the head itself whenever the command named nothing else, so
+   * `npm install zod` read as ['npm', 'zod'] with the manager taking the first
+   * slot. On this branch the arm sends no filter, so the surface that shows it
+   * is the pairing's recorded `pkg_versions`: `pkgVersions` reads only the first
+   * two names, and a manager sitting in front would spend one of them on a
+   * version nobody will ever compare against.
    */
-  it('sends no filter when the failure names no package', async () => {
-    const { baseUrl, bodies } = await serve(echo());
-    await pushOn(baseUrl);
+  it('records the installed package on the pairing, never the package manager', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'tenjin-push-repo-'));
+    try {
+      await mkdir(join(repo, 'node_modules', 'zod'), { recursive: true });
+      await writeFile(
+        join(repo, 'node_modules', 'zod', 'package.json'),
+        JSON.stringify({ name: 'zod', version: '3.24.1' }),
+      );
+      await mkdir(join(repo, 'node_modules', 'npm'), { recursive: true });
+      await writeFile(
+        join(repo, 'node_modules', 'npm', 'package.json'),
+        JSON.stringify({ name: 'npm', version: '10.9.0' }),
+      );
 
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'pnpm test' },
-        error: 'Exit code 1\nAssertionError: expected 3 to deeply equal 4',
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({ trigger: 'failure' });
-    expect(bodies()[0]).not.toHaveProperty('filters');
-  });
+      const { baseUrl } = await serve(echo());
+      await pushOn(baseUrl);
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PostToolUseFailure',
+          tool_name: 'Bash',
+          cwd: repo,
+          tool_input: { command: 'npm install zod' },
+          error:
+            "Exit code 1\nError: Cannot find module 'zod'\n    at Object.<anonymous> (src/index.ts:3:1)",
+        }),
+      );
 
-  /** ...and the package an install names is the filter, not the manager. */
-  it('sends the installed package, not the package manager', async () => {
-    const { baseUrl, bodies } = await serve(echo());
-    await pushOn(baseUrl);
-
-    await runScript(
-      pushFailureHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PostToolUseFailure',
-        tool_name: 'Bash',
-        tool_input: { command: 'npm install zod' },
-        error: 'Exit code 1\nnpm error ERESOLVE unable to resolve dependency tree',
-      }),
-    );
-    expect(bodies()[0]).toMatchObject({
-      trigger: 'failure',
-      filters: { appliesTo: { packages: ['zod'] } },
-    });
+      const rows = await pairings();
+      expect(rows).toHaveLength(1);
+      const versions = JSON.parse(String(rows[0]?.pkg_versions)) as Record<string, string>;
+      expect(versions).toEqual({ zod: '3.24.1' });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 
   it('sends trigger prompt and no filter at all', async () => {
@@ -1865,18 +2848,6 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     session_id: SESSION,
     hook_event_name: 'UserPromptSubmit',
     prompt: QUESTION,
-  });
-  const failureInput = JSON.stringify({
-    session_id: SESSION,
-    hook_event_name: 'PostToolUse',
-    tool_name: 'Bash',
-    tool_input: { command: 'pnpm install left-pad' },
-    tool_response: {
-      stdout: '',
-      stderr: "Error: Cannot find module 'left-pad' required by the vitest resolver",
-      exit_code: 1,
-      interrupted: false,
-    },
   });
 
   /** `count` spent lookups on `trigger`, `ageMs` old, from another session. */
@@ -1941,7 +2912,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
    * and failures are the arm worth spending on, so one flat pool meant the
    * cheap arm spent the expensive arm's allowance in the opening minutes.
    */
-  it('leaves the failure bucket untouched when a prompt flood exhausts its own', async () => {
+  it('leaves the research bucket untouched when a prompt flood exhausts its own', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
     // Well past the prompt cap, and not by one: a flood does not get to bleed
@@ -1951,10 +2922,12 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     const blocked = await runScript(pushPromptHookScript(dataDir), promptInput);
     expect(blocked.stdout).toBe('');
 
-    const allowed = await runScript(pushFailureHookScript(dataDir), failureInput);
+    // The research arm is the other arm worth spending on now that the failure
+    // arm asks no shelf at all (it answers from local pairings; #212).
+    const allowed = await runScript(websearchHookScript(dataDir), webSearch(QUESTION));
     expect(injected(allowed)).toContain(BODY_MD);
     const rows = await ledger();
-    expect(rows.at(-1)).toMatchObject({ trigger: 'failure', action: 'injected' });
+    expect(rows.at(-1)).toMatchObject({ trigger: 'research', action: 'injected' });
   });
 
   it('refills the bucket once the spend rolls out of the window', async () => {
@@ -2027,6 +3000,232 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     expect(await ledger()).toContainEqual(
       expect.objectContaining({ session: 'sess-2', reason: 'lookup-cap' }),
     );
+  });
+
+  /**
+   * The adaptive cooldown (tenjin-agent#212, CommonTrace `retrieval.py`): the
+   * cap scales from the shelf's per-trigger use rates the primer stored under
+   * `trigger_rates`. Each branch against the real bytes, and the guard — the
+   * one that makes it safe to ship before anything grades — twice.
+   */
+  describe('the adaptive cooldown', () => {
+    /** What the primer would have stored for this session. */
+    async function seedRates(
+      triggers: Record<string, { hits: number; used: number; wrong: number }>,
+      session = SESSION,
+    ): Promise<void> {
+      const store = await openStore(dataDir);
+      store?.run(STORE_SQL.setState, [
+        session,
+        'trigger_rates',
+        JSON.stringify({ at: Date.now(), days: 7, triggers }),
+        Date.now(),
+      ]);
+      store?.close();
+    }
+
+    /** The same row, written as RAW JSON: `JSON.stringify` turns NaN and
+     *  Infinity into `null`, so a payload carrying either has to be spelled the
+     *  way a shelf would send it over the wire. */
+    async function seedRawRates(promptRow: string, session = SESSION): Promise<void> {
+      const store = await openStore(dataDir);
+      store?.run(STORE_SQL.setState, [
+        session,
+        'trigger_rates',
+        `{"at":${Date.now()},"days":7,"triggers":{"prompt":${promptRow}}}`,
+        Date.now(),
+      ]);
+      store?.close();
+    }
+
+    it('doubles the cap of an arm whose graded lookups were used at least 40% of the time', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
+      // Full under the base cap of 8, under 16 with the doubling.
+      await seedLookups('prompt', 8, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+    });
+
+    it('still stops at the doubled cap', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 10, used: 4, wrong: 6 } });
+      await seedLookups('prompt', 16, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+      expect((await ledger()).at(-1)).toMatchObject({ reason: 'lookup-cap' });
+    });
+
+    it('cuts a cold arm (≥ 20 hits, < 5% used) to a third of its cap', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      // 2 spent: under the base cap of 8, at the cooled cap of floor(8/3) = 2.
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+      expect((await ledger()).at(-1)).toMatchObject({
+        session: SESSION,
+        trigger: 'prompt',
+        action: 'skipped',
+        reason: 'lookup-cap',
+      });
+      // The suppressed fire was counted, per session and per trigger.
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBe(1);
+    });
+
+    it('lets every 10th suppressed fire of a cold arm through', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      await seedLookups('prompt', 2, 0);
+
+      for (let i = 1; i <= 9; i += 1) {
+        const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+        expect(run.stdout, `fire ${i}`).toBe('');
+      }
+      expect(hits()).toBe(0);
+      const tenth = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(tenth)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBe(10);
+      expect(
+        (await ledger()).filter((r) => r.session === SESSION && r.reason === 'lookup-cap'),
+      ).toHaveLength(9);
+    });
+
+    it('never passes a suppressed fire past the base cap', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      // Past the BASE cap: the escape is for fires only the cooled cap stops.
+      await seedLookups('prompt', 8, 0);
+
+      for (let i = 1; i <= 10; i += 1) {
+        expect((await runScript(pushPromptHookScript(dataDir), promptInput)).stdout).toBe('');
+      }
+      expect(hits()).toBe(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    /**
+     * THE GUARD. On day 1 the shelf reports hundreds of lookups and nothing
+     * graded — #210 has not posted an outcome yet — which without this reads as
+     * "cold" for every arm at once. A trigger with nothing graded keeps its cap.
+     */
+    it('changes nothing for a trigger with no graded outcome, however many hits', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 867, used: 0, wrong: 0 } });
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('keeps the base cap with no graded outcome: the base cap still stops it', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRates({ prompt: { hits: 867, used: 0, wrong: 0 } });
+      await seedLookups('prompt', 8, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(0);
+    });
+
+    it('reads only its own trigger and its own session', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // A cold `research` row does not cool `prompt`, and a cold `prompt` row
+      // under another session does not cool this one.
+      await seedRates({ research: { hits: 30, used: 1, wrong: 29 } });
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } }, 'sess-someone-else');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+    });
+
+    /**
+     * NOT-A-COUNT COUNTS. `trigger_rates` is JSON off a shelf's
+     * `/api/lookups/stats`, so its numbers are untrusted, and `typeof x ===
+     * 'number'` admits three that are not counts. JSON has no NaN or Infinity
+     * literal, but `1e999` parses to Infinity and Infinity + -Infinity is NaN,
+     * so both are reachable over the wire; a negative is reachable outright.
+     *
+     * Each is coerced to 0 — the answer a missing field already gets — rather
+     * than left to make every comparison below it false by accident. That
+     * accident happened to give the right answer for NaN and the WRONG one for
+     * Infinity, which read as a permanently cold arm.
+     */
+    it('reads an Infinity hit count as no count, not as a cold arm', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // 1e999 parses to Infinity, which is >= the 20-hit cold threshold, and
+      // the rate is 0: uncoerced this cools the cap to floor(8/3) = 2 and the
+      // fire below is suppressed.
+      await seedRawRates('{"hits":1e999,"used":0,"wrong":1}');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('keeps the base cap when the counts add up to NaN', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // Infinity + -Infinity: the guard's `used + wrong <= 0` is FALSE for NaN,
+      // so this walks past it, and every threshold below is false for the same
+      // reason. The cap must be base because the counts are not counts, not
+      // because NaN loses every comparison.
+      await seedRawRates('{"hits":30,"used":1e999,"wrong":-1e999}');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('keeps the base cap with negative counts', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      await seedRawRates('{"hits":-1,"used":-1,"wrong":-1}');
+      await seedLookups('prompt', 2, 0);
+
+      const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(run)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBeNull();
+    });
+
+    it('is inert with a malformed rates row', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      const store = await openStore(dataDir);
+      store?.run(STORE_SQL.setState, [SESSION, 'trigger_rates', '"not an object"', Date.now()]);
+      store?.close();
+      await seedLookups('prompt', 2, 0);
+
+      expect(injected(await runScript(pushPromptHookScript(dataDir), promptInput))).toContain(
+        BODY_MD,
+      );
+      expect(hits()).toBeGreaterThan(0);
+    });
   });
 });
 
@@ -2170,6 +3369,36 @@ describe('the subagent arm (SubagentStart)', () => {
 });
 
 describe('the context arm (log-only)', () => {
+  /**
+   * The upserted `edited:<path>` state row keeps only the LAST timestamp per
+   * path, so "the same file edited before and after a user turn" was
+   * uncomputable from it. One appended event per edit, basename only.
+   */
+  it('appends an edit row per Edit/Write, with the basename and nothing else', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const file = join(scriptDir, 'nested', 'drizzle.config.ts');
+    for (const tool of ['Edit', 'Write']) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name: 'PreToolUse',
+          tool_name: tool,
+          tool_input: { file_path: file },
+        }),
+      );
+    }
+    expect(hits()).toBe(0);
+    const rows = await events();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.tool)).toEqual(['Edit', 'Write']);
+    for (const row of rows) {
+      expect(row).toMatchObject({ hook: 'edit', files: ['drizzle.config.ts'], error_hash: null });
+      expect(JSON.stringify(row)).not.toContain('nested');
+    }
+  });
+
   it('logs the packages a Read named and says nothing to the model', async () => {
     const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
@@ -2266,18 +3495,140 @@ describe('the context arm (log-only)', () => {
 });
 
 describe('the SessionStart primer', () => {
+  const primerInput = JSON.stringify({
+    session_id: SESSION,
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+  });
+
   it('prints the primer and nothing else, and spawns nothing', async () => {
     await writeConfig({});
-    const run = await runScript(
-      sessionPrimerHookScript(dataDir),
-      JSON.stringify({ session_id: SESSION, hook_event_name: 'SessionStart', source: 'startup' }),
-    );
+    const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
     expect(run.code).toBe(0);
     expect(run.stderr).toBe('');
     expect(injected(run)).toBe(PRIMER_TEXT);
     // The team shelf is a deployment now, so there is nothing on disk to refresh
     // and no reason for this script to reach child_process at all.
     expect(sessionPrimerHookScript(dataDir)).not.toContain('child_process');
+  });
+
+  /**
+   * The adaptive cooldown's input (tenjin-agent#212): the shelf's per-trigger
+   * use rates, fetched once at session start into `trigger_rates`. Counts only
+   * are kept; a failed fetch keeps nothing, which is what "caps unchanged" is.
+   */
+  describe('fetches the shelf use rates once per session', () => {
+    const stats = (req: StubRequest): { status: number; json: unknown } =>
+      req.url.startsWith('/api/lookups/stats')
+        ? {
+            status: 200,
+            json: {
+              windowDays: 7,
+              triggers: [
+                {
+                  trigger: 'prompt',
+                  lookups: 40,
+                  hits: 30,
+                  candidates: 90,
+                  used: 1,
+                  wrong: 29,
+                  useRate: 0.033,
+                },
+                {
+                  trigger: 'cli',
+                  lookups: 867,
+                  hits: 600,
+                  candidates: 1,
+                  used: 0,
+                  wrong: 0,
+                  useRate: 0,
+                },
+              ],
+            },
+          }
+        : { status: 404, json: {} };
+
+    it('stores the four counts per trigger under the session, and still prints the primer', async () => {
+      const { baseUrl, hits, headers } = await serve(stats);
+      await pushOn(baseUrl);
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(hits()).toBe(1);
+      expect(headers()[0]?.['user-agent']).toContain('tenjin');
+      expect(sessionState(SESSION, 'trigger_rates')).toMatchObject({
+        days: 7,
+        triggers: {
+          prompt: { lookups: 40, hits: 30, used: 1, wrong: 29 },
+          cli: { lookups: 867, hits: 600, used: 0, wrong: 0 },
+        },
+      });
+      // `useRate` and `candidates` are the shelf's numbers, not the cooldown's;
+      // only what lookupAllowed reads is kept.
+      const row = sessionState(SESSION, 'trigger_rates') as { triggers: Record<string, object> };
+      expect(row.triggers.prompt).not.toHaveProperty('useRate');
+    });
+
+    it('asks for the seven-day window', async () => {
+      const seen: string[] = [];
+      const { baseUrl } = await serve((req) => {
+        seen.push(req.url);
+        return stats(req);
+      });
+      await pushOn(baseUrl);
+      await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(seen).toEqual(['/api/lookups/stats?days=7']);
+    });
+
+    it('spends no request while push is off', async () => {
+      const { baseUrl, hits } = await serve(stats);
+      await writeConfig({ baseUrl, hooks: { push: 'off' } });
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(hits()).toBe(0);
+      expect(sessionState(SESSION, 'trigger_rates')).toBeNull();
+    });
+
+    it('fetches even when the primer text itself is off', async () => {
+      const { baseUrl, hits } = await serve(stats);
+      await pushOn(baseUrl, { sessionPrimer: 'off' });
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.stdout).toBe('');
+      expect(hits()).toBe(1);
+      expect(sessionState(SESSION, 'trigger_rates')).not.toBeNull();
+    });
+
+    it('keeps nothing on a non-200, so every cap stays what it was', async () => {
+      const { baseUrl } = await serve(() => ({ status: 500, json: { error: 'down' } }));
+      await pushOn(baseUrl);
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(sessionState(SESSION, 'trigger_rates')).toBeNull();
+    });
+
+    it('keeps nothing when the shelf does not answer in time', async () => {
+      const { baseUrl } = await serve(() => 'hang');
+      await pushOn(baseUrl);
+      const started = Date.now();
+      const run = await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+      expect(Date.now() - started).toBeLessThan(1600);
+      expect(sessionState(SESSION, 'trigger_rates')).toBeNull();
+    });
+
+    it('carries the team shelf bypass header on the team origin only', async () => {
+      const { baseUrl, headers } = await serve(stats);
+      await writeConfig({
+        baseUrl,
+        publicShelfUrl: 'https://tenjin.blog',
+        shelfBypassSecret: 'door-key',
+        hooks: { push: 'on' },
+      });
+      await runScript(sessionPrimerHookScript(dataDir), primerInput);
+      expect(headers()[0]?.['x-vercel-protection-bypass']).toBe('door-key');
+    });
   });
 });
 
@@ -2741,5 +4092,191 @@ describe('the state store the CLI and the scripts each carry', () => {
       expect(source).not.toContain("'capture-asked-'");
       expect(source).not.toContain('LEDGER_TAIL_BYTES');
     }
+  });
+});
+
+/**
+ * The automatic team-shelf sync (docs/command-reference.md, "Automatic sync"):
+ * the Stop hook spawns `node <cli> sync` detached when this project has a
+ * closed code-scoped pairing the shelf has not seen, behind a machine-wide
+ * claim row. The CLI here is a stub that records its argv, so the assertion is
+ * the claim row plus the stub's marker file — never a real publish.
+ */
+describe('automatic sync (Stop)', () => {
+  // A real directory: the child is spawned with the session's cwd, and a cwd
+  // that does not exist is a spawn error the hook swallows (no sync, no crash).
+  let cwd = '';
+  let stopInput = '';
+  beforeEach(async () => {
+    cwd = join(scriptDir, 'project-a');
+    await mkdir(cwd);
+    stopInput = JSON.stringify({ session_id: SESSION, hook_event_name: 'Stop', cwd });
+  });
+
+  /** A stub CLI: appends its argv and cwd to a marker file, then exits. */
+  async function stubCli(): Promise<{ cliPath: string; marker: string }> {
+    const marker = join(scriptDir, 'sync-calls.log');
+    const cliPath = join(scriptDir, 'stub-cli.mjs');
+    await writeFile(
+      cliPath,
+      `import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }) + '\\n');
+`,
+    );
+    return { cliPath, marker };
+  }
+
+  async function seedPairing(
+    over: {
+      scope?: string;
+      status?: string;
+      syncedAt?: number | null;
+      project?: string | null;
+    } = {},
+  ): Promise<void> {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    const uid = `pair-${Math.random().toString(36).slice(2)}`;
+    const at = Date.now() - 60_000;
+    store.run(STORE_SQL.insertPairing, [
+      uid,
+      at,
+      SESSION,
+      over.project === undefined ? projectId(cwd) : over.project,
+      'machine-a',
+      'sig_v1',
+      'abc123',
+      'coarse1',
+      'pnpm',
+      'pnpm test',
+      'Error: ENOENT',
+      JSON.stringify(['widget.ts']),
+      JSON.stringify({}),
+      over.scope ?? 'code',
+    ]);
+    store.run(
+      'UPDATE pairings SET status = ?, closes = 1, closed_at = ?, synced_at = ? WHERE uid = ?',
+      [over.status ?? 'unverified', at + 1000, over.syncedAt ?? null, uid],
+    );
+    store.close();
+  }
+
+  async function markerLines(marker: string): Promise<string[]> {
+    // The child is detached; give it a moment to write before reading.
+    for (let i = 0; i < 40; i += 1) {
+      if (existsSync(marker)) break;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (!existsSync(marker)) return [];
+    return (await readFile(marker, 'utf8')).split('\n').filter((l) => l.length > 0);
+  }
+
+  async function teamOn(): Promise<void> {
+    await writeConfig({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET });
+  }
+
+  it('spawns the baked CLI with `sync` in the session cwd, and takes the claim row', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    const run = await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(run.code).toBe(0);
+    const claim = sessionState('', SYNC_CLAIM_KEY) as { at?: number } | null;
+    expect(claim).not.toBeNull();
+    expect(typeof claim?.at).toBe('number');
+    const calls = await markerLines(marker);
+    expect(calls).toHaveLength(1);
+    const call = JSON.parse(calls[0] ?? '{}') as { argv: string[]; cwd: string };
+    expect(call.argv).toEqual(['sync']);
+    // macOS reports the tmpdir through /private; compare resolved paths.
+    expect(realpathSync(call.cwd)).toBe(realpathSync(cwd));
+  });
+
+  it('runs one sync between Stops inside the claim TTL, not one per Stop', async () => {
+    await teamOn();
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(await markerLines(marker)).toHaveLength(1);
+  });
+
+  it('never spawns without a baked CLI path', async () => {
+    await teamOn();
+    await seedPairing();
+    const run = await runScript(stopHookScript(dataDir, null), stopInput);
+    expect(run.code).toBe(0);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+  });
+
+  it('never spawns in public mode, even with unsynced code-scoped rows', async () => {
+    await writeConfig({});
+    await seedPairing();
+    const { cliPath, marker } = await stubCli();
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+    expect(await markerLines(marker)).toHaveLength(0);
+  });
+
+  it('spawns nothing for rows that are synced, user-scoped, or another project', async () => {
+    await teamOn();
+    await seedPairing({ syncedAt: Date.now() });
+    await seedPairing({ scope: 'user' });
+    await seedPairing({ scope: 'ambiguous' });
+    await seedPairing({ project: projectId('/tmp/other') });
+    const { cliPath, marker } = await stubCli();
+    await runScript(stopHookScript(dataDir, cliPath), stopInput);
+    expect(sessionState('', SYNC_CLAIM_KEY)).toBeNull();
+    expect(await markerLines(marker)).toHaveLength(0);
+  });
+
+  it('prints the by-hand fallback on the ask only when the last sync could not sign', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { capture: 'block' },
+    });
+    await seedSearch();
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    const event = (at: number, data: Record<string, unknown>) =>
+      store.run(STORE_SQL.insertEvent, [
+        `ev-${at}`,
+        at,
+        '',
+        projectId(cwd),
+        'machine-a',
+        'sync',
+        null,
+        null,
+        null,
+        JSON.stringify(data),
+      ]);
+    event(Date.now() - 2000, { code: 'USAGE', synced: 0, verified: 0, held: 0 });
+    store.close();
+
+    const failed = await runScript(stopHookScript(dataDir, null), stopInput);
+    const reason = (JSON.parse(failed.stdout) as { reason: string }).reason;
+    expect(reason).toContain(STOP_SYNC_FALLBACK_LINE.replace('<code>', 'USAGE'));
+
+    // A later run that finished (no code) silences the line.
+    const again = await openStore(dataDir);
+    if (again === null) throw new Error('no store');
+    again.run(STORE_SQL.insertEvent, [
+      'ev-ok',
+      Date.now(),
+      '',
+      projectId(cwd),
+      'machine-a',
+      'sync',
+      null,
+      null,
+      null,
+      JSON.stringify({ synced: 1, verified: 0, held: 0 }),
+    ]);
+    again.run(STORE_SQL.deleteState, [SESSION, 'capture_asked']);
+    again.close();
+    const ok = await runScript(stopHookScript(dataDir, null), stopInput);
+    expect((JSON.parse(ok.stdout) as { reason: string }).reason).not.toContain('could not sign');
   });
 });

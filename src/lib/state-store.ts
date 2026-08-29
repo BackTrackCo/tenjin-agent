@@ -1,4 +1,5 @@
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 /**
@@ -71,11 +72,23 @@ export const STORE_USER_VERSION = 2;
  * on stderr, which is exactly what Claude Code shows the operator. With
  * `busy_timeout` first, 3/3 runs completed with zero BUSY. The `timeout`
  * constructor option would do the same job but is 22.16+, so it is the pragma.
+ *
+ * FIRST, BUT IT DOES NOT COVER THE PRAGMA IT PRECEDES. Ordering fixed the
+ * common case; #246 was the rest of it. `PRAGMA journal_mode = wal` against a
+ * connection that holds a pending WRITE lock throws `database is locked` after
+ * 0 ms — the busy handler is not consulted for that lock at all — so no value
+ * here, raised or not, protects the WAL switch. That statement gets a retry
+ * instead of a wait; see `setWal`.
  */
 export const STORE_BUSY_TIMEOUT_MS = 250;
 
 /**
  * The wait for the ONE-TIME schema transaction, and how many times it is tried.
+ *
+ * The tier is a property of the STATEMENT, not of the caller: this is what
+ * `BEGIN IMMEDIATE` and the DDL it wraps run under, and nothing else. The other
+ * cold-start statement, the WAL switch, cannot use a timeout at all and is
+ * handled its own way (`setWal`).
  *
  * 250 ms is sized for a steady-state write: sub-millisecond inserts queueing
  * behind each other, inside every arm's budget. The cold start is a different
@@ -89,6 +102,16 @@ export const STORE_BUSY_TIMEOUT_MS = 250;
  * So the bootstrap gets its own, longer wait, and it is put back immediately
  * afterwards so no ordinary fire ever inherits it. This is a once-per-version
  * cost (the gate is `user_version < STORE_USER_VERSION`).
+ *
+ * WHAT THE WAL SWITCH ADDS TO THE BUDGET, AND WHEN. In the case that matters —
+ * another opener holding the write lock through its DDL — both of its attempts
+ * are decided instantly: a 0 ms throw before the bootstrap and a 1 ms no-op
+ * after it, which is the whole reason the retry sits after rather than before.
+ * A long-lived READER is the only thing that makes it wait, and then it waits
+ * the steady-state 250 ms, at most twice. So the arithmetic ceiling for the
+ * cold start is 250 + 500 x 2 + 250 = 1500 ms, which is the watchdog exactly;
+ * it needs a reader to hold on across both attempts AND the bootstrap to lose
+ * both of its own. Raise any of the three and that stops being an argument.
  *
  * THE BUDGET IS THE PRODUCT, NOT THE TIMEOUT, and the ceiling is 1500 ms, not
  * 2700. `DatabaseSync` is synchronous, so a `busy_timeout` wait blocks the
@@ -355,8 +378,8 @@ export const STORE_SQL = {
    */
   claimState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO NOTHING`,
-  /** Rows under one key prefix, newest first. Used for the per-path `edited:`
-   *  rows the close rule reads. */
+  /** Rows under one key prefix, newest first. Used for the per-agent, per-path
+   *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
      WHERE session = ? AND key >= ? AND key < ? AND at >= ? ORDER BY at DESC LIMIT ?`,
   countStatePrefix: `SELECT COUNT(*) AS n FROM session_state
@@ -370,6 +393,31 @@ export const STORE_SQL = {
      ON CONFLICT(session, key)
      DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), at = excluded.at
      RETURNING value`,
+
+  /**
+   * THE ONE THING `openStore` RECORDS ABOUT ITSELF.
+   *
+   * `PRAGMA journal_mode = wal` is the single statement in this module the busy
+   * timeout does not cover (see the probe in `setWal`), so a machine where BOTH
+   * attempts fail runs on for good against a rollback journal: correct, but
+   * serialised, and until this row completely silent — no error, no stderr, no
+   * field anywhere. A store that has quietly stopped being concurrent looks
+   * from the outside exactly like one that was never contended, which is the
+   * same argument that put the `node:sqlite` probe in `doctor` (#219).
+   *
+   * MACHINE BUCKET, RAW VALUE. Session '', key `store_journal`, value the bare
+   * word `rollback` or `wal` — NOT JSON, like the `draft-search:` link and
+   * unlike everything written through `setState`, because `openStore` writes it
+   * before the store handle those helpers need exists, and `doctor` reads it
+   * back as SQL text.
+   */
+  setStoreJournal: `INSERT INTO session_state (session, key, value, at)
+     VALUES ('', 'store_journal', ?, ?)
+     ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at`,
+  /** The point lookup that keeps the healthy path free of writes; see
+   *  `setStoreJournal` and `recordJournal`. Primary key, so it is one probe. */
+  getStoreJournal: `SELECT value, at FROM session_state
+     WHERE session = '' AND key = 'store_journal'`,
 
   recordSearch: `INSERT INTO searches (
        search_id, at, session, question, fingerprint, decision, candidates,
@@ -545,6 +593,55 @@ export const STORE_SQL = {
   /** `tenjin push status`, one pass over the window. */
   statusRows: `SELECT hook, shelf, action, reason, resource_id, deny, tokens
      FROM injections WHERE at >= ?`,
+  /** `tenjin push status`, the pairings opened in the window, grouped the
+   *  way the line reports them. `scope` is the FIRST closer's and stays
+   *  `ambiguous` on an open row, so the scope counts are read off closed rows
+   *  only. A scan of a table that grows by one row per distinct failure. */
+  pairingsStatus: `SELECT status, scope, cmd_head, COUNT(*) AS n
+     FROM pairings WHERE at >= ? GROUP BY status, scope, cmd_head`,
+
+  /**
+   * The closed, CODE-scoped pairings of one project that the team shelf has
+   * not seen in their current state: never synced, or promoted to `verified`
+   * by a close that landed AFTER the last sync (`closed_at` moves on every
+   * close, `synced_at` on every sync, so the comparison is the whole test).
+   * `user` and `ambiguous` rows never match: a fix that was somebody's laptop
+   * does not travel. The Stop hook counts these to decide whether to spawn
+   * `tenjin sync`; the command reads them. A scan of a table that grows by one
+   * row per distinct failure, on the one hook whose budget is silent.
+   */
+  unsyncedPairings: `SELECT * FROM pairings
+     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+       AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))
+     ORDER BY at`,
+  countUnsyncedPairings: `SELECT COUNT(*) AS n FROM pairings
+     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+       AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))`,
+  /** Stamp a pairing as synced (or as re-synced after a promotion). */
+  markPairingSynced: 'UPDATE pairings SET synced_at = ? WHERE id = ?',
+  /** What the last `tenjin sync` run reported, for the Stop hook's fallback line. */
+  lastSyncEvent: `SELECT data FROM events WHERE hook = 'sync' ORDER BY at DESC, id DESC LIMIT 1`,
+  /**
+   * `tenjin push status --sessions`, the importance-score report (#212,
+   * CommonTrace `detection.py`): every event row in the window in session
+   * order, the closes the machine's sessions made, the searches they ran, the
+   * sessions' own bounds, and the session_state families the score is compared
+   * against — `capture_asked` (per session) and the publish marks
+   * `published:<hash>` and `agent_published:<...>` (both machine-wide,
+   * attributed to a session by time; the second is a CHILD's own publish, and
+   * `LIKE 'published:%'` is anchored, so it needs naming separately). Report
+   * queries: a window scan over tables that never prune, run by a human, never
+   * by a hook.
+   */
+  scoreEvents: `SELECT session, at, hook, tool, error_hash, files, data
+     FROM events WHERE at >= ? ORDER BY session, at, id`,
+  scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
+  scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
+  scoreSessions: `SELECT session, started_at, ended_at FROM sessions
+     WHERE started_at >= ? OR ended_at >= ?`,
+  scoreState: `SELECT session, key, at FROM session_state
+     WHERE (key = 'capture_asked' OR key LIKE 'published:%'
+            OR key LIKE 'agent_published:%') AND at >= ?`,
 
   /** `tenjin push grade`: what was shown and never judged. */
   ungradedInjections: `SELECT uid, at, session, agent_id, hook, shelf, resource_id, title, url, search_id, form
@@ -653,12 +750,47 @@ const STATE_EDITS_PREFIX = 'edits:';
 const STATE_EDITED_PREFIX = 'edited:';
 const STATE_PACKAGES_PREFIX = 'package:';
 const STATE_SIGNATURES_PREFIX = 'sig:';
-/** Which pairing this session was SHOWN behind a given command head. It is what
- *  lets the session that was replayed a pairing be its second independent
- *  closer, which is the only route to \`verified\` through the hooks. */
+/** Which pairings ONE AGENT was SHOWN behind a given command head — the key is
+ *  \`replayed:<agent>:<head>\` and the value a JSON array of pairing ids. It is
+ *  what lets the agent that was replayed a pairing be its second independent
+ *  closer, which is the only route to \`verified\` through the hooks. Scoped by
+ *  agent because parallel subagents share their parent's session id, and a list
+ *  because one head answers for a whole build step. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
+/**
+ * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
+ * off, or a deployment too old to have the route), keyed by origin under the
+ * machine session and held for KEYS_OFF_TTL_MS. Machine-wide because the fact
+ * is about the shelf, not the session: an always-on loop session lasts a day,
+ * and a fresh session per prompt would otherwise pay one request each before
+ * learning it (tenjin-agent#212).
+ */
+const STATE_KEYS_OFF_PREFIX = 'keys_off:';
+const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
+/**
+ * The team-shelf post a LOCAL pairing corresponds to, keyed by the pairing's
+ * row id under the machine session. ONE SHAPE, shared with \`tenjin sync\`
+ * (commands/sync.ts, which imports the mirrored STATE_PAIRING_POST_PREFIX):
+ * \`{ postId, origin, at, own?, held?, closedAt?, status?, fixFiles? }\`.
+ * The failure arm's team leg writes \`{ postId, origin, at }\` when it replays
+ * a post and opens a pairing beside it, and stamps \`closedAt\`, \`status\`
+ * and \`fixFiles\` when this machine's later pass closes that pairing — which
+ * is the second, independent close the shelf has no endpoint for, so
+ * \`tenjin sync\` reads it and PUTs the post \`verified\` instead of
+ * publishing a duplicate. Sync itself adds \`own: true\` on a post it
+ * published and \`held: true\` on a holder it lost to. No column: the
+ * pairings table is not versioned for this, and the fact is a join key, not
+ * a row attribute.
+ */
+const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
+/** The shelf's per-trigger use rates, fetched by the SessionStart primer once
+ *  per session for the adaptive cooldown (PUSH_COOLDOWN_* in
+ *  lib/push-scripts.ts), and the per-trigger count of fires the cooled cap
+ *  suppressed. */
+const STATE_TRIGGER_RATES = 'trigger_rates';
+const STATE_COOLDOWN_PREFIX = 'cooldown:';
 const MACHINE_SESSION = '';
 
 /** The open database, or null once we know we cannot have one. */
@@ -734,6 +866,73 @@ function storeSession(sessionId) {
 }
 
 /**
+ * Switch the file to WAL. Returns whether it is now in WAL; NEVER throws.
+ *
+ * THE ONE STATEMENT IN THIS FILE THE BUSY TIMEOUT DOES NOT PROTECT. Probed
+ * 2026-08-27 on node 24.19 (\`node:sqlite\`), fresh file, \`busy_timeout = 500\`:
+ *
+ *  - another connection holding a write lock -> this pragma throws
+ *    \`database is locked\` after 0 ms. The busy handler is never called. An
+ *    ordinary INSERT in the same state waited the full 554 ms and then threw.
+ *  - another connection holding only a READ lock -> the busy handler IS called
+ *    and the pragma waits out the timeout.
+ *  - the file ALREADY in WAL, another connection mid-write -> succeeds in 1 ms.
+ *    A no-op switch needs no exclusive lock at all.
+ *
+ * So the cold-start stampede (#246) killed the loser here, one line before the
+ * transaction \`bootstrap()\` protects, and no timeout could have saved it: the
+ * winner holds the write lock for its DDL and this statement will not wait.
+ * The answer is the third bullet. Fail, let the caller run the version check —
+ * which blocks on the winner properly, because the busy handler DOES cover it —
+ * and come back afterwards, by which time the file is in WAL and the retry is a
+ * no-op.
+ *
+ * AND IT IS NEVER FATAL EITHER WAY. WAL is a concurrency optimisation, not a
+ * correctness requirement; a rollback journal under busy_timeout runs every
+ * statement in this module correctly. Losing it is worth strictly less than the
+ * hook's whole state for that fire, which is what throwing here costs.
+ */
+function setWal(db) {
+  try {
+    db.exec('PRAGMA journal_mode = wal');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Leave a mark when the WAL switch gave up, and take it back off when a later
+ * open gets WAL. See \`STORE_SQL.setStoreJournal\` for what the row is and why
+ * \`doctor\` reads it.
+ *
+ * CHEAP ON THE PATH THAT IS ALWAYS TAKEN. A degraded open costs one upsert. A
+ * healthy open costs ONE PRIMARY-KEY LOOKUP AND NO WRITE — the row is absent on
+ * a machine that has never lost WAL, and once a healed machine has been stamped
+ * \`wal\` the lookup finds it and returns. This runs inside \`openStore\`, on
+ * every fire, so a write here would put a lock acquisition in front of eight
+ * concurrent hooks to record a fact that changes about once in a machine's life.
+ *
+ * MUST STAY AFTER \`bootstrap()\`: there is no \`session_state\` to write to
+ * before it.
+ */
+function recordJournal(db, wal) {
+  try {
+    if (wal) {
+      const row = db.prepare(STORE_SQL.getStoreJournal).get();
+      if (!isRecord(row) || row.value === 'wal') return;
+      db.prepare(STORE_SQL.setStoreJournal).run('wal', Date.now());
+      return;
+    }
+    db.prepare(STORE_SQL.setStoreJournal).run('rollback', Date.now());
+  } catch {
+    // Bookkeeping about the bookkeeping. A store too contended to accept this
+    // row is precisely the store the row describes, and losing it costs one
+    // doctor line — never the fire.
+  }
+}
+
+/**
  * Open the store, once per process. NEVER AT MODULE SCOPE: a module-scope
  * \`await import\` that throws exits 1 with a stack trace, which is what the
  * operator sees as a hook error. Called inside main(), and every failure —
@@ -752,7 +951,8 @@ async function openStore() {
     // database under eight concurrent openers kills one of them outright at
     // that pragma (probed 2026-08-25).
     db.exec('PRAGMA busy_timeout = ' + STORE_BUSY_TIMEOUT_MS);
-    db.exec('PRAGMA journal_mode = wal');
+    // ...but busy_timeout DOES NOT COVER THIS ONE. See setWal.
+    let wal = setWal(db);
     db.exec('PRAGMA synchronous = normal');
     // LESS THAN, NEVER NOT-EQUAL. Hook scripts are regenerated only by
     // \`tenjin install\`, so a machine can run v1 hooks against a database a
@@ -762,6 +962,14 @@ async function openStore() {
     // throws on the second run) then cost the newer build its store. A higher
     // version is left exactly as it is.
     if (storeVersion(db) < STORE_USER_VERSION) bootstrap(db);
+    // Second and last attempt, now that the cold start this lost to has
+    // committed: on a file another opener has already switched, this is a 1 ms
+    // read of the header. If it fails again the store is still open and
+    // correct, just on a rollback journal.
+    if (!wal) wal = setWal(db);
+    // ...and the answer is now READ, not thrown away: a machine stuck on a
+    // rollback journal says so in one row that \`tenjin doctor\` surfaces.
+    recordJournal(db, wal);
     try {
       chmodSync(STATE_DB_PATH, 0o600);
     } catch {
@@ -1094,6 +1302,23 @@ function clearState(sessionId, key) {
 }
 
 /**
+ * A key that HOLDS until \`untilMs\` and then simply reads as absent. The
+ * expiry is the value, so a reader needs no clock column and no pruner: a
+ * stale row is one more row in a table nothing scans, overwritten the next
+ * time the fact is learned again.
+ */
+function setStateUntil(sessionId, key, untilMs) {
+  setState(sessionId, key, untilMs);
+}
+
+/** Whether \`key\` was set with setStateUntil and has not expired. A value
+ *  that is not a future timestamp reads as not held. */
+function stateHolds(sessionId, key) {
+  const until = getState(sessionId, key);
+  return typeof until === 'number' && until > Date.now();
+}
+
+/**
  * Claim \`key\` for this session: true the FIRST time, false ever after.
  *
  * ONE STATEMENT, because the pattern it replaces was a read-modify-write of a
@@ -1258,12 +1483,12 @@ function searchRow(row) {
 
 /**
  * Open a pairing on an allowlisted failure. Mechanical, no model: the key is the
- * failure's signature and the row is what a later success closes.
+ * failure's signature and the row is what a later success closes. Returns the
+ * new row's id, or null when the store refused the write.
  */
 function openPairing(row) {
-  const id = uid();
-  storeRun(STORE_SQL.insertPairing, [
-    id,
+  const result = storeRun(STORE_SQL.insertPairing, [
+    uid(),
     Date.now(),
     storeSession(row.session),
     projectId(row.cwd),
@@ -1278,7 +1503,11 @@ function openPairing(row) {
     storeJson(row.pkgVersions),
     String(row.scope),
   ]);
-  return id;
+  // The ROW ID, which is what \`replayed:<agent>:<head>\` and
+  // \`pairing_post:<id>\`
+  // key on and \`pairingById\` reads back; null when nothing was written.
+  const rowid = result === null ? null : Number(result.lastInsertRowid);
+  return Number.isSafeInteger(rowid) ? rowid : null;
 }
 
 /** The best local match for a signature: verified first, then most closed, then
@@ -1444,6 +1673,74 @@ function storeVersionOf(db: SqliteDatabase): number {
   return isRecord(row) && typeof row.user_version === 'number' ? row.user_version : -1;
 }
 
+/** Switch the file to WAL. Returns whether it is now in WAL; never throws. See
+ *  the probe in `setWal`'s comment in the hook template above for why this is
+ *  best-effort and why one retry after the bootstrap is what fixes it. */
+function setWalOn(db: SqliteDatabase): boolean {
+  try {
+    db.exec('PRAGMA journal_mode = wal');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** ⚠ MIRRORED with `recordJournal` in the hook template above, which carries the
+ *  reasoning: one upsert on the degraded path, one primary-key lookup and no
+ *  write on the healthy one, and never after anything but `bootstrap()`. */
+function recordJournalOn(db: SqliteDatabase, wal: boolean): void {
+  try {
+    if (wal) {
+      const row = db.prepare(STORE_SQL.getStoreJournal).get();
+      if (!isRecord(row) || row.value === 'wal') return;
+      db.prepare(STORE_SQL.setStoreJournal).run('wal', Date.now());
+      return;
+    }
+    db.prepare(STORE_SQL.setStoreJournal).run('rollback', Date.now());
+  } catch {
+    // A store too contended to take this row is the store the row is about.
+  }
+}
+
+/** What `openStore` last recorded about the WAL switch on this machine. */
+export interface StoreJournalState {
+  /** `rollback` means the store is open, correct and serialised — never absent. */
+  mode: 'rollback' | 'wal';
+  /** When the open that recorded it ran (ms since epoch). */
+  at: number;
+}
+
+/**
+ * Read the degraded-store marker for `doctor`, WITHOUT CREATING ANYTHING.
+ *
+ * `doctor` is the command reached for when something is already broken, so it
+ * may not be the thing that first materialises the state database: a missing
+ * file reads as "nothing to report", not as a store to bootstrap. When the file
+ * IS there this goes through the ordinary {@link openStore}, which means the
+ * answer reflects a real open attempt made now — including its own retry, so a
+ * machine whose loss of WAL was one transient cold start heals itself the moment
+ * an operator asks.
+ */
+export async function readStoreJournal(dataDir: string): Promise<StoreJournalState | null> {
+  try {
+    const { existsSync } = await import('node:fs');
+    if (!existsSync(stateDbPath(dataDir))) return null;
+    const store = await openStore(dataDir);
+    if (store === null) return null;
+    try {
+      const row = store.get(STORE_SQL.getStoreJournal);
+      if (row === null || (row.value !== 'rollback' && row.value !== 'wal')) return null;
+      return { mode: row.value, at: typeof row.at === 'number' ? row.at : 0 };
+    } finally {
+      store.close();
+    }
+  } catch {
+    // Same posture as every other reader here: unreadable is silent, never a
+    // doctor that throws on the machine it was run to diagnose.
+    return null;
+  }
+}
+
 /**
  * Open (and create) the store for the CLI.
  *
@@ -1465,7 +1762,12 @@ export async function openStore(dataDir: string): Promise<Store | null> {
     const path = stateDbPath(dataDir);
     db = new sqlite.DatabaseSync(path);
     db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
-    db.exec('PRAGMA journal_mode = wal');
+    // Best effort, never fatal, and retried after the version check: the same
+    // two-attempt shape and the same probe as `setWal` in the hook template
+    // above. A CLI command can be the one that meets a fresh file beside a
+    // burst of hooks, and this pragma is the one statement the busy timeout
+    // does not cover.
+    let wal = setWalOn(db);
     db.exec('PRAGMA synchronous = normal');
     // `<`, never `!==`: see the note in the hook template above. A database a
     // newer build has already migrated is left alone rather than downgraded.
@@ -1513,6 +1815,11 @@ export async function openStore(dataDir: string): Promise<Store | null> {
         }
       }
     }
+    // Second and last attempt, now that whatever cold start this lost to has
+    // committed.
+    if (!wal) wal = setWalOn(db);
+    // ...and the answer is recorded rather than discarded; see `recordJournal`.
+    recordJournalOn(db, wal);
     try {
       chmodSync(path, 0o600);
     } catch {
@@ -1645,6 +1952,47 @@ export function storeSession(sessionId: string | null | undefined): string {
 /** ⚠ MIRRORED with `searchFingerprint` in the hook core above. */
 export function searchFingerprint(question: string): string {
   return question.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
+}
+
+/** ⚠ MIRRORED with `shortHash` in the hook core above: a cwd or machine string
+ *  reduced to a stable, non-reversible 16-hex join key. The CLI computes it to
+ *  read the same `pairings.project` the hooks wrote. */
+export function shortHash(text: string): string {
+  return createHash('sha256').update(String(text)).digest('hex').slice(0, 16);
+}
+
+/** ⚠ MIRRORED with `projectId` in the hook core above. The `project` column a
+ *  pairing was stamped with, so the CLI (`tenjin sync`) scopes its read to the
+ *  same checkout the failure happened in; null for a cwd-less payload. */
+export function projectId(cwd: string | null | undefined): string | null {
+  return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;
+}
+
+/** ⚠ MIRRORED with `STATE_PAIRING_POST_PREFIX` in the hook core above: the
+ *  `session_state` row (machine session `''`) linking a local pairing to its
+ *  team-shelf post, `{ postId, origin, at, own?, held?, closedAt?, status?,
+ *  fixFiles? }`. The failure arm writes it; `tenjin sync` reads and extends it. */
+export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
+
+/**
+ * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
+ * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
+ * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is the origin URL
+ * read from `.git/config`. The salt goes over the stored hash, not the raw
+ * message, because a `pairings` row keeps only the hashes and `tenjin sync`
+ * reads rows back long after the failure arm's `sigV1()` call is gone.
+ *
+ * THE ONE DEFINITION. `tenjin sync` (commands/sync.ts) imports it directly; a
+ * hook script cannot import, so the failure arm's resolve leg carries a copy
+ * inside its generated source, and that copy must produce the same bytes for
+ * the same (coarse_key, repo) — a resolve query and a synced post that salted
+ * two different ways would never find each other, and the miss would be
+ * indistinguishable from "no teammate has hit this". The pinned value in
+ * state-store.test.ts is what both sides are held to. The caller adds the wire
+ * prefix: `` `sig_v1c:${teamCoarseKey(coarseKey, repo)}` ``.
+ */
+export function teamCoarseKey(coarseKey: string, repo: string): string {
+  return shortHash(`${coarseKey}|${repo}`);
 }
 
 // ---- searches: the CLI's typed handle ----

@@ -1,0 +1,5 @@
+---
+'tenjin-cli': minor
+---
+
+`tenjin sync` (team mode only): hand this checkout's closed, code-scoped error→fix pairings to the team shelf as keyed, card-less, price-0 posts, so a fix one machine already made is found beside the same error on the next. The Stop hook spawns it detached behind a machine-wide claim when there is something to sync; a run that cannot sign records the code and the Stop ask prints the by-hand fallback. The coarse fingerprint is salted with the repo origin (`teamCoarseKey`, shared by sync and the failure arm's resolve leg). A pairing closed beside a teammate's post syncs as this machine's own `verified` record (the second independent close; the teammate's post is theirs alone). Each row passes the publish scan (team-shelf survivor set) before it goes; a finding, an ingest-gate refusal, or a post gone from the shelf marks the row synced and skipped rather than holding up the queue, and any non-signing abort is recorded on the run's `hook: 'sync'` row as `error`.

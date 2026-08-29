@@ -72,7 +72,7 @@ const EVIDENCE_CHARS = 200;
 const SESSION_ID_RE = /^[A-Za-z0-9-]{1,80}$/;
 
 /** An agent id becomes a filename too (`agent-<id>.jsonl`), so it gets the same
- *  treatment. This is the SAME bound the hook prelude's `agentIdOf` applies
+ *  treatment. This is the SAME bound the hook prelude's `identityOf` applies
  *  before it records one; a test in grade.test.ts pins the two together, because
  *  an id one side accepts and the other refuses is a row that can never be
  *  graded. */
