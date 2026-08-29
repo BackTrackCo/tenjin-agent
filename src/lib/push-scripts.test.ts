@@ -5735,12 +5735,19 @@ describe('the capture ask (Stop)', () => {
     store?.close();
   }
 
-  /** The claim this session's SubagentStop ask writes when it asks a child. */
+  /**
+   * The claim this session's SubagentStop ask writes when it asks a child.
+   *
+   * THE TRAILING SEPARATOR IS THE KEY (#237). The hook writes this under
+   * `agentKey(id, '')`, and a helper that left the ':' off spelled a key no
+   * writer produces: every case built on it passed while the lane the cases
+   * describe reported nothing at all.
+   */
   async function seedChildAsk(agentId: string, at = Date.now()): Promise<void> {
     const store = await openStore(dataDir);
     store?.run(STORE_SQL.setState, [
       SESSION,
-      'capture:agent:' + agentId,
+      'capture:agent:' + agentId + ':',
       JSON.stringify({ searchId: SEARCH_ID, agentType: 'fork' }),
       at,
     ]);
@@ -5901,10 +5908,11 @@ describe('the capture ask (Stop)', () => {
     await writeSearchSignal();
     const store = await openStore(dataDir);
     const at = Date.now();
-    // What the SubagentStop ask writes when it asks a child...
+    // What the SubagentStop ask writes when it asks a child, separator and all
+    // (#237: without it this key is one no writer produces).
     store?.run(STORE_SQL.setState, [
       SESSION,
-      'capture:agent:a1',
+      'capture:agent:a1:',
       JSON.stringify({ searchId: SEARCH_ID, agentType: 'general-purpose' }),
       at,
     ]);
@@ -6097,6 +6105,50 @@ describe('the capture ask (Stop)', () => {
 
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(run.stdout).toBe('');
+  });
+
+  /**
+   * P1 (#237): THE TWO HALVES OF THE LANE SPELLED THE AGENT ID DIFFERENTLY, so
+   * the intersection was empty for every row and the whole child-publish lane
+   * was dead: no report, and a re-ask gate that never opened.
+   *
+   * The claim goes down under `agentKey(id, '')`, so a prefix scan of
+   * `capture:agent:` hands its reader back `<id>:`; the publish rows are keyed
+   * `<id>@<at>` and yield a bare `<id>`. `<id>:` never matched `<id>`.
+   *
+   * THE CLAIM IS WRITTEN BY THE REAL ASK HERE, and that is the point of the
+   * case. `seedChildAsk` spells the key by hand, without the separator the
+   * writer appends, so every other case in this file passed against a lane that
+   * reported nothing: they seeded the key the reader wanted rather than the key
+   * production writes.
+   */
+  it('names a publish by a child the real SubagentStop ask claimed', async () => {
+    await pushOn('https://tenjin.test', { capture: 'block' });
+    await seedSearch({ decision: 'MISS', source: 'dispatch-hook', sessionId: SESSION });
+
+    const ask = await runScript(
+      pushSubagentHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'SubagentStop',
+        agent_id: 'a1',
+        agent_type: 'general-purpose',
+        stop_hook_active: false,
+      }),
+    );
+    expect(JSON.parse(ask.stdout)).toMatchObject({ decision: 'block' });
+
+    await seedChildPublish('a1', 'https://tenjin.test/p/claimed-by-the-real-ask');
+    const reason = await askReason();
+    expect(reason).toContain('1 finding(s) your subagents published themselves');
+    expect(reason).toContain('claimed-by-the-real-ask');
+    // `agentType` rides that same claim row, so a report keyed wrong also loses
+    // WHO published: the line falls back to the anonymous 'a subagent'.
+    expect(reason).toContain('general-purpose subagent a1');
+
+    // The gate half, off the same claim: a later publish re-opens the turn end.
+    await seedChildPublish('a1', 'https://tenjin.test/p/and-the-one-after-it');
+    expect(await askReason()).toContain('and-the-one-after-it');
   });
 
   /**

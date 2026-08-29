@@ -51,7 +51,7 @@ import { dequeueFinding, publishedUrlFor, recordPublished } from '../lib/publish
 import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
-import { AGENT_ID_SHELL_SAFE } from '../lib/push-scripts';
+import { AGENT_ID_RE } from '../lib/grade';
 import { projectIdOf } from '../lib/state-store';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -970,12 +970,13 @@ async function resolveSource(
  */
 function parseAgentIdFlag(value: string | undefined): string | null {
   if (value === undefined) return null;
-  // The SAME regex the hook applies before it splices an id into a command
-  // line, imported rather than restated: two copies of a charset gate is how one
-  // of them widens.
-  if (!AGENT_ID_SHELL_SAFE.test(value)) {
+  // THE ONE AGENT ID CHARSET, imported rather than restated. This used to read a
+  // wider `shell-safe` copy that admitted `.` and `:`, so `--agent` accepted ids
+  // `identityOf` refuses and `:` is the separator `agentKey` joins on: a publish
+  // under one could never be reported, because no ask row is ever keyed on it.
+  if (!AGENT_ID_RE.test(value)) {
     throw new CliError('USAGE', 'Invalid --agent value.', {
-      fix: 'Pass the harness agent id as letters, digits, and `_ . : -`, up to 128 characters. The SubagentStop capture ask prints the exact flag to use.',
+      fix: 'Pass the harness agent id as letters, digits, `_` and `-`, up to 128 characters. The SubagentStop capture ask prints the exact flag to use.',
     });
   }
   return value;

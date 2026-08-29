@@ -52,6 +52,7 @@ import {
   WEBSEARCH_HOOK_USER_AGENT,
 } from './client-meta';
 import { isAbsolute } from 'node:path';
+import { AGENT_ID_RE } from './grade';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from './production-origin';
 // The push core, embedded in the three scripts here that grew a push arm (the
 // research arm injects beside the search, the dispatch arm caches, and both need
@@ -446,8 +447,12 @@ function sessionIdOf(input) {
  * \`<session>/subagents/agent-<agentId>.jsonl\`, so an id carrying a separator
  * names a path the harness never wrote — and stripping the separator out would
  * spell a DIFFERENT agent's id exactly, filing one agent's work under another.
- * The same bound is spelled out as AGENT_ID_RE in lib/grade.ts, and a test pins
- * the two together.
+ * The bound is \`AGENT_ID_RE\` in lib/grade.ts, INTERPOLATED rather than restated,
+ * because it is also what \`captureAskText\` splices an id into a command line
+ * under and what \`publish --agent\` accepts. That splice used to hold a
+ * \`shell-safe\` set of its own, wide enough for the '.' and the ':' this one
+ * refuses; a charset that only has to look like its reader is a charset that
+ * widens away from it.
  *
  * A REFUSED ID IS NOT THE MAIN SESSION, which is why \`invalid\` is reported
  * separately from an \`agent\` of null. The harness named a worker this build
@@ -456,14 +461,20 @@ function sessionIdOf(input) {
  * Every arm drops the fire instead — no lookup, no row — so the caller reads
  * \`invalid\` and exits quiet.
  */
+const AGENT_ID_RE = ${AGENT_ID_RE};
+
 function identityOf(input) {
   const session = sessionIdOf(input);
   if (!isRecord(input)) return { session, agent: null, invalid: false };
   const id = input.agent_id;
   if (id === undefined || id === null) return { session, agent: null, invalid: false };
-  const agent = typeof id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
+  const agent = typeof id === 'string' && AGENT_ID_RE.test(id) ? id : null;
   return { session, agent, invalid: agent === null };
 }
+
+/** Spelled once, because \`agentOfKey\` has to cut on exactly what \`agentKey\`
+ *  joined on. */
+const AGENT_KEY_SEP = ':';
 
 /**
  * One agent's \`session_state\` key segment: \`<agent-or-empty>:<name>\`, and the
@@ -475,7 +486,26 @@ function identityOf(input) {
  * Pass '' as the name for the prefix itself.
  */
 function agentKey(agent, name) {
-  return (agent ?? '') + ':' + name;
+  return (agent ?? '') + AGENT_KEY_SEP + name;
+}
+
+/**
+ * The agent id back out of a key \`statePrefixSince\` returned, which strips only
+ * the scan prefix and leaves whatever \`agentKey\` appended.
+ *
+ * ⚠ THE PAIR EXISTS BECAUSE HALF OF IT WENT MISSING. A row written under
+ * \`STATE_AGENT_ASKED_PREFIX + agentKey(id, '')\` comes back as \`<id>:\`, while
+ * the machine-wide publish rows it is intersected with yield a bare \`<id>\`. The
+ * two readers doing that intersection matched \`<id>:\` against \`<id>\`, so the
+ * child publish report and its re-ask gate were both permanently empty. Every
+ * reader of a per-agent key comes back through here so a third cannot repeat it.
+ *
+ * The id charset excludes the separator, so the FIRST one ends the id whether
+ * the caller scanned the bare prefix or a per-agent one.
+ */
+function agentOfKey(key) {
+  const cut = key.indexOf(AGENT_KEY_SEP);
+  return cut === -1 ? key : key.slice(0, cut);
 }
 
 /**
@@ -2649,9 +2679,11 @@ function childPublishLine(sessionId, windowStart, budget, atMs) {
   const asks = new Map();
   const types = new Map();
   for (const row of asked) {
-    asks.set(row.key, row.at);
+    // THE BARE ID, which is what the publish rows are keyed on.
+    const agentId = agentOfKey(row.key);
+    asks.set(agentId, row.at);
     types.set(
-      row.key,
+      agentId,
       isRecord(row.value) && typeof row.value.agentType === 'string' ? row.value.agentType : '',
     );
   }

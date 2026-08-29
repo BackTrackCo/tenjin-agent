@@ -415,10 +415,14 @@ describe('findTranscript', () => {
   /**
    * The arms record an agent id under one bound and this reads a file under
    * another; an id one side accepts and the other refuses is a row that can
-   * never be graded, so the two are pinned to the same literal.
+   * never be graded. The prelude interpolates this constant now rather than
+   * restating it, so what this pins is that the rendered scripts still take it
+   * from here: a hand-copied literal reappearing is what the pin is watching for.
    */
   it('bounds the agent id exactly as the hook accessor that recorded it does', () => {
-    expect(prelude('/tmp/data', 1000)).toContain(`/${AGENT_ID_RE.source}/.test(id)`);
+    const source = prelude('/tmp/data', 1000);
+    expect(source).toContain(`const AGENT_ID_RE = /${AGENT_ID_RE.source}/;`);
+    expect(source).toContain('AGENT_ID_RE.test(id)');
   });
 
   /** One project directory this run cannot stat into could be the one holding

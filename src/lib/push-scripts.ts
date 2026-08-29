@@ -18,6 +18,7 @@
  * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
+import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
 import { storeSource } from './state-store';
 
@@ -187,14 +188,6 @@ export const SUBAGENT_CAPTURE_REASON =
   ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
 /**
- * The characters an `agent_id` may have before it is spliced into a command the
- * child is told to run. Anything else drops the flag rather than the ask: the id
- * arrives on an undocumented payload, and a shell metacharacter in a command
- * line an agent is invited to run is not a risk worth an attribution field.
- */
-export const AGENT_ID_SHELL_SAFE = /^[A-Za-z0-9_.:-]{1,128}$/;
-
-/**
  * The search id a child may splice into its own publish, anchored. The
  * SubagentStart arm anchors the same value for the same reason: it comes off a
  * store row and lands in a command line an agent is invited to run.
@@ -219,7 +212,7 @@ export function subagentCaptureReason(
   publishMode: string,
   searchId: string | null = null,
 ): string {
-  const flag = agentId !== null && AGENT_ID_SHELL_SAFE.test(agentId) ? ` --agent ${agentId}` : '';
+  const flag = agentId !== null && AGENT_ID_RE.test(agentId) ? ` --agent ${agentId}` : '';
   const search =
     searchId !== null && CAPTURE_SEARCH_ID_RE.test(searchId) ? ` --search-id ${searchId}` : '';
   return SUBAGENT_CAPTURE_REASON.replace('<agent-flag>', flag)
@@ -2487,7 +2480,6 @@ const MESSAGE_TAIL = __MESSAGE_TAIL__;
 const FINDING_OPEN = __FINDING_OPEN__;
 const FINDING_FENCE = __FINDING_FENCE__;
 const CAPTURE_ASK = __CAPTURE_ASK__;
-const AGENT_ID_SHELL_SAFE = /^[A-Za-z0-9_.:-]{1,128}$/;
 
 /**
  * The child ask, with this agent's id, the loop it was earned by and this
@@ -2504,7 +2496,7 @@ const AGENT_ID_SHELL_SAFE = /^[A-Za-z0-9_.:-]{1,128}$/;
  */
 function captureAskText(agentId, publishMode, searchId) {
   const flag =
-    typeof agentId === 'string' && AGENT_ID_SHELL_SAFE.test(agentId) ? ' --agent ' + agentId : '';
+    typeof agentId === 'string' && AGENT_ID_RE.test(agentId) ? ' --agent ' + agentId : '';
   const search =
     typeof searchId === 'string' && UUID_RE.test(searchId) ? ' --search-id ' + searchId : '';
   return CAPTURE_ASK.replace('<agent-flag>', flag)

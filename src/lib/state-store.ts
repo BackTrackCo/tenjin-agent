@@ -1208,8 +1208,11 @@ const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
  * NOT A BOUND ON LIVE HANDOFFS, not since every dispatch parks into a slot of
  * its own (\`STATE_CACHE_PREFIX\`): \`cacheSlot\` sits outside the branch this
  * claim gates, so a dispatch that LOSES the claim still parks its own finding
- * and up to \`CACHE_SLOT_MAX\` handoffs are live at once. What the loser gives up
- * is the announcement, not the delivery.
+ * and several handoffs are live at once. \`CACHE_SLOT_MAX\` is not a ceiling on
+ * how many: it counts and writes in separate statements across concurrent
+ * processes, so it is back pressure and not a bound (\`liveHandoff\` below, which
+ * is why that read takes no row limit). What the loser gives up is the
+ * announcement, not the delivery.
  *
  * A SLOT, NOT A PIECE. Keying the claim by resource id let a later dispatch of
  * any strength above 'none' announce over a handoff an earlier one had already
@@ -2329,7 +2332,7 @@ function queuedFindingAfter(sessionId, sinceMs) {
  * published something objectionable and then anything innocuous overwrote the
  * first, and the parent's report — the whole mitigation for letting a child
  * publish from a sidechain — showed only the second. The key carries the
- * publish time after an \`@\`, which the agent-id charset (\`[A-Za-z0-9_.:-]\`)
+ * publish time after an \`@\`, which the agent-id charset (\`[A-Za-z0-9_-]\`)
  * cannot contain, so the id is whatever precedes the last one.
  *
  * Machine-wide by nature (the publishing process knows its agent, not its
@@ -2418,7 +2421,7 @@ function childPublishedSince(sessionId, windowStart, limit) {
   // THE SAME READ THE LIST USES. A gate that admitted a row the list then
   // refuses to name fires an ask with nothing in it, at every turn end.
   const asks = new Map();
-  for (const row of asked) asks.set(row.key, row.at);
+  for (const row of asked) asks.set(agentOfKey(row.key), row.at);
   return agentPublishes(windowStart, limit, asks).size > 0;
 }
 
