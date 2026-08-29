@@ -988,8 +988,10 @@ export const STORE_SQL = {
   /**
    * `tenjin push status --sessions`, the importance-score report (#212,
    * CommonTrace `detection.py`): every event row in the window in session
-   * order, the closes the machine's sessions made, the searches they ran, the
-   * sessions' own bounds, and the session_state families the score is compared
+   * order, the closes the machine's workers made, the searches they ran — all
+   * three carrying `agent_id`, since the report scores one (session, agent) at
+   * a time and a sibling's close is not this worker's fix — the sessions' own
+   * bounds, and the session_state families the score is compared
    * against — `capture_asked` (per session) and the publish marks
    * `published:<hash>` and `agent_published:<...>` (both machine-wide,
    * attributed to a session by time; the second is a CHILD's own publish, and
@@ -999,8 +1001,8 @@ export const STORE_SQL = {
    */
   scoreEvents: `SELECT session, agent_id, at, hook, tool, error_hash, files, data
      FROM events WHERE at >= ? ORDER BY session, at, id`,
-  scoreCloses: `SELECT session, at FROM pairing_closes WHERE at >= ?`,
-  scoreSearches: `SELECT session, at FROM searches WHERE at >= ?`,
+  scoreCloses: `SELECT session, agent_id, at FROM pairing_closes WHERE at >= ?`,
+  scoreSearches: `SELECT session, agent_id, at FROM searches WHERE at >= ?`,
   scoreSessions: `SELECT session, started_at, ended_at FROM sessions
      WHERE started_at >= ? OR ended_at >= ?`,
   scoreState: `SELECT session, key, at FROM session_state
