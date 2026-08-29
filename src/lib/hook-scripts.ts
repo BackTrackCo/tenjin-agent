@@ -937,11 +937,12 @@ function composedUserAgent() {
  * hooks differ only in the question they build, the source they record it under,
  * and whether they may speak. `hookLabel` names the lock's meta holder.
  *
- * `searchTimeoutMs` is the fetch budget for the LOOKUP, not per request: a
- * two-shelf lookup divides it between the legs (see `searchDeadline`). It is a
- * parameter for exactly one caller, the prompt arm, which sits between a human
- * pressing enter and the model starting to answer and so cannot afford the
- * default.
+ * `searchTimeoutMs` is the fetch budget for ONE LEG, and the lookup's wall clock
+ * is bounded by it either way: the push arms ask both shelves at once, so their
+ * lookup takes the slower leg; the dispatch hook asks them in turn and divides
+ * this budget between them (`legTimeoutMs`). It is a parameter for exactly one
+ * caller, the prompt arm, which sits between a human pressing enter and the
+ * model starting to answer and so cannot afford the default.
  */
 export function marketplaceSource(searchTimeoutMs: number = SEARCH_TIMEOUT_MS): string {
   return `
@@ -952,17 +953,19 @@ const SEARCH_TIMEOUT_MS = ${searchTimeoutMs};
  *
  * The watchdogs and the harness \`timeout\` were sized for "a search plus a body
  * fetch plus slack", and team mode added a SECOND search leg without adding any
- * time. With a fixed per-request timeout on both legs the worst case became
- * search + search + body — 1500 + 1500 + 800 against the prompt arm's 2700ms
- * budget — so a slow team shelf followed by an answering public one lost the
- * race to the arm's own overrun timer: stdout empty, a \`watchdog\` row in the
- * ledger, and a hit computed and thrown away.
+ * time. With a fixed per-request timeout on two SEQUENTIAL legs the worst case
+ * became search + search + body — 1500 + 1500 + 800 against the prompt arm's
+ * 2700ms budget — so a slow team shelf followed by an answering public one lost
+ * the race to the arm's own overrun timer: stdout empty, a \`watchdog\` row in
+ * the ledger, and a hit computed and thrown away.
  *
  * So a leg gets the SMALLER of its own timeout and the wall clock actually left
  * before \`deadline\`, minus what must still happen afterwards (\`reserveMs\`: the
- * body fetch). The first leg is unaffected — every arm's budget exceeds one
- * search plus its body — and the second gets whatever the first did not spend,
- * which is what keeps a two-shelf lookup inside a one-shelf watchdog.
+ * body fetch). This serves the DISPATCH hook, whose legs still run one after the
+ * other: its first leg is unaffected — every arm's budget exceeds one search
+ * plus its body — and its second gets whatever the first did not spend. The
+ * push arms ask both shelves at once, each leg on a fresh deadline, so for them
+ * this is the per-leg clamp and never squeezes a leg at t=0.
  */
 function legTimeoutMs(deadline, reserveMs) {
   const room = deadline - Date.now() - reserveMs;
