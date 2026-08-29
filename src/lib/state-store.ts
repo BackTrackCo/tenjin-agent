@@ -137,6 +137,34 @@ export const STORE_BOOTSTRAP_TIMEOUT_MS = 500;
 export const STORE_BOOTSTRAP_TRIES = 2;
 
 /**
+ * THE RELAY WINDOW, and the canonical statement of the invariant every other
+ * comment about the relay cites rather than restates.
+ *
+ * How long a `relayed` row suppresses a parent-facing re-announcement, and how
+ * long a dispatch holds the session's one handoff slot.
+ *
+ * It is the handoff cache's own TTL and must stay equal to
+ * `PUSH_CACHE_TTL_MS` (lib/push-scripts.ts), which `push-scripts.test.ts`
+ * pins: past that instant the SubagentStart arm rejects the cached pointer as
+ * stale, so no subagent can still receive what the relay withheld from the
+ * parent, and the suppression has to lift with it. It lives here rather than
+ * beside the cache TTL because `state-store.ts` is the file both the dispatch
+ * arm and the subagent arm already import; the reverse direction is a cycle.
+ *
+ * WHY IT EXPIRES AT ALL: a relay commits at PreToolUse, before the Task it
+ * hands off to is even permitted to run, so a denied or never-launched
+ * subagent must not leave the piece suppressed in every context for the rest
+ * of the session. An `injected` row is different in kind and never expires:
+ * some context really did receive the piece.
+ *
+ * WHY THE CLAIM AND THE CACHE STAY IN LOCKSTEP: the claim is taken on the
+ * cache SLOT and the cache is written only by whoever wins it, in that order,
+ * so both rows carry the same `at` and lapse together. A losing dispatch
+ * writes neither.
+ */
+export const STORE_RELAY_WINDOW_MS = 120_000;
+
+/**
  * The whole schema, run once at `user_version = 0` and never again: a database
  * that already has a schema is stepped up by {@link STORE_MIGRATIONS} instead,
  * so this text is the version 1 shape and stays it.
@@ -401,6 +429,20 @@ export const STORE_SQL = {
    */
   alreadyShown: `SELECT 1 FROM injections
      WHERE session = ? AND resource_id = ? AND action = 'injected' LIMIT 1`,
+  /**
+   * The wider seen set: injected, or relayed WHILE THE HANDOFF IS STILL LIVE.
+   * A 'relayed' row is a strong free dispatch hit the parent handed to its
+   * subagent instead of rendering (tenjin-agent#228): the child's own
+   * alreadyShown check must NOT see it, because the child delivery is the
+   * point of the relay, but a hint arm re-offering the piece to the parent is
+   * exactly the repeat the once-per-session rule stops.
+   *
+   * The `at >=` bound is the safety property, not an optimization: see
+   * `STORE_RELAY_WINDOW_MS` for why the suppression has to expire.
+   */
+  alreadyShownOrLiveRelay: `SELECT 1 FROM injections
+     WHERE session = ? AND resource_id = ?
+       AND (action = 'injected' OR (action = 'relayed' AND at >= ?)) LIMIT 1`,
   injectedCount: `SELECT COUNT(*) AS n FROM injections WHERE session = ? AND action = 'injected'`,
 
   /**
@@ -432,6 +474,27 @@ export const STORE_SQL = {
    */
   claimState: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
      ON CONFLICT(session, key) DO NOTHING`,
+  /**
+   * Claim one key, taking a claim older than the given instant over from
+   * whoever held it. Still ONE statement: `DO UPDATE ... WHERE` reports zero
+   * changed rows when the holder is too fresh to displace, which is the same
+   * arbitration `claimState` gets from `DO NOTHING`, only time-bounded.
+   *
+   * The dispatch relay is the caller, and it claims the handoff SLOT: a
+   * check-then-write there let two dispatches in one assistant message both
+   * pass the check and both write the one session-wide cache key, and a
+   * permanent claim would have made an unconsumed handoff suppress the piece
+   * forever (`STORE_RELAY_WINDOW_MS`). The stored value names the piece the
+   * winner parked, so a loser can tell "another dispatch already relayed MY
+   * piece" from "another piece holds the slot" without a second race.
+   *
+   * Not a job for the `injections` unique index, which covers
+   * `action='injected'` only and must keep doing so: widening it would refuse
+   * the child's own delivery row for the piece the parent relayed to it.
+   */
+  claimStateFresh: `INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(session, key) DO UPDATE SET value = excluded.value, at = excluded.at
+       WHERE session_state.at < ?`,
   /** Rows under one key prefix, newest first. Used for the per-agent, per-path
    *  `edited:<agent>:<path>` rows the close rule reads. */
   statePrefixSince: `SELECT key, value, at FROM session_state
@@ -778,6 +841,7 @@ const STORE_DDL = __DDL__;
 const STORE_MIGRATIONS = __MIGRATIONS__;
 const STORE_USER_VERSION = __USER_VERSION__;
 const STORE_BUSY_TIMEOUT_MS = __BUSY_TIMEOUT_MS__;
+const RELAY_WINDOW_MS = __RELAY_WINDOW_MS__;
 const STORE_BOOTSTRAP_TIMEOUT_MS = __BOOTSTRAP_TIMEOUT_MS__;
 const STORE_BOOTSTRAP_TRIES = __BOOTSTRAP_TRIES__;
 
@@ -840,6 +904,26 @@ const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
  * a row attribute.
  */
 const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
+/**
+ * THE SESSION'S ONE HANDOFF SLOT, and the arbiter for the dispatch relay line.
+ *
+ * A SLOT, NOT A PIECE. \`STATE_CACHE\` is a single session-wide key, so keying
+ * the claim by resource id let a later dispatch of any strength above 'none'
+ * overwrite a handoff an earlier one had already announced as relayed: the
+ * relayed piece then reached no context at all while its \`relayed\` row
+ * suppressed it from every parent arm for the window, and the parent
+ * transcript asserted a delivery that never happened. Claiming the slot makes
+ * one live handoff per session a bound; a dispatch that loses it leaves the
+ * live handoff alone and falls through to the ordinary parent hint.
+ *
+ * The value is the resource id the winner parked. Held only as long as the
+ * handoff it names can still be consumed (\`RELAY_WINDOW_MS\`).
+ *
+ * Adjacent to \`STATE_REPLAYED_PREFIX\` above and unrelated to it: that one is
+ * the failure arm's error->fix pairing replay, a different lane.
+ */
+const STATE_RELAY_SLOT = 'relay:handoff';
+
 const STATE_CAPTURE_ASKED = 'capture_asked';
 const STATE_PUBLISHED_PREFIX = 'published:';
 /** The shelf's per-trigger use rates, fetched by the SessionStart primer once
@@ -1341,6 +1425,50 @@ function alreadyShown(sessionId, resourceId) {
   return storeGet(STORE_SQL.alreadyShown, [storeSession(sessionId), resourceId]) !== null;
 }
 
+/**
+ * Is a handoff parked that a subagent could still consume?
+ *
+ * PRESENCE IS NOT LIVENESS, and the row is not the cache. \`STATE_RELAY_SLOT\`
+ * and the \`relayed\` injections row both outlive the parked entry they describe
+ * — the entry expires on its own clock, the first child consumes it, or a
+ * rollback of a failed park could not be written either — so anything that
+ * withholds a piece BECAUSE a relay is in flight has to ask the cache, and has
+ * to apply the child's own rule (SubagentStart rejects a cache older than the
+ * window). Same rule, same window, on every side.
+ */
+function liveHandoff(sessionId) {
+  const parked = getState(sessionId, STATE_CACHE);
+  if (!isRecord(parked) || typeof parked.at !== 'string') return false;
+  const at = Date.parse(parked.at);
+  return Number.isFinite(at) && Date.now() - at < RELAY_WINDOW_MS;
+}
+
+/** Like alreadyShown, but counting a parent relay whose handoff is still live.
+ *  A relayed piece is not an 'injected' claim (the child still has to deliver
+ *  it), yet it is a line the parent already read, so the parent-facing arms
+ *  dedupe on this set — for as long as a subagent can still be reached by it,
+ *  and no longer. That window is in the name because it is the safety
+ *  property: unbounded, this would suppress a piece nothing ever delivered.
+ *
+ *  TWO CLOCKS, BOTH REQUIRED. The row's own \`at >=\` bound expires the
+ *  suppression, but a fresh row over a cache that is already gone suppresses a
+ *  piece no child can be handed any more: the dispatch arm stopped going
+ *  silent on the slot alone for exactly that reason, and a hint arm that kept
+ *  suppressing on the row alone would have moved the silence rather than
+ *  ending it. So the relay half is gated on the parked entry too. */
+function alreadyShownOrLiveRelay(sessionId, resourceId) {
+  if (typeof resourceId !== 'string' || resourceId.length === 0) return false;
+  if (alreadyShown(sessionId, resourceId)) return true;
+  if (!liveHandoff(sessionId)) return false;
+  return (
+    storeGet(STORE_SQL.alreadyShownOrLiveRelay, [
+      storeSession(sessionId),
+      resourceId,
+      Date.now() - RELAY_WINDOW_MS,
+    ]) !== null
+  );
+}
+
 /** How many full-form injections this session has had. */
 function injectedCount(sessionId) {
   return storeCount(STORE_SQL.injectedCount, [storeSession(sessionId)]);
@@ -1382,7 +1510,11 @@ function getStateRaw(sessionId, key) {
 
 /** Upsert one key. Per key, so concurrent arms cannot clobber each other. */
 function setState(sessionId, key, value) {
-  storeRun(STORE_SQL.setState, [storeSession(sessionId), key, storeJson(value), Date.now()]);
+  // Answers whether the row actually landed. storeRun swallows a busy database,
+  // a full disk and every other write error as null, and a caller that has
+  // ALREADY told someone the write happened (the relay announcement) cannot
+  // treat that silence as success.
+  return storeRun(STORE_SQL.setState, [storeSession(sessionId), key, storeJson(value), Date.now()]) !== null;
 }
 
 function clearState(sessionId, key) {
@@ -1429,6 +1561,43 @@ function claimState(sessionId, key, value) {
   // A store that refused the write for any OTHER reason must not silence the
   // arm: the claim is a dedupe aid, and failing open costs a duplicate lookup.
   if (result === null) return true;
+  return typeof result.changes === 'number' ? result.changes > 0 : true;
+}
+
+/**
+ * Claim \`key\` for this session unless a claim newer than \`windowMs\` holds it,
+ * recording \`value\` as the winner's mark.
+ *
+ * THE CLAIM IS THE DECISION, the same way the injections unique index is for
+ * an injected row: the dispatch relay's rule was a read followed by a write,
+ * and two Task calls in one assistant message fire PreToolUse concurrently, so
+ * both read "free" and both wrote. One statement makes the loser lose.
+ * Time-bounded rather than permanent (\`RELAY_WINDOW_MS\`).
+ *
+ * AND IT FAILS CLOSED, unlike \`claimState\` above, whose fail-open contract is
+ * unchanged. \`claimState\` is a dedupe aid whose worst loss is a duplicate
+ * lookup, so a swallowed write there may read as a win. This one is an
+ * ARBITER. A null result means \`storeRun\` caught a throw, and SQLITE_BUSY past
+ * the busy timeout is what parallel Task calls in one assistant message
+ * produce — precisely the contention this claim exists for. Reading that as a
+ * win lets every contender win, the second park evict the first, and both
+ * announce a relay for a handoff only one of them holds. Failing closed costs
+ * the loser one relay that becomes an ordinary parent hint, which is already
+ * this arm's fallback on every other loss path.
+ */
+function claimStateFresh(sessionId, key, windowMs, value) {
+  // Same contract as claimState: no store is no dedupe, and the arms return
+  // before they reach here, so a caller that somehow did holds nothing.
+  if (STORE === null) return false;
+  const now = Date.now();
+  const result = storeRun(STORE_SQL.claimStateFresh, [
+    storeSession(sessionId),
+    key,
+    storeJson(value === undefined ? true : value),
+    now,
+    now - windowMs,
+  ]);
+  if (result === null) return false;
   return typeof result.changes === 'number' ? result.changes > 0 : true;
 }
 
@@ -1727,7 +1896,8 @@ export function storeSource(): string {
     .replaceAll('__DDL__', JSON.stringify(STORE_DDL))
     .replaceAll('__MIGRATIONS__', JSON.stringify(STORE_MIGRATIONS))
     .replaceAll('__USER_VERSION__', String(STORE_USER_VERSION))
-    .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS));
+    .replaceAll('__BUSY_TIMEOUT_MS__', String(STORE_BUSY_TIMEOUT_MS))
+    .replaceAll('__RELAY_WINDOW_MS__', String(STORE_RELAY_WINDOW_MS));
 }
 
 // ---------------------------------------------------------------------------

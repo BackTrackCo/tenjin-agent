@@ -378,12 +378,20 @@ function headerLine(candidate) {
   );
 }
 
+/** The head every card form opens with: the shelf's opener, the pointer line,
+ *  and the excerpt when there is one. Shared so the parent's card and the
+ *  child's cannot drift apart. */
+function cardHead(candidate, opener) {
+  const lines = [opener, headerLine(candidate)];
+  if (candidate.excerpt !== '') lines.push(clean(candidate.excerpt, 300));
+  return lines;
+}
+
 /** ~80 tokens: the pointer plus a one-line excerpt. \`opener\` names which shelf
  *  the piece came from; everything below it is the same either way, because both
  *  shelves are Tenjin deployments serving the same card. */
 function shortForm(candidate, opener) {
-  const lines = [opener, headerLine(candidate)];
-  if (candidate.excerpt !== '') lines.push(clean(candidate.excerpt, 300));
+  const lines = cardHead(candidate, opener);
   lines.push(
     isFree(candidate)
       ? 'Read it free: tenjin read ' + candidate.resourceId
@@ -653,8 +661,22 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   // THE 6x FIX. One already-shown set across every hook, not one per script:
   // the WebSearch and dispatch hint paths write to the same table, so a note
   // this session has already been handed cannot come back through another arm.
-  if (alreadyShown(sessionId, v.top.resourceId)) {
-    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+  // The set is the WIDER one, injected or live-relayed: this function serves
+  // the prompt, failure and WebSearch arms, all of which speak into the
+  // PARENT, and a piece the dispatch arm relayed is one the parent was
+  // deliberately not given so a subagent could have it. Injecting it here
+  // would put the withheld body in the parent anyway and then make the child
+  // skip it as already-injected, losing the delivery outright.
+  if (alreadyShownOrLiveRelay(sessionId, v.top.resourceId)) {
+    recordDecision({
+      ...row,
+      action: 'skipped',
+      // WHICH SET SILENCED THIS ARM. 'already-injected' on a piece nothing
+      // delivered reads as a delivery in the ledger; a live relay is the other
+      // reason this arm stays quiet, and it is the number the fan-out dogfood
+      // needs.
+      reason: alreadyShown(sessionId, v.top.resourceId) ? 'already-injected' : 'already-relayed',
+    });
     return { kind: 'done' };
   }
   let form = 'short';
@@ -666,12 +688,21 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
       text = fullForm(opener, headerLine(v.top), body);
     }
   }
-  // THE WRITE IS THE DECISION. The \`alreadyShown\` check above is a cheap
-  // pre-filter that saves a wasted body fetch, but between it and here this arm
-  // may have awaited a whole HTTP round trip, and a concurrent fire in the same
-  // session can have claimed the piece meanwhile. The unique index refuses the
-  // second row, and THAT is what makes once-per-session a bound rather than a
+  // THE WRITE IS THE DECISION, FOR THE INJECTED HALF. The
+  // \`alreadyShownOrLiveRelay\` check above is a cheap pre-filter that saves a
+  // wasted body fetch, but between it and here this arm may have awaited a
+  // whole HTTP round trip, and a concurrent fire in the same session can have
+  // claimed the piece meanwhile. The unique index refuses the second row, and
+  // THAT is what makes once-per-session-per-injection a bound rather than a
   // best-effort race — so a refusal turns into the skip it always meant.
+  //
+  // RELAYS ARE OUTSIDE THAT INDEX, deliberately: it is partial on
+  // \`action = 'injected'\` and must stay so, or it would refuse the child's own
+  // delivery row for the piece the parent relayed to it. So this arm can still
+  // win against a Task that relayed the same piece in parallel, and the parent
+  // then gets the body while the child skips as already-injected. That is the
+  // pre-relay outcome plus one relay line, not a regression, and the dispatch
+  // arm's own arbiter is the slot claim (\`STATE_RELAY_SLOT\`), not this index.
   const claimed = recordDecision({
     ...row,
     action: 'injected',
@@ -750,10 +781,37 @@ function packagesInSource(text) {
  * generic rule below it is what catches the vendor nobody has heard of yet.
  */
 const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|xox[baprse]-[A-Za-z0-9-]{10,}|ya29\.[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)/g;
-/** \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
- *  secret, so the value goes whatever it happens to look like. */
+/**
+ * \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
+ * secret, so the value goes whatever it happens to look like.
+ *
+ * THERE IS NO LEADING NAME CLASS, and the trailing one is BOUNDED. Both halves
+ * are load-bearing rather than cosmetic. Unbounded (\`[\w.-]*\`) they backtrack
+ * super-linearly on a keyword-dotted run: driving the rendered dispatch arm with
+ * a \`token.token.token…\` description measured 123 ms at 1k characters, 436 ms
+ * at 2k, 1.9 s at 4k and 14.6 s at 8k with nothing emitted. A synchronous regex
+ * cannot be pre-empted by an event-loop watchdog, so on attacker-chosen text
+ * that is a core spun until the harness kill, in front of a tool call the user
+ * is waiting on. Every caller windows its own input as well (defence in depth),
+ * but this is the bound that holds whatever any caller forgets.
+ *
+ * BOUNDING THE LEADING CLASS DID CHANGE MATCHES, which is why it is gone rather
+ * than capped. \`\b\` offers no start position inside an unbroken \`\w\` run,
+ * so with a leading \`[\w.-]{0,64}\` a name longer than 64 characters
+ * (\`my_service_\` x7 + \`password=\`) had no start the engine could retry from
+ * and the value leaked. Dropping the class instead is what restores that shape:
+ * the prefix was never the secret, the value is, and the match now starts at the
+ * keyword wherever it sits.
+ *
+ * THE SECOND ALTERNATIVE IS THE AUTHORIZATION HEADER, which the first cannot
+ * see: \`bearer abc123def456\` is separated by a space rather than \`=\` or
+ * \`:\`, and a 12-character value sits under the entropy rule's 28-character
+ * floor, so both rules walked past it. Eight characters is the floor here
+ * because a token shorter than that is not one; it costs the prose reading
+ * ("the bearer of bad news" keeps its words, none of which reach eight).
+ */
 const SECRET_ASSIGN_RE =
-  /\b[\w.-]*(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]*\s*[=:]\s*\S+/gi;
+  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
 /** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
  *  rule cannot see because that one starts at a slash. */
 const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
@@ -769,6 +827,31 @@ const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
  *  which is still under any real key's length. */
 const SECRET_ENTROPY_RE =
   /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
+/**
+ * Hostnames, and the addresses that are not names.
+ *
+ * THE TLD LIST IS WIDENED, NOT REPLACED BY A GENERIC DOTTED RUN. A rule that
+ * took any dotted run ending in letters would have to run a SECOND
+ * \`(?:label\.)+\` scan, and that shape is the quadratic residue already
+ * measured here (~1.4 s per 20k of \`a-a-a\`, x4 per doubling): a second one
+ * doubles it, in front of a tool call. Widening the alternation adds no scan and
+ * no backtracking, so \`.sh\`, \`.xyz\` and the ccTLDs an internal host actually
+ * uses leave without making the arm slower. It is a list, so it is not a promise
+ * of completeness; the path, userinfo and entropy rules are what catch the rest.
+ *
+ * THE LIST STAYS CASE-INSENSITIVE, over-redaction and all. Widening to ccTLDs
+ * put English words in it, so a missing space eats the next sentence
+ * (\`failed.In the log\` -> \`failed the log\`). Every case-based cure trades
+ * that for a leak: lower-case-only lets \`EU.ACME.DE\` through, and a
+ * Title-case guard lets \`Eu.Acme.De\` through, because no rule can tell a
+ * Title-cased host from a Title-cased word. Redacting a topic word is the
+ * cheaper mistake, so it stands.
+ */
+const SECRET_HOST_RE =
+  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b/gi;
+/** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
+ *  so no TLD. Bounded repetition, so it adds no backtracking. */
+const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 /**
  * Drop every credential, scheme-less path, hostname, hex id and number: what
@@ -783,16 +866,52 @@ const SECRET_ENTROPY_RE =
  */
 function scrub(text) {
   return String(text)
+    // ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so
+    // stripping the block first would leave \`[31m\` behind as text.
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
+    // C0 BEFORE EVERY WHOLE-TOKEN RULE, and deleted rather than spaced. A
+    // control byte inside a name is a SPLITTER: \`api_key<0x01>=hunter2\` reads
+    // as two tokens to every rule below, and \`clean\` only removes it after the
+    // scrub has already decided. Whitespace controls are left alone; they are
+    // real text here and the collapse at the bottom handles them.
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
     .replace(SECRET_USERINFO_RE, ' ')
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
     .replace(SECRET_ENTROPY_RE, ' ')
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
-    .replace(/(?:^|[\s'"(=:])(?:\/[\w.@-]+){2,}/g, ' ')
+    // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
+    // which carries exactly as much of a customer's name as the absolute one
+    // does (\`src/customers/acme-bank/keys.ts\`). Two separators minimum, so
+    // \`and/or\` survives. Both alternatives are anchored on a mandatory \`/\`
+    // between two classes that cannot contain one, so neither adds a
+    // backtracking seam.
+    //
+    // THE LEADING CLASS IS NEGATED, NOT ENUMERATED. Enumerating what a path is
+    // quoted or punctuated by is a list that is always one character short:
+    // \`**src/customers/acme-bank/keys.ts**\` (markdown bold, ordinary in a Task
+    // description) and \`a.ts;src/customers/…\` both walked past a class holding
+    // \`\s'"(=:,<\`~@[{\`. Anything that is not a path character now opens one.
+    //
+    // THE FIRST SEGMENT TAKES AT MOST THREE DOTS, and that bound is what keeps
+    // the negated class affordable. \`.\` opens a start position, so on 20k of
+    // \`a.a.a\` an unbounded \`[\w.@-]+\` re-scans the tail from every dot: 5 ms
+    // at 5k, 22 ms at 10k, 89 ms at 20k, x4 per doubling. Bounded, each start
+    // dies within four groups — 0.17 ms at 20k, x2 per doubling — and a real
+    // path prefix has nowhere near three dots.
+    //
+    // THE BOUND'S RESIDUE, PRICED AND KEPT: past three dots the match restarts
+    // inside the segment, so the HEAD of a longer one survives
+    // (\`acmebank.a.b.c.d/keys/prod.ts\` -> \`acmebank\`). Narrow, and paid for
+    // deliberately: widening the bound is what brings the quadratic back.
+    .replace(
+      /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
+      ' ',
+    )
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
     .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
-    .replace(/\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|internal|local)\b/gi, ' ')
+    .replace(SECRET_HOST_RE, ' ')
+    .replace(SECRET_IPV4_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -2229,6 +2348,76 @@ export function pushFailureHookScript(dataDir: string): string {
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
 
+/**
+ * The child pointer: the card head, then a capability ladder instead of one
+ * imperative. A child agent type may lack Bash, the tenjin allowlist, or tools
+ * altogether, and a pointer whose only resolution path is a command it cannot
+ * run is dead context (tenjin-agent#228), so the rungs descend from a CLI call
+ * to a plain fetch to an MCP tool, and every ladder ends in something ANY child
+ * can do: carry the id back to its parent.
+ *
+ * EVERY RUNG NAMES A TOOL THAT EXISTS. The MCP rung is the one added for the
+ * child with nothing else to fall back on, so a tool name it cannot resolve
+ * costs that child its whole turn on an unknown-tool error. src/mcp/server.ts
+ * registers eight tools and no read tool under any name; 'tenjin_inspect' is
+ * the free, read-only one, and it returns the answer card plus the preview
+ * rather than the body, which the rung says.
+ *
+ * WHAT THE PAID BRANCH MAY SAY. This context has no spend authority, so this
+ * line carries no purchase guidance and never names 'tenjin buy' itself.
+ * 'tenjin inspect' is not purchase guidance: it never signs, never pays and
+ * never saves (docs/agent-permissions.md), and it is the difference between a
+ * child that reports "the preview covers our case, worth the price" and one
+ * that reports a bare uuid. Its own output does close with "run tenjin buy to
+ * pay and read" (src/commands/inspect.ts), so what this line withholds is the
+ * instruction, not the string: defense in depth, since the child still has no
+ * key, no allowlist entry and no --yes.
+ *
+ * The team shelf drops the fetch rung: a team shelf exists only behind a
+ * protected deployment, and the bypass header that opens it is origin-pinned
+ * CLI config a child's WebFetch cannot send, so that rung would hand back the
+ * interstitial.
+ *
+ * The closing marker line correlates the text with its injected row: the same
+ * uid sits on that row. Correlation, NOT receipt, for the reason given at the
+ * marker's own site below.
+ */
+function childPointer(candidate, opener, marker, shelf, searchId) {
+  const lines = cardHead(candidate, opener);
+  if (isFree(candidate)) {
+    const rungs = ['Read it free: tenjin read ' + candidate.resourceId];
+    if (shelf !== 'team') rungs.push('or fetch ' + candidate.url);
+    rungs.push('or call the tenjin_inspect MCP tool with that id for its card and preview');
+    rungs.push('or, if you cannot run tools, carry that resource id into your final answer');
+    lines.push(rungs.join('; ') + ' for your parent.');
+  } else {
+    const rungs = ['Paid piece: this context cannot approve a purchase'];
+    rungs.push('preview it free: tenjin inspect ' + candidate.resourceId);
+    rungs.push('or call the tenjin_inspect MCP tool with that id');
+    rungs.push('or carry that resource id into your final answer');
+    lines.push(rungs.join('; ') + ' and let your parent decide.');
+  }
+  // THE ONE VALID OUTCOME ASK. '--last' resolves through latestDeliberate,
+  // whose filter is source IS NULL OR source = 'cli', which by construction
+  // EXCLUDES the dispatch-hook search this delivery came from: it would either
+  // throw SEARCH_NOT_FOUND or bind to the machine's most recent CLI search in
+  // some other project and post against that. The id is right here, so name
+  // it; with no id there is no valid ask and the rung is omitted rather than
+  // guessed at. The statuses are the three of OUTCOME_STATUSES a reader can
+  // report; anything outside that set throws USAGE. Spelled out rather than
+  // pipe-separated: the line is framed as runnable, and 'a|b|c' copied verbatim
+  // into a shell is three piped commands whose first one posts 'used'.
+  if (searchId !== '') {
+    lines.push(
+      'Afterwards report whether it helped: tenjin outcome --search-id ' + searchId +
+        ' --status <status>, where <status> is one of: used, partially_used, rejected. ' +
+        'Or state in your final answer whether you used it.',
+    );
+  }
+  lines.push('[tenjin-delivery ' + marker + ']');
+  return lines.join('\n');
+}
+
 async function main() {
   const input = JSON.parse(await readStdin());
   if (!isRecord(input)) return quiet();
@@ -2264,6 +2453,20 @@ async function main() {
   // Whichever shelf the dispatch hook actually asked. A cache written before
   // that field existed reads as 'public', which is what it was.
   const shelf = cache.shelf === 'team' ? 'team' : 'public';
+  // One uid per fire, stamped into the event row here and into the emitted
+  // text below. What it does NOT prove: Claude Code does not persist hook
+  // context fired inside a subagent to either transcript (probed 2.1.247), so
+  // no grep can confirm a child delivery. This correlates a row with the text
+  // that was emitted, and an 'injected' row stays a database claim. Skip rows
+  // inherit the marker through the ledger join, which is misleading; moving it
+  // onto the delivery row needs a store column and lands with the heartbeat
+  // work in the next layer (tenjin-agent#228 PR 2).
+  const marker = uid();
+  // ANCHORED, not just typed. The projection already refuses a non-UUID
+  // searchId before anything is cached, but this arm reads back out of the
+  // store and the value goes into a command line the child may run.
+  const searchId =
+    typeof cache.searchId === 'string' && UUID_RE.test(cache.searchId) ? cache.searchId : '';
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
@@ -2278,6 +2481,7 @@ async function main() {
       event: 'SubagentStart',
       query: clean(String(cache.query || ''), 512),
       agentType,
+      marker,
     },
   });
   const base = {
@@ -2292,7 +2496,7 @@ async function main() {
     trigger: 'subagent',
     event: 'SubagentStart',
     shelf,
-    searchId: typeof cache.searchId === 'string' ? cache.searchId : undefined,
+    searchId: searchId === '' ? undefined : searchId,
     candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
     strength: cache.strength,
   };
@@ -2307,16 +2511,22 @@ async function main() {
     recordDecision({ ...base, action: 'skipped', reason: 'already-injected' });
     return quiet();
   }
-  let form = 'short';
-  const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
-  let text = shortForm(top, opener);
-  if (isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
-    const body = await fetchFreeBody(top, config);
-    if (body !== null) {
-      form = 'full';
-      text = fullForm(opener, headerLine(top), body);
-    }
-  }
+  // POINTER ONLY, whatever the strength (tenjin-agent#228). The full-body
+  // upgrade this arm ran on a strong free hit had zero confirmed uses in the
+  // 19 sampled injections, at up to 6k chars each, while the one verified win
+  // was a short pointer; the body fetch is retired for child delivery until
+  // receipts prove a child reads more than the pointer.
+  const form = 'short';
+  // The definite opener, not a hedged one: the short openers said "may match"
+  // for the 'moderate' strength the shelf verdict retired, and only a strong
+  // hit is ever parked for a child.
+  const text = childPointer(
+    top,
+    shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER,
+    marker,
+    shelf,
+    searchId,
+  );
   const claimed = recordDecision({
     ...base,
     action: 'injected',
