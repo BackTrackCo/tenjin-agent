@@ -119,6 +119,24 @@ describe('main', () => {
     expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
+  /**
+   * `sync --cwd <path>` is what the Stop hook spawns with (tenjin-agent#249): the
+   * hook payload's cwd STRING, which `projectId` hashed the pairing rows under,
+   * and which `process.cwd()` in the spawned child would have resolved through
+   * any symlink into a different project id. It takes a value, and it is
+   * documented, because an operator running the by-hand fallback from a
+   * different directory needs the same scoping the hook gets.
+   */
+  it('documents sync --cwd and requires a value for it', async () => {
+    const cap = captureIo();
+    expect(await main(['sync', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('--cwd <path>');
+
+    const missing = captureIo();
+    expect(await main(['sync', '--cwd'], missing.io)).toBe(2);
+    expect(JSON.parse(missing.stdout()).error.code).toBe('USAGE');
+  });
+
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
     const cap = captureIo(true);
     const code = await main([], cap.io);

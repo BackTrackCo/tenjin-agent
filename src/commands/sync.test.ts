@@ -1,10 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSync } from './sync';
-import { openStore, projectId, STORE_SQL } from '../lib/state-store';
-import { repoSlug, teamCoarseKey } from '../lib/state-store';
+import { openStore, projectId, repoSlug, teamCoarseKey, STORE_SQL } from '../lib/state-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import { CliError } from '../lib/errors';
@@ -325,6 +324,59 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     const fork = await keyFor('git@github.com:fork/widgets.git', 'fine-fork');
     expect(ssh).toBe(https);
     expect(fork).not.toBe(ssh);
+  });
+
+  /**
+   * THE CHECKOUT IS THE ONE `--cwd` NAMES (tenjin-agent#249). `pairings.project`
+   * is `projectId(cwd)` over the cwd the hook payload carried, so a sync that
+   * scoped itself by `process.cwd()` read a different project's rows whenever
+   * the two strings differed — and the Stop hook, which counts with the payload
+   * cwd, would go on spawning a sync that saw nothing.
+   */
+  it('reads the rows of the checkout --cwd names, not the process working directory', async () => {
+    await writeTeamConfig();
+    const elsewhere = join(dir, 'elsewhere');
+    await mkdir(elsewhere, { recursive: true });
+    await seedPairing({ cwd: elsewhere, key: 'fine-elsewhere', status: 'unverified' });
+    // A row for the directory the test process itself is in, which must not
+    // travel: it belongs to another checkout entirely.
+    await seedPairing({ cwd: process.cwd(), key: 'fine-process-cwd', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: elsewhere, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1 });
+    expect(sent).toHaveLength(1);
+    const keys = sent[0]!.body!.keys as Array<{ key: string }>;
+    expect(keys[0]!.key).toBe('sig_v1:fine-elsewhere');
+  });
+
+  /**
+   * THE CASE THAT MADE IT MATTER: a checkout reached through a symlink. `getcwd`
+   * returns the RESOLVED path, so a child that inherited only the working
+   * directory hashed the real path while the failure arm had hashed the
+   * symlinked one the payload carried. Two project ids for one checkout, and
+   * every run reported "Nothing to sync."
+   */
+  it('scopes by the symlinked path it was given, not by the path it resolves to', async () => {
+    await writeTeamConfig();
+    const real = join(dir, 'real-checkout');
+    const link = join(dir, 'linked-checkout');
+    await mkdir(real, { recursive: true });
+    await symlink(real, link);
+    // The premise: the two strings are one directory and two project ids.
+    expect(await realpath(link)).toBe(await realpath(real));
+    expect(projectId(link)).not.toBe(projectId(await realpath(link)));
+
+    await seedPairing({ cwd: link, key: 'fine-symlinked', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: link, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1 });
+    expect((sent[0]!.body!.keys as Array<{ key: string }>)[0]!.key).toBe('sig_v1:fine-symlinked');
   });
 
   it('sends verified:true on the keys when the pairing closed as verified', async () => {

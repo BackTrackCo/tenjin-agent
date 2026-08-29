@@ -833,10 +833,18 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       'Publish this checkout’s fixed failures (closed code-scoped pairings) to your team shelf so a teammate hitting the same error sees the fix. Team mode only.',
     )
+    // The checkout to sync, and NOT a convenience (tenjin-agent#249). A pairing
+    // row is scoped by `projectId(cwd)` over the cwd STRING the hook payload
+    // carried, and `process.cwd()` is what `getcwd` resolves that string to —
+    // so in a session whose path runs through a symlink the two hash
+    // differently, and the Stop hook counted rows the sync it spawned could not
+    // see. The hook passes the payload's cwd here verbatim.
+    .option('--cwd <path>', 'the checkout whose pairings to sync (default: the working directory)')
     .action(async function (this: Command) {
       await runCommand('sync', this, async (ctx) => {
+        const o = this.opts();
         const { runSync } = await import('./commands/sync');
-        return runSync(ctx);
+        return runSync(ctx, typeof o.cwd === 'string' && o.cwd.length > 0 ? { cwd: o.cwd } : {});
       });
     });
 

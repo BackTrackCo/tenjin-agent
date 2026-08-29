@@ -48,9 +48,18 @@ export interface SyncDeps {
   useSession?: boolean;
   /** Environment seam; defaults to process.env. */
   env?: NodeJS.ProcessEnv;
-  /** The checkout whose pairings sync; defaults to process.cwd(). The Stop hook
-   *  spawns the child with the session's cwd, so the project scoping matches the
-   *  rows the failure arm wrote. */
+  /**
+   * The checkout whose pairings sync; defaults to `process.cwd()`. `tenjin sync
+   * --cwd <path>` sets it, and the Stop hook passes the hook payload's own cwd
+   * string there when it spawns the child.
+   *
+   * THE STRING, NOT THE RESOLVED PATH (tenjin-agent#249). `pairings.project` is
+   * `projectId(cwd)` over the cwd the payload carried, and `process.cwd()` is
+   * that path with every symlink resolved, so a session running under a symlinked
+   * checkout hashes one way in the hook and another way here — the hook counted
+   * unsynced rows the sync it spawned then could not see, and the run reported
+   * "Nothing to sync." forever.
+   */
   cwd?: string;
 }
 

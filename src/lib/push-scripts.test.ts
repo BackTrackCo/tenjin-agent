@@ -7257,8 +7257,14 @@ appendFileSync(${JSON.stringify(marker)}, JSON.stringify({ argv: process.argv.sl
     const calls = await markerLines(marker);
     expect(calls).toHaveLength(1);
     const call = JSON.parse(calls[0] ?? '{}') as { argv: string[]; cwd: string };
-    expect(call.argv).toEqual(['sync']);
-    // macOS reports the tmpdir through /private; compare resolved paths.
+    // `--cwd` CARRIES THE PAYLOAD'S OWN STRING (tenjin-agent#249). The child's
+    // working directory is set too, but `process.cwd()` inside it is that path
+    // RESOLVED — on macOS the tmpdir alone proves the difference, since the
+    // payload says /var/... and the child reads /private/var/... — and a
+    // `projectId` over the resolved path scopes to a project whose rows the
+    // failure arm never wrote.
+    expect(call.argv).toEqual(['sync', '--cwd', cwd]);
+    expect(call.cwd).not.toBe(cwd);
     expect(realpathSync(call.cwd)).toBe(realpathSync(cwd));
   });
 

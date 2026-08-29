@@ -2416,7 +2416,17 @@ function spawnSyncIfNeeded(config, cwd) {
     return false;
   }
   try {
-    const child = spawn(process.execPath, [CLI_PATH, 'sync'], {
+    // \`--cwd\`, NOT JUST THE CHILD'S WORKING DIRECTORY (tenjin-agent#249). The
+    // rows this sync must find are scoped by \`projectId(cwd)\` over the payload's
+    // cwd STRING, and a child that inherits only the directory computes its own
+    // scope from \`process.cwd()\` — which is the path \`getcwd\` RESOLVED, so a
+    // session whose cwd runs through a symlink hashed one way here and another
+    // way there, and the count that decided to spawn described rows the sync
+    // could not see. Both are set: the flag decides the scope, the directory
+    // keeps the child inside the project.
+    const args = [CLI_PATH, 'sync'];
+    if (typeof cwd === 'string' && cwd.length > 0) args.push('--cwd', cwd);
+    const child = spawn(process.execPath, args, {
       detached: true,
       stdio: 'ignore',
       ...(cwd === null ? {} : { cwd }),
