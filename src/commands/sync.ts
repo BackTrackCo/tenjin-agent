@@ -644,7 +644,7 @@ function parseJsonRecord(value: unknown): Record<string, string> {
  * file (a worktree or submodule) is followed to its real gitdir.
  *
  * ⚠ THE SAME RULE AS THE RESOLVE LEG (`repoOrigin` in lib/push-scripts.ts): the
- * URL is normalised to `owner/name` so the two transports of one repo salt
+ * URL is normalised to `host/full/path` so the two transports of one repo salt
  * alike, and a null (no origin, or a remote that is a bare local path) salts to
  * '' — a salt like any other, which the coarse key still goes out under.
  */

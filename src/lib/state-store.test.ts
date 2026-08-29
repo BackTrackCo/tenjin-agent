@@ -3408,6 +3408,28 @@ describe('repoSlug', () => {
   });
 
   /**
+   * THE OTHER HALF OF "transport is not identity": identity is not the tail of
+   * the path either (round-1 review of #256). The same `acme/api` on two hosts
+   * is two repos — an internal mirror, a self-hosted rewrite — and two GitLab
+   * namespaces that end alike are two repos. The last-two-segments rule pooled
+   * both pairs into one coarse scope, which is the state the salt exists to
+   * prevent.
+   */
+  it('keeps the same path on two hosts, and two deep paths that end alike, apart', () => {
+    expect(teamCoarseKey('abc123', repoSlug('git@github.com:acme/api.git'))).not.toBe(
+      teamCoarseKey('abc123', repoSlug('git@git.internal.acme.dev:acme/api.git')),
+    );
+    expect(teamCoarseKey('abc123', repoSlug('https://gitlab.com/a/b/c/api.git'))).not.toBe(
+      teamCoarseKey('abc123', repoSlug('https://gitlab.com/x/y/c/api.git')),
+    );
+    // And Azure DevOps's two transports are the documented split, pinned so a
+    // later reader sees it was chosen rather than missed.
+    expect(repoSlug('https://dev.azure.com/org/proj/_git/api')).not.toBe(
+      repoSlug('git@ssh.dev.azure.com:v3/org/proj/api'),
+    );
+  });
+
+  /**
    * A no-origin checkout salts with '' ON BOTH SIDES, so two of them match each
    * other. Before #249 the resolve leg asked under this key and `tenjin sync`
    * published nothing under it.

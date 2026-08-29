@@ -2678,7 +2678,7 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
       'sig_v1c:' + teamCoarseKey(local[0]!, repoSlug('git@github.com:acme/web.git')),
     );
     // And the salt is the SLUG, never the url it was read from.
-    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'acme/api'));
+    expect(coarse[0]).toBe('sig_v1c:' + teamCoarseKey(local[0]!, 'github.com/acme/api'));
     expect(coarse[0]).not.toBe(
       'sig_v1c:' + teamCoarseKey(local[0]!, 'git@github.com:acme/api.git'),
     );

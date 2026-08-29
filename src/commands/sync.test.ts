@@ -279,7 +279,7 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
 
     const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
-    const expected = 'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'acme/widgets');
+    const expected = 'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'github.com/acme/widgets');
     expect(keys.some((k) => k.key === expected)).toBe(true);
     expect(expected).toBe(
       'sig_v1c:' +
