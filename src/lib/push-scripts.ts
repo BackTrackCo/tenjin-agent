@@ -2035,6 +2035,10 @@ async function main() {
   if (!claimState(sessionId, STATE_SIGNATURES_PREFIX + signatureOf(line))) {
     recordInjection({
       session: sessionId,
+      // WHICH agent lost the claim is the entire content of this row: the claim
+      // is per session on purpose, so without the agent the row says only "this
+      // session hit the wall twice" — which is what it already said.
+      agentId,
       cwd,
       hook: 'failure',
       // LOCAL, like every other row this arm writes: no shelf was asked, and

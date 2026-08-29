@@ -2709,6 +2709,10 @@ describe('the arms tell an agent from a session', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       session: SESSION,
+      // THE LOSER, named. The claim is per session, so the session on this row
+      // is the same one the winner wrote under; the agent is what makes it a
+      // count of two workers rather than of one session twice.
+      agentId: 'a2',
       trigger: 'failure',
       shelf: 'local',
       action: 'skipped',
