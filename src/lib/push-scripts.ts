@@ -1413,6 +1413,35 @@ const HEAD_RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'uvx']);
 /** ... and the package-manager subcommands that do the same thing. */
 const PM_RUN_SUBS = new Set(['exec', 'dlx', 'x']);
 
+/** Root options the Tenjin CLI accepts before its leaf command. Boolean options
+ * consume one word; value options consume either one \`--name=value\` word or the
+ * following value too. Kept narrow to the root options declared in cli.ts: an
+ * unknown option is not evidence that a later word actually ran as a command. */
+const TENJIN_ROOT_BOOLEAN_OPTS = new Set(['--json']);
+const TENJIN_ROOT_VALUE_OPTS = new Set(['--base' + '-url', '--timeout']);
+
+/** The index of Tenjin's leaf command after any supported root options. */
+function skipTenjinRootOptions(words, i) {
+  while (i < words.length) {
+    const word = words[i];
+    if (TENJIN_ROOT_BOOLEAN_OPTS.has(word)) {
+      i += 1;
+      continue;
+    }
+    const equals = word.indexOf('=');
+    const option = equals === -1 ? word : word.slice(0, equals);
+    if (!TENJIN_ROOT_VALUE_OPTS.has(option)) break;
+    if (equals !== -1) {
+      i += 1;
+      continue;
+    }
+    // A missing value is an invalid CLI invocation and reaches no leaf.
+    if (i + 1 >= words.length) return words.length;
+    i += 2;
+  }
+  return i;
+}
+
 /**
  * Step \`i\` past one wrapper and its options: returns the index of the word
  * the wrapper runs. \`-uBUILDER\` and \`--user=builder\` carry their value in
@@ -1445,7 +1474,9 @@ function skipWrapper(words, i, valueOpts, name) {
  * \`/usr/local/bin/pnpm\` and \`./node_modules/.bin/vitest\` land on their
  * program names; leading \`FOO=bar\` assignments and wrappers are stepped over,
  * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`),
- * and \`python3 -m <module>\` lands on the module.
+ * and \`python3 -m <module>\` lands on the module. Tenjin's own root options
+ * are stepped over before its \`sub\` is reported, so \`tenjin --json publish\`
+ * identifies the same content command as \`tenjin publish --json\`.
  */
 function commandHeads(command) {
   const out = [];
@@ -1479,7 +1510,8 @@ function commandHeads(command) {
       break;
     }
     if (head.length === 0) continue;
-    out.push({ head, sub: i + 1 < words.length ? words[i + 1] : '' });
+    const subIndex = head === 'tenjin' ? skipTenjinRootOptions(words, i + 1) : i + 1;
+    out.push({ head, sub: subIndex < words.length ? words[subIndex] : '' });
   }
   return out;
 }
@@ -1504,6 +1536,18 @@ function allowedHeads(command) {
 /** Whether ANY command in the line is one this arm may fire behind. */
 function failureAllowed(command) {
   return allowedHeads(command).length > 0;
+}
+
+/**
+ * Publishing and editing Tenjin content are the capture loop's disposition,
+ * not evidence that this session did repository work. Exclude the whole Bash
+ * event when any parsed segment is one of those commands, including paths,
+ * wrappers and package-manager runners understood by commandHeads().
+ */
+function isTenjinContentCommand(command) {
+  return commandHeads(command).some(
+    ({ head, sub }) => head === 'tenjin' && (sub === 'publish' || sub === 'edit'),
+  );
 }
 
 /** The most informative line: the LAST error-shaped, non-frame line, because
@@ -2192,10 +2236,6 @@ async function main() {
   if (input.is_interrupt === true) return quiet();
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
   const command = typeof toolInput.command === 'string' ? toolInput.command : '';
-  // BEFORE anything is read, parsed or written. A command whose head is not a
-  // build, test, migration, install or lint step is not one this arm has an
-  // opinion about, however its output reads.
-  if (!failureAllowed(command)) return quiet();
 
   // WHICH AGENT, not just which session. Every subagent of a session carries the
   // parent's session id, so this is the only field that tells one parallel
@@ -2206,6 +2246,17 @@ async function main() {
   // session would let a child's fix verify a pairing its parent was shown.
   if (invalid) return quiet();
   const cwd = cwdOf(input);
+  const failureEligible = failureAllowed(command);
+  const rootShellActivity =
+    sessionId !== null &&
+    agentId === null &&
+    cwd !== null &&
+    !isTenjinContentCommand(command);
+
+  // An unrelated Bash event with no project-root activity to mark has no reason
+  // to create the state store. Failure handling and content-free root activity
+  // are the only two lanes below; decide that at the edge before openStore().
+  if (!failureEligible && !rootShellActivity) return quiet();
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
   // stderr line already written at open. Returning here rather than carrying on
@@ -2215,6 +2266,19 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+
+  // BEFORE THE FAILURE ALLOWLIST. Every root Bash call is repository activity,
+  // including read-only commands the mechanical failure lane intentionally
+  // ignores. The fixed marker stores no command, path or output and repeated
+  // calls only refresh its timestamp. Tenjin publish/edit are the capture
+  // disposition itself, so they cannot manufacture eligibility for another ask.
+  if (rootShellActivity) {
+    markRootActivity(sessionId, agentId, 'shell');
+  }
+
+  // A command whose head is not a build, test, migration, install or lint step
+  // is not one the FAILURE lane has an opinion about, however its output reads.
+  if (!failureEligible) return quiet();
   const heads = allowedHeads(command);
   const text = failureText(input);
   // A PASS, not a failure. This is the other half of the mechanical lane: the
@@ -3249,10 +3313,6 @@ async function main() {
   // session would close a pairing a sibling was shown.
   if (invalid) return quiet();
   if (sessionId === null) return quiet();
-  const cwd = cwdOf(input);
-  const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
-  const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
-  if (filePath.length === 0 || filePath.length > 4096) return quiet();
   const tool = input.tool_name;
   const event = input.hook_event_name;
   const isEdit = event === 'PreToolUse' && (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit');
@@ -3267,6 +3327,20 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+
+  const cwd = cwdOf(input);
+  const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
+  const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
+  if (filePath.length === 0 || filePath.length > 4096) return quiet();
+
+  // ROOT ACTIVITY, BEFORE EXTENSION AND PACKAGE GATES. The capture signal is
+  // deliberately content-free: one fixed row for inspection and one for
+  // mutation, never the path, tool input, result or a growing per-call counter.
+  // Subagent work is captured at its own boundary and must not make the parent
+  // eligible here.
+  if (agentId === null && cwd !== null) {
+    markRootActivity(sessionId, agentId, isRead ? 'inspection' : 'mutation');
+  }
 
   // EVERY EDITED PATH, WHATEVER ITS EXTENSION, and before the source-file gate
   // below. This is the mechanical lane's only view of a file change: the failure
