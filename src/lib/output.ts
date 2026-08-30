@@ -122,6 +122,10 @@ export function emitFailure(
     // without them an interactive publish hitting NEEDS_CONFIRMATION /
     // PUBLISH_BLOCKED sees the count but not WHICH lines tripped.
     lines.push(...findingLines(io, cliErr.details));
+    // A third is the card's own missing fields, so the one confirm a card-less
+    // or incomplete publish is guaranteed to reach names them instead of leaving
+    // the operator to learn it from the receipt after the write (tenjin-agent#257).
+    lines.push(...cardLines(io, cliErr.details));
     // The other is a stored child finding's body, because that confirm is the
     // READ GATE for it: `publish --finding` names a body only this machine's
     // hooks have ever seen, so approving without it printed is approving unread
@@ -333,6 +337,28 @@ function storedBodyLines(io: Io, details: unknown): string[] {
     '',
     ...body.split('\n').map((line) => sanitizeForTerminal(line)),
     '',
+  ];
+}
+
+/**
+ * Render `details.card` (the `localCardEligibility` preview publish attaches to
+ * NEEDS_CONFIRMATION) as one dim line, when the card is incomplete.
+ * Tenjin-agent#257: the review confirm is the one point-of-use gate a card-less
+ * or incomplete publish is guaranteed to pass through, so the card's own missing
+ * fields belong on that confirm the same way a scan finding does — otherwise a
+ * human approving it only ever reads the count of scan findings and never
+ * learns the card is thin until the receipt, after the write.
+ */
+function cardLines(io: Io, details: unknown): string[] {
+  if (typeof details !== 'object' || details === null || !('card' in details)) return [];
+  const { card } = details as { card: unknown };
+  if (typeof card !== 'object' || card === null) return [];
+  const { cacheEligible, missing } = card as { cacheEligible?: unknown; missing?: unknown };
+  if (cacheEligible !== false || !Array.isArray(missing) || missing.length === 0) return [];
+  const sentences = missing.filter((m): m is string => typeof m === 'string');
+  if (sentences.length === 0) return [];
+  return [
+    paint(io, 'dim', `  incomplete answer card: ${sentences.map(sanitizeForTerminal).join(' ')}`),
   ];
 }
 

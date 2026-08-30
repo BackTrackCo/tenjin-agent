@@ -217,6 +217,39 @@ describe('emitFailure', () => {
     expect(cap.stdout()).toContain('email [server] (line 4): a@b.com');
   });
 
+  /**
+   * tenjin-agent#257: `review` always throws NEEDS_CONFIRMATION before a
+   * publish, so it is the one point-of-use gate a card-less or incomplete
+   * publish is guaranteed to reach. Without the card rendered here, a human
+   * only ever sees the scan-finding count on this screen and learns the card
+   * is thin from the receipt, after the write.
+   */
+  it('at a TTY, renders details.card as an incomplete-card line', () => {
+    const cap = captureIo(true);
+    const err = new CliError('NEEDS_CONFIRMATION', 'needs confirm', {
+      fix: 'review then --yes',
+      details: {
+        mode: 'review',
+        card: {
+          cacheEligible: false,
+          missing: ['Describe the scope (what this piece covers).'],
+        },
+      },
+    });
+    emitFailure(cap.io, 'publish', err);
+    const out = cap.stdout();
+    expect(out).toContain('incomplete answer card: Describe the scope (what this piece covers).');
+  });
+
+  it('prints nothing extra for a complete card', () => {
+    const cap = captureIo(true);
+    const err = new CliError('NEEDS_CONFIRMATION', 'needs confirm', {
+      details: { mode: 'review', card: { cacheEligible: true, missing: [] } },
+    });
+    emitFailure(cap.io, 'publish', err);
+    expect(cap.stdout()).not.toContain('incomplete answer card');
+  });
+
   it('leaves the machine envelope unchanged when details.findings is present', () => {
     const cap = captureIo(false);
     const details = {

@@ -567,6 +567,20 @@ export async function runPublish(
     });
   }
 
+  // POINT-OF-USE CARD WARNING (tenjin-agent#257). `auto` with no scan warns and
+  // `full-auto` never throw the confirm above, and `--yes` skips it even where it
+  // would otherwise fire, so a card-less or incomplete publish reached this line
+  // in total silence until now — the only word of it was the receipt printed
+  // AFTER the write, once spending had already happened. Said here, unconditionally
+  // and before the wallet is even touched, so the operator (or the agent reading
+  // its own stderr) sees it while the publish can still be cancelled. Not gated on
+  // `humanMode`: like every other stderr notice in this file, `--json` reads
+  // stdout only, so this is invisible to a machine caller by construction, not by
+  // a check that could drift from it.
+  if (!eligibility.cacheEligible) {
+    ctx.io.stderr.write(`${cardWarningLine(eligibility.missing)}\n`);
+  }
+
   // Approved (or nothing to confirm): from here a wallet is required. The write
   // base URL is resolved through the shared settings seam and used for BOTH the
   // SIWX/session header domain and the POST host, so the two never diverge. In
@@ -1402,6 +1416,24 @@ function cardScanText(card: ResourceCardInput | undefined): string {
 function blockMessage(blocking: ScanFinding[], finding: ChildFinding | undefined): string {
   const what = finding === undefined ? 'the file' : `finding ${finding.id}`;
   return `Publish blocked: ${what} contains ${describeFindings(blocking)}.`;
+}
+
+/**
+ * The point-of-use card notice (tenjin-agent#257): what an incomplete or
+ * card-less publish is missing, in the same sentences the post-write receipt
+ * uses, so the two never describe the rubric differently. Deliberately silent
+ * on rank and filter placement — that is the receipt's business, and #628 /
+ * tenjin#797 already made card text a non-input to relevance, so this notice
+ * sticks to what the card actually is: the buyer's only pre-purchase read on
+ * whether the piece fits, and worth adding whether or not this run confirms.
+ */
+function cardWarningLine(missing: string[]): string {
+  const sentences = missing.map(sanitizeForTerminal).join(' ');
+  return (
+    `Publishing without a complete answer card: ${sentences} ` +
+    'A buyer reads the card, not the body, to judge fit before paying — add it now in ' +
+    'frontmatter, or after publishing with `tenjin edit <postId>`.'
+  );
 }
 
 /**

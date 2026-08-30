@@ -232,6 +232,78 @@ function label(content: string): string {
   return content === CLEAN ? 'clean' : content === WARN ? 'warn' : 'block';
 }
 
+// tenjin-agent#257: a card-less or incomplete publish used to reach the network
+// in total silence whenever the mode skipped or bypassed the confirm — `auto`
+// with no scan warns, `full-auto` always, and any mode with `--yes`. The only
+// word of it was the receipt printed AFTER the write, once spending had already
+// happened. These pin the stderr notice printed BEFORE the wallet is touched.
+describe('runPublish — point-of-use card warning', () => {
+  it('warns on stderr before a card-less publish in auto mode (no confirm to reach)', async () => {
+    const { provider } = spyProvider();
+    const { fetch, calls } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    const res = await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(calls).toHaveLength(1); // the write happened
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(stderr()).toContain('Publishing without a complete answer card:');
+    expect(stderr()).toContain('Describe the scope (what this piece covers).');
+    expect(stderr()).toContain('tenjin edit <postId>');
+  });
+
+  it('warns on stderr before a card-less publish in full-auto mode', async () => {
+    const { provider } = spyProvider();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'full-auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(stderr()).toContain('Publishing without a complete answer card:');
+  });
+
+  it('warns on stderr even when --yes bypasses an interactive confirm', async () => {
+    const { provider } = spyProvider();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'review', yes: true }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(stderr()).toContain('Publishing without a complete answer card:');
+  });
+
+  it('says nothing when the card is complete', async () => {
+    const file = await writeDoc(
+      [
+        '---',
+        'title: The Answer',
+        'questionsAnswered:',
+        '  - What is it?',
+        'scope: covers the answer',
+        'exclusions: not the question',
+        'provenanceSummary: measured directly',
+        '---',
+        'body',
+      ].join('\n'),
+    );
+    const { provider } = spyProvider();
+    const { fetch } = stubServer();
+    const { ctx, stderr } = makeCtxCapturingStderr();
+    await runPublish(
+      baseArgs(file, { mode: 'auto' }),
+      ctx,
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect(stderr()).not.toContain('Publishing without a complete answer card');
+  });
+});
+
 describe('runPublish — exit-code conformance', () => {
   it('PUBLISH_BLOCKED and NEEDS_CONFIRMATION are exit 3, unreadable file is exit 2', async () => {
     const { provider } = spyProvider();
