@@ -446,10 +446,11 @@ function cardLines(card: OwnPostCard | undefined): string[] {
 
 function eligibilityLine(card: OwnPostCard | undefined): string {
   if (card === undefined)
-    return 'No answer card: buyers have less pre-paywall context for judging fit.';
+    return 'No answer card: ranks below every carded piece, invisible to any freshWithin or appliesTo query, and never cited by POST /api/answer.';
   const missing = missingSentences(card.cacheEligibleMissing).map(sanitizeForTerminal);
-  if (missing.length === 0) return 'Answer card provides complete pre-paywall fit context.';
-  return `Answer card preview incomplete. To improve its pre-paywall fit context: ${missing.join(' ')}`;
+  if (missing.length === 0)
+    return 'Answer card is complete: full pre-paywall context, and eligible for filtered queries and POST /api/answer.';
+  return `Answer card incomplete, so it ranks below every complete card and POST /api/answer will not cite it. To fix: ${missing.join(' ')}`;
 }
 
 // ---------------------------------------------------------------------------
