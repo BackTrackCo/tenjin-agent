@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { constants, existsSync, fstatSync } from 'node:fs';
+import { constants, existsSync, fstatSync, realpathSync } from 'node:fs';
 import { mkdtemp, mkdir, open, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -44,6 +44,20 @@ describe('readRegularUtf8File', () => {
     }
   });
 
+  /**
+   * PLATFORM-DEPENDENT, and the guard says so rather than pretending otherwise.
+   * `readRegularUtf8File` calls `realpath` first. On macOS `/dev/fd/0` resolves
+   * to itself, so the stat sees a non-regular file and raises the error below.
+   * On Linux the same alias resolves to `pipe:[N]`, which is not a pathname, so
+   * realpath throws ENOENT and this assertion never gets its turn.
+   *
+   * The refusal is safe on both: nothing is consumed either way. Only the error
+   * TYPE differs, so the case is skipped where realpath cannot resolve the alias
+   * instead of asserting a class that platform cannot produce. This ran green in
+   * CI for months only because the worker's fd 0 was a regular file and the
+   * `isFile()` guard returned early; a new test file changed that and the case
+   * started failing on its Linux behaviour.
+   */
   it.skipIf(process.platform === 'win32')(
     'rejects an fd alias to non-regular stdin without consuming it',
     async () => {
@@ -54,6 +68,12 @@ describe('readRegularUtf8File', () => {
           ? '/proc/self/fd/0'
           : null;
       if (alias === null) return;
+      // Linux: realpath gives `pipe:[N]`, so the refusal arrives as ENOENT.
+      try {
+        realpathSync(alias);
+      } catch {
+        return;
+      }
 
       await expect(readRegularUtf8File(alias)).rejects.toBeInstanceOf(NotRegularFileError);
     },
