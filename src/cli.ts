@@ -6,6 +6,7 @@ import { dataDir } from './lib/paths';
 import { PERMISSIONS_DOC_URL } from './lib/permissions';
 import { defaultIo, emitFailure, emitSuccess } from './lib/output';
 import type { Io } from './lib/output';
+import type { StdinInput } from './lib/stdin';
 import { maybeUpdate, readUpdateSignal } from './lib/update-check';
 import type { CommandContext, CommandRun, GlobalFlags } from './context';
 
@@ -575,7 +576,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('publish [file]'))
     .description(
-      "Publish a Markdown file, or a finding one of this session's subagents stated at its own end (--finding <id>), as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the body hard-blocks, and soft findings need --yes",
+      "Publish Markdown from a file, `-`/non-TTY stdin, or a finding one of this session's subagents stated at its own end (--finding <id>), as a paid or free piece with an optional answer card, gated by the local scan and your publish.mode consent. Use to ship knowledge others can buy; a secret in the body hard-blocks, and soft findings need --yes",
     )
     // The queued child finding named by the capture ask, published as the body
     // through this same pipeline (tenjin-agent#228). It is a SOURCE, not a second
@@ -670,11 +671,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.methodology === 'string' ? { methodology: o.methodology } : {}),
           },
           ctx,
+          cliStdin(io),
         );
       });
     });
 
-  addGlobalFlags(program.command('edit <postId>'))
+  addGlobalFlags(program.command('edit <postId> [source]'))
     .description(
       'Show or update one of your own posts: with no change flags it prints the stored post and answer card, with them it merge-updates (omitted field = kept). Use to fix a price, sharpen a card, or ship a revised body; changes need --yes under your publish.mode consent. Reading is owner-scoped, so even the no-flag show signs with your wallet on first use, minting a read-scoped 24h session',
     )
@@ -686,7 +688,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     )
     .option('--title <text>', 'new post title')
     .option('--price <usd>', 'new post price in decimal USD')
-    .option('--body <file>', 'replace the body with this Markdown file (frontmatter ignored)')
+    .option(
+      '--body <file>',
+      'replace the body with this Markdown file, or `-` for stdin (frontmatter ignored)',
+    )
     .option('--excerpt <text>', 'new excerpt')
     .option(
       '--question <text>',
@@ -727,9 +732,19 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       collect,
       [],
     )
-    .action(async function (this: Command, postId: string) {
+    .action(async function (this: Command, postId: string, source: string | undefined) {
       await runCommand('edit', this, async (ctx) => {
         const o = this.opts();
+        if (source !== undefined && source !== '-') {
+          throw new CliError('USAGE', 'The positional edit source must be `-` for stdin.', {
+            fix: 'Use `tenjin edit <postId> -` for stdin, or `--body <file>` for a Markdown file.',
+          });
+        }
+        if (source === '-' && typeof o.body === 'string') {
+          throw new CliError('USAGE', 'Pass stdin or --body, not both.', {
+            fix: 'Use `tenjin edit <postId> -` for stdin, or `tenjin edit <postId> --body <file>` for a file.',
+          });
+        }
         const { runEdit } = await import('./commands/edit');
         return runEdit(
           {
@@ -739,7 +754,8 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.status === 'string' ? { status: o.status } : {}),
             ...(typeof o.title === 'string' ? { title: o.title } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
-            ...(typeof o.body === 'string' ? { body: o.body } : {}),
+            ...(source === '-' ? { body: '-' } : {}),
+            ...(source === undefined && typeof o.body === 'string' ? { body: o.body } : {}),
             ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
             ...(Array.isArray(o.question) && o.question.length > 0
               ? { question: o.question as string[] }
@@ -765,6 +781,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(Array.isArray(o.clear) && o.clear.length > 0 ? { clear: o.clear as string[] } : {}),
           },
           ctx,
+          cliStdin(io),
         );
       });
     });
@@ -947,6 +964,16 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 /** commander option collector for a repeatable flag (accumulates into an array). */
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
+}
+
+/**
+ * The CLI is the only surface allowed to turn stdin into Markdown. Tests inject
+ * it through Io. `defaultIo()` is the only place that grants the real process
+ * stream; injected/core-only Io values that omit it stay incapable of reading
+ * ambient stdin. MCP calls command cores directly and never cross this helper.
+ */
+function cliStdin(io: Io): { stdin?: StdinInput } {
+  return io.stdin === undefined ? {} : { stdin: io.stdin };
 }
 
 /**

@@ -272,7 +272,7 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
       'publish always resolves a signer, and with no usable session it mints one at ' +
       'read+write scope, which is strictly broader than the read-only key ' +
       '`tenjin session start` exists as a deliberate opt-in for. It publishes the contents ' +
-      'of ANY LOCAL FILE the agent can read, gated only by the heuristic scan. And it is a ' +
+      'of ANY REGULAR LOCAL FILE the agent can read, gated only by the heuristic scan. And it is a ' +
       'PREFIX rule, so it pins the verb and not the flags: `--base-url` rides it (see the ' +
       'flag caveat), and `--yes` is an ordinary flag on the same verb that clears exactly ' +
       'the WARN findings auto stopped on, so a re-run collapses auto into full-auto with ' +

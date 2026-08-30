@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
 import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
 import { openStore } from '../lib/state-store';
@@ -185,6 +186,132 @@ function baseArgs(file: string | undefined, over: Partial<PublishArgs> = {}): Pu
 function hermetic(over: PublishDeps = {}): PublishDeps {
   return { env: {}, cwd: dir, ...over };
 }
+
+function stdin(markdown: string, isTTY = false): NonNullable<PublishDeps['stdin']> {
+  return { stream: Readable.from([markdown]), isTTY };
+}
+
+describe('runPublish — Markdown from stdin', () => {
+  it('reads an explicit `-`, and --dry-run writes and spends nothing', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    const res = await runPublish(
+      { file: '-', dryRun: true, question: ['What does stdin preserve?'] },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider, stdin: stdin(CLEAN) }),
+    );
+    expect(res.data).toMatchObject({
+      dryRun: true,
+      published: false,
+      title: 'The Answer',
+      body: CLEAN,
+    });
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('uses non-TTY stdin for a bare publish and keeps every ordinary flag working', async () => {
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      {
+        mode: 'auto',
+        price: '0.25',
+        excerpt: 'stdin preview',
+        question: ['How is piped Markdown published?'],
+        scope: 'CLI stdin',
+      },
+      makeCtx(),
+      hermetic({
+        fetchImpl: fetch,
+        provider: spyProvider().provider,
+        stdin: stdin(CLEAN),
+      }),
+    );
+    expect(body()).toMatchObject({
+      title: 'The Answer',
+      bodyMd: CLEAN,
+      price: '250000',
+      excerpt: 'stdin preview',
+      resource: {
+        questionsAnswered: ['How is piped Markdown published?'],
+        scope: 'CLI stdin',
+      },
+    });
+  });
+
+  it('an explicit `-` reads even at a TTY', async () => {
+    const res = await runPublish(
+      { file: '-', dryRun: true },
+      makeCtx(),
+      hermetic({ stdin: stdin(CLEAN, true) }),
+    );
+    expect(res.data).toMatchObject({ dryRun: true, title: 'The Answer' });
+  });
+
+  it('a bare publish at a TTY returns usage without touching stdin', async () => {
+    let reads = 0;
+    const stream = new Readable({
+      read() {
+        reads += 1;
+      },
+    });
+    await expect(
+      runPublish({}, makeCtx(), hermetic({ stdin: { stream, isTTY: true } })),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2, message: 'Nothing to publish.' });
+    expect(reads).toBe(0);
+  });
+
+  it('refuses empty or failed stdin before any wallet or network work', async () => {
+    const { fetch, calls } = stubServer();
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        { file: '-' },
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider, stdin: stdin('  \n') }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: 'No Markdown received on stdin.' });
+
+    const broken = new Readable({
+      read() {
+        this.destroy(new Error('broken pipe'));
+      },
+    });
+    await expect(
+      runPublish(
+        { file: '-' },
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider, stdin: { stream: broken, isTTY: false } }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: 'Could not read Markdown from stdin.' });
+    expect(calls).toHaveLength(0);
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('without the CLI stdin capability, bare and `-` forms stay usage errors', async () => {
+    await expect(runPublish({}, makeCtx(), hermetic())).rejects.toMatchObject({
+      code: 'USAGE',
+      message: 'Nothing to publish.',
+    });
+    await expect(runPublish({ file: '-' }, makeCtx(), hermetic())).rejects.toMatchObject({
+      code: 'USAGE',
+      message: '`-` reads Markdown from CLI stdin.',
+    });
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a special-file path before wallet or network work',
+    async () => {
+      const { fetch, calls } = stubServer();
+      const { provider, getSignerCount } = spyProvider();
+      await expect(
+        runPublish({ file: '/dev/null' }, makeCtx(), hermetic({ fetchImpl: fetch, provider })),
+      ).rejects.toMatchObject({ code: 'USAGE', message: 'Could not read "/dev/null"' });
+      expect(calls).toHaveLength(0);
+      expect(getSignerCount()).toBe(0);
+    },
+  );
+});
 
 describe('runPublish — consent matrix (mode × content × --yes)', () => {
   type Outcome = 'success' | 'NEEDS_CONFIRMATION' | 'PUBLISH_BLOCKED';

@@ -295,7 +295,7 @@ export const PRIMER_TEXT =
  * a command to write.
  */
 export const CAPTURE_REASON =
-  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
+  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: pass the Markdown on stdin to `tenjin publish -`, with the title as its first `# ` heading (one per finding; publish.mode is <mode>). If it is already in a file, run `tenjin publish <file>` as its own bare shell/tool command, never chained behind writing the file. If nothing durable was learned, just stop again.';
 
 /**
  * The team-mode capture ask. `<mode>` is substituted with the resolved
@@ -3240,9 +3240,11 @@ function strongLine(s) {
   return (
     "Open Tenjin loop: '" +
     clean(s.question, 160) +
-    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it: tenjin publish <file> --search-id " +
+    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it from stdin: tenjin publish - --search-id " +
     id +
-    '. If not, close it: tenjin outcome --search-id ' +
+    '. If it is already in a file, run tenjin publish <file> --search-id ' +
+    id +
+    ' as its own bare shell/tool command, never chained behind writing the file. If not, close it: tenjin outcome --search-id ' +
     id +
     ' --status regenerated.'
   );
@@ -3260,7 +3262,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    ". Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
+    ". Durable public finding among them? Publish it from stdin: tenjin publish - --search-id <id>. If it is already in a file, run tenjin publish <file> --search-id <id> as its own bare shell/tool command, never chained behind writing the file. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
   );
 }
 
