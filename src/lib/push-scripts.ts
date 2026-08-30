@@ -1087,8 +1087,16 @@ const SECRET_ASSIGN_RE =
  *  path rule cannot see because that one starts at a slash. The host and path
  *  after the \`@\` go with it: a one-label host (\`h\`) is under the host
  *  rule's reach, and \`h/db\` left behind reads as an identifier to the
- *  prompt arm. */
-const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'"]*/gi;
+ *  prompt arm.
+ *
+ *  THE TAIL STOPS AT PUNCTUATION, NOT ONLY AT WHITESPACE. A url is written
+ *  inside a sentence, and a class that ran to the next space ate the prose
+ *  glued to it: \`postgres://u:p@h/db,migration fails\` lost \`,migration\`
+ *  along with the credential, which is the topic word the lookup needed. The
+ *  closers and separators a url is punctuated by end the match instead; a path
+ *  that really contains one loses its tail, and that is the cheaper mistake
+ *  because the credential is already gone by then. */
+const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*/gi;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
@@ -1149,6 +1157,16 @@ const SECRET_HOST_KEEP_RE = /^[a-z0-9-]+\.test\.(?:ts|tsx|js|mjs|cjs)$/i;
  *  separated pieces so \`keys.ts\` (a source file) is not \`key\`. */
 const SECRET_STEM_RE =
   /(?:^|[-_.])(?:secrets?|credentials?|service[-_]?account|tokens?|passwords?|passwd|private|certs?|certificate|keyfile|id_[a-z0-9]+)(?:[-_.]|$)/i;
+/** The stem whose reading depends on its extension. \`key\`/\`keys\` names
+ *  key MATERIAL under a config extension (\`keys.json\`, \`keys.yml\`) and
+ *  SOURCE CODE under a source one (\`keys.ts\`, the module that handles them),
+ *  so it cannot go on the list above: putting it there blanks the source file
+ *  that half the questions about key handling name. Gated on the extension, both
+ *  readings get what they deserve. */
+const SECRET_CONFIG_STEM_RE = /(?:^|[-_.])keys?(?:[-_.]|$)/i;
+/** The extensions a config stem is read under: the formats key material is
+ *  actually written in. */
+const SECRET_CONFIG_EXT_RE = /^(?:json|yml|yaml|toml|env)$/i;
 /** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
  *  so no TLD. Bounded repetition, so it adds no backtracking. */
 const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
@@ -1224,7 +1242,9 @@ function scrub(text) {
     // \`.env.production\`, \`id_rsa.pem\`, \`.key\` and \`.p12\` go with their
     // path; the stem list catches the credential files that sit behind an
     // innocent extension (\`prod-service-account.json\`, \`secrets.yml\`,
-    // \`id_rsa.md\`).
+    // \`id_rsa.md\`), and one stem is read BY its extension: \`keys.json\`
+    // and \`keys.yml\` are key material and go with the path, \`keys.ts\` is
+    // the module that handles them and stays.
     //
     // WHAT THIS DOES NOT DO is read the stem for a customer's name: no rule can
     // tell \`acme-bank.ts\` from \`push-scripts.ts\`, so a file NAMED for a
@@ -1234,8 +1254,12 @@ function scrub(text) {
       /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
       (m) => {
         const base =
-          /\/(([\w-]+(?:\.[\w-]+)*)\.(?:ts|tsx|js|mjs|cjs|json|yml|yaml|md|sql|py|toml))$/.exec(m);
-        return base === null || SECRET_STEM_RE.test(base[2]) ? ' ' : ' ' + base[1] + ' ';
+          /\/(([\w-]+(?:\.[\w-]+)*)\.(ts|tsx|js|mjs|cjs|json|yml|yaml|md|sql|py|toml))$/.exec(m);
+        if (base === null) return ' ';
+        const credential =
+          SECRET_STEM_RE.test(base[2]) ||
+          (SECRET_CONFIG_EXT_RE.test(base[3]) && SECRET_CONFIG_STEM_RE.test(base[2]));
+        return credential ? ' ' : ' ' + base[1] + ' ';
       },
     )
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')

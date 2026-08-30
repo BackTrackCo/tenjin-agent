@@ -1635,9 +1635,19 @@ describe('scrub', () => {
       'src/auth/token.ts',
       'infra/certs/private.json',
       'deploy/gcp/credentials.json',
+      // `key`/`keys` under a config extension is key MATERIAL.
+      'src/customers/acme-bank/keys.json',
+      'config/prod/keys.yml',
+      'infra/vault/api-keys.yaml',
+      'deploy/gcp/key.toml',
     ]) {
       expect(scrub(`why does ${gone} get read`)).toBe('why does get read');
     }
+    // The same stem under a SOURCE extension is the module that handles them,
+    // and it is the token half the key-handling questions name.
+    expect(scrub('src/auth/keys.ts and src/auth/keys.tsx and src/lib/monkeys.json break')).toBe(
+      'keys.ts and keys.tsx and monkeys.json break',
+    );
     // What the stem rule does NOT do, on record: a file named for a customer
     // travels as it would typed bare. Only its directories are blanked.
     expect(scrub('src/customers/acme-bank.ts fails on PR 751')).toBe(
@@ -1665,6 +1675,12 @@ describe('scrub', () => {
     expect(scrub('DATABASE_URL=postgres://u:p@h/db is wrong and postgres://u:p@h/db too')).toBe(
       'DATABASE_URL= is wrong and too',
     );
+    // The tail stops at punctuation too, or the prose glued to the url goes
+    // with it: `,migration` is the topic word the lookup needed.
+    // The separator itself stays behind as ordinary punctuation; what matters
+    // is that `migration fails` is no longer eaten with the credential.
+    expect(scrub('postgres://u:p@h/db,migration fails')).toBe(',migration fails');
+    expect(scrub('(postgres://u:p@h/db); the retry loops')).toBe('( ); the retry loops');
   });
 });
 
