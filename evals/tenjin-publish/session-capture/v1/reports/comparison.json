@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "fixtureRole": "synthetic_smoke_only",
+  "status": "not_run",
+  "reason": "A smoke comparison requires complete baseline and treatment replay reports; it is not the held-out archive comparison.",
+  "relativeTimingReplayed": false,
+  "notMeasured": [
+    "long/resumed relative offsets",
+    "elapsed-time windows",
+    "generation re-arm behavior"
+  ],
+  "consumerUseLane": {
+    "status": "blocked_not_run",
+    "blocker": "ordinary_team_prompt_hook_always_queries_public",
+    "publicRequestsMaximum": 0
+  }
+}

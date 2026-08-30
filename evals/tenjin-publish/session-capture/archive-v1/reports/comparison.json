@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/archive-v1",
+  "fixtureRole": "held_out_recorded_archive",
+  "evaluatorVersion": "session-capture-evaluator/2.0.0",
+  "status": "not_run",
+  "treatmentOutputInspected": false,
+  "manifestCasesSha256": "ca21efc416348716698722f4f2cdd5e94948c694499ef25131f21bc4e94f9e75",
+  "frozenInputs": {
+    "manifestSha256": "7bc99bdb0dc8759ee5276183ebdf768eff308ee965c6ca1eb670ebfcf8c391a4",
+    "labelsSha256": "a1342c7971eac06192625f85844e9c3ceb94a7f856e8a37694ff1dc158e9b206",
+    "questionsSha256": "5f7418a09665cc37d0f97a2b90458bdac609ba5e252d9f976724ecb7e5205b31",
+    "evaluatorSha256": "28d43a76ad6b5ce872639c81ca90e7429ab6f6e3e15aedee15a10c8a0c2eb3c8"
+  },
+  "baseline": null,
+  "treatment": null,
+  "consumer": {
+    "status": "blocked_not_run",
+    "blocker": "ordinary_team_prompt_hook_always_queries_public",
+    "publicRequestsMaximum": 0,
+    "outcomes": {
+      "used": null,
+      "rejected": null,
+      "unobserved": null,
+      "ungraded": null,
+      "posted": null,
+      "coverage": null
+    }
+  },
+  "retrieval": null,
+  "relativeTimingReplayed": false,
+  "notMeasured": [
+    "baseline and treatment outcomes",
+    "controlled publication and publication latency",
+    "Stop-continuation-attributable tokens and cost",
+    "consumer outcomes: ordinary team prompt hook always queries public, so the zero-public-traffic lane is blocked",
+    "team-only retrieval outcomes",
+    "long/resumed relative offsets",
+    "elapsed-time windows",
+    "generation re-arm behavior"
+  ]
+}

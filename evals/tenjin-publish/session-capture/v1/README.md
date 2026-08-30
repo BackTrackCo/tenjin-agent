@@ -1,0 +1,168 @@
+# Session-capture synthetic smoke suite v1
+
+This directory is a frozen, synthetic smoke input for the repo-activity capture
+harness. It is **not the held-out archive benchmark** and no report from it may
+be represented as that benchmark. It contains 30 opaque root-session cases: six
+each for reusable findings, routine work, WIP or failed work, sensitive source
+material, and long or resumed work with multiple potential findings.
+
+The cases are deliberately synthetic. They preserve only the facts the replay
+needs: root activity class, order, count, relative time, turn boundaries, and
+the expected disposition. There are no raw session UUIDs, prompts, paths,
+commands, outputs, bodies, credentials, requester identities, wallet addresses,
+or personal data. The fictional `sample/atlas-fixture` repository and its file
+names exist only to make controlled questions concrete.
+
+## Frozen files
+
+- `manifest.json` is the hand-reviewed, content-free source set. Its
+  `casesSha256` binds the ordered case array; `generate-manifest.mjs` verifies
+  and reproduces its canonical serialization.
+- `labels.json` and `labels.schema.json` freeze smoke dispositions,
+  dispositions, reusable concepts, and evaluator version.
+- `questions.json` freezes two natural teammate questions for every reusable
+  concept plus distractors. Questions must not be rewritten after treatment
+  pieces exist.
+- `evaluator.json` freezes the metric definitions and go/no-go ceilings.
+- `rubric.md` is the human/model grading contract.
+- `evals.json` exposes the same cases through the repository's existing output
+  expectation schema. `controlled.json` predeclares the complete smaller smoke
+  subset and mechanism-free initial task prompts for the installed-hook lane.
+  These cases do not create another grader or publish mode.
+
+The real recorded archive fixture lives in `../archive-v1/`; its sanitized
+human labels and natural questions are frozen separately from this synthetic
+smoke suite. Changing either frozen fixture requires a new version directory.
+Resource IDs and predeclared duplicate equivalents remain intentionally absent
+until publication; PR 2B binds them to the frozen question IDs without editing
+question text.
+
+## Validate and reproduce
+
+From the `tenjin-agent` repository root:
+
+```bash
+node evals/tenjin-publish/session-capture/v1/generate-manifest.mjs --check
+node evals/tenjin-publish/session-capture/v1/validate.mjs
+pnpm vitest run src/evals-fixtures.test.ts
+```
+
+The manifest generator writes only to stdout unless `--check` is used. To
+recreate the committed artifact without an in-place writer:
+
+```bash
+node evals/tenjin-publish/session-capture/v1/generate-manifest.mjs > /tmp/session-capture-manifest.json
+diff -u evals/tenjin-publish/session-capture/v1/manifest.json /tmp/session-capture-manifest.json
+```
+
+## Deterministic replay
+
+Replay is run once from a checkout pinned to the baseline commit and once from a
+checkout pinned to the treatment commit. Each invocation imports that checkout's
+production hook generators, writes the generated bundle with an embedded
+disposable data directory, invokes only those disposable scripts, and reads only
+their isolated SQLite store. `TENJIN_DATA_DIR` is removed from child environments;
+it is never treated as isolation. The installed config, Claude hook status, and
+installed script bytes are read for preflight/parity, but an installed script is
+never executed.
+
+```bash
+node evals/tenjin-publish/session-capture/v1/run-replay.mjs \
+  --kind baseline --expected-ref <baseline-commit> \
+  --installed-data-dir "$HOME/.tenjin" --out /tmp/capture-baseline.json
+
+node evals/tenjin-publish/session-capture/v1/run-replay.mjs \
+  --kind treatment --expected-ref <treatment-commit> \
+  --installed-data-dir "$HOME/.tenjin" --out /tmp/capture-treatment.json
+
+node evals/tenjin-publish/session-capture/v1/aggregate.mjs \
+  --baseline /tmp/capture-baseline.json \
+  --treatment /tmp/capture-treatment.json \
+  --out /tmp/capture-comparison.json
+```
+
+The installed-hooks output lane consumes a parity-only report from the same
+pinned clean checkout. This reads and normalizes installed bytes but never
+executes an installed hook:
+
+```bash
+node evals/tenjin-publish/session-capture/v1/run-replay.mjs \
+  --kind parity --expected-ref <exact-commit> \
+  --installed-data-dir "$HOME/.tenjin" \
+  --out /tmp/tenjin-installed-parity.json
+```
+
+The replay refuses a dirty checkout or a ref mismatch. It requires the ordinary
+installed setup to resolve to a team shelf, capture `block`, push `on`, and
+effective publish mode `auto`; records only those bounded values and their
+provenance; then mirrors them into loopback isolation. It generates two bundles
+pointing at different disposable directories, verifies that their bytes differ
+only at the embedded `DATA_DIR` literal, and verifies the normalized result
+against the installed bundle. The installed bundle must therefore have been
+generated by the same pinned build. A loopback MISS server is used for synthetic
+research events, so replay sends no traffic off-machine.
+
+`offsetMs` remains frozen input ordering metadata in this smoke suite; the
+runner does not sleep to recreate those intervals and reports
+`relativeTimingReplayed: false`. Consequently, it does not claim a re-arm or
+elapsed-time result from this smoke replay. In particular, the long/resumed
+case offsets, elapsed windows, and generation/re-arm behavior are unmeasured;
+optional generation re-arming remains outside PR 1.
+
+`reports/*.json` are honest smoke placeholders with `status: "not_run"`. They must
+not be changed to `complete` until the corresponding real report exists. Raw
+controlled-run transcripts, drafted bodies, grader evidence, credentials, and
+session mappings remain local and uncommitted; only the aggregate produced by
+`aggregate.mjs` is eligible to commit.
+
+## Controlled installed-hooks smoke lane
+
+`evals/harness/run_output_eval.py --installed-hooks` is explicit and live. It
+loads ordinary user hooks/session persistence, preflights the installed team +
+push + capture-block + auto configuration, requires a pinned installed-bundle
+parity report, and exposes only Bash and Write. A runner-owned PreToolUse policy
+allows byte-exact `git status --short`, a Write to
+`./tenjin-candidate.md`, and byte-exact
+`tenjin publish ./tenjin-candidate.md --json`; it rejects every other command or
+path before execution. Write and publish also require this run's session-scoped
+`capture_asked` row from the ordinary installed Stop hook, newer than the runner
+boundary; post-hoc transcript chronology is not the authorization boundary. It
+never sets `TENJIN_DATA_DIR` or publish mode.
+
+The initial task prompts in `controlled.json` do not mention capture,
+publication, hooks, or Stop. Claude first performs the inert repository
+inspection. Only the ordinary installed Stop continuation may initiate the
+candidate write and publication. The runner rejects a missing/multiple ask or
+any write/publish that precedes it, and `--only` cannot select less than the
+entire declared subset.
+
+Do not run this lane casually: a valid run can publish to the configured team
+shelf. First generate the content-free parity artifact from a clean pinned
+checkout, then invoke the lane explicitly:
+
+```bash
+python3 evals/harness/run_output_eval.py \
+  --installed-hooks \
+  --installed-parity-report /tmp/tenjin-installed-parity.json \
+  --eval-set evals/tenjin-publish/session-capture/v1/evals.json \
+  --skill skills/tenjin-publish \
+  --workspace "$(mktemp -d)" \
+  --out /tmp/session-capture-smoke.json
+```
+
+Keep raw redacted transcripts and grader evidence local. The committed live
+aggregate contains only bounded counts/costs: disposition, ask/publication
+counts, receipt class, whole-turn timing/tokens, human intervention, and strict
+pass/fail/ungraded totals. Stream arrival offsets measure capture-ask-to-publish
+receipt latency. Post-ask assistant usage measures continuation tokens when the
+stream supplies it. Stop-hook wall time is reported only from an explicitly
+attributed hook-duration event, and continuation cost remains unavailable when
+the stream supplies only whole-turn cost.
+
+The active consumer-use lane is explicitly `blocked_not_run`: the ordinary
+team-mode UserPromptSubmit arm always queries the public shelf concurrently,
+which violates the frozen team-private benchmark's zero-public-traffic rule.
+`evals/harness/run_consumer_eval.py` performs the full fixture/provenance/parity
+preflight and emits only the blocked thin aggregate; it never invokes Claude or
+`tenjin push grade`. This is an active PR 2A product-path limitation, not a
+completed consumer measurement or a deferred benchmark-selected change.

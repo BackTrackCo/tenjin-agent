@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/archive-v1",
+  "fixtureRole": "held_out_recorded_archive",
+  "evaluatorVersion": "session-capture-evaluator/2.0.0",
+  "status": "frozen_before_treatment",
+  "frozenAt": "2026-08-29T00:00:00Z",
+  "sourceManifestFileSha256": "3f621097147c8207fcc206468bc0a1354167fd1cb4e7303209b1a3bd9daf9434",
+  "sourceCanonicalSessionsSha256": "3a0432f4850104e00d571584fac187143d59c0c57f1fcaa3ddc74c982e351353",
+  "selectionAlgorithmVersion": "archive-v1-selection/2.0.0",
+  "manifestCasesSha256": "ca21efc416348716698722f4f2cdd5e94948c694499ef25131f21bc4e94f9e75",
+  "files": {
+    "manifest.json": "7bc99bdb0dc8759ee5276183ebdf768eff308ee965c6ca1eb670ebfcf8c391a4",
+    "labels.json": "a1342c7971eac06192625f85844e9c3ceb94a7f856e8a37694ff1dc158e9b206",
+    "questions.json": "5f7418a09665cc37d0f97a2b90458bdac609ba5e252d9f976724ecb7e5205b31",
+    "evaluator.json": "28d43a76ad6b5ce872639c81ca90e7429ab6f6e3e15aedee15a10c8a0c2eb3c8"
+  }
+}

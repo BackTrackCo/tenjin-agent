@@ -1,0 +1,293 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "frozenAt": "2026-08-29T00:00:00Z",
+  "concepts": [
+    {
+      "conceptId": "concept_route_precedence",
+      "fixtureScope": "sample/atlas-fixture lib/runtime/route-order.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_route_precedence_1",
+          "text": "In the Atlas fixture router, does the deny rule run before the fallback route?"
+        },
+        {
+          "questionId": "q_route_precedence_2",
+          "text": "Where is route precedence decided in lib/runtime/route-order.ts?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_queue_shutdown",
+      "fixtureScope": "sample/atlas-fixture src/queue/shutdown.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_queue_shutdown_1",
+          "text": "What order should Atlas use to stop intake and drain the worker queue?"
+        },
+        {
+          "questionId": "q_queue_shutdown_2",
+          "text": "Why can awaiting idle before closeIntake hang src/queue/shutdown.ts?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_migration_lock",
+      "fixtureScope": "sample/atlas-fixture schema/migrate.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_migration_lock_1",
+          "text": "How does the Atlas migration runner bound its advisory-lock wait?"
+        },
+        {
+          "questionId": "q_migration_lock_2",
+          "text": "Which setting in schema/migrate.ts prevents two fixture migrations from overlapping?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_cache_key_scope",
+      "fixtureScope": "sample/atlas-fixture src/cache/key.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_cache_key_scope_1",
+          "text": "What fields make an Atlas cache key safe across tenants and schema versions?"
+        },
+        {
+          "questionId": "q_cache_key_scope_2",
+          "text": "Why does src/cache/key.ts include both tenant and version in the key?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_retry_classification",
+      "fixtureScope": "sample/atlas-fixture src/http/retry.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_retry_classification_1",
+          "text": "Does the Atlas HTTP client retry a conflict response or only temporary service failures?"
+        },
+        {
+          "questionId": "q_retry_classification_2",
+          "text": "Where does src/http/retry.ts distinguish terminal 409 responses from retryable 503 responses?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_project_config_boundary",
+      "fixtureScope": "sample/atlas-fixture src/config/find-project.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_project_config_boundary_1",
+          "text": "Will Atlas read a project config above the repository root?"
+        },
+        {
+          "questionId": "q_project_config_boundary_2",
+          "text": "What stops the .atlasrc.json walk in src/config/find-project.ts?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_index_checkpoint",
+      "fixtureScope": "sample/atlas-fixture src/indexer/checkpoint.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_index_checkpoint_1",
+          "text": "When does the Atlas indexer persist a checkpoint relative to committing a batch?"
+        },
+        {
+          "questionId": "q_index_checkpoint_2",
+          "text": "How does src/indexer/checkpoint.ts avoid acknowledging an uncommitted batch?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_checksum_skip",
+      "fixtureScope": "sample/atlas-fixture src/indexer/checksum.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_checksum_skip_1",
+          "text": "Under what condition can the Atlas indexer skip an unchanged fixture segment?"
+        },
+        {
+          "questionId": "q_checksum_skip_2",
+          "text": "What does src/indexer/checksum.ts compare before re-indexing a segment?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_tenant_auth_order",
+      "fixtureScope": "sample/atlas-fixture src/auth/tenant.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_tenant_auth_order_1",
+          "text": "Does Atlas resolve the tenant before or after validating the signed request?"
+        },
+        {
+          "questionId": "q_tenant_auth_order_2",
+          "text": "Why is the ordering in src/auth/tenant.ts important for tenant isolation?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_cache_invalidation",
+      "fixtureScope": "sample/atlas-fixture src/auth/cache.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_cache_invalidation_1",
+          "text": "What invalidates the Atlas authorization cache after a role change?"
+        },
+        {
+          "questionId": "q_cache_invalidation_2",
+          "text": "Where does src/auth/cache.ts attach the role revision to cached authorization?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_bundle_artifact",
+      "fixtureScope": "sample/atlas-fixture build/bundle.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_bundle_artifact_1",
+          "text": "Which Atlas build artifact is the deploy step supposed to upload?"
+        },
+        {
+          "questionId": "q_bundle_artifact_2",
+          "text": "How does build/bundle.ts name the immutable fixture bundle?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_sourcemap_resolution",
+      "fixtureScope": "sample/atlas-fixture build/sourcemaps.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_sourcemap_resolution_1",
+          "text": "Why do Atlas source maps need paths relative to the emitted bundle?"
+        },
+        {
+          "questionId": "q_sourcemap_resolution_2",
+          "text": "Where does build/sourcemaps.ts normalize sources before upload?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_parser_fallback",
+      "fixtureScope": "sample/atlas-fixture src/parser/fallback.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_parser_fallback_1",
+          "text": "When does the Atlas parser use its legacy fallback instead of rejecting input?"
+        },
+        {
+          "questionId": "q_parser_fallback_2",
+          "text": "What guard in src/parser/fallback.ts keeps malformed fixture records out of the legacy path?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_input_normalization",
+      "fixtureScope": "sample/atlas-fixture src/parser/normalize.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_input_normalization_1",
+          "text": "Which fields does Atlas normalize before choosing a parser?"
+        },
+        {
+          "questionId": "q_input_normalization_2",
+          "text": "Why must src/parser/normalize.ts run before format detection?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_worker_lease",
+      "fixtureScope": "sample/atlas-fixture src/worker/lease.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_worker_lease_1",
+          "text": "How does an Atlas worker renew a lease without allowing two owners?"
+        },
+        {
+          "questionId": "q_worker_lease_2",
+          "text": "What comparison in src/worker/lease.ts makes lease renewal atomic?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_clock_skew",
+      "fixtureScope": "sample/atlas-fixture src/worker/clock.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_clock_skew_1",
+          "text": "How much clock skew does the Atlas worker lease logic tolerate?"
+        },
+        {
+          "questionId": "q_clock_skew_2",
+          "text": "Where does src/worker/clock.ts apply the fixture lease safety margin?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_cursor_pagination",
+      "fixtureScope": "sample/atlas-fixture src/api/cursor.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_cursor_pagination_1",
+          "text": "What values does an Atlas API cursor encode for stable pagination?"
+        },
+        {
+          "questionId": "q_cursor_pagination_2",
+          "text": "How does src/api/cursor.ts resume after two rows share the same timestamp?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_sort_stability",
+      "fixtureScope": "sample/atlas-fixture src/api/order.ts fixture-v1",
+      "questions": [
+        {
+          "questionId": "q_sort_stability_1",
+          "text": "Which tie-breaker keeps Atlas API pagination stable?"
+        },
+        {
+          "questionId": "q_sort_stability_2",
+          "text": "Why does src/api/order.ts sort by identifier after timestamp?"
+        }
+      ]
+    }
+  ],
+  "distractors": [
+    {
+      "questionId": "q_distractor_1",
+      "text": "How do I configure image thumbnails in the Atlas fixture dashboard?"
+    },
+    {
+      "questionId": "q_distractor_2",
+      "text": "Which payment processor does sample/atlas-fixture use for subscriptions?"
+    },
+    {
+      "questionId": "q_distractor_3",
+      "text": "Where is the Atlas mobile application's Bluetooth pairing code?"
+    },
+    {
+      "questionId": "q_distractor_4",
+      "text": "Does the fixture repository document GPU model training?"
+    },
+    {
+      "questionId": "q_distractor_5",
+      "text": "How are translation glossaries managed in Atlas?"
+    },
+    {
+      "questionId": "q_distractor_6",
+      "text": "What is the retention policy for Atlas video recordings?"
+    },
+    {
+      "questionId": "q_distractor_7",
+      "text": "Which CSS framework styles the Atlas marketing homepage?"
+    },
+    {
+      "questionId": "q_distractor_8",
+      "text": "How does Atlas export payroll records to an accounting system?"
+    }
+  ]
+}

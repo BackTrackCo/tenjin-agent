@@ -1,0 +1,424 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "fixtureRole": "synthetic_smoke_only",
+  "selection": {
+    "kind": "synthetic_smoke_cases",
+    "heldOut": false,
+    "frozenAt": "2026-08-29T00:00:00Z",
+    "rawSessionMapping": "none",
+    "caseIdDerivation": "scv1_ + first 12 hex chars of sha256('session-capture/v1:' + two-digit ordinal)"
+  },
+  "casesSha256": "7048772b4c55ce7d2b535a78e43bde7fb7f59ddf6aa7b232b5d43559a58733c2",
+  "cases": [
+    {
+      "caseId": "scv1_38a236795bf3",
+      "evalId": 101,
+      "stratum": "reusable_repo_finding",
+      "startedAt": "2026-08-18T13:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 1000, "kind": "inspection", "count": 3 },
+        { "offsetMs": 3000, "kind": "stop" },
+        { "offsetMs": 4000, "kind": "tenjin_publish", "count": 1 },
+        { "offsetMs": 5000, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_dfce9b3838ea",
+      "evalId": 102,
+      "stratum": "reusable_repo_finding",
+      "startedAt": "2026-08-18T14:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "inspection", "count": 2 },
+        { "offsetMs": 1700, "kind": "mutation", "count": 2 },
+        { "offsetMs": 2600, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_e5ac16d281d9",
+      "evalId": 103,
+      "stratum": "reusable_repo_finding",
+      "startedAt": "2026-08-18T15:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 1200, "kind": "shell", "count": 4 },
+        { "offsetMs": 3100, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_b8a1c6254a03",
+      "evalId": 104,
+      "stratum": "reusable_repo_finding",
+      "startedAt": "2026-08-18T16:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "research", "count": 1 },
+        { "offsetMs": 1800, "kind": "inspection", "count": 2 },
+        { "offsetMs": 3000, "kind": "mutation", "count": 1 },
+        { "offsetMs": 4200, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_0512464b3016",
+      "evalId": 105,
+      "stratum": "reusable_repo_finding",
+      "startedAt": "2026-08-18T17:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "inspection", "count": 4 },
+        { "offsetMs": 2200, "kind": "shell", "count": 2 },
+        { "offsetMs": 3500, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_81a039d707ad",
+      "evalId": 106,
+      "stratum": "reusable_repo_finding",
+      "startedAt": "2026-08-18T18:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 1000, "kind": "mutation", "count": 3 },
+        { "offsetMs": 2400, "kind": "shell", "count": 3 },
+        { "offsetMs": 3900, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_a84c480f69ea",
+      "evalId": 107,
+      "stratum": "routine_no_finding",
+      "startedAt": "2026-08-19T13:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "inspection", "count": 1 },
+        { "offsetMs": 1800, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_4e4880cf8d43",
+      "evalId": 108,
+      "stratum": "routine_no_finding",
+      "startedAt": "2026-08-19T14:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "mutation", "count": 1 },
+        { "offsetMs": 1700, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_b0ccf0aa6f7d",
+      "evalId": 109,
+      "stratum": "routine_no_finding",
+      "startedAt": "2026-08-19T15:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "shell", "count": 1 },
+        { "offsetMs": 1400, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_64ff94605e67",
+      "evalId": 110,
+      "stratum": "routine_no_finding",
+      "startedAt": "2026-08-19T16:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 600, "kind": "inspection", "count": 2 },
+        { "offsetMs": 1500, "kind": "mutation", "count": 1 },
+        { "offsetMs": 2500, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_38b5ed936791",
+      "evalId": 111,
+      "stratum": "routine_no_finding",
+      "startedAt": "2026-08-19T17:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "inspection", "count": 3 },
+        { "offsetMs": 2100, "kind": "shell", "count": 1 },
+        { "offsetMs": 3000, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_6d10475ff4a2",
+      "evalId": 112,
+      "stratum": "routine_no_finding",
+      "startedAt": "2026-08-19T18:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 1000, "kind": "mutation", "count": 2 },
+        { "offsetMs": 2300, "kind": "shell", "count": 1 },
+        { "offsetMs": 3300, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_5a20f0ca7407",
+      "evalId": 113,
+      "stratum": "wip_or_failed",
+      "startedAt": "2026-08-20T13:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "inspection", "count": 2 },
+        { "offsetMs": 1900, "kind": "shell_failure", "count": 2 },
+        { "offsetMs": 3000, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_4fd9e402f79a",
+      "evalId": 114,
+      "stratum": "wip_or_failed",
+      "startedAt": "2026-08-20T14:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "mutation", "count": 2 },
+        { "offsetMs": 1800, "kind": "shell_failure", "count": 1 },
+        { "offsetMs": 2800, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_fcc7508afe98",
+      "evalId": 115,
+      "stratum": "wip_or_failed",
+      "startedAt": "2026-08-20T15:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "shell_failure", "count": 3 },
+        { "offsetMs": 2400, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_513b359b547f",
+      "evalId": 116,
+      "stratum": "wip_or_failed",
+      "startedAt": "2026-08-20T16:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 600, "kind": "inspection", "count": 4 },
+        { "offsetMs": 2100, "kind": "mutation", "count": 1 },
+        { "offsetMs": 3300, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_db126bb3e78e",
+      "evalId": 117,
+      "stratum": "wip_or_failed",
+      "startedAt": "2026-08-20T17:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "inspection", "count": 1 },
+        { "offsetMs": 1500, "kind": "mutation", "count": 3 },
+        { "offsetMs": 2600, "kind": "shell_failure", "count": 1 },
+        { "offsetMs": 3700, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_fb6960ff5dd8",
+      "evalId": 118,
+      "stratum": "wip_or_failed",
+      "startedAt": "2026-08-20T18:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "mutation", "count": 1 },
+        { "offsetMs": 1700, "kind": "shell_failure", "count": 2 },
+        { "offsetMs": 2900, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_dc91358551df",
+      "evalId": 119,
+      "stratum": "sensitive_private",
+      "startedAt": "2026-08-21T13:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "inspection", "count": 2 },
+        { "offsetMs": 1900, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_36b94aee3ed4",
+      "evalId": 120,
+      "stratum": "sensitive_private",
+      "startedAt": "2026-08-21T14:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "research", "count": 1 },
+        { "offsetMs": 1500, "kind": "inspection", "count": 1 },
+        { "offsetMs": 2500, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_223cd0b64b6e",
+      "evalId": 121,
+      "stratum": "sensitive_private",
+      "startedAt": "2026-08-21T15:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "mutation", "count": 1 },
+        { "offsetMs": 1800, "kind": "shell", "count": 1 },
+        { "offsetMs": 2800, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_0ab3699690cd",
+      "evalId": 122,
+      "stratum": "sensitive_private",
+      "startedAt": "2026-08-21T16:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "inspection", "count": 3 },
+        { "offsetMs": 2100, "kind": "shell", "count": 1 },
+        { "offsetMs": 3100, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_b4ddb9ae1741",
+      "evalId": 123,
+      "stratum": "sensitive_private",
+      "startedAt": "2026-08-21T17:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "research", "count": 1 },
+        { "offsetMs": 1600, "kind": "mutation", "count": 2 },
+        { "offsetMs": 2700, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_7e3a09b8da31",
+      "evalId": 124,
+      "stratum": "sensitive_private",
+      "startedAt": "2026-08-21T18:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "inspection", "count": 2 },
+        { "offsetMs": 1900, "kind": "mutation", "count": 1 },
+        { "offsetMs": 3000, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_56abca2d6105",
+      "evalId": 125,
+      "stratum": "long_or_resumed",
+      "startedAt": "2026-08-22T13:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "inspection", "count": 4 },
+        { "offsetMs": 2600, "kind": "mutation", "count": 2 },
+        { "offsetMs": 4000, "kind": "stop" },
+        { "offsetMs": 86400000, "kind": "resume" },
+        { "offsetMs": 86401000, "kind": "inspection", "count": 3 },
+        { "offsetMs": 86402500, "kind": "shell", "count": 2 },
+        { "offsetMs": 86404000, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_5786c5dbab92",
+      "evalId": 126,
+      "stratum": "long_or_resumed",
+      "startedAt": "2026-08-22T14:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "research", "count": 1 },
+        { "offsetMs": 1700, "kind": "inspection", "count": 2 },
+        { "offsetMs": 3000, "kind": "stop" },
+        { "offsetMs": 43200000, "kind": "resume" },
+        { "offsetMs": 43201000, "kind": "mutation", "count": 2 },
+        { "offsetMs": 43202400, "kind": "shell", "count": 1 },
+        { "offsetMs": 43203800, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_bd01bba3324d",
+      "evalId": 127,
+      "stratum": "long_or_resumed",
+      "startedAt": "2026-08-22T15:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "inspection", "count": 3 },
+        { "offsetMs": 2100, "kind": "shell", "count": 2 },
+        { "offsetMs": 3400, "kind": "stop" },
+        { "offsetMs": 3600000, "kind": "resume" },
+        { "offsetMs": 3601000, "kind": "mutation", "count": 3 },
+        { "offsetMs": 3602600, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_f90c61148226",
+      "evalId": 128,
+      "stratum": "long_or_resumed",
+      "startedAt": "2026-08-22T16:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 900, "kind": "mutation", "count": 2 },
+        { "offsetMs": 2200, "kind": "shell", "count": 2 },
+        { "offsetMs": 3500, "kind": "stop" },
+        { "offsetMs": 7200000, "kind": "resume" },
+        { "offsetMs": 7201000, "kind": "inspection", "count": 2 },
+        { "offsetMs": 7202500, "kind": "tenjin_edit", "count": 1 },
+        { "offsetMs": 7203300, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_6447ca90b689",
+      "evalId": 129,
+      "stratum": "long_or_resumed",
+      "startedAt": "2026-08-22T17:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 800, "kind": "inspection", "count": 2 },
+        { "offsetMs": 1700, "kind": "background_start" },
+        { "offsetMs": 2500, "kind": "stop" },
+        { "offsetMs": 4200, "kind": "background_finish" },
+        { "offsetMs": 5200, "kind": "mutation", "count": 1 },
+        { "offsetMs": 6500, "kind": "stop" }
+      ]
+    },
+    {
+      "caseId": "scv1_12b9b9491997",
+      "evalId": 130,
+      "stratum": "long_or_resumed",
+      "startedAt": "2026-08-22T18:00:00Z",
+      "root": true,
+      "events": [
+        { "offsetMs": 0, "kind": "user_turn" },
+        { "offsetMs": 700, "kind": "research", "count": 1 },
+        { "offsetMs": 1500, "kind": "inspection", "count": 3 },
+        { "offsetMs": 2900, "kind": "stop" },
+        { "offsetMs": 14400000, "kind": "resume" },
+        { "offsetMs": 14401000, "kind": "shell", "count": 3 },
+        { "offsetMs": 14402500, "kind": "mutation", "count": 1 },
+        { "offsetMs": 14404000, "kind": "stop" }
+      ]
+    }
+  ]
+}

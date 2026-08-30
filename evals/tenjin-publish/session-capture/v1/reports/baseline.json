@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "fixtureRole": "synthetic_smoke_only",
+  "kind": "baseline",
+  "status": "not_run",
+  "reason": "The synthetic smoke replay has not been executed from its pinned checkout; this is not the held-out archive baseline.",
+  "relativeTimingReplayed": false,
+  "notMeasured": [
+    "long/resumed relative offsets",
+    "elapsed-time windows",
+    "generation re-arm behavior"
+  ]
+}

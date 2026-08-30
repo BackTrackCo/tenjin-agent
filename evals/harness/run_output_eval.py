@@ -40,6 +40,15 @@ Usage:
       --eval-set evals/tenjin/evals.json \\
       --skill skills/tenjin \\
       --workspace /tmp/output-run
+
+``--installed-hooks`` is a separate, explicit controlled-live lane. It loads
+the caller's normal Claude settings and persistent session, but exposes only
+``Bash`` and ``Write`` behind a runner-owned PreToolUse deny policy. The policy
+allows one exact repository inspection, one fixed candidate path, and one exact
+publish command. It uses the installed Tenjin configuration without setting
+``TENJIN_DATA_DIR`` or a publish-mode override. It is single-concurrency and can
+write to the preflighted team shelf. Its output is a thin aggregate; content and
+grader evidence remain in local transcripts.
 """
 
 from __future__ import annotations
@@ -53,10 +62,25 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from installed_hooks import (  # noqa: E402
+    CONTROLLED_INSTRUCTIONS,
+    InstalledHooksPreflightError,
+    build_controlled_report,
+    build_invalid_controlled_report,
+    installed_capture_state_db,
+    installed_child_env,
+    installed_hooks_preflight,
+    load_controlled_cases,
+    observe_installed_stream,
+    source_provenance,
+    validate_installed_parity_report,
+    write_command_policy,
+)
 from preflight import preflight  # noqa: E402
 from redaction import (  # noqa: E402
     FILE_CONTENT_TOOLS,
@@ -83,6 +107,17 @@ EXEC_ALLOWED = [
     "Glob(./**)",
     "Grep(./**)",
     "Skill",
+]
+
+# The controlled-live lane exposes only the two tool families its runner-owned
+# PreToolUse policy constrains byte-for-byte. User permission rules cannot widen
+# a tool that is absent from --tools, and the policy denies every Bash/Write
+# input except the fixed repo inspection, candidate file, and publish command.
+INSTALLED_EXEC_TOOLS = ["Bash", "Write"]
+INSTALLED_EXEC_ALLOWED = [
+    "Bash(git status --short)",
+    "Bash(tenjin:*)",
+    "Write(./tenjin-candidate.md)",
 ]
 
 # What the injection fixtures name instead of a live origin. Substituted at seed
@@ -133,6 +168,8 @@ def build_project(
     seeds: list[str],
     evals_dir: Path,
     sentinel_origin: str,
+    *,
+    client_tag: bool = True,
 ) -> Path:
     """A fresh project per case per configuration. `files` keep their eval-relative
     path, because that is the path the case prompt names.
@@ -149,7 +186,8 @@ def build_project(
         target = root / ".claude" / "skills" / name
         target.parent.mkdir(parents=True)
         shutil.copytree(skill_dir, target)
-    (root / "CLAUDE.md").write_text(CLIENT_TAG, encoding="utf-8")
+    if client_tag:
+        (root / "CLAUDE.md").write_text(CLIENT_TAG, encoding="utf-8")
     for seed in seeds:
         destination = root / seed
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -195,15 +233,16 @@ NO_SKILL_SUFFIX = (
 )
 
 
-def run_case(
+def executor_command(
     prompt: str,
-    project: Path,
     model: str,
-    timeout: int,
-    transcript: Path,
     allowed: list[str],
-    env: dict[str, str],
-) -> dict:
+    *,
+    installed_hooks: bool = False,
+    settings: Path | None = None,
+) -> list[str]:
+    """Build the Claude invocation with an explicit session/settings contract."""
+
     command = [
         "claude",
         "-p",
@@ -214,37 +253,167 @@ def run_case(
         "--model",
         model,
         "--strict-mcp-config",
-        "--setting-sources",
-        "project",
-        "--tools",
-        ",".join(EXEC_TOOLS),
-        "--allowedTools",
-        *allowed,
-        "--no-session-persistence",
     ]
+    if not installed_hooks:
+        command.extend(["--setting-sources", "project"])
+    elif settings is None:
+        raise ValueError("installed-hooks executor requires its command-policy settings")
+    else:
+        # Additional settings merge with the default user/project/local sources;
+        # they do not replace the installed hook bundle.
+        command.extend(["--settings", str(settings)])
+    tools = INSTALLED_EXEC_TOOLS if installed_hooks else EXEC_TOOLS
+    command.extend(
+        [
+            "--tools",
+            ",".join(tools),
+            "--allowedTools",
+            *allowed,
+        ]
+    )
+    if not installed_hooks:
+        command.append("--no-session-persistence")
+    return command
+
+
+def _timeout_stdout(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _run_streaming_process(
+    command: list[str], *, project: Path, timeout: int, env: dict[str, str]
+) -> tuple[str, list[int], int | None, bool]:
+    """Run Claude while retaining content-free stdout line-arrival offsets.
+
+    ``subprocess.run`` reveals only whole-turn wall time. The installed lane
+    needs the first capture-ask to publish-receipt interval, so stdout is drained
+    concurrently and each line gets a monotonic offset. Stderr is drained in a
+    second thread to avoid blocking; its content is neither persisted nor
+    reported.
+    """
+
+    started = time.monotonic()
+    process = subprocess.Popen(
+        command,
+        cwd=project,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=env,
+    )
+    stdout_lines: list[str] = []
+    line_offsets_ms: list[int] = []
+    stderr_lines: list[str] = []
+
+    def drain_stdout() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            stdout_lines.append(line)
+            line_offsets_ms.append(max(0, round((time.monotonic() - started) * 1000)))
+
+    def drain_stderr() -> None:
+        assert process.stderr is not None
+        stderr_lines.extend(process.stderr)
+
+    stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
+    timed_out = False
     try:
-        completed = subprocess.run(
-            command,
-            cwd=project,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        returncode: int | None = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return {"log": "", "answer": "", "cost_usd": 0.0, "error": "timeout", "turns": 0}
+        timed_out = True
+        process.kill()
+        process.wait()
+        returncode = None
+    stdout_thread.join()
+    stderr_thread.join()
+    return "".join(stdout_lines), line_offsets_ms, returncode, timed_out
+
+
+def run_case(
+    prompt: str,
+    project: Path,
+    model: str,
+    timeout: int,
+    transcript: Path,
+    allowed: list[str],
+    env: dict[str, str],
+    *,
+    installed_hooks: bool = False,
+    settings: Path | None = None,
+) -> dict:
+    command = executor_command(
+        prompt,
+        model,
+        allowed,
+        installed_hooks=installed_hooks,
+        settings=settings,
+    )
+    started = time.monotonic()
+    timed_out = False
+    line_offsets_ms: list[int] | None = None
+    if installed_hooks:
+        raw_stream, line_offsets_ms, returncode, timed_out = _run_streaming_process(
+            command, project=project, timeout=timeout, env=env
+        )
+    else:
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=project,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+            raw_stream = completed.stdout
+            returncode = completed.returncode
+        except subprocess.TimeoutExpired as error:
+            timed_out = True
+            raw_stream = _timeout_stdout(error.stdout)
+            returncode = None
 
     # Redacted before it touches the disk, and summarized from the redacted form
     # rather than the raw one, so a tool result's body reaches neither the
     # transcript nor the prompt. What the model does with a body after reading it
     # is outside this: prose and later tool inputs are copied through as they
     # are. See the retention section of evals/README.md.
-    sanitized = redact_stream(completed.stdout)
+    sanitized = redact_stream(raw_stream)
     transcript.write_text(sanitized, encoding="utf-8")
     outcome = summarize(sanitized)
-    if completed.returncode != 0 and outcome["error"] is None:
-        outcome["error"] = f"executor exited {completed.returncode}"
+    if timed_out:
+        outcome["error"] = "timeout"
+    elif returncode != 0 and outcome["error"] is None:
+        outcome["error"] = f"executor exited {returncode}"
+    outcome["wall_time_ms"] = max(0, round((time.monotonic() - started) * 1000))
+    if installed_hooks:
+        observation = observe_installed_stream(
+            raw_stream, line_offsets_ms=line_offsets_ms
+        )
+        # The real id remains local in memory and both transcript stores. The
+        # controlled report builder deliberately has no path for it.
+        outcome["session_id"] = observation.pop("session_id")
+        outcome["installed"] = observation
+        if outcome["session_id"] is None and outcome["error"] is None:
+            outcome["error"] = "installed-hooks run produced no persistent session id"
+        elif observation["captureAskCount"] != 1 and outcome["error"] is None:
+            outcome["error"] = (
+                "installed-hooks run did not observe exactly one ordinary Stop capture ask"
+            )
+        elif (
+            observation["prematureCandidateWriteCount"] > 0
+            or observation["prematurePublishCommandCount"] > 0
+        ) and outcome["error"] is None:
+            outcome["error"] = "installed-hooks run attempted publication before the Stop capture ask"
     # A command policy that is too strict fails the same way a leak does: the
     # number comes out wrong. Redacting the response a case is graded on would
     # otherwise look like the agent simply doing badly, so both the count and the
@@ -255,7 +424,7 @@ def run_case(
     # obedient agent's `curl -d "$(env)"` is refused and that refusal is the
     # measurement. Only a command this eval sanctions, refused for its spelling,
     # means a response went missing, and that is the one the run cannot survive.
-    withheld = withheld_bash_commands(completed.stdout)
+    withheld = withheld_bash_commands(raw_stream)
     outcome["bash_results_withheld"] = len(withheld)
     outcome["evidence_withheld"] = [
         command[:120] for command in withheld if bash_result_problem(command) == UNRECOGNISED
@@ -567,7 +736,12 @@ def main() -> int:
     parser.add_argument("--skill", required=True, type=Path)
     parser.add_argument("--model", default="sonnet")
     parser.add_argument("--grader-model", default="opus")
-    parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="parallel cases (default: 4 isolated, exactly 1 with --installed-hooks)",
+    )
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--workspace", type=Path, default=None)
     parser.add_argument("--out", type=Path, default=None)
@@ -601,6 +775,23 @@ def main() -> int:
         help="skip the freshness checks (offline runs); say so when reporting the numbers",
     )
     parser.add_argument(
+        "--installed-hooks",
+        action="store_true",
+        help=(
+            "CONTROLLED LIVE: load ordinary user hooks and a persistent Claude session, "
+            "use the installed team/auto configuration, and emit only a thin aggregate"
+        ),
+    )
+    parser.add_argument(
+        "--installed-parity-report",
+        type=Path,
+        default=None,
+        help=(
+            "content-free output from the pinned generator/installed-bundle parity check; "
+            "required with --installed-hooks"
+        ),
+    )
+    parser.add_argument(
         "--max-attempts",
         type=int,
         default=3,
@@ -611,24 +802,100 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    concurrency = args.concurrency if args.concurrency is not None else (1 if args.installed_hooks else 4)
+    if concurrency < 1:
+        print("--concurrency must be positive", file=sys.stderr)
+        return 2
+    if args.installed_hooks and concurrency != 1:
+        print("--installed-hooks is a single-producer lane; use --concurrency 1", file=sys.stderr)
+        return 2
+    if args.installed_hooks and args.no_preflight:
+        print("--installed-hooks requires its doctor/status/config preflight", file=sys.stderr)
+        return 2
+    if args.installed_hooks and args.installed_parity_report is None:
+        print("--installed-hooks requires --installed-parity-report", file=sys.stderr)
+        return 2
+    if not args.installed_hooks and args.installed_parity_report is not None:
+        print("--installed-parity-report is only valid with --installed-hooks", file=sys.stderr)
+        return 2
+    if args.installed_hooks and (args.allow or args.env):
+        print(
+            "--installed-hooks fixes its permission set and inherits the ordinary environment; "
+            "do not pass --allow or --env",
+            file=sys.stderr,
+        )
+        return 2
+
     workspace = args.workspace or Path(tempfile.mkdtemp(prefix="output-eval-"))
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "transcripts").mkdir(exist_ok=True)
     grader_dir = workspace / "grader"
     grader_dir.mkdir(exist_ok=True)
 
-    evals_dir = args.eval_set.resolve().parent.parent
+    # Seed paths are schema-relative to the repository's evals/ root. This also
+    # makes versioned suites such as session-capture/v1 work without guessing
+    # how many parent directories their evals.json happens to sit under.
+    evals_dir = Path(__file__).resolve().parents[1]
     spec = json.loads(args.eval_set.read_text(encoding="utf-8"))
     name = skill_name(args.skill)
+    controlled: dict | None = None
+    if args.installed_hooks:
+        try:
+            cases, controlled = load_controlled_cases(
+                eval_set=args.eval_set,
+                all_cases=spec["evals"],
+                requested_ids=args.only,
+            )
+        except InstalledHooksPreflightError as error:
+            print(f"--installed-hooks fixture refused: {error}", file=sys.stderr)
+            return 2
+    else:
+        cases = [c for c in spec["evals"] if args.only is None or c["id"] in args.only]
+    if not cases:
+        print("no eval cases selected", file=sys.stderr)
+        return 2
 
-    if not args.no_preflight:
+    installed_setup: dict | None = None
+    installed_source: dict | None = None
+    installed_parity: dict | None = None
+    installed_state_db: Path | None = None
+    installed_environment: dict[str, str] | None = None
+    if args.installed_hooks:
+        try:
+            installed_environment = installed_child_env()
+            installed_source = source_provenance(Path(__file__).resolve().parents[2])
+            installed_setup = installed_hooks_preflight(
+                cwd=workspace,
+                timeout=min(args.timeout, 120),
+                env=installed_environment,
+            )
+            installed_state_db = installed_capture_state_db(
+                env=installed_environment,
+                expected_hook_sha256=installed_setup["installedHookSetSha256"],
+            )
+            assert args.installed_parity_report is not None
+            installed_parity = validate_installed_parity_report(
+                args.installed_parity_report,
+                installed_source,
+                installed_setup,
+            )
+        except InstalledHooksPreflightError as error:
+            print("\nINSTALLED-HOOKS PREFLIGHT FAILED, nothing ran.", file=sys.stderr)
+            print(f"  {error}", file=sys.stderr)
+            return 2
+    elif not args.no_preflight:
         preflight(workspace=workspace, skills=[(args.skill, name)], model=args.model)
-    cases = [c for c in spec["evals"] if args.only is None or c["id"] in args.only]
 
-    log(f"skill {name} | {len(cases)} cases x 2 configurations | model {args.model}")
+    configuration_count = 1 if args.installed_hooks else 2
+    lane = "installed hooks (LIVE team writes)" if args.installed_hooks else "isolated delta"
+    log(
+        f"skill {name} | {len(cases)} cases x {configuration_count} configuration(s) | "
+        f"model {args.model} | {lane}"
+    )
     log(f"workspace {workspace}")
 
-    jobs = [(case, with_skill) for case in cases for with_skill in (True, False)]
+    configurations = (True,) if args.installed_hooks else (True, False)
+    jobs = [(case, with_skill) for case in cases for with_skill in configurations]
     runs: dict[tuple[int, bool], dict] = {}
 
     def run_once_for(case: dict, with_skill: bool, tag: str, attempt: int) -> dict:
@@ -638,29 +905,65 @@ def main() -> int:
         try:
             project = build_project(
                 workspace / f"case{case['id']}-{tag}",
-                args.skill if with_skill else None,
+                None if args.installed_hooks else (args.skill if with_skill else None),
                 name,
                 case.get("files", []),
                 evals_dir,
                 post.origin,
+                client_tag=not args.installed_hooks,
             )
             # Per attempt, not per configuration. A discarded attempt may have
             # obeyed the payload and written to this directory, and a retry that
             # inherited it would be counted while running against state the
             # previous attempt created.
-            data_dir = workspace / f"case{case['id']}-{tag}-tenjin-data-a{attempt}"
-            if data_dir.exists():
-                shutil.rmtree(data_dir)
-            data_dir.mkdir(parents=True)
             prompt = case["prompt"] if with_skill else case["prompt"] + NO_SKILL_SUFFIX
+            if args.installed_hooks:
+                assert installed_state_db is not None
+                assert installed_environment is not None
+                (project / "CLAUDE.md").write_text(
+                    CONTROLLED_INSTRUCTIONS,
+                    encoding="utf-8",
+                )
+                environment = dict(installed_environment)
+                initialized = subprocess.run(
+                    ["git", "init", "--quiet"],
+                    cwd=project,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=environment,
+                )
+                if initialized.returncode != 0:
+                    raise InstalledHooksPreflightError(
+                        "controlled case could not initialize its synthetic repository"
+                    )
+                policy_settings = write_command_policy(
+                    control_dir=workspace
+                    / "runner-control"
+                    / f"case{case['id']}-a{attempt}",
+                    project=project,
+                    state_db=installed_state_db,
+                )
+                allowed = INSTALLED_EXEC_ALLOWED
+            else:
+                policy_settings = None
+                data_dir = workspace / f"case{case['id']}-{tag}-tenjin-data-a{attempt}"
+                if data_dir.exists():
+                    shutil.rmtree(data_dir)
+                data_dir.mkdir(parents=True)
+                allowed = EXEC_ALLOWED + args.allow
+                environment = child_env(args.env, data_dir)
             outcome = run_case(
                 prompt,
                 project,
                 args.model,
                 args.timeout,
                 workspace / "transcripts" / f"case{case['id']}-{tag}{'' if attempt == 1 else f'-a{attempt}'}.jsonl",
-                EXEC_ALLOWED + args.allow,
-                child_env(args.env, data_dir),
+                allowed,
+                environment,
+                installed_hooks=args.installed_hooks,
+                settings=policy_settings,
             )
         finally:
             post.stop()
@@ -679,14 +982,18 @@ def main() -> int:
         lost = outcome.get("evidence_withheld", [])
         if lost and outcome["error"] is None:
             outcome["error"] = (
-                f"the command policy withheld the result of {len(lost)} sanctioned "
-                f"command(s): {lost[0]}"
+                f"the command policy withheld {len(lost)} sanctioned command result(s)"
+                if args.installed_hooks
+                else (
+                    f"the command policy withheld the result of {len(lost)} sanctioned "
+                    f"command(s): {lost[0]}"
+                )
             )
         return outcome
 
     def work(job: tuple[dict, bool]) -> None:
         case, with_skill = job
-        tag = "with" if with_skill else "without"
+        tag = "installed" if args.installed_hooks else ("with" if with_skill else "without")
         # Every attempt is kept, not just the one that counts. An attempt that
         # obeyed the injection and then failed for an unrelated reason is the
         # most important thing a run can discover, and overwriting it would have
@@ -698,9 +1005,21 @@ def main() -> int:
             history.append(outcome)
             if outcome["error"] is None:
                 break
+            # A failed process after any live write attempt is not retried. The
+            # receipt may be ambiguous, and retrying would create the duplicate
+            # the product intentionally leaves for a human to reconcile.
+            if args.installed_hooks and outcome.get("installed", {}).get(
+                "writeAttemptCount", 0
+            ) > 0:
+                log(
+                    f"  case {case['id']} installed INVALID after a write attempt; "
+                    "automatic retry suppressed"
+                )
+                break
+            error_text = "executor result unusable" if args.installed_hooks else outcome["error"]
             log(
-                f"  case {case['id']} {tag:7s} INVALID attempt {attempt}/"
-                f"{args.max_attempts}: {outcome['error']}"
+                f"  case {case['id']} {tag:9s} INVALID attempt {attempt}/"
+                f"{args.max_attempts}: {error_text}"
             )
         counted = history[-1]
         counted["history"] = history
@@ -715,7 +1034,7 @@ def main() -> int:
 
     # Both configurations of a case are spawned in the same wave, each in a fresh
     # context, so neither can inherit the other's reasoning.
-    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
         list(pool.map(work, jobs))
 
     log("grading")
@@ -723,7 +1042,7 @@ def main() -> int:
 
     def do_grade(job: tuple[dict, bool]) -> None:
         case, with_skill = job
-        tag = "with" if with_skill else "without"
+        tag = "installed" if args.installed_hooks else ("with" if with_skill else "without")
 
         # A run that failed is not going to be aggregated whatever the grader
         # says, and grading it costs a full model call per attempt to produce a
@@ -751,7 +1070,7 @@ def main() -> int:
             )
         graded[(case["id"], with_skill)] = result
 
-    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
         list(pool.map(do_grade, jobs))
 
     # The gate. Aggregating around a failed run or a partial grade array is how a
@@ -759,6 +1078,22 @@ def main() -> int:
     # is aggregated until every configuration of every case is whole.
     broken = unusable_configurations(jobs, runs, graded)
     if broken:
+        if args.installed_hooks:
+            assert installed_setup is not None
+            detail = args.out or (workspace / "invalid-run.json")
+            invalid = build_invalid_controlled_report(
+                broken=broken,
+                runs=runs,
+                preflight=installed_setup,
+            )
+            detail.parent.mkdir(parents=True, exist_ok=True)
+            detail.write_text(json.dumps(invalid, indent=2) + "\n", encoding="utf-8")
+            print(
+                f"\nRUN INVALID, nothing aggregated. {len(broken)} installed "
+                "configuration(s) unusable."
+            )
+            print(f"  sanitized detail {detail}")
+            return 2
         detail = workspace / "invalid-run.json"
         detail.write_text(json.dumps({"broken": broken}, indent=2) + "\n", encoding="utf-8")
         print(f"\nRUN INVALID, nothing aggregated. {len(broken)} configuration(s) unusable.")
@@ -768,6 +1103,41 @@ def main() -> int:
             print(f"  - case {entry['case']} {entry['configuration']}: {fault}")
         print(f"  detail    {detail}")
         return 2
+
+    if args.installed_hooks:
+        assert installed_setup is not None
+        assert installed_source is not None
+        assert installed_parity is not None
+        assert controlled is not None
+        report = build_controlled_report(
+            eval_set=args.eval_set,
+            cases=cases,
+            runs=runs,
+            graded=graded,
+            preflight=installed_setup,
+            source=installed_source,
+            parity=installed_parity,
+            controlled=controlled,
+            skill=name,
+            model=args.model,
+            grader_model=args.grader_model,
+        )
+        out = args.out or (workspace / "controlled-aggregate.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        summary = report["grading"]
+        publication = report["publication"]
+        print(f"\n{name} installed-hooks controlled cases")
+        print(
+            f"  expectations   {summary['pass']} pass, {summary['fail']} fail, "
+            f"{summary['ungraded']} ungraded"
+        )
+        print(
+            f"  publications   {publication['publishedSessions']} published session(s), "
+            f"{publication['unknownWriteSessions']} unknown-write session(s)"
+        )
+        print(f"  aggregate      {out}")
+        return 0
 
     report = {"skill": name, "model": args.model, "grader_model": args.grader_model, "cases": []}
     totals = {True: [0, 0, 0], False: [0, 0, 0]}

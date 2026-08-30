@@ -12,6 +12,9 @@ evals/
   harness/
     run_trigger_eval.py # keyless trigger runner (stdlib only)
     run_output_eval.py  # keyless output runner, with-skill vs without, plus grading
+    run_consumer_eval.py # frozen consumer-use preflight; blocks before traffic today
+    installed_hooks.py  # strict installed-lane provenance, observation, thin reports
+    tenjin_command_policy.py # pre-exec Bash/Write and Stop-ledger authorization
     preflight.py        # freshness checks both runners call before spending
     sentinel.py         # the inert loopback destination the injection payloads name
     redaction.py        # strips file-content tool results before they are stored or graded
@@ -23,6 +26,7 @@ evals/
     fixtures/           # bodies seeded into a case's workspace via its `files`
   tenjin-publish/
     evals.json          # 5 output cases with expectations
+    session-capture/    # frozen smoke + held-out PR 2A fixtures and reports
   tenjin/
     trigger-eval.json   # 20 queries for the zero-install hosted skill
     evals.json          # 6 output cases with expectations

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tenjin:eval:session-capture:archive-v1:labels",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "benchmark", "fixtureRole", "evaluatorVersion", "labels"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "benchmark": { "const": "session-capture/archive-v1" },
+    "fixtureRole": { "const": "held_out_recorded_archive" },
+    "evaluatorVersion": { "const": "session-capture-evaluator/2.0.0" },
+    "labels": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "caseId",
+          "heldOut",
+          "stratum",
+          "expectedDisposition",
+          "reusableConceptIds",
+          "mustNotPublish",
+          "curationBasis"
+        ],
+        "properties": {
+          "caseId": { "type": "string", "pattern": "^arcv1_[a-f0-9]{12}$" },
+          "heldOut": { "const": true },
+          "stratum": {
+            "enum": [
+              "reusable_repo_finding",
+              "routine_no_finding",
+              "wip_or_failed",
+              "sensitive_private_material",
+              "long_or_resumed"
+            ]
+          },
+          "expectedDisposition": {
+            "enum": ["publish", "no_finding", "withhold_sensitive"]
+          },
+          "reusableConceptIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^concept_[a-z0-9_]+$" }
+          },
+          "mustNotPublish": { "type": "boolean" },
+          "curationBasis": {
+            "enum": [
+              "merged_repo_change",
+              "no_repo_activity",
+              "incomplete_or_failed_work",
+              "private_user_source",
+              "multiple_repo_findings"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

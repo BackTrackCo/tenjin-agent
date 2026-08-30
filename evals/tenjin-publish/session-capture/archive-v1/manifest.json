@@ -1,0 +1,413 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/archive-v1",
+  "fixtureRole": "held_out_recorded_archive",
+  "frozenAt": "2026-08-29",
+  "source": {
+    "manifestFileSha256": "3f621097147c8207fcc206468bc0a1354167fd1cb4e7303209b1a3bd9daf9434",
+    "canonicalSessionsSha256": "3a0432f4850104e00d571584fac187143d59c0c57f1fcaa3ddc74c982e351353",
+    "rootSessionCount": 111,
+    "archivedTranscriptCount": 94,
+    "rawMapping": "local_uncommitted_mode_0600"
+  },
+  "selection": {
+    "kind": "deterministic_private_review_stratified_root_sessions",
+    "algorithmVersion": "archive-v1-selection/2.0.0",
+    "heldOut": true,
+    "caseCount": 30,
+    "treatmentOutputInspected": false
+  },
+  "casesSha256": "ca21efc416348716698722f4f2cdd5e94948c694499ef25131f21bc4e94f9e75",
+  "cases": [
+    {
+      "caseId": "arcv1_710a8741a8b9",
+      "selectionStratum": "reusable_repo_finding",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_577063970b50",
+      "selectionStratum": "reusable_repo_finding",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_ab227a2d36d6",
+      "selectionStratum": "reusable_repo_finding",
+      "root": true,
+      "durationBucket": "extended",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_a81d6eeeeff2",
+      "selectionStratum": "reusable_repo_finding",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_18eae63b2686",
+      "selectionStratum": "reusable_repo_finding",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_c5b8382bff1e",
+      "selectionStratum": "reusable_repo_finding",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_235280cba1de",
+      "selectionStratum": "routine_no_finding",
+      "root": true,
+      "durationBucket": "brief",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_acc841c3353b",
+      "selectionStratum": "routine_no_finding",
+      "root": true,
+      "durationBucket": "brief",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_cd82dc0b4189",
+      "selectionStratum": "routine_no_finding",
+      "root": true,
+      "durationBucket": "brief",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_29143fba2a22",
+      "selectionStratum": "routine_no_finding",
+      "root": true,
+      "durationBucket": "brief",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_eeb0535575f9",
+      "selectionStratum": "routine_no_finding",
+      "root": true,
+      "durationBucket": "brief",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_eff041d3a3eb",
+      "selectionStratum": "routine_no_finding",
+      "root": true,
+      "durationBucket": "brief",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_264cf645ac36",
+      "selectionStratum": "wip_or_failed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_cbdf6ba74942",
+      "selectionStratum": "wip_or_failed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_74c5e28e0b7b",
+      "selectionStratum": "wip_or_failed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_34ca83489c52",
+      "selectionStratum": "wip_or_failed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_db2893636b67",
+      "selectionStratum": "wip_or_failed",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_7eadf0676e1c",
+      "selectionStratum": "wip_or_failed",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_388624dfebbf",
+      "selectionStratum": "sensitive_private_material",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": false,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_7d968b7c95b4",
+      "selectionStratum": "sensitive_private_material",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": false,
+        "shell": false
+      },
+      "researchSignalPresent": false,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_eb354bde4662",
+      "selectionStratum": "sensitive_private_material",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_bb1693fd684e",
+      "selectionStratum": "sensitive_private_material",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": false
+    },
+    {
+      "caseId": "arcv1_7d31434ab474",
+      "selectionStratum": "sensitive_private_material",
+      "root": true,
+      "durationBucket": "bounded",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_38491d459952",
+      "selectionStratum": "sensitive_private_material",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_ad1ef06f5adc",
+      "selectionStratum": "long_or_resumed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_434bd38fec19",
+      "selectionStratum": "long_or_resumed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_9cdeed8a5c00",
+      "selectionStratum": "long_or_resumed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_c7423b8d7eba",
+      "selectionStratum": "long_or_resumed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_6de68d34ce09",
+      "selectionStratum": "long_or_resumed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    },
+    {
+      "caseId": "arcv1_8e28fc3be87f",
+      "selectionStratum": "long_or_resumed",
+      "root": true,
+      "durationBucket": "long_or_resumed",
+      "activityClasses": {
+        "inspection": true,
+        "mutation": true,
+        "shell": true
+      },
+      "researchSignalPresent": true,
+      "hasSubagents": true
+    }
+  ]
+}

@@ -1,0 +1,295 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/archive-v1",
+  "fixtureRole": "held_out_recorded_archive",
+  "frozenAt": "2026-08-29T00:00:00Z",
+  "authorship": "Sanitized from source-side merged-change evidence before treatment output was run or inspected.",
+  "concepts": [
+    {
+      "conceptId": "concept_ai_crawler_bulk_feed_policy",
+      "fixtureScope": "tenjin crawler policy and bulk teaser feeds",
+      "questions": [
+        {
+          "questionId": "q_ai_crawler_bulk_feed_policy_1",
+          "text": "Which Tenjin feed surfaces are intentionally withheld from AI-training crawlers?"
+        },
+        {
+          "questionId": "q_ai_crawler_bulk_feed_policy_2",
+          "text": "How does Tenjin keep bulk teaser feeds out of AI crawler access?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_mcp_cli_registry_manifest",
+      "fixtureScope": "tenjin MCP registry metadata",
+      "questions": [
+        {
+          "questionId": "q_mcp_cli_registry_manifest_1",
+          "text": "How is the Tenjin CLI stdio package advertised to MCP registries?"
+        },
+        {
+          "questionId": "q_mcp_cli_registry_manifest_2",
+          "text": "Which registry manifest entry lets an MCP client discover the Tenjin CLI server?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_credentialless_402_quote",
+      "fixtureScope": "tenjin answer endpoint payment quote behavior",
+      "questions": [
+        {
+          "questionId": "q_credentialless_402_quote_1",
+          "text": "Can the answer endpoint quote an x402 payment when a credential-less request body cannot be parsed?"
+        },
+        {
+          "questionId": "q_credentialless_402_quote_2",
+          "text": "What response should an unauthenticated answer probe receive for malformed input?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_cli_self_update",
+      "fixtureScope": "tenjin-agent CLI update command",
+      "questions": [
+        {
+          "questionId": "q_cli_self_update_1",
+          "text": "How does an installed Tenjin CLI update itself?"
+        },
+        {
+          "questionId": "q_cli_self_update_2",
+          "text": "Which CLI command performs a Tenjin self-update?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_builder_code_402_attribution",
+      "fixtureScope": "tenjin payment-required response attribution",
+      "questions": [
+        {
+          "questionId": "q_builder_code_402_attribution_1",
+          "text": "Which Tenjin payment-required responses declare builder-code attribution?"
+        },
+        {
+          "questionId": "q_builder_code_402_attribution_2",
+          "text": "Do both answer and phone verification 402 responses include builder attribution?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_planning_open_work_sweep",
+      "fixtureScope": "tenjin planning skill workflow",
+      "questions": [
+        {
+          "questionId": "q_planning_open_work_sweep_1",
+          "text": "What existing work should the Tenjin planning skill inspect before proposing a new plan?"
+        },
+        {
+          "questionId": "q_planning_open_work_sweep_2",
+          "text": "Does plan-tenjin review open pull requests and issues before drafting work?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_capture_once_per_session",
+      "fixtureScope": "tenjin-agent session capture contract",
+      "questions": [
+        {
+          "questionId": "q_capture_once_per_session_1",
+          "text": "How does the Tenjin capture loop keep its reminder to once per session?"
+        },
+        {
+          "questionId": "q_capture_once_per_session_2",
+          "text": "Where can an agent see the effective publication mode while finishing a session?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_publish_response_handle_nudge",
+      "fixtureScope": "tenjin publish response UX",
+      "questions": [
+        {
+          "questionId": "q_publish_response_handle_nudge_1",
+          "text": "Does a successful Tenjin publication still tell the author to configure a handle?"
+        },
+        {
+          "questionId": "q_publish_response_handle_nudge_2",
+          "text": "What happened to the handle reminder in the publish response?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_demand_count_retention",
+      "fixtureScope": "tenjin analytics retention",
+      "questions": [
+        {
+          "questionId": "q_demand_count_retention_1",
+          "text": "How are daily demand counts preserved after Tenjin's raw analytics window expires?"
+        },
+        {
+          "questionId": "q_demand_count_retention_2",
+          "text": "Do daily demand totals survive beyond the 90-day raw-event retention window?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_composed_cli_user_agent",
+      "fixtureScope": "tenjin-agent HTTP caller identity",
+      "questions": [
+        {
+          "questionId": "q_composed_cli_user_agent_1",
+          "text": "How does tenjin-cli combine its product token with a caller-provided User-Agent?"
+        },
+        {
+          "questionId": "q_composed_cli_user_agent_2",
+          "text": "Will a custom User-Agent replace or be composed behind the Tenjin CLI identity?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_ens_display_removal",
+      "fixtureScope": "tenjin profile identity rendering",
+      "questions": [
+        {
+          "questionId": "q_ens_display_removal_1",
+          "text": "Does Tenjin still resolve and display ENS names on profiles?"
+        },
+        {
+          "questionId": "q_ens_display_removal_2",
+          "text": "Which identity resolution was removed from profile rendering?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_plain_handle_identity",
+      "fixtureScope": "tenjin app-wide handle presentation",
+      "questions": [
+        {
+          "questionId": "q_plain_handle_identity_1",
+          "text": "What identity text does Tenjin show after removing ENS display?"
+        },
+        {
+          "questionId": "q_plain_handle_identity_2",
+          "text": "Are creator identities rendered as plain handles across the app?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_subagent_stop_harvest",
+      "fixtureScope": "tenjin-agent subagent completion capture",
+      "questions": [
+        {
+          "questionId": "q_subagent_stop_harvest_1",
+          "text": "How does Tenjin retain a reusable finding when a Claude subagent finishes?"
+        },
+        {
+          "questionId": "q_subagent_stop_harvest_2",
+          "text": "What bounded fallback does the SubagentStop path keep when a child cannot write a piece?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_team_replay_fingerprint",
+      "fixtureScope": "tenjin-agent team replay and sync",
+      "questions": [
+        {
+          "questionId": "q_team_replay_fingerprint_1",
+          "text": "How does Tenjin identify a team push replay without relying on transcript text?"
+        },
+        {
+          "questionId": "q_team_replay_fingerprint_2",
+          "text": "Which fingerprint ties team replay, sync, and session status together?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_client_header_removal",
+      "fixtureScope": "tenjin request telemetry headers",
+      "questions": [
+        {
+          "questionId": "q_client_header_removal_1",
+          "text": "Does the Tenjin client still send the X-Tenjin-Client header?"
+        },
+        {
+          "questionId": "q_client_header_removal_2",
+          "text": "Which legacy client-identification header was removed from requests?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_never_redirect_repo_signal",
+      "fixtureScope": "tenjin deployment cutover rules",
+      "questions": [
+        {
+          "questionId": "q_never_redirect_repo_signal_1",
+          "text": "How does the repository declare routes that must never redirect during cutover?"
+        },
+        {
+          "questionId": "q_never_redirect_repo_signal_2",
+          "text": "Where does Tenjin keep the never-redirect cutover signal?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_cli_pay_discover_toggle",
+      "fixtureScope": "tenjin-agent payment and discovery commands",
+      "questions": [
+        {
+          "questionId": "q_cli_pay_discover_toggle_1",
+          "text": "Which Tenjin CLI commands are controlled by the bazaar payment toggle?"
+        },
+        {
+          "questionId": "q_cli_pay_discover_toggle_2",
+          "text": "How do tenjin pay and tenjin discover behave when bazaarPay is disabled?"
+        }
+      ]
+    },
+    {
+      "conceptId": "concept_mcp_sdk_v2_protocol",
+      "fixtureScope": "tenjin MCP protocol implementation",
+      "questions": [
+        {
+          "questionId": "q_mcp_sdk_v2_protocol_1",
+          "text": "Which MCP SDK generation does the Tenjin server use?"
+        },
+        {
+          "questionId": "q_mcp_sdk_v2_protocol_2",
+          "text": "Does Tenjin's MCP server natively support the 2026-07-28 protocol revision?"
+        }
+      ]
+    }
+  ],
+  "distractors": [
+    {
+      "questionId": "q_archive_distractor_1",
+      "text": "How does Tenjin transcode uploaded video into adaptive bitrate streams?"
+    },
+    {
+      "questionId": "q_archive_distractor_2",
+      "text": "Which Bluetooth profile does the Tenjin mobile app use for pairing?"
+    },
+    {
+      "questionId": "q_archive_distractor_3",
+      "text": "Where does Tenjin calculate payroll withholding for publishers?"
+    },
+    {
+      "questionId": "q_archive_distractor_4",
+      "text": "How are translation glossaries synchronized across Tenjin workspaces?"
+    },
+    {
+      "questionId": "q_archive_distractor_5",
+      "text": "Which GPU scheduler trains recommendation models for Tenjin?"
+    },
+    {
+      "questionId": "q_archive_distractor_6",
+      "text": "What retention policy applies to Tenjin video recordings?"
+    },
+    {
+      "questionId": "q_archive_distractor_7",
+      "text": "How does the Tenjin desktop app export CAD drawings?"
+    },
+    {
+      "questionId": "q_archive_distractor_8",
+      "text": "Which warehouse carrier handles physical Tenjin shipments?"
+    }
+  ]
+}

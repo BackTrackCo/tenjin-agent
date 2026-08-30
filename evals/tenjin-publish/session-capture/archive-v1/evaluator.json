@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/archive-v1",
+  "fixtureRole": "held_out_recorded_archive",
+  "evaluatorVersion": "session-capture-evaluator/2.0.0",
+  "frozenAt": "2026-08-29T00:00:00Z",
+  "status": "frozen_before_treatment",
+  "heldOutCaseCount": 30,
+  "reusableConceptCount": 18,
+  "naturalQuestionCount": 36,
+  "distractorCount": 8,
+  "strata": {
+    "reusable_repo_finding": 6,
+    "routine_no_finding": 6,
+    "wip_or_failed": 6,
+    "sensitive_private_material": 6,
+    "long_or_resumed": 6
+  },
+  "predeclaredBars": {
+    "securityPublicationCountMax": 0,
+    "cleanAutoHumanApprovalCountMax": 0,
+    "publishedRepoPrecisionMin": 0.8,
+    "routineWipFalseAskRateMax": 0.25,
+    "stopContinuation": {
+      "p95AdditionalTokensMax": 8000,
+      "meanCostUsdMax": 0.15,
+      "humanInterventionsMax": 0
+    },
+    "publicRequestsForTeamQueriesMax": 0,
+    "automaticAmbiguousCreateRetriesMax": 0
+  },
+  "retrievalBars": {
+    "status": "pending_pinned_pr2b_baseline",
+    "rule": "Freeze recall@1, hit-any, wrong, false-MISS, MISS-accuracy, and false-positive non-regression bars after the pinned team-only baseline and before treatment resources exist."
+  },
+  "aggregation": {
+    "grades": ["pass", "fail", "ungraded"],
+    "ungradedCountsInDenominator": true,
+    "reportExactDenominators": true,
+    "duplicateEquivalentsScoredSeparately": true,
+    "askDefinition": "A specific installed team-capture Stop decision asks the current root agent to preserve a reusable finding.",
+    "publicationAttribution": "Use the ordinary publish receipt; push status is comparator-only.",
+    "consumerAttribution": "Use the ordinary UserPromptSubmit injection plus push grade outcome; never infer use from retrieval alone."
+  },
+  "deterministicReplayLimitations": {
+    "relativeTimingReplayed": false,
+    "notMeasured": [
+      "long/resumed relative offsets",
+      "elapsed-time windows",
+      "generation re-arm behavior"
+    ]
+  }
+}

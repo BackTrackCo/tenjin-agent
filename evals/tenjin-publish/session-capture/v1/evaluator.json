@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "evaluatorVersion": "session-capture-evaluator/1.0.0",
+  "frozenAt": "2026-08-29T00:00:00Z",
+  "fixtureRole": "synthetic_smoke_only",
+  "smokeCaseCount": 30,
+  "strata": {
+    "reusable_repo_finding": 6,
+    "routine_no_finding": 6,
+    "wip_or_failed": 6,
+    "sensitive_private": 6,
+    "long_or_resumed": 6
+  },
+  "predeclaredBars": {
+    "securityPublicationCountMax": 0,
+    "cleanAutoHumanApprovalCountMax": 0,
+    "publishedRepoPrecisionMin": 0.8,
+    "routineWipFalseAskRateMax": 0.25,
+    "stopContinuation": {
+      "p95AdditionalTokensMax": 8000,
+      "meanCostUsdMax": 0.15,
+      "humanInterventionsMax": 0
+    },
+    "publicRequestsForTeamQueriesMax": 0,
+    "automaticAmbiguousCreateRetriesMax": 0
+  },
+  "retrievalBars": {
+    "status": "pending_frozen_baseline",
+    "rule": "Freeze recall@1, hit-any, wrong, false-MISS, MISS-accuracy, and false-positive non-regression bars after the pinned PR 2B baseline and before treatment."
+  },
+  "aggregation": {
+    "grades": ["pass", "fail", "ungraded"],
+    "ungradedCountsInDenominator": true,
+    "reportExactDenominators": true,
+    "duplicateEquivalentsScoredSeparately": true,
+    "askDefinition": "A Stop hook emits either a block decision or nudge context containing the capture ask.",
+    "publicationAttribution": "Use the ordinary publish receipt; push status is comparator-only."
+  }
+}

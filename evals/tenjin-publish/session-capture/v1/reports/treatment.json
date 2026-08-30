@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "fixtureRole": "synthetic_smoke_only",
+  "kind": "treatment",
+  "status": "not_run",
+  "reason": "The synthetic smoke treatment has not been run or inspected; this is not a held-out archive result.",
+  "relativeTimingReplayed": false,
+  "notMeasured": [
+    "long/resumed relative offsets",
+    "elapsed-time windows",
+    "generation re-arm behavior"
+  ]
+}

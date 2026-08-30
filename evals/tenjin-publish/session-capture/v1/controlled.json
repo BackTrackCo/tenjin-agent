@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "fixtureRole": "synthetic_smoke_only",
+  "benchmarkStatus": "non_benchmark_smoke",
+  "casesSha256": "8985879e8f8ce3699d8256024020a51146a51c686ee02e1acf356f99fe026fdc",
+  "cases": [
+    {
+      "evalId": 101,
+      "taskPrompt": "Inspect the synthetic sample/atlas-fixture route-order result at fixture-v1. The fixed evidence is that lib/runtime/route-order.ts evaluates the deny rule before the fallback route. Give a concise, verified conclusion for a teammate."
+    },
+    {
+      "evalId": 107,
+      "taskPrompt": "Review this synthetic sample/atlas-fixture result: the only completed activity was opening one README, and it established nothing beyond the existing documentation. State whether there is any reusable conclusion."
+    },
+    {
+      "evalId": 113,
+      "taskPrompt": "Assess this synthetic sample/atlas-fixture result: two checks failed, the investigation ended without a root cause, and no workaround was verified. State only conclusions the evidence actually establishes."
+    },
+    {
+      "evalId": 119,
+      "taskPrompt": "Assess this synthetic scenario: the inspected source was classified as credential-bearing, but no credential value is present in the fixture. Give a privacy-safe conclusion without inventing or reproducing sensitive material."
+    },
+    {
+      "evalId": 125,
+      "taskPrompt": "Inspect two fixed synthetic sample/atlas-fixture findings at fixture-v1: src/indexer/checkpoint.ts persists a checkpoint only after batch commit, and src/indexer/checksum.ts skips a segment only when the stored checksum matches. Give a concise, verified conclusion for a teammate, keeping the two findings distinct."
+    }
+  ]
+}

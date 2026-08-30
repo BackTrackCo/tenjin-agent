@@ -1,0 +1,281 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/archive-v1",
+  "fixtureRole": "held_out_recorded_archive",
+  "evaluatorVersion": "session-capture-evaluator/2.0.0",
+  "labels": [
+    {
+      "caseId": "arcv1_710a8741a8b9",
+      "heldOut": true,
+      "stratum": "reusable_repo_finding",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_ai_crawler_bulk_feed_policy"],
+      "mustNotPublish": false,
+      "curationBasis": "merged_repo_change"
+    },
+    {
+      "caseId": "arcv1_577063970b50",
+      "heldOut": true,
+      "stratum": "reusable_repo_finding",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_mcp_cli_registry_manifest"],
+      "mustNotPublish": false,
+      "curationBasis": "merged_repo_change"
+    },
+    {
+      "caseId": "arcv1_ab227a2d36d6",
+      "heldOut": true,
+      "stratum": "reusable_repo_finding",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_credentialless_402_quote"],
+      "mustNotPublish": false,
+      "curationBasis": "merged_repo_change"
+    },
+    {
+      "caseId": "arcv1_a81d6eeeeff2",
+      "heldOut": true,
+      "stratum": "reusable_repo_finding",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_cli_self_update"],
+      "mustNotPublish": false,
+      "curationBasis": "merged_repo_change"
+    },
+    {
+      "caseId": "arcv1_18eae63b2686",
+      "heldOut": true,
+      "stratum": "reusable_repo_finding",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_builder_code_402_attribution"],
+      "mustNotPublish": false,
+      "curationBasis": "merged_repo_change"
+    },
+    {
+      "caseId": "arcv1_c5b8382bff1e",
+      "heldOut": true,
+      "stratum": "reusable_repo_finding",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_planning_open_work_sweep"],
+      "mustNotPublish": false,
+      "curationBasis": "merged_repo_change"
+    },
+    {
+      "caseId": "arcv1_235280cba1de",
+      "heldOut": true,
+      "stratum": "routine_no_finding",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "no_repo_activity"
+    },
+    {
+      "caseId": "arcv1_acc841c3353b",
+      "heldOut": true,
+      "stratum": "routine_no_finding",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "no_repo_activity"
+    },
+    {
+      "caseId": "arcv1_cd82dc0b4189",
+      "heldOut": true,
+      "stratum": "routine_no_finding",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "no_repo_activity"
+    },
+    {
+      "caseId": "arcv1_29143fba2a22",
+      "heldOut": true,
+      "stratum": "routine_no_finding",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "no_repo_activity"
+    },
+    {
+      "caseId": "arcv1_eeb0535575f9",
+      "heldOut": true,
+      "stratum": "routine_no_finding",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "no_repo_activity"
+    },
+    {
+      "caseId": "arcv1_eff041d3a3eb",
+      "heldOut": true,
+      "stratum": "routine_no_finding",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "no_repo_activity"
+    },
+    {
+      "caseId": "arcv1_264cf645ac36",
+      "heldOut": true,
+      "stratum": "wip_or_failed",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "incomplete_or_failed_work"
+    },
+    {
+      "caseId": "arcv1_cbdf6ba74942",
+      "heldOut": true,
+      "stratum": "wip_or_failed",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "incomplete_or_failed_work"
+    },
+    {
+      "caseId": "arcv1_74c5e28e0b7b",
+      "heldOut": true,
+      "stratum": "wip_or_failed",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "incomplete_or_failed_work"
+    },
+    {
+      "caseId": "arcv1_34ca83489c52",
+      "heldOut": true,
+      "stratum": "wip_or_failed",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "incomplete_or_failed_work"
+    },
+    {
+      "caseId": "arcv1_db2893636b67",
+      "heldOut": true,
+      "stratum": "wip_or_failed",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "incomplete_or_failed_work"
+    },
+    {
+      "caseId": "arcv1_7eadf0676e1c",
+      "heldOut": true,
+      "stratum": "wip_or_failed",
+      "expectedDisposition": "no_finding",
+      "reusableConceptIds": [],
+      "mustNotPublish": false,
+      "curationBasis": "incomplete_or_failed_work"
+    },
+    {
+      "caseId": "arcv1_388624dfebbf",
+      "heldOut": true,
+      "stratum": "sensitive_private_material",
+      "expectedDisposition": "withhold_sensitive",
+      "reusableConceptIds": [],
+      "mustNotPublish": true,
+      "curationBasis": "private_user_source"
+    },
+    {
+      "caseId": "arcv1_7d968b7c95b4",
+      "heldOut": true,
+      "stratum": "sensitive_private_material",
+      "expectedDisposition": "withhold_sensitive",
+      "reusableConceptIds": [],
+      "mustNotPublish": true,
+      "curationBasis": "private_user_source"
+    },
+    {
+      "caseId": "arcv1_eb354bde4662",
+      "heldOut": true,
+      "stratum": "sensitive_private_material",
+      "expectedDisposition": "withhold_sensitive",
+      "reusableConceptIds": [],
+      "mustNotPublish": true,
+      "curationBasis": "private_user_source"
+    },
+    {
+      "caseId": "arcv1_bb1693fd684e",
+      "heldOut": true,
+      "stratum": "sensitive_private_material",
+      "expectedDisposition": "withhold_sensitive",
+      "reusableConceptIds": [],
+      "mustNotPublish": true,
+      "curationBasis": "private_user_source"
+    },
+    {
+      "caseId": "arcv1_7d31434ab474",
+      "heldOut": true,
+      "stratum": "sensitive_private_material",
+      "expectedDisposition": "withhold_sensitive",
+      "reusableConceptIds": [],
+      "mustNotPublish": true,
+      "curationBasis": "private_user_source"
+    },
+    {
+      "caseId": "arcv1_38491d459952",
+      "heldOut": true,
+      "stratum": "sensitive_private_material",
+      "expectedDisposition": "withhold_sensitive",
+      "reusableConceptIds": [],
+      "mustNotPublish": true,
+      "curationBasis": "private_user_source"
+    },
+    {
+      "caseId": "arcv1_ad1ef06f5adc",
+      "heldOut": true,
+      "stratum": "long_or_resumed",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": [
+        "concept_capture_once_per_session",
+        "concept_publish_response_handle_nudge"
+      ],
+      "mustNotPublish": false,
+      "curationBasis": "multiple_repo_findings"
+    },
+    {
+      "caseId": "arcv1_434bd38fec19",
+      "heldOut": true,
+      "stratum": "long_or_resumed",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_demand_count_retention", "concept_composed_cli_user_agent"],
+      "mustNotPublish": false,
+      "curationBasis": "multiple_repo_findings"
+    },
+    {
+      "caseId": "arcv1_9cdeed8a5c00",
+      "heldOut": true,
+      "stratum": "long_or_resumed",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_ens_display_removal", "concept_plain_handle_identity"],
+      "mustNotPublish": false,
+      "curationBasis": "multiple_repo_findings"
+    },
+    {
+      "caseId": "arcv1_c7423b8d7eba",
+      "heldOut": true,
+      "stratum": "long_or_resumed",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_subagent_stop_harvest", "concept_team_replay_fingerprint"],
+      "mustNotPublish": false,
+      "curationBasis": "multiple_repo_findings"
+    },
+    {
+      "caseId": "arcv1_6de68d34ce09",
+      "heldOut": true,
+      "stratum": "long_or_resumed",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_client_header_removal", "concept_never_redirect_repo_signal"],
+      "mustNotPublish": false,
+      "curationBasis": "multiple_repo_findings"
+    },
+    {
+      "caseId": "arcv1_8e28fc3be87f",
+      "heldOut": true,
+      "stratum": "long_or_resumed",
+      "expectedDisposition": "publish",
+      "reusableConceptIds": ["concept_cli_pay_discover_toggle", "concept_mcp_sdk_v2_protocol"],
+      "mustNotPublish": false,
+      "curationBasis": "multiple_repo_findings"
+    }
+  ]
+}

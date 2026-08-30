@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "session-capture/v1",
+  "fixtureRole": "synthetic_smoke_only",
+  "kind": "dogfood_7d",
+  "status": "not_run",
+  "reason": "The seven-day organic observation window has not started; this synthetic suite cannot supply that measurement."
+}

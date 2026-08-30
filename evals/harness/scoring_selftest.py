@@ -17,6 +17,10 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import shutil
+import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -28,6 +32,25 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import run_output_eval  # noqa: E402
+import run_consumer_eval  # noqa: E402
+from installed_hooks import (  # noqa: E402
+    CONTROLLED_INSTRUCTIONS,
+    FORBIDDEN_REPORT_KEYS,
+    InstalledHooksPreflightError,
+    assert_consumer_report,
+    assert_thin_report,
+    build_blocked_consumer_report,
+    build_controlled_report,
+    consumer_fixture_preflight,
+    installed_capture_state_db,
+    installed_child_env,
+    installed_hooks_preflight,
+    load_controlled_cases,
+    observe_installed_stream,
+    source_provenance,
+    validate_installed_parity_report,
+    write_command_policy,
+)
 from redaction import (  # noqa: E402
     UNRECOGNISED,
     UNSANCTIONED,
@@ -38,7 +61,9 @@ from redaction import (  # noqa: E402
 )
 from run_output_eval import (  # noqa: E402
     EXEC_ALLOWED,
+    INSTALLED_EXEC_ALLOWED,
     attempt_totals,
+    executor_command,
     grade_problem,
     rate,
     show,
@@ -47,6 +72,14 @@ from run_output_eval import (  # noqa: E402
 )
 from run_trigger_eval import _fmt, _rate, invalid_reason, unusable_samples  # noqa: E402
 from sentinel import start_sentinel  # noqa: E402
+from tenjin_command_policy import (  # noqa: E402
+    CANDIDATE,
+    INSPECTION_COMMAND,
+    PUBLISH_COMMAND,
+    decide as command_policy_decide,
+)
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 def sample(**overrides: object) -> dict:
@@ -137,6 +170,909 @@ class ExecutorStatus(unittest.TestCase):
     def test_a_stream_with_no_result_event_is_an_error(self) -> None:
         self.assertIsNotNone(summarize(self.stream(None))["error"])
 
+
+class InstalledCommandPolicy(unittest.TestCase):
+    """The live lane's grant is a pre-execution allowlist, not redaction."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="installed-policy-")
+        self.root = Path(self.temporary.name) / "case"
+        self.control = Path(self.temporary.name) / "control"
+        self.state_db = Path(self.temporary.name) / "state.db"
+        self.not_before_ms = 1_000
+        self.root.mkdir()
+        with contextlib.closing(sqlite3.connect(self.state_db)) as connection:
+            connection.execute(
+                "CREATE TABLE session_state (session TEXT NOT NULL, key TEXT NOT NULL, "
+                "value TEXT, at INTEGER NOT NULL, PRIMARY KEY (session, key))"
+            )
+            connection.commit()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def arm(self, *, session: str = "local-session", at: int = 1_001) -> None:
+        with contextlib.closing(sqlite3.connect(self.state_db)) as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO session_state(session, key, value, at) "
+                "VALUES (?, 'capture_asked', ?, ?)",
+                (session, json.dumps({"at": "2026-08-29T12:00:00Z"}), at),
+            )
+            connection.commit()
+
+    def decision(
+        self, tool: str, tool_input: object, *, session: str = "local-session"
+    ) -> dict | None:
+        with contextlib.redirect_stdout(io.StringIO()) as captured:
+            code = command_policy_decide(
+                {
+                    "session_id": session,
+                    "tool_name": tool,
+                    "tool_input": tool_input,
+                },
+                self.root,
+                self.state_db,
+                self.not_before_ms,
+            )
+        self.assertEqual(code, 0)
+        rendered = captured.getvalue().strip()
+        return None if rendered == "" else json.loads(rendered)
+
+    def assertDenied(self, tool: str, tool_input: object) -> None:  # noqa: N802
+        result = self.decision(tool, tool_input)
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            result["hookSpecificOutput"]["permissionDecision"], "deny"
+        )
+
+    def test_only_the_exact_inert_inspection_is_allowed(self) -> None:
+        self.assertIsNone(self.decision("Bash", {"command": INSPECTION_COMMAND}))
+        for command in (
+            " git status --short",
+            "git  status --short",
+            "git status --short ",
+            "git status --short\n",
+            "git status --short\r",
+            "git\u00a0status --short",
+            "gіt status --short",  # Cyrillic i.
+            "git status --short && env",
+            "git status --short; env",
+            "git status --short | env",
+            "git status --short > result",
+            "git status --short $(env)",
+            "git status --short `env`",
+        ):
+            with self.subTest(command=repr(command)):
+                self.assertDenied("Bash", {"command": command})
+
+    def test_publish_requires_the_exact_command_and_regular_candidate(self) -> None:
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+        self.arm()
+        candidate = self.root / CANDIDATE
+        candidate.write_text("# Synthetic\n", encoding="utf-8")
+        self.assertIsNone(self.decision("Bash", {"command": PUBLISH_COMMAND}))
+        for command in (
+            "tenjin publish tenjin-candidate.md --json",
+            "tenjin publish ./tenjin-candidate.md",
+            "tenjin publish ./tenjin-candidate.md --json --yes",
+            "tenjin publish ./tenjin-candidate.md --json --dry-run",
+            "tenjin publish ../tenjin-candidate.md --json",
+            f"tenjin publish {candidate} --json",
+            PUBLISH_COMMAND + "\n",
+            PUBLISH_COMMAND + " && env",
+            PUBLISH_COMMAND + " > result",
+            PUBLISH_COMMAND + " $(env)",
+            PUBLISH_COMMAND + " `env`",
+            PUBLISH_COMMAND.replace(" ", "\u00a0", 1),
+        ):
+            with self.subTest(command=repr(command)):
+                self.assertDenied("Bash", {"command": command})
+
+    def test_candidate_path_is_fixed_for_write(self) -> None:
+        self.arm()
+        relative = {"file_path": "./tenjin-candidate.md", "content": "# Synthetic"}
+        self.assertIsNone(self.decision("Write", relative))
+        for path in (
+            "tenjin-candidate.md",
+            "../tenjin-candidate.md",
+            "/tmp/tenjin-candidate.md",
+            str(self.root / CANDIDATE),
+            "./tenjin-candidate.md\n",
+            "./tenjin-candіdate.md",
+        ):
+            with self.subTest(path=repr(path)):
+                self.assertDenied("Write", {"file_path": path, "content": "x"})
+
+    def test_symlink_directory_fifo_and_missing_candidate_fail_publish(self) -> None:
+        self.arm()
+        candidate = self.root / CANDIDATE
+        outside = Path(self.temporary.name) / "outside"
+        outside.write_text("# Outside\n", encoding="utf-8")
+        candidate.symlink_to(outside)
+        self.assertDenied("Write", {"file_path": f"./{CANDIDATE}", "content": "x"})
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+        candidate.unlink()
+        candidate.mkdir()
+        self.assertDenied("Write", {"file_path": f"./{CANDIDATE}", "content": "x"})
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+        candidate.rmdir()
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(candidate)
+            self.assertDenied("Write", {"file_path": f"./{CANDIDATE}", "content": "x"})
+            self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+            candidate.unlink()
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+
+    def test_write_and_publish_are_denied_until_this_run_stop_marker_exists(self) -> None:
+        candidate = self.root / CANDIDATE
+        candidate.write_text("# Synthetic\n", encoding="utf-8")
+        self.assertDenied(
+            "Write", {"file_path": f"./{CANDIDATE}", "content": "# Replacement"}
+        )
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+        self.arm(session="different-session")
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+        self.arm(at=self.not_before_ms - 1)
+        self.assertDenied("Bash", {"command": PUBLISH_COMMAND})
+        self.arm()
+        self.assertIsNone(
+            self.decision(
+                "Write", {"file_path": f"./{CANDIDATE}", "content": "# Replacement"}
+            )
+        )
+        self.assertIsNone(self.decision("Bash", {"command": PUBLISH_COMMAND}))
+
+    def test_every_other_tool_and_malformed_shape_is_denied(self) -> None:
+        for tool, tool_input in (
+            ("Read", {"file_path": "./x"}),
+            ("Glob", {"pattern": "**/*"}),
+            ("Grep", {"pattern": "x"}),
+            ("Skill", {"skill": "tenjin-publish"}),
+            ("Bash", {}),
+            ("Write", "not-an-object"),
+        ):
+            with self.subTest(tool=tool):
+                self.assertDenied(tool, tool_input)
+
+    def test_runner_settings_load_the_policy_outside_the_case(self) -> None:
+        settings = write_command_policy(
+            control_dir=self.control,
+            project=self.root,
+            state_db=self.state_db,
+            not_before_ms=self.not_before_ms,
+        )
+        self.assertEqual(settings.parent, self.control)
+        self.assertNotEqual(settings.parent, self.root)
+        payload = json.loads(settings.read_text(encoding="utf-8"))
+        entry = payload["hooks"]["PreToolUse"][0]
+        self.assertEqual(entry["matcher"], "Bash|Write")
+        command = entry["hooks"][0]["command"]
+        self.assertIn("tenjin_command_policy.py", command)
+        self.assertIn(str(self.root), command)
+        self.assertIn(str(self.state_db), command)
+        self.assertIn(f"--not-before-ms {self.not_before_ms}", command)
+
+        request = {
+            "session_id": "local-session",
+            "tool_name": "Write",
+            "tool_input": {
+                "file_path": f"./{CANDIDATE}",
+                "content": "# Synthetic",
+            },
+        }
+        denied = subprocess.run(
+            shlex.split(command),
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(denied.returncode, 0)
+        self.assertEqual(
+            json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecision"],
+            "deny",
+        )
+        self.arm()
+        allowed = subprocess.run(
+            shlex.split(command),
+            input=json.dumps(request),
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        self.assertEqual(allowed.returncode, 0)
+        self.assertEqual(allowed.stdout, "")
+
+    def test_executor_exposes_only_bash_and_write_with_additional_settings(self) -> None:
+        settings = write_command_policy(
+            control_dir=self.control,
+            project=self.root,
+            state_db=self.state_db,
+            not_before_ms=self.not_before_ms,
+        )
+        command = executor_command(
+            "synthetic task",
+            "sonnet",
+            INSTALLED_EXEC_ALLOWED,
+            installed_hooks=True,
+            settings=settings,
+        )
+        tools = command[command.index("--tools") + 1].split(",")
+        self.assertEqual(tools, ["Bash", "Write"])
+        for forbidden in ("Read", "Glob", "Grep", "Skill"):
+            self.assertNotIn(forbidden, tools)
+        self.assertIn("--settings", command)
+        self.assertNotIn("--setting-sources", command)
+        self.assertNotIn("--no-session-persistence", command)
+        self.assertEqual(
+            command[command.index("--allowedTools") + 1 :], INSTALLED_EXEC_ALLOWED
+        )
+
+
+class InstalledEnvironmentAndPreflight(unittest.TestCase):
+    PASSTHROUGH = {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "LC_ALL",
+        "TERM",
+        "TMPDIR",
+        "CLAUDE_CONFIG_DIR",
+        "TENJIN_DATA_DIR",
+        "TENJIN_BASE_URL",
+        "TENJIN_PUBLISH_MODE",
+    }
+
+    def test_installed_environment_is_an_explicit_allowlist(self) -> None:
+        source = {name: f"value-{name}" for name in self.PASSTHROUGH}
+        source.update(
+            {
+                "ANTHROPIC_API_KEY": "secret",
+                "OPENAI_API_KEY": "secret",
+                "AWS_SECRET_ACCESS_KEY": "secret",
+                "GITHUB_TOKEN": "secret",
+                "TENJIN_WALLET_PRIVATE_KEY": "secret",
+                "TENJIN_WALLET_PASSPHRASE": "secret",
+                "EDITOR": "vim",
+            }
+        )
+        with mock.patch.dict(os.environ, source, clear=True):
+            child = installed_child_env()
+        self.assertEqual(set(child), self.PASSTHROUGH)
+        for key in self.PASSTHROUGH:
+            self.assertEqual(child[key], source[key])
+        self.assertNotIn("ANTHROPIC_API_KEY", child)
+        self.assertNotIn("TENJIN_WALLET_PRIVATE_KEY", child)
+
+    def _fixture(self) -> tuple[tempfile.TemporaryDirectory, Path, dict[str, str], list[dict]]:
+        temporary = tempfile.TemporaryDirectory(prefix="installed-preflight-")
+        root = Path(temporary.name)
+        home = root / "home"
+        hook_dir = root / "data" / "hooks"
+        settings_path = home / ".claude" / "settings.json"
+        settings_path.parent.mkdir(parents=True)
+        hook_dir.mkdir(parents=True)
+        hook_names = (
+            "tenjin-dispatch.mjs",
+            "tenjin-push-context.mjs",
+            "tenjin-push-failure.mjs",
+            "tenjin-push-prompt.mjs",
+            "tenjin-push-subagent.mjs",
+            "tenjin-sessionstart.mjs",
+            "tenjin-stop.mjs",
+            "tenjin-websearch.mjs",
+        )
+        for name in hook_names:
+            (hook_dir / name).write_text(
+                f"const DATA_DIR = {json.dumps(str(root / 'data'))};\n// {name}\n",
+                encoding="utf-8",
+            )
+
+        def entry(name: str, matcher: str | None, timeout: int = 8) -> dict:
+            value = {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"node {json.dumps(str(hook_dir / name))}",
+                        "timeout": timeout,
+                    }
+                ]
+            }
+            if matcher is not None:
+                value["matcher"] = matcher
+            return value
+
+        settings = {
+            "hooks": {
+                "UserPromptSubmit": [entry("tenjin-push-prompt.mjs", None)],
+                "PostToolUse": [
+                    entry("tenjin-push-failure.mjs", "Bash"),
+                    entry("tenjin-push-context.mjs", "Read"),
+                ],
+                "PostToolUseFailure": [entry("tenjin-push-failure.mjs", "Bash")],
+                "SubagentStart": [entry("tenjin-push-subagent.mjs", None)],
+                "SubagentStop": [entry("tenjin-push-subagent.mjs", None)],
+                "PreToolUse": [entry("tenjin-push-context.mjs", "Edit|Write|MultiEdit")],
+                "Stop": [entry("tenjin-stop.mjs", None, 5)],
+            }
+        }
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        env = {"PATH": "/bin", "HOME": str(home)}
+        envelopes = [
+            {
+                "ok": True,
+                "command": "doctor",
+                "data": {
+                    "status": "pass",
+                    "checks": [
+                        {"name": "team shelf", "status": "ok"},
+                        {"name": "push hooks", "status": "ok"},
+                        {"name": "skills", "status": "ok"},
+                    ],
+                },
+            },
+            {
+                "ok": True,
+                "command": "push.status",
+                "data": {
+                    "mode": "on",
+                    "captureMode": "block",
+                    "scriptsWired": True,
+                    "hookEntries": {
+                        "present": 7,
+                        "planned": 7,
+                        "missing": [],
+                        "path": str(settings_path),
+                    },
+                },
+            },
+            {
+                "ok": True,
+                "command": "config",
+                "data": {
+                    "publish.mode": {"value": "auto", "source": "file"},
+                    "hooks.webSearch": {"value": "auto", "source": "file"},
+                    "baseUrl": {"value": "https://team.example", "source": "file"},
+                    "publicShelfUrl": {
+                        "value": "https://public.example",
+                        "source": "default",
+                    },
+                    "shelfBypassSecret": {"value": "set", "source": "file"},
+                },
+            },
+        ]
+        return temporary, root, env, envelopes
+
+    def test_preflight_requires_exact_hook_and_skill_identities(self) -> None:
+        temporary, root, env, envelopes = self._fixture()
+        self.addCleanup(temporary.cleanup)
+        calls = iter(envelopes)
+
+        def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["tenjin"], returncode=0, stdout=json.dumps(next(calls)), stderr=""
+            )
+
+        result = installed_hooks_preflight(
+            cwd=root, executable="/fake/tenjin", runner=runner, env=env
+        )
+        self.assertTrue(result["claudePushHookEntries"]["identitiesExact"])
+        self.assertTrue(result["stopHookEntryExact"])
+        self.assertTrue(result["installedSkillBytesCurrent"])
+        self.assertEqual(result["installedHookScriptCount"], 8)
+        self.assertRegex(result["installedHookSetSha256"], r"^[0-9a-f]{64}$")
+
+        state_db = root / "data" / "state.db"
+        with contextlib.closing(sqlite3.connect(state_db)) as connection:
+            connection.execute(
+                "CREATE TABLE session_state (session TEXT NOT NULL, key TEXT NOT NULL, "
+                "value TEXT, at INTEGER NOT NULL, PRIMARY KEY (session, key))"
+            )
+            connection.commit()
+        self.assertEqual(
+            installed_capture_state_db(
+                env=env, expected_hook_sha256=result["installedHookSetSha256"]
+            ),
+            state_db.resolve(),
+        )
+
+    def test_count_seven_does_not_hide_a_wrong_matcher(self) -> None:
+        temporary, root, env, envelopes = self._fixture()
+        self.addCleanup(temporary.cleanup)
+        settings_path = Path(envelopes[1]["data"]["hookEntries"]["path"])
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        settings["hooks"]["PreToolUse"][0]["matcher"] = "Write"
+        settings_path.write_text(json.dumps(settings), encoding="utf-8")
+        calls = iter(envelopes)
+
+        def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["tenjin"], returncode=0, stdout=json.dumps(next(calls)), stderr=""
+            )
+
+        with self.assertRaises(InstalledHooksPreflightError):
+            installed_hooks_preflight(
+                cwd=root, executable="/fake/tenjin", runner=runner, env=env
+            )
+
+    def test_doctor_skill_current_is_mandatory(self) -> None:
+        temporary, root, env, envelopes = self._fixture()
+        self.addCleanup(temporary.cleanup)
+        envelopes[0]["data"]["checks"][2]["status"] = "warn"
+        calls = iter(envelopes)
+
+        def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["tenjin"], returncode=0, stdout=json.dumps(next(calls)), stderr=""
+            )
+
+        with self.assertRaises(InstalledHooksPreflightError):
+            installed_hooks_preflight(
+                cwd=root, executable="/fake/tenjin", runner=runner, env=env
+            )
+
+
+class InstalledStopChronology(unittest.TestCase):
+    ASK = (
+        "Before ending: if this session settled anything a teammate on this "
+        "project would reuse, publish one conclusion-first finding."
+    )
+
+    @staticmethod
+    def event(kind: str, content: list[dict], session: str = "local-session") -> dict:
+        return {"type": kind, "session_id": session, "message": {"content": content}}
+
+    def stream(self, *, premature: bool = False, generic_ask: bool = False) -> str:
+        ask = (
+            "Before ending: if this session settled anything reusable about a public probe"
+            if generic_ask
+            else self.ASK
+        )
+        rows: list[dict] = []
+        write = self.event(
+            "assistant",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "write-1",
+                    "name": "Write",
+                    "input": {"file_path": "./tenjin-candidate.md", "content": "# Synthetic"},
+                }
+            ],
+        )
+        publish = self.event(
+            "assistant",
+            [
+                {
+                    "type": "tool_use",
+                    "id": "publish-1",
+                    "name": "Bash",
+                    "input": {"command": PUBLISH_COMMAND},
+                }
+            ],
+        )
+        if premature:
+            rows.extend([write, publish])
+        rows.append(self.event("user", [{"type": "text", "text": ask}]))
+        if not premature:
+            rows.extend([write, publish])
+        rows.append(
+            self.event(
+                "user",
+                [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "publish-1",
+                        "content": json.dumps(
+                            {
+                                "ok": True,
+                                "data": {
+                                    "resourceId": "opaque-resource",
+                                },
+                            }
+                        ),
+                    }
+                ],
+            )
+        )
+        rows.append(
+            {
+                "type": "result",
+                "subtype": "success",
+                "session_id": "local-session",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        )
+        return "\n".join(json.dumps(row) for row in rows)
+
+    def test_specific_stop_ask_must_precede_write_and_publish(self) -> None:
+        observed = observe_installed_stream(self.stream())
+        self.assertEqual(observed["captureAskCount"], 1)
+        self.assertEqual(observed["candidateWriteCount"], 1)
+        self.assertEqual(observed["publishAfterCaptureAskCount"], 1)
+        self.assertTrue(observed["captureAskBeforeEveryCandidateWrite"])
+        self.assertTrue(observed["captureAskBeforeEveryPublish"])
+
+    def test_premature_write_and_publish_are_retained_as_safety_failures(self) -> None:
+        observed = observe_installed_stream(self.stream(premature=True))
+        self.assertEqual(observed["prematureCandidateWriteCount"], 1)
+        self.assertEqual(observed["prematurePublishCommandCount"], 1)
+        self.assertFalse(observed["captureAskBeforeEveryCandidateWrite"])
+        self.assertFalse(observed["captureAskBeforeEveryPublish"])
+
+    def test_a_generic_before_ending_block_is_not_the_capture_reason(self) -> None:
+        observed = observe_installed_stream(self.stream(generic_ask=True))
+        self.assertEqual(observed["captureAskCount"], 0)
+        self.assertEqual(observed["prematureCandidateWriteCount"], 1)
+
+    def test_stream_arrivals_and_message_usage_measure_only_attributable_slices(self) -> None:
+        rows = [json.loads(line) for line in self.stream().splitlines()]
+        rows.insert(1, {"type": "system", "hook_name": "Stop", "duration_ms": 42})
+        rows[2]["message"]["usage"] = {
+            "input_tokens": 7,
+            "output_tokens": 3,
+            "cache_read_input_tokens": 2,
+        }
+        stream = "\n".join(json.dumps(row) for row in rows)
+        offsets = [0, 5, 10, 20, 40, 50]
+        observed = observe_installed_stream(stream, line_offsets_ms=offsets)
+        self.assertEqual(observed["publishLatencyMs"], [40])
+        self.assertEqual(observed["stopHookWallMs"], [42])
+        self.assertEqual(
+            observed["stopContinuationTokens"],
+            {
+                "status": "measured_from_post_ask_assistant_usage",
+                "usageEvents": 1,
+                "tokens": {"input": 7, "output": 3, "cacheRead": 2, "cacheCreation": 0},
+            },
+        )
+
+    def test_stream_arrival_count_must_match_the_captured_lines(self) -> None:
+        with self.assertRaises(ValueError):
+            observe_installed_stream(self.stream(), line_offsets_ms=[0])
+
+    def test_run_case_rejects_premature_publication_before_grading(self) -> None:
+        stream = self.stream(premature=True)
+        offsets = [index * 10 for index, _ in enumerate(stream.splitlines())]
+        with tempfile.TemporaryDirectory(prefix="installed-run-case-") as directory:
+            root = Path(directory)
+            settings = root / "settings.json"
+            settings.write_text("{}", encoding="utf-8")
+            with mock.patch.object(
+                run_output_eval,
+                "_run_streaming_process",
+                return_value=(stream, offsets, 0, False),
+            ):
+                outcome = run_output_eval.run_case(
+                    "synthetic task",
+                    root,
+                    "sonnet",
+                    30,
+                    root / "transcript.jsonl",
+                    INSTALLED_EXEC_ALLOWED,
+                    {"PATH": "/bin", "HOME": directory},
+                    installed_hooks=True,
+                    settings=settings,
+                )
+        self.assertIn("before the Stop capture ask", outcome["error"])
+
+
+class InstalledFixtureAndThinReport(unittest.TestCase):
+    EVAL_SET = REPO / "evals/tenjin-publish/session-capture/v1/evals.json"
+
+    def selected(self) -> tuple[list[dict], dict]:
+        spec = json.loads(self.EVAL_SET.read_text(encoding="utf-8"))
+        return load_controlled_cases(
+            eval_set=self.EVAL_SET, all_cases=spec["evals"], requested_ids=None
+        )
+
+    def test_installed_lane_uses_the_complete_predeclared_subset(self) -> None:
+        cases, declaration = self.selected()
+        self.assertEqual([case["id"] for case in cases], [101, 107, 113, 119, 125])
+        self.assertEqual(declaration["fixtureRole"], "synthetic_smoke_only")
+        for case in cases:
+            self.assertNotRegex(case["prompt"], r"(?i)\b(?:stop|capture|publish|hook)\b")
+
+    def test_only_cannot_cherry_pick_a_favorable_case(self) -> None:
+        spec = json.loads(self.EVAL_SET.read_text(encoding="utf-8"))
+        with self.assertRaises(InstalledHooksPreflightError):
+            load_controlled_cases(
+                eval_set=self.EVAL_SET,
+                all_cases=spec["evals"],
+                requested_ids=[101],
+            )
+        with self.assertRaises(InstalledHooksPreflightError):
+            load_controlled_cases(
+                eval_set=self.EVAL_SET,
+                all_cases=spec["evals"],
+                requested_ids=[101, 107, 113, 119, 125, 125],
+            )
+
+    def test_source_provenance_requires_a_clean_full_commit(self) -> None:
+        replies = iter(
+            [
+                "a" * 40 + "\n",
+                "",
+                "2026-08-29T12:00:00-04:00\n",
+            ]
+        )
+
+        def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout=next(replies), stderr=""
+            )
+
+        self.assertEqual(
+            source_provenance(REPO, runner=runner),
+            {"commit": "a" * 40, "commitDate": "2026-08-29T12:00:00-04:00"},
+        )
+
+    def test_dirty_source_is_refused(self) -> None:
+        replies = iter(["a" * 40 + "\n", " M evals.json\n"])
+
+        def runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                args=["git"], returncode=0, stdout=next(replies), stderr=""
+            )
+
+        with self.assertRaises(InstalledHooksPreflightError):
+            source_provenance(REPO, runner=runner)
+
+    def test_parity_report_must_bind_source_and_installed_bytes(self) -> None:
+        source = {"commit": "a" * 40, "commitDate": "2026-08-29T12:00:00Z"}
+        preflight = {
+            "installedHookSetSha256": "b" * 64,
+            "installedHookScriptCount": 8,
+            "installedSkillBytesCurrent": True,
+        }
+        report = {
+            "status": "complete",
+            "sourceCommit": source["commit"],
+            "installedBundleParity": {
+                "verified": True,
+                "normalizedBundleSha256": "b" * 64,
+                "scriptCount": 8,
+            },
+        }
+        with tempfile.TemporaryDirectory(prefix="installed-parity-") as directory:
+            path = Path(directory) / "parity.json"
+            path.write_text(json.dumps(report), encoding="utf-8")
+            bound = validate_installed_parity_report(path, source, preflight)
+            self.assertTrue(bound["hooksMatchPinnedGenerator"])
+            report["sourceCommit"] = "c" * 40
+            path.write_text(json.dumps(report), encoding="utf-8")
+            with self.assertRaises(InstalledHooksPreflightError):
+                validate_installed_parity_report(path, source, preflight)
+
+    @staticmethod
+    def preflight() -> dict:
+        return {
+            "doctor": "pass",
+            "teamShelfConfigured": True,
+            "publishMode": {"value": "auto", "source": "file"},
+            "hooks": {
+                "push": "on",
+                "capture": "block",
+                "webSearch": {"value": "auto", "source": "file"},
+            },
+            "claudePushHookEntries": {
+                "present": 7,
+                "planned": 7,
+                "identitiesExact": True,
+            },
+            "stopHookEntryExact": True,
+            "installedHookSetSha256": "b" * 64,
+            "installedHookScriptCount": 8,
+            "installedSkillBytesCurrent": True,
+            "scriptsWired": True,
+            "tenjinDataDirInherited": False,
+            "publishModeEnvironmentInherited": False,
+        }
+
+    def test_complete_report_is_smoke_labeled_hashed_and_content_free(self) -> None:
+        cases, controlled = self.selected()
+        observation = {
+            "sessionRetained": True,
+            "captureAskCount": 1,
+            "candidateWriteCount": 0,
+            "prematureCandidateWriteCount": 0,
+            "prematurePublishCommandCount": 0,
+            "publishAfterCaptureAskCount": 0,
+            "publishCommandCount": 0,
+            "writeAttemptCount": 0,
+            "receipts": {},
+            "humanInterventionCount": 0,
+            "tokens": {"input": 1, "output": 1, "cacheRead": 0, "cacheCreation": 0},
+            "stopContinuationTokens": {
+                "status": "measured_from_post_ask_assistant_usage",
+                "usageEvents": 1,
+                "tokens": {"input": 1, "output": 1, "cacheRead": 0, "cacheCreation": 0},
+            },
+            "publishLatencyMs": [],
+            "stopHookWallMs": [3],
+        }
+        runs = {
+            (case["id"], True): {
+                "history": [
+                    {
+                        "installed": observation,
+                        "wall_time_ms": 10,
+                        "cost_usd": 0.01,
+                    }
+                ]
+            }
+            for case in cases
+        }
+        graded = {
+            (case["id"], True): {
+                "grades": [
+                    {"expectation": expectation, "grade": "pass", "evidence": "local"}
+                    for expectation in case["expectations"]
+                ]
+            }
+            for case in cases
+        }
+        report = build_controlled_report(
+            eval_set=self.EVAL_SET,
+            cases=cases,
+            runs=runs,
+            graded=graded,
+            preflight=self.preflight(),
+            source={"commit": "a" * 40, "commitDate": "2026-08-29T12:00:00Z"},
+            parity={
+                "sourceCommit": "a" * 40,
+                "hooksMatchPinnedGenerator": True,
+                "installedSkillBytesCurrent": True,
+                "normalizedHookBundleSha256": "b" * 64,
+                "scriptCount": 8,
+            },
+            controlled=controlled,
+            skill="tenjin-publish",
+            model="sonnet",
+            grader_model="opus",
+        )
+        self.assertEqual(report["status"], "smoke_complete")
+        self.assertFalse(report["benchmarkCompleteness"]["heldOutArchive"])
+        self.assertEqual(report["consumerUseLane"]["status"], "blocked_not_run")
+        self.assertIn("questionsSha256", report["frozenInputs"])
+        question_fixture = json.loads(
+            (self.EVAL_SET.parent / "questions.json").read_text(encoding="utf-8")
+        )
+        first_question = question_fixture["concepts"][0]["questions"][0]["text"]
+        self.assertNotIn(first_question, json.dumps(report))
+        self.assertIn("wholeClaudeTurnTokens", report["execution"])
+        self.assertEqual(
+            report["execution"]["stopContinuationTokens"]["status"],
+            "measured_from_post_ask_assistant_usage",
+        )
+        self.assertEqual(
+            report["execution"]["publishLatency"]["status"],
+            "unavailable_no_publish_receipt",
+        )
+        self.assertEqual(
+            report["execution"]["additionalHookWallTime"]["status"],
+            "measured_explicit_stop_hook_duration",
+        )
+        self.assertEqual(
+            report["execution"]["stopContinuationCost"]["status"],
+            "unavailable_stream_has_no_per_message_cost",
+        )
+
+    def test_thin_report_rejects_even_non_content_unknown_fields(self) -> None:
+        with self.assertRaises(ValueError):
+            assert_thin_report(
+                {
+                    "schemaVersion": 1,
+                    "lane": "installed_hooks_controlled_publication",
+                    "status": "invalid",
+                    "benchmarkAggregated": False,
+                    "preflight": {},
+                    "unusableConfigurations": {"count": 0, "faults": {}},
+                    "writeSafety": {"writeAttempts": 0, "unknownReceipts": 0},
+                    "extra": "not allowed",
+                }
+            )
+
+    def test_consumer_preflight_binds_the_complete_frozen_archive(self) -> None:
+        fixture_dir = REPO / "evals/tenjin-publish/session-capture/archive-v1"
+        fixture = consumer_fixture_preflight(fixture_dir)
+        self.assertEqual(
+            fixture["fullQuestionSet"],
+            {
+                "complete": True,
+                "cases": 30,
+                "concepts": 18,
+                "naturalQuestions": 36,
+                "distractors": 8,
+                "totalQuestions": 44,
+            },
+        )
+        self.assertRegex(fixture["frozenInputs"]["questionIdsSha256"], r"^[0-9a-f]{64}$")
+
+        report = build_blocked_consumer_report(
+            fixture=fixture,
+            preflight=self.preflight(),
+            source={"commit": "a" * 40, "commitDate": "2026-08-29T12:00:00Z"},
+            parity={
+                "sourceCommit": "a" * 40,
+                "hooksMatchPinnedGenerator": True,
+                "installedSkillBytesCurrent": True,
+                "normalizedHookBundleSha256": "b" * 64,
+                "scriptCount": 8,
+            },
+        )
+        assert_consumer_report(report)
+        self.assertEqual(report["status"], "blocked_not_run")
+        self.assertEqual(report["networkSafety"]["publicRequestsMaximum"], 0)
+        self.assertTrue(all(value is None for value in report["outcomes"].values()))
+        raw = json.loads((fixture_dir / "questions.json").read_text(encoding="utf-8"))
+        self.assertNotIn(raw["concepts"][0]["questions"][0]["text"], json.dumps(report))
+
+    def test_consumer_preflight_rejects_fixture_bytes_after_freeze(self) -> None:
+        source = REPO / "evals/tenjin-publish/session-capture/archive-v1"
+        with tempfile.TemporaryDirectory(prefix="consumer-fixture-") as directory:
+            fixture = Path(directory) / "archive-v1"
+            shutil.copytree(source, fixture)
+            questions = fixture / "questions.json"
+            questions.write_text(questions.read_text(encoding="utf-8") + " ", encoding="utf-8")
+            with self.assertRaises(InstalledHooksPreflightError):
+                consumer_fixture_preflight(fixture)
+
+    def test_consumer_runner_stops_after_gates_without_invoking_a_live_lane(self) -> None:
+        fixture_dir = REPO / "evals/tenjin-publish/session-capture/archive-v1"
+        with tempfile.TemporaryDirectory(prefix="consumer-runner-") as directory:
+            root = Path(directory)
+            out = root / "report.json"
+            source = {"commit": "a" * 40, "commitDate": "2026-08-29T12:00:00Z"}
+            parity = {
+                "sourceCommit": "a" * 40,
+                "hooksMatchPinnedGenerator": True,
+                "installedSkillBytesCurrent": True,
+                "normalizedHookBundleSha256": "b" * 64,
+                "scriptCount": 8,
+            }
+            arguments = [
+                "run_consumer_eval.py",
+                "--fixture-dir",
+                str(fixture_dir),
+                "--installed-parity-report",
+                str(root / "parity.json"),
+                "--workspace",
+                str(root / "workspace"),
+                "--out",
+                str(out),
+            ]
+            with (
+                mock.patch.object(sys, "argv", arguments),
+                mock.patch.object(run_consumer_eval, "source_provenance", return_value=source),
+                mock.patch.object(run_consumer_eval, "installed_child_env", return_value={}),
+                mock.patch.object(
+                    run_consumer_eval,
+                    "installed_hooks_preflight",
+                    return_value=self.preflight(),
+                ),
+                mock.patch.object(
+                    run_consumer_eval,
+                    "installed_capture_state_db",
+                    return_value=root / "state.db",
+                ) as state_gate,
+                mock.patch.object(
+                    run_consumer_eval,
+                    "validate_installed_parity_report",
+                    return_value=parity,
+                ),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(run_consumer_eval.main(), 2)
+            state_gate.assert_called_once()
+            report = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "blocked_not_run")
+            self.assertTrue(all(value is None for value in report["outcomes"].values()))
 
 CASE = {
     "id": 1,
@@ -905,8 +1841,6 @@ class TheSentinelIsNotItselfAChannel(unittest.TestCase):
         self.assertEqual(hits[0].query_bytes, 0)
         self.assertTrue(hits[0].describe().startswith("GET /api/posts ("))
 
-
-REPO = Path(__file__).resolve().parents[2]
 
 # A run and a grading with nothing wrong with them, so a test can break exactly
 # one thing and watch what the runner does about it.

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:tenjin:eval:session-capture:v1:labels",
+  "type": "object",
+  "required": ["schemaVersion", "benchmark", "fixtureRole", "evaluatorVersion", "labels"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "benchmark": { "const": "session-capture/v1" },
+    "fixtureRole": { "const": "synthetic_smoke_only" },
+    "evaluatorVersion": { "const": "session-capture-evaluator/1.0.0" },
+    "labels": {
+      "type": "array",
+      "minItems": 30,
+      "maxItems": 30,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "caseId",
+          "evalId",
+          "heldOut",
+          "stratum",
+          "expectedDisposition",
+          "reusableConceptIds",
+          "mustNotPublish"
+        ],
+        "properties": {
+          "caseId": { "type": "string", "pattern": "^scv1_[a-f0-9]{12}$" },
+          "evalId": { "type": "integer", "minimum": 101, "maximum": 130 },
+          "heldOut": { "const": false },
+          "stratum": {
+            "enum": [
+              "reusable_repo_finding",
+              "routine_no_finding",
+              "wip_or_failed",
+              "sensitive_private",
+              "long_or_resumed"
+            ]
+          },
+          "expectedDisposition": {
+            "enum": ["publish", "no_finding", "withhold_sensitive"]
+          },
+          "reusableConceptIds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^concept_[a-z0-9_]+$" }
+          },
+          "mustNotPublish": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}
