@@ -359,15 +359,29 @@ describe('tenjin-publish teaches complete public card context', () => {
     }
   });
 
-  it('states that completeness improves buyer context without changing retrieval', () => {
-    expect(text).toMatch(/card completeness never changes decision-search\s*rank or candidacy/i);
-    expect(text).toMatch(/pre-paywall fit\s*context/i);
-    expect(text).toMatch(/Card prose is public buyer context,\s*not a retrieval input/i);
-    expect(text).toMatch(/repeat natural questions and exact repo\/component\/file terms/i);
+  /**
+   * The distinction this pins is easy to flatten in either direction, and both
+   * flattenings mislead. #628 took card text out of RELEVANCE, so no card prose
+   * makes a piece match a query better. It left PLACEMENT alone: `cacheEligible`
+   * still sorts ahead of `ts_rank` and fills the limit first, `freshWithin` and
+   * `appliesTo` reject a card-less row outright, and `/api/answer` keeps a hard
+   * gate. So the skill must say both halves, and must not say a card-less piece
+   * is simply absent from search, which is the one thing that is NOT true.
+   */
+  it('separates card relevance from card placement, and claims neither too widely', () => {
+    expect(text).toMatch(
+      /does not affect how well a piece MATCHES a query|no card text improves how well the piece MATCHES/i,
+    );
+    expect(text).toMatch(/ranks below every eligible one|eligible cards rank ahead/i);
+    expect(text).toMatch(/`freshWithin`/);
+    expect(text).toMatch(/`appliesTo`/);
+    expect(text).toMatch(/POST \/api\/answer/);
     expect(text).toMatch(/`incomplete answer card`/);
+    expect(text).toMatch(/repeat natural questions and exact repo\/component\/file terms/i);
+    // Search RANKS an uncarded piece; it does not hide it. Only the filtered
+    // queries and /api/answer exclude one.
     expect(text).not.toMatch(/out of agent decision search/i);
-    expect(text).not.toMatch(/bottom tier/i);
-    expect(text).not.toMatch(/ranks below/i);
+    expect(text).not.toMatch(/never changes.*(rank|candidacy)/i);
   });
 
   /**
@@ -954,7 +968,7 @@ describe('the public render did not move', () => {
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': 'ae6946e6608f34a8b4a607c5f8e1c0a5',
+      'tenjin-publish': 'aa78c3aa318607bb136fb3313906a93a',
     });
   });
 
