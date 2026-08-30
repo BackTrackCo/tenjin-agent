@@ -370,7 +370,7 @@ describe('the hot-path queries never scan', () => {
         ['injectedCount', STORE_SQL.injectedCount, ['s']],
         ['alreadyShown', STORE_SQL.alreadyShown, ['s', 'r']],
         ['alreadyShownOrLiveRelay', STORE_SQL.alreadyShownOrLiveRelay, ['s', 'r', 0]],
-        ['bucketCount', STORE_SQL.bucketCount, ['prompt', 0]],
+        ['bucketCount', STORE_SQL.bucketCount, ['s', 'prompt', 0]],
         ['findPairing', STORE_SQL.findPairing, ['p', 'k', 'c']],
         ['openForHead', STORE_SQL.openForHead, ['p', 'h', 0, 8]],
         ['openLoops', STORE_SQL.openLoops, [0, '', '', 25]],
@@ -1283,17 +1283,22 @@ describe('already-injected spans two different hooks', () => {
 });
 
 describe('the lookup bucket is read from the database', () => {
-  it('counts attempts machine-wide and stops the arm at the cap', async () => {
+  /** The session the arm below fires under: the bucket is per session, so the
+   *  seeded spend has to be this one's for the cap to stop it. */
+  const ARM_SESSION = 's1';
+
+  it("counts one session's attempts and stops that session's arm at the cap", async () => {
     const store = await openStore(dataDir);
     const now = Date.now();
-    // A full prompt bucket from a DIFFERENT session: the bucket is machine-wide.
+    // A full prompt bucket for THIS session: the bucket is per (session,
+    // trigger), so what stops the arm below is what this session spent.
     const cap = PUSH_LOOKUP_CAPS_PER_WINDOW.prompt ?? PUSH_LOOKUP_CAP_DEFAULT;
     for (let i = 0; i < cap; i += 1) {
       store?.run(STORE_SQL.insertInjection, [
         `uid-${i}`,
         null,
         now,
-        'other-session',
+        ARM_SESSION,
         null,
         'machine',
         'prompt',
@@ -1315,11 +1320,22 @@ describe('the lookup bucket is read from the database', () => {
         null,
       ]);
     }
-    expect(store?.get(STORE_SQL.bucketCount, ['prompt', now - 1000])).toEqual({ n: cap });
+    expect(store?.get(STORE_SQL.bucketCount, [ARM_SESSION, 'prompt', now - 1000])).toEqual({
+      n: cap,
+    });
     // A window that starts after the rows sees nothing.
-    expect(store?.get(STORE_SQL.bucketCount, ['prompt', now + 1000])).toEqual({ n: 0 });
+    expect(store?.get(STORE_SQL.bucketCount, [ARM_SESSION, 'prompt', now + 1000])).toEqual({
+      n: 0,
+    });
     // Another arm's bucket is untouched.
-    expect(store?.get(STORE_SQL.bucketCount, ['failure', now - 1000])).toEqual({ n: 0 });
+    expect(store?.get(STORE_SQL.bucketCount, [ARM_SESSION, 'failure', now - 1000])).toEqual({
+      n: 0,
+    });
+    // ...and so is another SESSION's, which is the unit change of #258: a
+    // concurrent session on this machine has its own full allowance.
+    expect(store?.get(STORE_SQL.bucketCount, ['other-session', 'prompt', now - 1000])).toEqual({
+      n: 0,
+    });
     store?.close();
 
     const shelf = await serveSearch((baseUrl) => ({
@@ -1340,8 +1356,12 @@ describe('the lookup bucket is read from the database', () => {
       expect(run.stdout).toBe('');
       // The cap was hit BEFORE the shelf was asked.
       expect(shelf.hits()).toBe(0);
+      // The seeded spend is this session's too now, so the fire's own row is
+      // the one past it: exactly one, and it is the cap.
       expect(
-        rows("SELECT reason FROM injections WHERE session = 's1'").map((r) => r.reason),
+        rows("SELECT reason FROM injections WHERE session = 's1' AND uid NOT LIKE 'uid-%'").map(
+          (r) => r.reason,
+        ),
       ).toEqual(['lookup-cap']);
     } finally {
       await shelf.close();
@@ -1818,7 +1838,7 @@ describe('a fire with no store makes no request at all', () => {
   it('reads an unknown count as a bound that engages, not one that disappears', async () => {
     const store = await openStore(dataDir);
     // A live store counts for real...
-    expect(store?.get(STORE_SQL.bucketCount, ['prompt', 0])).toEqual({ n: 0 });
+    expect(store?.get(STORE_SQL.bucketCount, ['s1', 'prompt', 0])).toEqual({ n: 0 });
     store?.close();
     // ...and the helpers the arms use return Infinity without one, which is what
     // makes `spent < cap` and `injected < max` refuse rather than wave through.
