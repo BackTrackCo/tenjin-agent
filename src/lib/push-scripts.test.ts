@@ -714,12 +714,8 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     });
   });
 
-  /**
-   * BOTH FIELDS, AND BOTH MUST AGREE. A confidence the shelf is happy with does
-   * not stand in for corroboration: 'high' is reachable by a dense-only hit,
-   * which is the weakest evidence the pipeline produces and precisely the class
-   * that put twelve wrong notes in front of one machine.
-   */
+  /** BOTH FIELDS, AND BOTH MUST AGREE. Fused confidence does not stand in for
+   * strong identifier/title/excerpt lexical evidence. */
   it('says nothing on an uncorroborated hit, whatever its confidence', async () => {
     const { baseUrl } = await serve(echo({ confidence: 'medium', corroborated: false }));
     await pushOn(baseUrl);
@@ -850,7 +846,8 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
 
   it('takes the first strong candidate among the top three', async () => {
     // Rank 1 is uncorroborated, rank 2 is corroborated but low, rank 3 is the
-    // shelf's real yes. Ranking is by similarity; corroboration is the verdict.
+    // shelf's real yes. Ranking is fused relevance; corroboration is the public
+    // evidence half of the hook verdict.
     const { baseUrl } = await serve(
       ranked([
         card(RESOURCE_ID, 1, { confidence: 'high', corroborated: false }),
@@ -5951,7 +5948,7 @@ describe('the subagent arm (SubagentStop)', () => {
     // loop the ask was earned by riding along so the publish CLOSES it: without
     // that flag the preferred path leaves the dispatch MISS open (only the
     // fallback closed it, through `inheritedSearchIds`) and the piece lands with
-    // no question on its card, ranking below every carded piece.
+    // less public pre-paywall context linking it to the motivating question.
     expect(reason).toContain('publish it YOURSELF now');
     expect(reason).toContain('`tenjin publish <file> --agent a1 --search-id ' + SEARCH_ID + '`');
     // A rung for the child with no shell, on the same principle the child

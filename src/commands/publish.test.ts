@@ -306,7 +306,7 @@ describe('runPublish — receipt + card echo', () => {
     expect((res.data as { url: string }).url).toBe('https://preview.example/a/iris/\u202egpj.exe');
   });
 
-  it('an ineligible-but-published post still succeeds (card-less, bottom-tier in search)', async () => {
+  it('a card-less post still succeeds and preserves compatibility fields', async () => {
     const { fetch } = stubServer(CREATED); // no resource echo
     const { provider } = spyProvider();
     const res = await runPublish(

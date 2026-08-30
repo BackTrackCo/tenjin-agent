@@ -73,8 +73,8 @@ describe('runInspect', () => {
   });
 });
 
-// The answer card left the search candidate in search v2, so this free 402 fetch
-// is the ONLY place an agent can read what a piece claims before paying for it.
+// Search v3 may inline a bounded rank-1 subset; this free 402 fetch is where an
+// agent reads the full public card for any paid candidate before paying.
 describe('runInspect, the 402 answer card', () => {
   const cardedPreview = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
     title: 'The Answer',

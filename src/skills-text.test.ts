@@ -336,14 +336,10 @@ describe('tenjin-publish: publish denials are the gate working', () => {
   });
 });
 
-/**
- * The two card fields that decide whether a published piece is reachable at all.
- * Server-side `evaluateCacheEligibility` requires `exclusions` AND one of
- * provenance/methodology, and the embeddings indexer skips an ineligible card
- * outright — so a piece missing either never enters agent decision search
- * (15 of 241 posts in 30 days, PR #164 comment).
- */
-describe('tenjin-publish tells the agent to earn card eligibility', () => {
+/** The public card is buyer context, not a retrieval gate. Keep the complete-card
+ * authoring rubric while pinning the release-step-1 promise that missing fields do
+ * not change rank or candidacy. */
+describe('tenjin-publish teaches complete public card context', () => {
   const text = flat('tenjin-publish');
 
   // ONE block, naming every condition the server actually checks. Spreading them
@@ -363,17 +359,15 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     }
   });
 
-  it('states the stake once, and states it as a bottom tier rather than absence', () => {
-    // Until tenjin#691 an ineligible card kept the piece out of decision search
-    // entirely; it now ranks in a bottom tier below every eligible candidate and
-    // is labelled in matchReasons. The skill must not promise the older claim.
-    expect(text).toMatch(/Leave any one empty and the card is ineligible/i);
-    expect(text).toMatch(/bottom tier below every eligible candidate/i);
+  it('states that completeness improves buyer context without changing retrieval', () => {
+    expect(text).toMatch(/card completeness never changes decision-search\s*rank or candidacy/i);
+    expect(text).toMatch(/pre-paywall fit\s*context/i);
+    expect(text).toMatch(/Card prose is public buyer context,\s*not a retrieval input/i);
+    expect(text).toMatch(/repeat natural questions and exact repo\/component\/file terms/i);
     expect(text).toMatch(/`incomplete answer card`/);
     expect(text).not.toMatch(/out of agent decision search/i);
-    expect(text).not.toMatch(/not ranked lower/i);
-    // Said once: the earlier shape repeated the stake in the exclusions bullet.
-    expect(text.match(/bottom tier/gi)).toHaveLength(1);
+    expect(text).not.toMatch(/bottom tier/i);
+    expect(text).not.toMatch(/ranks below/i);
   });
 
   /**
@@ -402,8 +396,8 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
 
   // `provenance` and `methodology` are FLAG names; the frontmatter keys are the
   // long ones, and deriveCard has no unknown-key check, so a draft written from
-  // the short spelling loses the field silently and lands ineligible: exactly the
-  // failure this block exists to prevent (PR #164 round 3, major 5).
+  // the short spelling loses the field silently and leaves the preview incomplete:
+  // exactly the failure this block exists to prevent (PR #164 round 3, major 5).
   it('names the frontmatter keys, not just the flags that set them', () => {
     expect(text).toMatch(/`provenanceSummary` \(flag `--provenance`\)/);
     expect(text).toMatch(/`methodologySummary` \(flag `--methodology`\)/);
@@ -926,11 +920,9 @@ describe('the public render did not move', () => {
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
-  // Re-pinned when #203's skill resync landed on main: it changed the PUBLIC
-  // guidance on purpose (an incomplete card "just ranks below every complete one
-  // in agent search" rather than the older browse-only wording), so the else arm
-  // carries main's sentence and the public render is byte-for-byte main's
-  // unshaped SKILL.md again. The team arm keeps its own browse-only line.
+  // Re-pinned when #203's skill resync landed on main. The answer-card overhaul
+  // later removed card completeness as a ranking/candidacy signal in both modes;
+  // compatibility fields remain public fit-context guidance only.
   //
   // Re-pinned again for the scan hardening: the public arm's warn triage now names
   // the detectors that branch added (`private-network-endpoint`, `high-entropy-string`,
@@ -962,7 +954,7 @@ describe('the public render did not move', () => {
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
+      'tenjin-publish': 'ae6946e6608f34a8b4a607c5f8e1c0a5',
     });
   });
 

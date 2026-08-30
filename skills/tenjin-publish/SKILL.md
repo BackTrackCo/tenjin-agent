@@ -41,14 +41,14 @@ description: >-
 This machine publishes to a **team shelf**, a Tenjin deployment of the team's own
 rather than the public marketplace. A finding that cost a real install, a probe,
 or an hour of elapsed time is worth the same hour to the next teammate who hits
-it. Notes are free, and an incomplete card still publishes as browse-only.
+it. Notes are free, and card completeness never changes search rank or candidacy.
 <!-- tenjin:else -->
 # Tenjin publish: sell and maintain reusable answers
 
 Tenjin sells reusable answers to agents. A finding that cost a real install, a
 probe, or an hour of elapsed time is worth something to the next agent facing the
 same question. Publishing is free, and an incomplete card still publishes; it
-just ranks below every complete one in agent search.
+gives buyers less pre-paywall context but does not change search rank or candidacy.
 <!-- /tenjin:when -->
 
 ## Know your mode before you do anything
@@ -216,11 +216,11 @@ needs no price prompt.
 
 ### The answer card
 
-**Fill all five, every time** (the fifth applies to snapshots). Leave any one
-empty and the card is ineligible: the piece still publishes, but agent decision
-search ranks it in a bottom tier below every eligible candidate, filling only the
-slots those left empty, and labels it `incomplete answer card` (or `no answer
-card`) in `matchReasons`. The receipt names whatever is still missing.
+**Fill all five, every time** (the fifth applies to snapshots). The piece still
+publishes when one is empty, and card completeness never changes decision-search
+rank or candidacy. A complete public card gives buyers better pre-paywall fit
+context; compatibility `matchReasons` may label an `incomplete answer card` (or
+`no answer card`), and the receipt names whatever is still missing.
 
 - `questionsAnswered`, or `tasksSupported` for a piece that supports tasks rather
   than answering questions: 5 to 10 entries, 200 characters max each, and do not
@@ -234,14 +234,14 @@ card`) in `matchReasons`. The receipt names whatever is still missing.
 - `provenanceSummary` (flag `--provenance`): one sentence, how you verified the
   claims. `methodologySummary` (flag `--methodology`) counts instead if it fits
   better. The frontmatter key is the long name; a draft carrying `provenance:` has
-  it silently dropped and lands ineligible.
+  it silently dropped and leaves the public preview incomplete.
 - `asOf`: required when `temporalMode` is `snapshot`. Add a decay note or
   `validUntil` where honest.
 
 Describe what the piece IS with the card's own vocabulary (artifactType, genre,
-appliesTo, temporalMode), adding no new labels. Only `questionsAnswered` and
-`scope` match on MEANING; everything else matches on wording, so anything you want
-found by meaning belongs in those two.
+appliesTo, temporalMode), adding no new labels. Card prose is public buyer context,
+not a retrieval input: repeat natural questions and exact repo/component/file terms
+in the visible title or body so search can find the piece.
 
 ## You are the only semantic reviewer
 
@@ -263,9 +263,9 @@ and answer card included, BEFORE invoking `tenjin publish`:
    personal information, credentials for anything.
 3. **Title/answer-card honesty check.** Write the card as an author-approved
    claim, never as an AI summary. There is nothing to withhold from a teammate,
-   so the card and title should say plainly what the piece concluded — a card
-   that hedges what it found makes the note unfindable, which is the only real
-   failure mode on this shelf.
+   so the card should make fit plain and the visible title/body should state the
+   conclusion and searchable repo terms. Hedging those visible fields can make
+   the note hard to find; hedging the card makes it hard to judge before reading.
 <!-- tenjin:else -->
 The scan is lexical and cannot judge meaning. That is YOUR job, and in
 `auto`/`full-auto` you are the only reviewer, so run this pass on the draft, title

@@ -252,7 +252,7 @@ const CAPTURE_SEARCH_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[
  *
  * THE SEARCH ID IS THE LOOP THE ASK WAS EARNED BY. Without it the child's own
  * publish closes nothing and the piece lands with no `questionsAnswered`
- * prefill, so it ranks below every carded piece; the fallback path closes the
+ * prefill, so buyers lose that public fit context; the fallback path closes the
  * same loop through `inheritedSearchIds`, and this is the preferred path
  * getting what the fallback already had.
  */
@@ -323,7 +323,7 @@ const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
 const PUSH_BODY_TIMEOUT = __BODY_TIMEOUT__;
 /** Candidates a push arm asks a shelf for: three, so \`verdict\` can take a
- *  corroborated rank 2 or 3 over an uncorroborated rank 1. The WebSearch hint
+ *  strong-lexical-evidence rank 2 or 3 over an uncorroborated rank 1. The WebSearch hint
  *  keeps its own SEARCH_LIMIT. */
 const PUSH_SEARCH_LIMIT = 3;
 
@@ -338,14 +338,17 @@ function wordCount(text) {
  * The verdict on what a shelf returned. TWO SERVER FIELDS ARE THE WHOLE TEST,
  * and nothing at all is scored on this machine.
  *
- * \`corroborated\` is whether the shelf's own two retrieval legs agreed on the
- * piece, and \`confidence\` is its coarse match bucket. A candidate is 'strong'
- * only when the shelf both corroborated it AND did not call it 'low'; everything
- * else is 'none', which injects nothing.
+ * \`corroborated\` means strong identifier/title/excerpt lexical evidence,
+ * including identifiers extracted from the full body, so it is not a promise
+ * that the evidence appears in the public preview,
+ * and \`confidence\` is the shelf's coarse fused match bucket. A candidate is
+ * 'strong' only when it has that lexical evidence AND the shelf did not call it
+ * 'low'; everything else is 'none', which injects nothing.
  *
  * THE FIRST STRONG CANDIDATE AMONG THE ONES ASKED FOR (PUSH_SEARCH_LIMIT, three)
- * is the hit. Ranking is by similarity, corroboration is a separate signal, and
- * a corroborated piece at rank 2 or 3 under an uncorroborated rank 1 is exactly
+ * is the hit. Ranking is by fused relevance; corroboration is a separate strong
+ * evidence signal. A corroborated piece at rank 2 or 3 under an uncorroborated
+ * rank 1 is exactly
  * the case the rank-1-only read threw away. When none is strong, rank 1 is the
  * row's candidate, so the weak rows still record what the shelf put first.
  *
@@ -357,8 +360,8 @@ function wordCount(text) {
  * a query against a title and an excerpt, which is the one comparison a hook can
  * make and also the weakest evidence in the system: probed 2026-08-27, 12 of 12
  * real injections on one machine were wrong matches, and the shelf had called
- * every one of them \`low\`. The shelf has the embeddings, the full body and both
- * retrieval legs; the hook has forty words of card text. So the hook stops
+ * every one of them \`low\`. The shelf has the embeddings, full body, and fused
+ * retrieval evidence; the hook has forty words of public text. So the hook stops
  * guessing and reads the answer.
  *
  * ABSENT IS NOT FALSE, in either direction: a deployment that sends no

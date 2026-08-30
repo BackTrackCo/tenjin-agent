@@ -515,11 +515,11 @@ describe('runEdit — show mode (no change flags)', () => {
     expect(human).toContain('questionsAnswered (1): What is it?');
     expect(human).toContain('scope: "L2 fees only"');
     expect(human).toContain(
-      'Answer card incomplete, ranks below every complete card in agent search. To fix: State the exclusions (what this piece does not cover).',
+      'Answer card preview incomplete. To improve its pre-paywall fit context: State the exclusions (what this piece does not cover).',
     );
   });
 
-  it('a card-less post says it ranks below every carded piece', async () => {
+  it('a card-less post says buyers have less public fit context', async () => {
     const stub = stubServer({ get: { ...STORED, resource: undefined } });
     const res = await runEdit(
       args(),
@@ -527,7 +527,7 @@ describe('runEdit — show mode (no change flags)', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'No answer card: ranks below every carded piece in agent search.',
+      'No answer card: buyers have less pre-paywall context for judging fit.',
     );
   });
 
@@ -776,7 +776,7 @@ describe('runEdit — a no-op edit writes nothing', () => {
 });
 
 describe('runEdit — the update receipt', () => {
-  it('surfaces server warnings, the url, and the recomputed eligibility', async () => {
+  it('surfaces server warnings, the url, and the recomputed card context', async () => {
     const stub = stubServer({
       put: {
         ...STORED,
@@ -792,7 +792,7 @@ describe('runEdit — the update receipt', () => {
     );
     expect(res.humanLines).toEqual([
       'Updated A Better Answer → https://preview.example/a/iris/the-answer',
-      'Answer card is search-eligible.',
+      'Answer card provides complete pre-paywall fit context.',
       'warning: dropped external image ./pic.png',
     ]);
     // --json emits the full PUT response data.
@@ -835,7 +835,7 @@ describe('runEdit — the update receipt', () => {
     expect('notes' in (res.data as object)).toBe(false);
   });
 
-  it('reports the missing rubric items when the card is still ineligible', async () => {
+  it('reports the missing rubric items when the public card is incomplete', async () => {
     const stub = stubServer();
     const res = await runEdit(
       args({ yes: true, scope: 'a new scope' }),
@@ -843,7 +843,7 @@ describe('runEdit — the update receipt', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'Answer card incomplete, ranks below every complete card in agent search. To fix: State the exclusions',
+      'Answer card preview incomplete. To improve its pre-paywall fit context: State the exclusions',
     );
   });
 });

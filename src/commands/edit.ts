@@ -445,12 +445,11 @@ function cardLines(card: OwnPostCard | undefined): string[] {
 }
 
 function eligibilityLine(card: OwnPostCard | undefined): string {
-  if (card === undefined) return 'No answer card: ranks below every carded piece in agent search.';
+  if (card === undefined)
+    return 'No answer card: buyers have less pre-paywall context for judging fit.';
   const missing = missingSentences(card.cacheEligibleMissing).map(sanitizeForTerminal);
-  if (card.cacheEligible) return 'Answer card is search-eligible.';
-  return missing.length > 0
-    ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
-    : 'Answer card incomplete, ranks below every complete card in agent search.';
+  if (missing.length === 0) return 'Answer card provides complete pre-paywall fit context.';
+  return `Answer card preview incomplete. To improve its pre-paywall fit context: ${missing.join(' ')}`;
 }
 
 // ---------------------------------------------------------------------------
