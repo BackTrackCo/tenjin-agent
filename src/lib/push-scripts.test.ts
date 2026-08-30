@@ -1682,6 +1682,40 @@ describe('scrub', () => {
     expect(scrub('postgres://u:p@h/db,migration fails')).toBe(',migration fails');
     expect(scrub('(postgres://u:p@h/db); the retry loops')).toBe('( ); the retry loops');
   });
+
+  /**
+   * The residue of the rule above: the tail stops at `;`, `?` and `&`, so a
+   * short `name=value` hanging off a blanked url used to SURVIVE it — and a
+   * mixed letters-and-digits value is an identifier by shape, so the prompt
+   * arm promoted it into the `identifiers` list and sent it to both shelves.
+   * Both halves of the close are pinned here: the signing words on
+   * `SECRET_ASSIGN_RE`, and the remainder eaten by the userinfo replacer.
+   */
+  it('eats the parameter remainder hanging off a blanked userinfo url', () => {
+    const scrubbed = scrub('postgres://admin:hunter2@db.acme.com/prod;sig=abc123 breaks migrate');
+    expect(scrubbed).toBe('breaks migrate');
+    expect(scrubbed).not.toContain('abc123');
+    expect(scrubbed).not.toContain('sig=');
+    // The promotion is what made this worth closing: nothing to send.
+    expect(identifiersOf(scrubbed)).toEqual([]);
+    // Whatever the parameter is named, and however many of them there are.
+    for (const tail of [';ref=abc123', '?token=abc123', '&x-amz-signature=abc123&expires=900']) {
+      expect(scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`)).toBe(
+        'breaks migrate',
+      );
+    }
+    // THE SIGNING WORDS ALONE, with no url in front: `sig`, `signature`,
+    // `nonce` and `hmac` name a credential the other keywords do not.
+    for (const assign of ['sig=abc123', 'signature: abc123', 'nonce=abc123', 'hmac=abc123']) {
+      expect(scrub(`the ${assign} is stale`)).toBe('the is stale');
+    }
+    // THE CONTROL: the same remainder after a url with NO credential in it is
+    // an ordinary query string, and it travels. The host goes, the page
+    // number stays — it is a topic word, not a key.
+    const control = scrub('https://db.acme.com/prod?page=2 is empty');
+    expect(control).toContain('?page=2');
+    expect(control).toBe('https: ?page=2 is empty');
+  });
 });
 
 describe('the prompt arm (UserPromptSubmit)', () => {

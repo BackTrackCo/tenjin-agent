@@ -1080,9 +1080,25 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]
  * floor, so both rules walked past it. Eight characters is the floor here
  * because a token shorter than that is not one; it costs the prose reading
  * ("the bearer of bad news" keeps its words, none of which reach eight).
+ *
+ * THE SIGNING WORDS ARE ON THE LIST TOO — \`sig\`, \`signature\`, \`nonce\`,
+ * \`hmac\` — because a request signature is a credential the other words do
+ * not name: \`;sig=abc123\` is what a presigned url or a webhook callback
+ * carries, and the value under it is mixed letters and digits well short of
+ * the entropy rule's floor, so it left whole and the identifier rule then
+ * PROMOTED it (\`abc123\` is a handle by shape) onto the wire to both shelves.
+ *
+ * \`sig\` IS A SUBSTRING OF ORDINARY WORDS, and that cost is paid knowingly.
+ * The alternation has no leading boundary — deliberately, see above, so a
+ * long prefix cannot hide the keyword — so \`design=dark\` and
+ * \`assignee=me\` match at their inner \`sig\` and go. The cures are worse:
+ * a \`(?<![A-Za-z])\` guard on the whole alternation loses camelCase
+ * (\`requestSig=abc\`, \`servicePassword=hunter2\`), which is the exact
+ * shape being closed here, and no rule can tell a signing prefix from an
+ * English one. Redacting a topic word is the cheaper mistake.
  */
 const SECRET_ASSIGN_RE =
-  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
+  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
 /** \`postgres://user:hunter2@host/db\`: the userinfo half of a url, which the
  *  path rule cannot see because that one starts at a slash. The host and path
  *  after the \`@\` go with it: a one-label host (\`h\`) is under the host
@@ -1095,8 +1111,26 @@ const SECRET_ASSIGN_RE =
  *  along with the credential, which is the topic word the lookup needed. The
  *  closers and separators a url is punctuated by end the match instead; a path
  *  that really contains one loses its tail, and that is the cheaper mistake
- *  because the credential is already gone by then. */
-const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*/gi;
+ *  because the credential is already gone by then.
+ *
+ *  THE PARAMETER REMAINDER GOES WITH IT, which is the price of stopping at
+ *  punctuation. \`;\`, \`?\` and \`&\` end the tail, so
+ *  \`postgres://admin:hunter2@db.acme.com/prod;sig=abc123\` blanked the
+ *  credential and left \`;sig=abc123\` standing — and \`abc123\` is a handle
+ *  by shape, so the identifier rule promoted it onto the wire to BOTH
+ *  shelves. A \`name=value\` run hanging off a url that carried a credential
+ *  is part of that url, never prose, so the replacer eats it. Bounded on
+ *  every side (a 64-character name, a 256-character value, and a value class
+ *  that excludes the separators so each repeat has one forced extent), which
+ *  is what keeps the repetition linear.
+ *
+ *  A NON-CREDENTIAL URL IS UNTOUCHED BY THIS. The rule only ever engages
+ *  after \`user:pass@\`, so \`https://acme.com/docs?page=2\` keeps
+ *  \`?page=2\` — the host rule takes the host and the page number travels as
+ *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
+ *  blanks a signing parameter wherever it sits, url or not. */
+const SECRET_USERINFO_RE =
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*(?:[;?&][A-Za-z_]{1,64}=[^\s'",;)\]}>?&]{0,256})*/gi;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
