@@ -968,7 +968,7 @@ describe('the public render did not move', () => {
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': 'aa78c3aa318607bb136fb3313906a93a',
+      'tenjin-publish': 'd24d6b3458d303f01c57cd6a145d2d90',
     });
   });
 

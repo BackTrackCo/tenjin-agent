@@ -227,8 +227,10 @@ needs no price prompt.
 publishes when one is empty, and no card text improves how well the piece MATCHES a
 query. Completeness decides everything after the match: an ineligible card ranks
 below every eligible one within the retrieved window, filling only the slots those
-leave, and it is invisible to any query using `freshWithin` or `appliesTo` and to
-`POST /api/answer`. `matchReasons` labels it `incomplete answer card` (or `no
+leave, and `POST /api/answer` never cites it. The filter gates are separate and
+read the VALUES, not eligibility: only a card-less piece fails `freshWithin` and
+`appliesTo` outright, and a `snapshot` card whose `asOf` you left empty fails
+`freshWithin` too. `matchReasons` labels it `incomplete answer card` (or `no
 answer card`) so a buyer can tell before paying, and the receipt names what is
 missing.
 
