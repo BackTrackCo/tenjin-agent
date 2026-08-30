@@ -1,4 +1,3 @@
-import { text } from 'node:stream/consumers';
 import { CliError } from './errors';
 
 /**
@@ -14,12 +13,40 @@ export interface StdinInput {
   isTTY: boolean;
 }
 
-/** Read one complete UTF-8 Markdown document from stdin. */
+/**
+ * The most stdin may carry. A published piece is prose an agent wrote, and
+ * `MAX_GIT_FILE_BYTES` already bounds the largest single file the scan will read,
+ * so a document past this is a misdirected pipe rather than a long answer.
+ */
+export const PUBLISH_STDIN_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Read one complete UTF-8 Markdown document from stdin.
+ *
+ * Bounded DURING the read, not after it: `text(stream)` resolves only once the
+ * whole stream is in memory, so a post-hoc length check would still have taken
+ * the 50 MB before it could refuse. Chunks are counted as they arrive and the
+ * read is abandoned at the first one that crosses the cap, which is also why
+ * this does not use `node:stream/consumers`.
+ */
 export async function readMarkdownStdin(input: StdinInput): Promise<string> {
   let raw: string;
   try {
-    raw = await text(input.stream);
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    for await (const chunk of input.stream) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      bytes += buf.length;
+      if (bytes > PUBLISH_STDIN_MAX_BYTES) {
+        throw new CliError('USAGE', 'Too much Markdown received on stdin.', {
+          fix: `Publish at most ${PUBLISH_STDIN_MAX_BYTES} bytes on stdin. A larger document is usually a misdirected pipe; pass a Markdown file instead.`,
+        });
+      }
+      chunks.push(buf);
+    }
+    raw = Buffer.concat(chunks).toString('utf8');
   } catch (err) {
+    if (err instanceof CliError) throw err;
     throw new CliError('USAGE', 'Could not read Markdown from stdin.', {
       fix: 'Pipe a readable Markdown document into the command, or pass a Markdown file instead.',
       cause: err,
