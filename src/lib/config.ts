@@ -269,6 +269,16 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
  */
 const InstallConfigSchema = z.object({
   harness: z.array(z.enum(HARNESS_TARGETS)),
+  /**
+   * Set true when an install explicitly declined the free-verb allowlist
+   * (`--no-allow-free-verbs`, or "no" at the interactive prompt), so
+   * `--refresh` can tell "the operator said no" from "nothing has asked yet"
+   * instead of recomputing `pending` from the settings file and nagging on
+   * every refresh (tenjin-agent#234). Cleared back to false the next time an
+   * install actually wires the allowlist, so a later legitimate grant is not
+   * shadowed by a stale decline.
+   */
+  freeVerbsDeclined: z.boolean().optional(),
 });
 
 /**
@@ -409,7 +419,7 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [] },
+  install: { harness: [], freeVerbsDeclined: false },
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json. Both hooks
@@ -558,7 +568,11 @@ export async function loadConfig(dir: string): Promise<Config> {
       ackServerWarnings:
         raw.publish?.ackServerWarnings ?? CONFIG_DEFAULTS.publish.ackServerWarnings,
     },
-    install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
+    install: {
+      harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
+      freeVerbsDeclined:
+        raw.install?.freeVerbsDeclined ?? CONFIG_DEFAULTS.install.freeVerbsDeclined,
+    },
     hooks: {
       webSearch: resolvedWebSearch,
       agentDispatch: resolvedAgentDispatch,

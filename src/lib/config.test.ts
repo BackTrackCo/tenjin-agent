@@ -232,14 +232,19 @@ describe('hooks block: push and capture (docs/command-reference.md#push-experime
 });
 
 describe('install block', () => {
-  it('defaults to no recorded harness', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [] });
-    expect((await loadConfig(dir)).install).toEqual({ harness: [] });
+  it('defaults to no recorded harness and no recorded decline', async () => {
+    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [], freeVerbsDeclined: false });
+    expect((await loadConfig(dir)).install).toEqual({ harness: [], freeVerbsDeclined: false });
   });
 
   it('reads back the recorded targets', async () => {
     await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'shared'] } }));
     expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'shared']);
+  });
+
+  it('reads back a recorded free-verb decline', async () => {
+    await writeFile(configFile(), JSON.stringify({ install: { freeVerbsDeclined: true } }));
+    expect((await loadConfig(dir)).install.freeVerbsDeclined).toBe(true);
   });
 
   it('rejects a harness name install could not have written', async () => {

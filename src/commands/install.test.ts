@@ -4316,6 +4316,26 @@ describe('runInstall --refresh', () => {
     expect(result.humanLines?.join(' ')).toContain('tenjin install');
   });
 
+  /**
+   * tenjin-agent#234: a settled `--no-allow-free-verbs` must stay settled, not
+   * get recomputed from the settings file (which has none of the rules) and
+   * reported as pending on every later refresh.
+   */
+  it('does not re-report a declined allowlist as pending', async () => {
+    await runInstall(
+      { harness: ['claude'], searchHooks: 'auto', allowFreeVerbs: false, publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+    expect((await readSettings()).permissions?.allow ?? []).toEqual([]);
+
+    const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
+
+    const data_ = result.data as { permissions: { pending: string[] } };
+    expect(data_.permissions.pending).toEqual([]);
+    expect(result.humanLines?.join(' ')).not.toContain('were NOT written');
+  });
+
   it('registers no hook entry the machine does not already have', async () => {
     await installed();
     const settings = await readSettings();
