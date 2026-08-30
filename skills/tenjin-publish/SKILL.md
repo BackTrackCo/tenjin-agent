@@ -209,10 +209,12 @@ needs no price prompt.
   structured credential shapes block, so this list is yours to enforce.
 <!-- /tenjin:when -->
 - Agent-ready body: tables, exact commands, decision rules; no prose padding.
-- Keep the free preview minimal: roughly what it answers plus the as-of date. Set
-  it with `--excerpt` (max 500 chars); without one the server derives it from the
-  body's first ~500 characters, so lead with the date, versions, and questions
-  answered, keeping the verdict below.
+- Keep the in-page free preview minimal: roughly what it answers plus the as-of
+  date. Put `<!--paywall-->` on its own line (blank line above and below) where
+  the free half ends; markdown before it is the preview, after it is gated, and
+  no marker means a paid piece has NO free preview at all. `--excerpt` (max 500
+  chars) is a separate, optional LISTING teaser for cards/feed — it does not
+  affect the in-page preview; without one the server derives it from the body.
 
 ### The answer card
 
@@ -239,9 +241,10 @@ card`) in `matchReasons`. The receipt names whatever is still missing.
   `validUntil` where honest.
 
 Describe what the piece IS with the card's own vocabulary (artifactType, genre,
-appliesTo, temporalMode), adding no new labels. Only `questionsAnswered` and
-`scope` match on MEANING; everything else matches on wording, so anything you want
-found by meaning belongs in those two.
+appliesTo, temporalMode), adding no new labels. No card field is a ranking
+input: agent search matches the piece's own body text, not the card. `appliesTo`
+is still an exact-wording FILTER, so put the products or versions a caller may
+filter on there.
 
 ## You are the only semantic reviewer
 

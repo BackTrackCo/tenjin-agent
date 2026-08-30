@@ -959,10 +959,16 @@ describe('the public render did not move', () => {
   // inside a bash fence as `a|b|c`, which a shell reads as three piped commands
   // whose first one posts `used`. It is spelled out below the fence now, the
   // same fix the child rung already carries. tenjin-publish is untouched.
+  //
+  // Re-pinned for tenjin#733: the excerpt/free-preview conflation (`--excerpt`
+  // did not gate the in-page preview; `<!--paywall-->` does) and the stale
+  // "questionsAnswered/scope match on MEANING" ranking claim (no card field is
+  // a ranking input — search matches the piece's own body text). tenjin-search
+  // is untouched, so only tenjin-publish's digest moves.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
+      'tenjin-publish': '2a78bf076625f665521192abd195c10b',
     });
   });
 
