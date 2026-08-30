@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { constants, existsSync, fstatSync, realpathSync } from 'node:fs';
+import { constants, existsSync, fstatSync, realpathSync, statSync } from 'node:fs';
 import { mkdtemp, mkdir, open, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -46,10 +46,10 @@ describe('readRegularUtf8File', () => {
 
   /**
    * PLATFORM-DEPENDENT, and the guard says so rather than pretending otherwise.
-   * `readRegularUtf8File` calls `realpath` first. On macOS `/dev/fd/0` resolves
-   * to itself, so the stat sees a non-regular file and raises the error below.
-   * On Linux the same alias resolves to `pipe:[N]`, which is not a pathname, so
-   * realpath throws ENOENT and this assertion never gets its turn.
+   * `readRegularUtf8File` resolves then stats. On macOS `/dev/fd/0` resolves to
+   * itself and stats as a non-regular file, which is the error asserted below.
+   * On Linux realpath SUCCEEDS and hands back the string `pipe:[N]`; the stat of
+   * that non-path throws ENOENT, so this assertion never gets its turn.
    *
    * The refusal is safe on both: nothing is consumed either way. Only the error
    * TYPE differs, so the case is skipped where realpath cannot resolve the alias
@@ -68,9 +68,11 @@ describe('readRegularUtf8File', () => {
           ? '/proc/self/fd/0'
           : null;
       if (alias === null) return;
-      // Linux: realpath gives `pipe:[N]`, so the refusal arrives as ENOENT.
+      // Linux: realpath SUCCEEDS and returns the string `pipe:[N]`; the stat of
+      // that non-path is what throws ENOENT. Guard on the same two calls the
+      // function makes before its first assertion, in the same order.
       try {
-        realpathSync(alias);
+        statSync(realpathSync(alias));
       } catch {
         return;
       }
