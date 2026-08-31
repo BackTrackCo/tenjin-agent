@@ -843,8 +843,10 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(sent).toContain('error-handling');
     expect(sent).toContain('optional-chain');
     expect(sent).toContain('does parse throw here');
-    // The host is exactly what scrub() takes out: what leaves is the shape of the
-    // question, never the address it was going to.
+    // The host never enters `words` at all — fetchQuestion reads only the
+    // pathname and allow-listed query params, never `url.hostname` — so it is
+    // absent whether or not the arm scrubs (tenjin-agent#197 rework: as of
+    // this arm, it no longer does).
     expect(sent).not.toContain('zod.dev');
     expect(injected(run)).toContain(BODY_MD);
   });
@@ -852,7 +854,16 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
   /**
    * A url's query string is where an api key and an account id live. The path
    * segments are the topic and they are what gets sent; a param value rides
-   * along only under a key that names a topic.
+   * along only under a key that names a topic — an ALLOW-LIST on which
+   * VALUES are even read, independent of scrub and unaffected by the
+   * tenjin-agent#197 rework below: `api_key` and `account` are simply never
+   * on {@link SAFE_PARAM_KEY_RE}, so their values never enter `words` at all.
+   *
+   * THE PROMPT ITSELF IS A DIFFERENT STORY (owner policy, tenjin-agent#197
+   * rework): this arm no longer scrubs at all, so a secret an agent typed into
+   * the WebFetch prompt now rides along too — the url has already left the
+   * machine via the fetch itself, and search availability wins over
+   * sanitizing a copy of it that protects nothing.
    */
   it('sends a WebFetch url path without the credentials in its query string', async () => {
     const { baseUrl, queries } = await serve(echo());
@@ -866,8 +877,7 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
         tool_name: 'WebFetch',
         tool_input: {
           url: 'https://api.internal.acme.com/v1/usage/report?api_key=sk-live-9f3QQAbCdEfGhIjK&account=acct_882&q=monthly+revenue',
-          prompt:
-            'Summarise the revenue for this account, my key is sk-ant-api03-AbC_dEf-1234567890',
+          prompt: 'Summarise the revenue for this account',
         },
       }),
     );
@@ -876,12 +886,11 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(sent).toContain('usage');
     expect(sent).toContain('report');
     // The one allow-listed key's value survives; everything else in the query
-    // string does not, whatever it looks like.
+    // string does not, because it is never read at all.
     expect(sent).toContain('monthly');
     expect(sent).not.toContain('sk-live');
     expect(sent).not.toContain('9f3QQ');
     expect(sent).not.toContain('acct_882');
-    expect(sent).not.toContain('sk-ant');
     expect(sent).not.toContain('acme.com');
   });
 

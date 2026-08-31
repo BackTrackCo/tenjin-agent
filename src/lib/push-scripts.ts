@@ -1008,9 +1008,17 @@ const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
  * on most often is an auth failure. The hex rule further down is not a
  * credential rule and never was: a PAT is mixed case with an underscore, so
  * \`\b[a-f0-9]{16,}\b\` cannot match one.
+ *
+ * \`mode === 'secretsOnly'\` stops right here, after the credential rules and
+ * the control-character cleanup: paths, hostnames, IPv4 literals, emails and
+ * generic hex ids are left alone. That is what \`dispatchQuestion\` asks for
+ * (tenjin-agent#197 rework): a Task prompt is a work order, and a path or a
+ * hostname in it is the best search key the server has, not an address to
+ * hide. Every OTHER caller passes no second argument and keeps the full
+ * behavior below unchanged.
  */
-function scrub(text) {
-  return String(text)
+function scrub(text, mode) {
+  const out = String(text)
     // ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so
     // stripping the block first would leave \`[31m\` behind as text.
     .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
@@ -1023,7 +1031,9 @@ function scrub(text) {
     .replace(SECRET_USERINFO_RE, ' ')
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
-    .replace(SECRET_ENTROPY_RE, ' ')
+    .replace(SECRET_ENTROPY_RE, ' ');
+  if (mode === 'secretsOnly') return out.replace(/\s+/g, ' ').trim();
+  return out
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
     // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
     // which carries exactly as much of a customer's name as the absolute one
