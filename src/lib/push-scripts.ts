@@ -1095,7 +1095,12 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]
  * a \`(?<![A-Za-z])\` guard on the whole alternation loses camelCase
  * (\`requestSig=abc\`, \`servicePassword=hunter2\`), which is the exact
  * shape being closed here, and no rule can tell a signing prefix from an
- * English one. Redacting a topic word is the cheaper mistake.
+ * English one. Redacting a topic word is the cheaper mistake. The COLON
+ * form is the everyday trigger, not the \`=\` form: \`the new design:
+ * dark mode\` scrubs to \`the new de mode\` and \`assignee: bob\` to
+ * \`as\` — a two-character residue, not a clean removal. Harmless on the
+ * wire (lowercase fragments never become identifiers) but expected, so
+ * the next reader is not surprised by it in prose.
  */
 const SECRET_ASSIGN_RE =
   /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
