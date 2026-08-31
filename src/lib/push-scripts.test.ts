@@ -35,6 +35,7 @@ import {
   sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
+  withStdinCapturePublish,
 } from './hook-scripts';
 import {
   PUSH_CACHE_TTL_MS,
@@ -5895,8 +5896,8 @@ describe('the capture ask (Stop)', () => {
 
   /** The ask as the hook renders it: the mode is spliced into the text, because
    *  it is what decides whether the agent may run the command it was handed. */
-  const publicAsk = CAPTURE_REASON.replace('<mode>', 'review');
-  const teamAsk = CAPTURE_REASON_TEAM.replace('<mode>', 'review');
+  const publicAsk = withStdinCapturePublish(CAPTURE_REASON).replace('<mode>', 'review');
+  const teamAsk = withStdinCapturePublish(CAPTURE_REASON_TEAM).replace('<mode>', 'review');
 
   /** A recorded search stamped with this session: the research signal. */
   async function writeSearchSignal(): Promise<void> {
