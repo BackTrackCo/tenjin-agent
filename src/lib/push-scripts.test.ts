@@ -6124,8 +6124,9 @@ describe('the capture ask (Stop)', () => {
     expect(teamAsk).toContain('private or restricted third-party data/material');
     expect(teamAsk).toContain('Never paste raw shell/tool output, logs, transcripts, or diffs');
     expect(teamAsk).toContain('Do not present unmerged or unverified work as shipped behaviour');
-    expect(teamAsk).toContain('Write it to a file and run `tenjin publish <file>`');
-    expect(teamAsk).not.toContain('tenjin publish -');
+    expect(teamAsk).toContain('Pass the Markdown on stdin to `tenjin publish -`');
+    expect(teamAsk).toContain('If it is already in a file, run `tenjin publish <file>`');
+    expect(teamAsk).toContain('never chained behind writing the file');
   });
 
   it('uses root repository activity as a first-ask signal only for a team shelf', async () => {
