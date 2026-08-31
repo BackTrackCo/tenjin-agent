@@ -1967,6 +1967,64 @@ describe('runInstall: permissions decision', () => {
     expect(await declinedList()).toEqual([]);
   });
 
+  /**
+   * Greptile P1 (tenjin-agent#272): the grant branch used to clear
+   * `freeVerbsDeclined` BEFORE `wireFreeVerbAllowlist` returned, so a refused
+   * settings write left the rules absent but the record erased — reopening
+   * exactly the #234 bug this changeset fixes (a settled decline recomputed as
+   * pending on every later refresh) for the one machine that can least repair
+   * it: one where the write itself keeps failing. Race the grant's own write
+   * out from under it with the same settings-interleave hook `changed-since-read`
+   * uses elsewhere in this file, and check the decline survives the refusal
+   * and a follow-up refresh still honors it rather than re-nagging.
+   */
+  it('a failed grant leaves the decline on record, so refresh keeps honoring it', async () => {
+    await writeSettings({ permissions: { allow: [] } });
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+    const declinedBefore = await declinedList();
+    expect(declinedBefore?.length).toBeGreaterThan(0);
+
+    // The file changes the instant the grant's own snapshot read returns, so
+    // its later current-vs-raw compare sees a moved file and refuses to write.
+    fsHooks.settingsInterleave = `${JSON.stringify({ permissions: { allow: [] }, theirs: 1 }, null, 2)}\n`;
+    fsHooks.settingsInterleaveOnRead = 2;
+    fsHooks.settingsReads = 0;
+    let res;
+    try {
+      res = await runInstall(
+        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        makeCtx(),
+        deps({ which: (bin) => bin === 'claude' }),
+      );
+    } finally {
+      fsHooks.settingsInterleave = '';
+      fsHooks.settingsReads = 0;
+      fsHooks.settingsInterleaveOnRead = 1;
+    }
+    expect(wiredOf(res.data).skipped).toBe('changed-since-read');
+    // The rules never landed...
+    expect(await allowList()).toEqual([]);
+    // ...and the refusal must not have erased the record that told the
+    // operator so: it survives exactly as it was.
+    expect(await declinedList()).toEqual(declinedBefore);
+
+    // A follow-up refresh must still honor that surviving record rather than
+    // re-nagging: with the decline erased (the bug), these rules would be
+    // recomputed as freshly pending on every refresh, which is the #234
+    // regression this whole changeset exists to close.
+    const refreshRes = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+    const pending = (refreshRes.data as { permissions: { pending: string[] } }).permissions.pending;
+    for (const rule of declinedBefore ?? []) expect(pending).not.toContain(rule);
+  });
+
   // Every skipped state names the command that changes it, the same contract a
   // CliError's `fix` carries, so a machine consumer never has to parse prose.
   it('carries a fix string on every skipped permissions state', async () => {
@@ -4438,18 +4496,35 @@ describe('runInstall --refresh', () => {
   // A later grant clears the declined list (see the runInstall: permissions
   // decision suite), so a subsequent refresh reports fresh pending rules
   // rather than silencing them off a stale decline.
+  //
+  // A1igator's nit (PR #272): the version of this test that only checked the
+  // refresh output passed unchanged with all three production hunks reverted,
+  // because a single-rule `pending` mock reads back identically whether or not
+  // the declined set was actually cleared — nothing here distinguished "the
+  // grant cleared the record" from "the record was never consulted at all".
+  // Read `install.freeVerbsDeclined` off disk directly so the test fails if
+  // the grant stops clearing it.
   it('reports freshly-pending rules again once a decline has been cleared by a grant', async () => {
     await runInstall(
       { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
+    const declinedBefore = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
+      install?: { freeVerbsDeclined?: string[] };
+    };
+    expect(declinedBefore.install?.freeVerbsDeclined?.length).toBeGreaterThan(0);
+
     // A later, explicit run grants the allowlist and clears the record.
     await runInstall(
       { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
+    const declinedAfter = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
+      install?: { freeVerbsDeclined?: string[] };
+    };
+    expect(declinedAfter.install?.freeVerbsDeclined).toEqual([]);
 
     const REVOKED_RULE = FREE_VERB_RULES[0]!;
     const result = await runInstall(

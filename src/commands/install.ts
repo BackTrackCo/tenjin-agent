@@ -1791,10 +1791,19 @@ async function resolvePermissions(args: {
   }
 
   if (flag === true || !canPrompt) {
-    // Either an explicit grant or the headless settle — both actually wire the
-    // allowlist, so a decline recorded on some earlier run is stale as of now.
-    await persistFreeVerbsDeclined(ctx.dataDir, []);
-    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+    // Either an explicit grant or the headless settle — both attempt to wire
+    // the allowlist, so a decline recorded on some earlier run is stale as of
+    // now IF the write lands. Greptile P1 (tenjin-agent#272): clearing before
+    // the write returns meant a refused settings write (unreadable file,
+    // changed underneath us) left the rules absent but erased the very record
+    // that told the next refresh they were still pending. Wire first, and only
+    // clear the decline once `wireFreeVerbAllowlist` reports it actually wrote
+    // (no `skipped`) rather than assuming the attempt succeeded.
+    const wired = await wireFreeVerbAllowlist(home, publishMode);
+    if (wired.skipped === undefined) {
+      await persistFreeVerbsDeclined(ctx.dataDir, []);
+    }
+    return withRetraction(wired);
   }
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;

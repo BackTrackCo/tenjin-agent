@@ -13,7 +13,13 @@ persists the EXACT rules that were pending in `install.freeVerbsDeclined` (a
 list, not a flag), and `--refresh` subtracts that list from what it recomputes
 instead of nagging about all of it forever. Per-rule rather than a single
 suppress-everything switch, so a later version's genuinely new rule still gets
-reported even on a machine sitting on an old decline — and it never survives an
-actual grant: it is cleared the moment an install wires the allowlist, or finds
-it already fully satisfied, so a later legitimate grant is never shadowed by a
-stale decline.
+reported even on a machine sitting on an old decline.
+
+This is a nag-silencer, not a consent record: it clears whenever an install
+actually wires the allowlist, whether that is an explicit grant, a headless
+settle with nobody there to answer, or finding the allowlist already fully
+satisfied — installing Tenjin is the operator's consent, per existing policy,
+so any of those is enough to retire a stale decline. It stays recorded when the
+write itself is refused (an unreadable or concurrently-changed settings file):
+the rules stay absent, so the next refresh still reports them pending instead
+of silently forgetting they were ever asked about.
