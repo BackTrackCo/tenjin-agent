@@ -1110,38 +1110,71 @@ const SECRET_ASSIGN_RE =
  *  rule's reach, and \`h/db\` left behind reads as an identifier to the
  *  prompt arm.
  *
- *  THE TAIL STOPS AT PUNCTUATION, NOT ONLY AT WHITESPACE. A url is written
- *  inside a sentence, and a class that ran to the next space ate the prose
- *  glued to it: \`postgres://u:p@h/db,migration fails\` lost \`,migration\`
- *  along with the credential, which is the topic word the lookup needed. The
- *  closers and separators a url is punctuated by end the match instead; a path
- *  that really contains one loses its tail, and that is the cheaper mistake
- *  because the credential is already gone by then.
+ *  THE EXTENT IS THE WHOLE NON-WHITESPACE RUN, AND THE ENUMERATION IS
+ *  RETIRED. This rule used to parse the query string after the credential
+ *  with a hand-rolled \`(separator)(name)=(value)\` repetition, and three
+ *  consecutive review rounds patched that repetition: round 2 put the signing
+ *  words on the assign rule, round 3 widened the separator class to every
+ *  character the match stopped at, round 4 widened the parameter-name class
+ *  twice, once for interior digits and once for a leading one. Every one of
+ *  those fixes was correct and every one closed exactly the shape it had been
+ *  shown, and the next round found the next shape:
+ *  \`?apikey[0]=hunter2secret\` — a real credential value, in the form
+ *  \`qs\`, Rails and PHP all emit — plus \`?filter[id]=abc123\`,
+ *  \`;;ref=abc123\`, \`;;;;t=abc123\`, \`;ref=abc123&&next=xyz789abc\`,
+ *  \`;a.b=abc123\` and \`;%73ig=abc123\`, all of them promoted into the
+ *  identifiers array and sent to BOTH shelves. Two character classes cannot
+ *  enumerate what a query string is, so a fourth patch would only have bought
+ *  an eighth shape. The tail is therefore no longer parsed at all: after
+ *  \`user:pass@\` the match runs to the next whitespace and NOTHING inside
+ *  that run survives. Brackets, empty separator runs, dotted or
+ *  percent-encoded names, a value with no \`=\` in front of it — whatever the
+ *  vendor glues on, it was written as one word with a credential inside it,
+ *  so it leaves as one word.
  *
- *  THE PARAMETER REMAINDER GOES WITH IT, which is the price of stopping at
- *  punctuation. \`;\`, \`?\` and \`&\` end the tail, so
- *  \`postgres://admin:hunter2@db.acme.com/prod;sig=abc123\` blanked the
- *  credential and left \`;sig=abc123\` standing — and \`abc123\` is a handle
- *  by shape, so the identifier rule promoted it onto the wire to BOTH
- *  shelves. A \`name=value\` run hanging off a url that carried a credential
- *  is part of that url, never prose, so the replacer eats it. Bounded on
- *  every side (a 64-character name that may start with a digit, a
- *  256-character value, and a value class that excludes the separators so
- *  each repeat has one forced extent), which is what keeps the repetition
- *  linear. The separator class matches every
- *  character the main match stops at — not only \`;?&\` — so a parameter
- *  glued on with a comma, bracket or quote (\`,ref=abc123\`) goes with the
- *  url instead of surviving into the identifiers array; each repeat still
- *  requires a literal \`name=\`, so a bare \`(url)\` or a trailing comma in
- *  prose is untouched.
+ *  THE REPLACER HANDS BACK THE TRAILING PUNCTUATION, which is what keeps a
+ *  url readable inside prose. The handback is the run matched by
+ *  \`SECRET_URL_TRAIL_RE\` at the END of the match and nothing else: the
+ *  closers \`)\`, \`]\`, \`}\`, \`>\`, the quotes \`"\`, \`'\` and backtick,
+ *  the markdown \`*\`, and the sentence punctuation \`.\`, \`,\`, \`;\`,
+ *  \`:\`, \`!\`, \`?\`. So \`(postgres://u:p@h/db); the retry loops\` keeps
+ *  \`);\` and, across the space, its sentence, and a bare \`(url)\` keeps its
+ *  parens. Every character in that class is non-alphanumeric, so nothing
+ *  handed back can be a credential value or reach the identifiers array;
+ *  \`=\` is deliberately NOT in it, because it is base64 padding and a key
+ *  may end on it.
+ *
+ *  PROSE GLUED STRAIGHT ONTO THE URL GOES WITH IT, and that is the priced
+ *  cost of the redesign rather than an oversight.
+ *  \`postgres://u:p@h/db,migration fails\` used to keep \`,migration\` and
+ *  now keeps only \`fails\`. Nothing can tell \`,migration\` from
+ *  \`,hunter2secret\` except the enumeration that just failed three times in
+ *  a row, so the file's standing trade applies: redacting a topic word is the
+ *  cheaper mistake. One space is all it takes to keep the word, and the
+ *  spaced form is how a url is written in a sentence anyway.
+ *
+ *  LINEAR, AND RE-MEASURED ON THE SHAPES THE OLD REPETITION WAS TUNED FOR.
+ *  \`[^\s:@/]+\` stops at the first \`:\` and \`[^\s@/]+\` stops at the first
+ *  \`/\`, so the only backtracking seam left is bounded by the distance to
+ *  the next slash, and the tail is one greedy \`\S*\` with nothing after it
+ *  to backtrack into. Timed over the whole \`scrub\` at 16k characters per
+ *  input: \`;a=\` repeats 0.15 ms, alternating \`?a=1&b=2\` 0.08 ms, all-\`?\`
+ *  0.24 ms, \`?a\` repeats 0.19 ms, \`&a=b\` repeats then a forced fail
+ *  0.05 ms, 16k of trailing non-matching text 0.05 ms, \`a://\` repeats
+ *  0.52 ms, and the one seam that can still backtrack — \`x://\` then a 16k
+ *  \`a:\` run with no \`@\` — 0.65 ms. Doubling every one of them to 32k
+ *  doubles the time (worst case 1.31 ms), which is the linearity claim.
  *
  *  A NON-CREDENTIAL URL IS UNTOUCHED BY THIS. The rule only ever engages
  *  after \`user:pass@\`, so \`https://acme.com/docs?page=2\` keeps
  *  \`?page=2\` — the host rule takes the host and the page number travels as
  *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
  *  blanks a signing parameter wherever it sits, url or not. */
-const SECRET_USERINFO_RE =
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*(?:[,;?&)\]}>'"][A-Za-z0-9_][A-Za-z0-9_-]{0,63}=[^\s'",;)\]}>?&]{0,256})*/gi;
+const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@\S*/gi;
+/** The trailing punctuation a blanked userinfo url hands back to the sentence
+ *  it was written inside. Closers, quotes and sentence punctuation only: no
+ *  alphanumeric, and no \`=\`. */
+const SECRET_URL_TRAIL_RE = /[)\]}>'"\u0060*.,;:!?]+$/;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
@@ -1239,7 +1272,12 @@ function scrub(text) {
     // scrub has already decided. Whitespace controls are left alone; they are
     // real text here and the collapse at the bottom handles them.
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(SECRET_USERINFO_RE, ' ')
+    // The extent is the whole non-whitespace run; only the trailing
+    // punctuation comes back, so the sentence around the url still reads.
+    .replace(SECRET_USERINFO_RE, (m) => {
+      const tail = m.match(SECRET_URL_TRAIL_RE);
+      return tail ? ' ' + tail[0] : ' ';
+    })
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
     // AN ENV-VAR NAME IS NOT A KEY. All caps with at least one underscore

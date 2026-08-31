@@ -1675,49 +1675,114 @@ describe('scrub', () => {
     expect(scrub('DATABASE_URL=postgres://u:p@h/db is wrong and postgres://u:p@h/db too')).toBe(
       'DATABASE_URL= is wrong and too',
     );
-    // The tail stops at punctuation too, or the prose glued to the url goes
-    // with it: `,migration` is the topic word the lookup needed.
-    // The separator itself stays behind as ordinary punctuation; what matters
-    // is that `migration fails` is no longer eaten with the credential.
-    expect(scrub('postgres://u:p@h/db,migration fails')).toBe(',migration fails');
+    // THE EXTENT IS THE NON-WHITESPACE RUN (round 4 redesign). Anything glued
+    // straight onto the url goes with it, prose included: `,migration` used to
+    // survive and no longer does, because the enumeration that told it apart
+    // from `,hunter2secret` is what leaked a credential three rounds running.
+    // A space is all it takes to keep the word.
+    expect(scrub('postgres://u:p@h/db,migration fails')).toBe('fails');
+    expect(scrub('postgres://u:p@h/db, migration fails')).toBe(', migration fails');
+    // THE TRAILING PUNCTUATION COMES BACK, so the sentence still reads.
     expect(scrub('(postgres://u:p@h/db); the retry loops')).toBe('( ); the retry loops');
+    expect(scrub('see (postgres://u:p@h/db) for it')).toBe('see ( ) for it');
+    expect(scrub('see "postgres://u:p@h/db". next')).toBe('see " ". next');
+    expect(scrub('the url is postgres://u:p@h/db.')).toBe('the url is .');
   });
 
   /**
-   * The residue of the rule above: the tail stops at `;`, `?` and `&`, so a
-   * short `name=value` hanging off a blanked url used to SURVIVE it — and a
-   * mixed letters-and-digits value is an identifier by shape, so the prompt
-   * arm promoted it into the `identifiers` list and sent it to both shelves.
-   * Both halves of the close are pinned here: the signing words on
-   * `SECRET_ASSIGN_RE`, and the remainder eaten by the userinfo replacer.
+   * THE HANDBACK RULE. A blanked userinfo url returns the run of closers,
+   * quotes and sentence punctuation that TERMINATES its match and nothing
+   * else — no alphanumeric, and never `=`, which is base64 padding. Pinned as
+   * a rule rather than as examples because it is the only thing standing
+   * between the redesign and a url eating the bracket it was written inside.
    */
-  it('eats the parameter remainder hanging off a blanked userinfo url', () => {
-    const scrubbed = scrub('postgres://admin:hunter2@db.acme.com/prod;sig=abc123 breaks migrate');
-    expect(scrubbed).toBe('breaks migrate');
-    expect(scrubbed).not.toContain('abc123');
-    expect(scrubbed).not.toContain('sig=');
-    // The promotion is what made this worth closing: nothing to send.
-    expect(identifiersOf(scrubbed)).toEqual([]);
-    // Whatever the parameter is named, and however many of them there are.
-    for (const tail of [
-      ';ref=abc123',
-      '?token=abc123',
-      '&x-amz-signature=abc123&expires=900',
-      // The stop characters double as separators: a parameter glued on with
-      // punctuation the match stops at goes with the url too (round 3).
-      ',ref=abc123',
-      // Digit-bearing and hyphenated names too, including a leading digit.
-      ';ref2=abc123',
-      '&utm_2-src=abc123',
-      ';2fa=abc123',
-      ')ref=abc123',
-      ']v=abc123',
-      '>id=abc123',
-      '"x=abc123',
+  it('hands back the trailing punctuation and nothing else', () => {
+    for (const [open, close] of [
+      ['(', ')'],
+      ['[', ']'],
+      ['{', '}'],
+      ['<', '>'],
+      ['"', '"'],
+      ["'", "'"],
+      ['`', '`'],
+      ['**', '**'],
     ]) {
-      expect(scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`)).toBe(
-        'breaks migrate',
+      expect(scrub(`the url ${open}postgres://u:p@h/db${close} is stale`)).toBe(
+        `the url ${open} ${close} is stale`,
       );
+    }
+    for (const mark of ['.', ',', ';', ':', '!', '?']) {
+      expect(scrub(`the url postgres://u:p@h/db${mark} next`)).toBe(`the url ${mark} next`);
+    }
+    // Nested and stacked closers come back in order, credential and all gone.
+    expect(scrub('see ("postgres://admin:hunter2@db.acme.com/prod?sig=abc123"), then')).toBe(
+      'see (" "), then',
+    );
+    // AND NOT `=`: a base64 key may END on its padding, so a run that stops on
+    // an `=` hands back nothing that could carry it.
+    const padded = scrub('postgres://u:p@h/db?k=aGVsbG93b3JsZGhlbGxvd29ybGQx==');
+    expect(padded).toBe('');
+    expect(identifiersOf(padded)).toEqual([]);
+  });
+
+  /**
+   * THE ROUND-4 TABLE. The hand-rolled `(separator)(name)=(value)` tail was
+   * patched in three consecutive review rounds and leaked a new shape each
+   * time; every row the reviewer measured on the enumeration is fixtured here
+   * against the redesign. `identifiersOf` is asserted on every one because
+   * that array is the half that reaches BOTH shelves — the team shelf and the
+   * public marketplace — so a value surviving into it is the leak, not the
+   * residue in the text.
+   */
+  it('eats every query-string tail hanging off a blanked userinfo url', () => {
+    const TAILS = [
+      // The round-4 table. The first is the one that mattered:
+      // `apikey[0]=hunter2secret` is a credential value, `SECRET_ASSIGN_RE`
+      // misses it because `[` is outside `[\w.-]`, and it is the form `qs`,
+      // Rails and PHP all emit.
+      ['?apikey[0]=hunter2secret', 'hunter2secret'],
+      ['?filter[id]=abc123', 'abc123'],
+      [';;ref=abc123', 'abc123'],
+      [';;;;t=abc123', 'abc123'],
+      [';ref=abc123&&next=xyz789abc', 'xyz789abc'],
+      [';a.b=abc123', 'abc123'],
+      [';%73ig=abc123', 'abc123'],
+      // The rounds before it, kept so the redesign does not regress them.
+      [';sig=abc123', 'abc123'],
+      [';ref=abc123', 'abc123'],
+      ['?token=abc123', 'abc123'],
+      ['&x-amz-signature=abc123&expires=900', 'abc123'],
+      [',ref=abc123', 'abc123'],
+      [';ref2=abc123', 'abc123'],
+      ['&utm_2-src=abc123', 'abc123'],
+      [';2fa=abc123', 'abc123'],
+      [')ref=abc123', 'abc123'],
+      [']v=abc123', 'abc123'],
+      ['>id=abc123', 'abc123'],
+      ['"x=abc123', 'abc123'],
+      ["'y=abc123", 'abc123'],
+      ['}z=abc123', 'abc123'],
+      ['|ref=abc123', 'abc123'],
+      ['#frag=abc123', 'abc123'],
+      // Shapes no enumeration was ever shown, which is the point of the
+      // redesign: the run is the extent, so there is nothing left to enumerate.
+      ['?apikey[0][1]=hunter2secret', 'hunter2secret'],
+      ['?a=1&&ref=abc123', 'abc123'],
+      ['?&ref=abc123', 'abc123'],
+      ['&&ref=abc123', 'abc123'],
+      ['?ref=abc123&', 'abc123'],
+      ['#abc123def', 'abc123def'],
+      ['/../abc123def', 'abc123def'],
+      [';ref:abc123', 'abc123'],
+      ['?ref%3Dabc123', 'abc123'],
+      ['?=abc123', 'abc123'],
+      ['?ref=abc123#f=xyz789abc', 'xyz789abc'],
+    ] as const;
+    for (const [tail, value] of TAILS) {
+      const scrubbed = scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`);
+      expect(scrubbed, tail).toBe('breaks migrate');
+      expect(scrubbed, tail).not.toContain(value);
+      expect(identifiersOf(scrubbed), tail).toEqual([]);
     }
     // THE SIGNING WORDS ALONE, with no url in front: `sig`, `signature`,
     // `nonce` and `hmac` name a credential the other keywords do not.
@@ -1730,6 +1795,9 @@ describe('scrub', () => {
     const control = scrub('https://db.acme.com/prod?page=2 is empty');
     expect(control).toContain('?page=2');
     expect(control).toBe('https: ?page=2 is empty');
+    // A SPACE-SEPARATED parameter is prose, not part of the url, and it is
+    // left alone deliberately: eating it would be the over-blank direction.
+    expect(scrub('postgres://admin:hunter2@db.acme.com/prod ref=abc123')).toBe('ref=abc123');
   });
 });
 
