@@ -3,6 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import {
   OPTIONAL_PAY_SKILL,
   OPTIONAL_SKILL_NAMES,
@@ -226,7 +227,8 @@ export async function collectDoctorChecks(
    * Here it degrades to the global answer rather than taking down every unrelated
    * check on the page.
    */
-  const project = await loadProjectConfig(deps.cwd ?? process.cwd()).catch(() => null);
+  const cwd = deps.cwd ?? process.cwd();
+  const project = await loadProjectConfig(cwd).catch(() => null);
   const settings = resolveSettings({
     config,
     flags: { baseUrl: ctx.flags.baseUrl },
@@ -306,6 +308,11 @@ export async function collectDoctorChecks(
   // default machine gets no check about a feature it never turned on.
   const teamShelf = checkTeamShelf(settings, bypass);
   if (teamShelf !== null) built.push(teamShelf);
+
+  // Same rule again: silent when this project has no vitest, or already wires
+  // the reporter the failure arm's test-identity lane (tenjin-agent#267) prefers.
+  const testReporterHint = await checkTestReporterHints(cwd);
+  if (testReporterHint !== null) built.push(testReporterHint);
 
   const hermes = await checkHermes({
     home,
@@ -1240,6 +1247,135 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
       fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
     },
   };
+}
+
+/**
+ * One test framework's reporter hint: how to spot its config, how to tell
+ * whether a structured JSON reporter is already wired, and what to suggest
+ * when it is not. A row here is worth adding only once an artifact parser
+ * exists for that framework's report — `sig_v1_test` (tenjin-agent#267) reads
+ * a fresh vitest JSON report today and has no pytest/jest equivalent yet, so
+ * this table carries exactly one row until one does.
+ */
+interface TestReporterFramework {
+  /** Name used in the hint text. */
+  name: string;
+  /** Dedicated config filenames to look for in cwd, in priority order. */
+  configFiles: string[];
+  /** package.json dependency key that marks this framework present with no dedicated config file. */
+  depName: string;
+  /**
+   * A config file shared with other tooling (`vite.config.*`) only counts when
+   * its source matches this pattern; otherwise a Vite-only project with no
+   * test block at all would be misread as an unconfigured vitest.
+   */
+  sharedConfigNeedsPattern?: RegExp;
+  /**
+   * Heuristic, plain-text scan of the config source — never a config
+   * evaluation. Answers whether a JSON reporter with an outputFile looks
+   * already wired.
+   */
+  hasJsonReporter: (source: string) => boolean;
+  /** Doctor detail line for a framework detected without that reporter. */
+  detail: string;
+  /** Doctor fix line: the snippet to add. */
+  fix: string;
+}
+
+const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
+  {
+    name: 'vitest',
+    configFiles: [
+      'vitest.config.ts',
+      'vitest.config.js',
+      'vitest.config.mts',
+      'vitest.config.mjs',
+      'vite.config.ts',
+      'vite.config.js',
+      'vite.config.mts',
+      'vite.config.mjs',
+    ],
+    depName: 'vitest',
+    sharedConfigNeedsPattern: /\btest\s*:/,
+    hasJsonReporter: (source) =>
+      /reporters\s*:/.test(source) && /json/i.test(source) && /outputFile/.test(source),
+    detail:
+      'vitest detected without a JSON reporter — test-failure matching falls back to console parsing (lower precision)',
+    fix: "Add to vitest.config.ts: reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]]",
+  },
+];
+
+/** What {@link detectFrameworkConfig} found, or 'dep-only' for a dependency with no dedicated config file. */
+type FrameworkConfigFound = { path: string; source: string } | 'dep-only';
+
+/**
+ * Does this project have `fw` at all, and if so, from what? A dedicated config
+ * file wins over a bare dependency, since only the file's source can be
+ * scanned for a reporter; a `vite.config.*` file only counts once its source
+ * matches {@link TestReporterFramework.sharedConfigNeedsPattern}, so a Vite
+ * project with no `test:` block is not read as unconfigured vitest.
+ */
+async function detectFrameworkConfig(
+  cwd: string,
+  fw: TestReporterFramework,
+): Promise<FrameworkConfigFound | null> {
+  for (const file of fw.configFiles) {
+    let source: string;
+    try {
+      source = await readFile(join(cwd, file), 'utf8');
+    } catch {
+      continue;
+    }
+    if (
+      file.startsWith('vite.config') &&
+      fw.sharedConfigNeedsPattern !== undefined &&
+      !fw.sharedConfigNeedsPattern.test(source)
+    ) {
+      continue;
+    }
+    return { path: join(cwd, file), source };
+  }
+  try {
+    const pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as {
+      devDependencies?: Record<string, unknown>;
+      dependencies?: Record<string, unknown>;
+    };
+    if (fw.depName in (pkg.devDependencies ?? {}) || fw.depName in (pkg.dependencies ?? {})) {
+      return 'dep-only';
+    }
+  } catch {
+    // No package.json, or it does not parse; nothing more to detect from.
+  }
+  return null;
+}
+
+/**
+ * WARN-level (never fails doctor), and silent unless there is something to
+ * say: a project with no vitest, or one whose config already wires the JSON
+ * reporter the `sig_v1_test` lane (tenjin-agent#267) prefers, gets no line at
+ * all — the same "nothing to report" posture as {@link checkStoreJournal}.
+ * Detection is a plain-text scan of config source, described as heuristic in
+ * every doc that mentions it: never a config evaluation, so it can both miss a
+ * reporter wired through a shared helper and mistake a commented-out one for
+ * live.
+ */
+async function checkTestReporterHints(cwd: string): Promise<BuiltCheck | null> {
+  for (const fw of TEST_REPORTER_FRAMEWORKS) {
+    const found = await detectFrameworkConfig(cwd, fw);
+    if (found === null) continue;
+    const hasReporter = found !== 'dep-only' && fw.hasJsonReporter(found.source);
+    if (hasReporter) continue;
+    return {
+      result: {
+        name: 'test-reporters',
+        status: 'warn',
+        required: false,
+        detail: fw.detail,
+        fix: fw.fix,
+      },
+    };
+  }
+  return null;
 }
 
 /**
