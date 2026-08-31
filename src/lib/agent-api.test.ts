@@ -811,29 +811,31 @@ describe('getLookupStats', () => {
  * PR 277 round-2 review, nit on state-store.ts:4132: `findPairingCandidate`
  * used to synthesize `title: ''` / `price: '0'` for a `pairing_post` link
  * missing them — a false default a future spend-check could have trusted.
- * `getPostMetadata` is the replacement: the public `GET /api/posts/<id>`
- * route a sibling server PR adds for PUBLISHED posts. It must never invent a
- * value, so every failure mode (404, any other non-200, a network error, or
- * a body this CLI cannot read) collapses to the same `null`.
+ * `getPostMetadata` is the replacement: `GET /api/posts/<id>/public`
+ * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`
+ * route, serving `articleBase()`'s shape for PUBLISHED posts only — `handle`
+ * lives under `creator`, not at the top level. It must never invent a value,
+ * so every failure mode (404, any other non-200, a network error, or a body
+ * this CLI cannot read) collapses to the same `null`.
  */
 describe('getPostMetadata', () => {
   const POST = {
     id: '11111111-1111-4111-8111-111111111111',
+    slug: 'fix-pnpm-enoent',
     title: 'Fix: pnpm — ENOENT',
     price: '100000',
-    handle: 'iris',
-    slug: 'fix-pnpm-enoent',
     status: 'published',
+    creator: { handle: 'iris' },
   };
 
-  it('GETs the post by id and returns its title and price', async () => {
+  it('GETs the post by id off the /public sibling route and returns its title and price', async () => {
     const { fetch, calls } = stubFetch(json(200, POST));
     const meta = await getPostMetadata(POST.id, {
       baseUrl: 'https://preview.example/',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect(calls[0]?.url).toBe(`https://preview.example/api/posts/${POST.id}`);
+    expect(calls[0]?.url).toBe(`https://preview.example/api/posts/${POST.id}/public`);
     expect(calls[0]?.init.method).toBe('GET');
     expect(meta).toEqual({ title: POST.title, price: POST.price });
   });

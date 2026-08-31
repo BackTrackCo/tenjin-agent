@@ -635,14 +635,16 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
   };
 }
 
+// `articleBase()`'s wire shape (tenjin PR #803): `handle` sits under
+// `creator`, not at the top level, unlike `searchCandidateSchema` above.
 const postMetadataSchema = z
   .object({
     id: z.string().regex(UUID_RE, 'id must be a uuid'),
+    slug: z.string(),
     title: z.string(),
     price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
-    handle: z.string(),
-    slug: z.string(),
     status: z.string(),
+    creator: z.object({ handle: z.string() }).passthrough(),
   })
   .passthrough();
 
@@ -652,25 +654,29 @@ export interface PostMetadata {
 }
 
 /**
- * GET /api/posts/<id> — the public id lookup for a PUBLISHED post (tenjin
- * server, sibling of the tenjin-agent#252 local-bookkeeping removal in PR
- * 277 round-2 review: `state-store.ts`'s `findPairingCandidate` used to
+ * GET /api/posts/<id>/public — the public id lookup for a PUBLISHED post
+ * (tenjin PR #803, sibling of the tenjin-agent#252 local-bookkeeping removal
+ * in PR 277 round-2 review: `state-store.ts`'s `findPairingCandidate` used to
  * synthesize `title: ''` / `price: '0'` for a link missing them, which is
- * exactly the "invented value" this function exists not to produce).
+ * exactly the "invented value" this function exists not to produce). A
+ * sibling route to the owner-scoped SIWX `GET /api/posts/<id>`, not a
+ * relaxation of it.
  *
- * Every failure collapses to `null`: a 404 (draft, unknown id, or a
- * deployment that predates this route — indistinguishable from here, and
- * both mean "no metadata"), any other non-200, a network or timeout error,
- * a body that does not match the contract, or a `status` other than
- * `published`. This is the one function in this module that must never
- * throw or guess — a resolved id with no metadata is UNKNOWN, never a
- * default title or a free price.
+ * Every failure collapses to `null`: a 404 (draft, unlisted, unknown id, a
+ * malformed id, or a deployment that predates this route — all
+ * indistinguishable from here, and all mean "no metadata"), any other
+ * non-200, a network or timeout error, a body that does not match the
+ * contract, or a `status` other than `published` (the route's own contract
+ * says this is always `published`, but this CLI checks rather than trusts
+ * it). This is the one function in this module that must never throw or
+ * guess — a resolved id with no metadata is UNKNOWN, never a default title
+ * or a free price.
  */
 export async function getPostMetadata(
   resourceId: string,
   opts: AgentApiOptions,
 ): Promise<PostMetadata | null> {
-  const url = `${trimSlash(opts.baseUrl)}/api/posts/${encodeURIComponent(resourceId)}`;
+  const url = `${trimSlash(opts.baseUrl)}/api/posts/${encodeURIComponent(resourceId)}/public`;
   const res = await httpRequest(url, {
     method: 'GET',
     timeoutMs: opts.timeoutMs,
