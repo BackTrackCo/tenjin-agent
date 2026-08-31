@@ -1727,13 +1727,26 @@ function filesInError(text) {
  * as cheap (04, "Close rule"): the pairing stays open rather than closing on
  * an edit that was never a fix.
  */
+// isHomeDotDirPath:begin
 function isHomeDotDirPath(path) {
   const home = homedir();
   if (typeof home !== 'string' || home.length === 0) return false;
   const root = home.replace(/[/\\]+$/, '');
-  if (root.length === 0 || !String(path).startsWith(root)) return false;
-  return /^[/\\]\.[^/\\]+(?:[/\\]|$)/.test(String(path).slice(root.length));
+  if (root.length === 0) return false;
+  // CASE-INSENSITIVE ON WIN32 ONLY. NTFS is case-preserving, not
+  // case-sensitive, so an edit path can differ in casing from what
+  // \`os.homedir()\` returns and still name the same directory; a bare
+  // \`startsWith\` would then miss it and let a home-dotfile edit through as
+  // tracked. Every other platform keeps the exact-case compare.
+  const candidate = String(path);
+  const hasRoot =
+    process.platform === 'win32'
+      ? candidate.slice(0, root.length).toLowerCase() === root.toLowerCase()
+      : candidate.startsWith(root);
+  if (!hasRoot) return false;
+  return /^[/\\]\.[^/\\]+(?:[/\\]|$)/.test(candidate.slice(root.length));
 }
+// isHomeDotDirPath:end
 
 /**
  * A path this machine's own repo owns, as opposed to one the toolchain owns or

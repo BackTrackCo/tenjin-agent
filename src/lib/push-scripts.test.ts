@@ -3025,6 +3025,46 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
   });
 
+  /**
+   * WIN32 CASING (review on #268's PR: A1igator/greptile). `homedir()` on
+   * Windows can come back with different casing than the path a tool call
+   * names for the very same directory, and NTFS treats the two as identical.
+   * `isHomeDotDirPath`'s prefix check is exact-case everywhere except win32,
+   * where it lowercases both sides before comparing — this drives that branch
+   * directly, since spawning the real hook (as the other #268 tests do) only
+   * ever runs it on whatever platform CI is, never on win32.
+   *
+   * EXTRACTED BY SENTINEL, not brace-counted (as `repoSlugSource` already does
+   * for the same reason: round-1 nit 4 of #256).
+   */
+  it('matches a home dotfile path on win32 even when its casing differs from homedir()', () => {
+    const source = pushFailureHookScript(dataDir);
+    const start = source.indexOf('// isHomeDotDirPath:begin');
+    const end = source.indexOf('// isHomeDotDirPath:end');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    expect(body).toContain('function isHomeDotDirPath(path)');
+    const generated = new Function('homedir', `${body}; return isHomeDotDirPath;`)(
+      () => 'C:\\Users\\Ali',
+    ) as (path: string) => boolean;
+
+    const originalPlatform = process.platform;
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(true);
+      expect(generated('C:\\Users\\Ali\\.claude\\memory\\x.md')).toBe(true);
+      expect(generated('C:\\Users\\Alison\\.claude\\x')).toBe(false);
+
+      // NON-WIN32 STAYS EXACT-CASE: this is the regression check for the fix
+      // above — it must not turn every platform case-insensitive.
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(false);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
+  });
+
   it("marks the linked post on this machine's own close, for sync to verify", async () => {
     const stub = resolveStub('hit');
     const team = await serve(stub.handler);
