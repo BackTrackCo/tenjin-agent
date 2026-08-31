@@ -3464,6 +3464,33 @@ describe('the sig_v1_test lane — team leg (tenjin-agent#267)', () => {
     ]);
   });
 
+  it('links BOTH the sig_v1 and sig_v1_test rows to the post on a round-1 hit (tenjin-agent#278)', async () => {
+    const stub = sequencedResolveStub(['hit']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    expect(injected(run)).not.toBeNull();
+
+    // TWO local rows opened for this one event: sig_v1 (the frame-keyed
+    // signature) and sig_v1_test (the test identity), because the wire's OR
+    // never says which of round 1's three keys the teammate's post actually
+    // matched. Both describe the same failure, so both must be linked —
+    // whichever this machine closes first is the second independent close
+    // the cross-machine `verified` promotion depends on.
+    const opened = await pairings();
+    expect(opened.map((p) => p.kind).sort()).toEqual(['sig_v1', 'sig_v1_test']);
+    for (const row of opened) {
+      expect(sessionState('', `pairing_post:${row.id}`)).toMatchObject({
+        postId: TESTID_TEAM_POST_ID,
+      });
+    }
+    // AND BOTH REPLAYED behind the head, so a later pass can close either one.
+    const replayed = sessionState(SESSION, 'replayed::pnpm') as number[];
+    expect([...replayed].sort()).toEqual(opened.map((p) => p.id as number).sort());
+  });
+
   it('makes no second request, and asks the same single request as before #267, on an ordinary (non-test) failure', async () => {
     const stub = sequencedResolveStub(['miss', 'hit']); // round 2 would hit if it fired
     const team = await serve(stub.handler);

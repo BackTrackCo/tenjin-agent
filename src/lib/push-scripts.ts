@@ -2802,11 +2802,18 @@ async function main() {
 
     // THE TEST-IDENTITY LANE, tried whether or not sig_v1 itself matched or
     // opened anything above (tenjin-agent#267): it is a genuinely different
-    // question, so a miss on one says nothing about the other.
+    // question, so a miss on one says nothing about the other. KEPT IN ITS OWN
+    // SLOT, never folded into \`pairingId\`: \`teamResolve\`'s OR ranks by kind
+    // without saying which key matched a hit below (its own doc comment,
+    // "Retrieval order"), so this build cannot tell whether a hit came from
+    // \`sig\`'s row or this one, and collapsing the two into one shared variable
+    // silently discarded whichever row lost the race — the exact row whose own
+    // \`sig_v1_test\`/\`sig_v1_test_c\` keys a teammate's post might actually match.
+    let testPairingId = null;
     if (testSig !== null) {
       const testResult = tryTestLane();
       if (testResult.emitted !== null) return emit(event, testResult.emitted);
-      if (pairingId === null) pairingId = testResult.pairingId;
+      testPairingId = testResult.pairingId;
     }
 
     // THE TEAM LEG, in team mode only. The public shelf refuses keys and holds
@@ -2828,10 +2835,20 @@ async function main() {
     // verified record (a teammate's post cannot be PUT from here). A hit is
     // evidence the failure is a real, fixable one even when the error named
     // no file: the same-command branch of the close rule still applies.
-    if (pairingId === null) pairingId = open();
-    if (pairingId !== null) {
-      rememberReplay(sessionId, agentId, head === null ? '' : head, pairingId);
-      setState(MACHINE_SESSION, STATE_PAIRING_POST_PREFIX + pairingId, {
+    //
+    // LINK EVERY ROW THIS EVENT OPENED, sig_v1 and sig_v1_test alike, not just
+    // whichever happened to claim \`pairingId\` first. Both rows describe the
+    // SAME failure on this machine, just at different fingerprint
+    // granularities, so either one closing later is equally valid evidence the
+    // teammate's fix worked here too — and \`closeOpenPairings\` already expects
+    // more than one pairing open behind one head (its own "ALL OF THEM, not
+    // the last one" comment). The fallback \`open()\` only fires when NEITHER
+    // lane produced a row, so a hit is never left with nothing to link.
+    if (pairingId === null && testPairingId === null) pairingId = open();
+    for (const id of [pairingId, testPairingId]) {
+      if (id === null) continue;
+      rememberReplay(sessionId, agentId, head === null ? '' : head, id);
+      setState(MACHINE_SESSION, STATE_PAIRING_POST_PREFIX + id, {
         postId: hit.top.resourceId,
         origin,
         at: Date.now(),
