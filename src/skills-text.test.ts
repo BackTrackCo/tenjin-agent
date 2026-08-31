@@ -336,16 +336,16 @@ describe('tenjin-publish: publish denials are the gate working', () => {
   });
 });
 
-/** The public card is buyer context, not a retrieval gate. Keep the complete-card
- * authoring rubric while pinning the release-step-1 promise that missing fields do
- * not change rank or candidacy. */
+/** The public card is buyer context, not a retrieval gate. Keep the legacy
+ * completeness authoring rubric while pinning the post-#797 promise that neither
+ * card prose nor completeness changes any retrieval or answer-source decision. */
 describe('tenjin-publish teaches complete public card context', () => {
   const text = flat('tenjin-publish');
 
-  // ONE block, naming every condition the server actually checks. Spreading them
+  // ONE block, naming every legacy completeness condition the server reports. Spreading them
   // across bullets is how `asOf` went unmentioned while the section claimed to be
-  // about eligibility (PR #164 round 2, minor 2).
-  it('names all five conditions the server gate checks, in one place', () => {
+  // complete (PR #164 round 2, minor 2).
+  it('names all five legacy completeness conditions in one place', () => {
     expect(text).toMatch(/Fill all five, every time/i);
     for (const field of [
       '`questionsAnswered`',
@@ -360,28 +360,31 @@ describe('tenjin-publish teaches complete public card context', () => {
   });
 
   /**
-   * The distinction this pins is easy to flatten in either direction, and both
-   * flattenings mislead. #628 took card text out of RELEVANCE, so no card prose
-   * makes a piece match a query better. It left PLACEMENT alone: `cacheEligible`
-   * still sorts ahead of `ts_rank` and fills the limit first, `freshWithin` and
-   * `appliesTo` reject a card-less row outright, and `/api/answer` keeps a hard
-   * gate. So the skill must say both halves, and must not say a card-less piece
-   * is simply absent from search, which is the one thing that is NOT true.
+   * #797 removes legacy completeness from every retrieval decision, not only
+   * from the text match. The explicit claim filters and expiry gate remain, so
+   * this also pins the narrower value-dependent behavior that is easy to erase
+   * while correcting the old rank-tier language.
    */
-  it('separates card relevance from card placement, and claims neither too widely', () => {
+  it('keeps completeness out of relevance, placement, candidacy, and answer sources', () => {
     expect(text).toMatch(
-      /does not affect how well a piece MATCHES a query|no card text improves how well the piece MATCHES/i,
+      /never change search relevance, rank (or|\/) placement, candidacy, or whether `POST \/api\/answer` may use the piece/i,
     );
-    expect(text).toMatch(/ranks below every eligible one|eligible cards rank ahead/i);
-    expect(text).toMatch(/`freshWithin`/);
-    expect(text).toMatch(/`appliesTo`/);
-    expect(text).toMatch(/POST \/api\/answer/);
+    expect(text).toMatch(/a card-less piece fails `freshWithin` and `appliesTo`/i);
+    expect(text).toMatch(/snapshot must carry an in-window `asOf` for `freshWithin`/i);
+    expect(text).toMatch(/`appliesTo` requires every requested value/i);
+    expect(text).toMatch(/present, expired `validUntil` always excludes/i);
     expect(text).toMatch(/`incomplete answer card`/);
-    expect(text).toMatch(/repeat natural questions and exact repo\/component\/file terms/i);
-    // Search RANKS an uncarded piece; it does not hide it. Only the filtered
-    // queries and /api/answer exclude one.
+    expect(text).toMatch(/describe preview state only/i);
+    expect(text).toMatch(/visible title, excerpt, or body/i);
     expect(text).not.toMatch(/out of agent decision search/i);
-    expect(text).not.toMatch(/never changes.*(rank|candidacy)/i);
+    expect(text).not.toMatch(/ranks below|eligible cards rank ahead|only an eligible card/i);
+  });
+
+  it('separates the listing excerpt from the paywall-controlled in-page preview', () => {
+    expect(text).toMatch(/Put `<!--paywall-->` on its own line/i);
+    expect(text).toMatch(/no marker means a paid piece has NO free preview/i);
+    expect(text).toMatch(/`--excerpt`.*separate, optional LISTING teaser/i);
+    expect(text).toMatch(/does not\s*affect the in-page preview/i);
   });
 
   /**
@@ -420,8 +423,8 @@ describe('tenjin-publish teaches complete public card context', () => {
     expect(text).toMatch(/a draft carrying `provenance:` has\s*it silently dropped/i);
   });
 
-  // The server gate is provenance OR methodology, and asOf only binds on a
-  // snapshot; the text must not overstate either.
+  // The legacy completeness report accepts provenance OR methodology, and asOf
+  // is requested only for a snapshot; the text must not overstate either.
   it('keeps the two conditional conditions conditional', () => {
     expect(text).toMatch(/`methodologySummary` \(flag `--methodology`\) counts\s*instead/i);
     expect(text).toMatch(/required when `temporalMode` is `snapshot`/i);
@@ -965,10 +968,15 @@ describe('the public render did not move', () => {
   // inside a bash fence as `a|b|c`, which a shell reads as three piped commands
   // whose first one posts `used`. It is spelled out below the fence now, the
   // same fix the child rung already carries. tenjin-publish is untouched.
+  //
+  // Re-pinned for tenjin#733 and the post-#797 card contract: `--excerpt` is a
+  // listing teaser rather than the in-page preview boundary, and legacy card
+  // completeness no longer claims any relevance, placement, candidacy, or
+  // answer-source effect. tenjin-search is untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': 'd24d6b3458d303f01c57cd6a145d2d90',
+      'tenjin-publish': '1f8300720d7d1ecf5b92b8448e091be0',
     });
   });
 

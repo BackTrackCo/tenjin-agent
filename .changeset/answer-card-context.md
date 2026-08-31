@@ -2,10 +2,10 @@
 'tenjin-cli': patch
 ---
 
-Correct what answer-card completeness does and does not affect. Card prose is not a
-retrieval input: no card text makes a piece match a query better. Completeness still
-decides placement, so an incomplete card ranks below every complete one within the
-retrieved window and `POST /api/answer` will not cite it, while a card-less piece
-additionally fails any `freshWithin` or `appliesTo` filter. CLI receipts, installed
-publishing guidance, and the plain-HTTP skill now state that distinction instead of
-describing completeness as cosmetic.
+Treat answer-card completeness as public buyer context rather than a retrieval or
+answer-eligibility signal. Card prose and completeness do not change relevance,
+rank or placement, candidacy, or whether `POST /api/answer` may use a piece. Explicit
+`freshWithin` and `appliesTo` filters still require matching stored claims, and a
+present `validUntil` remains an expiry gate. CLI receipts, installed publishing
+guidance now state that distinction. The vendored plain-HTTP skill must be resynced
+from canonical server output after the companion server release is deployed.

@@ -515,11 +515,11 @@ describe('runEdit — show mode (no change flags)', () => {
     expect(human).toContain('questionsAnswered (1): What is it?');
     expect(human).toContain('scope: "L2 fees only"');
     expect(human).toContain(
-      'Answer card incomplete, so it ranks below every complete card and POST /api/answer will not cite it. To fix: State the exclusions (what this piece does not cover).',
+      'Answer card preview incomplete. To improve its public pre-paywall fit context: State the exclusions (what this piece does not cover).',
     );
   });
 
-  it('a card-less post names what an absent card costs it', async () => {
+  it('a card-less post says buyers have less public fit context', async () => {
     const stub = stubServer({ get: { ...STORED, resource: undefined } });
     const res = await runEdit(
       args(),
@@ -527,7 +527,7 @@ describe('runEdit — show mode (no change flags)', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'No answer card: ranks below every carded piece, invisible to any freshWithin or appliesTo query, and never cited by POST /api/answer.',
+      'No answer card: buyers have less public pre-paywall context for judging fit.',
     );
   });
 
@@ -792,7 +792,7 @@ describe('runEdit — the update receipt', () => {
     );
     expect(res.humanLines).toEqual([
       'Updated A Better Answer → https://preview.example/a/iris/the-answer',
-      'Answer card is complete: full pre-paywall context, and eligible for filtered queries and POST /api/answer.',
+      'Answer card provides complete public pre-paywall fit context.',
       'warning: dropped external image ./pic.png',
     ]);
     // --json emits the full PUT response data.
@@ -843,7 +843,7 @@ describe('runEdit — the update receipt', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'Answer card incomplete, so it ranks below every complete card and POST /api/answer will not cite it. To fix: State the exclusions',
+      'Answer card preview incomplete. To improve its public pre-paywall fit context: State the exclusions',
     );
   });
 });

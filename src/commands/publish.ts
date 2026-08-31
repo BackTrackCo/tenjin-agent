@@ -1139,10 +1139,10 @@ function receipt(
   const human = [
     `Published ${title} (${sanitizeForTerminal(result.status)}) for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
     result.cacheEligible === undefined
-      ? 'Published without an answer card: ranks below every carded piece, invisible to any freshWithin or appliesTo query, and never cited by POST /api/answer.'
+      ? 'Published without an answer card: buyers have less public pre-paywall context for judging fit.'
       : missing.length > 0
-        ? `Answer card incomplete, so it ranks below every complete card and POST /api/answer will not cite it. To fix: ${missing.join(' ')}`
-        : 'Answer card is complete: full pre-paywall context, and eligible for filtered queries and POST /api/answer.',
+        ? `Answer card preview incomplete. To improve its public pre-paywall fit context: ${missing.join(' ')}`
+        : 'Answer card provides complete public pre-paywall fit context.',
     ...searches.filter((s) => s.closed).map(closeLine),
     undoLine(undo),
     ...(finding === undefined
