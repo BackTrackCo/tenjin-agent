@@ -3615,6 +3615,45 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     });
 
     /**
+     * THE #254 FIX, DOWNSTREAM. Grading one row wrong — crediting a boilerplate
+     * span the session never actually used, the false positive tenjin-agent#254a
+     * audited — is not just a mislabeled row: `used` and `wrong` are exactly
+     * the counts this cooldown reads. At the graded floor (used + wrong = 20,
+     * rate = used / graded) one row moving from `used` to `wrong` is the
+     * difference between a rate of 5% — `rate < coldRate` is strict, so this
+     * does NOT cool the arm — and a rate of 0%, which does. Same lookup spend,
+     * same base cap, same floor: only the corrected count changes, and that
+     * alone flips the throttle from "allow" to "block".
+     */
+    it('#254: correcting one wrongly-graded verdict flips the throttle decision', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+      // BEFORE THE FIX: the false-positive span inflates `used` by one, which
+      // holds the rate exactly at the 5% floor and leaves the arm at its base
+      // cap — the spend below is well under it, so the lookup goes through.
+      await seedRates({ prompt: { hits: 20, used: 1, wrong: 19 } });
+      await seedLookups('prompt', COLD_CAP, 0);
+      const before = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(before)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+
+      // AFTER THE FIX: the same 20 graded rows, with that one false positive
+      // now correctly graded `wrong` instead. No other input changes — same
+      // trigger, same session, the lookup spend only one higher (the call
+      // above just spent one) — but the rate now clears the cold floor, the
+      // cap is cut to a third, and the next lookup this window is throttled.
+      await seedRates({ prompt: { hits: 20, used: 0, wrong: 20 } });
+      const after = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(after.stdout).toBe('');
+      expect((await ledger()).at(-1)).toMatchObject({
+        session: SESSION,
+        trigger: 'prompt',
+        action: 'skipped',
+        reason: 'lookup-cap',
+      });
+    });
+
+    /**
      * THE GUARD. On day 1 the shelf reports hundreds of lookups and nothing
      * graded — #210 has not posted an outcome yet — which without this reads as
      * "cold" for every arm at once. A trigger with nothing graded keeps its cap.

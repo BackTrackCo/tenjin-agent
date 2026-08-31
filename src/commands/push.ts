@@ -1590,14 +1590,15 @@ function shelfOrigin(url: string): string | null {
 /**
  * The verdict as the shelf's outcome vocabulary.
  *
- * `partially_used` for a span, and that is the honest word for it: a phrase
- * copied out of the injected text says the agent took SOMETHING from the piece,
- * not that the piece answered the question. Only a followed pointer, or a human
- * saying so, is `used`.
+ * `partially_used` for a `span` or a `likely` match, and that is the honest
+ * word for either: a phrase copied out of the injected text, or a command
+ * head / file basename named in its prose, says the agent took SOMETHING from
+ * the piece, not that the piece answered the question. Only a followed
+ * pointer, or a human saying so, is `used`.
  */
 function wireStatus(outcome: string, by: string): string {
   if (outcome === 'rejected') return 'rejected';
-  return by === 'span' ? 'partially_used' : 'used';
+  return by === 'span' || by === 'likely' ? 'partially_used' : 'used';
 }
 
 function buildGradeData(

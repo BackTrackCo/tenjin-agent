@@ -20,14 +20,28 @@ import { CliError } from './errors';
  * `tool_use` block's input, serialized whole so a command, an edit's new text
  * and a written file all read the same way.
  *
- * TWO VERDICTS FOR "USED", ONE WEAK. Explicit `tenjin read|inspect <id>`, or the
- * injected url appearing in a tool input, is the agent following the pointer:
- * that is `read`, and it counts anywhere later in the session, because a piece
- * bought twenty tool calls after it was shown is still a piece the injection
- * sold. A backtick span copied out of the injected text is much weaker — it may
- * be a command the agent would have run anyway — so it counts only inside
- * {@link SPAN_WINDOW} tool calls of the anchor, needs at least two words, and is
- * reported to the shelf as `partially_used` rather than `used`.
+ * THREE VERDICTS FOR "USED", TWO WEAK. Explicit `tenjin read|inspect <id>`, or
+ * the injected url appearing in a tool input, is the agent following the
+ * pointer: that is `read`, and it counts anywhere later in the session,
+ * because a piece bought twenty tool calls after it was shown is still a piece
+ * the injection sold. A backtick span copied out of the injected text is much
+ * weaker — it may be a command the agent would have run anyway — so it counts
+ * only inside {@link SPAN_WINDOW} tool calls of the anchor, needs at least two
+ * words, and is reported to the shelf as `partially_used` rather than `used`.
+ * `likely` is weaker again: a command head or file basename named anywhere in
+ * the note's prose, with no backticks at all, matched the same way and ranked
+ * below `span` — see {@link likelyTokens}.
+ *
+ * A SPAN OR A LIKELY TOKEN IS EXCLUDED WHEN THE SESSION ALREADY USED IT BEFORE
+ * THE INJECTION (tenjin-agent#254a). Boilerplate a machine writes into every
+ * subagent work order — `CI=true pnpm format:check` and the like — will always
+ * reappear in the next tool call whether or not the injection ran, so a match
+ * that cannot see behind the anchor cannot tell "copied because shown" from
+ * "was going to type this anyway". `judge()` is handed the tool calls BEFORE
+ * the anchor as well as after, and a candidate already present there earns no
+ * credit. This applies to `span` and `likely` only: `read` is a command
+ * naming this specific piece, which nothing pre-injection could have done by
+ * coincidence.
  *
  * NOTHING IS NOT REJECTION UNTIL THE SESSION IS OVER. A row whose session is
  * still running has simply not been answered yet, and grading it `rejected`
@@ -102,7 +116,7 @@ export interface GradeTarget {
 }
 
 export type Verdict =
-  | { outcome: 'used'; by: 'read' | 'span'; evidence: string }
+  | { outcome: 'used'; by: 'read' | 'span' | 'likely'; evidence: string }
   | { outcome: 'rejected'; by: 'none'; evidence: string[] }
   | { outcome: 'unobserved'; by: 'none' }
   /** Still open: the session may yet answer, so nothing is written. */
@@ -189,6 +203,79 @@ export function backtickSpans(text: string): string[] {
   return [...spans];
 }
 
+/** A candidate token has to carry its own punctuation to qualify — see
+ *  {@link likelyTokens}. */
+const LIKELY_TOKEN_RE = /\b[A-Za-z][A-Za-z0-9]*(?:[:_./-][A-Za-z0-9]+)+\b/g;
+const LIKELY_MIN_CHARS = 4;
+/** Compounds common enough in ordinary prose to look like a command or a path
+ *  but never are one. Not a promise of completeness — the punctuation
+ *  requirement in {@link LIKELY_TOKEN_RE} is what does most of the work; this
+ *  catches the handful of hyphenated English words that would otherwise slip
+ *  through it. */
+const LIKELY_GENERIC = new Set([
+  're-run',
+  're-runs',
+  're-ran',
+  're-executes',
+  're-executed',
+  'up-to-date',
+  'well-known',
+  'self-contained',
+  'read-only',
+  'long-lived',
+  'built-in',
+  'one-word',
+  'two-word',
+  'so-called',
+  'case-by-case',
+  'pre-commit',
+  'post-commit',
+  'e.g',
+  'i.e',
+]);
+
+/**
+ * Command heads and file basenames named anywhere in `text`, with no backticks
+ * at all — the weaker, single-token net {@link judge} tries below `span` for a
+ * note that describes a command in prose instead of quoting it
+ * (tenjin-agent#254b: "gh run rerun" named only in a title, "pnpm check" named
+ * only as English words, each with a tool call that actually followed it).
+ *
+ * CONSERVATIVE ON PURPOSE. A bare English word ("run", "check", or "pnpm" on
+ * its own) is exactly what the two-word floor on {@link backtickSpans} already
+ * excludes as noise the agent was going to type anyway; a single-token net
+ * that took bare words would reopen that hole wider than the floor closes it.
+ * So a candidate must carry its own internal structure — a colon, dot, slash
+ * or hyphen joining two word-shaped halves, the way a subcommand
+ * (`db:generate`), a filename (`ci.yml`), or a path segment does — which a
+ * plain English word essentially never does, and it must be at least
+ * {@link LIKELY_MIN_CHARS} long.
+ *
+ * BACKTICK CONTENT IS STRIPPED FIRST, so a span already tried (and ranked
+ * above this) is never re-offered as weaker evidence for the same text.
+ *
+ * THE PIECE'S OWN ID AND URL ARE EXCLUDED. Those already have a dedicated,
+ * stronger `read` verdict; re-crediting them here would rank a followed
+ * pointer BELOW a copied identifier instead of above it.
+ */
+export function likelyTokens(text: string, target: GradeTarget): string[] {
+  const stripped = text.replace(/`[^`\n]+`/g, ' ');
+  const tokens = new Set<string>();
+  for (const match of stripped.matchAll(LIKELY_TOKEN_RE)) {
+    const token = match[0];
+    if (token.length < LIKELY_MIN_CHARS) continue;
+    if (LIKELY_GENERIC.has(token.toLowerCase())) continue;
+    // A FRAGMENT counts as the id or the url, not just an exact match: a uuid
+    // is all hyphens and hex, so the token regex can walk in from the middle
+    // of one (`bbbb-cccc-dddd-...`) and still name nothing but the piece the
+    // `read` tier already owns.
+    if (target.resourceId !== null && target.resourceId.includes(token)) continue;
+    if (target.url !== null && target.url.length > 0 && target.url.includes(token)) continue;
+    tokens.add(token);
+  }
+  return [...tokens];
+}
+
 /**
  * The verdict for one injection, given its transcript and its anchor.
  *
@@ -203,9 +290,12 @@ export function gradeInjection(
 ): Verdict {
   if (anchor < 0 || anchor >= rows.length) return { outcome: 'unobserved', by: 'none' };
   // EXCLUSIVE: the anchor row IS the injection, so the calls that can answer for
-  // it are the ones after it.
+  // it are the ones after it. The ones BEFORE it are what a span or a likely
+  // token has to clear to earn credit — see the module note on #254a.
+  const before = rows.slice(0, anchor).filter((row) => row.kind === 'tool_use');
   const after = rows.slice(anchor + 1).filter((row) => row.kind === 'tool_use');
-  return judge(after, backtickSpans(rows[anchor]?.text ?? ''), target, opts.ended);
+  const text = rows[anchor]?.text ?? '';
+  return judge(after, before, backtickSpans(text), likelyTokens(text, target), target, opts.ended);
 }
 
 /**
@@ -235,8 +325,11 @@ export function gradeRelayed(
   const calls = rows.filter((row) => row.kind === 'tool_use');
   // The title is the only injected text this row left on disk; usually it holds
   // no two-word backtick span at all, and that is the documented limit of what
-  // a relayed row can be judged `span` on.
-  return judge(calls, backtickSpans(target.title ?? ''), target, opts.ended);
+  // a relayed row can be judged `span` or `likely` on. No pre-injection
+  // exclusion here: the pointer preceded the child's first call, so there is no
+  // "before" inside this transcript for anything to have leaked from.
+  const title = target.title ?? '';
+  return judge(calls, [], backtickSpans(title), likelyTokens(title, target), target, opts.ended);
 }
 
 /**
@@ -244,12 +337,19 @@ export function gradeRelayed(
  * are eligible. Shared byte-for-byte by both verdict functions, so a relayed row
  * and a main-session row can never drift into being judged by different rules.
  *
- * Read beats span: both may be present, and "the agent went and read the piece"
- * is the stronger claim, so it is the one reported.
+ * Read beats span beats likely: each may be present alongside a weaker one, and
+ * the strongest claim actually supported is the one reported.
+ *
+ * `before` is the tool calls that happened in this same session BEFORE the
+ * injection (empty for a relayed row, which has none). A span or a likely
+ * token already present there is boilerplate the session was going to write
+ * anyway, so it earns no credit here — tenjin-agent#254a.
  */
 function judge(
   after: TranscriptRow[],
+  before: TranscriptRow[],
   spans: string[],
+  likely: string[],
   target: GradeTarget,
   ended: boolean,
 ): Verdict {
@@ -262,11 +362,17 @@ function judge(
       return { outcome: 'used', by: 'read', evidence: cap(row.text) };
     }
   }
+  const seenBefore = (candidate: string): boolean =>
+    before.some((row) => row.text.includes(candidate));
   for (const row of after.slice(0, SPAN_WINDOW)) {
-    const hit = spans.find((span) => row.text.includes(span));
+    const hit = spans.find((span) => !seenBefore(span) && row.text.includes(span));
     // Capped like every other evidence string here: the span is copied out of
     // injected text, which came off a shelf, and `--explain` prints it.
     if (hit !== undefined) return { outcome: 'used', by: 'span', evidence: cap(hit) };
+  }
+  for (const row of after.slice(0, SPAN_WINDOW)) {
+    const hit = likely.find((token) => !seenBefore(token) && row.text.includes(token));
+    if (hit !== undefined) return { outcome: 'used', by: 'likely', evidence: cap(hit) };
   }
   const evidence = after.slice(0, EVIDENCE_ROWS).map(cap);
   return ended ? { outcome: 'rejected', by: 'none', evidence } : { outcome: null, evidence };
