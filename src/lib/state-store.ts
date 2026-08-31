@@ -908,7 +908,17 @@ export const STORE_SQL = {
        cmd_head, cmd, error_line, error_files, pkg_versions, scope, status
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`,
   /**
-   * A local match, best first: verified outranks unverified, then most recent.
+   * A local match, best first: an EXACT key match outranks a coarse-only one,
+   * then verified outranks unverified, then most recent.
+   *
+   * FINE BEFORE VERIFIED (tenjin-agent#278, minor 2). `coarse_key` is never
+   * null for `sig_v1_test` (unlike `sig_v1`'s own, which needs an errno), so
+   * with the status tiebreaker ranked first a VERIFIED row for a DIFFERENT
+   * test — matching only on `coarse_key` — outranked an UNVERIFIED row that
+   * matched the query's own `key` exactly, and the caller's `isFine` check
+   * (`match.key === testSig.key`) then read the exact-test hit as a mere
+   * coarse one and downgraded it to the one-line pointer. A verified fix for
+   * a different test is not stronger evidence about this one.
    *
    * SCOPED TO THE PROJECT. 04's whole close rule is about a fix that changed a
    * file in the repo the failure happened in, so a pairing from a different
@@ -920,7 +930,9 @@ export const STORE_SQL = {
      WHERE project IS ?
        AND (key = ? OR (coarse_key IS NOT NULL AND coarse_key = ?))
        AND status IN ('unverified', 'verified')
-     ORDER BY CASE status WHEN 'verified' THEN 0 ELSE 1 END, closes DESC, at DESC
+     ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END,
+              CASE status WHEN 'verified' THEN 0 ELSE 1 END,
+              closes DESC, at DESC
      LIMIT 1`,
   /** Pairings this success could be closing: same project, same command head,
    *  still open. Without the project predicate a passing `pnpm test` in one repo
@@ -2635,11 +2647,12 @@ function openPairing(row) {
   return Number.isSafeInteger(rowid) ? rowid : null;
 }
 
-/** The best local match for a signature: verified first, then most closed, then
- *  most recent. Fine key, then coarse — one indexed query does both. */
+/** The best local match for a signature: an exact key match first, then
+ *  verified over unverified, then most closed, then most recent. Fine key,
+ *  then coarse — one indexed query does both. */
 function findPairing(cwd, key, coarseKey) {
   const coarse = typeof coarseKey === 'string' && coarseKey.length > 0 ? coarseKey : '';
-  const row = storeGet(STORE_SQL.findPairing, [projectId(cwd), String(key), coarse]);
+  const row = storeGet(STORE_SQL.findPairing, [projectId(cwd), String(key), coarse, String(key)]);
   return row === null ? null : pairingRow(row);
 }
 

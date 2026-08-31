@@ -3161,6 +3161,81 @@ describe('the sig_v1_test lane — local matching (tenjin-agent#267)', () => {
     expect(testRows).toHaveLength(1); // one row, matched coarse on the second run
     expect(testRows[0]!.status).toBe('unverified');
   });
+
+  it('an exact-test match is not downgraded to a pointer by a VERIFIED row for a different test in the same file/suite (tenjin-agent#278, minor 2)', async () => {
+    await pushOn('http://127.0.0.1:1');
+
+    const failA = (session: string, message: string) =>
+      run(session, vitestFailure('src/a.test.ts', 'formatDate', 'handles null', message));
+    const failB = (session: string, message: string) =>
+      run(session, vitestFailure('src/a.test.ts', 'formatDate', 'handles undefined', message));
+
+    // Test A opens and closes once, from sess-1 (unverified).
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failA('sess-1', 'AssertionError: expected undefined to be null'),
+    );
+    await closeIt('sess-1');
+
+    // sess-1 is SHOWN test A's row again (a different message each time —
+    // `signatureOf`'s own claim-dedup collapses digits, so the wording itself
+    // has to differ — so sig_v1's own message hash always misses and this
+    // exercises the sig_v1_test lane specifically) — marking that row
+    // "already shown" to sess-1, and closing it again is a same-session
+    // no-op for promotion.
+    const replay1 = await runScript(
+      pushFailureHookScript(dataDir),
+      failA('sess-1', 'AssertionError: expected undefined to equal null'),
+    );
+    expect(injected(replay1)).not.toBeNull();
+    await closeIt('sess-1');
+
+    // Test B, a DIFFERENT test sharing test A's coarse key, fails under
+    // sess-1: because sess-1 has already been SHOWN test A's row, the coarse
+    // match is skipped (`!alreadyShown`) and sess-1 opens test B's OWN row
+    // instead — the only way, through the ordinary hook flow, for a second
+    // test in one file/suite to get a row of its own rather than perpetually
+    // matching the first test's coarse key.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failB('sess-1', 'AssertionError: expected 1 to be undefined'),
+    );
+    await closeIt('sess-1');
+    expect((await pairings()).filter((p) => p.kind === 'sig_v1_test')).toHaveLength(2);
+
+    // A FRESH session (sess-2) is shown test A's row — the exact-key match
+    // outranks test B's row unconditionally regardless of status, so this is
+    // deterministic even before either row is verified — and promotes it to
+    // VERIFIED as the second independent closer.
+    const replay2 = await runScript(
+      pushFailureHookScript(dataDir),
+      failA('sess-2', 'AssertionError: expected undefined to strictly equal null'),
+    );
+    expect(injected(replay2)).not.toBeNull();
+    await closeIt('sess-2');
+    const rows = await pairings();
+    const rowA = rows.find((p) => p.kind === 'sig_v1_test' && p.status === 'verified');
+    const rowB = rows.find((p) => p.kind === 'sig_v1_test' && p.status === 'unverified');
+    expect(rowA).toBeDefined();
+    expect(rowB).toBeDefined();
+    expect(rowA?.coarse_key).toBe(rowB?.coarse_key); // same file/suite
+
+    // Test B fails again, in a BRAND NEW session: an exact-test UNVERIFIED
+    // match exists (its own row) alongside a coarse-only VERIFIED match (test
+    // A's row). The exact match must win — a verified fix for a DIFFERENT
+    // test is not stronger evidence about this one.
+    const third = await runScript(
+      pushFailureHookScript(dataDir),
+      failB('sess-3', 'AssertionError: expected 1 to strictly equal undefined'),
+    );
+    const text = injected(third);
+    expect(text).not.toBeNull();
+    expect(text).toContain('this machine has already seen this failure fixed');
+    // FULL treatment, not the coarse pointer, even though a VERIFIED coarse
+    // match for a different test exists and ranked first under the old
+    // status-before-key ordering.
+    expect(text).not.toContain('has been fixed here before');
+  });
 });
 
 describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () => {
@@ -3320,6 +3395,165 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
       expect(row?.error_files).toEqual(['fresh.test.ts']);
     } finally {
       await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a fresh report artifact when the failing command was not a test run (tenjin-agent#278, major 1)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-nontest-'));
+    try {
+      // A fresh report, left over from the test run BEFORE this build failure.
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        JSON.stringify({
+          testResults: [
+            {
+              name: join(cwd, 'src/unrelated.test.ts'),
+              status: 'failed',
+              assertionResults: [
+                { status: 'failed', title: 'an unrelated failure', ancestorTitles: ['suite'] },
+              ],
+            },
+          ],
+        }),
+      );
+      await pushOn('http://127.0.0.1:1');
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      // No sig_v1_test row at all: a TS build failure must never claim a test's
+      // identity, however fresh the report artifact sitting in the checkout is.
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('recognizes `pnpm test`/`pnpm test:unit` as test runs, not just `pnpm vitest run` (tenjin-agent#278, major 1)', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm test:unit' },
+        tool_response: {
+          stdout:
+            ' FAIL  src/scripted.test.ts > scriptedSuite > a scripted test\nAssertionError: z\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    expect((await pairings()).find((p) => p.kind === 'sig_v1_test')?.error_files).toEqual([
+      'scripted.test.ts',
+    ]);
+  });
+
+  it("takes the LAST failed assertion in the report, matching the console leg's own recency rule (tenjin-agent#278, major 2)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-multi-'));
+    try {
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        JSON.stringify({
+          testResults: [
+            {
+              name: join(cwd, 'src/multi.test.ts'),
+              status: 'failed',
+              assertionResults: [
+                { status: 'failed', title: 'the first failure', ancestorTitles: ['suite'] },
+                { status: 'failed', title: 'the last failure', ancestorTitles: ['suite'] },
+              ],
+            },
+          ],
+        }),
+      );
+      await pushOn('http://127.0.0.1:1');
+      // Run 1: the artifact leg is the only source of identity (no FAIL
+      // breadcrumb the console leg could parse), so whichever of the two
+      // failed assertions it picks becomes this row's fine key.
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: 'AssertionError: expected 1 to be 2\n\n Tests  2 failed | 0 passed\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      expect((await pairings()).filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1);
+
+      // Close run 1's row (open -> unverified) so `findPairing` can match it
+      // at all — an `open` row is excluded from the local-match query on
+      // purpose (it has no closer yet), same as every other pairing.
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: join(cwd, 'src/multi.test.ts') },
+        }),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: { stdout: 'ok', stderr: '', interrupted: false },
+        }),
+      );
+
+      // Run 2: the artifact is gone, so this leg falls back to a console
+      // breadcrumb naming "the last failure" explicitly — the same failure
+      // the console leg's OWN recency rule (take the LAST `FAIL` line) would
+      // pick on a real multi-failure run.
+      await rm(join(cwd, '.vitest-report.json'));
+      const second = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: ' FAIL  src/multi.test.ts > suite > the last failure\nAssertionError: z\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      // ONE row, MATCHED — not two. If run 1's artifact leg had kept the
+      // FIRST failed assertion instead, this console breadcrumb (naming the
+      // LAST one) would have missed and opened a second, disagreeing row.
+      expect((await pairings()).filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1);
+      expect(injected(second)).not.toBeNull();
+    } finally {
+      await rm(cwd, { recursive: true, force: true }).catch(() => {});
     }
   });
 });

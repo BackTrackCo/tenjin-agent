@@ -1285,14 +1285,19 @@ interface TestReporterFramework {
 const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
   {
     name: 'vitest',
+    // Kept in step with push-scripts.ts's own TEST_CONFIG_FILES (tenjin-agent#278
+    // nit 2): a repo on `vitest.config.cts`/`.cjs` cleared the failure arm's own
+    // read but never got this hint, since this list was a strict subset.
     configFiles: [
       'vitest.config.ts',
-      'vitest.config.js',
       'vitest.config.mts',
+      'vitest.config.cts',
+      'vitest.config.js',
       'vitest.config.mjs',
+      'vitest.config.cjs',
       'vite.config.ts',
-      'vite.config.js',
       'vite.config.mts',
+      'vite.config.js',
       'vite.config.mjs',
     ],
     depName: 'vitest',
@@ -1301,7 +1306,11 @@ const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
       /reporters\s*:/.test(source) && /json/i.test(source) && /outputFile/.test(source),
     detail:
       'vitest detected without a JSON reporter — test-failure matching falls back to console parsing (lower precision)',
-    fix: "Add to vitest.config.ts: reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]]",
+    // Also names WHERE the report lands, not just how to make it: the report
+    // holds every failure's full message and stack, absolute paths included
+    // (tenjin-agent#278, verdict note) — worth telling an operator adopting
+    // this for the first time, not just this repo's own already-gitignored one.
+    fix: "Add to vitest.config.ts: reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]] — and add .vitest-report.json to .gitignore (it holds full failure messages and absolute paths)",
   },
 ];
 

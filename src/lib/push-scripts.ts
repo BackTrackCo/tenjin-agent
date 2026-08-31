@@ -1788,7 +1788,14 @@ function configuredTestReportPath(cwd) {
     } catch {
       continue;
     }
-    const m = TEST_OUTPUT_FILE_RE.exec(text);
+    // BOUNDED before the regex, not after (tenjin-agent#278, nit 3): a real
+    // config is a few hundred bytes and the \`reporters\` block \`TEST_OUTPUT_FILE_RE\`
+    // wants is always near the top, but the regex's own bounded-but-large
+    // \`[\s\S]{0,600}\`/\`{0,300}\` gaps still cost roughly 1ms per KB of input on an
+    // adversarial config with no match at all — self-inflicted only (this file
+    // is never anyone else's to control but the repo's own), but a slice costs
+    // nothing on the common case and caps the self-inflicted one.
+    const m = TEST_OUTPUT_FILE_RE.exec(text.slice(0, 64_000));
     return m !== null && typeof m[1] === 'string' && m[1].length > 0 ? m[1] : null;
   }
   return null;
@@ -1823,13 +1830,25 @@ function relTestFile(cwd, path) {
 }
 
 /**
- * The first FAILED assertion in a vitest/Jest-shaped JSON report, or null.
+ * The LAST failed assertion in a vitest/Jest-shaped JSON report, or null.
  * \`testResults[].assertionResults[]\` is the shape vitest's own \`json\` reporter
  * writes (Jest-compatible); \`ancestorTitles\` is every enclosing \`describe\`,
  * already outer-to-inner, so joining it IS the suite path.
+ *
+ * LAST, not first (tenjin-agent#278, major 2): the console leg's own
+ * \`identityFromConsole\` takes the LAST \`FAIL\` line on the stated recency rule
+ * — the tail of the output is where the specific failure lives. Returning on
+ * the first match here instead meant the two legs picked DIFFERENT failures on
+ * any run with more than one, so a teammate whose failure hook read the
+ * artifact and one whose hook read the console breadcrumb never computed the
+ * same fine key for the same run. Taking the last failure on both legs does
+ * not make either leg agree with vitest's own worker-completion order across
+ * two separate runs, but it is the smaller fix that at least makes the two
+ * legs of THIS run agree with each other.
  */
 function identityFromReport(report, cwd) {
   if (!isRecord(report) || !Array.isArray(report.testResults)) return null;
+  let found = null;
   for (const file of report.testResults) {
     if (!isRecord(file) || !Array.isArray(file.assertionResults)) continue;
     const name = typeof file.name === 'string' ? file.name : '';
@@ -1841,10 +1860,10 @@ function identityFromReport(report, cwd) {
       const ancestors = Array.isArray(a.ancestorTitles)
         ? a.ancestorTitles.filter((t) => typeof t === 'string')
         : [];
-      return { file: relTestFile(cwd, name), suite: ancestors.join(' > '), test: title };
+      found = { file: relTestFile(cwd, name), suite: ancestors.join(' > '), test: title };
     }
   }
-  return null;
+  return found;
 }
 
 /**
@@ -1938,6 +1957,36 @@ function identityFromConsole(text) {
 function testIdentityOf(text, cwd, nowMs) {
   const fromArtifact = testIdentityFromArtifact(cwd, nowMs);
   return fromArtifact !== null ? fromArtifact : identityFromConsole(text);
+}
+
+/** Test-runner binaries this lane recognizes directly, wherever they land as
+ *  either the HEAD (\`vitest\`, and \`npx vitest\`/\`pnpm exec vitest\` once
+ *  \`commandHeads\` has stepped past the runner) or the SUB (\`pnpm vitest run\`,
+ *  the package-manager-script spelling this repo's own tests use). */
+const TEST_RUNNER_NAMES = new Set(['vitest', 'jest', 'mocha', 'pytest', 'unittest', 'tox', 'nox']);
+
+/**
+ * Whether \`command\` actually ran a test, not merely an allowlisted build/test
+ * head (tenjin-agent#278, major 1). \`testIdentityOf\` used to run behind ANY
+ * allowlisted failure regardless of what the command was: a failing
+ * \`pnpm build\` with a two-minute-old \`.vitest-report.json\` left over from the
+ * test run before it opened a \`sig_v1_test\` row keyed on that unrelated
+ * test — closeable by an edit to a file the build failure never named, and
+ * later published under that test's fingerprint as the build error's fix. The
+ * freshness check in \`testIdentityFromArtifact\` cannot catch this: the report
+ * really is fresh, just about a different command.
+ *
+ * THE SUB, not just the head: \`pnpm vitest run\` and \`pnpm build\` are both
+ * \`pnpm\` at the head, so the runner's own name or the package-manager's
+ * \`test\`/\`test:*\` script convention has to be read off the word after it.
+ */
+function looksLikeTestRun(command) {
+  for (const { head, sub } of commandHeads(command)) {
+    if (TEST_RUNNER_NAMES.has(head) || TEST_RUNNER_NAMES.has(sub)) return true;
+    if (RUNTIME_HEADS.has(head) && RUNTIME_TEST_SUBS.has(sub)) return true;
+    if (PM_HEADS.has(head) && (sub === 'test' || sub.startsWith('test:'))) return true;
+  }
+  return false;
 }
 
 /**
@@ -2626,7 +2675,12 @@ async function main() {
   // no hook payload this arm reads carries the command's own start, and the
   // hook fires within milliseconds of the command's exit, so "now" is the
   // tight upper bound the freshness check (\`testIdentityFromArtifact\`) needs.
-  const testId = testIdentityOf(text, cwd, Date.now());
+  //
+  // GATED ON \`looksLikeTestRun\`, not just on the head being allowlisted
+  // (tenjin-agent#278, major 1): without it, a failing \`pnpm build\` with a
+  // stale-but-fresh \`.vitest-report.json\` sitting in the checkout from the
+  // test run before it opened a row for a test this build failure never ran.
+  const testId = looksLikeTestRun(command) ? testIdentityOf(text, cwd, Date.now()) : null;
   const testSig = testId === null ? null : sigV1Test(testId);
   // The failure row carries the signature's fine key as \`error_hash\` (the
   // column has existed since #219 and was never written) and the SCRUBBED
