@@ -1724,8 +1724,9 @@ function filesInError(text) {
  * directly inside a home dotfile — \`~/.dotfiles\`, \`~/.config/nvim\`, a worktree
  * under \`~/.cache\` — and this rule ignores an edit there too; the trade is
  * accepted because the cost lands on the side this close rule already treats
- * as cheap (04, "Close rule"): the pairing stays open rather than closing on
- * an edit that was never a fix.
+ * as cheap (04, "Close rule"): a pairing whose fix genuinely lived under a
+ * home dotfile stays open instead of closing, same as any other false
+ * negative here.
  */
 // isHomeDotDirPath:begin
 function isHomeDotDirPath(path) {
@@ -1733,18 +1734,23 @@ function isHomeDotDirPath(path) {
   if (typeof home !== 'string' || home.length === 0) return false;
   const root = home.replace(/[/\\]+$/, '');
   if (root.length === 0) return false;
-  // CASE-INSENSITIVE ON WIN32 ONLY. NTFS is case-preserving, not
-  // case-sensitive, so an edit path can differ in casing from what
-  // \`os.homedir()\` returns and still name the same directory; a bare
-  // \`startsWith\` would then miss it and let a home-dotfile edit through as
-  // tracked. Every other platform keeps the exact-case compare.
-  const candidate = String(path);
-  const hasRoot =
-    process.platform === 'win32'
-      ? candidate.slice(0, root.length).toLowerCase() === root.toLowerCase()
-      : candidate.startsWith(root);
+  // CASE-INSENSITIVE ON WIN32 AND DARWIN. NTFS is case-preserving, not
+  // case-sensitive, and a default APFS (or HFS+) volume is the same way, so
+  // an edit path can differ in casing from what \`os.homedir()\` returns and
+  // still name the same directory on either platform; a bare \`startsWith\`
+  // would then miss it and let a home-dotfile edit through as tracked.
+  // Linux keeps the exact-case compare. Separators are normalized to \`/\`
+  // in the same expression, so a forward-slash path — routine on Windows,
+  // and what most tooling there emits — classifies the same as a
+  // backslash one instead of slipping past the root compare unmatched.
+  const candidate = String(path).replace(/\\/g, '/');
+  const normalizedRoot = root.replace(/\\/g, '/');
+  const foldCase = process.platform === 'win32' || process.platform === 'darwin';
+  const hasRoot = foldCase
+    ? candidate.slice(0, normalizedRoot.length).toLowerCase() === normalizedRoot.toLowerCase()
+    : candidate.startsWith(normalizedRoot);
   if (!hasRoot) return false;
-  return /^[/\\]\.[^/\\]+(?:[/\\]|$)/.test(candidate.slice(root.length));
+  return /^\/\.[^/]+(?:\/|$)/.test(candidate.slice(normalizedRoot.length));
 }
 // isHomeDotDirPath:end
 

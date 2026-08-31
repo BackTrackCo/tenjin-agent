@@ -3026,18 +3026,21 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
   });
 
   /**
-   * WIN32 CASING (review on #268's PR: A1igator/greptile). `homedir()` on
-   * Windows can come back with different casing than the path a tool call
-   * names for the very same directory, and NTFS treats the two as identical.
-   * `isHomeDotDirPath`'s prefix check is exact-case everywhere except win32,
-   * where it lowercases both sides before comparing — this drives that branch
-   * directly, since spawning the real hook (as the other #268 tests do) only
-   * ever runs it on whatever platform CI is, never on win32.
+   * WIN32/DARWIN CASING + SEPARATORS (review on #268's PR: A1igator/greptile,
+   * round 1 and round 2). `homedir()` on Windows can come back with different
+   * casing than the path a tool call names for the very same directory, and
+   * NTFS treats the two as identical; a default APFS (or HFS+) volume on
+   * macOS is the same way. `isHomeDotDirPath`'s prefix check folds case on
+   * both of those platforms and normalizes `\` to `/` before comparing, so a
+   * forward-slash Windows path classifies the same as a backslash one. Linux
+   * keeps the exact-case compare. This drives all three branches directly,
+   * since spawning the real hook (as the other #268 tests do) only ever runs
+   * it on whatever platform CI is, never on win32 or darwin.
    *
    * EXTRACTED BY SENTINEL, not brace-counted (as `repoSlugSource` already does
    * for the same reason: round-1 nit 4 of #256).
    */
-  it('matches a home dotfile path on win32 even when its casing differs from homedir()', () => {
+  it('folds case and separators for a home dotfile path on win32 and darwin, but not linux', () => {
     const source = pushFailureHookScript(dataDir);
     const start = source.indexOf('// isHomeDotDirPath:begin');
     const end = source.indexOf('// isHomeDotDirPath:end');
@@ -3055,10 +3058,21 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
       expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(true);
       expect(generated('C:\\Users\\Ali\\.claude\\memory\\x.md')).toBe(true);
       expect(generated('C:\\Users\\Alison\\.claude\\x')).toBe(false);
+      // FORWARD-SLASH ON WIN32 (round 2, new minor 2): routine on Windows and
+      // what most tooling there emits — must classify the same as backslash.
+      expect(generated('C:/Users/Ali/.claude/x')).toBe(true);
+      expect(generated('c:/users/ali/.claude/x')).toBe(true);
 
-      // NON-WIN32 STAYS EXACT-CASE: this is the regression check for the fix
-      // above — it must not turn every platform case-insensitive.
+      // DARWIN NOW FOLDS TOO (round 2, new minor 1): a default APFS/HFS+
+      // volume is case-insensitive the same way NTFS is, so this can no
+      // longer stay exact-case the way it did before round 2.
       Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(true);
+      expect(generated('C:\\Users\\Alison\\.claude\\x')).toBe(false);
+
+      // LINUX STAYS EXACT-CASE: this is the regression check for both fixes
+      // above — they must not turn every platform case-insensitive.
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
       expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(false);
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
