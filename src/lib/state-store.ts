@@ -2605,6 +2605,11 @@ function searchRow(row) {
  * Open a pairing on an allowlisted failure. Mechanical, no model: the key is the
  * failure's signature and the row is what a later success closes. Returns the
  * new row's id, or null when the store refused the write.
+ *
+ * \`row.kind\` defaults to \`'sig_v1'\`: every caller before tenjin-agent#267 opened
+ * that one lane, so an omitted field reproduces exactly what they always wrote.
+ * The failure arm's \`sig_v1_test\` lane (file+suite+test identity, keyed
+ * alongside sig_v1 rather than instead of it) is the first caller to pass one.
  */
 function openPairing(row) {
   const result = storeRun(STORE_SQL.insertPairing, [
@@ -2613,7 +2618,7 @@ function openPairing(row) {
     storeSession(row.session),
     projectId(row.cwd),
     machineId(),
-    'sig_v1',
+    typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v1',
     String(row.key),
     typeof row.coarseKey === 'string' ? row.coarseKey : null,
     typeof row.cmdHead === 'string' ? row.cmdHead : null,

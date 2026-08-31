@@ -1702,6 +1702,284 @@ function sigV1(line, text) {
   };
 }
 
+// ---- sig_v1_test: test-identity keys (tenjin-agent#267) ----
+//
+// sig_v1's coarse key needs an errno, and a vitest assertion failure almost
+// never has one — \`errnoOf\` sees "AssertionError: expected 1 to be 2" and finds
+// nothing to grab, so \`coarseKey\` is null for the dominant failure class (0 of
+// 46 test-shaped shelf keys were \`sig_v1c\`, tenjin-agent#267) and a cross-machine
+// match needs the two machines' assertion text to be byte-identical, which two
+// runs of the same test essentially never are (different expected/actual
+// values, different line numbers, a different package version in the trace).
+//
+// The fix is not a coarser sig_v1. A \`command_head + top-frame\` coarse key was
+// considered and rejected: WER and ReBucket both document that exact shape as
+// an over-grouping trap on a busy test file, where every failing test in it
+// shares one frame and one head. Nor is a fuzzy match-time search: the team
+// shelf already tried it (04/06) and killed it on real data. What is left is a
+// SEPARATE lane keyed on what the test runner itself already names — the file,
+// the suite (its \`describe\` chain), and the test — because two runs of the
+// SAME test are the same key whatever the assertion text says, and that
+// survives exactly the variation sig_v1's message hash cannot.
+//
+// ADDITIVE, not a replacement. \`sig\` (sig_v1) above is untouched: still
+// computed first, still tried first, locally and on the wire. \`sig_v1_test\`
+// only ever adds a SECOND local pairing row (its own \`kind\`) and a second pair
+// of wire keys, when a test identity is found beside it — a repo that never
+// has one runs exactly the code it ran before this issue.
+
+/** The default path the README's opt-in reporter snippet writes to, relative
+ *  to the failing command's cwd: \`reporters: ['default', ['json', {
+ *  outputFile: '.vitest-report.json' }]]\`. */
+const TEST_ARTIFACT_DEFAULT_PATH = '.vitest-report.json';
+
+/**
+ * How stale a report file may be and still count as evidence about THIS
+ * failure. The hook fires within milliseconds of the command's own exit, so a
+ * report older than this is a leftover from an earlier run in the same
+ * checkout — using it would pin today's failure to yesterday's identity, or
+ * worse, to a run that PASSED (a report vitest overwrote is gone; one from a
+ * run that crashed before writing it is simply absent — this bound is about
+ * the ordinary case, an artifact from two commands ago that nothing removed).
+ * Two minutes is generous next to "milliseconds" on purpose: a slow CI
+ * runner's clock and the hook's are not perfectly synced, and rejecting a
+ * genuinely fresh report is the worse of the two mistakes (04's rule for the
+ * whole lane: no identity beats a wrong one, but a real one should not be
+ * thrown away over a few seconds of skew).
+ */
+const TEST_ARTIFACT_MAX_AGE_MS = 2 * 60 * 1000;
+
+/** A vitest/vite config file this arm may read as TEXT — never imported, never
+ *  executed, never \`require\`d: a hook must not run a repo's own build config.
+ *  Checked in this order so a project-specific \`vitest.config.*\` wins over a
+ *  shared \`vite.config.*\` when a repo has both. */
+const TEST_CONFIG_FILES = [
+  'vitest.config.ts',
+  'vitest.config.mts',
+  'vitest.config.cts',
+  'vitest.config.js',
+  'vitest.config.mjs',
+  'vitest.config.cjs',
+  'vite.config.ts',
+  'vite.config.mts',
+  'vite.config.js',
+  'vite.config.mjs',
+];
+
+/** A \`['json', { outputFile: '...' }]\` reporter entry, read off a config's raw
+ *  TEXT rather than its evaluated shape. Conservative on purpose: a config
+ *  this cannot see into (a computed path, a spread, a helper function) means
+ *  "nothing configured", never a guess, and the arm falls back to the
+ *  documented default path — the one a repo that used the README's snippet
+ *  verbatim actually wrote. */
+const TEST_OUTPUT_FILE_RE =
+  /reporters\s*:[\s\S]{0,600}?['"]json['"][\s\S]{0,300}?outputFile\s*:\s*['"]([^'"]+)['"]/;
+
+/** The \`outputFile\` a repo's own vitest/vite config names for its \`json\`
+ *  reporter, or null when there is no config, no \`json\` reporter in it, or the
+ *  regex cannot see the path. A repo WITH a recognized config but no match
+ *  stops here rather than trying the next file in the list — a project that
+ *  has decided is not a reason to guess from a sibling config. */
+function configuredTestReportPath(cwd) {
+  for (const name of TEST_CONFIG_FILES) {
+    let text;
+    try {
+      text = readFileSync(join(cwd, name), 'utf8');
+    } catch {
+      continue;
+    }
+    const m = TEST_OUTPUT_FILE_RE.exec(text);
+    return m !== null && typeof m[1] === 'string' && m[1].length > 0 ? m[1] : null;
+  }
+  return null;
+}
+
+function isAbsoluteTestPath(path) {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path);
+}
+
+/** The artifact paths worth checking for \`cwd\`, most specific first: whatever
+ *  the repo's own config names, then the documented default — deduplicated so
+ *  a repo that configured the default explicitly is checked once. */
+function testReportCandidates(cwd) {
+  const configured = configuredTestReportPath(cwd);
+  const out = [];
+  if (typeof configured === 'string' && configured.length > 0) out.push(configured);
+  if (!out.includes(TEST_ARTIFACT_DEFAULT_PATH)) out.push(TEST_ARTIFACT_DEFAULT_PATH);
+  return out;
+}
+
+/** An absolute path AS THE REPO NAMES IT: relative to \`cwd\`, forward-slashed,
+ *  so the same test file hashes the same across a Windows and a POSIX
+ *  checkout, and across two clones sitting at different absolute paths. Falls
+ *  back to the basename when \`path\` is not under \`cwd\` at all (a monorepo test
+ *  run from a parent directory) — still stable across machines, just coarser. */
+function relTestFile(cwd, path) {
+  if (typeof cwd === 'string' && cwd.length > 0 && path.startsWith(cwd)) {
+    const rest = path.slice(cwd.length).replace(/^[/\\]+/, '');
+    if (rest.length > 0) return rest.split(/[/\\]/).join('/');
+  }
+  return path.split(/[/\\]/).pop() || path;
+}
+
+/**
+ * The first FAILED assertion in a vitest/Jest-shaped JSON report, or null.
+ * \`testResults[].assertionResults[]\` is the shape vitest's own \`json\` reporter
+ * writes (Jest-compatible); \`ancestorTitles\` is every enclosing \`describe\`,
+ * already outer-to-inner, so joining it IS the suite path.
+ */
+function identityFromReport(report, cwd) {
+  if (!isRecord(report) || !Array.isArray(report.testResults)) return null;
+  for (const file of report.testResults) {
+    if (!isRecord(file) || !Array.isArray(file.assertionResults)) continue;
+    const name = typeof file.name === 'string' ? file.name : '';
+    if (name.length === 0) continue;
+    for (const a of file.assertionResults) {
+      if (!isRecord(a) || a.status !== 'failed') continue;
+      const title = typeof a.title === 'string' ? a.title : '';
+      if (title.length === 0) continue;
+      const ancestors = Array.isArray(a.ancestorTitles)
+        ? a.ancestorTitles.filter((t) => typeof t === 'string')
+        : [];
+      return { file: relTestFile(cwd, name), suite: ancestors.join(' > '), test: title };
+    }
+  }
+  return null;
+}
+
+/**
+ * The artifact leg (04's preference order, "structured artifact" first): read,
+ * freshness-check, parse, extract — each step failing closed to \`null\` rather
+ * than throwing, because a torn write (the hook can fire while vitest is still
+ * flushing the file) is exactly as uninformative as no file at all.
+ *
+ * NO USABLE cwd, NO ARTIFACT LEG: \`cwdOf\` returns \`null\` for a payload with no
+ * (or an oversized) \`cwd\` field — the common shape for a failure this arm has
+ * always handled — and \`join(null, name)\` throws rather than failing closed.
+ * An uncaught throw here is caught only by \`main().catch(quiet)\`, which exits
+ * with NOTHING written: no event row, no pairing, for a failure that has
+ * nothing to do with this lane at all. Console parsing needs no path, so it is
+ * unaffected.
+ */
+function testIdentityFromArtifact(cwd, nowMs) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return null;
+  for (const rel of testReportCandidates(cwd)) {
+    const path = isAbsoluteTestPath(rel) ? rel : join(cwd, rel);
+    let stat;
+    try {
+      stat = statSync(path);
+    } catch {
+      continue;
+    }
+    // STALE MTIME REJECTED, not just a missing file: a report left over from an
+    // earlier run in this checkout is evidence about THAT run, and using it
+    // would key this failure under a file (or a PASS) the earlier run happened
+    // to produce.
+    if (nowMs - stat.mtimeMs > TEST_ARTIFACT_MAX_AGE_MS) continue;
+    const raw = readJsonFile(path);
+    const identity = identityFromReport(raw, cwd);
+    if (identity !== null) return identity;
+  }
+  return null;
+}
+
+/**
+ * vitest's own failure-recap header, matched conservatively: one or two
+ * leading spaces, \`FAIL\`, the file, then a LITERAL \`>\` opening \` > \`-joined
+ * ancestor titles ending in the test name — e.g.
+ * \` FAIL  src/a.test.ts > formatDate > handles null\`.
+ *
+ * THE \`>\` IS REQUIRED, not optional text after the file. \`state-store.test.ts\`
+ * pins a real trap this floor already learned once (sig_v1's own
+ * \`SIG_ERRNO_RE\`, "a whitelist, not a shape"): a bare \`FAIL  some suite\` —
+ * deliberately shaped like a test-runner verdict with nothing specific in it
+ * at all — matched an earlier, looser version of this pattern (a run of
+ * non-space text after \`FAIL\` and its file, whatever the text) and opened a
+ * pairing keyed on words with no \`>\` breadcrumb behind them. Requiring the
+ * separator itself is what tells "vitest's own identity syntax" from
+ * "any line that happens to start with FAIL"; a line this does not match
+ * yields no identity rather than a guessed one, the same rule \`SIG_FRAME_RE\`
+ * follows for a stack frame.
+ */
+const TEST_FAIL_HEADER_RE = /^ {0,2}FAIL {1,4}(\S+) {0,4}>\s*(.+)$/;
+
+/**
+ * The console fallback (04's second preference, for a repo with no reporter
+ * configured): scan for \`FAIL  file > suite > test\` lines and take the LAST
+ * one — the same recency rule \`errorLine\` uses, because the tail of the output
+ * is where the specific failure lives, pages of an earlier one further back.
+ */
+function identityFromConsole(text) {
+  const lines = String(text).split('\n');
+  for (let i = lines.length - 1; i >= 0 && i >= lines.length - 400; i -= 1) {
+    const m = TEST_FAIL_HEADER_RE.exec(lines[i]);
+    if (m === null) continue;
+    const file = m[1];
+    // \`.trim()\` for CRLF output: \`(.+)\` stops at \`\\n\` (lines are already
+    // split on it) but happily captures a trailing \`\\r\`.
+    const rest = typeof m[2] === 'string' ? m[2].trim() : '';
+    if (typeof file !== 'string' || file.length === 0 || rest.length === 0) continue;
+    const parts = rest.split(/\s*>\s*/).filter((p) => p.length > 0);
+    if (parts.length === 0) continue;
+    const test = parts[parts.length - 1];
+    const suite = parts.slice(0, -1).join(' > ');
+    if (typeof test !== 'string' || test.length === 0) continue;
+    return { file: file.split(/[/\\]/).join('/'), suite, test };
+  }
+  return null;
+}
+
+/**
+ * The failure's test identity, artifact first (04, "Identity source,
+ * preference order"). A repo with neither yields \`null\` — never a guessed
+ * one: this whole lane exists because a guess (the sig_v1c that used to key on
+ * the bare word ERROR) is worse than silence.
+ */
+function testIdentityOf(text, cwd, nowMs) {
+  const fromArtifact = testIdentityFromArtifact(cwd, nowMs);
+  return fromArtifact !== null ? fromArtifact : identityFromConsole(text);
+}
+
+/**
+ * The test-identity key pair: fine = file+suite+test, coarse = file+suite.
+ * UNSALTED, like sig_v1's own local keys — a local lookup is already
+ * project-scoped (\`findPairing\`'s \`project\` predicate), and the salt is a
+ * TEAM-SHELF concern applied at the wire boundary (\`saltedCoarse\`, mirroring
+ * \`teamCoarseKey\`), never to the row this machine keeps for itself.
+ *
+ * COARSE IS NEVER NULL, unlike sig_v1's — \`file\` and \`suite\` come from the test
+ * runner's own identity, not from scanning error text for an errno, so there
+ * is nothing here that can be "below the floor" the way a bare "2 failed"
+ * summary line is for sig_v1.
+ */
+function sigV1Test(identity) {
+  const base = identity.file + '|' + identity.suite;
+  return {
+    key: shortHash('sig_v1_test|' + base + '|' + identity.test),
+    coarseKey: shortHash('sig_v1_test_c|' + base),
+    file: identity.file,
+    suite: identity.suite,
+    test: identity.test,
+  };
+}
+
+/** The pointer body a COARSE test-key match earns (06, "Injection tiering"): a
+ *  local match on file+suite alone says "this test file has been fixed
+ *  before", not "this exact test" — a claim too weak for the fix body a FINE
+ *  match (\`pairingText\`) gets, so it is one line naming where to look and
+ *  nothing else: no files, no command, no staleness note. */
+function testPointerText(pairing) {
+  const where = pairing.errorFiles.length > 0 ? pairing.errorFiles[0] : 'this file';
+  return clean(
+    PAIRING_OPENER +
+      '\n' +
+      'A similar failure in ' +
+      where +
+      " has been fixed here before; run \`tenjin push status\` for details.",
+    PAIRING_BODY_MAX,
+  );
+}
+
 /** File basenames the error itself named — what the close rule checks a change
  *  against. Frames, tsc/rustc locations, and Python tracebacks. */
 function filesInError(text) {
@@ -1890,9 +2168,16 @@ const TEAM_RESOLVE_LIMIT = 3;
  * remote returns before this is called. Null exactly when the local coarse key
  * is: no errno, nothing coarse to send.
  */
+/** The salting formula itself, over a raw (unsalted) coarse hash — pulled out
+ *  of \`teamCoarseKey\` so the \`sig_v1_test\` lane can reuse the exact same
+ *  formula on its own coarse hash without reshaping itself into a \`sig\`-like
+ *  object first. */
+function saltedCoarse(coarseKey, repo) {
+  return shortHash(coarseKey + '|' + repo);
+}
+
 function teamCoarseKey(sig, repo) {
-  if (sig.coarseKey === null) return null;
-  return shortHash(sig.coarseKey + '|' + repo);
+  return sig.coarseKey === null ? null : saltedCoarse(sig.coarseKey, repo);
 }
 
 /** What an injected pairing says. Verified reads as a fix; unverified reads as
@@ -2048,12 +2333,33 @@ function replayedPairings(sessionId, agentId, head) {
   return stored.filter((id) => typeof id === 'number').slice(-REPLAYED_PER_HEAD_MAX);
 }
 
+/** The one-line pointer a COARSE test-key hit earns on the team leg — the
+ *  wire-tier analogue of \`testPointerText\` above, worded to name what actually
+ *  happened: a TEAMMATE's machine, this file/suite, no claim about the exact
+ *  test. Never fetched, never the free-body full form. */
+const TEAM_TEST_COARSE_LINE =
+  "A teammate hit a similar failure in this file/suite; run \`tenjin push status\` for details.";
+
 /**
  * The team leg (04, "Retrieval order", last step): ask the TEAM SHELF, and only
  * it, whether a teammate's machine has paired this failure — by fingerprint,
- * through \`POST /api/keys/resolve\`, with exactly the two hashes on the wire.
+ * through \`POST /api/keys/resolve\`, with exactly the wire keys built below.
  * The error text, the command, the packages: none of it is sent, and nothing
  * is sent to the public shelf, which refuses keys and holds no pairings.
+ *
+ * \`args.testSig\`, when present (tenjin-agent#267), rides beside \`sig\` rather
+ * than replacing it: its FINE key joins \`sig\`'s own keys in the FIRST request
+ * (a hit there is a specific-enough match, whichever of the three fired, for
+ * the existing full-treatment form); its COARSE key is asked in a SECOND
+ * request, made ONLY when the first came back a genuine miss. That split is
+ * not an accident of the requests being cheap — the shelf's own OR "ranks by
+ * kind, without saying which key matched" (06, "What the live system says"),
+ * so a coarse key mixed into the fine request would make an eventual hit's
+ * tier unrecoverable: this machine could no longer tell "the exact test" from
+ * "the same file", and 06's injection tiering (a coarse hit is a pointer,
+ * never the fix body) needs exactly that distinction. \`sig\`'s OWN coarse key
+ * stays in the first request, unmoved and untiered — it is already rare (an
+ * errno-bearing test failure) and this issue does not touch it.
  *
  * Returns \`{ text, top }\` to emit, or null. Every outcome is a decision row
  * against \`eventUid\`, on the failure arm's own lookup bucket:
@@ -2079,7 +2385,7 @@ function replayedPairings(sessionId, agentId, head) {
  *                    them.
  */
 async function teamResolve(args) {
-  const { sig, cwd, config, sessionId, eventUid, origin } = args;
+  const { sig, testSig, cwd, config, sessionId, eventUid, origin } = args;
   const base = {
     session: sessionId,
     cwd,
@@ -2115,71 +2421,97 @@ async function teamResolve(args) {
     recordDecision({ ...base, action: 'skipped', reason: 'quiet' });
     return null;
   }
-  // TWO KEYS, BOTH FINGERPRINTS, and never \`command_head\`: resolve ORs its
-  // keys and ranks fingerprint over head without saying which one matched, so
-  // a head key would return the newest post keyed \`pnpm\` for every failure
-  // behind \`pnpm\` and the row could not tell it from a real hit.
-  const keys = [{ kind: 'fingerprint', key: 'sig_v1:' + sig.key }];
-  const coarse = teamCoarseKey(sig, repo);
-  if (coarse !== null) keys.push({ kind: 'fingerprint', key: 'sig_v1c:' + coarse });
-  const found = await askTenjinKeys(keys, config, {
-    shelfBaseUrl: origin,
-    timeoutMs: SEARCH_TIMEOUT_MS,
-    trigger: 'failure',
-    limit: TEAM_RESOLVE_LIMIT,
-  });
-  if (found.kind === 'off') {
-    setStateUntil(MACHINE_SESSION, offKey, Date.now() + KEYS_OFF_TTL_MS);
-    recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
-    return null;
-  }
-  if (found.kind === 'no-answer') {
-    recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
-    return null;
-  }
-  if (found.kind === 'miss') {
-    recordDecision({ ...base, searchId: found.searchId, action: 'skipped', reason: 'miss' });
-    return null;
-  }
-  const top = found.rich[0];
-  const row = {
-    ...base,
-    searchId: found.searchId,
-    candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
-    strength: 'strong',
-    confidence: top.confidence,
-    corroborated: top.corroborated,
-  };
-  // Same once-per-session set as every other arm: the post id is the key, so a
-  // team pairing this session was already handed cannot come back.
-  if (alreadyShown(sessionId, top.resourceId)) {
-    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
-    return null;
-  }
-  let form = 'short';
-  let text = shortForm(top, TEAM_PAIRING_OPENER);
-  if (isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
-    const body = await fetchFreeBody(top, config);
-    if (body !== null) {
-      form = 'full';
-      // A synced pairing's body is a record — the failing head, the fix, the
-      // files — and it gets the same room a local replay does, not a piece's.
-      text = fullForm(TEAM_PAIRING_OPENER, headerLine(top), clean(body, PAIRING_BODY_MAX), false);
+
+  /** One resolve request against \`keys\`, sharing every decision-row shape the
+   *  original single-request version always used. \`pointerOnly\` forces the
+   *  one-line coarse wording and skips the free-body fetch entirely, whatever
+   *  the candidate's own price or form would otherwise earn. Returns
+   *  \`{ hit, miss }\`: \`miss\` is true ONLY for a genuine 200-with-nothing-matched
+   *  answer — the one outcome worth spending a second request on. */
+  async function resolveRound(keys, pointerOnly) {
+    const found = await askTenjinKeys(keys, config, {
+      shelfBaseUrl: origin,
+      timeoutMs: SEARCH_TIMEOUT_MS,
+      trigger: 'failure',
+      limit: TEAM_RESOLVE_LIMIT,
+    });
+    if (found.kind === 'off') {
+      setStateUntil(MACHINE_SESSION, offKey, Date.now() + KEYS_OFF_TTL_MS);
+      recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
+      return { hit: null, miss: false };
     }
+    if (found.kind === 'no-answer') {
+      recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
+      return { hit: null, miss: false };
+    }
+    if (found.kind === 'miss') {
+      recordDecision({ ...base, searchId: found.searchId, action: 'skipped', reason: 'miss' });
+      return { hit: null, miss: true };
+    }
+    const top = found.rich[0];
+    const row = {
+      ...base,
+      searchId: found.searchId,
+      candidate: { resourceId: top.resourceId, title: top.title, price: top.price, url: top.url },
+      strength: 'strong',
+      confidence: top.confidence,
+      corroborated: top.corroborated,
+    };
+    // Same once-per-session set as every other arm: the post id is the key, so
+    // a team pairing this session was already handed cannot come back.
+    if (alreadyShown(sessionId, top.resourceId)) {
+      recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+      return { hit: null, miss: false };
+    }
+    let form = 'short';
+    let text = pointerOnly
+      ? clean(TEAM_PAIRING_OPENER + '\n' + TEAM_TEST_COARSE_LINE, PAIRING_BODY_MAX)
+      : shortForm(top, TEAM_PAIRING_OPENER);
+    if (!pointerOnly && isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
+      const body = await fetchFreeBody(top, config);
+      if (body !== null) {
+        form = 'full';
+        // A synced pairing's body is a record — the failing head, the fix, the
+        // files — and it gets the same room a local replay does, not a piece's.
+        text = fullForm(TEAM_PAIRING_OPENER, headerLine(top), clean(body, PAIRING_BODY_MAX), false);
+      }
+    }
+    const claimed = recordDecision({
+      ...row,
+      action: 'injected',
+      reason: 'key-match',
+      form,
+      deny: false,
+      tokens: Math.ceil(text.length / 4),
+    });
+    if (!mayShow(claimed)) {
+      recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
+      return { hit: null, miss: false };
+    }
+    return { hit: { text, top }, miss: false };
   }
-  const claimed = recordDecision({
-    ...row,
-    action: 'injected',
-    reason: 'key-match',
-    form,
-    deny: false,
-    tokens: Math.ceil(text.length / 4),
-  });
-  if (!mayShow(claimed)) {
-    recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
-    return null;
-  }
-  return { text, top };
+
+  // ROUND 1: fine, unchanged in shape from before #267 when there is no test
+  // identity — sig's own fine key, then sig's own coarse key (rare), then the
+  // test lane's FINE key if this failure has one.
+  const fineKeys = [{ kind: 'fingerprint', key: 'sig_v1:' + sig.key }];
+  const sigCoarse = teamCoarseKey(sig, repo);
+  if (sigCoarse !== null) fineKeys.push({ kind: 'fingerprint', key: 'sig_v1c:' + sigCoarse });
+  if (testSig !== null) fineKeys.push({ kind: 'fingerprint', key: 'sig_v1_test:' + testSig.key });
+  const first = await resolveRound(fineKeys, false);
+  if (!first.miss) return first.hit;
+  // A repo with no test identity has nothing left to try: this is exactly the
+  // original one-request behavior.
+  if (testSig === null) return null;
+
+  // ROUND 2: the test lane's COARSE key alone — the only key on this request,
+  // so a hit here is unambiguously "same file/suite", never "same test".
+  const testCoarse = saltedCoarse(testSig.coarseKey, repo);
+  const second = await resolveRound(
+    [{ kind: 'fingerprint', key: 'sig_v1_test_c:' + testCoarse }],
+    true,
+  );
+  return second.hit;
 }
 
 async function main() {
@@ -2287,17 +2619,29 @@ async function main() {
   const scrubbed = scrub(line);
   const sig = sigV1(line, text);
   const errorFiles = filesInError(text);
+  // The test-identity lane (tenjin-agent#267): tried whatever \`sig\` came back
+  // with, because it answers a DIFFERENT question — "was this exact TEST seen
+  // before", not "was this exact MESSAGE seen before" — and the two can
+  // disagree in either direction. \`Date.now()\` here, not a stored start time:
+  // no hook payload this arm reads carries the command's own start, and the
+  // hook fires within milliseconds of the command's exit, so "now" is the
+  // tight upper bound the freshness check (\`testIdentityFromArtifact\`) needs.
+  const testId = testIdentityOf(text, cwd, Date.now());
+  const testSig = testId === null ? null : sigV1Test(testId);
   // The failure row carries the signature's fine key as \`error_hash\` (the
   // column has existed since #219 and was never written) and the SCRUBBED
   // error line: the same string the pairing stores, and the only place the
   // error text is kept at all now that it no longer goes on the wire.
+  // \`sig\`'s key wins when both exist — it is the one shape every reader before
+  // #267 expects on this column — and the test lane's key stands in only when
+  // there is nothing else at all (below sig_v1's own specificity floor).
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
     hook: 'failure',
     tool: 'Bash',
-    errorHash: sig === null ? undefined : sig.key,
-    files: errorFiles,
+    errorHash: sig !== null ? sig.key : testSig !== null ? testSig.key : undefined,
+    files: testSig === null ? errorFiles : [...new Set([...errorFiles, testSig.file])],
     agentId,
     data: {
       event,
@@ -2310,6 +2654,82 @@ async function main() {
   // then the team shelf by fingerprint). A pairing this machine closed itself
   // is the cheapest and most specific answer there is, and it costs no request.
   const head = heads.length > 0 ? heads[heads.length - 1] : null;
+
+  /**
+   * The sig_v1_test local lane, on its own \`kind\` and its own row (never
+   * \`sig\`'s): match, or open. Returns \`{ emitted }\` with a body to show (the
+   * caller must \`emit\` it and stop) when it found something; otherwise
+   * \`{ pairingId }\` — the row just opened, so the team leg's "open a pairing on
+   * a hit too" bookkeeping has one to link even when \`sig\`'s own lane found
+   * nothing to open (no errno, no frame, no local match at all).
+   */
+  function tryTestLane() {
+    const match = findPairing(cwd, testSig.key, testSig.coarseKey);
+    if (match !== null && !alreadyShown(sessionId, 'pairing:' + match.id)) {
+      // TIER, BY COMPARING KEYS, NOT BY A SEPARATE COLUMN: \`findPairing\` ORs
+      // \`key\` and \`coarse_key\`, so a row it returns matched one or the other,
+      // and the returned \`key\` is only ever a row's OWN fine key — a coarse hit
+      // is exactly the case where it differs from what was asked for (06,
+      // "Injection tiering").
+      const isFine = match.key === testSig.key;
+      const body = isFine ? pairingText(match, stalenessNote(match, cwd)) : testPointerText(match);
+      rememberReplay(sessionId, agentId, head === null ? '' : head, match.id);
+      const claimed = recordInjection({
+        session: sessionId,
+        agentId,
+        cwd,
+        eventUid,
+        hook: 'failure',
+        shelf: 'local',
+        candidate: { id: 'pairing:' + match.id, title: match.errorLine, price: '0' },
+        strength: isFine ? (match.status === 'verified' ? 'strong' : 'unverified') : 'weak',
+        action: 'injected',
+        form: 'short',
+        tokens: Math.ceil(body.length / 4),
+      });
+      if (mayShow(claimed)) return { emitted: body, pairingId: match.id };
+      recordInjection({
+        session: sessionId,
+        agentId,
+        cwd,
+        eventUid,
+        hook: 'failure',
+        shelf: 'local',
+        candidate: { id: 'pairing:' + match.id, title: match.errorLine, price: '0' },
+        action: 'skipped',
+        reason: 'already-injected',
+      });
+      return { emitted: null, pairingId: null };
+    }
+    // ALWAYS OPENED, no \`errorFiles.length > 0\` gate: unlike sig_v1's row, this
+    // one's \`error_files\` is the test file the identity itself named, which is
+    // never empty and never \`<string>\`/\`<stdin>\` — the shape the gate on
+    // sig_v1's own \`open()\` exists to keep out.
+    //
+    // THE BASENAME, not \`testSig.file\` (which keeps its directory, for the
+    // KEY's sake — two \`utils.test.ts\` files in different packages must not
+    // collide). \`editedSince\` — the close rule's only source of "what changed"
+    // — returns basenames, and \`closeOpenPairings\` compares them against
+    // \`error_files\` with a plain \`.includes\`: a row storing the directory-
+    // qualified path here would never be closeable, silently, the one shape
+    // sig_v1's own rows never take because \`filesInError\`'s regex cannot
+    // capture a path separator at all.
+    const opened = openPairing({
+      session: sessionId,
+      cwd,
+      kind: 'sig_v1_test',
+      key: testSig.key,
+      coarseKey: testSig.coarseKey,
+      cmdHead: head,
+      cmd: safeCommand(command),
+      errorLine: clean(scrubbed, 300),
+      errorFiles: [testSig.file.split('/').pop()],
+      pkgVersions: pkgVersions(cwd, packages),
+      scope: 'ambiguous',
+    });
+    return { emitted: null, pairingId: opened };
+  }
+
   let pairingId = null;
   if (sig !== null) {
     const match = findPairing(cwd, sig.key, sig.coarseKey);
@@ -2380,13 +2800,24 @@ async function main() {
       });
     if (errorFiles.length > 0) pairingId = open();
 
+    // THE TEST-IDENTITY LANE, tried whether or not sig_v1 itself matched or
+    // opened anything above (tenjin-agent#267): it is a genuinely different
+    // question, so a miss on one says nothing about the other.
+    if (testSig !== null) {
+      const testResult = tryTestLane();
+      if (testResult.emitted !== null) return emit(event, testResult.emitted);
+      if (pairingId === null) pairingId = testResult.pairingId;
+    }
+
     // THE TEAM LEG, in team mode only. The public shelf refuses keys and holds
     // no pairings, so in public mode a failure this machine has not paired is
     // silent, with no request and no decision row, as it has been since the
-    // fuzzy leg was dropped. The only thing on the wire is two hashes.
+    // fuzzy leg was dropped. The only thing on the wire is two hashes (three,
+    // or four, with a test identity beside them — teamResolve, "Retrieval
+    // order").
     const origin = teamShelfOrigin(config);
     if (origin === null) return quiet();
-    const hit = await teamResolve({ sig, cwd, config, sessionId, eventUid, event, origin });
+    const hit = await teamResolve({ sig, testSig, cwd, config, sessionId, eventUid, event, origin });
     if (hit === null) return quiet();
     // A TEAM HIT OPENS A LOCAL PAIRING TOO, files or no files, and links it to
     // the post. Otherwise this machine's later pass would close nothing, and
@@ -2407,6 +2838,16 @@ async function main() {
       });
     }
     return emit(event, hit.text);
+  }
+
+  // NO sig_v1 SIGNATURE (no errno, no frame at all) — rare for a real test
+  // failure, but the test-identity lane still has something to try, LOCALLY.
+  // No team leg here: \`teamResolve\` builds its first request around \`sig.key\`,
+  // which does not exist in this branch, and the case is uncommon enough that
+  // widening it to a sig-less team ask is a follow-up, not part of #267.
+  if (testSig !== null) {
+    const testResult = tryTestLane();
+    if (testResult.emitted !== null) return emit(event, testResult.emitted);
   }
 
   // NO SIGNATURE, NO LOOKUP. Under the specificity floor there is nothing to

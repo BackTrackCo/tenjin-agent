@@ -5,3 +5,6 @@ dist/
 .eslintcache
 .prettiercache
 __pycache__/
+# The tenjin-agent#267 test-identity key lane's dogfood reporter output — an
+# artifact of the most recent local `vitest run`, never something to commit.
+.vitest-report.json

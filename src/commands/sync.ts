@@ -67,6 +67,9 @@ export interface SyncDeps {
 /** One pairing as `tenjin sync` reads it back out of the store (raw columns). */
 interface PairingRow {
   id: number;
+  /** `'sig_v1'` (the default every row before tenjin-agent#267 has) or
+   *  `'sig_v1_test'` — which wire prefix `keysFor` puts on this row's keys. */
+  kind: string;
   key: string;
   coarseKey: string | null;
   cmdHead: string | null;
@@ -414,6 +417,17 @@ function lazySigner(provider: WalletProvider, address: TenjinSigner['address']):
   };
 }
 
+/** The wire prefix for one row's kind: `'sig_v1'` (every row before
+ *  tenjin-agent#267) gets the original `sig_v1`/`sig_v1c` pair; the test-identity
+ *  lane's own rows (`kind: 'sig_v1_test'`, file+suite+test hashes) get
+ *  `sig_v1_test`/`sig_v1_test_c` so a resolve query can ask for either lane by
+ *  name without the two ever colliding on the wire. */
+function keyPrefixFor(kind: string): { fine: string; coarse: string } {
+  return kind === 'sig_v1_test'
+    ? { fine: 'sig_v1_test', coarse: 'sig_v1_test_c' }
+    : { fine: 'sig_v1', coarse: 'sig_v1c' };
+}
+
 /** The wire keys for one pairing: the fine fingerprint verbatim, the coarse
  *  fingerprint SALTED with the repo slug (so an ERR_PNPM_OUTDATED_LOCKFILE-class
  *  error does not match across every repo the team has), and the command head for
@@ -422,13 +436,17 @@ function lazySigner(provider: WalletProvider, address: TenjinSigner['address']):
  *  close rule's own report and may. `repo` is never '' here: a checkout with no
  *  remote returns before this is reached, publishing nothing at all (#249). */
 function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput[] {
-  const keys: PostKeyInput[] = [{ kind: 'fingerprint', key: 'sig_v1:' + row.key, verified }];
+  const prefix = keyPrefixFor(row.kind);
+  const keys: PostKeyInput[] = [
+    { kind: 'fingerprint', key: `${prefix.fine}:${row.key}`, verified },
+  ];
   if (row.coarseKey !== null && row.coarseKey.length > 0) {
     // Salt the coarse HASH, not the raw message+errno: the CLI has only the
     // stored hashes (message/errno exist only transiently inside the failure
     // arm's sigV1() call, never as columns), so `teamCoarseKey` — shared with
     // the resolve leg via lib/push-scripts.ts — salts what both sides actually
-    // have (06, "Team-shelf coarse keys").
+    // have (06, "Team-shelf coarse keys"). The SAME salting formula serves both
+    // lanes; only the wire prefix names which one a hash belongs to.
     //
     // NO `repo.length > 0` GUARD, and none is needed (tenjin-agent#249). The
     // guard that used to live here dropped the coarse key while the resolve leg
@@ -439,7 +457,7 @@ function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput
     // nothing, so the two sides agree and '' never reaches this line.
     keys.push({
       kind: 'fingerprint',
-      key: 'sig_v1c:' + teamCoarseKey(row.coarseKey, repo),
+      key: `${prefix.coarse}:${teamCoarseKey(row.coarseKey, repo)}`,
       verified,
     });
   }
@@ -632,6 +650,7 @@ function readPairing(row: Record<string, unknown>): PairingRow | null {
   if (id === null || key === null) return null;
   return {
     id,
+    kind: typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v1',
     key,
     coarseKey: typeof row.coarse_key === 'string' ? row.coarse_key : null,
     cmdHead: typeof row.cmd_head === 'string' ? row.cmd_head : null,

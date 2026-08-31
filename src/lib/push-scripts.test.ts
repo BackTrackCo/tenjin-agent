@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -3008,6 +3008,483 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
       ['injected', 'key-match'],
       ['skipped', 'already-injected'],
     ]);
+  });
+});
+
+/**
+ * THE TEST-IDENTITY LANE (tenjin-agent#267): sig_v1's coarse key needs an
+ * errno, and a vitest assertion failure almost never has one, so the shelf
+ * held 0 `sig_v1c` keys among 46 test-shaped pairings and a cross-machine
+ * match needed byte-identical assertion text. `sig_v1_test` keys on the file,
+ * the suite and the test name instead — identity the runner already names —
+ * so a fine match survives a different expected value and a coarse match
+ * (same file/suite, different test) still says something, just less: a
+ * one-line pointer, never the fix body (06, "Injection tiering").
+ */
+describe('the sig_v1_test lane — local matching (tenjin-agent#267)', () => {
+  const TESTID_CWD = '/repo/testid';
+  const TEST_FILE = `${TESTID_CWD}/src/a.test.ts`;
+
+  /** A vitest console failure: the recap header this lane parses, plus a stack
+   *  frame so sig_v1 ALSO clears its own floor — the point of these cases is
+   *  that sig_v1's OWN lane still misses across two runs even though this one
+   *  does not, not that sig_v1 is absent. */
+  const vitestFailure = (
+    file: string,
+    suite: string,
+    test: string,
+    message: string,
+  ): { stdout: string; stderr: string; interrupted: boolean } => ({
+    stdout: ` FAIL  ${file} > ${suite} > ${test}\n${message}\n    at Object.<anonymous> (${file}:12:5)\n`,
+    stderr: '',
+    interrupted: false,
+  });
+
+  const run = (session: string, tool_response: unknown): string =>
+    JSON.stringify({
+      session_id: session,
+      cwd: TESTID_CWD,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'pnpm vitest run' },
+      tool_response,
+    });
+
+  const edit = (path: string, session: string): string =>
+    JSON.stringify({
+      session_id: session,
+      cwd: TESTID_CWD,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: path },
+    });
+
+  /** `findPairing` only ever returns `unverified`/`verified` rows (never
+   *  `open`), so every case here has to close what run 1 opens before run 2
+   *  can find it — the same edit-then-pass flow the sig_v1 local-match cases
+   *  use, run once for both rows a vitest failure opens. */
+  async function closeIt(session: string): Promise<void> {
+    await runScript(pushContextHookScript(dataDir), edit(TEST_FILE, session));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      run(session, { stdout: 'ok', stderr: '', interrupted: false }),
+    );
+  }
+
+  it('matches FINE across two runs with different assertion text, where sig_v1 alone opens a new row each time', async () => {
+    await pushOn('http://127.0.0.1:1'); // public mode: no team leg is ever reached
+    const first = await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-a',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles null',
+          'AssertionError: expected undefined to be null',
+        ),
+      ),
+    );
+    expect(injected(first)).toBeNull();
+
+    const opened = await pairings();
+    expect(opened.filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1);
+    expect(opened.filter((p) => p.kind === 'sig_v1')).toHaveLength(1);
+    await closeIt('sess-a');
+    expect((await pairings()).map((p) => p.status)).toEqual(['unverified', 'unverified']);
+
+    // A second, independent failure: the SAME test, a DIFFERENT expected
+    // value, so sig_v1's own message hash is a different key — its own lane
+    // finds no local match and opens a SECOND `sig_v1` row.
+    const second = await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-b',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles null',
+          'AssertionError: expected undefined to be 1970-01-01',
+        ),
+      ),
+    );
+    const text = injected(second);
+    expect(text).not.toBeNull();
+    expect(text).toContain('this machine has already seen this failure fixed');
+    expect(text).toContain('a.test.ts');
+    // FULL treatment, not the pointer: a FINE test-key match.
+    expect(text).not.toContain('has been fixed here before');
+
+    const after = await pairings();
+    expect(after.filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1); // matched, not duplicated
+    expect(after.filter((p) => p.kind === 'sig_v1')).toHaveLength(2); // sig_v1 missed both times
+  });
+
+  it('matches COARSE across two DIFFERENT tests in the same file/suite, and injects a pointer only', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-a',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles null',
+          'AssertionError: expected undefined to be null',
+        ),
+      ),
+    );
+    await closeIt('sess-a');
+
+    const second = await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-b',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles undefined',
+          'AssertionError: expected 1 to be undefined',
+        ),
+      ),
+    );
+    const text = injected(second);
+    expect(text).not.toBeNull();
+    expect(text).toContain('has been fixed here before');
+    expect(text).toContain('a.test.ts');
+    expect(text).toContain('tenjin push status');
+    // Never the fine match's wording or its file list.
+    expect(text).not.toContain('Someone once fixed this by touching');
+
+    const rows = await pairings();
+    const testRows = rows.filter((p) => p.kind === 'sig_v1_test');
+    expect(testRows).toHaveLength(1); // one row, matched coarse on the second run
+    expect(testRows[0]!.status).toBe('unverified');
+  });
+});
+
+describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () => {
+  const TESTID_CWD = '/repo/testid';
+
+  it('parses file, suite and test off a nested describe chain', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run' },
+        tool_response: {
+          stdout:
+            ' FAIL  src/deep.test.ts > outer > inner > handles the deep case\nAssertionError: expected 1 to be 2\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = await pairings();
+    const row = rows.find((p) => p.kind === 'sig_v1_test');
+    expect(row?.error_files).toEqual(['deep.test.ts']);
+  });
+
+  it('parses a top-level test with no describe block at all', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run' },
+        tool_response: {
+          stdout: ' FAIL  src/flat.test.ts > a bare test\nAssertionError: expected 1 to be 2\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = await pairings();
+    expect(rows.find((p) => p.kind === 'sig_v1_test')?.error_files).toEqual(['flat.test.ts']);
+  });
+
+  it('yields no test identity, and no sig_v1_test row, when the output has no FAIL breadcrumb', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build' },
+        tool_response: {
+          stdout: '',
+          stderr: "Error: ENOENT: no such file, open 'x.ts'",
+          interrupted: false,
+        },
+      }),
+    );
+    expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+  });
+
+  it('prefers a fresh JSON report artifact over the console breadcrumb', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-'));
+    try {
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        JSON.stringify({
+          testResults: [
+            {
+              name: join(cwd, 'src/from-artifact.test.ts'),
+              status: 'failed',
+              assertionResults: [
+                { status: 'passed', title: 'an unrelated pass', ancestorTitles: ['suite'] },
+                {
+                  status: 'failed',
+                  title: 'the real failure',
+                  ancestorTitles: ['fromArtifactSuite'],
+                },
+              ],
+            },
+          ],
+        }),
+      );
+      await pushOn('http://127.0.0.1:1');
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            // A console breadcrumb that names a DIFFERENT file/test — if this
+            // fires instead of the artifact, the row below would say so.
+            stdout:
+              ' FAIL  src/from-console.test.ts > wrongSuite > wrong test\nAssertionError: x\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.kind === 'sig_v1_test');
+      expect(row?.error_files).toEqual(['from-artifact.test.ts']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a stale report artifact and falls back to the console breadcrumb', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-stale-'));
+    try {
+      const reportPath = join(cwd, '.vitest-report.json');
+      await writeFile(
+        reportPath,
+        JSON.stringify({
+          testResults: [
+            {
+              name: join(cwd, 'src/stale.test.ts'),
+              status: 'failed',
+              assertionResults: [
+                { status: 'failed', title: 'a stale failure', ancestorTitles: ['staleSuite'] },
+              ],
+            },
+          ],
+        }),
+      );
+      // Older than TEST_ARTIFACT_MAX_AGE_MS (two minutes): a leftover from an
+      // earlier run in the same checkout, not evidence about this failure.
+      const old = new Date(Date.now() - 5 * 60 * 1000);
+      await utimes(reportPath, old, old);
+      await pushOn('http://127.0.0.1:1');
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: ' FAIL  src/fresh.test.ts > freshSuite > a fresh test\nAssertionError: y\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.kind === 'sig_v1_test');
+      expect(row?.error_files).toEqual(['fresh.test.ts']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the sig_v1_test lane — team leg (tenjin-agent#267)', () => {
+  const REPO_TESTID = join(tmpdir(), `tenjin-push-testid-repo-${process.pid}`);
+  beforeEach(async () => {
+    await mkdir(join(REPO_TESTID, '.git'), { recursive: true });
+    await writeFile(
+      join(REPO_TESTID, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
+    );
+  });
+  afterEach(async () => {
+    await rm(REPO_TESTID, { recursive: true, force: true });
+  });
+
+  const TESTID_TEAM_POST_ID = '66666666-6666-4666-8666-666666666666';
+
+  interface WireBody {
+    keys: { kind: string; key: string }[];
+  }
+
+  /** A shelf whose resolve answers, call by call, from \`answers\` (the last
+   *  entry repeats once exhausted) — the two-round test-lane request needs a
+   *  stub that can miss on round 1 and hit on round 2. */
+  function sequencedResolveStub(
+    answers: Array<'hit' | 'miss'>,
+    bodyMd = 'Fix: pnpm — src/a.test.ts. Edited a.ts, passed on pnpm vitest run.',
+  ): { bodies: WireBody[]; handler: (req: StubRequest) => { status: number; json: unknown } } {
+    const bodies: WireBody[] = [];
+    let call = 0;
+    return {
+      bodies,
+      handler: (req) => {
+        if (req.url.startsWith('/api/keys/resolve')) {
+          bodies.push(JSON.parse(req.body) as WireBody);
+          const answer = answers[Math.min(call, answers.length - 1)];
+          call += 1;
+          if (answer === 'miss') {
+            return {
+              status: 200,
+              json: { schemaVersion: 3, searchId: SEARCH_ID, items: [], matched: 0 },
+            };
+          }
+          return {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              items: [
+                {
+                  resourceId: TESTID_TEAM_POST_ID,
+                  url: `${req.base}/@team/fix`,
+                  title: 'Fix: pnpm — src/a.test.ts',
+                  price: '0',
+                  excerpt: '',
+                  creator: { handle: 'teammate' },
+                  confidence: 'high',
+                  corroborated: true,
+                },
+              ],
+              matched: 1,
+            },
+          };
+        }
+        if (req.url.startsWith('/api/search')) {
+          return { status: 200, json: { schemaVersion: 3, searchId: SEARCH_ID, items: [] } };
+        }
+        return { status: 200, json: { bodyMd } };
+      },
+    };
+  }
+
+  const vitestFail = (session: string): string =>
+    JSON.stringify({
+      session_id: session,
+      cwd: REPO_TESTID,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'pnpm vitest run' },
+      tool_response: {
+        // The stack frame matters: without one, sig_v1's OWN floor is not
+        // cleared (no errno either), `sig` is null, and the team leg — which
+        // teamResolve builds its first request around `sig.key` — never runs
+        // at all. A real vitest assertion error carries a frame.
+        stdout:
+          ' FAIL  src/a.test.ts > formatDate > handles null\nAssertionError: expected undefined to be null\n    at Object.<anonymous> (src/a.test.ts:12:5)\n',
+        stderr: '',
+        interrupted: false,
+      },
+    });
+
+  it('sends the test fine key beside sig_v1 on round 1, and stops there on a hit', async () => {
+    const stub = sequencedResolveStub(['hit']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    const text = injected(run);
+    expect(text).not.toBeNull();
+    expect(text).toContain("a teammate's machine has seen this failure fixed");
+
+    // ONE request: sig_v1's own fine key (no sig_v1 coarse — there is no
+    // errno here) plus the test lane's FINE key, never its coarse one.
+    expect(stub.bodies).toHaveLength(1);
+    const keys = stub.bodies[0]!.keys.map((k) => k.key);
+    expect(keys.some((k) => k.startsWith('sig_v1:'))).toBe(true);
+    expect(keys.some((k) => k.startsWith('sig_v1_test:'))).toBe(true);
+    expect(keys.some((k) => k.startsWith('sig_v1_test_c:'))).toBe(false);
+    expect(pub.hits()).toBe(0);
+  });
+
+  it('falls back to a coarse-only second request on a fine miss, and injects a pointer', async () => {
+    const stub = sequencedResolveStub(['miss', 'hit']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    const text = injected(run);
+    expect(text).not.toBeNull();
+    expect(text).toContain("a teammate's machine has seen this failure fixed");
+    // POINTER, not the fix body: never fetched, so the free-body GET the
+    // fine-hit case makes was never called for this one.
+    expect(text).toContain('A teammate hit a similar failure in this file/suite');
+    expect(text).toContain('tenjin push status');
+    expect(text).not.toContain('Edited a.ts');
+
+    expect(stub.bodies).toHaveLength(2);
+    const round1 = stub.bodies[0]!.keys.map((k) => k.key);
+    expect(round1.some((k) => k.startsWith('sig_v1_test_c:'))).toBe(false);
+    // ROUND 2: the coarse test key, and ONLY it.
+    expect(stub.bodies[1]!.keys).toHaveLength(1);
+    expect(stub.bodies[1]!.keys[0]!.key).toMatch(/^sig_v1_test_c:[0-9a-f]{16}$/);
+
+    const rows = await ledger();
+    expect(rows.map((r) => [r.action, r.reason])).toEqual([
+      ['skipped', 'miss'],
+      ['injected', 'key-match'],
+    ]);
+  });
+
+  it('makes no second request, and asks the same single request as before #267, on an ordinary (non-test) failure', async () => {
+    const stub = sequencedResolveStub(['miss', 'hit']); // round 2 would hit if it fired
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const ENOENT_NO_TEST =
+      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: REPO_TESTID,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm db:migrate' },
+        tool_response: { stdout: '', stderr: ENOENT_NO_TEST, interrupted: false },
+      }),
+    );
+    expect(injected(run)).toBeNull(); // a genuine miss with no test lane to fall back on
+    expect(stub.bodies).toHaveLength(1);
   });
 });
 
