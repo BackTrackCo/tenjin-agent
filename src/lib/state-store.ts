@@ -3012,9 +3012,108 @@ export async function openStore(dataDir: string): Promise<Store | null> {
 }
 
 /** A single `SELECT` (or `WITH ... SELECT`), with no second statement riding
- *  along after a `;`. Case-insensitive; leading/trailing whitespace and one
- *  trailing `;` are tolerated. */
+ *  along after a `;`. Case-insensitive; leading/trailing whitespace, a
+ *  leading comment, and one trailing `;` are tolerated. Applied to the
+ *  MASKED text (see {@link maskSqlNoise}), never the raw one — a leading `--`
+ *  comment reads as whitespace there, which is what lets one through. */
 const SELECT_STATEMENT_RE = /^\s*(select|with)\b/i;
+
+/**
+ * Statement keywords SQLite accepts that this verb must never run, checked as
+ * whole words against the MASKED text. Exists for the shape a leading-keyword
+ * check alone cannot see: SQLite's grammar allows a `WITH cte AS (SELECT ...)`
+ * prefix on `INSERT`/`UPDATE`/`DELETE` too, not only on `SELECT`, so
+ * `WITH x AS (SELECT 1) DELETE FROM t` starts with the allowed keyword and
+ * still writes. `readOnly: true` on the driver would refuse the write anyway,
+ * but this is what keeps the refusal a clean `USAGE` message instead of a
+ * `STATE_QUERY_FAILED` surfaced from the driver, and what keeps the contract
+ * ("rejected before the file is ever opened") true for this shape too.
+ * `PRAGMA`/`ATTACH` are in the list for the same reason, even though today's
+ * leading-keyword check already rejects them on their own — a second layer
+ * that does not depend on where in the statement they appear.
+ */
+const WRITE_KEYWORD_RE =
+  /\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|ATTACH|DETACH|VACUUM|REINDEX|ANALYZE|GRANT|REVOKE|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|PRAGMA)\b/i;
+
+/**
+ * Blank out everything a semicolon or keyword check must not see INSIDE: `'…'`
+ * and `"…"` literals (with the standard doubled-quote escape), `` `…` `` and
+ * `[…]` quoted identifiers, and both comment styles (line and block) —
+ * replaced character-for-character with spaces so positions and length are
+ * preserved and every other check keeps running against the same offsets.
+ *
+ * WHY THIS EXISTS: `body.includes(';')` on the raw string rejected a valid
+ * single statement whose only `;` sat inside a string literal or a comment
+ * (`SELECT * FROM t WHERE msg = 'a;b'`), and a bare leading-keyword regex has
+ * no way to see a write keyword that a `WITH` clause's parenthesized CTEs
+ * push later in the string. Masking first makes both checks blind to noise
+ * they were never supposed to be reading.
+ */
+function maskSqlNoise(sql: string): string {
+  let out = '';
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const c = sql[i];
+    const c2 = i + 1 < n ? sql[i + 1] : '';
+    if (c === '-' && c2 === '-') {
+      while (i < n && sql[i] !== '\n') {
+        out += sql[i] === '\n' ? sql[i] : ' ';
+        i++;
+      }
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      out += '  ';
+      i += 2;
+      while (i < n && !(sql[i] === '*' && i + 1 < n && sql[i + 1] === '/')) {
+        out += sql[i] === '\n' ? sql[i] : ' ';
+        i++;
+      }
+      if (i < n) {
+        out += '  ';
+        i += 2;
+      }
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`') {
+      const quote = c;
+      out += ' ';
+      i++;
+      while (i < n) {
+        if (sql[i] === quote) {
+          if (i + 1 < n && sql[i + 1] === quote) {
+            out += '  ';
+            i += 2;
+            continue;
+          }
+          out += ' ';
+          i++;
+          break;
+        }
+        out += sql[i] === '\n' ? sql[i] : ' ';
+        i++;
+      }
+      continue;
+    }
+    if (c === '[') {
+      out += ' ';
+      i++;
+      while (i < n && sql[i] !== ']') {
+        out += sql[i] === '\n' ? sql[i] : ' ';
+        i++;
+      }
+      if (i < n) {
+        out += ' ';
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
 
 /**
  * Validate `sql` is exactly one read statement, or throw USAGE. Exported
@@ -3028,19 +3127,30 @@ export function assertSelectOnly(sql: string): string {
       fix: 'Pass a SELECT statement, e.g. `tenjin state query "SELECT key, at FROM session_state LIMIT 5"`.',
     });
   }
+  // `trimmed` has no trailing whitespace, so `masked` is the same length and
+  // stays index-aligned with it for every check below.
+  const masked = maskSqlNoise(trimmed);
   // Exactly one trailing `;` is stripped before the chaining check, so
   // `SELECT 1;` is not mistaken for two statements; `SELECT 1; DROP TABLE x`
-  // still is — chaining is checked on what is LEFT after that strip, not on
-  // the raw string.
-  const body = trimmed.endsWith(';') ? trimmed.slice(0, -1) : trimmed;
-  if (body.includes(';')) {
+  // still is. Checked on the MASKED tail so a `;` that is the last character
+  // of a string literal (`SELECT ';'`) is not mistaken for a statement
+  // terminator.
+  const strip = masked.endsWith(';');
+  const body = strip ? trimmed.slice(0, -1) : trimmed;
+  const bodyMasked = strip ? masked.slice(0, -1) : masked;
+  if (bodyMasked.includes(';')) {
     throw new CliError('USAGE', 'Only one statement is allowed.', {
       fix: 'Pass exactly one SELECT statement — drop everything after the first `;`.',
     });
   }
-  if (!SELECT_STATEMENT_RE.test(body)) {
+  if (!SELECT_STATEMENT_RE.test(bodyMasked)) {
     throw new CliError('USAGE', 'Only a SELECT statement is allowed.', {
       fix: '`tenjin state query` is read-only: pass a `SELECT ...` or `WITH ... SELECT ...` statement.',
+    });
+  }
+  if (WRITE_KEYWORD_RE.test(bodyMasked)) {
+    throw new CliError('USAGE', 'Only a read-only SELECT statement is allowed.', {
+      fix: 'Remove the write keyword (INSERT/UPDATE/DELETE/DROP/ALTER/PRAGMA/...) — a `WITH` clause may not lead into one.',
     });
   }
   return body;

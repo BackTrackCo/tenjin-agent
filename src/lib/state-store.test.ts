@@ -24,6 +24,7 @@ import {
   openSearches,
   openStore,
   probeSqlite,
+  assertSelectOnly,
   queryStateReadOnly,
   recordSearch,
   removeRetiredState,
@@ -735,6 +736,63 @@ describe('queryStateReadOnly', () => {
     await expect(queryStateReadOnly(dataDir, 'SELECT * FROM no_such_table')).rejects.toMatchObject({
       code: 'STATE_QUERY_FAILED',
     });
+  });
+});
+
+/**
+ * Edge cases in the single-read-statement guard, filed against Greptile's PR
+ * 277 review: a semicolon or a write keyword sitting INSIDE a string literal
+ * or a comment must not be read as though it were outside one, and a `WITH`
+ * clause must not be allowed to lead into a write just because the leading
+ * keyword happens to be `WITH`.
+ */
+describe('assertSelectOnly: literals, comments, and WITH-prefixed writes', () => {
+  it('accepts a SELECT whose only ";" sits inside a string literal', () => {
+    expect(assertSelectOnly("SELECT * FROM t WHERE msg = 'a;b'")).toBe(
+      "SELECT * FROM t WHERE msg = 'a;b'",
+    );
+  });
+
+  it('still rejects a real second statement after a literal that contains a ";"', () => {
+    expect(() => assertSelectOnly("SELECT * FROM t WHERE msg = 'a;b'; DROP TABLE t")).toThrow(
+      /one statement/i,
+    );
+  });
+
+  it('accepts a SELECT preceded by a line comment', () => {
+    expect(assertSelectOnly('-- note\nSELECT 1')).toBe('-- note\nSELECT 1');
+  });
+
+  it('accepts a SELECT preceded by a block comment', () => {
+    expect(assertSelectOnly('/* note */ SELECT 1')).toBe('/* note */ SELECT 1');
+  });
+
+  it('rejects a WITH clause that leads into a DELETE rather than a SELECT', () => {
+    expect(() => assertSelectOnly('WITH x AS (SELECT 1) DELETE FROM session_state')).toThrow(
+      /read-only/i,
+    );
+  });
+
+  it('rejects a WITH clause that leads into an INSERT rather than a SELECT', () => {
+    expect(() =>
+      assertSelectOnly("WITH x AS (SELECT 1) INSERT INTO session_state VALUES ('', 'k', 'v', 0)"),
+    ).toThrow(/read-only/i);
+  });
+
+  it('does not misfire on a write keyword that only appears inside a string literal', () => {
+    expect(assertSelectOnly("SELECT * FROM injections WHERE reason = 'insert failed'")).toBe(
+      "SELECT * FROM injections WHERE reason = 'insert failed'",
+    );
+  });
+
+  it('does not misfire on a column name that merely contains a write keyword as a substring', () => {
+    expect(assertSelectOnly('SELECT deleted_at FROM pairings')).toBe(
+      'SELECT deleted_at FROM pairings',
+    );
+  });
+
+  it('still rejects a bare PRAGMA', () => {
+    expect(() => assertSelectOnly('PRAGMA journal_mode')).toThrow(/SELECT/i);
   });
 });
 
