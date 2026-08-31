@@ -1720,10 +1720,12 @@ function filesInError(text) {
  * and the rest of a machine's own configuration, as opposed to a checkout
  * living under it. cwd is not in scope here — the same "NO GIT INVOCATION"
  * constraint on the function below applies to this helper too — so home-rooted
- * is the only signal available that does not need one: a project's own
- * checkout is vanishingly unlikely to sit directly inside a dotfile of the
- * operator's home directory, while this very tool's own memory, skills and
- * config all do.
+ * is the only signal available that does not need one. A real checkout CAN sit
+ * directly inside a home dotfile — \`~/.dotfiles\`, \`~/.config/nvim\`, a worktree
+ * under \`~/.cache\` — and this rule ignores an edit there too; the trade is
+ * accepted because the cost lands on the side this close rule already treats
+ * as cheap (04, "Close rule"): the pairing stays open rather than closing on
+ * an edit that was never a fix.
  */
 function isHomeDotDirPath(path) {
   const home = homedir();
