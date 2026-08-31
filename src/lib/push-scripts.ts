@@ -1125,9 +1125,10 @@ const SECRET_ASSIGN_RE =
  *  by shape, so the identifier rule promoted it onto the wire to BOTH
  *  shelves. A \`name=value\` run hanging off a url that carried a credential
  *  is part of that url, never prose, so the replacer eats it. Bounded on
- *  every side (a 64-character name, a 256-character value, and a value class
- *  that excludes the separators so each repeat has one forced extent), which
- *  is what keeps the repetition linear. The separator class matches every
+ *  every side (a 64-character name that may start with a digit, a
+ *  256-character value, and a value class that excludes the separators so
+ *  each repeat has one forced extent), which is what keeps the repetition
+ *  linear. The separator class matches every
  *  character the main match stops at — not only \`;?&\` — so a parameter
  *  glued on with a comma, bracket or quote (\`,ref=abc123\`) goes with the
  *  url instead of surviving into the identifiers array; each repeat still
@@ -1140,7 +1141,7 @@ const SECRET_ASSIGN_RE =
  *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
  *  blanks a signing parameter wherever it sits, url or not. */
 const SECRET_USERINFO_RE =
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*(?:[,;?&)\]}>'"][A-Za-z_][A-Za-z0-9_-]{0,63}=[^\s'",;)\]}>?&]{0,256})*/gi;
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*(?:[,;?&)\]}>'"][A-Za-z0-9_][A-Za-z0-9_-]{0,63}=[^\s'",;)\]}>?&]{0,256})*/gi;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
