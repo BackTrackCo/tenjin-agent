@@ -59,6 +59,11 @@ const EXIT_BY_CODE: Record<ErrorCode, ExitCode> = {
   UPDATE_FAILED: 1,
   // Refused BEFORE any signature existed: the Bazaar lane's fail-closed check.
   REGISTRY_MISMATCH: 3,
+  // The driver itself refused (no store to open, a bad column/table name) —
+  // runtime, like every other "the store said no" failure in this table.
+  // Malformed input CALLER-SIDE (not a SELECT, more than one statement) is
+  // USAGE instead; see commands/state.ts.
+  STATE_QUERY_FAILED: 1,
 };
 
 export function exitCodeFor(code: ErrorCode): ExitCode {

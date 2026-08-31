@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertOnBaseOrigin, resolveResourceRef } from './resource-ref';
 import { CliError } from './errors';
-import { openStore, recordSearch, searchFingerprint, STORE_SQL } from './state-store';
+import {
+  openStore,
+  recordSearch,
+  searchFingerprint,
+  STATE_PAIRING_POST_PREFIX,
+  STORE_SQL,
+} from './state-store';
 import { knownDeploymentOrigins } from './production-origin';
 
 let dir: string;
@@ -139,6 +145,64 @@ describe('resolveResourceRef', () => {
   });
 
   it('fails RESOURCE_NOT_FOUND for an unknown uuid', async () => {
+    await expect(resolveResourceRef(RES, dir, BASE)).rejects.toMatchObject({
+      code: 'RESOURCE_NOT_FOUND',
+    });
+  });
+
+  /**
+   * tenjin-agent#252: `tenjin sync` publishes a pairing to the team shelf and
+   * links it under `pairing_post:<n>` (own: true), but never records it as a
+   * search — so `inspect <id>`/`read <id>` on a post this machine's own CLI
+   * just published refused with RESOURCE_NOT_FOUND, because `findStoredCandidate`
+   * only ever looks at `searches`. This is the fallback: a pairing link that
+   * carries a `url` (stamped from `publishPost`'s own response) resolves too.
+   */
+  it('resolves a uuid via an own-published pairing_post link when no search knows it', async () => {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      store.run(STORE_SQL.setState, [
+        '',
+        STATE_PAIRING_POST_PREFIX + '1',
+        JSON.stringify({
+          postId: RES,
+          origin: BASE,
+          at: Date.now(),
+          own: true,
+          url: 'https://tenjin.blog/api/read/team/fix-pairing',
+          title: 'Fix: pnpm vitest run — TS2345',
+          price: '0',
+        }),
+        Date.now(),
+      ]);
+    } finally {
+      store.close();
+    }
+    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({
+      url: 'https://tenjin.blog/api/read/team/fix-pairing',
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
+  });
+
+  /** A `held` link (a teammate's post whose slug this machine never fetched)
+   *  carries no `url`, and there is no unauthenticated by-id route to fall
+   *  through to — it stays RESOURCE_NOT_FOUND rather than inventing a request
+   *  the server has nowhere to answer. */
+  it('does not resolve a pairing_post link with no stored url', async () => {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      store.run(STORE_SQL.setState, [
+        '',
+        STATE_PAIRING_POST_PREFIX + '2',
+        JSON.stringify({ postId: RES, origin: BASE, at: Date.now(), held: true }),
+        Date.now(),
+      ]);
+    } finally {
+      store.close();
+    }
     await expect(resolveResourceRef(RES, dir, BASE)).rejects.toMatchObject({
       code: 'RESOURCE_NOT_FOUND',
     });

@@ -287,7 +287,15 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
           // no unsynced row for a future run to pick up. Leaving it unstamped
           // costs one duplicate POST at worst.
           if (
-            !setLink(store, row.id, { postId: result.resourceId, origin, at: now(), own: true })
+            !setLink(store, row.id, {
+              postId: result.resourceId,
+              origin,
+              at: now(),
+              own: true,
+              url: result.url,
+              title: result.title,
+              price: result.priceAtomic,
+            })
           ) {
             continue;
           }
@@ -482,7 +490,13 @@ function discriminant(row: PairingRow): string {
  *  re-bounded here. */
 function bodyFor(row: PairingRow): string {
   const lines: string[] = [];
-  if (row.cmd !== null && row.cmd.length > 0) lines.push(`Failed: ${row.cmd}`);
+  // The HEAD, not `row.cmd`: the row keeps the whole scrubbed command line for
+  // `sig_v1` (the fingerprint hashes it), but a synced pairing's body is public
+  // team-shelf prose, and the full line routinely carries a pipeline tail
+  // (`| grep ...`) or a scrubbed-to-`/` cwd that reads as a bogus `cd /`
+  // (tenjin-agent#252). `cmdHead` is the same value the title and the
+  // `command_head` key already use.
+  if (row.cmdHead !== null && row.cmdHead.length > 0) lines.push(`Failed: ${row.cmdHead}`);
   if (row.fixFiles.length > 0) lines.push(`Changed: ${row.fixFiles.slice(0, 4).join(', ')}`);
   if (row.fixCmd !== null && row.fixCmd.length > 0) lines.push(`Passed on: ${row.fixCmd}`);
   const pkgs = Object.entries(row.pkgVersions)
@@ -553,6 +567,18 @@ interface PairingLink {
   closedAt?: number;
   status?: string;
   fixFiles?: string[];
+  /**
+   * The read URL, title and atomic price `publishPost` echoed back on an OWN
+   * publish (tenjin-agent#252): the read route is keyed by handle/slug, so an
+   * id alone cannot rebuild it later, and this is the one moment the CLI is
+   * ever handed the slug for a post it just created. Stored here so
+   * `findPairingCandidate` (state-store.ts) can answer `inspect`/`read` for an
+   * id `tenjin sync` published without ever having been searched for. Absent
+   * on a `held` link — this machine never fetched the holder's own slug.
+   */
+  url?: string;
+  title?: string;
+  price?: string;
 }
 
 function getLink(store: Store, pairingId: number): PairingLink | null {
@@ -577,6 +603,9 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
       ...(Array.isArray(link.fixFiles)
         ? { fixFiles: link.fixFiles.filter((f): f is string => typeof f === 'string') }
         : {}),
+      ...(typeof link.url === 'string' && link.url.length > 0 ? { url: link.url } : {}),
+      ...(typeof link.title === 'string' ? { title: link.title } : {}),
+      ...(typeof link.price === 'string' ? { price: link.price } : {}),
     };
   } catch {
     return null;

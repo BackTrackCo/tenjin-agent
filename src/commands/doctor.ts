@@ -50,7 +50,12 @@ import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/se
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
 import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
-import { PUSH_SCRIPT_FILES, countPushHookEntries, pushScriptsPresent } from '../lib/harness-hooks';
+import {
+  PUSH_SCRIPT_FILES,
+  compareHookScripts,
+  countPushHookEntries,
+  pushScriptsPresent,
+} from '../lib/harness-hooks';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -295,6 +300,11 @@ export async function collectDoctorChecks(
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   );
+
+  // Silent (no check pushed) on a machine with no hook scripts on disk at all;
+  // see checkHookScripts.
+  const hookScripts = await checkHookScripts(ctx.dataDir);
+  if (hookScripts !== null) built.push(hookScripts);
 
   // Only when the experiment is on. Off, there is nothing to be half-wired and
   // a permanently-present check about a feature nobody enabled is noise.
@@ -1238,6 +1248,48 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
       required: false,
       detail: `baseUrl is ${sanitizeForTerminal(baseUrl)}, a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated; if that deployment is access-protected they were answered by its protection page rather than by Tenjin`,
       fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
+    },
+  };
+}
+
+/**
+ * Are the generated hook/push scripts ON DISK current for this build?
+ *
+ * `tenjin update` bumps the npm-installed binary and nothing else; the scripts
+ * under `<dataDir>/hooks` are written once, at `tenjin install` time, and stay
+ * exactly those bytes until an operator reinstalls (`lib/install-location.ts`
+ * refuses the self-heal outright on a git checkout, which is how this team
+ * runs `main` — there is no `update` path that could have refreshed them).
+ * tenjin-agent#242's hook-allowlist fix merged and kept producing junk pairings
+ * on a machine that had not reinstalled for hours, which is the dogfooded case
+ * this check exists to catch earlier than that.
+ *
+ * The skills-staleness check above (`compareWiredSkills`) is the model: same
+ * "matches what this build would write now" compare, same silent-until-there
+ * shape. Silent (`null`) when nothing is installed at all — a fresh machine
+ * that never ran `tenjin install` is the skills/push-hooks checks' business,
+ * not this one's.
+ */
+async function checkHookScripts(dataDir: string): Promise<BuiltCheck | null> {
+  const { stale, present } = await compareHookScripts(dataDir);
+  if (present.length === 0) return null;
+  if (stale.length === 0) {
+    return {
+      result: {
+        name: 'hook scripts',
+        status: 'ok',
+        required: false,
+        detail: `${present.length} generated hook/push script(s) on disk match this build`,
+      },
+    };
+  }
+  return {
+    result: {
+      name: 'hook scripts',
+      status: 'warn',
+      required: false,
+      detail: `${stale.length} of ${present.length} generated hook/push scripts on disk are stale (${stale.join(', ')}); agents are running an older build's hook code`,
+      fix: 'tenjin install',
     },
   };
 }

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { CliError } from './errors';
 
 /**
  * The sidecar's local state: one SQLite file under the data dir, opened by the
@@ -3010,6 +3011,98 @@ export async function openStore(dataDir: string): Promise<Store | null> {
   }
 }
 
+/** A single `SELECT` (or `WITH ... SELECT`), with no second statement riding
+ *  along after a `;`. Case-insensitive; leading/trailing whitespace and one
+ *  trailing `;` are tolerated. */
+const SELECT_STATEMENT_RE = /^\s*(select|with)\b/i;
+
+/**
+ * Validate `sql` is exactly one read statement, or throw USAGE. Exported
+ * separately from {@link queryStateReadOnly} so `tenjin state query` can reject
+ * a bad statement before it ever touches the filesystem.
+ */
+export function assertSelectOnly(sql: string): string {
+  const trimmed = sql.trim();
+  if (trimmed.length === 0) {
+    throw new CliError('USAGE', 'A SQL statement is required.', {
+      fix: 'Pass a SELECT statement, e.g. `tenjin state query "SELECT key, at FROM session_state LIMIT 5"`.',
+    });
+  }
+  // Exactly one trailing `;` is stripped before the chaining check, so
+  // `SELECT 1;` is not mistaken for two statements; `SELECT 1; DROP TABLE x`
+  // still is — chaining is checked on what is LEFT after that strip, not on
+  // the raw string.
+  const body = trimmed.endsWith(';') ? trimmed.slice(0, -1) : trimmed;
+  if (body.includes(';')) {
+    throw new CliError('USAGE', 'Only one statement is allowed.', {
+      fix: 'Pass exactly one SELECT statement — drop everything after the first `;`.',
+    });
+  }
+  if (!SELECT_STATEMENT_RE.test(body)) {
+    throw new CliError('USAGE', 'Only a SELECT statement is allowed.', {
+      fix: '`tenjin state query` is read-only: pass a `SELECT ...` or `WITH ... SELECT ...` statement.',
+    });
+  }
+  return body;
+}
+
+/**
+ * Run one read-only SELECT against the state database, for `tenjin state
+ * query` (tenjin-agent#252).
+ *
+ * OPENED READ-ONLY THROUGH THE DRIVER'S OWN FLAG (`node:sqlite`'s
+ * `DatabaseSync` `readOnly` option), not the standalone `sqlite3` binary's
+ * `-readonly` flag: the state db runs in WAL mode ({@link setWalOn}), and a
+ * bare `sqlite3 -readonly ~/.tenjin/state.db` invoked from a subshell fails
+ * with "unable to open database file (14)" because SQLite's read-only open
+ * still wants to touch the `-shm` sidecar. `node:sqlite`'s own driver does not
+ * have that failure mode, which is the actual fix; the doc note is only for
+ * whoever still reaches for the standalone binary out of habit.
+ *
+ * NEVER {@link openStore}: that helper creates the file, runs migrations and
+ * flips pragmas on it — none of which a read-only inspection command may ever
+ * do, and `readOnly: true` fails outright rather than creating a database that
+ * is not there, which is exactly the right answer for this verb.
+ *
+ * `sql` is re-validated here (not only by the CLI's own {@link assertSelectOnly}
+ * call before this), because this is also the function a test calls directly.
+ */
+export async function queryStateReadOnly(
+  dataDir: string,
+  sql: string,
+): Promise<Record<string, unknown>[]> {
+  const statement = assertSelectOnly(sql);
+  const sqlite = (await import('node:sqlite')) as unknown as {
+    DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDatabase;
+  };
+  let db: SqliteDatabase;
+  try {
+    db = new sqlite.DatabaseSync(stateDbPath(dataDir), { readOnly: true });
+  } catch (err) {
+    throw new CliError(
+      'STATE_QUERY_FAILED',
+      `Could not open the state database read-only: ${errorMessageOf(err)}`,
+      {
+        fix: 'Run a command that touches the store first (e.g. `tenjin search`), or check the data dir.',
+      },
+    );
+  }
+  try {
+    const rows = db.prepare(statement).all();
+    return rows.filter(isRecord);
+  } catch (err) {
+    throw new CliError('STATE_QUERY_FAILED', `Query failed: ${errorMessageOf(err)}`, {
+      fix: 'Check the table/column names against docs/command-reference.md, "State store".',
+    });
+  } finally {
+    db.close();
+  }
+}
+
+function errorMessageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * What the store replaced, deleted by `tenjin install` (plan 03, owner decision
  * 3: no legacy path).
@@ -3113,7 +3206,9 @@ export function projectId(cwd: string | null | undefined): string | null {
 /** ⚠ MIRRORED with `STATE_PAIRING_POST_PREFIX` in the hook core above: the
  *  `session_state` row (machine session `''`) linking a local pairing to its
  *  team-shelf post, `{ postId, origin, at, own?, held?, closedAt?, status?,
- *  fixFiles? }`. The failure arm writes it; `tenjin sync` reads and extends it. */
+ *  fixFiles?, url?, title?, price? }`. The failure arm writes it; `tenjin sync`
+ *  reads and extends it, and stamps `url`/`title`/`price` off `publishPost`'s own
+ *  response on an OWN publish — see {@link findPairingCandidate}. */
 export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
 
 /**
@@ -3868,6 +3963,66 @@ export async function findStoredCandidate(
     } catch {
       return null;
     }
+  });
+}
+
+/**
+ * The candidate a `pairing_post:<n>` link carries for `resourceId` — a piece
+ * THIS MACHINE's own `tenjin sync` published, independent of `searches`
+ * (tenjin-agent#252). `sync` never records the id it just posted as a search
+ * result, so a bare `inspect <id>`/`read <id>` for a pairing this machine
+ * published a minute ago found nothing in {@link findStoredCandidate}, only
+ * `RESOURCE_NOT_FOUND` — even though the id came straight out of this CLI's own
+ * `tenjin sync` output.
+ *
+ * Scanned rather than keyed: the link is stored per PAIRING id
+ * (`pairing_post:<row id>`), and the only thing a caller here has is the POST
+ * id, so every row under the prefix is read back and matched on `postId`.
+ * `RECENT_LIMIT` bounds the scan the same way it bounds every other reader of
+ * this ledger.
+ *
+ * A link with no `url` — a `held` link naming a teammate's post whose slug this
+ * machine never fetched, or (impossible after this fix, but not assumed) one
+ * written by an older build — answers null. There is no second network hop
+ * here: an unauthenticated fetch-by-id route does not exist on this API (GET
+ * /api/posts/<id> is owner-scoped SIWX; GET /api/read/<handle>/<slug> is keyed
+ * by slug, not id), so a link this machine cannot already resolve stays
+ * unresolved rather than the CLI inventing a request the server has nowhere to
+ * answer.
+ */
+export async function findPairingCandidate(
+  dataDir: string,
+  resourceId: string,
+): Promise<StoredCandidate | null> {
+  return await withStore(dataDir, null as StoredCandidate | null, (store) => {
+    const rows = store.all(STORE_SQL.statePrefixSince, [
+      MACHINE_SESSION,
+      STATE_PAIRING_POST_PREFIX,
+      STATE_PAIRING_POST_PREFIX + String.fromCharCode(0xffff),
+      0,
+      RECENT_LIMIT,
+    ]);
+    for (const row of rows) {
+      if (typeof row.value !== 'string') continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(row.value);
+      } catch {
+        continue;
+      }
+      if (!isRecord(parsed) || parsed.postId !== resourceId) continue;
+      // A matching row with no `url` (a `held` link) does not end the search:
+      // a rarer second link for the same postId (e.g. a re-synced pairing)
+      // could still carry one.
+      if (typeof parsed.url !== 'string' || parsed.url.length === 0) continue;
+      return {
+        resourceId,
+        url: parsed.url,
+        title: typeof parsed.title === 'string' ? parsed.title : '',
+        price: typeof parsed.price === 'string' ? parsed.price : '0',
+      };
+    }
+    return null;
   });
 }
 

@@ -536,6 +536,18 @@ export interface TriggerStats {
 export interface LookupStats {
   windowDays: number;
   triggers: TriggerStats[];
+  /**
+   * The response's `Age` header (RFC 9111 §5.1), when the server sent one — how
+   * long ago the underlying answer was computed, not how long ago this CLI
+   * asked. `GET /api/lookups/stats` is cached for several minutes server-side
+   * (tenjin-agent#252), so a `push grade` run and the next `push status` can
+   * read the same stale count and look, wrongly, like grading never reached the
+   * shelf. Surfacing the header is what tells the two apart. Undefined when the
+   * header is absent (an uncached hit, or a deployment that never sends it) or
+   * unparseable — never coerced to 0, which would claim a freshness this CLI
+   * was never told.
+   */
+  ageSeconds?: number;
 }
 
 /**
@@ -599,5 +611,9 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
       details: parsed.error.issues,
     });
   }
-  return parsed.data;
+  const age = Number(res.header('age'));
+  return {
+    ...parsed.data,
+    ...(Number.isFinite(age) && age >= 0 ? { ageSeconds: age } : {}),
+  };
 }

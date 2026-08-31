@@ -465,6 +465,18 @@ tenjin push grade --explain
 tenjin push off
 ```
 
+## State store
+
+`~/.tenjin/state.db` holds pairings, searches, and every hook's own bookkeeping. It runs in WAL mode, so **inspect it with `sqlite3 ~/.tenjin/state.db`, not `sqlite3 -readonly ~/.tenjin/state.db`** — the standalone binary's `-readonly` open still wants to touch the `-shm` sidecar, which fails from a subshell with `unable to open database file (14)`; a plain open works.
+
+### `tenjin state query "<sql>"`
+
+A read-only escape hatch that does not have that failure mode: one `SELECT` (or `WITH ... SELECT`) statement, run through the CLI's own `node:sqlite` driver opened `readOnly`, with rows printed as JSON. Anything else — a second `;`-separated statement, an INSERT/UPDATE/DELETE/PRAGMA — is refused before the file is ever opened.
+
+```bash
+tenjin state query "SELECT key, at FROM session_state WHERE key LIKE 'pairing_post:%' LIMIT 20"
+```
+
 ## MCP
 
 `tenjin mcp` runs a local stdio MCP server over the same command cores. It exposes search, inspect, buy, outcome, publish, edit, wallet, and fund tools. The wallet stays local, and the same spend and publish gates apply.

@@ -1,5 +1,5 @@
 import { CliError } from './errors';
-import { findStoredCandidate } from './state-store';
+import { findPairingCandidate, findStoredCandidate } from './state-store';
 import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
 import { isSameDeployment } from './production-origin';
@@ -123,7 +123,14 @@ export async function resolveResourceRef(
     return { url, shelfBaseUrl: shelfFor(url) };
   }
   if (UUID_RE.test(trimmed)) {
-    const candidate = await findStoredCandidate(dataDir, trimmed);
+    // A search candidate first (the ordinary case), then a pairing this
+    // machine's own `tenjin sync` published (tenjin-agent#252): `sync` never
+    // records what it publishes as a search result, so an id straight out of
+    // its own output would otherwise refuse to resolve here even though the
+    // CLI is the one that minted it.
+    const candidate =
+      (await findStoredCandidate(dataDir, trimmed)) ??
+      (await findPairingCandidate(dataDir, trimmed));
     if (candidate === null) {
       throw new CliError('RESOURCE_NOT_FOUND', `No local search knows resource ${trimmed}.`, {
         fix: 'Run `tenjin search` to surface it first, or pass the full read URL.',

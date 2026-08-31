@@ -988,7 +988,12 @@ function renderStatusLines(data: {
       lines.push(`server ${label}: unavailable`);
       continue;
     }
-    lines.push(`server ${label} (${stats.windowDays}d):`);
+    // The endpoint is cached server-side for several minutes (tenjin-agent#252),
+    // so a count that has not moved since the last `push grade` is routinely the
+    // cache, not proof grading never reached the shelf. `Age` says which.
+    const asOf =
+      stats.ageSeconds !== undefined ? ` — shelf stats as of ~${stats.ageSeconds}s ago` : '';
+    lines.push(`server ${label} (${stats.windowDays}d)${asOf}:`);
     for (const t of stats.triggers) {
       const rate = t.useRate === null ? 'n/a' : t.useRate.toFixed(2);
       // The one string in this block the shelf chose. Bounded by the response

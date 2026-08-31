@@ -24,6 +24,7 @@ import {
   openSearches,
   openStore,
   probeSqlite,
+  queryStateReadOnly,
   recordSearch,
   removeRetiredState,
   projectIdOf,
@@ -661,6 +662,81 @@ function columns(table: string): string[] {
 
 /** The four tables version 2 puts `agent_id` on. */
 const V2_TABLES = ['events', 'injections', 'searches', 'pairing_closes'] as const;
+
+/**
+ * `tenjin state query` (tenjin-agent#252): read-only ad hoc SQL against the
+ * state db, for an operator who reaches for `sqlite3 -readonly` and hits
+ * "unable to open database file (14)" against the WAL-mode store.
+ */
+describe('queryStateReadOnly', () => {
+  it('runs a SELECT and returns rows as plain objects', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, ['', 'k1', 'v1', 1000]);
+    store.run(STORE_SQL.setState, ['', 'k2', 'v2', 2000]);
+    store.close();
+
+    const rows = await queryStateReadOnly(
+      dataDir,
+      "SELECT key, value FROM session_state WHERE session = '' ORDER BY key",
+    );
+    expect(rows).toEqual([
+      { key: 'k1', value: 'v1' },
+      { key: 'k2', value: 'v2' },
+    ]);
+  });
+
+  it('accepts a WITH ... SELECT statement and a single trailing semicolon', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, ['', 'k1', 'v1', 1000]);
+    store.close();
+
+    const rows = await queryStateReadOnly(
+      dataDir,
+      'WITH t AS (SELECT key FROM session_state) SELECT key FROM t;',
+    );
+    expect(rows).toEqual([{ key: 'k1' }]);
+  });
+
+  it('rejects a non-SELECT statement before opening the file', async () => {
+    await expect(queryStateReadOnly(dataDir, 'DELETE FROM session_state')).rejects.toMatchObject({
+      code: 'USAGE',
+    });
+    await expect(queryStateReadOnly(dataDir, '   ')).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  /** A SELECT smuggling a second statement after a `;` is still one write this
+   *  verb must never make room for. */
+  it('rejects a second statement riding after a semicolon', async () => {
+    await expect(
+      queryStateReadOnly(dataDir, 'SELECT 1; DROP TABLE session_state'),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  /** `readOnly: true` fails outright rather than creating the file — the right
+   *  answer for an inspection tool that must never materialize the store it was
+   *  asked to look inside. */
+  it('fails STATE_QUERY_FAILED against a data dir with no store yet', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'tenjin-state-query-'));
+    try {
+      await expect(queryStateReadOnly(empty, 'SELECT 1 AS one')).rejects.toMatchObject({
+        code: 'STATE_QUERY_FAILED',
+      });
+    } finally {
+      await rm(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('fails STATE_QUERY_FAILED on a query the driver itself refuses', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.close();
+    await expect(queryStateReadOnly(dataDir, 'SELECT * FROM no_such_table')).rejects.toMatchObject({
+      code: 'STATE_QUERY_FAILED',
+    });
+  });
+});
 
 /**
  * A database that already exists is the ONLY interesting case for a schema

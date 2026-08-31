@@ -503,6 +503,46 @@ export async function stopHookIsCurrent(dataDir: string): Promise<boolean> {
   return onDisk === null || onDisk === spec.script;
 }
 
+/**
+ * Which of the generated hook/push scripts ON DISK do not match what THIS
+ * BUILD would write.
+ *
+ * The doctor equivalent of `compareWiredSkills` (commands/doctor.ts), same
+ * reason: `tenjin update` bumps the npm-installed binary and nothing else
+ * (lib/install-location.ts refuses the self-heal on a git checkout entirely,
+ * which is how this team runs `main`), so a script a merge changed keeps
+ * running whatever it was until someone re-runs `tenjin install`
+ * (tenjin-agent#252 — #242's hook-allowlist fix merged and kept producing junk
+ * pairings on this machine for hours because of exactly this). `stopHookIsCurrent`
+ * already does this for the one script `push status` cannot do without;
+ * this covers all eight, for doctor to report on generally.
+ *
+ * PLANNED WITH `push: true` (via `scriptPlan`), same as the writer: a body is
+ * generated whether or not the seven push entries are registered, so a stale
+ * push script is real drift even on a machine where `hooks.push` reads `off`.
+ *
+ * Absent scripts are not stale — nothing installed cannot have drifted, and a
+ * fresh machine that never ran `tenjin install` is not this check's business
+ * (the skills / push-hooks checks already cover "nothing wired").
+ */
+export async function compareHookScripts(
+  dataDir: string,
+): Promise<{ stale: string[]; present: string[] }> {
+  const dir = hooksDir(dataDir);
+  const seen = new Set<string>();
+  const present: string[] = [];
+  const stale: string[] = [];
+  for (const spec of scriptPlan(dataDir)) {
+    if (seen.has(spec.scriptFile)) continue;
+    seen.add(spec.scriptFile);
+    const onDisk = await readFile(join(dir, spec.scriptFile), 'utf8').catch(() => null);
+    if (onDisk === null) continue;
+    present.push(spec.scriptFile);
+    if (onDisk !== spec.script) stale.push(spec.scriptFile);
+  }
+  return { stale, present };
+}
+
 export interface WireHooksOptions {
   homeDir: string;
   dataDir: string;

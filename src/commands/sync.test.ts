@@ -276,6 +276,70 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
   });
 
   /**
+   * tenjin-agent#252: the body used to write `Failed: ${row.cmd}` — the WHOLE
+   * scrubbed command line, pipeline tail and all — while the title and the
+   * `command_head` key both already used `cmdHead`. A scrubbed cwd renders as
+   * `/`, so a pipeline like this reads as a bogus `cd /` in the published body.
+   */
+  it('writes the body Failed: line off cmdHead, not the full scrubbed command', async () => {
+    await writeTeamConfig();
+    await seedPairing({
+      cwd: dir,
+      key: 'fine-hash-head',
+      coarseKey: 'coarse-hash-head',
+      cmdHead: 'pnpm',
+      cmd: 'cd / && pnpm vitest run src/commands/sync.test.ts | grep -B2 Error; echo ---SQL',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    const bodyMd = sent[0]!.body!.bodyMd as string;
+    expect(bodyMd).toContain('Failed: pnpm');
+    expect(bodyMd).not.toContain('cd /');
+    expect(bodyMd).not.toContain('grep');
+    expect(bodyMd).not.toContain('---SQL');
+  });
+
+  /**
+   * tenjin-agent#252: `publishPost`'s own response names the read URL, title
+   * and price of the post this machine just created, and `setLink` now stashes
+   * them on the `pairing_post:<n>` link — which is what lets `inspect
+   * <resourceId>`/`read <resourceId>` resolve an id this CLI's own `tenjin
+   * sync` just published without it ever having been searched for (see
+   * lib/state-store.ts#findPairingCandidate and its resource-ref.test.ts
+   * coverage).
+   */
+  it('stamps the published url/title/price onto the pairing_post link', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({
+      cwd: dir,
+      key: 'fine-hash-url',
+      coarseKey: 'coarse-hash-url',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch } = shelfServer();
+
+    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as { value: string };
+    store.close();
+    expect(JSON.parse(link.value)).toMatchObject({
+      postId: '11111111-1111-4111-8111-111111111111',
+      own: true,
+      url: `${TEAM}/a/team/fix-pnpm-test`,
+      title: 'Fix: pnpm — ENOENT',
+      price: '0',
+    });
+  });
+
+  /**
    * NO REMOTE, NO SHELF (tenjin-agent#249, owner decision). '' is what stands in
    * for a repo scope this checkout does not have, and it is not a salt:
    * publishing under it would put every origin-less checkout on the team's
@@ -724,10 +788,16 @@ describe('tenjin sync: a 404 on the update of our own post', () => {
 describe('tenjin sync: the publish scan', () => {
   it('keeps a row whose body carries a credential on the machine, marked synced and skipped', async () => {
     await writeTeamConfig();
+    // The credential rides in `fixCmd` (a field `bodyFor` still writes in
+    // full, `Passed on: ...`), not `cmd`: tenjin-agent#252 swapped the
+    // `Failed:` line to `cmdHead`, so a secret sitting only in the full
+    // scrubbed command line no longer reaches the body this scan reads at
+    // all — this test is about the scan catching what IS synced, not about
+    // `cmd` specifically.
     const leaky = await seedPairing({
       cwd: dir,
       key: 'fine-leaky',
-      cmd: 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE pnpm test',
+      fixCmd: 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE pnpm test',
       status: 'unverified',
     });
     const clean = await seedPairing({ cwd: dir, key: 'fine-clean', status: 'unverified' });

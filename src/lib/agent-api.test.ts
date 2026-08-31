@@ -678,6 +678,37 @@ describe('getLookupStats', () => {
     }
   });
 
+  /**
+   * tenjin-agent#252: `GET /api/lookups/stats` is cached server-side for
+   * several minutes, and the response's own `Age` header is the only thing
+   * that says so — a stale zero-`used` count otherwise reads as "grading
+   * never reached the shelf" rather than "the cache has not turned over yet".
+   */
+  it('captures the Age response header as ageSeconds', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '137' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBe(137);
+  });
+
+  /** Absent, never coerced to 0 — a freshness claim this CLI was never told. */
+  it('leaves ageSeconds undefined with no Age header', async () => {
+    const { fetch } = stubFetch(json(200, STATS));
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBeUndefined();
+  });
+
   /** A pattern rather than the arm names, so a shelf that grows an arm still
    *  renders instead of failing the whole block. */
   it('accepts an arm name this build has never heard of', async () => {
