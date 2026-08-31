@@ -1699,7 +1699,18 @@ describe('scrub', () => {
     // The promotion is what made this worth closing: nothing to send.
     expect(identifiersOf(scrubbed)).toEqual([]);
     // Whatever the parameter is named, and however many of them there are.
-    for (const tail of [';ref=abc123', '?token=abc123', '&x-amz-signature=abc123&expires=900']) {
+    for (const tail of [
+      ';ref=abc123',
+      '?token=abc123',
+      '&x-amz-signature=abc123&expires=900',
+      // The stop characters double as separators: a parameter glued on with
+      // punctuation the match stops at goes with the url too (round 3).
+      ',ref=abc123',
+      ')ref=abc123',
+      ']v=abc123',
+      '>id=abc123',
+      '"x=abc123',
+    ]) {
       expect(scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`)).toBe(
         'breaks migrate',
       );
