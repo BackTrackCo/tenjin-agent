@@ -1706,6 +1706,9 @@ describe('scrub', () => {
       // The stop characters double as separators: a parameter glued on with
       // punctuation the match stops at goes with the url too (round 3).
       ',ref=abc123',
+      // Digit-bearing and hyphenated names too (greptile round 4).
+      ';ref2=abc123',
+      '&utm_2-src=abc123',
       ')ref=abc123',
       ']v=abc123',
       '>id=abc123',

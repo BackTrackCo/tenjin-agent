@@ -1140,7 +1140,7 @@ const SECRET_ASSIGN_RE =
  *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
  *  blanks a signing parameter wherever it sits, url or not. */
 const SECRET_USERINFO_RE =
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*(?:[,;?&)\]}>'"][A-Za-z_]{1,64}=[^\s'",;)\]}>?&]{0,256})*/gi;
+  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@[^\s'",;)\]}>]*(?:[,;?&)\]}>'"][A-Za-z_][A-Za-z0-9_-]{0,63}=[^\s'",;)\]}>?&]{0,256})*/gi;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
