@@ -293,8 +293,6 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
               at: now(),
               own: true,
               url: result.url,
-              title: result.title,
-              price: result.priceAtomic,
             })
           ) {
             continue;
@@ -651,17 +649,24 @@ interface PairingLink {
   status?: string;
   fixFiles?: string[];
   /**
-   * The read URL, title and atomic price `publishPost` echoed back on an OWN
-   * publish (tenjin-agent#252): the read route is keyed by handle/slug, so an
-   * id alone cannot rebuild it later, and this is the one moment the CLI is
+   * The read URL `publishPost` echoed back on an OWN publish
+   * (tenjin-agent#252): the read route is keyed by handle/slug, so an id
+   * alone cannot rebuild it later, and this is the one moment the CLI is
    * ever handed the slug for a post it just created. Stored here so
    * `findPairingCandidate` (state-store.ts) can answer `inspect`/`read` for an
    * id `tenjin sync` published without ever having been searched for. Absent
    * on a `held` link — this machine never fetched the holder's own slug.
+   *
+   * Title and price are deliberately NOT stored alongside it (PR 277 round-2
+   * review, nit on state-store.ts:4132): they were only ever read back as a
+   * synthesized `title: ''` / `price: '0'` default for a caller that reads
+   * only `.url`, and a stale or defaulted price is the wrong thing to hand a
+   * future spend-check. A caller that needs display metadata for a resolved
+   * id fetches it live off `GET /api/posts/<id>` (`getPostMetadata`,
+   * lib/agent-api.ts) instead, and gets "unknown" rather than an invented
+   * value when that call fails or the route predates the deployment.
    */
   url?: string;
-  title?: string;
-  price?: string;
 }
 
 function getLink(store: Store, pairingId: number): PairingLink | null {
@@ -687,8 +692,6 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
         ? { fixFiles: link.fixFiles.filter((f): f is string => typeof f === 'string') }
         : {}),
       ...(typeof link.url === 'string' && link.url.length > 0 ? { url: link.url } : {}),
-      ...(typeof link.title === 'string' ? { title: link.title } : {}),
-      ...(typeof link.price === 'string' ? { price: link.price } : {}),
     };
   } catch {
     return null;

@@ -3,6 +3,7 @@ import {
   buildSearchRequest,
   buildOutcomeItem,
   getLookupStats,
+  getPostMetadata,
   postSearch,
   postOutcomes,
   type SearchResult,
@@ -803,5 +804,99 @@ describe('getLookupStats', () => {
       fetchImpl: fetch,
     });
     expect(stats.triggers[0]?.trigger).toBe('newarm');
+  });
+});
+
+/**
+ * PR 277 round-2 review, nit on state-store.ts:4132: `findPairingCandidate`
+ * used to synthesize `title: ''` / `price: '0'` for a `pairing_post` link
+ * missing them — a false default a future spend-check could have trusted.
+ * `getPostMetadata` is the replacement: the public `GET /api/posts/<id>`
+ * route a sibling server PR adds for PUBLISHED posts. It must never invent a
+ * value, so every failure mode (404, any other non-200, a network error, or
+ * a body this CLI cannot read) collapses to the same `null`.
+ */
+describe('getPostMetadata', () => {
+  const POST = {
+    id: '11111111-1111-4111-8111-111111111111',
+    title: 'Fix: pnpm — ENOENT',
+    price: '100000',
+    handle: 'iris',
+    slug: 'fix-pnpm-enoent',
+    status: 'published',
+  };
+
+  it('GETs the post by id and returns its title and price', async () => {
+    const { fetch, calls } = stubFetch(json(200, POST));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example/',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(calls[0]?.url).toBe(`https://preview.example/api/posts/${POST.id}`);
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(meta).toEqual({ title: POST.title, price: POST.price });
+  });
+
+  it('tolerates extra fields the contract does not name', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, tags: ['x'], readCount: 12 }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toEqual({ title: POST.title, price: POST.price });
+  });
+
+  it('returns null on a 404 (draft, unknown id, or a deployment without the route)', async () => {
+    const { fetch } = stubFetch(json(404, { error: 'not found' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null on any other non-200 status', async () => {
+    const { fetch } = stubFetch(json(500, { error: 'boom' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null on a network failure rather than throwing', async () => {
+    const throwing = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: throwing,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null on a body that does not match the contract', async () => {
+    const { fetch } = stubFetch(json(200, { id: POST.id, title: 'x' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for a non-published status rather than trusting the body', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, status: 'draft' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
   });
 });

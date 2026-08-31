@@ -427,15 +427,20 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
   });
 
   /**
-   * tenjin-agent#252: `publishPost`'s own response names the read URL, title
-   * and price of the post this machine just created, and `setLink` now stashes
-   * them on the `pairing_post:<n>` link — which is what lets `inspect
+   * tenjin-agent#252: `publishPost`'s own response names the read URL of the
+   * post this machine just created, and `setLink` stashes it on the
+   * `pairing_post:<n>` link — which is what lets `inspect
    * <resourceId>`/`read <resourceId>` resolve an id this CLI's own `tenjin
    * sync` just published without it ever having been searched for (see
    * lib/state-store.ts#findPairingCandidate and its resource-ref.test.ts
    * coverage).
+   *
+   * Title and price are deliberately NOT stamped here any more (PR 277
+   * round-2 review, nit on state-store.ts:4132): a caller after display
+   * metadata for a resolved id fetches it live off `GET /api/posts/<id>`
+   * instead of trusting this local, possibly-stale bookkeeping.
    */
-  it('stamps the published url/title/price onto the pairing_post link', async () => {
+  it('stamps the published url onto the pairing_post link, without title/price', async () => {
     await writeTeamConfig();
     const id = await seedPairing({
       cwd: dir,
@@ -452,13 +457,14 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     if (store === null) throw new Error('no store');
     const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as { value: string };
     store.close();
-    expect(JSON.parse(link.value)).toMatchObject({
+    const parsedLink: unknown = JSON.parse(link.value);
+    expect(parsedLink).toMatchObject({
       postId: '11111111-1111-4111-8111-111111111111',
       own: true,
       url: `${TEAM}/a/team/fix-pnpm-test`,
-      title: 'Fix: pnpm — ENOENT',
-      price: '0',
     });
+    expect(parsedLink).not.toHaveProperty('title');
+    expect(parsedLink).not.toHaveProperty('price');
   });
 
   /**

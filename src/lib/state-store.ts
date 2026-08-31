@@ -4097,6 +4097,18 @@ export async function findStoredCandidate(
   });
 }
 
+/** What a `pairing_post:<n>` link resolves `resourceId` to: just enough to
+ *  build the read URL. See {@link findPairingCandidate}. Deliberately NOT a
+ *  {@link StoredCandidate} — this id-link carries no display metadata of its
+ *  own (PR 277 round-2 review, nit on the old `title`/`price` defaults
+ *  below); a caller that wants a title or price for a resolved id fetches it
+ *  live (`getPostMetadata`, lib/agent-api.ts) rather than reading it off this
+ *  local, possibly-stale bookkeeping. */
+export interface PairingCandidate {
+  resourceId: string;
+  url: string;
+}
+
 /**
  * The candidate a `pairing_post:<n>` link carries for `resourceId` — a piece
  * THIS MACHINE's own `tenjin sync` published, independent of `searches`
@@ -4113,19 +4125,20 @@ export async function findStoredCandidate(
  * this ledger.
  *
  * A link with no `url` — a `held` link naming a teammate's post whose slug this
- * machine never fetched, or (impossible after this fix, but not assumed) one
- * written by an older build — answers null. There is no second network hop
- * here: an unauthenticated fetch-by-id route does not exist on this API (GET
- * /api/posts/<id> is owner-scoped SIWX; GET /api/read/<handle>/<slug> is keyed
- * by slug, not id), so a link this machine cannot already resolve stays
- * unresolved rather than the CLI inventing a request the server has nowhere to
- * answer.
+ * machine never fetched, or one written by an older build — answers null.
+ * This id-link only tells a caller the id is OURS/known; it carries no title
+ * or price (that used to be synthesized here as `title: ''` / `price: '0'`
+ * when a link's own copy was missing — a false default a future spend-check
+ * could have trusted). A caller after display metadata for a resolved id
+ * fetches it live off the public `GET /api/posts/<id>` route
+ * (`getPostMetadata`, lib/agent-api.ts), which answers "unknown" rather than
+ * a guess when the route 404s or the deployment predates it.
  */
 export async function findPairingCandidate(
   dataDir: string,
   resourceId: string,
-): Promise<StoredCandidate | null> {
-  return await withStore(dataDir, null as StoredCandidate | null, (store) => {
+): Promise<PairingCandidate | null> {
+  return await withStore(dataDir, null as PairingCandidate | null, (store) => {
     const rows = store.all(STORE_SQL.statePrefixSince, [
       MACHINE_SESSION,
       STATE_PAIRING_POST_PREFIX,
@@ -4146,12 +4159,7 @@ export async function findPairingCandidate(
       // a rarer second link for the same postId (e.g. a re-synced pairing)
       // could still carry one.
       if (typeof parsed.url !== 'string' || parsed.url.length === 0) continue;
-      return {
-        resourceId,
-        url: parsed.url,
-        title: typeof parsed.title === 'string' ? parsed.title : '',
-        price: typeof parsed.price === 'string' ? parsed.price : '0',
-      };
+      return { resourceId, url: parsed.url };
     }
     return null;
   });

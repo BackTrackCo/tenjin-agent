@@ -634,3 +634,51 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
     ...(Number.isFinite(age) ? { ageSeconds: age } : {}),
   };
 }
+
+const postMetadataSchema = z
+  .object({
+    id: z.string().regex(UUID_RE, 'id must be a uuid'),
+    title: z.string(),
+    price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
+    handle: z.string(),
+    slug: z.string(),
+    status: z.string(),
+  })
+  .passthrough();
+
+export interface PostMetadata {
+  title: string;
+  price: string;
+}
+
+/**
+ * GET /api/posts/<id> — the public id lookup for a PUBLISHED post (tenjin
+ * server, sibling of the tenjin-agent#252 local-bookkeeping removal in PR
+ * 277 round-2 review: `state-store.ts`'s `findPairingCandidate` used to
+ * synthesize `title: ''` / `price: '0'` for a link missing them, which is
+ * exactly the "invented value" this function exists not to produce).
+ *
+ * Every failure collapses to `null`: a 404 (draft, unknown id, or a
+ * deployment that predates this route — indistinguishable from here, and
+ * both mean "no metadata"), any other non-200, a network or timeout error,
+ * a body that does not match the contract, or a `status` other than
+ * `published`. This is the one function in this module that must never
+ * throw or guess — a resolved id with no metadata is UNKNOWN, never a
+ * default title or a free price.
+ */
+export async function getPostMetadata(
+  resourceId: string,
+  opts: AgentApiOptions,
+): Promise<PostMetadata | null> {
+  const url = `${trimSlash(opts.baseUrl)}/api/posts/${encodeURIComponent(resourceId)}`;
+  const res = await httpRequest(url, {
+    method: 'GET',
+    timeoutMs: opts.timeoutMs,
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+    fetchImpl: opts.fetchImpl,
+  });
+  if (!res.ok || res.status !== 200) return null;
+  const parsed = postMetadataSchema.safeParse(res.json);
+  if (!parsed.success || parsed.data.status !== 'published') return null;
+  return { title: parsed.data.title, price: parsed.data.price };
+}
