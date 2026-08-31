@@ -523,24 +523,42 @@ export async function stopHookIsCurrent(dataDir: string): Promise<boolean> {
  *
  * Absent scripts are not stale — nothing installed cannot have drifted, and a
  * fresh machine that never ran `tenjin install` is not this check's business
- * (the skills / push-hooks checks already cover "nothing wired").
+ * (the skills / push-hooks checks already cover "nothing wired"). A script
+ * that IS there but could not be READ (permissions, a device node standing in
+ * its place) is a third case distinct from both: `lstat` proves something is
+ * installed, so it is not absent, and an unreadable file cannot be compared
+ * byte-for-byte, so it is not "current" either. Reported back as
+ * {@link unreadable} rather than folded into either list, so the caller can
+ * say so rather than the file quietly vanishing from the report — the same
+ * silent-drop `compareWiredSkills` has for this exact case, which is a gap
+ * there too rather than a precedent to repeat here.
  */
 export async function compareHookScripts(
   dataDir: string,
-): Promise<{ stale: string[]; present: string[] }> {
+): Promise<{ stale: string[]; present: string[]; unreadable: string[] }> {
   const dir = hooksDir(dataDir);
   const seen = new Set<string>();
   const present: string[] = [];
   const stale: string[] = [];
+  const unreadable: string[] = [];
   for (const spec of scriptPlan(dataDir)) {
     if (seen.has(spec.scriptFile)) continue;
     seen.add(spec.scriptFile);
-    const onDisk = await readFile(join(dir, spec.scriptFile), 'utf8').catch(() => null);
-    if (onDisk === null) continue;
+    const target = join(dir, spec.scriptFile);
+    // `lstat` first (as {@link writeOwnedScripts} does) so a script that
+    // exists but cannot be opened is told apart from one that is not there at
+    // all, rather than both landing on the same `catch (() => null)`.
+    const entry = await lstat(target).catch(() => null);
+    if (entry === null) continue;
+    const onDisk = await readFile(target, 'utf8').catch(() => null);
+    if (onDisk === null) {
+      unreadable.push(spec.scriptFile);
+      continue;
+    }
     present.push(spec.scriptFile);
     if (onDisk !== spec.script) stale.push(spec.scriptFile);
   }
-  return { stale, present };
+  return { stale, present, unreadable };
 }
 
 export interface WireHooksOptions {

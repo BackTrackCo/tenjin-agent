@@ -1268,12 +1268,16 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
  * "matches what this build would write now" compare, same silent-until-there
  * shape. Silent (`null`) when nothing is installed at all — a fresh machine
  * that never ran `tenjin install` is the skills/push-hooks checks' business,
- * not this one's.
+ * not this one's. A script that IS installed but could not be READ is neither
+ * of those: `compareHookScripts` reports it separately rather than dropping
+ * it, so a permissions problem under the hooks directory (or a device node
+ * where a script should be) is a `warn` an operator sees, not a diagnostic
+ * that silently found "nothing wrong" by never looking.
  */
 async function checkHookScripts(dataDir: string): Promise<BuiltCheck | null> {
-  const { stale, present } = await compareHookScripts(dataDir);
-  if (present.length === 0) return null;
-  if (stale.length === 0) {
+  const { stale, present, unreadable } = await compareHookScripts(dataDir);
+  if (present.length === 0 && unreadable.length === 0) return null;
+  if (stale.length === 0 && unreadable.length === 0) {
     return {
       result: {
         name: 'hook scripts',
@@ -1283,13 +1287,25 @@ async function checkHookScripts(dataDir: string): Promise<BuiltCheck | null> {
       },
     };
   }
+  const parts: string[] = [];
+  if (stale.length > 0) {
+    parts.push(
+      `${stale.length} of ${present.length} readable script(s) are stale (${stale.join(', ')})`,
+    );
+  }
+  if (unreadable.length > 0) {
+    parts.push(`${unreadable.length} could not be read (${unreadable.join(', ')})`);
+  }
   return {
     result: {
       name: 'hook scripts',
       status: 'warn',
       required: false,
-      detail: `${stale.length} of ${present.length} generated hook/push scripts on disk are stale (${stale.join(', ')}); agents are running an older build's hook code`,
-      fix: 'tenjin install',
+      detail: `${parts.join('; ')}; agents may be running an older build's hook code`,
+      fix:
+        unreadable.length > 0
+          ? 'Check permissions under the hooks directory, then `tenjin install`.'
+          : 'tenjin install',
     },
   };
 }

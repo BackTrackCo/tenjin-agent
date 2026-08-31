@@ -2839,4 +2839,25 @@ describe('runDoctor — hook scripts go stale after a CLI update', () => {
     expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
     expect(check?.fix).toBe('tenjin install');
   });
+
+  // chmod 0o000 only blocks the owner's own read on a non-root process; skip
+  // rather than false-fail where that does not hold (Windows, root).
+  const canDenyOwnRead = process.platform !== 'win32' && process.getuid?.() !== 0;
+  (canDenyOwnRead ? it : it.skip)(
+    'warns when an installed script cannot be read, rather than staying silent',
+    async () => {
+      await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
+      const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
+      await chmod(target, 0o000);
+      try {
+        const check = await hookScriptsCheck();
+        expect(check?.status).toBe('warn');
+        expect(check?.detail).toContain('could not be read');
+        expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
+        expect(check?.fix).toContain('permissions');
+      } finally {
+        await chmod(target, 0o755);
+      }
+    },
+  );
 });
