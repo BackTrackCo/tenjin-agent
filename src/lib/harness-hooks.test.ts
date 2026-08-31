@@ -457,6 +457,52 @@ describe('compareHookScripts', () => {
       }
     },
   );
+
+  // A directory-level EACCES fails every child `lstat` inside it the same way
+  // ENOENT would (both throw); folding both into "absent" the way the fix
+  // above still could have (branching only on presence, not the error CODE)
+  // would report every script as not-installed instead of naming the real
+  // permissions problem.
+  (canDenyOwnRead ? it : it.skip)(
+    'reports scripts unreadable, not absent, when the hooks directory itself loses search permission',
+    async () => {
+      await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+      const dir = hooksDir(data);
+      await chmod(dir, 0o000);
+      try {
+        const { present, unreadable } = await compareHookScripts(data);
+        expect(present).toEqual([]);
+        expect(unreadable).toContain(WEBSEARCH_HOOK_FILE);
+      } finally {
+        // Restored so the temp dir (and its contents) can be cleaned up in afterEach.
+        await chmod(dir, 0o755);
+      }
+    },
+  );
+
+  // Filed against PR 277's review: without an `isFile()` check, `readFile` on
+  // a FIFO blocks forever waiting for a writer to open the other end, which
+  // would hang `tenjin doctor` (an unattended, agent-runnable command) rather
+  // than reporting the script unreadable.
+  const canMkfifo = platform() !== 'win32';
+  (canMkfifo ? it : it.skip)(
+    'reports a FIFO standing in for a script as unreadable, without hanging',
+    async () => {
+      await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+      const target = join(hooksDir(data), WEBSEARCH_HOOK_FILE);
+      await rm(target, { force: true });
+      const { execFileSync } = await import('node:child_process');
+      execFileSync('mkfifo', [target]);
+      const result = await Promise.race([
+        compareHookScripts(data),
+        new Promise<'TIMEOUT'>((resolve) => setTimeout(() => resolve('TIMEOUT'), 2000)),
+      ]);
+      expect(result).not.toBe('TIMEOUT');
+      const { present, unreadable } = result as Awaited<ReturnType<typeof compareHookScripts>>;
+      expect(present).not.toContain(WEBSEARCH_HOOK_FILE);
+      expect(unreadable).toContain(WEBSEARCH_HOOK_FILE);
+    },
+  );
 });
 
 describe('wireSearchHooks: idempotence', () => {

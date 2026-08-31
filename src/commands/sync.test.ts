@@ -305,6 +305,34 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
   });
 
   /**
+   * PR 277 review (tenjin-agent#252): the `Passed on:` line got the same
+   * whole-scrubbed-command treatment `Failed:` had — `fix_cmd` is the full
+   * successful command from `safeCommand(command)`, so the same `cd /`
+   * (a scrubbed cwd) and pipeline tail reached the published body through the
+   * second field even after `Failed:` was fixed to use `cmdHead`.
+   */
+  it('writes the body Passed on: line off a derived head, not the full scrubbed fix command', async () => {
+    await writeTeamConfig();
+    await seedPairing({
+      cwd: dir,
+      key: 'fine-hash-fix-head',
+      coarseKey: 'coarse-hash-fix-head',
+      fixCmd: 'cd / && ; pnpm typecheck > $S/tc2.log',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    const bodyMd = sent[0]!.body!.bodyMd as string;
+    expect(bodyMd).toContain('Passed on: pnpm');
+    expect(bodyMd).not.toContain('cd /');
+    expect(bodyMd).not.toContain('tc2.log');
+  });
+
+  /**
    * tenjin-agent#252: `publishPost`'s own response names the read URL, title
    * and price of the post this machine just created, and `setLink` now stashes
    * them on the `pairing_post:<n>` link — which is what lets `inspect
@@ -788,16 +816,16 @@ describe('tenjin sync: a 404 on the update of our own post', () => {
 describe('tenjin sync: the publish scan', () => {
   it('keeps a row whose body carries a credential on the machine, marked synced and skipped', async () => {
     await writeTeamConfig();
-    // The credential rides in `fixCmd` (a field `bodyFor` still writes in
-    // full, `Passed on: ...`), not `cmd`: tenjin-agent#252 swapped the
-    // `Failed:` line to `cmdHead`, so a secret sitting only in the full
-    // scrubbed command line no longer reaches the body this scan reads at
-    // all — this test is about the scan catching what IS synced, not about
-    // `cmd` specifically.
+    // The credential rides in `fixFiles` (`Changed: ...` in the body), not
+    // `cmd` or `fixCmd`: tenjin-agent#252 (PR 277 review) swapped both the
+    // `Failed:` line to `cmdHead` and the `Passed on:` line to a head derived
+    // from `fixCmd`, so a secret sitting only in either full scrubbed command
+    // line no longer reaches the body this scan reads at all — this test is
+    // about the scan catching what IS synced, not about a specific field.
     const leaky = await seedPairing({
       cwd: dir,
       key: 'fine-leaky',
-      fixCmd: 'AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE pnpm test',
+      fixFiles: ['AKIAIOSFODNN7EXAMPLE.ts'],
       status: 'unverified',
     });
     const clean = await seedPairing({ cwd: dir, key: 'fine-clean', status: 'unverified' });

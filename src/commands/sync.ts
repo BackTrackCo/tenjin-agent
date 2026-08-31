@@ -484,6 +484,58 @@ function discriminant(row: PairingRow): string {
   return row.errorFiles.length > 0 ? (row.errorFiles[0] ?? '') : '';
 }
 
+/** Shell scaffolding (`cd`, `echo`, `printf`) and pipe-tail text filters
+ *  (`grep`, `head`, ...) that never mark what actually FIXED a failure — only
+ *  what shaped or scaffolded a prior command's output. Kept separate from
+ *  push-scripts.ts's `FAILURE_HEADS`: that allowlist is generated hook-script
+ *  SOURCE (a string this module cannot import, not a real binding) and is
+ *  scoped to failure signatures, not to "what command passed". A denylist
+ *  answers the looser "Passed on:" question well enough without a schema
+ *  change to store a computed head at fix time. */
+const FIX_CMD_NOISE_HEADS = new Set([
+  'cd',
+  'echo',
+  'printf',
+  'true',
+  'false',
+  'grep',
+  'head',
+  'tail',
+  'sed',
+  'awk',
+  'sort',
+  'uniq',
+  'wc',
+  'cut',
+  'tr',
+  'xargs',
+]);
+
+/** The first non-noise command basename in `command`, for the `Passed on:`
+ *  line — the same "publish the head, not the whole line" treatment `cmdHead`
+ *  already gets for `Failed:`. `fixCmd` carries the WHOLE scrubbed successful
+ *  command (a scrubbed-to-`/` `cd /` prefix and pipeline tails included),
+ *  unlike `cmdHead`, which push-scripts.ts computes once at pairing-open time
+ *  and stores (tenjin-agent#252, PR 277 review). Returns null when nothing but
+ *  noise words remain, so the caller drops the line the same way it already
+ *  drops `Failed:` for a null `cmdHead`. */
+function fixCmdHead(command: string): string | null {
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    const words = segment
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0);
+    let i = 0;
+    while (i < words.length && /^[A-Za-z_]\w*=/.test(words[i] ?? '')) i++;
+    if (i >= words.length) continue;
+    const word = words[i] ?? '';
+    const head = word.split('/').pop() || word;
+    if (FIX_CMD_NOISE_HEADS.has(head)) continue;
+    return head;
+  }
+  return null;
+}
+
 /** ≤300 chars: the failing head, the fix command and files, the verify command,
  *  and a `pkg:` line (which a later staleness read parses back). Every field
  *  already passed the local scrub on the way into the row; the whole thing is
@@ -498,7 +550,11 @@ function bodyFor(row: PairingRow): string {
   // `command_head` key already use.
   if (row.cmdHead !== null && row.cmdHead.length > 0) lines.push(`Failed: ${row.cmdHead}`);
   if (row.fixFiles.length > 0) lines.push(`Changed: ${row.fixFiles.slice(0, 4).join(', ')}`);
-  if (row.fixCmd !== null && row.fixCmd.length > 0) lines.push(`Passed on: ${row.fixCmd}`);
+  // Same head-not-whole-line treatment as `Failed:` above, via a local
+  // derivation rather than `row.cmdHead` (`fixCmd` is a different capture with
+  // no stored head of its own).
+  const fixHead = row.fixCmd !== null && row.fixCmd.length > 0 ? fixCmdHead(row.fixCmd) : null;
+  if (fixHead !== null) lines.push(`Passed on: ${fixHead}`);
   const pkgs = Object.entries(row.pkgVersions)
     .slice(0, 3)
     .map(([name, ver]) => `${name}@${ver}`);

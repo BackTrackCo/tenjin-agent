@@ -532,6 +532,24 @@ export async function stopHookIsCurrent(dataDir: string): Promise<boolean> {
  * say so rather than the file quietly vanishing from the report — the same
  * silent-drop `compareWiredSkills` has for this exact case, which is a gap
  * there too rather than a precedent to repeat here.
+ *
+ * TWO MORE "is gone" lies a bare `catch(() => null)` would tell here, both
+ * filed against this PR's review:
+ *
+ * 1. A hooks DIRECTORY that itself lost search (`+x`) permission fails EVERY
+ *    child `lstat` with EACCES, not ENOENT. Catching every code the same way
+ *    would read that as "nothing installed" and doctor would stay silent
+ *    instead of naming a permissions problem, so the catch below keeps ENOENT
+ *    (truly absent) and everything else (EACCES here, on the file or on the
+ *    directory above it) lands in {@link unreadable} instead.
+ * 2. `entry.isFile()` is checked before the read: a FIFO standing where a
+ *    script should be makes `readFile` block forever waiting for a writer
+ *    (verified: a `mkfifo` target hangs past any timeout this process sets),
+ *    and a symlink to an unbounded source is an unbounded read. `lstat`
+ *    (never `stat`) does not follow the link, so a symlink standing in for a
+ *    script — the "device node" case the doc above already named — fails
+ *    `isFile()` and lands in {@link unreadable} without `readFile` ever
+ *    touching it.
  */
 export async function compareHookScripts(
   dataDir: string,
@@ -547,9 +565,18 @@ export async function compareHookScripts(
     const target = join(dir, spec.scriptFile);
     // `lstat` first (as {@link writeOwnedScripts} does) so a script that
     // exists but cannot be opened is told apart from one that is not there at
-    // all, rather than both landing on the same `catch (() => null)`.
-    const entry = await lstat(target).catch(() => null);
+    // all, rather than both landing on the same `catch (() => null)`. ENOENT
+    // is the only code that means absent; anything else (EACCES on the file,
+    // or on the directory above it) means something IS there and could not be
+    // looked at, which belongs in `unreadable`, not silence.
+    const entry = await lstat(target).catch((err: NodeJS.ErrnoException) =>
+      err.code === 'ENOENT' ? null : err,
+    );
     if (entry === null) continue;
+    if (entry instanceof Error || !entry.isFile()) {
+      unreadable.push(spec.scriptFile);
+      continue;
+    }
     const onDisk = await readFile(target, 'utf8').catch(() => null);
     if (onDisk === null) {
       unreadable.push(spec.scriptFile);

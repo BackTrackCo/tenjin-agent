@@ -3057,8 +3057,11 @@ function maskSqlNoise(sql: string): string {
     const c = sql[i];
     const c2 = i + 1 < n ? sql[i + 1] : '';
     if (c === '-' && c2 === '-') {
+      // The loop condition already excludes '\n', so every character masked
+      // here is a non-newline; a per-character `=== '\n'` check on top of
+      // that can never take its true branch.
       while (i < n && sql[i] !== '\n') {
-        out += sql[i] === '\n' ? sql[i] : ' ';
+        out += ' ';
         i++;
       }
       continue;
@@ -3097,16 +3100,27 @@ function maskSqlNoise(sql: string): string {
       continue;
     }
     if (c === '[') {
+      // An UNTERMINATED `[` is not a quoted identifier — it is one stray
+      // character. Masking it through to end-of-input (as a naive "consume
+      // until ']' or EOF" would) blanks out everything after it, INCLUDING
+      // any `;` that followed, which is exactly the separator the caller
+      // relies on this function to preserve (PR 277 review). Looked up with
+      // `indexOf` first so an unmatched `[` falls through to the plain-char
+      // append below instead.
+      const close = sql.indexOf(']', i + 1);
+      if (close === -1) {
+        out += c;
+        i++;
+        continue;
+      }
       out += ' ';
       i++;
-      while (i < n && sql[i] !== ']') {
+      while (i < close) {
         out += sql[i] === '\n' ? sql[i] : ' ';
         i++;
       }
-      if (i < n) {
-        out += ' ';
-        i++;
-      }
+      out += ' ';
+      i = close + 1;
       continue;
     }
     out += c;
@@ -3197,6 +3211,13 @@ export async function queryStateReadOnly(
       },
     );
   }
+  // Every other opener in this module sets this first (see the module-level
+  // comment above and the #246 postmortem it references) because it is what
+  // stops a BUSY kill under a concurrent writer holding the WAL; this was the
+  // one opener that never did (PR 277 review). A read-only handle can still
+  // hit BUSY racing a checkpoint, so it gets the same wait instead of an
+  // immediate `STATE_QUERY_FAILED`.
+  db.exec(`PRAGMA busy_timeout = ${STORE_BUSY_TIMEOUT_MS}`);
   try {
     const rows = db.prepare(statement).all();
     return rows.filter(isRecord);

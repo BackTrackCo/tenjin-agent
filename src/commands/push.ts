@@ -1655,6 +1655,14 @@ function gradeLines(
   if (posted.skipped.length > 0) {
     lines.push(`${posted.skipped.length} verdict(s) not routed to any shelf; still unposted`);
   }
+  // The endpoint `push status` reads is cached server-side for several minutes
+  // (tenjin-agent#252): a verdict this run just posted routinely will not move
+  // the server counts a `push status` right after this checks. Only worth
+  // saying when something was actually posted — an all-skipped or all-failed
+  // run has no fresh verdict for the cache to be behind on yet.
+  if (posted.posted > 0) {
+    lines.push('shelf stats can take several minutes to reflect what was just posted');
+  }
   if (!explain) return lines;
   for (const row of rows) {
     const anchor = row.anchorLine === null ? 'no anchor' : `anchor line ${row.anchorLine}`;

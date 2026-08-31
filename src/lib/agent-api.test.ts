@@ -709,6 +709,49 @@ describe('getLookupStats', () => {
     expect(stats.ageSeconds).toBeUndefined();
   });
 
+  /**
+   * PR 277 review: `Number(raw)` alone accepts everything `Age` never
+   * legitimately carries. An empty header is the sharpest case — some proxies
+   * emit `Age: ""`, and `Number('') === 0` reads as a freshly-served answer,
+   * exactly inverting the signal this field exists to give.
+   */
+  it.each([
+    ['', 'empty'],
+    ['   ', 'whitespace-only'],
+    ['0x10', 'hex'],
+    ['+5', 'leading plus'],
+    ['1e300', 'exponent'],
+    ['1.5', 'fractional'],
+    ['-1', 'negative'],
+    ['12abc', 'trailing garbage'],
+  ])('leaves ageSeconds undefined for a non-integer Age header: %s (%s)', async (raw) => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: raw },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBeUndefined();
+  });
+
+  it('accepts a zero Age header (a genuinely fresh read, not the empty-string default)', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '0' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBe(0);
+  });
+
   /** A pattern rather than the arm names, so a shelf that grows an arm still
    *  renders instead of failing the whole block. */
   it('accepts an arm name this build has never heard of', async () => {

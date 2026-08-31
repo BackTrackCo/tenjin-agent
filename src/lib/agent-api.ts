@@ -611,9 +611,16 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
       details: parsed.error.issues,
     });
   }
-  const age = Number(res.header('age'));
+  // `Number(...)` alone accepts what `Age` never legitimately carries: `''`
+  // and whitespace coerce to 0 (a false "fresh"), hex/leading-`+`/exponent
+  // forms all parse, and a fraction survives. RFC 9111 `Age` is delta-seconds,
+  // a plain non-negative integer, so requiring that shape BEFORE the numeric
+  // conversion is what keeps this "undefined when absent or unparseable,
+  // never coerced to a freshness this CLI was never told" (PR 277 review).
+  const rawAge = res.header('age');
+  const age = rawAge !== undefined && /^\d+$/.test(rawAge) ? Number(rawAge) : NaN;
   return {
     ...parsed.data,
-    ...(Number.isFinite(age) && age >= 0 ? { ageSeconds: age } : {}),
+    ...(Number.isFinite(age) ? { ageSeconds: age } : {}),
   };
 }

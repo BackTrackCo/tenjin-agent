@@ -794,6 +794,23 @@ describe('assertSelectOnly: literals, comments, and WITH-prefixed writes', () =>
   it('still rejects a bare PRAGMA', () => {
     expect(() => assertSelectOnly('PRAGMA journal_mode')).toThrow(/SELECT/i);
   });
+
+  /**
+   * PR 277 review nit: an UNTERMINATED `[` used to be masked through to
+   * end-of-input on the (correct, for a CLOSED bracket) assumption that it
+   * opens a quoted identifier — which blanked out everything after it,
+   * including the real statement separator, so a second statement rode
+   * through undetected. An unmatched `[` is not a quoted identifier at all,
+   * so it now falls through as a literal character instead of eating the
+   * rest of the string.
+   */
+  it('still rejects a second statement hidden behind an unmatched "["', () => {
+    expect(() => assertSelectOnly('SELECT 1 [ ; DROP TABLE events')).toThrow(/one statement/i);
+  });
+
+  it('still masks a real quoted identifier, closing bracket and all', () => {
+    expect(assertSelectOnly('SELECT [my col] FROM pairings')).toBe('SELECT [my col] FROM pairings');
+  });
 });
 
 /**
