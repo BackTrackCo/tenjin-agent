@@ -1716,6 +1716,24 @@ function filesInError(text) {
 }
 
 /**
+ * A dotfile directory straight under \`$HOME\` — \`.claude\`, \`.config\`, \`.ssh\`,
+ * and the rest of a machine's own configuration, as opposed to a checkout
+ * living under it. cwd is not in scope here — the same "NO GIT INVOCATION"
+ * constraint on the function below applies to this helper too — so home-rooted
+ * is the only signal available that does not need one: a project's own
+ * checkout is vanishingly unlikely to sit directly inside a dotfile of the
+ * operator's home directory, while this very tool's own memory, skills and
+ * config all do.
+ */
+function isHomeDotDirPath(path) {
+  const home = homedir();
+  if (typeof home !== 'string' || home.length === 0) return false;
+  const root = home.replace(/[/\\]+$/, '');
+  if (root.length === 0 || !String(path).startsWith(root)) return false;
+  return /^[/\\]\.[^/\\]+(?:[/\\]|$)/.test(String(path).slice(root.length));
+}
+
+/**
  * A path this machine's own repo owns, as opposed to one the toolchain owns or
  * one that holds machine configuration.
  *
@@ -1725,11 +1743,23 @@ function filesInError(text) {
  * or a node_modules artefact — are separable by name alone. A false positive
  * costs a pairing that replays locally and never syncs; a false negative costs a
  * pairing that stays open.
+ *
+ * HOME DOTFILES TOO (tenjin-agent#268), and this is the same separation, not a
+ * new one: a note under \`~/.claude/...\` edited between two runs of an
+ * unrelated failing command closed a pairing on it, because nothing here had
+ * ever checked the one case the docstring above already claimed — "a path ...
+ * that holds machine configuration" — against anything but \`.env*\` and vendor
+ * dirs. \`cwd\`-based project scoping was considered and rejected: the session's
+ * cwd is the same for the failing command and for an edit made via an absolute
+ * path elsewhere, so it cannot tell the two apart. A home dotfile can, without
+ * asking git or the filesystem, and without rejecting a fix that lives in a
+ * sibling package of a monorepo the cwd never leaves.
  */
 function isTrackedPath(path) {
   if (/(?:^|[/\\])(?:node_modules|\.git|dist|build|coverage|\.next|target|out)(?:[/\\]|$)/.test(path)) {
     return false;
   }
+  if (isHomeDotDirPath(path)) return false;
   const base = path.split(/[/\\]/).pop() || '';
   return base.length > 0 && !base.startsWith('.env');
 }

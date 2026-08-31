@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -2963,6 +2963,65 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     // one.
     await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts', child));
     await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate', child));
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+  });
+
+  /**
+   * THE JUNK SHAPE ITSELF (tenjin-agent#268): a team-shelf post recorded a note
+   * under `~/.claude/...` as the fix for an ELIFECYCLE failure, because the
+   * failing and passing command were the identical string — the sameCommand
+   * branch of the close rule, which takes ANY tracked edit as corroboration
+   * once the error named no file of its own to match against. `isTrackedPath`
+   * now excludes a home dotfile directory for exactly this: the pairing must
+   * stay open, and nothing should land in `pairing_closes`.
+   */
+  it('does not close a pairing on an edit under a home dotfile directory (#268)', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm install', ENOENT));
+    await runScript(
+      pushContextHookScript(dataDir),
+      edit(join(homedir(), '.claude', 'memory', 'some-note.md')),
+    );
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm install'));
+
+    expect(await closes()).toEqual([]);
+    expect((await pairings())[0]).toMatchObject({ status: 'open' });
+  });
+
+  /**
+   * THE NAMED-FILE BRANCH GETS THE SAME GUARD. A home-dotfile edit is filtered
+   * in `editedSince`, upstream of the basename match against the error's own
+   * frame, so a same-named decoy under `~/.claude` never reaches that
+   * comparison either — it never counts as "changed" at all.
+   */
+  it('does not close a pairing on a home-dotfile edit even when its basename matches the error (#268)', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit(join(homedir(), '.claude', 'migrate.ts')));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm build'));
+
+    expect(await closes()).toEqual([]);
+    expect((await pairings())[0]).toMatchObject({ status: 'open' });
+  });
+
+  /**
+   * AN IN-PROJECT EDIT IS UNAFFECTED. The new guard only excludes a home
+   * dotfile directory, so an ordinary repo-relative fix still closes exactly
+   * as before — this is the regression check for the #268 fix.
+   */
+  it('still closes a pairing on an ordinary in-project edit (#268 regression)', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+
+    expect(await closes()).toHaveLength(1);
     expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
   });
 
