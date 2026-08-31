@@ -316,18 +316,26 @@ const DISPATCH_PROMPT_MIN = 80;
 const DISPATCH_DESCRIPTION_MAX = 100;
 const DISPATCH_SESSION_MAX = 10;
 /**
- * The floor on what SURVIVES scrub, not on the raw prompt `DISPATCH_PROMPT_MIN`
- * already bounds. Scrub only removes text shaped like a path, host or secret —
- * ordinary prose is untouched by design — so a prompt that clears the raw floor
+ * The floor on what SURVIVES scrub — gated on scrub having changed anything at
+ * all, never on raw length. THE INVARIANT IS "SUPPRESS ONLY SCRUB RESIDUE", not
+ * "suppress anything short": a bare length floor also drops short REAL
+ * questions ("is it free?") that scrub never touches, because `fetchQuestion`
+ * has no `DISPATCH_PROMPT_MIN`-shaped raw precondition to hide that behind
+ * (Greptile P1s on the #197 fix itself). A prompt or URL scrub leaves untouched
+ * is sent whatever its length; the floor applies only to what is LEFT AFTER
+ * scrub has actually removed something.
+ *
+ * Once scrub has changed the text, a prompt that clears `DISPATCH_PROMPT_MIN`
  * can still reduce to a bare connective fragment when its one topic-bearing run
  * was itself path- or secret-shaped and everything else was scaffolding
  * ("investigate <a long absolute path> for a question about it" scrubs to "for
  * a question about it"). `fetchQuestion` hits the same shape from a URL whose
- * path is pure entropy. Below this floor there is no real question left to ask,
- * whatever the scrubbed prose happens to spell (tenjin-agent#197: production
- * lookups carrying the exact leftover fragment this test suite uses as its own
- * query fixture, `a question`, traced to prompts and fetches that scrub down to
- * just that).
+ * path is pure entropy — that residue IS scrub-changed, and stays suppressed.
+ * Below this floor, once scrub has changed the text, there is no real question
+ * left to ask, whatever the scrubbed prose happens to spell (tenjin-agent#197:
+ * production lookups carrying the exact leftover fragment this test suite uses
+ * as its own query fixture, `a question`, traced to prompts and fetches that
+ * scrub down to just that).
  */
 const QUESTION_SIGNAL_MIN = 20;
 /**
@@ -1470,12 +1478,22 @@ function fetchQuestion(toolInput) {
     return '';
   }
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.slice(0, 400) : '';
-  const scrubbed = clean(scrub(words + ' ' + prompt), ${QUESTION_MAX});
-  // BELOW QUESTION_SIGNAL_MIN, TREAT IT AS SCRUB LEFT NOTHING (tenjin-agent#197,
-  // same reasoning as the dispatch arm's \`head\`): a url that is pure entropy or
-  // hostname and a prompt with nothing else in it can both be scrubbed away,
-  // leaving prose scaffolding rather than a real question.
-  return scrubbed.length >= ${QUESTION_SIGNAL_MIN} ? scrubbed : '';
+  const combined = words + ' ' + prompt;
+  const scrubbed = scrub(combined);
+  // THE FLOOR GATES ON SCRUB HAVING CHANGED SOMETHING, NOT ON LENGTH (Greptile
+  // P1: this arm has no raw-length precondition like the dispatch arm's
+  // \`DISPATCH_PROMPT_MIN\`, so a bare length floor dropped short REAL questions,
+  // e.g. a WebFetch prompt of "is it free?"). Whitespace is normalized on both
+  // sides first so an incidental space collapse — scrub's own \`\\s+\` -> ' ' —
+  // never counts as "removed".
+  const scrubChanged = scrubbed !== combined.replace(/\\s+/g, ' ').trim();
+  const cleaned = clean(scrubbed, ${QUESTION_MAX});
+  // BELOW QUESTION_SIGNAL_MIN, TREAT IT AS SCRUB LEFT NOTHING (tenjin-agent#197):
+  // a url that is pure entropy or hostname and a prompt with nothing else in it
+  // scrub away to prose scaffolding rather than a real question — but only when
+  // scrub actually did the removing. A short, untouched question ships whatever
+  // its length.
+  return scrubChanged && cleaned.length < ${QUESTION_SIGNAL_MIN} ? '' : cleaned;
 }
 
 async function main() {
@@ -1625,18 +1643,35 @@ function dispatchQuestion(toolInput) {
   const window = prompt.slice(0, ${DISPATCH_PROMPT_SLICE * 4});
   const whole =
     window.length < prompt.length ? window.slice(0, window.search(/\\s\\S*$/) + 1) : window;
-  const scrubbedHead = clean(scrub(whole).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
-  // BELOW QUESTION_SIGNAL_MIN, TREAT IT AS SCRUB LEFT NOTHING (tenjin-agent#197).
-  // \`whole\` cleared \`DISPATCH_PROMPT_MIN\` before scrub ever ran, so a head this
-  // short did not start short: scrub ate almost all of it, and what remains is
-  // prose scaffolding, not a question.
-  const head = scrubbedHead.length >= ${QUESTION_SIGNAL_MIN} ? scrubbedHead : '';
-  // THE DESCRIPTION TAKES THE SAME TREATMENT, for the same reason and in the
-  // same order. It is a caller-chosen string with no length bound of its own,
-  // and bounding it AFTER \`scrub\` is what made the prompt above cubic in the
-  // first place. This arm is worse to get wrong than the harvest is: it runs on
-  // every Task/Agent PreToolUse on a default install, with no push and no
-  // capture, and it BLOCKS the tool call while it runs.
+  const scrubbedWhole = scrub(whole);
+  // THE FLOOR GATES ON SCRUB HAVING CHANGED SOMETHING, NOT ON LENGTH (Greptile
+  // P1 on the #197 fix itself). \`whole\` clearing \`DISPATCH_PROMPT_MIN\` used to
+  // stand in for "a short head means scrub ate it", but that is the wrong
+  // invariant — the precise one is SUPPRESS ONLY SCRUB RESIDUE, checked
+  // directly by comparing scrub's output against \`whole\` with whitespace
+  // normalized on both sides (so scrub's own \`\\s+\` -> ' ' collapse never reads
+  // as "removed").
+  const headChanged = scrubbedWhole !== whole.replace(/\\s+/g, ' ').trim();
+  const cleanedHead = clean(
+    scrubbedWhole.slice(0, ${DISPATCH_PROMPT_SLICE}),
+    ${DISPATCH_PROMPT_SLICE},
+  );
+  // BELOW QUESTION_SIGNAL_MIN, TREAT IT AS SCRUB LEFT NOTHING (tenjin-agent#197),
+  // but only when scrub actually changed \`whole\`: what remains after a real
+  // removal is prose scaffolding, not a question.
+  const head = headChanged && cleanedHead.length < ${QUESTION_SIGNAL_MIN} ? '' : cleanedHead;
+  // NO HEAD, NO DISPATCH — whatever the description says. A description is a
+  // caller-chosen label, never a question on its own, so
+  // \`description + ': ' + head\` with \`head\` gated to '' used to emit a
+  // description-only query with a dangling colon: exactly the scaffolding
+  // class #197 targets, just built from the other side of the join.
+  if (head === '') return '';
+  // THE DESCRIPTION TAKES THE SAME SCRUB TREATMENT, for the same reason and in
+  // the same order. It is a caller-chosen string with no length bound of its
+  // own, and bounding it AFTER \`scrub\` is what made the prompt above cubic in
+  // the first place. This arm is worse to get wrong than the harvest is: it
+  // runs on every Task/Agent PreToolUse on a default install, with no push and
+  // no capture, and it BLOCKS the tool call while it runs.
   const raw = typeof toolInput.description === 'string' ? toolInput.description : '';
   const descWindow = raw.slice(0, ${DISPATCH_DESCRIPTION_MAX * 4});
   // A DESCRIPTION OVER THE WINDOW WITH NO WHITESPACE IN IT DROPS TO ''. The

@@ -4212,10 +4212,33 @@ describe('dispatch hook: scrub can leave only scaffolding behind (tenjin-agent#1
     expect(cap.hits()).toBe(1);
     expect(questionSent(cap.bodies)).toContain('durable third-party question');
   });
+
+  /**
+   * Greptile P1 on the fix above: `description + ': ' + head` fired even when
+   * `head` gated to '', emitting a description-only query with a dangling
+   * colon — the exact scaffolding class #197 targets, built from the other
+   * side of the join. A head that gates to empty now means no dispatch at
+   * all, whatever the description says.
+   */
+  it('never composes a description-only query when the prompt head is all scrub residue', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl });
+    const prompt =
+      'a question ' +
+      '/Users/alice/projects/acme-internal-app/src/very/deep/nested/module/path/file.ts';
+    const run = await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ description: 'probe ox', prompt }),
+    );
+    expect(run.stdout).toBe('');
+    expect(cap.hits()).toBe(0);
+    expect(cap.bodies).toHaveLength(0);
+    expect(cap.bodies.every((b) => !b.includes('probe ox'))).toBe(true);
+  });
 });
 
 describe('WebFetch push arm: scrub can leave only scaffolding behind (tenjin-agent#197)', () => {
-  it('never fires when the url is pure entropy and the prompt is only "a question"', async () => {
+  it('never fires when the url path is pure entropy and the prompt is only "a question"', async () => {
     const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
     await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
     const run = await runScript(
@@ -4225,7 +4248,11 @@ describe('WebFetch push arm: scrub can leave only scaffolding behind (tenjin-age
         hook_event_name: 'PreToolUse',
         tool_name: 'WebFetch',
         tool_input: {
-          url: 'https://8f14e45fceea167a5a36dedd4bea2543829384756abcdef.s3.amazonaws.com/',
+          // The entropy is in the PATH, which is what `fetchQuestion` actually
+          // reads into `words` (a hostname is never included). Scrub eats the
+          // path token whole, and what survives — "a question" — is exactly
+          // the #197 residue: scrub-changed, and under the floor.
+          url: 'https://example.com/8f14e45fceea167a5a36dedd4bea2543829384756abcdef',
           prompt: 'a question',
         },
       }),
@@ -4233,5 +4260,49 @@ describe('WebFetch push arm: scrub can leave only scaffolding behind (tenjin-age
     expect(run.stdout).toBe('');
     expect(cap.hits()).toBe(0);
     expect(cap.bodies.every((b) => !b.includes('a question'))).toBe(true);
+  });
+
+  /**
+   * Greptile P1: the fetch arm has no raw-length precondition like the
+   * dispatch arm's `DISPATCH_PROMPT_MIN`, so a bare length floor dropped short
+   * REAL questions scrub never touched. Scrub is a no-op on this url and
+   * prompt (no path words, no secret-shaped text), so the question ships
+   * whatever its length.
+   */
+  it('sends a short, untouched question scrub never changed', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
+    await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'fetch-short-real',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'WebFetch',
+        tool_input: { url: 'https://example.com/', prompt: 'is it free?' },
+      }),
+    );
+    expect(cap.hits()).toBe(1);
+    expect(questionSent(cap.bodies)).toContain('is it free');
+  });
+
+  it('still fires when scrub removes a secret from the prompt but real signal survives it', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
+    await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'fetch-real-long',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'WebFetch',
+        tool_input: {
+          url: 'https://docs.example.com/guides/retry',
+          prompt:
+            'why does this fail after commit deadbeefdeadbeefdeadbeef01234567 in the retry queue',
+        },
+      }),
+    );
+    expect(cap.hits()).toBe(1);
+    expect(questionSent(cap.bodies)).toContain('retry queue');
+    expect(cap.bodies.every((b) => !b.includes('deadbeefdeadbeefdeadbeef01234567'))).toBe(true);
   });
 });
