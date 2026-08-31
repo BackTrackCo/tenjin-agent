@@ -40,6 +40,7 @@ import {
   WebSearchModeSchema,
   parsePublishModeFlag,
   parseWebSearchHookModeFlag,
+  resolveFreeVerbsDeclined,
 } from '../lib/config';
 import type { PartialConfig, PublishMode, WebSearchMode } from '../lib/config';
 import {
@@ -414,20 +415,21 @@ async function runInstallRefresh(
   // set this run must not. Reported so the operator can see what an explicit
   // install is holding for them.
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
+  // A settled `--no-allow-free-verbs` (or an interactive "no") persists the
+  // EXACT rules that were pending at the time in `install.freeVerbsDeclined`
+  // (see `resolvePermissions`), and this run subtracts that recorded set from
+  // what it would otherwise report — recomputing from the settings file alone,
+  // with nothing to distinguish "declined" from "never asked", reported the
+  // full set forever (tenjin-agent#234). A per-rule set rather than a
+  // suppress-everything flag: a rule that was never offered before — a later
+  // version's genuinely new suggestion — is not in this list, so it still
+  // surfaces even on a machine sitting on an old decline.
+  const declined = new Set(resolveFreeVerbsDeclined(rawConfig.install?.freeVerbsDeclined));
   const permissions = {
     path: probe.satisfied?.path ?? claudeSettingsPath(home),
     alreadyPresent: probe.satisfied?.alreadyPresent ?? [],
-    /**
-     * Rules a `tenjin install` would write. Never written here; see the header.
-     *
-     * A settled `--no-allow-free-verbs` (or an interactive "no") persists
-     * `install.freeVerbsDeclined` (see `resolvePermissions`), and that recorded
-     * decline — not the settings file — is what silences this list on every
-     * later refresh: recomputing from the file alone, with nothing to
-     * distinguish "declined" from "never asked", reported the full set forever
-     * (tenjin-agent#234).
-     */
-    pending: rawConfig.install?.freeVerbsDeclined === true ? [] : (probe.pending ?? []),
+    /** Rules a `tenjin install` would write. Never written here; see the header. */
+    pending: (probe.pending ?? []).filter((rule) => !declined.has(rule)),
   };
 
   const touched =
@@ -1760,13 +1762,26 @@ async function resolvePermissions(args: {
       permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude'),
     );
   }
+
+  // Read ahead of the decline guard (rather than only on the branches that go
+  // on to grant) so a decline has the EXACT rule set that was actually pending
+  // to persist. `--refresh` subtracts this from what it recomputes, per rule
+  // (tenjin-agent#234); a `null` probe (unreadable/unparsable file) means there
+  // is nothing concrete to record, so a decline there persists an empty list
+  // rather than guessing.
+  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
+
   if (flag === false) {
-    await persistFreeVerbsDeclined(ctx.dataDir, true);
+    await persistFreeVerbsDeclined(ctx.dataDir, probe.pending ?? []);
     return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
-
-  const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
-  if (probe.satisfied !== undefined) return withRetraction(probe.satisfied);
+  if (probe.satisfied !== undefined) {
+    // Fully satisfied: nothing pending, nothing to retire. Clear any decline
+    // recorded on an earlier run so a satisfied state never leaves a stale
+    // suppression sitting in config.json for a future rule to inherit.
+    await persistFreeVerbsDeclined(ctx.dataDir, []);
+    return withRetraction(probe.satisfied);
+  }
   // Nothing to GRANT, but something of ours to retract: an older version's rule
   // for a command that no longer exists, or the publish rule under a mode that
   // no longer carries it. That needs no consent — it only ever removes a rule
@@ -1778,16 +1793,16 @@ async function resolvePermissions(args: {
   if (flag === true || !canPrompt) {
     // Either an explicit grant or the headless settle — both actually wire the
     // allowlist, so a decline recorded on some earlier run is stale as of now.
-    await persistFreeVerbsDeclined(ctx.dataDir, false);
+    await persistFreeVerbsDeclined(ctx.dataDir, []);
     return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
   }
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(permissionsQuestion(publishMode)))) {
-    await persistFreeVerbsDeclined(ctx.dataDir, true);
+    await persistFreeVerbsDeclined(ctx.dataDir, probe.pending ?? []);
     return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
-  await persistFreeVerbsDeclined(ctx.dataDir, false);
+  await persistFreeVerbsDeclined(ctx.dataDir, []);
   return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
 }
 

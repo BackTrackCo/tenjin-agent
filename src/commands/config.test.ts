@@ -181,14 +181,17 @@ describe('runConfigList', () => {
     // Seeded as a past `install --harness claude` would have left it; declining
     // the allowlist on a later run must not clobber that record.
     await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude'] } }));
-    await persistFreeVerbsDeclined(dir, true);
+    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
     expect(await readRawFile()).toEqual({
-      install: { harness: ['claude'], freeVerbsDeclined: true },
+      install: {
+        harness: ['claude'],
+        freeVerbsDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
+      },
     });
     // A later grant clears it back, through the same merge.
-    await persistFreeVerbsDeclined(dir, false);
+    await persistFreeVerbsDeclined(dir, []);
     expect(await readRawFile()).toEqual({
-      install: { harness: ['claude'], freeVerbsDeclined: false },
+      install: { harness: ['claude'], freeVerbsDeclined: [] },
     });
   });
 

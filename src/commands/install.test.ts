@@ -1901,6 +1901,72 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toBeUndefined();
   });
 
+  async function declinedList(): Promise<string[] | undefined> {
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
+    if (raw === null) return undefined;
+    return (JSON.parse(raw) as { install?: { freeVerbsDeclined?: string[] } }).install
+      ?.freeVerbsDeclined;
+  }
+
+  // tenjin-agent#234, per-rule fix: a decline records the EXACT rules that were
+  // pending, not a flag that suppresses everything forever.
+  it('--no-allow-free-verbs persists the exact rules that were pending', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect(await declinedList()).toEqual([...FREE_VERB_RULES]);
+  });
+
+  /**
+   * Greptile P1 #1: the satisfied-early-return in `resolvePermissions` used to
+   * return before ever touching `install.freeVerbsDeclined`, so a decline
+   * recorded on one run survived a grant made an entirely different way (a
+   * hand-edit, another tool, or `tenjin uninstall` and reinstall of just the
+   * settings file) — the next refresh kept nagging about rules the settings
+   * file plainly already had. A satisfied state must clear the record.
+   */
+  it('a satisfied file clears a stale decline, even when satisfied by hand', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
+    expect(await declinedList()).toEqual([...FREE_VERB_RULES]);
+
+    // Granted by some means entirely outside `install` — nothing this CLI wrote.
+    await writeSettings({ permissions: { allow: [...FREE_VERB_RULES] } });
+
+    // A bare re-run finds it already satisfied.
+    const res = await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
+    expect(wiredOf(res.data).added).toEqual([]);
+    expect(await declinedList()).toEqual([]);
+  });
+
+  /**
+   * Greptile P1 #2: a boolean decline suppressed every future pending rule
+   * forever, so a later version's genuinely NEW suggestion was silently never
+   * reported. The per-rule list must let a new rule through while an old
+   * decline stays quiet — proven end to end via `--refresh` in the
+   * `runInstall --refresh` suite below.
+   */
+  it('a later grant clears the declined list entirely', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
+    expect((await declinedList())?.length).toBeGreaterThan(0);
+
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      makeCtx(),
+      deps(),
+    );
+    expect(await declinedList()).toEqual([]);
+  });
+
   // Every skipped state names the command that changes it, the same contract a
   // CliError's `fix` carries, so a machine consumer never has to parse prose.
   it('carries a fix string on every skipped permissions state', async () => {
@@ -4334,6 +4400,65 @@ describe('runInstall --refresh', () => {
     const data_ = result.data as { permissions: { pending: string[] } };
     expect(data_.permissions.pending).toEqual([]);
     expect(result.humanLines?.join(' ')).not.toContain('were NOT written');
+  });
+
+  /**
+   * Greptile P1 #2: a boolean `freeVerbsDeclined` suppressed EVERY future
+   * pending rule forever, so a later version's genuinely new suggestion would
+   * never be reported once any decline was on record. The per-rule list must
+   * silence only the rules that were actually declined and let a new one
+   * through.
+   */
+  it('still reports a genuinely new rule after an earlier decline', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+    expect((await readSettings()).permissions?.allow ?? []).toEqual([]);
+
+    const NEW_RULE = 'Bash(tenjin brandnewverb:*)';
+    const declinedRules = [...FREE_VERB_RULES, ...MODE_GATED_RULES];
+    const result = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      refreshDeps({
+        inspectPermissions: async () => ({ pending: [...declinedRules, NEW_RULE] }),
+      }),
+    );
+
+    const data_ = result.data as { permissions: { pending: string[] } };
+    // Every rule this decline actually covered stays quiet...
+    for (const rule of declinedRules) expect(data_.permissions.pending).not.toContain(rule);
+    // ...but a rule the decline never saw still surfaces.
+    expect(data_.permissions.pending).toEqual([NEW_RULE]);
+    expect(result.humanLines?.join(' ')).toContain('tenjin install');
+  });
+
+  // A later grant clears the declined list (see the runInstall: permissions
+  // decision suite), so a subsequent refresh reports fresh pending rules
+  // rather than silencing them off a stale decline.
+  it('reports freshly-pending rules again once a decline has been cleared by a grant', async () => {
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+    // A later, explicit run grants the allowlist and clears the record.
+    await runInstall(
+      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+
+    const REVOKED_RULE = FREE_VERB_RULES[0]!;
+    const result = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      refreshDeps({ inspectPermissions: async () => ({ pending: [REVOKED_RULE] }) }),
+    );
+    const data_ = result.data as { permissions: { pending: string[] } };
+    expect(data_.permissions.pending).toEqual([REVOKED_RULE]);
   });
 
   it('registers no hook entry the machine does not already have', async () => {
