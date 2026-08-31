@@ -316,6 +316,21 @@ const DISPATCH_PROMPT_MIN = 80;
 const DISPATCH_DESCRIPTION_MAX = 100;
 const DISPATCH_SESSION_MAX = 10;
 /**
+ * The floor on what SURVIVES scrub, not on the raw prompt `DISPATCH_PROMPT_MIN`
+ * already bounds. Scrub only removes text shaped like a path, host or secret —
+ * ordinary prose is untouched by design — so a prompt that clears the raw floor
+ * can still reduce to a bare connective fragment when its one topic-bearing run
+ * was itself path- or secret-shaped and everything else was scaffolding
+ * ("investigate <a long absolute path> for a question about it" scrubs to "for
+ * a question about it"). `fetchQuestion` hits the same shape from a URL whose
+ * path is pure entropy. Below this floor there is no real question left to ask,
+ * whatever the scrubbed prose happens to spell (tenjin-agent#197: production
+ * lookups carrying the exact leftover fragment this test suite uses as its own
+ * query fixture, `a question`, traced to prompts and fetches that scrub down to
+ * just that).
+ */
+const QUESTION_SIGNAL_MIN = 20;
+/**
  * The window `DISPATCH_SESSION_MAX` is counted over.
  *
  * It used to be implicit: the count came from a 50-entry searches.json, so a
@@ -1455,7 +1470,12 @@ function fetchQuestion(toolInput) {
     return '';
   }
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.slice(0, 400) : '';
-  return clean(scrub(words + ' ' + prompt), ${QUESTION_MAX});
+  const scrubbed = clean(scrub(words + ' ' + prompt), ${QUESTION_MAX});
+  // BELOW QUESTION_SIGNAL_MIN, TREAT IT AS SCRUB LEFT NOTHING (tenjin-agent#197,
+  // same reasoning as the dispatch arm's \`head\`): a url that is pure entropy or
+  // hostname and a prompt with nothing else in it can both be scrubbed away,
+  // leaving prose scaffolding rather than a real question.
+  return scrubbed.length >= ${QUESTION_SIGNAL_MIN} ? scrubbed : '';
 }
 
 async function main() {
@@ -1605,7 +1625,12 @@ function dispatchQuestion(toolInput) {
   const window = prompt.slice(0, ${DISPATCH_PROMPT_SLICE * 4});
   const whole =
     window.length < prompt.length ? window.slice(0, window.search(/\\s\\S*$/) + 1) : window;
-  const head = clean(scrub(whole).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
+  const scrubbedHead = clean(scrub(whole).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
+  // BELOW QUESTION_SIGNAL_MIN, TREAT IT AS SCRUB LEFT NOTHING (tenjin-agent#197).
+  // \`whole\` cleared \`DISPATCH_PROMPT_MIN\` before scrub ever ran, so a head this
+  // short did not start short: scrub ate almost all of it, and what remains is
+  // prose scaffolding, not a question.
+  const head = scrubbedHead.length >= ${QUESTION_SIGNAL_MIN} ? scrubbedHead : '';
   // THE DESCRIPTION TAKES THE SAME TREATMENT, for the same reason and in the
   // same order. It is a caller-chosen string with no length bound of its own,
   // and bounding it AFTER \`scrub\` is what made the prompt above cubic in the

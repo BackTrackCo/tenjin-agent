@@ -4180,3 +4180,58 @@ describe('dispatch hook: two shelves in team mode', () => {
     }
   });
 });
+
+// tenjin-agent#197: production lookups carried the exact string this suite uses
+// as its own query fixture, `a question`. Traced to `dispatchQuestion` and
+// `fetchQuestion`: a prompt or a fetch whose only topic-bearing content is
+// itself path-, host- or entropy-shaped scrubs down to bare connective prose
+// ("a question", "for a question about it") that reads as a short real
+// question and is not one — it is scaffolding scrub left behind. These pin the
+// no-op: no request reaches the wire, and — the assertion the issue asked for —
+// no request BODY ever carries the fixture literal.
+describe('dispatch hook: scrub can leave only scaffolding behind (tenjin-agent#197)', () => {
+  it('never fires when a path is the only topic and "a question" is the only prose', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl });
+    const prompt =
+      'a question ' +
+      '/Users/alice/projects/acme-internal-app/src/very/deep/nested/module/path/file.ts';
+    const run = await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+    expect(run.stdout).toBe('');
+    expect(cap.hits()).toBe(0);
+    expect(cap.bodies.every((b) => !b.includes('a question'))).toBe(true);
+  });
+
+  it('still fires on a real dispatch prompt whose topic is not path-shaped', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({ prompt: longPrompt('a durable third-party question') }),
+    );
+    expect(cap.hits()).toBe(1);
+    expect(questionSent(cap.bodies)).toContain('durable third-party question');
+  });
+});
+
+describe('WebFetch push arm: scrub can leave only scaffolding behind (tenjin-agent#197)', () => {
+  it('never fires when the url is pure entropy and the prompt is only "a question"', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'abc',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'WebFetch',
+        tool_input: {
+          url: 'https://8f14e45fceea167a5a36dedd4bea2543829384756abcdef.s3.amazonaws.com/',
+          prompt: 'a question',
+        },
+      }),
+    );
+    expect(run.stdout).toBe('');
+    expect(cap.hits()).toBe(0);
+    expect(cap.bodies.every((b) => !b.includes('a question'))).toBe(true);
+  });
+});
