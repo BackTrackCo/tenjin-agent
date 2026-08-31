@@ -1,6 +1,7 @@
 import { resolveResourceRef } from '../lib/resource-ref';
-import { resolveContextSettings } from '../lib/settings';
+import { resolveContextSettings, shelfRouteFor, type ResolvedSettings } from '../lib/settings';
 import { fetchRead, type PreviewCard } from '../lib/read-client';
+import { getPostMetadata, type PostMetadata } from '../lib/agent-api';
 import { toMoney } from '../lib/money';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal } from '../lib/output';
@@ -48,6 +49,24 @@ export async function runInspect(
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
   });
 
+  // Lazy and memoized: a live GET /api/posts/<id>/public call, made only for a
+  // ref resolved via a bare id (a URL-only ref has no id to look up) and only
+  // when a caller below actually needs it — the common case (an entitled body,
+  // or a 402 preview that already names a title) never triggers this. Routed
+  // through `shelfRouteFor` the same way every other id-keyed lookup is, so
+  // the bypass secret only rides to the shelf it was paired with.
+  let metadataPromise: Promise<PostMetadata | null> | undefined;
+  const displayMetadata = (): Promise<PostMetadata | null> => {
+    const resourceId = ref.resourceId;
+    if (metadataPromise === undefined) {
+      metadataPromise =
+        resourceId === undefined
+          ? Promise.resolve(null)
+          : fetchDisplayMetadata(resourceId, ref.shelfBaseUrl, ctx, settings, deps);
+    }
+    return metadataPromise;
+  };
+
   if (result.kind === 'entitled') {
     // Free (or already-entitled) resource: the body is readable now, no payment.
     const body = result.body;
@@ -74,11 +93,19 @@ export async function runInspect(
     const requirement = result.paymentRequired.accepts[0];
     const price = requirement !== undefined ? toMoney(requirement.amount) : undefined;
     const card = result.preview.card;
+    // The 402 preview already names a title on every deployment that sends one
+    // (zero extra network cost); a title-less preview — an older deployment, or
+    // one that omits it for some other reason — falls back to the live
+    // GET /api/posts/<id>/public lookup. Never a default: `title` stays
+    // undefined, and the line below reads exactly as it always has, when
+    // neither source has one.
+    const title = result.preview.title ?? (await displayMetadata())?.title;
     return {
       data: {
         url: ref.url,
         ...(ref.resourceId !== undefined ? { resourceId: ref.resourceId } : {}),
         access: 'paid',
+        ...(title !== undefined ? { title } : {}),
         ...(price !== undefined ? { price } : {}),
         payment:
           requirement !== undefined
@@ -101,7 +128,9 @@ export async function runInspect(
         nextCommand: `tenjin buy ${ref.url}`,
       },
       humanLines: [
-        `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
+        title !== undefined
+          ? `${sanitizeForTerminal(title)}, paid${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`
+          : `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
         ...cardLines(card),
         // Three distinct states behind an absent card, and they call for three
         // different actions: the piece attests nothing (a signal, judge on that),
@@ -123,18 +152,45 @@ export async function runInspect(
   }
 
   // already_purchased without a payment header is unexpected; report it plainly.
-  // Owned means delivery is free, so this branch points at `read` too.
+  // Owned means delivery is free, so this branch points at `read` too. No 402
+  // preview exists on this path at all (the result carries only a message), so
+  // title/price come only from the live metadata lookup below when the ref
+  // resolved via id — absent, never invented, when it doesn't.
+  const metadata = await displayMetadata();
   return {
     data: {
       url: ref.url,
       access: 'entitled',
+      ...(metadata !== null ? { title: metadata.title, price: toMoney(metadata.price) } : {}),
       message: result.message,
       nextCommand: `tenjin read ${ref.url}`,
     },
     humanLines: [
+      ...(metadata !== null ? [`${sanitizeForTerminal(metadata.title)}.`] : []),
       `${sanitizeForTerminal(result.message)} Read it with \`tenjin read ${sanitizeForTerminal(ref.url)}\`.`,
     ],
   };
+}
+
+/** A best-effort `GET /api/posts/<id>/public` lookup for a ref resolved via a
+ *  bare id, routed the same way every other id-keyed shelf lookup is
+ *  (`shelfRouteFor`): the bypass secret only carries to the shelf origin it
+ *  was paired with, never to a second one. Callers gate on `ref.resourceId`
+ *  before calling this (a URL-only ref has nothing to look up). */
+async function fetchDisplayMetadata(
+  resourceId: string,
+  shelfBaseUrl: string,
+  ctx: CommandContext,
+  settings: ResolvedSettings,
+  deps: InspectDeps,
+): Promise<PostMetadata | null> {
+  const route = shelfRouteFor({ shelfBaseUrl }, settings);
+  return getPostMetadata(resourceId, {
+    baseUrl: route.baseUrl,
+    timeoutMs: ctx.flags.timeout,
+    ...(route.bypass !== undefined ? { bypass: route.bypass } : {}),
+    ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+  });
 }
 
 /**
