@@ -6124,8 +6124,11 @@ describe('the capture ask (Stop)', () => {
     expect(teamAsk).toContain('private or restricted third-party data/material');
     expect(teamAsk).toContain('Never paste raw shell/tool output, logs, transcripts, or diffs');
     expect(teamAsk).toContain('Do not present unmerged or unverified work as shipped behaviour');
-    expect(teamAsk).toContain('Write it to a file and run `tenjin publish <file>`');
-    expect(teamAsk).not.toContain('tenjin publish -');
+    // This capture-only branch keeps the raw template compatible with the
+    // current CLI. The independent stdin PR upgrades this stable sentence when
+    // it generates the hook, so the two branches can merge in either order.
+    expect(CAPTURE_REASON_TEAM).toContain('Write it to a file and run `tenjin publish <file>`');
+    expect(CAPTURE_REASON_TEAM).not.toContain('tenjin publish -');
   });
 
   it('uses root repository activity as a first-ask signal only for a team shelf', async () => {
