@@ -37,11 +37,13 @@ import { CliError } from './errors';
  * subagent work order — `CI=true pnpm format:check` and the like — will always
  * reappear in the next tool call whether or not the injection ran, so a match
  * that cannot see behind the anchor cannot tell "copied because shown" from
- * "was going to type this anyway". `judge()` is handed the tool calls BEFORE
- * the anchor as well as after, and a candidate already present there earns no
- * credit. This applies to `span` and `likely` only: `read` is a command
- * naming this specific piece, which nothing pre-injection could have done by
- * coincidence.
+ * "was going to type this anyway". `judge()` is handed the {@link SPAN_WINDOW}
+ * tool calls BEFORE the anchor as well as after, and a candidate already
+ * present there earns no credit — matched at a token boundary, not by plain
+ * substring, so a longer pre-injection token cannot erase credit for a
+ * shorter genuine one. This applies to `span` and `likely` only: `read` is a
+ * command naming this specific piece, which nothing pre-injection could have
+ * done by coincidence.
  *
  * NOTHING IS NOT REJECTION UNTIL THE SESSION IS OVER. A row whose session is
  * still running has simply not been answered yet, and grading it `rejected`
@@ -232,6 +234,12 @@ const LIKELY_GENERIC = new Set([
   'post-commit',
   'e.g',
   'i.e',
+  // The injection's OWN scaffolding, not anything a seller wrote: PUBLIC_OPENER
+  // and CLOSING_LINE in push-scripts.ts land in every full-form injection, so
+  // without these two `likelyTokens(fullForm(...))` always nets its own
+  // boilerplate as a candidate.
+  'third-party',
+  're-verifying',
 ]);
 
 /**
@@ -291,8 +299,15 @@ export function gradeInjection(
   if (anchor < 0 || anchor >= rows.length) return { outcome: 'unobserved', by: 'none' };
   // EXCLUSIVE: the anchor row IS the injection, so the calls that can answer for
   // it are the ones after it. The ones BEFORE it are what a span or a likely
-  // token has to clear to earn credit — see the module note on #254a.
-  const before = rows.slice(0, anchor).filter((row) => row.kind === 'tool_use');
+  // token has to clear to earn credit — see the module note on #254a. Bounded
+  // to the same SPAN_WINDOW as `after`: a session's first call from an hour
+  // before the injection is not "standing boilerplate" any more than a session's
+  // fiftieth call after it is still "the injection in view" — both are the same
+  // claim, made symmetrically.
+  const before = rows
+    .slice(0, anchor)
+    .filter((row) => row.kind === 'tool_use')
+    .slice(-SPAN_WINDOW);
   const after = rows.slice(anchor + 1).filter((row) => row.kind === 'tool_use');
   const text = rows[anchor]?.text ?? '';
   return judge(after, before, backtickSpans(text), likelyTokens(text, target), target, opts.ended);
@@ -340,10 +355,10 @@ export function gradeRelayed(
  * Read beats span beats likely: each may be present alongside a weaker one, and
  * the strongest claim actually supported is the one reported.
  *
- * `before` is the tool calls that happened in this same session BEFORE the
- * injection (empty for a relayed row, which has none). A span or a likely
- * token already present there is boilerplate the session was going to write
- * anyway, so it earns no credit here — tenjin-agent#254a.
+ * `before` is up to {@link SPAN_WINDOW} tool calls that happened in this same
+ * session BEFORE the injection (empty for a relayed row, which has none). A
+ * span or a likely token already present there is boilerplate the session was
+ * going to write anyway, so it earns no credit here — tenjin-agent#254a.
  */
 function judge(
   after: TranscriptRow[],
@@ -362,8 +377,16 @@ function judge(
       return { outcome: 'used', by: 'read', evidence: cap(row.text) };
     }
   }
-  const seenBefore = (candidate: string): boolean =>
-    before.some((row) => row.text.includes(candidate));
+  // A TOKEN BOUNDARY MATCH, not a substring: `db:generate` is a plain substring
+  // of `db:generate-types`, so a pre-injection call to the latter must not
+  // erase credit for a genuine post-injection call to the former. The class in
+  // the lookaround is exactly {@link LIKELY_TOKEN_RE}'s own — a colon, dot,
+  // slash or hyphen still extends a token, so this only rules out landing
+  // inside a longer one, not a real reappearance next to punctuation.
+  const seenBefore = (candidate: string): boolean => {
+    const re = new RegExp(`(?<![A-Za-z0-9:_./-])${escapeRe(candidate)}(?![A-Za-z0-9:_./-])`);
+    return before.some((row) => re.test(row.text));
+  };
   for (const row of after.slice(0, SPAN_WINDOW)) {
     const hit = spans.find((span) => !seenBefore(span) && row.text.includes(span));
     // Capped like every other evidence string here: the span is copied out of

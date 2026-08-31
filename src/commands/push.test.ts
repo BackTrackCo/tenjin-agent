@@ -1393,8 +1393,19 @@ describe('runPushGrade', () => {
 
     expect(result.data).toMatchObject({
       since: '7d',
-      graded: { used: 1, rejected: 1, unobserved: 1, open: 1 },
+      graded: {
+        used: 1,
+        rejected: 1,
+        unobserved: 1,
+        open: 1,
+        byTier: { read: 1, span: 0, likely: 0 },
+      },
     });
+    // tenjin-agent#276 review (A1igator, minor 3): the tier behind `used` rides
+    // in the default line, not only under `--explain`.
+    expect(result.humanLines?.join('\n')).toContain(
+      'used=1 (read=1 span=0 likely=0) rejected=1 unobserved=1 open=1',
+    );
     const byUid = new Map(
       (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
         r.uid,
