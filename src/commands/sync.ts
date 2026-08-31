@@ -511,6 +511,26 @@ const FIX_CMD_NOISE_HEADS = new Set([
   'xargs',
 ]);
 
+/** A head coming out of `fixCmdHead` must look like a command/basename, not an
+ *  arbitrary token: `$(...)`, a backtick, a redirect, or a runaway-length
+ *  string are all rejected rather than published (PR 277 round-2 review, nit 2
+ *  under sync.ts:532). */
+const CMD_HEAD_SHAPE_RE = /^[\w.@+-]{1,40}$/;
+
+/** True when `word` — one candidate env-assignment word (`NAME=value...`) —
+ *  carries an odd number of `"` or `'` characters. A whitespace-split word
+ *  like that is not a whole assignment: the quoted value continues into the
+ *  next word(s), which the splitter has no way to reassemble, so the "next
+ *  word" `fixCmdHead` would otherwise treat as the command head is actually a
+ *  fragment of the quoted value (PR 277 round-2 review, new-in-delta finding
+ *  on sync.ts:526-529: `MYSQL_PWD="correct horse battery staple" pnpm test`
+ *  published `Passed on: horse`). */
+function hasUnbalancedQuote(word: string): boolean {
+  const dq = (word.match(/"/g) ?? []).length;
+  const sq = (word.match(/'/g) ?? []).length;
+  return dq % 2 !== 0 || sq % 2 !== 0;
+}
+
 /** The first non-noise command basename in `command`, for the `Passed on:`
  *  line — the same "publish the head, not the whole line" treatment `cmdHead`
  *  already gets for `Failed:`. `fixCmd` carries the WHOLE scrubbed successful
@@ -518,7 +538,10 @@ const FIX_CMD_NOISE_HEADS = new Set([
  *  unlike `cmdHead`, which push-scripts.ts computes once at pairing-open time
  *  and stores (tenjin-agent#252, PR 277 review). Returns null when nothing but
  *  noise words remain, so the caller drops the line the same way it already
- *  drops `Failed:` for a null `cmdHead`. */
+ *  drops `Failed:` for a null `cmdHead` — and also returns null outright (the
+ *  whole line dropped, not just this segment) the moment a skipped assignment
+ *  word carries an unbalanced quote, since the words after it are unreliable
+ *  fragments of that quoted value rather than a real command. */
 function fixCmdHead(command: string): string | null {
   for (const segment of command.split(/&&|\|\||[;|\n]/)) {
     const words = segment
@@ -526,11 +549,15 @@ function fixCmdHead(command: string): string | null {
       .split(/\s+/)
       .filter((w) => w.length > 0);
     let i = 0;
-    while (i < words.length && /^[A-Za-z_]\w*=/.test(words[i] ?? '')) i++;
+    while (i < words.length && /^[A-Za-z_]\w*=/.test(words[i] ?? '')) {
+      if (hasUnbalancedQuote(words[i] ?? '')) return null;
+      i++;
+    }
     if (i >= words.length) continue;
     const word = words[i] ?? '';
     const head = word.split('/').pop() || word;
     if (FIX_CMD_NOISE_HEADS.has(head)) continue;
+    if (!CMD_HEAD_SHAPE_RE.test(head)) continue;
     return head;
   }
   return null;

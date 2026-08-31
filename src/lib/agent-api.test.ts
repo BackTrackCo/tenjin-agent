@@ -752,6 +752,40 @@ describe('getLookupStats', () => {
     expect(stats.ageSeconds).toBe(0);
   });
 
+  /**
+   * PR 277 round-2 review, nit 3: the digit-only shape check has no length
+   * cap of its own, so `Age: "99999999999999999999999999"` still parsed and
+   * rendered as "~1e+26s ago" — a proxy sending an absurd value should read as
+   * unparseable, not as a freshness claim past any real cache lifetime.
+   */
+  it('leaves ageSeconds undefined for an Age header past the sanity cap', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '99999999999999999999999999' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBeUndefined();
+  });
+
+  it('accepts an Age header at the sanity cap boundary', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '10000000' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBe(10000000);
+  });
+
   /** A pattern rather than the arm names, so a shelf that grows an arm still
    *  renders instead of failing the whole block. */
   it('accepts an arm name this build has never heard of', async () => {

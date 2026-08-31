@@ -564,6 +564,11 @@ export interface LookupStats {
  */
 const TRIGGER_RE = /^[a-z]{1,16}$/;
 
+/** Sanity cap on an `Age` response header, in seconds (~115 days). Past this,
+ *  the value is treated the same as unparseable rather than rendered verbatim
+ *  (PR 277 round-2 review, nit 3). */
+const MAX_AGE_SECONDS = 1e7;
+
 const lookupStatsSchema = z.object({
   windowDays: z.number().int().positive(),
   triggers: z.array(
@@ -617,8 +622,13 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
   // a plain non-negative integer, so requiring that shape BEFORE the numeric
   // conversion is what keeps this "undefined when absent or unparseable,
   // never coerced to a freshness this CLI was never told" (PR 277 review).
+  // The digit-only shape has no length cap of its own, so a proxy sending an
+  // absurd `Age` (`"99999999999999999999999999"`) still parsed and rendered
+  // as "~1e+26s ago" (PR 277 round-2 review, nit 3 on agent-api.ts:621);
+  // MAX_AGE_SECONDS rejects anything past ~115 days, well past any real cache.
   const rawAge = res.header('age');
-  const age = rawAge !== undefined && /^\d+$/.test(rawAge) ? Number(rawAge) : NaN;
+  const parsedAge = rawAge !== undefined && /^\d+$/.test(rawAge) ? Number(rawAge) : NaN;
+  const age = parsedAge <= MAX_AGE_SECONDS ? parsedAge : NaN;
   return {
     ...parsed.data,
     ...(Number.isFinite(age) ? { ageSeconds: age } : {}),
