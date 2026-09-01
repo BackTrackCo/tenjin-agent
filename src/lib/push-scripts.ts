@@ -20,6 +20,7 @@
 
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
+import { condenseSource } from './query-condense';
 import { repoSlugSource, storeSource } from './state-store';
 
 export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
@@ -37,37 +38,52 @@ export const PUSH_INJECT_MAX_PER_SESSION = 5;
 /**
  * The lookup budget's window, and each trigger's allowance inside it.
  *
- * THE UNIT IS TIME AND TRIGGER, NOT SESSION. A flat per-session cap starved the
- * case this sidecar exists for: an always-on loop session keeps one session id
- * for hours, so its opening minutes spend the whole allowance on whatever fires
- * most often — ordinary prompts — and every later failure or research lookup is
- * skipped for the rest of the run. So: a rolling window that recovers on its
- * own, and one bucket per trigger so a prompt flood cannot spend the failure
- * arm's allowance. The buckets are counted MACHINE-WIDE rather than per
- * session: concurrent sessions on one laptop are one machine's worth of
- * requests however many session ids they carry. The per-session `seen` set is
- * untouched: once-per-piece is a property of the conversation being injected
- * into, not of the machine.
+ * THE UNIT IS (SESSION, TRIGGER) PER ROLLING HOUR (tenjin-agent#258, owner
+ * decision). Two earlier units both failed, in opposite directions, and the
+ * rolling window is what lets this one avoid both:
  *
- * THE NUMBER IS A RUNAWAY GUARD, NOT A BUDGET (tenjin-agent#258). At 8 an hour
- * machine-wide, four or five concurrent sessions left each one ~2 prompt
- * lookups an hour: 65 `lookup-cap` skips in a week on one machine, eleven in a
- * row inside the one confusion a teammate's note would have answered
- * (tenjin-agent#255). A lookup is one ~0.4 s search and one embedding call, so
- * fifteen an hour is noise for a shelf, and while the team experiment is being
- * measured every skipped lookup is a data point lost. 60 an hour still stops a
- * stuck loop from hammering a shelf, and the adaptive cooldown below still
- * scales it on evidence once anything is graded.
+ *  - A FLAT PER-SESSION cap, with no window, starved the case this sidecar
+ *    exists for: an always-on loop session keeps one session id for hours, so
+ *    its opening minutes spent the whole allowance on whatever fires most often
+ *    — ordinary prompts — and every later failure or research lookup was
+ *    skipped for the rest of the run. The window fixes that on its own: 60 an
+ *    hour that recovers on the clock is not an allowance a long-lived session
+ *    can exhaust for good, and one bucket per trigger means a prompt flood
+ *    cannot spend the failure arm's share either.
+ *  - COUNTING MACHINE-WIDE then over-corrected. Concurrent sessions on one
+ *    laptop are one machine's worth of requests, which is true and is not the
+ *    property that should be rationed: ten sessions in a fan-out shared ONE
+ *    hourly allowance and burned it in the first half hour, so every session
+ *    that started later was capped before it had asked anything, and the arm
+ *    went quiet exactly when the machine was busiest.
  *
- * THE MACHINE-WIDE CEILING, so the next reader decides on the same number: six
- * arms at 60 is 360 lookups an hour, 720 with the hot rule doubling every arm
- * — about 1,440 shelf requests an hour at one search plus one embedding each,
- * nine times the 80 this shipped with. It is a guard against a runaway loop,
- * not against a merely chatty one; the shelf's own rate limit is the bound on
- * that, and this constant is the only client-side bound on shelf egress. An
- * arm added to this table raises the ceiling by 60; the test that pins the
- * band (push-scripts.test.ts, "keeps the machine-wide ceiling") is what makes
- * that a decision rather than a drift.
+ * So the count is per session and per trigger, over the last
+ * PUSH_LOOKUP_WINDOW_MS. THERE IS DELIBERATELY NO MACHINE CEILING on top of it.
+ * A per-machine bound is the thing that just failed, and what it was guarding
+ * against — a stuck loop hammering a shelf — is still bounded here: that loop is
+ * one session, and one session gets 60 an hour per trigger however long it runs.
+ * The per-session `seen` set is untouched, and always was: once-per-piece is a
+ * property of the conversation being injected into.
+ *
+ * THE NUMBER IS A RUNAWAY GUARD, NOT A BUDGET. At 8 an hour machine-wide, four
+ * or five concurrent sessions left each one ~2 prompt lookups an hour: 65
+ * `lookup-cap` skips in a week on one machine, eleven in a row inside the one
+ * confusion a teammate's note would have answered (tenjin-agent#255). A lookup
+ * is one ~0.4 s search and one embedding call, so a handful an hour is noise for
+ * a shelf, and while the team experiment is being measured every skipped lookup
+ * is a data point lost. 60 an hour still stops a stuck loop from hammering a
+ * shelf, and the adaptive cooldown below still scales it on evidence once
+ * anything is graded.
+ *
+ * THE PER-SESSION CEILING, so the next reader decides on the same number: six
+ * arms at 60 is 360 lookups an hour for one session, 720 with the hot rule
+ * doubling every arm — about 1,440 shelf requests an hour at one search plus one
+ * embedding each. Concurrent sessions multiply that, by design: the shelf's own
+ * rate limit is the bound on a busy machine, and this constant is the only
+ * client-side bound on one session's egress. An arm added to this table raises
+ * the per-session ceiling by 60; the test that pins the band
+ * (push-scripts.test.ts, "keeps the per-session ceiling") is what makes that a
+ * decision rather than a drift.
  */
 export const PUSH_LOOKUP_WINDOW_MS = 60 * 60 * 1000;
 export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
@@ -80,7 +96,7 @@ export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
 };
 /** What a trigger not named above may spend: the same guard, since the guard
  *  is about a stuck loop, not about which arm is worth the spend. Note that
- *  it also means an unsized arm raises the machine-wide ceiling by 60; size
+ *  it also means an unsized arm raises the per-session ceiling by 60; size
  *  a new arm in the table above deliberately rather than falling through. */
 export const PUSH_LOOKUP_CAP_DEFAULT = 60;
 /**
@@ -218,10 +234,13 @@ export const PUSH_FINDING_TAG = 'tenjin-finding';
  * that would poison the queue.
  */
 export const SUBAGENT_CAPTURE_REASON =
-  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: write it to a file and run `tenjin publish <file>' +
+  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
   '<agent-flag>' +
   '<search-flag>' +
-  '` with the title as the first `# ` heading of the file (one finding per publish), or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
+  '` with the title as the first `# ` heading (one finding per publish). If it is already in a file, run `tenjin publish <file>' +
+  '<agent-flag>' +
+  '<search-flag>' +
+  '` as its own bare shell/tool command, never chained behind writing the file; or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   PUSH_FINDING_TAG +
   ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
@@ -253,8 +272,8 @@ export function subagentCaptureReason(
   const flag = agentId !== null && AGENT_ID_RE.test(agentId) ? ` --agent ${agentId}` : '';
   const search =
     searchId !== null && CAPTURE_SEARCH_ID_RE.test(searchId) ? ` --search-id ${searchId}` : '';
-  return SUBAGENT_CAPTURE_REASON.replace('<agent-flag>', flag)
-    .replace('<search-flag>', search)
+  return SUBAGENT_CAPTURE_REASON.replaceAll('<agent-flag>', flag)
+    .replaceAll('<search-flag>', search)
     .replace('<mode>', publishMode);
 }
 
@@ -266,13 +285,14 @@ export const PUSH_READ_PACKAGES_MAX = 10;
  * Watchdogs: a search plus a body fetch must fit under the settings.json
  * timeout, which is set from this with headroom.
  *
- * "A SEARCH" IS THE WHOLE LOOKUP, NOT ONE REQUEST. Team mode asks two shelves,
- * and they divide one search-plus-body wall clock between them (`legTimeoutMs`
- * in lib/hook-scripts.ts), precisely so this arithmetic does not have to grow a
- * second search term: a two-shelf lookup costs what a one-shelf lookup always
- * cost. Sizing the watchdog for search + search + body instead would mean making
- * the prompt arm's own budget long enough to be felt by the human waiting
- * behind it.
+ * "A SEARCH" IS THE SLOWEST LEG, NOT THE SUM OF THEM. Team mode asks two
+ * shelves, and the push arms ask them SIDE BY SIDE (`pushDecide`), each on its
+ * own search-plus-body clock, so the lookup's wall clock is max(team, public) +
+ * body — the one-shelf sum this arithmetic was sized for — while the requests
+ * double. Sizing the watchdog for search + search + body instead would mean
+ * making the prompt arm's own budget long enough to be felt by the human waiting
+ * behind it. The dispatch hook still runs its legs one after the other and
+ * divides the same clock between them (`legTimeoutMs` in lib/hook-scripts.ts).
  */
 export const PUSH_WATCHDOG_MS = 4500;
 export const PUSH_HOOK_TIMEOUT_SECONDS = 8;
@@ -284,10 +304,10 @@ export const PUSH_PROMPT_SEARCH_TIMEOUT_MS = 1500;
 /** The prompt arm's own body budget, half the other arms'. THE WATCHDOG MUST
  *  EXCEED SEARCH + BODY + SLACK, or the arm pays for a lookup, blocks the human
  *  for it, and is killed before it can say or record anything: 1500 + 800 fits
- *  under 3000 with room for the search write in between. SEARCH is the
- *  lookup's whole budget however many shelves it asks — the two legs share the
- *  1500 rather than taking it each, which is what keeps this sum true in team
- *  mode. */
+ *  under 3000 with room for the search write in between. SEARCH is one leg's
+ *  budget, and in team mode the two legs run at once, so the lookup's clock is
+ *  the slower leg's 1500, not 1500 + 1500 — which is what keeps this sum true
+ *  in team mode. */
 export const PUSH_PROMPT_BODY_TIMEOUT_MS = 800;
 /** When the prompt arm gives up on its own and writes the row saying so. Under
  *  the watchdog, so a run that overruns is VISIBLE in the ledger rather than
@@ -310,6 +330,10 @@ const PUSH_FAILURE_STOP = __FAILURE_STOP__;
 const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
 const PUSH_BODY_TIMEOUT = __BODY_TIMEOUT__;
+/** Candidates a push arm asks a shelf for: three, so \`verdict\` can take a
+ *  corroborated rank 2 or 3 over an uncorroborated rank 1. The WebSearch hint
+ *  keeps its own SEARCH_LIMIT. */
+const PUSH_SEARCH_LIMIT = 3;
 
 /** Whole words of \`text\` long enough to be a topic word. Not a scorer — the
  *  shelf decides strength — just the floor that keeps an arm from spending a
@@ -323,9 +347,19 @@ function wordCount(text) {
  * and nothing at all is scored on this machine.
  *
  * \`corroborated\` is whether the shelf's own two retrieval legs agreed on the
- * piece, and \`confidence\` is its coarse match bucket. A hit is 'strong' only
- * when the shelf both corroborated it AND did not call it 'low'; everything else
- * is 'none', which injects nothing and falls through to the next shelf.
+ * piece, and \`confidence\` is its coarse match bucket. A candidate is 'strong'
+ * only when the shelf both corroborated it AND did not call it 'low'; everything
+ * else is 'none', which injects nothing.
+ *
+ * THE FIRST STRONG CANDIDATE AMONG THE ONES ASKED FOR (PUSH_SEARCH_LIMIT, three)
+ * is the hit. Ranking is by similarity, corroboration is a separate signal, and
+ * a corroborated piece at rank 2 or 3 under an uncorroborated rank 1 is exactly
+ * the case the rank-1-only read threw away. When none is strong, rank 1 is the
+ * row's candidate, so the weak rows still record what the shelf put first.
+ *
+ * A strong rank 1 that this session already injected STAYS the hit and is
+ * recorded as 'already-injected'; it does not fall through to rank 2. The set
+ * exists to stop a piece from being said twice, not to promote the runner-up.
  *
  * WHY NOTHING LOCAL IS LEFT. The local word-overlap scorer this replaces judged
  * a query against a title and an excerpt, which is the one comparison a hook can
@@ -344,10 +378,13 @@ function verdict(found) {
   if (found === null || found.rich.length === 0) {
     return { top: null, strength: 'none', confidence: null, corroborated: null };
   }
-  const top = found.rich[0];
+  const strongIdx = found.rich.findIndex(
+    (c) => c.corroborated === true && c.confidence !== 'low',
+  );
+  const top = strongIdx >= 0 ? found.rich[strongIdx] : found.rich[0];
   const confidence = typeof top.confidence === 'string' ? top.confidence : null;
   const corroborated = typeof top.corroborated === 'boolean' ? top.corroborated : null;
-  const strength = corroborated === true && confidence !== 'low' ? 'strong' : 'none';
+  const strength = strongIdx >= 0 ? 'strong' : 'none';
   return { top, strength, confidence, corroborated };
 }
 
@@ -406,31 +443,45 @@ function lookupCapFor(trigger) {
 /**
  * Whether \`trigger\` has anything left in the current window.
  *
- * TWO UNITS, DELIBERATELY. This one is a machine-wide count per trigger over the
- * last PUSH_LOOKUP_WINDOW_MS: it bounds requests, and requests are a property of
- * the machine and of the clock, not of a session id that an always-on loop holds
- * for a day. The inject cap, the once-per-piece set and the outage brake stay
- * per session, because each is a property of the one conversation being injected
- * into.
+ * ONE UNIT: (session, trigger) over the last PUSH_LOOKUP_WINDOW_MS. It is the
+ * CLOCK that does the work a machine-wide count was reaching for — an allowance
+ * that refills means a long-lived session cannot exhaust it for good — and
+ * keeping the count per session is what stops a fan-out's sessions from eating
+ * each other's. See PUSH_LOOKUP_WINDOW_MS for why the unit moved off the
+ * machine. The inject cap, the once-per-piece set and the outage brake were
+ * already per session, so this is now the same scope as every other bound here.
  *
  * ONE INDEXED COUNT, not a parse. This used to mean reading the last 256 KB of
  * an append-only ledger in front of every tool call and tallying it in memory —
  * which also meant the window could only ever be UNDERCOUNTED, since a machine
  * writing more than the tail inside one window lost its oldest rows from the
- * count. The count is now exact, and cheap enough that the per-session "this
- * bucket is full" cache the file version needed is gone with it.
+ * count. The count is now exact (\`injections(session, at)\` is the index it
+ * seeks on), and cheap enough that the per-session "this bucket is full" cache
+ * the file version needed is gone with it.
  */
-function lookupAllowed(trigger, sessionId) {
-  const spent = bucketCount(triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
+function lookupAllowed(trigger, sessionId, legs = 1) {
+  const spent = bucketCount(sessionId, triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
   const base = lookupCapFor(trigger);
   const cap = cooldownCap(trigger, base, sessionId);
-  if (spent < cap) return true;
+  // \`legs\` IS WHAT THIS FIRE WILL SPEND, checked once: a team-mode fire asks
+  // two shelves at once, and both rows count against the bucket, so the gate
+  // asks whether both fit rather than letting each leg read the same stale
+  // count and pass at one lookup left. A two-shelf fire is two lookups.
+  //
+  // WITHIN ONE FIRE. Across fires the count can still overshoot: the read arm
+  // runs two \`pushDecide\` calls under one \`Promise.all\`, and each of them
+  // gates before either has written a row, so both can read the same count and
+  // both pass at one fire's worth left. The overshoot is bounded by one fire —
+  // two lookups in team mode — which a runaway guard can afford; serializing the
+  // pair to close it would cost the arm the parallelism it exists for.
+  if (spent + legs <= cap) return true;
   // THE COLD ARM'S ESCAPE. Under the reduced cap, and under the base cap it
   // replaced, every Nth suppressed fire goes through: an arm nothing grades
   // never warms, and a cap that only ever shrinks is a switch, not a cooldown.
-  // Counted per session and per trigger, in one statement, so two concurrent
-  // fires cannot both be the Nth.
-  if (cap < base && spent < base) {
+  // Counted per session and per trigger, in one statement, ONCE PER FIRE
+  // whatever the leg count, so two concurrent fires cannot both be the Nth and
+  // one fire's two legs cannot be the (N-1)th and the Nth.
+  if (cap < base && spent + legs <= base) {
     const n = bumpState(sessionId, STATE_COOLDOWN_PREFIX + triggerKey(trigger));
     return n > 0 && n % PUSH_COOLDOWN.passEvery === 0;
   }
@@ -610,10 +661,10 @@ function fullForm(opener, header, body) {
 }
 
 /**
- * The push core: look \`query\` up on the team shelf and then, only if that had
- * nothing, on the public one; read the shelf's verdict, pick a form, write the
- * ledger row. Returns { text, form } for an arm to emit, or null when there is
- * nothing to say. \`mode\` is 'inject' or 'log': a log-only arm does everything
+ * The push core: look \`query\` up on the team shelf and the public one AT ONCE
+ * in team mode, prefer the team answer, and fall back to the public one; read the
+ * shelf's verdict, pick a form, write the ledger rows. Returns { text, form } for
+ * an arm to emit, or null when there is nothing to say. \`mode\` is 'inject' or 'log': a log-only arm does everything
  * but speak, which is how a new trigger earns its precision number before it is
  * allowed to interrupt anyone.
  *
@@ -625,14 +676,16 @@ function fullForm(opener, header, body) {
  * initiative, nobody asked, and it records 'push-hook' so those three never
  * mistake a sidecar's curiosity for the agent's own research.
  *
- * TEAM FIRST IS THE WHOLE ORDER, and in team mode the team shelf IS
- * \`baseUrl\`: a second deployment of this same app, with its own database, that
- * only this team can reach. The public marketplace does not cover what a working
- * day looks like (README v3: a framework module error matches nothing) and the
- * team's own findings do, so the public shelf is consulted only when the team
- * shelf had nothing. In PUBLIC mode (no bypass secret configured) there is one
- * shelf, \`baseUrl\`, and this behaves exactly as it did before the team shelf
- * existed.
+ * TEAM WINS, PUBLIC IS ASKED ANYWAY. In team mode the team shelf IS \`baseUrl\`:
+ * a second deployment of this same app, with its own database, that only this
+ * team can reach. The public marketplace does not cover what a working day looks
+ * like (README v3: a framework module error matches nothing) and the team's own
+ * findings do, so a strong team answer is the one delivered and a strong public
+ * answer under it is recorded as \`shadowed\`. Both shelves are asked on every
+ * team-mode fire, side by side: sequential legs made the public answer wait on
+ * the team leg's whole timeout, and the arm that paid was the prompt one. In
+ * PUBLIC mode (no bypass secret configured) there is one shelf, \`baseUrl\`, and
+ * this behaves exactly as it did before the team shelf existed.
  */
 async function pushDecide(args) {
   const { query, config, sessionId, mode } = args;
@@ -674,139 +727,215 @@ async function pushDecide(args) {
   // baseUrl still on the marketplace there is no second shelf to fall through
   // to, only the same origin asked twice and filed as a team hit.
   const teamMode = teamShelfOrigin(config) !== null;
-  // ONE WALL CLOCK FOR THE WHOLE LOOKUP: EXACTLY WHAT ONE SHELF ALWAYS COST, a
-  // search plus a body, which is the sum every arm's watchdog and the harness
-  // \`timeout\` were sized against. Two legs on fixed timeouts instead made the
-  // worst case search + search + body, and the arm that paid for it was the
-  // prompt one: a slow team shelf spent its 1500ms, the public leg answered
-  // inside its own, and the 2700ms overrun timer had already written a
-  // \`watchdog\` row and exited — the hit computed, never emitted. Each leg is
-  // clamped to what is left before this deadline, less the body that still has
-  // to fit; the FIRST leg is unaffected by construction (at t=0 the clamp is
-  // exactly SEARCH_TIMEOUT_MS), so only a second shelf can be squeezed, and it
-  // is squeezed rather than allowed to overrun the arm.
-  const deadline = Date.now() + SEARCH_TIMEOUT_MS + PUSH_BODY_TIMEOUT;
-  const first = await shelfDecide(
-    args,
-    base,
-    teamMode ? 'team' : 'public',
-    config.baseUrl,
-    deadline,
-  );
-  if (first.kind !== 'miss') return first.decided ?? null;
-  if (!teamMode) return null;
-  // Shelf 2, team mode only: the public marketplace, consume-only. Its budget is
-  // re-read inside \`shelfDecide\` rather than carried over, because the team leg
-  // just spent a lookup and wrote a row; a stale count would let one fire spend
-  // two lookups against a cap that says one.
-  const second = await shelfDecide(args, base, 'public', config.publicShelfUrl, deadline);
-  return second.decided ?? null;
+  // EACH LEG GETS ITS OWN WALL CLOCK, one search plus one body, which is what
+  // every arm's watchdog and the harness \`timeout\` were sized against. The two
+  // legs run side by side rather than dividing that clock: sequentially, a slow
+  // team shelf spent the whole search budget and the public leg was squeezed to
+  // nothing (\`no-time\`), or on fixed timeouts the pair overran the prompt arm's
+  // own 2700ms budget and the hit was computed and never emitted. Joined, the
+  // lookup takes max(team, public) + body, the sum the watchdogs already hold.
+  const legDeadline = () => Date.now() + SEARCH_TIMEOUT_MS + PUSH_BODY_TIMEOUT;
+  // THE GATES RUN ONCE PER FIRE, before any leg. The cap and quiet gates are per
+  // trigger and per session, not per shelf, and they have side effects: the cap
+  // check bumps the cold arm's escape counter, and a gate run per leg bumped it
+  // twice per fire, so every other escape pass landed on a leg whose result the
+  // team leg's stop then threw away. One check, sized to the legs this fire
+  // will spend, and one \`lookup-cap\` row when it says no, as it always did.
+  const legs = teamMode ? 2 : 1;
+  const gate = shelfGate({ ...base, shelf: teamMode ? 'team' : 'public' }, sessionId, legs);
+  if (gate !== null) {
+    recordDecision(gate);
+    return null;
+  }
+  if (!teamMode) {
+    const only = await shelfAsk(args, base, 'public', config.baseUrl, legDeadline());
+    if (only.kind !== 'hit') {
+      recordDecision(only.row);
+      return null;
+    }
+    return shelfDeliver(args, only);
+  }
+  // Team mode: both shelves, at once. The rows are then written in a FIXED
+  // order, team then public, whichever leg answered first — \`push status\` and
+  // the grader read the ledger positionally by shelf, and a row order that
+  // depended on network timing would be two ledgers for one behaviour.
+  const [team, pub] = await Promise.all([
+    shelfAsk(args, base, 'team', config.baseUrl, legDeadline()),
+    shelfAsk(args, base, 'public', config.publicShelfUrl, legDeadline()),
+  ]);
+  if (team.kind === 'hit') {
+    const decided = await shelfDeliver(args, team);
+    // THE TEAM LEG WON AND DELIVERED NOTHING. \`shelfDeliver\` answers null for a
+    // piece this session has already been given (already-injected, or relayed to
+    // a child), and shadowing the public hit behind that spent the fire on two
+    // strong answers and emitted neither. A team hit that could not be spoken is
+    // not an answer, so the public one stands on its own exactly as it does under
+    // a team miss. Its row is written by \`shelfDeliver\` after the team leg's
+    // own, so shelf order holds.
+    if (decided === null && pub.kind === 'hit') return await shelfDeliver(args, pub);
+    // The public leg was asked, so it is on the record: a public hit under a
+    // team hit is \`shadowed\`, and a public miss is the miss it was on that
+    // shelf (the research arm's open-loop accounting reads it as one).
+    //
+    // A PUBLIC MISS UNDER A TEAM HIT STILL OPENS A LOOP, deliberately. The
+    // research arm's Stop-hook accounting reads that row as the miss it is, and
+    // it is a real one: the team shelf answering does not mean the marketplace
+    // has this, and a piece the team wrote for itself is the piece worth
+    // publishing publicly. Recording it as anything softer would close a loop
+    // that publishing is the only thing that closes.
+    recordDecision(
+      pub.kind === 'hit' ? { ...pub.row, action: 'skipped', reason: 'shadowed' } : pub.row,
+    );
+    return decided;
+  }
+  // A team miss, or the \`no-time\` clamp on a leg handed no wall clock: either
+  // way its row is written and the public leg's answer stands on its own.
+  recordDecision(team.row);
+  if (pub.kind === 'hit') return shelfDeliver(args, pub);
+  recordDecision(pub.row);
+  return null;
 }
 
 /**
- * One shelf's half of {@link pushDecide}: ask \`shelfBaseUrl\`, read its verdict,
- * pick a form, write the ledger row. The return says what the OTHER shelf may do
- * next, which is the only reason this is not just inlined twice:
- *
- *  - \`miss\`   nothing worth saying was found (no answer, no candidate, or a
- *              candidate too weak to offer). The next shelf may be asked.
- *  - \`stop\`   this trigger has spent its lookup budget for the window, or the
- *              marketplace is in its quiet window. Asking a second shelf would
- *              spend the budget the stop exists to protect, so nothing else is
- *              asked.
- *  - \`done\`   this shelf answered — injected, logged, or deliberately skipped
- *              because the same piece already landed this session. \`decided\` is
- *              what the arm emits (null for a log-only or skipped outcome).
+ * The per-fire gates for {@link pushDecide}: the row to record and stop on, or
+ * null to go ahead. Run ONCE per fire, never per leg, because the cap check
+ * counts (the cold arm's escape counter) and the count is per trigger and per
+ * session, not per shelf. \`legs\` is how many lookups the fire will spend, so
+ * the cap is held exactly rather than read twice and overshot by one.
  */
-async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
-  const { query, config, sessionId, mode } = args;
-  const source = typeof args.source === 'string' ? args.source : 'push-hook';
-  const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
-  const base = { ...outerBase, shelf };
-
+function shelfGate(base, sessionId, legs) {
   // This arm's OWN bucket for the current window, not a shared pool: a prompt
   // flood spends the prompt allowance and leaves the failure arm's untouched.
   // The row already carries \`trigger\`, so \`push status\` shows which bucket
   // filled up without a new field.
-  if (!lookupAllowed(base.trigger, sessionId)) {
-    recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
-    return { kind: 'stop' };
+  if (!lookupAllowed(base.trigger, sessionId, legs)) {
+    return { ...base, action: 'skipped', reason: 'lookup-cap' };
   }
   // The shelf is not answering: stop asking it for a while. Self-healing, and
   // recorded, so \`push status\` shows an outage as an outage rather than as a
   // sidecar that quietly did nothing.
   const outage = failStreak(sessionId);
   if (outage.streak >= PUSH_FAILURE_STOP && Date.now() - outage.lastAt < PUSH_QUIET_MS) {
-    recordDecision({ ...base, action: 'skipped', reason: 'quiet' });
-    return { kind: 'stop' };
+    return { ...base, action: 'skipped', reason: 'quiet' };
   }
-  // Out of wall clock: the first leg spent what this one would have needed.
-  // Recorded on its own reason rather than as \`no-answer\`, because this shelf
-  // was never asked — filing it as an outage would build a failure streak
-  // against a shelf that may be perfectly healthy and quiet the arm for the rest
-  // of the session.
+  return null;
+}
+
+/**
+ * One shelf's ask, for {@link pushDecide}: the search, the search record and
+ * the verdict. THE GATES ARE NOT HERE — {@link shelfGate} ran them once for the
+ * fire, before any leg — and IT WRITES NO DECISION ROW. Two of these run side
+ * by side in team mode and the caller writes their rows in shelf order, so the
+ * row an ask would have written comes back as \`row\`, ready to record:
+ *
+ *  - \`stop\`   the leg has no wall clock left. Nothing was asked.
+ *  - \`miss\`   asked, and nothing worth saying was found (no answer, no
+ *              candidate, or a candidate too weak to offer).
+ *  - \`hit\`    a strong candidate; \`v\` is the verdict and {@link shelfDeliver}
+ *              turns it into text and the injected row.
+ *
+ * IT NEVER REJECTS. Two of these are handed to \`Promise.all\`, so one leg that
+ * throws would reject the pair and take the OTHER shelf's answer down with it —
+ * a fire that had a good answer in hand emits nothing and writes no row. The
+ * whole leg is therefore inside one try: the fetch, the search record and the
+ * verdict alike, since everything after the fetch reads a body an untrusted
+ * origin sent. A throw comes back as the \`no-answer\` miss, which is what an
+ * unanswered leg already meant.
+ */
+async function shelfAsk(args, outerBase, shelf, shelfBaseUrl, deadline) {
+  const { query, config, sessionId } = args;
+  const source = typeof args.source === 'string' ? args.source : 'push-hook';
+  const base = { ...outerBase, shelf };
+
+  // Out of wall clock before the leg even starts: the caller handed this leg a
+  // deadline it cannot fit a search and a body under. Cannot happen with the
+  // fresh per-leg deadline \`pushDecide\` mints, but the clamp is what keeps a
+  // caller honest, and the reason stays its own rather than \`no-answer\`: this
+  // shelf was never asked, and filing it as an outage would build a failure
+  // streak against a shelf that may be perfectly healthy.
   const leg = legTimeoutMs(deadline, PUSH_BODY_TIMEOUT);
   if (leg < SEARCH_MIN_LEG_MS) {
-    recordDecision({ ...base, action: 'skipped', reason: 'no-time' });
-    return { kind: 'stop' };
+    return { kind: 'stop', row: { ...base, action: 'skipped', reason: 'no-time' } };
   }
-  let found = null;
+  // A MISS, NOT A STOP. A protected team shelf that refuses the bypass header
+  // answers nothing, and silencing the public shelf for the rest of the session
+  // on the strength of that would turn one misconfigured secret into a sidecar
+  // that never speaks again. The failure streak above is the brake that handles
+  // a real outage. It is also what a THROWN leg comes back as, below.
+  const noAnswer = { kind: 'miss', row: { ...base, action: 'skipped', reason: 'no-answer' } };
   try {
-    found = await askTenjin(query, config, {
+    const found = await askTenjin(query, config, {
       shelfBaseUrl,
       timeoutMs: leg,
       trigger: base.trigger,
       packageName: args.packageName,
+      identifiers: args.identifiers,
+      limit: PUSH_SEARCH_LIMIT,
     });
+    if (found === null) return noAnswer;
+    recordSearch(
+      found.searchId,
+      query,
+      found.decision,
+      found.stored,
+      sessionId,
+      base.agentId,
+      source,
+      shelfBaseUrl,
+    );
+    const v = verdict(found);
+    const row = {
+      ...base,
+      searchId: found.searchId,
+      candidate:
+        v.top === null
+          ? null
+          : {
+              resourceId: v.top.resourceId,
+              title: v.top.title,
+              price: v.top.price,
+              url: v.top.url,
+            },
+      strength: v.strength,
+      // Both server fields, on EVERY row including the misses and the weak ones:
+      // the rows a rule would have changed are exactly the ones a rule has to be
+      // judged against, so recording only the rows that injected would answer the
+      // question with the cases that already agreed.
+      confidence: v.confidence ?? null,
+      corroborated: v.corroborated ?? null,
+    };
+    if (v.top === null) {
+      return { kind: 'miss', row: { ...row, action: 'skipped', reason: 'miss' } };
+    }
+    if (v.strength === 'none') {
+      return { kind: 'miss', row: { ...row, action: 'skipped', reason: 'weak' } };
+    }
+    return { kind: 'hit', row, v };
   } catch {
-    found = null;
+    // EVERYTHING AFTER THE FETCH IS IN HERE TOO, not just the fetch. \`found\` is
+    // a body an untrusted origin sent, and the record and the verdict walk it;
+    // outside the try, one leg's throw rejected the \`Promise.all\` in
+    // {@link pushDecide} and the OTHER shelf's answer was lost with it — the arm
+    // emitted nothing and wrote no row for either leg. This leg is unanswered,
+    // which is what \`no-answer\` has always meant.
+    return noAnswer;
   }
-  if (found === null) {
-    // A MISS, NOT A STOP. A protected team shelf that refuses the bypass header
-    // answers nothing, and silencing the public shelf for the rest of the
-    // session on the strength of that would turn one misconfigured secret into a
-    // sidecar that never speaks again. The failure streak above is the brake
-    // that handles a real outage.
-    recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
-    return { kind: 'miss' };
-  }
-  recordSearch(
-    found.searchId,
-    query,
-    found.decision,
-    found.stored,
-    sessionId,
-    base.agentId,
-    source,
-    shelfBaseUrl,
-  );
-  const v = verdict(found);
-  const row = {
-    ...base,
-    searchId: found.searchId,
-    candidate:
-      v.top === null
-        ? null
-        : { resourceId: v.top.resourceId, title: v.top.title, price: v.top.price, url: v.top.url },
-    strength: v.strength,
-    // Both server fields, on EVERY row including the misses and the weak ones:
-    // the rows a rule would have changed are exactly the ones a rule has to be
-    // judged against, so recording only the rows that injected would answer the
-    // question with the cases that already agreed.
-    confidence: v.confidence ?? null,
-    corroborated: v.corroborated ?? null,
-  };
-  if (v.top === null) {
-    recordDecision({ ...row, action: 'skipped', reason: 'miss' });
-    return { kind: 'miss' };
-  }
-  if (v.strength === 'none') {
-    recordDecision({ ...row, action: 'skipped', reason: 'weak' });
-    return { kind: 'miss' };
-  }
+}
+
+/**
+ * The delivery half of one shelf's ask: given a \`hit\` from {@link shelfAsk},
+ * pick a form, fetch the free body, claim the injected row, and return
+ * { text, form } for the arm to emit — or null when the arm is log-only or the
+ * piece already landed this session. Every ledger row a hit produces is written
+ * here, so the caller can order it against the other shelf's row.
+ */
+async function shelfDeliver(args, asked) {
+  const { config, sessionId, mode } = args;
+  const { row, v } = asked;
+  const opener = row.shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
   if (mode === 'log') {
     recordDecision({ ...row, action: 'logged', form: isFree(v.top) ? 'full' : 'short' });
-    return { kind: 'done' };
+    return null;
   }
   // THE 6x FIX. One already-shown set across every hook, not one per script:
   // the WebSearch and dispatch hint paths write to the same table, so a note
@@ -827,7 +956,7 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
       // needs.
       reason: alreadyShown(sessionId, v.top.resourceId) ? 'already-injected' : 'already-relayed',
     });
-    return { kind: 'done' };
+    return null;
   }
   let form = 'short';
   let text = shortForm(v.top, opener);
@@ -861,9 +990,9 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   });
   if (!mayShow(claimed)) {
     recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
-    return { kind: 'done' };
+    return null;
   }
-  return { kind: 'done', decided: { text, form } };
+  return { text, form };
 }
 
 // ---- per-session state (edits seen, packages seen, error signatures seen) ----
@@ -959,12 +1088,101 @@ const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]
  * floor, so both rules walked past it. Eight characters is the floor here
  * because a token shorter than that is not one; it costs the prose reading
  * ("the bearer of bad news" keeps its words, none of which reach eight).
+ *
+ * THE SIGNING WORDS ARE ON THE LIST TOO — \`sig\`, \`signature\`, \`nonce\`,
+ * \`hmac\` — because a request signature is a credential the other words do
+ * not name: \`;sig=abc123\` is what a presigned url or a webhook callback
+ * carries, and the value under it is mixed letters and digits well short of
+ * the entropy rule's floor, so it left whole and the identifier rule then
+ * PROMOTED it (\`abc123\` is a handle by shape) onto the wire to both shelves.
+ *
+ * \`sig\` IS A SUBSTRING OF ORDINARY WORDS, and that cost is paid knowingly.
+ * The alternation has no leading boundary — deliberately, see above, so a
+ * long prefix cannot hide the keyword — so \`design=dark\` and
+ * \`assignee=me\` match at their inner \`sig\` and go. The cures are worse:
+ * a \`(?<![A-Za-z])\` guard on the whole alternation loses camelCase
+ * (\`requestSig=abc\`, \`servicePassword=hunter2\`), which is the exact
+ * shape being closed here, and no rule can tell a signing prefix from an
+ * English one. Redacting a topic word is the cheaper mistake. The COLON
+ * form is the everyday trigger, not the \`=\` form: \`the new design:
+ * dark mode\` scrubs to \`the new de mode\` and \`assignee: bob\` to
+ * \`as\` — a two-character residue, not a clean removal. Harmless on the
+ * wire (lowercase fragments never become identifiers) but expected, so
+ * the next reader is not surprised by it in prose.
  */
 const SECRET_ASSIGN_RE =
-  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
-/** \`postgres://user:hunter2@host\`: the userinfo half of a url, which the path
- *  rule cannot see because that one starts at a slash. */
-const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
+  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
+/** \`postgres://user:hunter2@host/db\`: the userinfo half of a url, which the
+ *  path rule cannot see because that one starts at a slash. The host and path
+ *  after the \`@\` go with it: a one-label host (\`h\`) is under the host
+ *  rule's reach, and \`h/db\` left behind reads as an identifier to the
+ *  prompt arm.
+ *
+ *  THE EXTENT IS THE WHOLE NON-WHITESPACE RUN, AND THE ENUMERATION IS
+ *  RETIRED. This rule used to parse the query string after the credential
+ *  with a hand-rolled \`(separator)(name)=(value)\` repetition, and three
+ *  consecutive review rounds patched that repetition: round 2 put the signing
+ *  words on the assign rule, round 3 widened the separator class to every
+ *  character the match stopped at, round 4 widened the parameter-name class
+ *  twice, once for interior digits and once for a leading one. Every one of
+ *  those fixes was correct and every one closed exactly the shape it had been
+ *  shown, and the next round found the next shape:
+ *  \`?apikey[0]=hunter2secret\` — a real credential value, in the form
+ *  \`qs\`, Rails and PHP all emit — plus \`?filter[id]=abc123\`,
+ *  \`;;ref=abc123\`, \`;;;;t=abc123\`, \`;ref=abc123&&next=xyz789abc\`,
+ *  \`;a.b=abc123\` and \`;%73ig=abc123\`, all of them promoted into the
+ *  identifiers array and sent to BOTH shelves. Two character classes cannot
+ *  enumerate what a query string is, so a fourth patch would only have bought
+ *  an eighth shape. The tail is therefore no longer parsed at all: after
+ *  \`user:pass@\` the match runs to the next whitespace and NOTHING inside
+ *  that run survives. Brackets, empty separator runs, dotted or
+ *  percent-encoded names, a value with no \`=\` in front of it — whatever the
+ *  vendor glues on, it was written as one word with a credential inside it,
+ *  so it leaves as one word.
+ *
+ *  THE REPLACER HANDS BACK THE TRAILING PUNCTUATION, which is what keeps a
+ *  url readable inside prose. The handback is the run matched by
+ *  \`SECRET_URL_TRAIL_RE\` at the END of the match and nothing else: the
+ *  closers \`)\`, \`]\`, \`}\`, \`>\`, the quotes \`"\`, \`'\` and backtick,
+ *  the markdown \`*\`, and the sentence punctuation \`.\`, \`,\`, \`;\`,
+ *  \`:\`, \`!\`, \`?\`. So \`(postgres://u:p@h/db); the retry loops\` keeps
+ *  \`);\` and, across the space, its sentence, and a bare \`(url)\` keeps its
+ *  parens. Every character in that class is non-alphanumeric, so nothing
+ *  handed back can be a credential value or reach the identifiers array;
+ *  \`=\` is deliberately NOT in it, because it is base64 padding and a key
+ *  may end on it.
+ *
+ *  PROSE GLUED STRAIGHT ONTO THE URL GOES WITH IT, and that is the priced
+ *  cost of the redesign rather than an oversight.
+ *  \`postgres://u:p@h/db,migration fails\` used to keep \`,migration\` and
+ *  now keeps only \`fails\`. Nothing can tell \`,migration\` from
+ *  \`,hunter2secret\` except the enumeration that just failed three times in
+ *  a row, so the file's standing trade applies: redacting a topic word is the
+ *  cheaper mistake. One space is all it takes to keep the word, and the
+ *  spaced form is how a url is written in a sentence anyway.
+ *
+ *  LINEAR, AND RE-MEASURED ON THE SHAPES THE OLD REPETITION WAS TUNED FOR.
+ *  \`[^\s:@/]+\` stops at the first \`:\` and \`[^\s@/]+\` stops at the first
+ *  \`/\`, so the only backtracking seam left is bounded by the distance to
+ *  the next slash, and the tail is one greedy \`\S*\` with nothing after it
+ *  to backtrack into. Timed over the whole \`scrub\` at 16k characters per
+ *  input: \`;a=\` repeats 0.15 ms, alternating \`?a=1&b=2\` 0.08 ms, all-\`?\`
+ *  0.24 ms, \`?a\` repeats 0.19 ms, \`&a=b\` repeats then a forced fail
+ *  0.05 ms, 16k of trailing non-matching text 0.05 ms, \`a://\` repeats
+ *  0.52 ms, and the one seam that can still backtrack — \`x://\` then a 16k
+ *  \`a:\` run with no \`@\` — 0.65 ms. Doubling every one of them to 32k
+ *  doubles the time (worst case 1.31 ms), which is the linearity claim.
+ *
+ *  A NON-CREDENTIAL URL IS UNTOUCHED BY THIS. The rule only ever engages
+ *  after \`user:pass@\`, so \`https://acme.com/docs?page=2\` keeps
+ *  \`?page=2\` — the host rule takes the host and the page number travels as
+ *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
+ *  blanks a signing parameter wherever it sits, url or not. */
+const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@\S*/gi;
+/** The trailing punctuation a blanked userinfo url hands back to the sentence
+ *  it was written inside. Closers, quotes and sentence punctuation only: no
+ *  alphanumeric, and no \`=\`. */
+const SECRET_URL_TRAIL_RE = /[)\]}>'"\u0060*.,;:!?]+$/;
 /** The catch-all: a long opaque run mixing letters and digits is not a word
  *  anybody typed as part of a question. Dropping a rare long identifier costs
  *  one topic word; keeping a key costs the key.
@@ -977,6 +1195,9 @@ const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@/gi;
  *  which is still under any real key's length. */
 const SECRET_ENTROPY_RE =
   /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
+/** The env-var-name exception to the rule above: all caps and digits, at least
+ *  one underscore, at most 64 characters. Bounded again in the replacer. */
+const SECRET_ENV_NAME_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
 /**
  * Hostnames, and the addresses that are not names.
  *
@@ -996,17 +1217,51 @@ const SECRET_ENTROPY_RE =
  * Title-case guard lets \`Eu.Acme.De\` through, because no rule can tell a
  * Title-cased host from a Title-cased word. Redacting a topic word is the
  * cheaper mistake, so it stands.
+ *
+ * A HOST FOLLOWED BY AN EXTENSION IS STILL A HOST, AND THE EXTENSION GOES
+ * WITH IT. \`api.acme.com.json\`, \`values.prod.acme.io.yaml\` and
+ * \`internal.corp.md\` are per-host config files, exactly the shape an nginx
+ * sites directory or a cert bundle takes, so the trailing dotted labels are
+ * consumed into the match (\`api.acme.com.tsx-beta\` included: the class runs
+ * to the next non-label character) and the whole run is blanked. A negative
+ * lookahead on the extension was tried first and did the opposite: the engine
+ * found no shorter label run to match, so the host survived WHOLE.
+ *
+ * THE ONE FILE NAME KEPT is \`<name>.test.<source ext>\`: \`test\` is on the
+ * TLD list, so \`push-scripts.test.ts\` used to leave \`.ts\` behind, and it
+ * is the file most questions about a failing suite name. A single label
+ * before \`.test\` and a source extension after it is not a host anybody
+ * runs; \`docker-compose.dev.yml\` and \`settings.local.json\` still go,
+ * which is the cheaper mistake.
  */
 const SECRET_HOST_RE =
-  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b/gi;
+  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b(?:\.[a-z0-9-]+)*/gi;
+/** The one host-shaped file name the host rule hands back: see above. */
+const SECRET_HOST_KEEP_RE = /^[a-z0-9-]+\.test\.(?:ts|tsx|js|mjs|cjs)$/i;
+/** A basename stem the path rule must not hand back whatever its extension:
+ *  the words a credential file is named with, matched as whole \`-\`/\`_\`/\`.\`
+ *  separated pieces so \`keys.ts\` (a source file) is not \`key\`. */
+const SECRET_STEM_RE =
+  /(?:^|[-_.])(?:secrets?|credentials?|service[-_]?account|tokens?|passwords?|passwd|private|certs?|certificate|keyfile|id_[a-z0-9]+)(?:[-_.]|$)/i;
+/** The stem whose reading depends on its extension. \`key\`/\`keys\` names
+ *  key MATERIAL under a config extension (\`keys.json\`, \`keys.yml\`) and
+ *  SOURCE CODE under a source one (\`keys.ts\`, the module that handles them),
+ *  so it cannot go on the list above: putting it there blanks the source file
+ *  that half the questions about key handling name. Gated on the extension, both
+ *  readings get what they deserve. */
+const SECRET_CONFIG_STEM_RE = /(?:^|[-_.])keys?(?:[-_.]|$)/i;
+/** The extensions a config stem is read under: the formats key material is
+ *  actually written in. */
+const SECRET_CONFIG_EXT_RE = /^(?:json|yml|yaml|toml|env)$/i;
 /** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
  *  so no TLD. Bounded repetition, so it adds no backtracking. */
 const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 /**
- * Drop every credential, scheme-less path, hostname, hex id and number: what
+ * Drop every credential, path, hostname, address, email and hex id: what
  * leaves the machine is the shape of the problem, never the address of it and
- * never the key to it.
+ * never the key to it. A path leaves its basename behind when the extension is
+ * a source or config one; an ALL_CAPS env-var name survives the entropy rule.
  *
  * THE CREDENTIAL RULES RUN FIRST, and they run on every arm, because the arm
  * most likely to be handed a secret is the failure arm and the failure it fires
@@ -1025,10 +1280,25 @@ function scrub(text) {
     // scrub has already decided. Whitespace controls are left alone; they are
     // real text here and the collapse at the bottom handles them.
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(SECRET_USERINFO_RE, ' ')
+    // The extent is the whole non-whitespace run; only the trailing
+    // punctuation comes back, so the sentence around the url still reads.
+    .replace(SECRET_USERINFO_RE, (m) => {
+      const tail = m.match(SECRET_URL_TRAIL_RE);
+      return tail ? ' ' + tail[0] : ' ';
+    })
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
-    .replace(SECRET_ENTROPY_RE, ' ')
+    // AN ENV-VAR NAME IS NOT A KEY. All caps with at least one underscore
+    // (\`NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1\`) is a name somebody typed,
+    // never a base64 secret, and it is the exact token a shelf lookup keys on;
+    // anything else the floor catches still goes. BOUNDED: at most 64
+    // characters and no piece of 16+ between the underscores, because
+    // \`GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890\` is a name glued to its
+    // value, and a hex-style key is all caps and digits too. The longest
+    // piece of a real env-var name is a word.
+    .replace(SECRET_ENTROPY_RE, (m) =>
+      m.length <= 64 && SECRET_ENV_NAME_RE.test(m) && !/[A-Z0-9]{16}/.test(m) ? m : ' ',
+    )
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
     // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
     // which carries exactly as much of a customer's name as the absolute one
@@ -1054,13 +1324,38 @@ function scrub(text) {
     // inside the segment, so the HEAD of a longer one survives
     // (\`acmebank.a.b.c.d/keys/prod.ts\` -> \`acmebank\`). Narrow, and paid for
     // deliberately: widening the bound is what brings the quadratic back.
+    //
+    // THE BASENAME STAYS WHEN ITS EXTENSION IS ON THE ALLOWLIST AND ITS STEM
+    // IS NOT CREDENTIAL-SHAPED. The basename is the one exact token a shelf can
+    // match a finding on (\`migrate.yml\`, \`keys.ts\`), and dropping the
+    // whole path left the failure and dispatch arms blind to the file the
+    // question was about. The extension list is source and config only, so
+    // \`.env.production\`, \`id_rsa.pem\`, \`.key\` and \`.p12\` go with their
+    // path; the stem list catches the credential files that sit behind an
+    // innocent extension (\`prod-service-account.json\`, \`secrets.yml\`,
+    // \`id_rsa.md\`), and one stem is read BY its extension: \`keys.json\`
+    // and \`keys.yml\` are key material and go with the path, \`keys.ts\` is
+    // the module that handles them and stays.
+    //
+    // WHAT THIS DOES NOT DO is read the stem for a customer's name: no rule can
+    // tell \`acme-bank.ts\` from \`push-scripts.ts\`, so a file NAMED for a
+    // customer travels the same way it would typed bare with no path in front
+    // of it, and only its directories are blanked. The docs say so.
     .replace(
       /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
-      ' ',
+      (m) => {
+        const base =
+          /\/(([\w-]+(?:\.[\w-]+)*)\.(ts|tsx|js|mjs|cjs|json|yml|yaml|md|sql|py|toml))$/.exec(m);
+        if (base === null) return ' ';
+        const credential =
+          SECRET_STEM_RE.test(base[2]) ||
+          (SECRET_CONFIG_EXT_RE.test(base[3]) && SECRET_CONFIG_STEM_RE.test(base[2]));
+        return credential ? ' ' : ' ' + base[1] + ' ';
+      },
     )
     .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
     .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
-    .replace(SECRET_HOST_RE, ' ')
+    .replace(SECRET_HOST_RE, (m) => (SECRET_HOST_KEEP_RE.test(m) ? m : ' '))
     .replace(SECRET_IPV4_RE, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -1114,6 +1409,8 @@ export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string
 const PROMPT_JS = String.raw`
 const PROMPT_MIN_CHARS = 80;
 const PROMPT_MAX_CHARS = 4000;
+// The same figure as CONDENSE_MAX_CHARS: condense() already cuts at a whole
+// token under it, so the clean() below only sees the fallback.
 const PROMPT_QUERY_CHARS = 400;
 
 async function main() {
@@ -1131,16 +1428,35 @@ async function main() {
       ? input.prompt
       : (typeof input.user_input === 'string' ? input.user_input : '');
   const prompt = raw.trim();
-  // Scrubbed BEFORE the slice, so a path at character 380 cannot survive by
-  // being cut in half, and what the ledger records is what was sent.
-  const query = clean(scrub(prompt).slice(0, PROMPT_QUERY_CHARS), PROMPT_QUERY_CHARS);
+  // Scrubbed first, then CONDENSED rather than sliced (tenjin-agent#255): the
+  // prompt is under 4,000 characters by the \`long\` gate below, so the whole
+  // of it is read for identifiers — a file name at character 500 used to be
+  // cut off by a 400-character slice — and the query the shelf sees is the
+  // identifiers first, then the prompt's own words with the filler out, at
+  // most 24 tokens and 400 characters, cut at a whole token. \`identifiers\`
+  // rides beside it on the wire in the \`pr-751\` spelling. What the ledger
+  // records is what was sent.
+  //
+  // WHEN CONDENSING LEAVES NOTHING the scrubbed head goes instead. A prompt of
+  // seven three-word questions ("does it build? does it lint? ...") has no
+  // identifier and no clause of four words, so condense() returns '' — and an
+  // empty query still spends a request on both shelves and writes a row that
+  // says nothing. The 400-character head is what this arm sent before #255.
+  const scrubbed = scrub(prompt);
+  const identifiers = identifiersOf(scrubbed);
+  const condensed = condense(scrubbed);
+  const query = clean(
+    condensed.length > 0 ? condensed : scrubbed.slice(0, PROMPT_QUERY_CHARS),
+    PROMPT_QUERY_CHARS,
+  );
   // Why this prompt will not be looked up, or null. Decided BEFORE the store is
   // opened, so the row below can say so, and applied after it, so the row is
   // written either way.
   //  - short/long: outside the size window.
   //  - slash: a harness command, not a question.
   //  - words: under three real words there is no question here, only "keep
-  //    going" — not worth a request.
+  //    going" — not worth a request. Read off the SCRUBBED prompt, not the
+  //    condensed query: three identifiers and no prose is a question.
   const skipped =
     prompt.length < PROMPT_MIN_CHARS
       ? 'short'
@@ -1148,7 +1464,7 @@ async function main() {
         ? 'long'
         : prompt.startsWith('/')
           ? 'slash'
-          : wordCount(query) < 3
+          : wordCount(scrubbed) < 3
             ? 'words'
             : null;
   if (prompt.length === 0) return quiet();
@@ -1175,8 +1491,9 @@ async function main() {
   // a "/clear" and a one-line correction all turned over the turn and none of
   // them was on record. The row is what pushDecide would have opened — it is
   // handed the uid so the lookup does not open a second one — plus \`skipped\`
-  // when this arm went no further. A skipped prompt's query is the same
-  // scrubbed, capped text a looked-up one records.
+  // when this arm went no further. A looked-up prompt records the condensed
+  // query it sent; a skipped one sent nothing, so its row keeps the scrubbed
+  // prompt text — a "yes" is on record as "yes", not as an empty query.
   const eventUid = recordEvent({
     session: sessionId,
     cwd,
@@ -1184,7 +1501,7 @@ async function main() {
     agentId,
     data: {
       event: 'UserPromptSubmit',
-      query: clean(query, 512),
+      query: clean(skipped === null ? query : scrubbed, 512),
       ...(skipped === null ? {} : { skipped }),
     },
   });
@@ -1212,6 +1529,7 @@ async function main() {
     trigger: 'prompt',
     event: 'UserPromptSubmit',
     query,
+    identifiers,
     config,
     sessionId,
     agentId,
@@ -1230,7 +1548,7 @@ main().catch(quiet);
 `;
 
 export function pushPromptHookScript(dataDir: string): string {
-  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource(PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
+  return `${prelude(dataDir, PUSH_PROMPT_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource(PUSH_PROMPT_SEARCH_TIMEOUT_MS)}${pushSource(PUSH_PROMPT_BODY_TIMEOUT_MS)}${condenseSource()}${PROMPT_JS.replaceAll('__PROMPT_BUDGET__', String(PUSH_PROMPT_BUDGET_MS))}`;
 }
 
 /**
@@ -1418,6 +1736,35 @@ const HEAD_RUNNERS = new Set(['npx', 'pnpx', 'bunx', 'uvx']);
 /** ... and the package-manager subcommands that do the same thing. */
 const PM_RUN_SUBS = new Set(['exec', 'dlx', 'x']);
 
+/** Root options the Tenjin CLI accepts before its leaf command. Boolean options
+ * consume one word; value options consume either one \`--name=value\` word or the
+ * following value too. Kept narrow to the root options declared in cli.ts: an
+ * unknown option is not evidence that a later word actually ran as a command. */
+const TENJIN_ROOT_BOOLEAN_OPTS = new Set(['--json']);
+const TENJIN_ROOT_VALUE_OPTS = new Set(['--base' + '-url', '--timeout']);
+
+/** The index of Tenjin's leaf command after any supported root options. */
+function skipTenjinRootOptions(words, i) {
+  while (i < words.length) {
+    const word = words[i];
+    if (TENJIN_ROOT_BOOLEAN_OPTS.has(word)) {
+      i += 1;
+      continue;
+    }
+    const equals = word.indexOf('=');
+    const option = equals === -1 ? word : word.slice(0, equals);
+    if (!TENJIN_ROOT_VALUE_OPTS.has(option)) break;
+    if (equals !== -1) {
+      i += 1;
+      continue;
+    }
+    // A missing value is an invalid CLI invocation and reaches no leaf.
+    if (i + 1 >= words.length) return words.length;
+    i += 2;
+  }
+  return i;
+}
+
 /**
  * Step \`i\` past one wrapper and its options: returns the index of the word
  * the wrapper runs. \`-uBUILDER\` and \`--user=builder\` carry their value in
@@ -1450,7 +1797,9 @@ function skipWrapper(words, i, valueOpts, name) {
  * \`/usr/local/bin/pnpm\` and \`./node_modules/.bin/vitest\` land on their
  * program names; leading \`FOO=bar\` assignments and wrappers are stepped over,
  * each by its own option table, however many stack (\`sudo env FOO=1 pnpm test\`),
- * and \`python3 -m <module>\` lands on the module.
+ * and \`python3 -m <module>\` lands on the module. Tenjin's own root options
+ * are stepped over before its \`sub\` is reported, so \`tenjin --json publish\`
+ * identifies the same content command as \`tenjin publish --json\`.
  */
 function commandHeads(command) {
   const out = [];
@@ -1484,7 +1833,8 @@ function commandHeads(command) {
       break;
     }
     if (head.length === 0) continue;
-    out.push({ head, sub: i + 1 < words.length ? words[i + 1] : '' });
+    const subIndex = head === 'tenjin' ? skipTenjinRootOptions(words, i + 1) : i + 1;
+    out.push({ head, sub: subIndex < words.length ? words[subIndex] : '' });
   }
   return out;
 }
@@ -1509,6 +1859,18 @@ function allowedHeads(command) {
 /** Whether ANY command in the line is one this arm may fire behind. */
 function failureAllowed(command) {
   return allowedHeads(command).length > 0;
+}
+
+/**
+ * Publishing and editing Tenjin content are the capture loop's disposition,
+ * not evidence that this session did repository work. Exclude the whole Bash
+ * event when any parsed segment is one of those commands, including paths,
+ * wrappers and package-manager runners understood by commandHeads().
+ */
+function isTenjinContentCommand(command) {
+  return commandHeads(command).some(
+    ({ head, sub }) => head === 'tenjin' && (sub === 'publish' || sub === 'edit'),
+  );
 }
 
 /** The most informative line: the LAST error-shaped, non-frame line, because
@@ -2561,10 +2923,6 @@ async function main() {
   if (input.is_interrupt === true) return quiet();
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
   const command = typeof toolInput.command === 'string' ? toolInput.command : '';
-  // BEFORE anything is read, parsed or written. A command whose head is not a
-  // build, test, migration, install or lint step is not one this arm has an
-  // opinion about, however its output reads.
-  if (!failureAllowed(command)) return quiet();
 
   // WHICH AGENT, not just which session. Every subagent of a session carries the
   // parent's session id, so this is the only field that tells one parallel
@@ -2575,6 +2933,17 @@ async function main() {
   // session would let a child's fix verify a pairing its parent was shown.
   if (invalid) return quiet();
   const cwd = cwdOf(input);
+  const failureEligible = failureAllowed(command);
+  const rootShellActivity =
+    sessionId !== null &&
+    agentId === null &&
+    cwd !== null &&
+    !isTenjinContentCommand(command);
+
+  // An unrelated Bash event with no project-root activity to mark has no reason
+  // to create the state store. Failure handling and content-free root activity
+  // are the only two lanes below; decide that at the edge before openStore().
+  if (!failureEligible && !rootShellActivity) return quiet();
   // NO STORE, NO FIRE. Plan 03, "Fail-open, spelled out": a fire without a store
   // behaves exactly like the quiet() path — exit 0, nothing on stdout, one
   // stderr line already written at open. Returning here rather than carrying on
@@ -2584,6 +2953,19 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+
+  // BEFORE THE FAILURE ALLOWLIST. Every root Bash call is repository activity,
+  // including read-only commands the mechanical failure lane intentionally
+  // ignores. The fixed marker stores no command, path or output and repeated
+  // calls only refresh its timestamp. Tenjin publish/edit are the capture
+  // disposition itself, so they cannot manufacture eligibility for another ask.
+  if (rootShellActivity) {
+    markRootActivity(sessionId, agentId, 'shell');
+  }
+
+  // A command whose head is not a build, test, migration, install or lint step
+  // is not one the FAILURE lane has an opinion about, however its output reads.
+  if (!failureEligible) return quiet();
   const heads = allowedHeads(command);
   const text = failureText(input);
   // A PASS, not a failure. This is the other half of the mechanical lane: the
@@ -2978,8 +3360,8 @@ function captureAskText(agentId, publishMode, searchId) {
     typeof agentId === 'string' && AGENT_ID_RE.test(agentId) ? ' --agent ' + agentId : '';
   const search =
     typeof searchId === 'string' && UUID_RE.test(searchId) ? ' --search-id ' + searchId : '';
-  return CAPTURE_ASK.replace('<agent-flag>', flag)
-    .replace('<search-flag>', search)
+  return CAPTURE_ASK.replaceAll('<agent-flag>', flag)
+    .replaceAll('<search-flag>', search)
     .replace('<mode>', publishMode);
 }
 
@@ -3750,7 +4132,6 @@ async function main() {
   // session would close a pairing a sibling was shown.
   if (invalid) return quiet();
   if (sessionId === null) return quiet();
-  const cwd = cwdOf(input);
   const tool = input.tool_name;
   const event = input.hook_event_name;
   // THE BASH TIMING STASH (tenjin-agent#278 round 3, "Decide which segment
@@ -3759,15 +4140,14 @@ async function main() {
   // whether a test-report artifact could possibly be about THIS command. NO
   // file_path GATE below this branch — Bash carries none — and no store means
   // no stamp, the same fail-open posture every arm here takes, not a reason to
-  // guess a timestamp the failure arm would then trust wrongly.
+  // guess a timestamp the failure arm would then trust wrongly. BEFORE
+  // isEdit/isRead: Bash satisfies neither, so it would fall straight through
+  // to the quiet() below them anyway — this just answers it first.
   if (event === 'PreToolUse' && tool === 'Bash') {
     if ((await openStore()) === null) return quiet();
     setState(sessionId, STATE_BASH_START_PREFIX + agentKey(agentId, ''), Date.now());
     return quiet();
   }
-  const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
-  const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
-  if (filePath.length === 0 || filePath.length > 4096) return quiet();
   const isEdit = event === 'PreToolUse' && (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit');
   const isRead = event === 'PostToolUse' && tool === 'Read';
   if (!isEdit && !isRead) return quiet();
@@ -3780,6 +4160,20 @@ async function main() {
   // dedup all read from nothing, and they would all have been off at once, in
   // front of every tool call, indefinitely.
   if ((await openStore()) === null) return quiet();
+
+  const cwd = cwdOf(input);
+  const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
+  const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
+  if (filePath.length === 0 || filePath.length > 4096) return quiet();
+
+  // ROOT ACTIVITY, BEFORE EXTENSION AND PACKAGE GATES. The capture signal is
+  // deliberately content-free: one fixed row for inspection and one for
+  // mutation, never the path, tool input, result or a growing per-call counter.
+  // Subagent work is captured at its own boundary and must not make the parent
+  // eligible here.
+  if (agentId === null && cwd !== null) {
+    markRootActivity(sessionId, agentId, isRead ? 'inspection' : 'mutation');
+  }
 
   // EVERY EDITED PATH, WHATEVER ITS EXTENSION, and before the source-file gate
   // below. This is the mechanical lane's only view of a file change: the failure

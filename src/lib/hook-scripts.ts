@@ -302,7 +302,31 @@ export const CAPTURE_REASON =
  * publish.mode at run time, exactly as in the public wording above.
  */
 export const CAPTURE_REASON_TEAM =
-  'Before ending: if this session settled anything a teammate on this project would want to know (a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why), publish it to the team shelf now: write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
+  'Before ending: if this session settled anything a teammate on this project would reuse, publish one conclusion-first finding or durable code map to the team shelf now (publish.mode is <mode>). Name the repository and commit/version where known, but scope code references to repo-relative paths and components only, never absolute paths. State the evidence and explicit exclusions. Put the natural-language questions a teammate would ask in the answer card, and repeat exact repository, component, file, identifier, and error-symbol terms in the visible title/body as well as the card so future search finds them. Treat repo findings as snapshots: set `temporalMode=snapshot`, `asOf`, and a `validUntil` 14 days later by default, never more than 30 days later. Remove credentials, wallet identifiers, requester identifiers, personal data, customer data, and any private or restricted third-party data/material. Never paste raw shell/tool output, logs, transcripts, or diffs; summarize the evidence. Do not present unmerged or unverified work as shipped behaviour: omit it or label it clearly. Write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding). If nothing durable was learned, just stop again.';
+
+const FILE_CAPTURE_PUBLISH_RE =
+  /write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file \((one per finding(?:; publish\.mode is <mode>)?)\)/i;
+
+/**
+ * Upgrade either capture template to the CLI's permission-safe stdin form.
+ *
+ * The raw public and team templates deliberately retain the file instruction
+ * that older builds understand. Applying the upgrade while generating the hook
+ * keeps this PR independent from the repo-activity PR: if that PR supplies a
+ * richer team template later, the same stable sentence is upgraded without
+ * either branch having to own the other's wording.
+ */
+export function withStdinCapturePublish(text: string): string {
+  const upgraded = text.replace(FILE_CAPTURE_PUBLISH_RE, (_match, cadence: string) =>
+    [
+      'pass the Markdown on stdin to `tenjin publish -`, with the title as its first `# ` heading',
+      `(${cadence}).`,
+      'If it is already in a file, run `tenjin publish <file>` as its own bare shell/tool command, never chained behind writing the file',
+    ].join(' '),
+  );
+  if (upgraded === text) throw new Error('capture publish instruction drifted');
+  return upgraded;
+}
 
 /**
  * The dispatch hook's bounds. The slice is a PRIVACY bound, not a display one: a
@@ -937,11 +961,12 @@ function composedUserAgent() {
  * hooks differ only in the question they build, the source they record it under,
  * and whether they may speak. `hookLabel` names the lock's meta holder.
  *
- * `searchTimeoutMs` is the fetch budget for the LOOKUP, not per request: a
- * two-shelf lookup divides it between the legs (see `searchDeadline`). It is a
- * parameter for exactly one caller, the prompt arm, which sits between a human
- * pressing enter and the model starting to answer and so cannot afford the
- * default.
+ * `searchTimeoutMs` is the fetch budget for ONE LEG, and the lookup's wall clock
+ * is bounded by it either way: the push arms ask both shelves at once, so their
+ * lookup takes the slower leg; the dispatch hook asks them in turn and divides
+ * this budget between them (`legTimeoutMs`). It is a parameter for exactly one
+ * caller, the prompt arm, which sits between a human pressing enter and the
+ * model starting to answer and so cannot afford the default.
  */
 export function marketplaceSource(searchTimeoutMs: number = SEARCH_TIMEOUT_MS): string {
   return `
@@ -952,17 +977,19 @@ const SEARCH_TIMEOUT_MS = ${searchTimeoutMs};
  *
  * The watchdogs and the harness \`timeout\` were sized for "a search plus a body
  * fetch plus slack", and team mode added a SECOND search leg without adding any
- * time. With a fixed per-request timeout on both legs the worst case became
- * search + search + body — 1500 + 1500 + 800 against the prompt arm's 2700ms
- * budget — so a slow team shelf followed by an answering public one lost the
- * race to the arm's own overrun timer: stdout empty, a \`watchdog\` row in the
- * ledger, and a hit computed and thrown away.
+ * time. With a fixed per-request timeout on two SEQUENTIAL legs the worst case
+ * became search + search + body — 1500 + 1500 + 800 against the prompt arm's
+ * 2700ms budget — so a slow team shelf followed by an answering public one lost
+ * the race to the arm's own overrun timer: stdout empty, a \`watchdog\` row in
+ * the ledger, and a hit computed and thrown away.
  *
  * So a leg gets the SMALLER of its own timeout and the wall clock actually left
  * before \`deadline\`, minus what must still happen afterwards (\`reserveMs\`: the
- * body fetch). The first leg is unaffected — every arm's budget exceeds one
- * search plus its body — and the second gets whatever the first did not spend,
- * which is what keeps a two-shelf lookup inside a one-shelf watchdog.
+ * body fetch). This serves the DISPATCH hook, whose legs still run one after the
+ * other: its first leg is unaffected — every arm's budget exceeds one search
+ * plus its body — and its second gets whatever the first did not spend. The
+ * push arms ask both shelves at once, each leg on a fresh deadline, so for them
+ * this is the per-leg clamp and never squeezes a leg at t=0.
  */
 function legTimeoutMs(deadline, reserveMs) {
   const room = deadline - Date.now() - reserveMs;
@@ -1094,6 +1121,15 @@ async function askTenjin(question, config, opts) {
       trigger: o.trigger,
       ...(typeof o.packageName === 'string' && o.packageName.length > 0
         ? { filters: { appliesTo: { packages: [o.packageName] } } }
+        : {}),
+      // The prompt arm's identifiers (tenjin-agent#255): at most 12 strings of
+      // at most 80 characters, \`pr-751\` spelling. A shelf that does not read
+      // the key strips it and echoes the name under \`warnings\`
+      // (tenjin lib/search/understand.ts, \`unknownRequestKeys\`), which
+      // parseSearchBody never reads, so this is inert until the shelf's
+      // identifier leg lands.
+      ...(Array.isArray(o.identifiers) && o.identifiers.length > 0
+        ? { identifiers: o.identifiers.slice(0, 12).map((s) => clean(s, 80)) }
         : {}),
     }),
     signal: AbortSignal.timeout(
@@ -2476,8 +2512,8 @@ function syncFallbackLine() {
 }
 const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
 const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
-const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
-const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
+const CAPTURE_REASON = ${JSON.stringify(withStdinCapturePublish(CAPTURE_REASON))};
+const CAPTURE_REASON_TEAM = ${JSON.stringify(withStdinCapturePublish(CAPTURE_REASON_TEAM))};
 
 /** The ask for this machine's mode, with the resolved publish.mode spliced in.
  *  The mode is in the ask itself rather than on a line above it because it is
@@ -2796,8 +2832,9 @@ function markCaptureAsked(sessionId) {
  * Did this session do any research at all? Two signals, either of which is
  * enough: a search the SESSION asked for (the CLI's own \`tenjin search\`, the
  * WebSearch hook, the dispatch hook), or an injection row showing a finding was
- * actually put in front of it. Two indexed queries. A session that only edited files is not asked to
- * publish anything, because it has nothing to write down.
+ * actually put in front of it. Two indexed queries. Root repository activity is
+ * a separate, content-free signal used only for a configured team shelf; it is
+ * deliberately not treated as public-marketplace research here.
  *
  * NEITHER SIGNAL MAY BE THE SIDECAR'S OWN TELEMETRY. The push arms search on
  * their own initiative — the log-only read arm fires on the first source file
@@ -3119,7 +3156,8 @@ function captureAsk(config, sessionId, transcriptPath) {
   // Only on the FIRST ask. Anything that arrived after it is its own evidence
   // the session researched, and re-testing the older signals here would just
   // re-derive an answer this session already gave.
-  if (!asked && !didResearch(sessionId)) return null;
+  const teamActivity = teamShelfOrigin(config) !== null && didRepoActivity(sessionId);
+  if (!asked && !didResearch(sessionId) && !teamActivity) return null;
   // ONE WINDOW, not a \`since\` and a \`windowStart\` threaded separately: they were
   // the same value, and two names for one bound is how the two halves of the
   // report end up reading different ranges after somebody edits one of them.
@@ -3240,9 +3278,11 @@ function strongLine(s) {
   return (
     "Open Tenjin loop: '" +
     clean(s.question, 160) +
-    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it: tenjin publish <file> --search-id " +
+    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it from stdin: tenjin publish - --search-id " +
     id +
-    '. If not, close it: tenjin outcome --search-id ' +
+    '. If it is already in a file, run tenjin publish <file> --search-id ' +
+    id +
+    ' as its own bare shell/tool command, never chained behind writing the file. If not, close it: tenjin outcome --search-id ' +
     id +
     ' --status regenerated.'
   );
@@ -3260,7 +3300,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    ". Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
+    ". Durable public finding among them? Publish it from stdin: tenjin publish - --search-id <id>. If it is already in a file, run tenjin publish <file> --search-id <id> as its own bare shell/tool command, never chained behind writing the file. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
   );
 }
 

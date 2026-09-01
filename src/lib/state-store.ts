@@ -585,7 +585,18 @@ export const STORE_SQL = {
   injectedCount: `SELECT COUNT(*) AS n FROM injections WHERE session = ? AND action = 'injected'`,
 
   /**
-   * This arm's machine-wide lookup count for the current window.
+   * One session's lookup count on one arm for the current window.
+   *
+   * PER SESSION, NOT PER MACHINE (tenjin-agent#258, owner decision). This
+   * counted every session on the laptop into one bucket, and ten concurrent
+   * sessions then shared one hourly allowance and burned it in the first half
+   * hour, so the sessions that started later were capped before they had asked
+   * anything. The unit is now (session, trigger): a long-lived loop session
+   * cannot starve itself, and a fan-out cannot starve its neighbours.
+   *
+   * `session` LEADS THE PREDICATE because `injections(session, at)` is the
+   * index it seeks on — still one indexed COUNT, not a scan, which is what
+   * makes this affordable in front of every tool call.
    *
    * A LOOKUP IS AN ATTEMPT, NOT AN ANSWER: counting only rows that carry a
    * search_id made a FAILING lookup free, so during an outage the counter stayed
@@ -593,7 +604,8 @@ export const STORE_SQL = {
    * call. `no-answer` rows count too.
    */
   bucketCount: `SELECT COUNT(*) AS n FROM injections
-     WHERE hook = ? AND at >= ? AND (search_id IS NOT NULL OR reason = 'no-answer')`,
+     WHERE session = ? AND hook = ? AND at >= ?
+       AND (search_id IS NOT NULL OR reason = 'no-answer')`,
   /** The trailing run of unanswered lookups for one session, newest first. */
   recentReasons: `SELECT reason, at FROM injections
      WHERE session = ? ORDER BY at DESC LIMIT ?`,
@@ -1280,6 +1292,17 @@ const STATE_RELAY_SLOT = 'relay:handoff';
 
 const STATE_CAPTURE_ASKED = 'capture_asked';
 /**
+ * Content-free evidence that the ROOT agent worked in the repository during
+ * this session. There are exactly three possible suffixes (inspection,
+ * mutation, shell), so repeated tool calls only refresh one of three rows.
+ *
+ * Deliberately no command, path, tool output or counter is stored. The marker
+ * exists only to let a team-shelf Stop ask distinguish a working session from
+ * an untouched one without copying operator-controlled content into state.
+ */
+const STATE_REPO_ACTIVITY_PREFIX = 'capture:activity:';
+const REPO_ACTIVITY_KINDS = new Set(['inspection', 'mutation', 'shell']);
+/**
  * Which CHILDREN this session has already asked for a finding, one row per
  * agent, holding the signal that earned the ask.
  *
@@ -1903,9 +1926,10 @@ function injectedCount(sessionId) {
   return storeCount(STORE_SQL.injectedCount, [storeSession(sessionId)]);
 }
 
-/** This arm's machine-wide lookups since \`sinceMs\`. */
-function bucketCount(hook, sinceMs) {
-  return storeCount(STORE_SQL.bucketCount, [String(hook), sinceMs]);
+/** This session's lookups on this arm since \`sinceMs\`. Per session, not per
+ *  machine: see STORE_SQL.bucketCount for why the unit moved. */
+function bucketCount(sessionId, hook, sinceMs) {
+  return storeCount(STORE_SQL.bucketCount, [storeSession(sessionId), String(hook), sinceMs]);
 }
 
 /**
@@ -2247,6 +2271,32 @@ function countStatePrefix(sessionId, prefix) {
     prefix,
     prefix + String.fromCharCode(0xffff),
   ]);
+}
+
+/**
+ * Mark one of the three bounded, content-free root activity categories.
+ *
+ * The state boundary repeats the call-site identity checks deliberately: these
+ * helpers ship into several independent hook scripts, and a future caller must
+ * not turn a child or session-less event into parent capture eligibility. Once
+ * capture has asked, activity is disposition/continuation and must not add a
+ * fresh category that could become re-arm state later.
+ */
+function markRootActivity(sessionId, agentId, kind) {
+  if (
+    sessionId === null ||
+    agentId !== null ||
+    !REPO_ACTIVITY_KINDS.has(kind) ||
+    getState(sessionId, STATE_CAPTURE_ASKED) !== null
+  ) {
+    return false;
+  }
+  return setState(sessionId, STATE_REPO_ACTIVITY_PREFIX + kind, true);
+}
+
+/** Whether this session carries any bounded root repository-activity marker. */
+function didRepoActivity(sessionId) {
+  return countStatePrefix(sessionId, STATE_REPO_ACTIVITY_PREFIX) > 0;
 }
 
 /** The search id of the newest dispatch MISS this session has left open inside

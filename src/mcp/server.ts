@@ -145,7 +145,12 @@ const outcomeInput = {
 } satisfies Record<keyof OutcomeArgs, z.ZodTypeAny>;
 
 const publishInput = {
-  file: z.string().optional().describe('Path to the Markdown file to publish'),
+  file: z
+    .string()
+    .optional()
+    .describe(
+      'Path to a regular Markdown file to publish (`-` stdin is available only on the CLI)',
+    ),
   // A SOURCE, not a second publish path: the same scan, consent cascade, confirm
   // and pricing govern it. The ONE gate that is its own is the cross-project
   // confirm, and it is described because `full-auto` clears the consent cascade
@@ -235,7 +240,9 @@ const editInput = {
   body: z
     .string()
     .optional()
-    .describe('Path to a Markdown file whose body replaces the stored body (frontmatter ignored)'),
+    .describe(
+      'Path to a regular Markdown file whose body replaces the stored body; `-` stdin is available only on the CLI (frontmatter ignored)',
+    ),
   excerpt: z.string().optional().describe('New excerpt'),
   question: z.array(z.string()).optional().describe('REPLACE the questions this piece answers'),
   task: z.array(z.string()).optional().describe('REPLACE the tasks this piece supports'),
@@ -488,7 +495,7 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Publish a piece',
       description:
-        "Publish a Markdown file, or a finding one of this session's subagents stated at its own " +
+        "Publish a regular Markdown file, or a finding one of this session's subagents stated at its own " +
         'end (finding:"<id>", the id the capture ask printed), as a paid or free piece with an optional ' +
         'answer card. Gated by a deterministic local scan and your publish.mode consent: in review ' +
         'mode, or on a soft finding, it returns NEEDS_CONFIRMATION with the exact payload (mode, ' +

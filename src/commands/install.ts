@@ -40,11 +40,13 @@ import {
   WebSearchModeSchema,
   parsePublishModeFlag,
   parseWebSearchHookModeFlag,
+  resolveFreeVerbsDeclined,
 } from '../lib/config';
 import type { PartialConfig, PublishMode, WebSearchMode } from '../lib/config';
 import {
   persistAgentDispatchHookMode,
   persistBazaarPay,
+  persistFreeVerbsDeclined,
   persistInstallHarness,
   persistPublishMode,
   persistWebSearchHookMode,
@@ -384,10 +386,10 @@ async function runInstallRefresh(
     );
   }
 
-  // Read, never written. A refresh is not a decision about this machine, so the
-  // two things it reads out of config are the two that shape what it rewrites:
-  // whether the push arms are armed (the WebSearch matcher follows it) and which
-  // rule set a real install would want.
+  // Read, never written. A refresh is not a decision about this machine, so what
+  // it reads out of config only shapes what it rewrites or reports: whether the
+  // push arms are armed (the WebSearch matcher follows it), which rule set a
+  // real install would want, and whether that rule set was already declined.
   const rawConfig = await loadRawConfig(ctx.dataDir);
   const pushOn = rawConfig.hooks?.push === 'on';
   const publishMode = rawConfig.publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
@@ -413,19 +415,21 @@ async function runInstallRefresh(
   // set this run must not. Reported so the operator can see what an explicit
   // install is holding for them.
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
+  // A settled `--no-allow-free-verbs` (or an interactive "no") persists the
+  // EXACT rules that were pending at the time in `install.freeVerbsDeclined`
+  // (see `resolvePermissions`), and this run subtracts that recorded set from
+  // what it would otherwise report — recomputing from the settings file alone,
+  // with nothing to distinguish "declined" from "never asked", reported the
+  // full set forever (tenjin-agent#234). A per-rule set rather than a
+  // suppress-everything flag: a rule that was never offered before — a later
+  // version's genuinely new suggestion — is not in this list, so it still
+  // surfaces even on a machine sitting on an old decline.
+  const declined = new Set(resolveFreeVerbsDeclined(rawConfig.install?.freeVerbsDeclined));
   const permissions = {
     path: probe.satisfied?.path ?? claudeSettingsPath(home),
     alreadyPresent: probe.satisfied?.alreadyPresent ?? [],
-    /**
-     * Rules a `tenjin install` would write. Never written here; see the header.
-     *
-     * KNOWN GAP, deliberately left: this is recomputed from the settings file
-     * alone and nothing persists a decline, so a machine installed with
-     * `--no-allow-free-verbs` reports the full set on every refresh. Answering it
-     * properly needs persisted per-rule state, which is a decision about consent
-     * and not part of a re-materialize. Tracked as tenjin-agent#234.
-     */
-    pending: probe.pending ?? [],
+    /** Rules a `tenjin install` would write. Never written here; see the header. */
+    pending: (probe.pending ?? []).filter((rule) => !declined.has(rule)),
   };
 
   const touched =
@@ -664,15 +668,18 @@ async function installBody(
   const publishMode = await underDataDir(ctx.dataDir, () =>
     resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt),
   );
-  const permissions = await resolvePermissions({
-    plans,
-    home,
-    deps,
-    flag: allowFreeVerbs,
-    dryRun,
-    canPrompt,
-    publishMode: publishMode.value,
-  });
+  const permissions = await underDataDir(ctx.dataDir, () =>
+    resolvePermissions({
+      plans,
+      home,
+      ctx,
+      deps,
+      flag: allowFreeVerbs,
+      dryRun,
+      canPrompt,
+      publishMode: publishMode.value,
+    }),
+  );
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
   );
@@ -1681,6 +1688,7 @@ export const WALLET_QUESTION = 'Create a wallet now?';
 async function resolvePermissions(args: {
   plans: HarnessPlan[];
   home: string;
+  ctx: CommandContext;
   deps: InstallDeps;
   flag: boolean | undefined;
   dryRun: boolean;
@@ -1692,7 +1700,7 @@ async function resolvePermissions(args: {
    */
   publishMode: PublishMode;
 }): Promise<PermissionsResult> {
-  const { plans, home, deps, flag, dryRun, canPrompt, publishMode } = args;
+  const { plans, home, ctx, deps, flag, dryRun, canPrompt, publishMode } = args;
 
   // A dry run writes nothing, so it settles before the retraction rather than
   // after it: what it owes the operator is the plan, not a revocation.
@@ -1754,10 +1762,26 @@ async function resolvePermissions(args: {
       permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude'),
     );
   }
-  if (flag === false) return withRetraction(permissionsSkipped('claude', home, 'declined'));
 
+  // Read ahead of the decline guard (rather than only on the branches that go
+  // on to grant) so a decline has the EXACT rule set that was actually pending
+  // to persist. `--refresh` subtracts this from what it recomputes, per rule
+  // (tenjin-agent#234); a `null` probe (unreadable/unparsable file) means there
+  // is nothing concrete to record, so a decline there persists an empty list
+  // rather than guessing.
   const probe = await (deps.inspectPermissions ?? inspectFreeVerbRules)(home, publishMode);
-  if (probe.satisfied !== undefined) return withRetraction(probe.satisfied);
+
+  if (flag === false) {
+    await persistFreeVerbsDeclined(ctx.dataDir, probe.pending ?? []);
+    return withRetraction(permissionsSkipped('claude', home, 'declined'));
+  }
+  if (probe.satisfied !== undefined) {
+    // Fully satisfied: nothing pending, nothing to retire. Clear any decline
+    // recorded on an earlier run so a satisfied state never leaves a stale
+    // suppression sitting in config.json for a future rule to inherit.
+    await persistFreeVerbsDeclined(ctx.dataDir, []);
+    return withRetraction(probe.satisfied);
+  }
   // Nothing to GRANT, but something of ours to retract: an older version's rule
   // for a command that no longer exists, or the publish rule under a mode that
   // no longer carries it. That needs no consent — it only ever removes a rule
@@ -1767,14 +1791,35 @@ async function resolvePermissions(args: {
   }
 
   if (flag === true || !canPrompt) {
-    return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+    // Either an explicit grant or the headless settle — both attempt to wire
+    // the allowlist, so a decline recorded on some earlier run is stale as of
+    // now IF the write lands. Greptile P1 (tenjin-agent#272): clearing before
+    // the write returns meant a refused settings write (unreadable file,
+    // changed underneath us) left the rules absent but erased the very record
+    // that told the next refresh they were still pending. Wire first, and only
+    // clear the decline once `wireFreeVerbAllowlist` reports it actually wrote
+    // (no `skipped`) rather than assuming the attempt succeeded.
+    const wired = await wireFreeVerbAllowlist(home, publishMode);
+    if (wired.skipped === undefined) {
+      await persistFreeVerbsDeclined(ctx.dataDir, []);
+    }
+    return withRetraction(wired);
   }
 
   const confirm = deps.confirmPermissions ?? defaultConfirm;
   if (!(await confirm(permissionsQuestion(publishMode)))) {
+    await persistFreeVerbsDeclined(ctx.dataDir, probe.pending ?? []);
     return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
-  return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+  // Same ordering as the grant branch above: wire first, and only clear the
+  // decline once the write actually lands (no `skipped`). An interactive yes
+  // whose settings write is then refused (Greptile #272 at :1815) must not
+  // erase the record that tells the next refresh these rules are still pending.
+  const wired = await wireFreeVerbAllowlist(home, publishMode);
+  if (wired.skipped === undefined) {
+    await persistFreeVerbsDeclined(ctx.dataDir, []);
+  }
+  return withRetraction(wired);
 }
 
 // --- Search hooks (decision 3) ----------------------------------------------------
