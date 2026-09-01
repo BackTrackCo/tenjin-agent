@@ -237,6 +237,23 @@ describe('tenjin_buy consent', () => {
 });
 
 describe('tenjin_publish consent', () => {
+  it('never treats the MCP stdio transport or a special file as a publish body', async () => {
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: { publish: { cwd: dir, env: {} } },
+    });
+    const inputs: Array<Record<string, unknown>> = [{}, { file: '-' }];
+    if (process.platform !== 'win32') inputs.push({ file: '/dev/null' });
+    for (const arguments_ of inputs) {
+      const res = await client.callTool({ name: 'tenjin_publish', arguments: arguments_ });
+      expect(res.isError).toBe(true);
+      const error = (res.structuredContent as ErrorEnvelope).error;
+      expect(error.code).toBe('USAGE');
+      expect(error.message).toMatch(/Nothing to publish|CLI stdin|Could not read/);
+    }
+  });
+
   it('review mode without yes returns NEEDS_CONFIRMATION carrying the confirm payload', async () => {
     const file = join(dir, 'clean.md');
     await writeFile(file, '# Caching notes\n\nSome clean public prose about caching.\n');
@@ -489,6 +506,24 @@ describe('tenjin_edit', () => {
       deps: { edit: { fetchImpl, provider: testWalletProvider(), cwd: dir, env: {} } },
     });
   }
+
+  it('never treats the MCP stdio transport or a special file as an edit body', async () => {
+    const server = editServer();
+    const client = await editClient(server.fetch);
+    const bodies = ['-'];
+    if (process.platform !== 'win32') bodies.push('/dev/null');
+    for (const body of bodies) {
+      const res = await client.callTool({
+        name: 'tenjin_edit',
+        arguments: { postId: POST_ID, body },
+      });
+      expect(res.isError).toBe(true);
+      const error = (res.structuredContent as ErrorEnvelope).error;
+      expect(error.code).toBe('USAGE');
+      expect(error.message).toMatch(/CLI stdin|Could not read/);
+    }
+    expect(server.puts()).toHaveLength(0);
+  });
 
   it('review mode without yes returns NEEDS_CONFIRMATION carrying the change summary', async () => {
     const server = editServer();

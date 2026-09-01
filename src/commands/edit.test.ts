@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
 import { runPublish } from './publish';
 import { publishedUrlFor } from '../lib/publish-dedup';
@@ -180,6 +181,10 @@ function hermetic(over: EditDeps = {}): EditDeps {
   return { env: { TENJIN_PUBLISH_MODE: 'auto' }, cwd: dir, ...over };
 }
 
+function stdin(markdown: string, isTTY = false): NonNullable<EditDeps['stdin']> {
+  return { stream: Readable.from([markdown]), isTTY };
+}
+
 function args(over: Partial<EditArgs> = {}): EditArgs {
   return { postId: POST_ID, ...over };
 }
@@ -283,6 +288,63 @@ describe('runEdit — flag to body mapping', () => {
     const { stub } = await edit({ body: file });
     expect(stub.putBody()).toEqual({ bodyMd: '# New\n\nFresh body.\n' });
   });
+
+  it('reads `-` from stdin, strips frontmatter, and merges the other edit flags', async () => {
+    const stub = stubServer();
+    await runEdit(
+      args({ body: '-', title: 'From stdin', yes: true }),
+      makeCtx(),
+      hermetic({
+        fetchImpl: stub.fetch,
+        provider: spyProvider().provider,
+        stdin: stdin('---\ntitle: ignored\n---\n# New\n\nFresh body.\n'),
+      }),
+    );
+    expect(stub.putBody()).toEqual({ title: 'From stdin', bodyMd: '# New\n\nFresh body.\n' });
+  });
+
+  it('never treats MCP/core stdin as available unless the caller injected it', async () => {
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ body: '-', yes: true }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: '`-` reads Markdown from CLI stdin.' });
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it('refuses empty stdin before reading the owner post', async () => {
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ body: '-', yes: true }),
+        makeCtx(),
+        hermetic({
+          fetchImpl: stub.fetch,
+          provider: spyProvider().provider,
+          stdin: stdin('\n'),
+        }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', message: 'No Markdown received on stdin.' });
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a special-file body before reading the owner post',
+    async () => {
+      const stub = stubServer();
+      await expect(
+        runEdit(
+          args({ body: '/dev/null', yes: true }),
+          makeCtx(),
+          hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+        ),
+      ).rejects.toMatchObject({ code: 'USAGE', message: 'Could not read "/dev/null"' });
+      expect(stub.calls).toHaveLength(0);
+    },
+  );
 });
 
 describe('runEdit — --clear', () => {

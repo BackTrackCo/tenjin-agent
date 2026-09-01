@@ -2461,16 +2461,22 @@ describe('pairings: open, close, replay', () => {
     expect(rows('SELECT status FROM pairings')[0]?.status).toBe('open');
   });
 
-  it('never fires behind a command head the allowlist excludes', async () => {
+  it('keeps excluded heads out of the failure lane while marking bounded shell activity', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
     await runScript(
       pushFailureHookScript(dataDir),
       failure('which codex', 'codex not found\n    at x (/repo/one/a.ts:1:1)\n'),
     );
-    // NOTHING was read or written: the head check runs before the store is even
-    // opened, so a `which codex` fire costs one config read and no more.
-    const { existsSync } = await import('node:fs');
-    expect(existsSync(join(dataDir, STATE_DB_FILE))).toBe(false);
+    // The capture lane intentionally opens the store before the mechanical
+    // failure allowlist so ordinary root Bash work can arm the team Stop ask.
+    // Its one content-free, fixed-cardinality marker is the ONLY write: an
+    // excluded head still creates no failure event, pairing or injection.
+    expect(rows('SELECT session, key, value FROM session_state')).toEqual([
+      { session: 's1', key: 'capture:activity:shell', value: 'true' },
+    ]);
+    expect(rows('SELECT * FROM events')).toEqual([]);
+    expect(rows('SELECT * FROM pairings')).toEqual([]);
+    expect(rows('SELECT * FROM injections')).toEqual([]);
   });
 });
 

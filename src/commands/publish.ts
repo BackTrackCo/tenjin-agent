@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -53,6 +52,8 @@ import { describeWallet, resolveWalletProvider, type WalletProvider } from '../l
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
 import { AGENT_ID_RE } from '../lib/grade';
 import { projectIdOf } from '../lib/state-store';
+import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
+import { readRegularUtf8File } from '../lib/regular-file';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -76,7 +77,7 @@ import type { CommandContext, CommandResult } from '../context';
  */
 
 export interface PublishArgs {
-  /** The Markdown file to publish. */
+  /** The regular Markdown file to publish, or `-` for CLI stdin. */
   file?: string;
   /** A stored subagent finding to publish as the body, instead of a file. */
   finding?: string;
@@ -146,6 +147,8 @@ export interface PublishDeps {
   env?: NodeJS.ProcessEnv;
   /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
   cwd?: string;
+  /** CLI-only stdin capability. Omitted by MCP so it can never consume its stdio transport. */
+  stdin?: StdinInput;
   /** How this surface spells the search-id input, for edge errors: the CLI flag
    *  by default, `searchId` from the MCP tool. A dep and not an arg because
    *  `publishInput`'s `satisfies` would expose a new PublishArgs key to agents. */
@@ -249,7 +252,7 @@ export async function runPublish(
   // Resolved FIRST because team mode changes what the rest of this function
   // does, not just where the POST goes.
   const runtime = await resolveContextSettings(ctx);
-  const { raw, finding } = await resolveSource(args, ctx, projectIdOf(cwd));
+  const { raw, finding } = await resolveSource(args, ctx, projectIdOf(cwd), deps.stdin);
 
   // The consent cascade + resolved price (global < project < env < flag), with the
   // full-auto loosening gate. Pure config reads: no writes, no network, no wallet,
@@ -938,6 +941,7 @@ async function resolveSource(
   args: PublishArgs,
   ctx: CommandContext,
   project: string | null,
+  stdin: StdinInput | undefined,
 ): Promise<PublishSource> {
   if (args.file !== undefined && args.finding !== undefined) {
     throw new CliError('USAGE', 'Pass a file or --finding, not both.', {
@@ -954,9 +958,25 @@ async function resolveSource(
     return { raw: finding.body, finding };
   }
   if (args.file === undefined) {
+    // Bare publish is the convenient pipe form, but only on the CLI and only
+    // when stdin is actually non-interactive. A TTY must fail immediately: an
+    // empty read there waits forever for input the caller never said it would
+    // provide. MCP supplies no capability at all, so its protocol stream is
+    // never mistaken for a document.
+    if (stdin !== undefined && !stdin.isTTY) {
+      return { raw: await readMarkdownStdin(stdin) };
+    }
     throw new CliError('USAGE', 'Nothing to publish.', {
-      fix: 'Pass a Markdown file, e.g. `tenjin publish post.md`, or a stored finding with `--finding <id>`.',
+      fix: 'Pipe Markdown to `tenjin publish -`, pass a regular Markdown file such as `tenjin publish post.md`, or use `--finding <id>`.',
     });
+  }
+  if (args.file === '-') {
+    if (stdin === undefined) {
+      throw new CliError('USAGE', '`-` reads Markdown from CLI stdin.', {
+        fix: 'On this surface, pass a regular Markdown file or a stored finding instead.',
+      });
+    }
+    return { raw: await readMarkdownStdin(stdin) };
   }
   return { raw: await readMarkdown(args.file) };
 }
@@ -1241,10 +1261,10 @@ function closeLine(search: SearchReceipt): string {
 
 async function readMarkdown(file: string): Promise<string> {
   try {
-    return await readFile(file, 'utf8');
+    return await readRegularUtf8File(file);
   } catch (err) {
     throw new CliError('USAGE', `Could not read ${JSON.stringify(file)}`, {
-      fix: 'Pass a path to a readable Markdown file, e.g. `tenjin publish post.md`.',
+      fix: 'Pass a path to a readable regular Markdown file, e.g. `tenjin publish post.md`.',
       cause: err,
     });
   }

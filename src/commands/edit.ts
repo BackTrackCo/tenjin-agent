@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
@@ -40,6 +39,8 @@ import {
 } from '../lib/consent';
 import { parseScanSuccessReport, scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
+import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
+import { readRegularUtf8File } from '../lib/regular-file';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -104,7 +105,7 @@ export interface EditArgs {
   title?: string;
   /** Post price, decimal USD at the edge (O1). */
   price?: string;
-  /** A Markdown file whose body (frontmatter stripped) replaces the stored body. */
+  /** A regular Markdown file, or `-` for CLI stdin, whose body replaces the stored body. */
   body?: string;
   excerpt?: string;
   /** Card fields to clear (repeatable); see CLEAR_FIELDS. */
@@ -123,6 +124,8 @@ export interface EditDeps {
   env?: NodeJS.ProcessEnv;
   /** Working directory for the `.tenjin.json` walk; defaults to process.cwd(). */
   cwd?: string;
+  /** CLI-only stdin capability. Omitted by MCP so it can never consume its stdio transport. */
+  stdin?: StdinInput;
   /**
    * Force the answer to the server gate's warn tier, whatever `publish.mode` and
    * `publish.ackServerWarnings` say; the same seam `PublishDeps` carries, for the
@@ -155,7 +158,7 @@ export async function runEdit(
   const clears = parseClears(args);
   const cardFlags = cardFlagsFrom(args);
   const priceAtomic = args.price !== undefined ? parseUsdToAtomic(args.price) : undefined;
-  const bodyFile = args.body !== undefined ? await readBodyFile(args.body) : undefined;
+  const bodyFile = args.body !== undefined ? await readBodyFile(args.body, deps.stdin) : undefined;
   const wantsChange = hasChangeFlags(args);
 
   const runtime = await resolveContextSettings(ctx);
@@ -243,7 +246,8 @@ export async function runEdit(
   // private-by-default, so text quoting them warns. Markers derive from the
   // CONTENT's project — the body file's own directory when there is one, else the
   // working directory — never from wherever the shell happens to be.
-  const markerRoot = args.body !== undefined ? dirname(resolve(cwd, args.body)) : cwd;
+  const markerRoot =
+    args.body !== undefined && args.body !== '-' ? dirname(resolve(cwd, args.body)) : cwd;
   const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
   // The scan covers exactly what this edit SHIPS: the typed text behind the keys
   // that survived pruning, plus the body file only when the body itself survived.
@@ -1024,15 +1028,24 @@ interface BodyFile {
   hadFrontmatter: boolean;
 }
 
-async function readBodyFile(file: string): Promise<BodyFile> {
+async function readBodyFile(file: string, stdin: StdinInput | undefined): Promise<BodyFile> {
   let raw: string;
-  try {
-    raw = await readFile(file, 'utf8');
-  } catch (err) {
-    throw new CliError('USAGE', `Could not read ${JSON.stringify(file)}`, {
-      fix: 'Pass a path to a readable Markdown file, e.g. `tenjin edit <id> --body post.md`.',
-      cause: err,
-    });
+  if (file === '-') {
+    if (stdin === undefined) {
+      throw new CliError('USAGE', '`-` reads Markdown from CLI stdin.', {
+        fix: 'On this surface, pass a regular Markdown file with `body` instead.',
+      });
+    }
+    raw = await readMarkdownStdin(stdin);
+  } else {
+    try {
+      raw = await readRegularUtf8File(file);
+    } catch (err) {
+      throw new CliError('USAGE', `Could not read ${JSON.stringify(file)}`, {
+        fix: 'Pass a path to a readable regular Markdown file, e.g. `tenjin edit <id> --body post.md`.',
+        cause: err,
+      });
+    }
   }
   const { frontmatter, body } = parseFrontmatter(raw);
   return { raw, body, hadFrontmatter: Object.keys(frontmatter).length > 0 };

@@ -876,7 +876,10 @@ describe('Stop hook: open-loop collection', () => {
     expect(run.stderr).toBe('');
     const text = injected(run) ?? '';
     expect(text).toContain(`'${OPEN_MISS.question}' was a MISS`);
-    expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
+    expect(text).toContain(`tenjin publish - --search-id ${OPEN_MISS.searchId}`);
+    expect(text).toContain(
+      `tenjin publish <file> --search-id ${OPEN_MISS.searchId} as its own bare shell/tool command`,
+    );
     // The second arm CLOSES the loop rather than saving the work for later.
     expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
     expect(text).not.toContain('candidate add');
@@ -914,7 +917,7 @@ describe('Stop hook: open-loop collection', () => {
     // would be a second, quietly weaker rendering of the same nag.
     expect(text).toContain('publish.mode=review: publishing asks first.');
     expect(text).toContain(`'${OPEN_MISS.question}' was a MISS`);
-    expect(text).toContain(`tenjin publish <file> --search-id ${OPEN_MISS.searchId}`);
+    expect(text).toContain(`tenjin publish - --search-id ${OPEN_MISS.searchId}`);
     expect(text).toContain(`tenjin outcome --search-id ${OPEN_MISS.searchId} --status regenerated`);
     expect(text).not.toContain('candidate add');
   });
@@ -1239,7 +1242,10 @@ describe('Stop hook: the two kinds of open loop', () => {
     expect(text).toContain('a web query 1');
     expect(text).toContain('a web query 2');
     expect(text).toContain('Durable public finding among them?');
-    expect(text).toContain('tenjin publish <file> --search-id <id>');
+    expect(text).toContain('tenjin publish - --search-id <id>');
+    expect(text).toContain(
+      'tenjin publish <file> --search-id <id> as its own bare shell/tool command',
+    );
     expect(text).not.toContain('candidate add');
     expect(text).not.toContain('Open Tenjin loop');
   });

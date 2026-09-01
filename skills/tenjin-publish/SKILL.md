@@ -323,8 +323,23 @@ demand, never evidence the answer is safe to publish.**
 ## Publish
 
 ```bash
-tenjin publish <file.md> --json [--search-id <id>] [--draft]
+tenjin publish - --json <<'TENJIN_MD'
+---
+title: Exact finding title
+---
+The reusable answer, evidence, and limits.
+TENJIN_MD
 ```
+
+The explicit `-` reads one complete Markdown document from stdin, including at a
+TTY. A bare `tenjin publish` also reads stdin when it is non-interactive, but use
+`-` in agent shell/tool calls so the input source is visible. Every ordinary
+publish flag can go before the heredoc redirection.
+
+When the Markdown already exists in a regular file on disk, run `tenjin publish <file.md> ...` as
+its own bare shell/tool command. Never chain it behind `cat`, `cd`, or the
+file-writing command: the installed publish prefix permission matches only when
+the command itself starts with `tenjin publish`.
 
 Pass `--search-id <id>` when the piece answers a search that MISSed: it closes
 that loop, prefills the searched question into `questionsAnswered` when the draft

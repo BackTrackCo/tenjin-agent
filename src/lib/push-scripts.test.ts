@@ -35,6 +35,7 @@ import {
   sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
+  withStdinCapturePublish,
 } from './hook-scripts';
 import {
   PUSH_CACHE_TTL_MS,
@@ -533,6 +534,26 @@ function sessionState(session: string, key: string): unknown {
       .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
       .get(session, key) as unknown as { value?: string } | undefined;
     return row?.value === undefined ? null : JSON.parse(row.value);
+  } finally {
+    db.close();
+  }
+}
+
+/** All state under a prefix, for fixed-cardinality/content-free assertions. */
+function sessionStateRows(session: string, prefix: string): Array<{ key: string; value: unknown }> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    const rows = db
+      .prepare(
+        'SELECT key, value FROM session_state WHERE session = ? AND key >= ? AND key < ? ORDER BY key',
+      )
+      .all(session, prefix, prefix + String.fromCharCode(0xffff)) as unknown as Array<{
+      key: string;
+      value: string;
+    }>;
+    return rows.map((row) => ({ key: row.key, value: JSON.parse(row.value) }));
   } finally {
     db.close();
   }
@@ -1672,49 +1693,114 @@ describe('scrub', () => {
     expect(scrub('DATABASE_URL=postgres://u:p@h/db is wrong and postgres://u:p@h/db too')).toBe(
       'DATABASE_URL= is wrong and too',
     );
-    // The tail stops at punctuation too, or the prose glued to the url goes
-    // with it: `,migration` is the topic word the lookup needed.
-    // The separator itself stays behind as ordinary punctuation; what matters
-    // is that `migration fails` is no longer eaten with the credential.
-    expect(scrub('postgres://u:p@h/db,migration fails')).toBe(',migration fails');
+    // THE EXTENT IS THE NON-WHITESPACE RUN (round 4 redesign). Anything glued
+    // straight onto the url goes with it, prose included: `,migration` used to
+    // survive and no longer does, because the enumeration that told it apart
+    // from `,hunter2secret` is what leaked a credential three rounds running.
+    // A space is all it takes to keep the word.
+    expect(scrub('postgres://u:p@h/db,migration fails')).toBe('fails');
+    expect(scrub('postgres://u:p@h/db, migration fails')).toBe(', migration fails');
+    // THE TRAILING PUNCTUATION COMES BACK, so the sentence still reads.
     expect(scrub('(postgres://u:p@h/db); the retry loops')).toBe('( ); the retry loops');
+    expect(scrub('see (postgres://u:p@h/db) for it')).toBe('see ( ) for it');
+    expect(scrub('see "postgres://u:p@h/db". next')).toBe('see " ". next');
+    expect(scrub('the url is postgres://u:p@h/db.')).toBe('the url is .');
   });
 
   /**
-   * The residue of the rule above: the tail stops at `;`, `?` and `&`, so a
-   * short `name=value` hanging off a blanked url used to SURVIVE it — and a
-   * mixed letters-and-digits value is an identifier by shape, so the prompt
-   * arm promoted it into the `identifiers` list and sent it to both shelves.
-   * Both halves of the close are pinned here: the signing words on
-   * `SECRET_ASSIGN_RE`, and the remainder eaten by the userinfo replacer.
+   * THE HANDBACK RULE. A blanked userinfo url returns the run of closers,
+   * quotes and sentence punctuation that TERMINATES its match and nothing
+   * else — no alphanumeric, and never `=`, which is base64 padding. Pinned as
+   * a rule rather than as examples because it is the only thing standing
+   * between the redesign and a url eating the bracket it was written inside.
    */
-  it('eats the parameter remainder hanging off a blanked userinfo url', () => {
-    const scrubbed = scrub('postgres://admin:hunter2@db.acme.com/prod;sig=abc123 breaks migrate');
-    expect(scrubbed).toBe('breaks migrate');
-    expect(scrubbed).not.toContain('abc123');
-    expect(scrubbed).not.toContain('sig=');
-    // The promotion is what made this worth closing: nothing to send.
-    expect(identifiersOf(scrubbed)).toEqual([]);
-    // Whatever the parameter is named, and however many of them there are.
-    for (const tail of [
-      ';ref=abc123',
-      '?token=abc123',
-      '&x-amz-signature=abc123&expires=900',
-      // The stop characters double as separators: a parameter glued on with
-      // punctuation the match stops at goes with the url too (round 3).
-      ',ref=abc123',
-      // Digit-bearing and hyphenated names too, including a leading digit.
-      ';ref2=abc123',
-      '&utm_2-src=abc123',
-      ';2fa=abc123',
-      ')ref=abc123',
-      ']v=abc123',
-      '>id=abc123',
-      '"x=abc123',
+  it('hands back the trailing punctuation and nothing else', () => {
+    for (const [open, close] of [
+      ['(', ')'],
+      ['[', ']'],
+      ['{', '}'],
+      ['<', '>'],
+      ['"', '"'],
+      ["'", "'"],
+      ['`', '`'],
+      ['**', '**'],
     ]) {
-      expect(scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`)).toBe(
-        'breaks migrate',
+      expect(scrub(`the url ${open}postgres://u:p@h/db${close} is stale`)).toBe(
+        `the url ${open} ${close} is stale`,
       );
+    }
+    for (const mark of ['.', ',', ';', ':', '!', '?']) {
+      expect(scrub(`the url postgres://u:p@h/db${mark} next`)).toBe(`the url ${mark} next`);
+    }
+    // Nested and stacked closers come back in order, credential and all gone.
+    expect(scrub('see ("postgres://admin:hunter2@db.acme.com/prod?sig=abc123"), then')).toBe(
+      'see (" "), then',
+    );
+    // AND NOT `=`: a base64 key may END on its padding, so a run that stops on
+    // an `=` hands back nothing that could carry it.
+    const padded = scrub('postgres://u:p@h/db?k=aGVsbG93b3JsZGhlbGxvd29ybGQx==');
+    expect(padded).toBe('');
+    expect(identifiersOf(padded)).toEqual([]);
+  });
+
+  /**
+   * THE ROUND-4 TABLE. The hand-rolled `(separator)(name)=(value)` tail was
+   * patched in three consecutive review rounds and leaked a new shape each
+   * time; every row the reviewer measured on the enumeration is fixtured here
+   * against the redesign. `identifiersOf` is asserted on every one because
+   * that array is the half that reaches BOTH shelves — the team shelf and the
+   * public marketplace — so a value surviving into it is the leak, not the
+   * residue in the text.
+   */
+  it('eats every query-string tail hanging off a blanked userinfo url', () => {
+    const TAILS = [
+      // The round-4 table. The first is the one that mattered:
+      // `apikey[0]=hunter2secret` is a credential value, `SECRET_ASSIGN_RE`
+      // misses it because `[` is outside `[\w.-]`, and it is the form `qs`,
+      // Rails and PHP all emit.
+      ['?apikey[0]=hunter2secret', 'hunter2secret'],
+      ['?filter[id]=abc123', 'abc123'],
+      [';;ref=abc123', 'abc123'],
+      [';;;;t=abc123', 'abc123'],
+      [';ref=abc123&&next=xyz789abc', 'xyz789abc'],
+      [';a.b=abc123', 'abc123'],
+      [';%73ig=abc123', 'abc123'],
+      // The rounds before it, kept so the redesign does not regress them.
+      [';sig=abc123', 'abc123'],
+      [';ref=abc123', 'abc123'],
+      ['?token=abc123', 'abc123'],
+      ['&x-amz-signature=abc123&expires=900', 'abc123'],
+      [',ref=abc123', 'abc123'],
+      [';ref2=abc123', 'abc123'],
+      ['&utm_2-src=abc123', 'abc123'],
+      [';2fa=abc123', 'abc123'],
+      [')ref=abc123', 'abc123'],
+      [']v=abc123', 'abc123'],
+      ['>id=abc123', 'abc123'],
+      ['"x=abc123', 'abc123'],
+      ["'y=abc123", 'abc123'],
+      ['}z=abc123', 'abc123'],
+      ['|ref=abc123', 'abc123'],
+      ['#frag=abc123', 'abc123'],
+      // Shapes no enumeration was ever shown, which is the point of the
+      // redesign: the run is the extent, so there is nothing left to enumerate.
+      ['?apikey[0][1]=hunter2secret', 'hunter2secret'],
+      ['?a=1&&ref=abc123', 'abc123'],
+      ['?&ref=abc123', 'abc123'],
+      ['&&ref=abc123', 'abc123'],
+      ['?ref=abc123&', 'abc123'],
+      ['#abc123def', 'abc123def'],
+      ['/../abc123def', 'abc123def'],
+      [';ref:abc123', 'abc123'],
+      ['?ref%3Dabc123', 'abc123'],
+      ['?=abc123', 'abc123'],
+      ['?ref=abc123#f=xyz789abc', 'xyz789abc'],
+    ] as const;
+    for (const [tail, value] of TAILS) {
+      const scrubbed = scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`);
+      expect(scrubbed, tail).toBe('breaks migrate');
+      expect(scrubbed, tail).not.toContain(value);
+      expect(identifiersOf(scrubbed), tail).toEqual([]);
     }
     // THE SIGNING WORDS ALONE, with no url in front: `sig`, `signature`,
     // `nonce` and `hmac` name a credential the other keywords do not.
@@ -1727,6 +1813,9 @@ describe('scrub', () => {
     const control = scrub('https://db.acme.com/prod?page=2 is empty');
     expect(control).toContain('?page=2');
     expect(control).toBe('https: ?page=2 is empty');
+    // A SPACE-SEPARATED parameter is prose, not part of the url, and it is
+    // left alone deliberately: eating it would be the over-blank direction.
+    expect(scrub('postgres://admin:hunter2@db.acme.com/prod ref=abc123')).toBe('ref=abc123');
   });
 });
 
@@ -2344,6 +2433,80 @@ describe('the failure arm (PostToolUse Bash)', () => {
         interrupted: false,
       },
     });
+
+  it('marks root shell activity before the failure allowlist, with fixed content-free state', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const secretCommand = 'git status --short /repo/customer-alpha/private.ts';
+    const input = JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/customer-alpha',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: secretCommand },
+      tool_response: { stdout: 'private.ts', stderr: '', exit_code: 0 },
+    });
+
+    await runScript(pushFailureHookScript(dataDir), input);
+    await runScript(pushFailureHookScript(dataDir), input);
+
+    const rows = sessionStateRows(SESSION, 'capture:activity:');
+    expect(rows).toEqual([{ key: 'capture:activity:shell', value: true }]);
+    expect(JSON.stringify(rows)).not.toContain(secretCommand);
+    expect(JSON.stringify(rows)).not.toContain('customer-alpha');
+    expect(JSON.stringify(rows)).not.toContain('private.ts');
+    expect(await events()).toEqual([]);
+  });
+
+  it('requires a project cwd and a root agent before marking shell activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const base = {
+      session_id: SESSION,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git status' },
+      tool_response: { stdout: '', stderr: '', exit_code: 0 },
+    };
+
+    await runScript(pushFailureHookScript(dataDir), JSON.stringify(base));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({ ...base, cwd: '/repo/project', agent_id: 'child-1' }),
+    );
+
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
+  it('excludes Tenjin publish/edit Bash events without excluding other Tenjin commands', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const input = (command: string): string =>
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: '/repo/project',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: { stdout: '', stderr: '', exit_code: 0 },
+      });
+
+    for (const command of [
+      'tenjin publish finding.md',
+      'tenjin --json publish finding.md',
+      '/usr/local/bin/tenjin edit post-1 --body finding.md',
+      '/usr/local/bin/tenjin --timeout 500 edit post-1 --body finding.md',
+      'env NOTE=safe tenjin publish finding.md && git status',
+      'env NOTE=safe tenjin --base-url https://team.example publish finding.md && git status',
+      'pnpm exec tenjin edit post-1 --body finding.md',
+      'pnpm exec tenjin --base-url=https://team.example --json edit post-1 --body finding.md',
+    ]) {
+      await runScript(pushFailureHookScript(dataDir), input(command));
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+
+    await runScript(pushFailureHookScript(dataDir), input('tenjin search resolver'));
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([
+      { key: 'capture:activity:shell', value: true },
+    ]);
+  });
 
   /**
    * THE ERROR NEVER LEAVES THE MACHINE (tenjin-agent#212). This arm used to
@@ -5950,7 +6113,13 @@ describe('the subagent arm (SubagentStop)', () => {
     // fallback closed it, through `inheritedSearchIds`) and the piece lands with
     // less public pre-paywall context linking it to the motivating question.
     expect(reason).toContain('publish it YOURSELF now');
-    expect(reason).toContain('`tenjin publish <file> --agent a1 --search-id ' + SEARCH_ID + '`');
+    expect(reason).toContain('`tenjin publish - --agent a1 --search-id ' + SEARCH_ID + '`');
+    expect(reason).toContain(
+      '`tenjin publish <file> --agent a1 --search-id ' +
+        SEARCH_ID +
+        '` as its own bare shell/tool command',
+    );
+    expect(reason).toContain('never chained behind writing the file');
     // A rung for the child with no shell, on the same principle the child
     // pointer ladders on: one unrunnable rung is dead context.
     expect(reason).toContain('or call the tenjin_publish MCP tool with that file');
@@ -6427,6 +6596,97 @@ describe('the subagent arm (SubagentStop)', () => {
 });
 
 describe('the context arm (log-only)', () => {
+  it('keeps root inspection/mutation activity to two content-free rows', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const privatePath = join(scriptDir, 'customer-alpha', 'private-notes.txt');
+    const fire = async (
+      tool: string,
+      hook_event_name: string,
+      agent_id?: string,
+    ): Promise<void> => {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd: '/repo/customer-alpha',
+          ...(agent_id === undefined ? {} : { agent_id }),
+          hook_event_name,
+          tool_name: tool,
+          tool_input: { file_path: privatePath },
+        }),
+      );
+    };
+
+    await fire('Read', 'PostToolUse');
+    for (const tool of ['Edit', 'Write', 'MultiEdit', 'Edit']) await fire(tool, 'PreToolUse');
+
+    const rows = sessionStateRows(SESSION, 'capture:activity:');
+    expect(rows).toEqual([
+      { key: 'capture:activity:inspection', value: true },
+      { key: 'capture:activity:mutation', value: true },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('customer-alpha');
+    expect(JSON.stringify(rows)).not.toContain('private-notes');
+  });
+
+  it('does not turn subagent context work into root activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    for (const [tool, hook_event_name] of [
+      ['Read', 'PostToolUse'],
+      ['Edit', 'PreToolUse'],
+    ]) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          agent_id: 'child-1',
+          cwd: '/repo/project',
+          hook_event_name,
+          tool_name: tool,
+          tool_input: { file_path: join(scriptDir, 'child.txt') },
+        }),
+      );
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
+  it('requires a project cwd before root Read/Edit can mark activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    for (const [tool, hook_event_name] of [
+      ['Read', 'PostToolUse'],
+      ['Edit', 'PreToolUse'],
+    ]) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name,
+          tool_name: tool,
+          tool_input: { file_path: join(scriptDir, 'root.txt') },
+        }),
+      );
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
+  it('requires a valid file path before root context can mark activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    for (const input of [
+      { tool_name: 'Read', hook_event_name: 'PostToolUse', tool_input: {} },
+      {
+        tool_name: 'Edit',
+        hook_event_name: 'PreToolUse',
+        tool_input: { file_path: 'x'.repeat(4097) },
+      },
+    ]) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({ session_id: SESSION, cwd: '/repo/project', ...input }),
+      );
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
   /**
    * The upserted `edited:<path>` state row keeps only the LAST timestamp per
    * path, so "the same file edited before and after a user turn" was
@@ -6701,12 +6961,27 @@ describe('the capture ask (Stop)', () => {
 
   /** The ask as the hook renders it: the mode is spliced into the text, because
    *  it is what decides whether the agent may run the command it was handed. */
-  const publicAsk = CAPTURE_REASON.replace('<mode>', 'review');
-  const teamAsk = CAPTURE_REASON_TEAM.replace('<mode>', 'review');
+  const publicAsk = withStdinCapturePublish(CAPTURE_REASON).replace('<mode>', 'review');
+  const teamAsk = withStdinCapturePublish(CAPTURE_REASON_TEAM).replace('<mode>', 'review');
 
   /** A recorded search stamped with this session: the research signal. */
   async function writeSearchSignal(): Promise<void> {
     await seedSearch();
+  }
+
+  /** A non-allowlisted root Bash event: activity only, never research. */
+  async function writeShellActivity(cwd: string | undefined = '/repo/project'): Promise<void> {
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        ...(cwd === undefined ? {} : { cwd }),
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git status --short' },
+        tool_response: { stdout: '', stderr: '', exit_code: 0 },
+      }),
+    );
   }
 
   /** Forget that this session was asked, so the next Stop asks again. */
@@ -6715,6 +6990,113 @@ describe('the capture ask (Stop)', () => {
     store?.run(STORE_SQL.deleteState, [SESSION, 'capture_asked']);
     store?.close();
   }
+
+  it('gives the team ask a retrievable, bounded and privacy-safe capture brief', () => {
+    expect(teamAsk).toContain('conclusion-first finding or durable code map');
+    expect(teamAsk).toContain('repository and commit/version where known');
+    expect(teamAsk).toContain('repo-relative paths and components only');
+    expect(teamAsk).toContain('evidence and explicit exclusions');
+    expect(teamAsk).toContain('natural-language questions');
+    expect(teamAsk).toContain(
+      'exact repository, component, file, identifier, and error-symbol terms',
+    );
+    expect(teamAsk).toContain('visible title/body as well as the card');
+    expect(teamAsk).toContain('Treat repo findings as snapshots');
+    expect(teamAsk).toContain('`temporalMode=snapshot`');
+    expect(teamAsk).toContain('`asOf`');
+    expect(teamAsk).toContain('`validUntil` 14 days later by default');
+    expect(teamAsk).toContain('never more than 30 days later');
+    expect(teamAsk).toContain('credentials, wallet identifiers, requester identifiers');
+    expect(teamAsk).toContain('personal data, customer data');
+    expect(teamAsk).toContain('private or restricted third-party data/material');
+    expect(teamAsk).toContain('Never paste raw shell/tool output, logs, transcripts, or diffs');
+    expect(teamAsk).toContain('Do not present unmerged or unverified work as shipped behaviour');
+    // This capture-only branch keeps the raw template compatible with the
+    // current CLI. The independent stdin PR upgrades this stable sentence when
+    // it generates the hook, so the two branches can merge in either order.
+    expect(CAPTURE_REASON_TEAM).toContain('Write it to a file and run `tenjin publish <file>`');
+    expect(CAPTURE_REASON_TEAM).not.toContain('tenjin publish -');
+  });
+
+  it('uses root repository activity as a first-ask signal only for a team shelf', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
+    });
+    await writeShellActivity();
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([
+      { key: 'capture:activity:shell', value: true },
+    ]);
+  });
+
+  it.each([
+    ['Read', 'PostToolUse', 'inspection'],
+    ['Edit', 'PreToolUse', 'mutation'],
+    ['Write', 'PreToolUse', 'mutation'],
+    ['MultiEdit', 'PreToolUse', 'mutation'],
+  ])('lets root %s activity make a team Stop eligible', async (tool, event, kind) => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
+    });
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: '/repo/project',
+        hook_event_name: event,
+        tool_name: tool,
+        tool_input: { file_path: join(scriptDir, 'activity.txt') },
+      }),
+    );
+
+    expect(sessionState(SESSION, `capture:activity:${kind}`)).toBe(true);
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
+  });
+
+  it('does not treat repository activity as public-marketplace research', async () => {
+    await writeConfig({ hooks: { push: 'on', capture: 'block' } });
+    await writeShellActivity();
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
+    expect(sessionState(SESSION, 'capture_asked')).toBeNull();
+  });
+
+  it('does not re-arm a team ask when another root activity category arrives', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
+    });
+    await writeShellActivity();
+    const first = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(first.stdout)).toEqual({ decision: 'block', reason: teamAsk });
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: '/repo/project',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: join(scriptDir, 'README.txt') },
+      }),
+    );
+    // The boundary helper sees capture_asked and refuses the continuation
+    // marker; activity is first-ask evidence, never optional re-arm state.
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([
+      { key: 'capture:activity:shell', value: true },
+    ]);
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
 
   it('blocks once, with nothing else on stdout, then lets the session end', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
@@ -6741,8 +7123,8 @@ describe('the capture ask (Stop)', () => {
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
     const reason = (JSON.parse(run.stdout) as { reason: string }).reason;
-    expect(reason).toContain('a teammate on this project would want to know');
-    expect(reason).toContain('publish it to the team shelf');
+    expect(reason).toContain('a teammate on this project would reuse');
+    expect(reason).toContain('to the team shelf');
     // The public bar is not applied to a shelf that is not public.
     expect(reason).not.toContain('rights-clean');
   });

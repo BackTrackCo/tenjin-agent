@@ -41,7 +41,7 @@ first install, headless included, writes the two mode-gated rules
 The terminal says it in plain words, two lines and a link: what the agent will now
 do, how many rules are allowed, and the one command that turns it off. The
 complete disclosure (both rule strings, unattended keystore access, the read+write
-session credential minted on disk, publishing the contents of any local file the
+session credential minted on disk, publishing the contents of any regular local file the
 agent can read, the `--base-url` and `--yes` caveats, all three undos) is
 unchanged in docs/agent-permissions.md, in `tenjin doctor --json`, and in this
 command's own `--json` envelope.

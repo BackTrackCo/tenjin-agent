@@ -336,6 +336,35 @@ describe('tenjin-publish: publish denials are the gate working', () => {
   });
 });
 
+describe('tenjin-publish: stdin is the permission-safe authoring path', () => {
+  const text = flat('tenjin-publish');
+  const raw = read('tenjin-publish');
+  const maintain = flat('tenjin-publish', 'references/maintain.md');
+  const maintainRaw = read('tenjin-publish', 'references/maintain.md');
+
+  it('gives a heredoc whose shell command starts with explicit stdin publish', () => {
+    expect(raw).toMatch(/^tenjin publish - --json <<'TENJIN_MD'$/m);
+    expect(text).toMatch(/bare `tenjin publish` also reads stdin when it is non-interactive/i);
+  });
+
+  it('keeps file publishing as its own bare prefix-matched command', () => {
+    expect(text).toMatch(
+      /run `tenjin publish <file\.md> \.\.\.` as its own bare shell\/tool command/i,
+    );
+    expect(text).toMatch(/Never chain it behind `cat`, `cd`, or the file-writing command/i);
+    expect(text).toMatch(/installed publish prefix permission/i);
+    expect(text).toMatch(/command itself starts with `tenjin publish`/i);
+  });
+
+  it('teaches body replacement through positional stdin without changing show-only edit', () => {
+    expect(maintainRaw).toMatch(/^tenjin edit "\$POST_ID" - --yes <<'TENJIN_MD'$/m);
+    expect(maintain).toContain('`--body -` is equivalent');
+    expect(maintain).toMatch(
+      /without `-` or a change flag it keeps its existing show-only behaviour/i,
+    );
+  });
+});
+
 /** The public card is buyer context, not a retrieval gate. Keep the legacy
  * completeness authoring rubric while pinning the post-#797 promise that neither
  * card prose nor completeness changes any retrieval or answer-source decision. */
@@ -969,14 +998,22 @@ describe('the public render did not move', () => {
   // whose first one posts `used`. It is spelled out below the fence now, the
   // same fix the child rung already carries. tenjin-publish is untouched.
   //
+  // Re-pinned for stdin publishing (#260): the canonical publish example is a
+  // heredoc whose command begins with `tenjin publish -`, and the file fallback
+  // explicitly stays a standalone prefix-matched command. The follow-up regular-
+  // file boundary names that constraint on the fallback without changing either
+  // publish mode's policy.
+  //
   // Re-pinned for tenjin#733 and the post-#797 card contract: `--excerpt` is a
   // listing teaser rather than the in-page preview boundary, and legacy card
   // completeness no longer claims any relevance, placement, candidacy, or
-  // answer-source effect. tenjin-search is untouched.
+  // answer-source effect. tenjin-search is untouched, so its digest still carries
+  // the value the stdin rung pinned; tenjin-publish's is this merge's own bytes,
+  // both chains applied.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': '1f8300720d7d1ecf5b92b8448e091be0',
+      'tenjin-publish': '584c3e507794957238f180a56278163a',
     });
   });
 
