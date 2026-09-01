@@ -662,7 +662,7 @@ interface PairingLink {
    * synthesized `title: ''` / `price: '0'` default for a caller that reads
    * only `.url`, and a stale or defaulted price is the wrong thing to hand a
    * future spend-check. A caller that needs display metadata for a resolved
-   * id fetches it live off `GET /api/posts/<id>` (`getPostMetadata`,
+   * id fetches it live off `GET /api/posts/<id>/public` (`getPostMetadata`,
    * lib/agent-api.ts) instead, and gets "unknown" rather than an invented
    * value when that call fails or the route predates the deployment.
    */

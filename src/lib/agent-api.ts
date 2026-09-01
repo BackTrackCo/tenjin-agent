@@ -635,16 +635,19 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
   };
 }
 
-// `articleBase()`'s wire shape (tenjin PR #803): `handle` sits under
-// `creator`, not at the top level, unlike `searchCandidateSchema` above.
+// `articleBase()`'s wire shape (tenjin PR #803) carries a lot more than this
+// reads (slug, excerpt, coverImageId, arbiterId, publishedAt, tags, the rest
+// of `creator`) — `.passthrough()` keeps all of it out of this schema's
+// required set. Only `id`/`title`/`price`/`status` are asserted, because
+// they're the only fields `getPostMetadata` returns; a shape drift in a field
+// this function never reads (PR 277 round-3 review nit) must not turn a good
+// response into `null`.
 const postMetadataSchema = z
   .object({
     id: z.string().regex(UUID_RE, 'id must be a uuid'),
-    slug: z.string(),
     title: z.string(),
     price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
     status: z.string(),
-    creator: z.object({ handle: z.string() }).passthrough(),
   })
   .passthrough();
 

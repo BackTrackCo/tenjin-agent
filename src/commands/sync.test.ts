@@ -437,7 +437,7 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
    *
    * Title and price are deliberately NOT stamped here any more (PR 277
    * round-2 review, nit on state-store.ts:4132): a caller after display
-   * metadata for a resolved id fetches it live off `GET /api/posts/<id>`
+   * metadata for a resolved id fetches it live off `GET /api/posts/<id>/public`
    * instead of trusting this local, possibly-stale bookkeeping.
    */
   it('stamps the published url onto the pairing_post link, without title/price', async () => {

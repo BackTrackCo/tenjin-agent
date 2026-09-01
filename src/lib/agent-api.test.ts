@@ -813,9 +813,13 @@ describe('getLookupStats', () => {
  * missing them — a false default a future spend-check could have trusted.
  * `getPostMetadata` is the replacement: `GET /api/posts/<id>/public`
  * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`
- * route, serving `articleBase()`'s shape for PUBLISHED posts only — `handle`
- * lives under `creator`, not at the top level. It must never invent a value,
- * so every failure mode (404, any other non-200, a network error, or a body
+ * route, serving `articleBase()`'s full shape (id, slug, title, excerpt,
+ * coverImageId, price, arbiterId, status, publishedAt, tags, creator) for
+ * PUBLISHED posts only. This CLI only reads title/price, so the schema
+ * asserts only `id`/`title`/`price`/`status` (PR 277 round-3 review nit) —
+ * a drift in a field it never reads, like `slug` or `creator.handle`, must
+ * not turn a good response into `null`. It must never invent a value, so
+ * every failure mode (404, any other non-200, a network error, or a body
  * this CLI cannot read) collapses to the same `null`.
  */
 describe('getPostMetadata', () => {
@@ -842,6 +846,22 @@ describe('getPostMetadata', () => {
 
   it('tolerates extra fields the contract does not name', async () => {
     const { fetch } = stubFetch(json(200, { ...POST, tags: ['x'], readCount: 12 }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toEqual({ title: POST.title, price: POST.price });
+  });
+
+  /** PR 277 round-3 review nit: `slug` and `creator.handle` are part of the
+   *  real `#803` response but this function never reads either, so a
+   *  response missing them (a future field rename, a leaner mock) must
+   *  still resolve rather than fail closed on a field this CLI does not use. */
+  it('does not require slug or creator, which it never reads', async () => {
+    const { fetch } = stubFetch(
+      json(200, { id: POST.id, title: POST.title, price: POST.price, status: POST.status }),
+    );
     const meta = await getPostMetadata(POST.id, {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,

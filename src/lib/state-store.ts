@@ -4130,7 +4130,7 @@ export interface PairingCandidate {
  * or price (that used to be synthesized here as `title: ''` / `price: '0'`
  * when a link's own copy was missing — a false default a future spend-check
  * could have trusted). A caller after display metadata for a resolved id
- * fetches it live off the public `GET /api/posts/<id>` route
+ * fetches it live off the public `GET /api/posts/<id>/public` route
  * (`getPostMetadata`, lib/agent-api.ts), which answers "unknown" rather than
  * a guess when the route 404s or the deployment predates it.
  */
