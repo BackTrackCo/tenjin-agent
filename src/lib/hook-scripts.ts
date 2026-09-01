@@ -1431,14 +1431,15 @@ function paramWords(url) {
  * plus the values of the few query keys that hold a topic) and the prompt the
  * agent attached.
  *
- * NOT SCRUBBED (tenjin-agent#197 rework, reversing what this arm used to do):
- * the url is already leaving this machine via the fetch itself, so scrubbing
- * our own search copy of it protects nothing and only throws away the best
- * search keys the server has — a path or a hostname is exactly what
- * identifier-aware BM25 retrieval matches on. This also removes the one place
- * \`scrub\`'s path/host rule ran on attacker-influenced input synchronously in
- * front of a tool call: a dotted, slash-free pathname made \`SECRET_HOST_RE\`
- * quadratic on this arm. With no scrub call left here, that stall cannot fire.
+ * SECRETS ONLY, NOW (tenjin-agent#197 rework, round 2, owner-approved): a path
+ * segment is not just a topic word — \`acme.com/download/sk-abc.../file.pdf\`
+ * puts a credential-shaped value in the PATH rather than the query string, and
+ * {@link paramWords}'s allow-list only ever guarded the query string, so that
+ * shape rode this marketplace query whole. The url has still already left the
+ * machine via the fetch itself, so \`scrub(combined, 'secretsOnly')\` is not
+ * about hiding the address: paths and hostnames still ship unchanged, and only
+ * a credential, control byte or email is dropped — the same floor every other
+ * search-query and published-knowledge arm now holds to.
  *
  * PARAM VALUES ARE STILL NOT SENT WHOLESALE, independent of scrub: a url's
  * query string is where an api key, an account id and a presigned signature
@@ -1465,7 +1466,7 @@ function fetchQuestion(toolInput) {
   // Whitespace-collapsed and trimmed, the same cleanup scrub used to do as a
   // side effect, so a run of url-word spacing doesn't read as content.
   const combined = (words + ' ' + prompt).replace(/\\s+/g, ' ').trim();
-  return clean(combined, ${QUESTION_MAX});
+  return clean(scrub(combined, 'secretsOnly'), ${QUESTION_MAX});
 }
 
 async function main() {

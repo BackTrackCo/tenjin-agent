@@ -1315,7 +1315,7 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   const QUESTION =
     'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps';
 
-  it('injects on the same turn, and scrubs the paths out of what it sends', async () => {
+  it('injects on the same turn, and keeps the path in what it sends', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
 
@@ -1325,12 +1325,41 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     );
     expect(run.code).toBe(0);
     expect(injected(run)).toContain(BODY_MD);
-    expect(queries()[0]).not.toContain('/Users/vraspar');
+    // secretsOnly (owner policy, tenjin-agent#197 rework): a path is a search
+    // key the server's identifier-aware BM25 lane ranks on, not an address to
+    // hide, so it now ships rather than being scrubbed away.
+    expect(queries()[0]).toContain('/Users/vraspar');
     expect((await ledger())[0]).toMatchObject({
       trigger: 'prompt',
       event: 'UserPromptSubmit',
       action: 'injected',
     });
+  });
+
+  /**
+   * The credential/PII floor still holds even though the path floor is gone:
+   * a git SHA and a path are search keys and ship, but a secret-shaped token
+   * and an email address are exactly what `secretsOnly` still strips.
+   */
+  it('keeps a path and a git SHA in the query, and strips a key and an email', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9021324354';
+    const key = 'sk-abcdefghijklmnopqrstuvwxyz012345';
+    const run = await runScript(
+      pushPromptHookScript(dataDir),
+      prompt(
+        `${QUESTION} at commit ${sha} in src/lib/thing.ts, key ${key}, contact vraspar@example.com`,
+      ),
+    );
+    expect(run.code).toBe(0);
+    expect(injected(run)).toContain(BODY_MD);
+    const query = queries()[0]!;
+    expect(query).toContain(sha);
+    expect(query).toContain('src/lib/thing.ts');
+    expect(query).not.toContain(key);
+    expect(query).not.toContain('vraspar@example.com');
   });
 
   /**
@@ -5354,6 +5383,38 @@ describe('the subagent arm (SubagentStop)', () => {
   });
 
   /**
+   * secretsOnly (owner policy, tenjin-agent#197 rework): a finding is
+   * published knowledge, and a path or a git SHA in it is a search key for the
+   * team/public shelf, not an address to hide. Only a credential-shaped token
+   * still comes out; `tenjin publish`'s own `scanDraft()` is the backstop that
+   * runs later, at actual publish time.
+   */
+  it('keeps paths and a git SHA in a harvested finding, and strips a key', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9021324354';
+    const key = 'sk-abcdefghijklmnopqrstuvwxyz012345';
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({
+        stop_hook_active: true,
+        last_assistant_message: answer(
+          `${FINDING} The fix landed in src/lib/thing.ts at commit ${sha}. Key was ${key}.`,
+        ),
+      }),
+    );
+    expect(run.stdout).toBe('');
+
+    const finding = (await stopRows()).find((r) => r.kind === 'finding');
+    const body = String(finding?.body);
+    expect(body).toContain('src/lib/thing.ts');
+    expect(body).toContain(sha);
+    expect(body).not.toContain(key);
+  });
+
+  /**
    * ROUND-4 MINOR 4: THE HARVEST CLAIM GUARDS DATA, NOT A TURN.
    *
    * The two budget claims are right to fail closed on a swallowed write: what
@@ -5718,6 +5779,51 @@ describe('the context arm (log-only)', () => {
     expect(rows[0]!.query).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
     expect(queries().join('\n')).toContain('checkout');
     expect(queries().join('\n')).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
+  });
+
+  /**
+   * A REAL BUG, fixed by the same secretsOnly switch — but NOT the one a
+   * `.sh`/`.io` basename would suggest. This arm's own extension gate (the
+   * `main()` guard above, shared with the read arm) only lets
+   * `.js/.jsx/.ts/.tsx/.mjs/.mts/.cjs/.py` files reach scrub at all, and none
+   * of those extensions is itself a TLD `SECRET_HOST_RE` knows about — so a
+   * literal `deploy.sh` or `index.io` never reaches this arm's scrub call in
+   * the first place; it is filtered out one line earlier, for an unrelated
+   * reason (the arm only understands JS/TS/Python imports).
+   *
+   * THE SAME COLLISION STILL FIRES ONE LEVEL IN, because `SECRET_HOST_RE` has
+   * no anchors and matches a TLD-shaped label ANYWHERE in the basename, not
+   * just at the end. `test`, `dev`, `app`, `co`, `local` and `internal` are
+   * all in that TLD list AND all common naming segments in an allowed
+   * extension — `checkout.test.ts` (this very suite's own naming pattern),
+   * `app.config.dev.ts`, `login.local.ts` all scrub to nothing under full
+   * mode: `checkout.test.ts` -> \` .ts\` -> (extension stripped) -> \`\` ->
+   * \`wordCount(query) < 1\` -> silence, with no error and no row. secretsOnly
+   * does not run the host rule at all, so the segment survives and the arm
+   * ships \`checkout test\` instead of going quiet.
+   */
+  it('sends a request for a churned checkout.test.ts, which used to scrub to nothing', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const file = join(scriptDir, 'checkout.test.ts');
+    await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
+
+    const edit = JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: file },
+    });
+    for (let i = 0; i < 4; i += 1) {
+      const run = await runScript(pushContextHookScript(dataDir), edit);
+      expect(run.stdout).toBe('');
+    }
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ trigger: 'churn', action: 'logged' });
+    expect(rows[0]!.query).toContain('checkout');
+    expect(queries().join('\n')).toContain('checkout');
   });
 
   /**

@@ -999,25 +999,37 @@ const SECRET_HOST_RE =
 const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 /**
- * Drop every credential, scheme-less path, hostname, hex id and number: what
- * leaves the machine is the shape of the problem, never the address of it and
- * never the key to it.
+ * Drop every credential, control byte and email in \`secretsOnly\` mode; full
+ * mode additionally drops the scheme-less path, hostname, hex id and number
+ * that would otherwise still carry the address of the problem, not just its
+ * shape.
  *
  * THE CREDENTIAL RULES RUN FIRST, and they run on every arm, because the arm
  * most likely to be handed a secret is the failure arm and the failure it fires
- * on most often is an auth failure. The hex rule further down is not a
- * credential rule and never was: a PAT is mixed case with an underscore, so
- * \`\b[a-f0-9]{16,}\b\` cannot match one.
+ * on most often is an auth failure. The hex rule further down (full mode only)
+ * is not a credential rule and never was: a PAT is mixed case with an
+ * underscore, so \`\b[a-f0-9]{16,}\b\` cannot match one.
  *
- * \`mode === 'secretsOnly'\` stops right here, after the credential rules and
- * the control-character cleanup: paths, hostnames, IPv4 literals, emails and
- * generic hex ids are left alone. That is what \`dispatchQuestion\` asks for
- * (tenjin-agent#197 rework): a Task prompt is a work order, and a path or a
- * hostname in it is the best search key the server has, not an address to
- * hide. Every OTHER caller passes no second argument and keeps the full
- * behavior below unchanged.
+ * \`mode === 'secretsOnly'\` stops after the credential rules, the email rule
+ * and the control-character cleanup: paths, hostnames, IPv4 literals and
+ * generic hex ids (a 40-character git SHA included) are left alone. That is
+ * OWNER POLICY (tenjin-agent#197 rework): search-query and published-knowledge
+ * text keep paths, hostnames, file basenames and git SHAs, because those are
+ * the identifiers the server's identifier-aware BM25 lane ranks on — only
+ * credentials, control bytes and emails are PII/secret enough to always strip.
+ * Full privacy-tier scrubbing (the return below) is retired from every
+ * knowledge/search arm; the callers still passing no second argument are the
+ * ones where full redaction is still load-bearing for something other than a
+ * path or a host.
+ *
+ * EMAILS ARE THE ONE PII RULE THAT RUNS IN BOTH MODES. Unlike a path or a
+ * hostname, an email address is near-never a search key — nobody searches a
+ * shelf by somebody's inbox — so it is dropped even in \`secretsOnly\`, right
+ * alongside the credential rules rather than down with the path/host rules
+ * that mode skips.
  */
 function scrub(text, mode) {
+  const secretsOnly = mode === 'secretsOnly';
   const out = String(text)
     // ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so
     // stripping the block first would leave \`[31m\` behind as text.
@@ -1031,8 +1043,22 @@ function scrub(text, mode) {
     .replace(SECRET_USERINFO_RE, ' ')
     .replace(SECRET_ASSIGN_RE, ' ')
     .replace(SECRET_TOKEN_RE, ' ')
-    .replace(SECRET_ENTROPY_RE, ' ');
-  if (mode === 'secretsOnly') return out.replace(/\s+/g, ' ').trim();
+    // A PURE-HEX MATCH SURVIVES IN \`secretsOnly\` MODE ONLY: that shape
+    // (\`[0-9a-f]+\`, nothing else) is what a git SHA looks like and, not
+    // coincidentally, what a hex-only API token also looks like too — this is
+    // the one accepted trade, taken deliberately and only where the owner
+    // asked for it, so a commit SHA is not collateral damage in a search query
+    // or a published finding. Every OTHER shape this rule catches — mixed
+    // case, base64's \`+/=\`, an underscore or hyphen anywhere in the run — is
+    // still dropped in \`secretsOnly\` exactly as before, and full mode ignores
+    // the match entirely and always drops it, unchanged.
+    .replace(SECRET_ENTROPY_RE, (m) => (secretsOnly && /^[0-9a-f]+$/.test(m) ? m : ' '));
+  if (secretsOnly) {
+    return out
+      .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
   return out
     .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
     // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
@@ -1138,7 +1164,16 @@ async function main() {
   const prompt = raw.trim();
   // Scrubbed BEFORE the slice, so a path at character 380 cannot survive by
   // being cut in half, and what the ledger records is what was sent.
-  const query = clean(scrub(prompt).slice(0, PROMPT_QUERY_CHARS), PROMPT_QUERY_CHARS);
+  //
+  // secretsOnly: this prompt is about to become a search query the team and
+  // public shelf both rank on, and a path or a hostname the human typed is
+  // the best search key the server has, not an address to hide (owner
+  // policy, tenjin-agent#197 rework). Only credentials, control bytes and
+  // emails are stripped.
+  const query = clean(
+    scrub(prompt, 'secretsOnly').slice(0, PROMPT_QUERY_CHARS),
+    PROMPT_QUERY_CHARS,
+  );
   // Why this prompt will not be looked up, or null. Decided BEFORE the store is
   // opened, so the row below can say so, and applied after it, so the row is
   // written either way.
@@ -1587,8 +1622,16 @@ function failureText(input) {
   return stdout + '\n' + stderr;
 }
 
+/**
+ * A local dedup key only — \`STATE_SIGNATURES_PREFIX + signatureOf(line)\` is a
+ * claim in this machine's own state store, never read back into a prompt and
+ * never sent anywhere. secretsOnly here does not change what leaves the
+ * machine; it keeps this arm's every \`scrub()\` call on the one shared policy
+ * rather than carving out an exception for the one caller that happens not to
+ * need it.
+ */
 function signatureOf(line) {
-  return scrub(line).toLowerCase().replace(/\d+/g, '#').slice(0, 200);
+  return scrub(line, 'secretsOnly').toLowerCase().replace(/\d+/g, '#').slice(0, 200);
 }
 
 // ---- sig_v1: the mechanical lane's key (04, "Two knowledge lanes") ----
@@ -1778,9 +1821,18 @@ function pairingScope(errorLine, fixFiles) {
  * read back out into a LATER session's context by \`pairingText\`. The plan's
  * adversarial section is explicit that the db never holds more than the wire
  * did, so the same \`scrub()\` every query goes through runs here too.
+ *
+ * secretsOnly, not full: this string is not local-only. \`openPairing\` stores
+ * it as \`pairings.cmd\` / \`pairings.fix_cmd\`, and \`tenjin sync\` (commands/
+ * sync.ts, \`bodyFor\`) reads those columns straight into a Fix post's body —
+ * "Failed: <cmd>" / "Passed on: <fix cmd>" on the team shelf. The owner wants
+ * a Fix post to keep the command as written, path arguments included, so full
+ * redaction here would erase exactly what makes the post findable. The
+ * publish-time \`scan()\`/\`survivesTeamDrop\` gate in sync.ts is the backstop
+ * that still blocks or warns on an actual secret shape reaching the wire.
  */
 function safeCommand(command) {
-  return clean(scrub(command), 300);
+  return clean(scrub(command, 'secretsOnly'), 300);
 }
 
 /** The bare package name of \`name@1.2.3\`, keeping a scope intact. */
@@ -2294,7 +2346,15 @@ async function main() {
   const packages = [
     ...new Set([...packagesInError(text), ...packagesInCommand(command)].map(bareName)),
   ];
-  const scrubbed = scrub(line);
+  // secretsOnly: this is the same string \`openPairing\` stores as
+  // \`errorLine\` and \`tenjin sync\` reads into a Fix post's title/body
+  // (commands/sync.ts \`titleFor\`/\`discriminant\`, which greps the file the
+  // error named back out of it) — a file name and a host in an error line are
+  // exactly what makes the post findable, so only credentials, control bytes
+  // and emails come out here. \`sigV1\`/\`normalizeForSig\` is the separate,
+  // untouched fingerprint path: it hashes its own normalized copy of \`line\`
+  // and never carries content onto the wire, so it is not scrubbed at all.
+  const scrubbed = scrub(line, 'secretsOnly');
   const sig = sigV1(line, text);
   const errorFiles = filesInError(text);
   // The failure row carries the signature's fine key as \`error_hash\` (the
@@ -2726,6 +2786,14 @@ function findingClose(body) {
  * end of the message rather than refused, because the bound makes that safe and
  * a child that forgot the closing fence still settled the thing.
  *
+ * secretsOnly, not full: this block is published knowledge (owner policy,
+ * tenjin-agent#197 rework) and a path, hostname or basename in it is a search
+ * key for the team/public shelf's identifier-aware BM25 lane, not an address
+ * to hide — only credentials, control bytes and emails are stripped here.
+ * \`tenjin publish\`'s own \`scanDraft()\` (commands/publish.ts) still runs at
+ * publish time over whatever the operator lets through the queue and remains
+ * the secrets/PII backstop (block/warn); this scrub is not the last gate.
+ *
  * ONE LINE OUT, whatever went in: \`clean\` turns control characters into
  * spaces, which is what makes the stored body safe to splice into the parent's
  * capture ask without a child's newlines reshaping it.
@@ -2736,7 +2804,7 @@ function findingBlock(text) {
   const rest = text.slice(start + 1);
   const end = findingClose(rest);
   const raw = (end === -1 ? rest : rest.slice(0, end)).slice(0, FINDING_MAX_CHARS);
-  const body = clean(scrub(raw), FINDING_MAX_CHARS);
+  const body = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
   return body.length === 0 ? null : body;
 }
 
@@ -3368,7 +3436,21 @@ async function main() {
     // length and drops control bytes, nothing more. Scrub runs BEFORE the
     // separators are squashed to spaces, because \`sk_live_...\` in a filename
     // stops looking like a token the moment its underscores are gone.
-    const name = scrub(filePath.split('/').pop() || '').replace(/\.[^.]+$/, '');
+    //
+    // secretsOnly, not full: \`SECRET_HOST_RE\` has no anchors, so it matches a
+    // TLD-shaped label ANYWHERE in a basename, not just its own final
+    // extension — this arm only ever sees a
+    // \`.js/.jsx/.ts/.tsx/.mjs/.mts/.cjs/.py\` file (the guard above), and none
+    // of those extensions is itself a TLD, but \`test\`, \`dev\`, \`app\`, \`co\` and
+    // \`local\` all are, and all are ordinary naming segments in one:
+    // \`checkout.test.ts\` (this very suite's own naming pattern),
+    // \`app.config.dev.ts\`. Full mode's host rule matched the whole
+    // \`name.tld\` run — \`checkout.test.ts\` -> \` .ts\` — and \`wordCount(query) <
+    // 1\` below then silenced the arm with no error and no row. secretsOnly
+    // does not run the host rule at all, so the segment survives scrub and
+    // only the later \`.replace(/\.[^.]+$/, '')\` strips the real extension —
+    // which is what makes \`checkout.test.ts\` ship as \`checkout test\` again.
+    const name = scrub(filePath.split('/').pop() || '', 'secretsOnly').replace(/\.[^.]+$/, '');
     const packages = packagesInSource(fileHead(filePath)).slice(0, 3);
     const query = clean(name.replace(/[-_.]/g, ' '), 300);
     if (wordCount(query) < 1) return quiet();

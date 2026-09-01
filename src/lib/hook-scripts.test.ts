@@ -2501,14 +2501,25 @@ describe('dispatch hook: a subagent dispatch', () => {
    * The fixture above is 219 chars against a 400-char slice, so
    * `scrub(prompt).slice(0, 400)` and `scrub(prompt.slice(0, 400))` are the
    * same expression on it and the regression greptile found is unpinned. Here
-   * the commit id STRADDLES offset 400: slicing first leaves a 12-character
+   * the secret STRADDLES offset 400: slicing first leaves a 12-character
    * fragment, which is under the hex rule's 16-character floor, so the head of
-   * a real commit id ships. Scrubbing first removes the whole token.
+   * a real secret ships. Scrubbing first removes the whole token.
+   *
+   * MIXED CASE AND HYPHENATED, DELIBERATELY, not a plain hex run: a pure
+   * lowercase `[0-9a-f]` match is exactly the shape `secretsOnly` now exempts
+   * from the entropy rule (a git SHA, tenjin-agent#197 rework) so it is no
+   * longer replaced at all and a straddling fragment of ONE would say nothing
+   * about whether a straddling SECRET still leaks — this fixture keeps the
+   * uppercase run the entropy rule needs to still treat it as one. The
+   * hyphens are load-bearing too, kept OUT of a plain 40-char run: a solid
+   * base64-charset string this shape and length reads as a real AWS secret
+   * access key to GitHub's push protection, which has no checksum to tell a
+   * test fixture from a live credential.
    */
   it('scrubs a secret that straddles the slice boundary', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
-    const commit = 'abcdef0123456789abcdef0123456789abcdef01';
+    const commit = 'ABCDEF0123456789-abcdef0123456789-ABCDE';
     const lead = 'Work out why the migration replays, checking each release in turn. ';
     // The id starts at offset 387, so a 400-char slice keeps 13 hex characters
     // of it: a recognisable head, and one short of the rule's 16-char floor.
@@ -2518,6 +2529,29 @@ describe('dispatch hook: a subagent dispatch', () => {
     await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
 
     expect(bodies[0]).not.toContain(commit.slice(0, 13));
+  });
+
+  /**
+   * THE OTHER HALF OF THE SAME BOUNDARY, now that a git SHA is exempt: a
+   * PURE lowercase hex run in this exact straddling position is not replaced
+   * by the entropy rule at all (it survives scrub whole, as a SHA should),
+   * so the fragment the trailing `.slice(0, 400)` leaves behind is a
+   * truncated SHA, not a leaked secret — the same thing that would happen to
+   * a long path or hostname sitting at this offset. This is the accepted
+   * shape of the trade, pinned so a future change cannot silently re-widen
+   * the entropy rule's replacement over this case and call it a fix.
+   */
+  it('leaves a straddling git SHA truncated by the length bound, not re-hidden', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    const commit = 'abcdef0123456789abcdef0123456789abcdef01';
+    const lead = 'Work out why the migration replays, checking each release in turn. ';
+    const prompt = `${lead.padEnd(377, 'x ').slice(0, 377)}at commit ${commit} and report what actually happens.`;
+    expect(prompt.indexOf(commit)).toBe(387);
+
+    await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
+
+    expect(bodies[0]).toContain(commit.slice(0, 13));
   });
 
   /**
@@ -3976,7 +4010,7 @@ describe('dispatch hook: two shelves in team mode', () => {
           sessionId: 'scrub-legs',
           prompt:
             'Find the retry bug behind /srv/app/queue/worker.js on jobs.internal-corp.io using key ' +
-            'AKIAABCDEFGHIJKLMNOP and say which release fixed it. Check every version and report ' +
+            'AKIAIOSFODNN7EXAMPLE and say which release fixed it. Check every version and report ' +
             'what actually happens.',
         }),
       );
@@ -3992,7 +4026,7 @@ describe('dispatch hook: two shelves in team mode', () => {
         expect(body).toContain('/srv/app/queue');
         expect(body).toContain('internal-corp.io');
         // The one thing still scrubbed everywhere.
-        expect(body).not.toContain('AKIAABCDEFGHIJKLMNOP');
+        expect(body).not.toContain('AKIAIOSFODNN7EXAMPLE');
       }
     } finally {
       await pub.close();
@@ -4185,12 +4219,12 @@ describe('dispatch hook: two shelves in team mode', () => {
 // stripped from a search query. The original fix suppressed the fixture
 // literal (`a question`) by gating on scrub residue; that gate is gone, and
 // with it the false premise that a path is something to scrub away in the
-// first place. The WebFetch arm drops scrubbing entirely — the url has
-// already left the machine via the fetch itself, so scrubbing our own search
-// copy of it protects nothing. The Task/dispatch arm keeps scrubbing
-// SECRET-shaped tokens only: a Task prompt can embed an API key that is not
-// otherwise outbound, and a team-shelf miss forwards this same query to the
-// public marketplace.
+// first place. Both the WebFetch arm and the Task/dispatch arm now scrub
+// SECRET-shaped tokens only (round 2: a credential can sit in a url PATH
+// segment, not just the query string, so the WebFetch arm's initial
+// no-scrub-at-all trade was revised to `secretsOnly` too) — a Task prompt or
+// a fetched url can embed an API key that is not otherwise outbound, and a
+// team-shelf miss forwards this same query to the public marketplace.
 describe('dispatch hook: paths ship as content, secrets do not (tenjin-agent#197 rework)', () => {
   it('ships a path-bearing prompt with the path intact', async () => {
     const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
@@ -4218,12 +4252,12 @@ describe('dispatch hook: paths ship as content, secrets do not (tenjin-agent#197
     const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
     await writeConfig({ baseUrl: cap.baseUrl });
     const prompt = longPrompt(
-      'why is auth failing with key AKIAABCDEFGHIJKLMNOP in the retry queue',
+      'why is auth failing with key AKIAIOSFODNN7EXAMPLE in the retry queue',
     );
     await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
     expect(cap.hits()).toBe(1);
     expect(questionSent(cap.bodies)).toContain('retry queue');
-    expect(cap.bodies.every((b) => !b.includes('AKIAABCDEFGHIJKLMNOP'))).toBe(true);
+    expect(cap.bodies.every((b) => !b.includes('AKIAIOSFODNN7EXAMPLE'))).toBe(true);
   });
 
   /**
@@ -4255,7 +4289,7 @@ describe('dispatch hook: paths ship as content, secrets do not (tenjin-agent#197
   });
 });
 
-describe('WebFetch push arm: no scrubbing at all, paths and hosts ship as search keys (tenjin-agent#197 rework)', () => {
+describe('WebFetch push arm: secretsOnly — paths and hosts ship, credentials do not (tenjin-agent#197 rework)', () => {
   it('ships a url whose path is pure entropy, with the short prompt attached', async () => {
     const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
     await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
@@ -4292,12 +4326,14 @@ describe('WebFetch push arm: no scrubbing at all, paths and hosts ship as search
   });
 
   /**
-   * THE ARM-LEVEL TRADE, MADE EXPLICIT: this arm no longer scrubs at all
-   * (owner policy). The url has already left the machine via the fetch
-   * itself, so a secret embedded in the WebFetch prompt rides too — the Task
-   * arm above is the one that still owes a secret this treatment.
+   * THE ARM-LEVEL TRADE, REVISED (round 2, owner-approved): this arm scrubs
+   * SECRETS ONLY now, same as every other search-query arm. A commit id is
+   * not a secret — it is a pure lowercase hex run, the shape `secretsOnly`
+   * exempts from the entropy rule (tenjin-agent#197 rework) — so it still
+   * ships, along with the hostname and the path. What no longer rides is a
+   * credential-shaped prompt fragment.
    */
-  it('does not scrub a secret out of a WebFetch prompt — availability wins on this arm', async () => {
+  it('keeps the hash and the retry-queue prose in a WebFetch prompt', async () => {
     const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
     await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
     await runScript(
@@ -4316,6 +4352,39 @@ describe('WebFetch push arm: no scrubbing at all, paths and hosts ship as search
     expect(cap.hits()).toBe(1);
     expect(questionSent(cap.bodies)).toContain('retry queue');
     expect(questionSent(cap.bodies)).toContain('deadbeefdeadbeefdeadbeef01234567');
+  });
+
+  /**
+   * THE FIX THIS ROUND CLOSES: a credential does not only ride in the query
+   * string {@link SAFE_PARAM_KEY_RE} guards — it can sit in the PATH itself
+   * (`acme.com/download/sk-.../file.pdf`), which \`paramWords\` never looks at
+   * and nothing used to scrub. \`fetchQuestion\` now runs
+   * \`scrub(combined, 'secretsOnly')\` over the assembled path+prompt text, so
+   * a credential-shaped path segment is stripped while every other word in
+   * the path — and the hostname, kept out of \`words\` entirely and so never
+   * even reaching scrub — still ships.
+   */
+  it('strips a credential embedded in the url PATH, keeping the rest of the path', async () => {
+    const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
+    await writeConfig({ baseUrl: cap.baseUrl, hooks: { push: 'on' } });
+    await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'fetch-path-secret',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'WebFetch',
+        tool_input: {
+          url: 'https://acme.com/download/sk-abcdefghijklmnopqrstuvwxyz012345/file.pdf',
+          prompt: 'why does this download keep failing for enterprise customers',
+        },
+      }),
+    );
+    expect(cap.hits()).toBe(1);
+    const question = questionSent(cap.bodies);
+    expect(question).toContain('download');
+    expect(question).toContain('file');
+    expect(question).toContain('enterprise customers');
+    expect(question).not.toContain('sk-abcdefghijklmnopqrstuvwxyz012345');
   });
 
   it('still no-ops on an empty or whitespace-only fetch', async () => {
