@@ -2424,6 +2424,35 @@ describe('runPushStatus: the graded rollup and the shelf stats', () => {
   });
 
   /**
+   * tenjin-agent#252: `GET /api/lookups/stats` is cached server-side for
+   * several minutes, so a `used` count that has not moved since `push grade`
+   * ran is routinely the cache, not proof grading never reached the shelf.
+   * `Age` is what tells the two apart, surfaced right on the header line.
+   */
+  it('renders "shelf stats as of ~Ns ago" when the response carried an Age header', async () => {
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => NOW,
+      lookupStats: async () => ({ ...STATS, ageSeconds: 137 }),
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('server public (7d) — shelf stats as of ~137s ago:');
+  });
+
+  /** No `Age` header, no claim about freshness — the header line reads exactly
+   *  as it did before this field existed. */
+  it('omits the as-of clause with no Age header', async () => {
+    const result = await runPushStatus(makeCtx(), {
+      homeDir: home,
+      now: () => NOW,
+      lookupStats: async () => STATS,
+    });
+    const human = result.humanLines?.join('\n') ?? '';
+    expect(human).toContain('server public (7d):');
+    expect(human).not.toContain('shelf stats as of');
+  });
+
+  /**
    * The trigger name is the shelf's text, and this line is the only place it is
    * drawn. The response schema bounds it and this strips it: a length bound is
    * not an escape-sequence bound, and the two layers fail differently.

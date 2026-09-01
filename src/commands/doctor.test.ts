@@ -21,6 +21,8 @@ import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 import { wireHermesIntegration } from '../lib/hermes';
 import { wireSearchHooks } from '../lib/harness-hooks';
+import { WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
+import { hooksDir } from '../lib/paths';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -2790,4 +2792,72 @@ describe('runDoctor — push hook wiring', () => {
     expect(check.detail).toContain('only half wired');
     expect(check.fix).toBe('tenjin push on');
   });
+});
+
+/**
+ * tenjin-agent#252: `tenjin update` bumps the npm-installed binary and nothing
+ * else, so the generated hook/push scripts under `<dataDir>/hooks` stay
+ * whatever bytes `tenjin install` last wrote until an operator reinstalls —
+ * the exact shape #242's merged allowlist fix hit (junk pairings kept
+ * accumulating for hours on a machine that had not reinstalled). Modeled on
+ * the "skills go stale after a CLI update" block above:
+ * {@link compareWiredSkills}'s equivalent for the four generated scripts.
+ */
+describe('runDoctor — hook scripts go stale after a CLI update', () => {
+  async function hookScriptsCheck(): Promise<CheckResult | undefined> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'hook scripts');
+  }
+
+  it('reports nothing on a machine with no hook scripts on disk', async () => {
+    expect(await hookScriptsCheck()).toBeUndefined();
+  });
+
+  it('is ok when every wired script matches this build', async () => {
+    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
+    const check = await hookScriptsCheck();
+    expect(check?.status).toBe('ok');
+  });
+
+  it('warns and names the stale script when one was hand-edited (or left over from a merge)', async () => {
+    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
+    // The exact dogfooded shape: a merge changed the generated source, and
+    // nobody has run `tenjin install` since — simulated here by mutating the
+    // installed script directly rather than re-generating it.
+    const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
+    await writeFile(target, `${await readFile(target, 'utf8')}\n// hand-edited, or pre-merge\n`);
+
+    const check = await hookScriptsCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('1 of');
+    expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
+    expect(check?.fix).toBe('tenjin install');
+  });
+
+  // chmod 0o000 only blocks the owner's own read on a non-root process; skip
+  // rather than false-fail where that does not hold (Windows, root).
+  const canDenyOwnRead = process.platform !== 'win32' && process.getuid?.() !== 0;
+  (canDenyOwnRead ? it : it.skip)(
+    'warns when an installed script cannot be read, rather than staying silent',
+    async () => {
+      await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
+      const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
+      await chmod(target, 0o000);
+      try {
+        const check = await hookScriptsCheck();
+        expect(check?.status).toBe('warn');
+        expect(check?.detail).toContain('could not be read');
+        expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
+        expect(check?.fix).toContain('permissions');
+      } finally {
+        await chmod(target, 0o755);
+      }
+    },
+  );
 });

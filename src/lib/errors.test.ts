@@ -32,6 +32,7 @@ const EXPECTED: Record<ErrorCode, ExitCode> = {
   SEND_FAILED: 4,
   DELETE_FAILED: 4,
   UPDATE_FAILED: 1,
+  STATE_QUERY_FAILED: 1,
 };
 
 describe('exitCodeFor', () => {

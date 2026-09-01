@@ -876,6 +876,22 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  // `tenjin state query "<sql>"` (docs/command-reference.md, "State store"):
+  // read-only ad hoc SQL against ~/.tenjin/state.db, for an operator debugging a
+  // pairing, a search, or a hook's own bookkeeping by hand. See
+  // commands/state.ts for why this exists instead of `sqlite3 -readonly`.
+  const state = addGlobalFlags(
+    program.command('state').description('Inspect the local state database'),
+  );
+  addGlobalFlags(state.command('query <sql>'))
+    .description('Run one read-only SELECT against the state database and print the rows as JSON')
+    .action(async function (this: Command, sql: string) {
+      await runCommand('state.query', this, async (ctx) => {
+        const { runStateQuery } = await import('./commands/state');
+        return runStateQuery({ sql }, ctx);
+      });
+    });
+
   // `mcp` is NOT routed through runCommand: it hands stdout to the MCP transport
   // and blocks until the client disconnects, so it prints no envelope and sets no
   // exit code on success. buildContext reuses the same flag/dataDir plumbing every
