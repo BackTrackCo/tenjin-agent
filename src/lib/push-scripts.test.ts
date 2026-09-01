@@ -24,6 +24,7 @@ import {
   type StoredSearch,
 } from './state-store';
 import { REPO_SLUG_CASES } from './repo-slug-cases';
+import { findAnchor, gradeInjection, parseTranscript, type GradeTarget } from './grade';
 import {
   CAPTURE_REASON,
   CAPTURE_REASON_TEAM,
@@ -4801,6 +4802,100 @@ describe('the lookup budget (rolling window, per trigger)', () => {
         reason: 'lookup-cap',
       });
       expect(sessionState(SESSION, 'cooldown:prompt')).toBe(1);
+    });
+
+    /**
+     * THE #254 FIX, DOWNSTREAM. Grading one row wrong — crediting a boilerplate
+     * span the session never actually used, the false positive tenjin-agent#254a
+     * audited — is not just a mislabeled row: `used` and `wrong` are exactly
+     * the counts this cooldown reads. At the graded floor (used + wrong = 20,
+     * rate = used / graded) one row moving from `used` to `wrong` is the
+     * difference between a rate of 5% — `rate < coldRate` is strict, so this
+     * does NOT cool the arm — and a rate of 0%, which does. Same lookup spend,
+     * same base cap, same floor: only the corrected count changes, and that
+     * alone flips the throttle from "allow" to "block".
+     *
+     * THE "AFTER" COUNT COMES FROM THE REAL GRADER, not a typed literal: this
+     * is the exact #254a shape (grade.test.ts) — a span that is standing
+     * boilerplate in every subagent work order, written again after the
+     * injection purely because it always is — run through the actual
+     * `gradeInjection()`/`judge()` this PR changed. A regression in the
+     * pre-injection exclusion would flip `outcome` back to `used` here, and
+     * this test would fail on that alone, before the cooldown math ever runs
+     * (tenjin-agent#276 review, minor 4: the previous version of this test
+     * seeded `used`/`wrong` by hand and could not fail on this diff).
+     */
+    it('#254: correcting one wrongly-graded verdict flips the throttle decision', async () => {
+      const { baseUrl, hits } = await serve(echo());
+      await pushOn(baseUrl);
+
+      const boilerplate = 'Gates: pnpm typecheck, pnpm lint, pnpm build, CI=true pnpm format:check';
+      const note =
+        'Team note: pre-commit can abort with no TTY — run `CI=true pnpm format:check` once.';
+      const gradeTarget: GradeTarget = {
+        resourceId: null,
+        url: null,
+        title: 'pre-commit can abort with no TTY',
+      };
+      const rows = parseTranscript(
+        [
+          // BEFORE the injection: the same span, for an unrelated reason.
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              content: [{ type: 'tool_use', name: 'Task', input: { prompt: boilerplate } }],
+            },
+          }),
+          JSON.stringify({
+            type: 'attachment',
+            attachment: {
+              type: 'hook_additional_context',
+              content: [note],
+              hookName: 'PostToolUse',
+            },
+          }),
+          // AFTER the injection: the note was never read; this is the same
+          // boilerplate every subagent work order on this machine carries.
+          JSON.stringify({
+            type: 'assistant',
+            message: {
+              content: [{ type: 'tool_use', name: 'Task', input: { prompt: boilerplate } }],
+            },
+          }),
+        ].join('\n'),
+      );
+      const verdict = gradeInjection(rows, findAnchor(rows, gradeTarget), gradeTarget, {
+        ended: true,
+      });
+      // Pins the fix this cooldown scenario depends on: the boilerplate is
+      // correctly excluded, so the row grades `wrong`, not `used`.
+      expect(verdict).toMatchObject({ outcome: 'rejected' });
+      const usedAfter = verdict.outcome === 'used' ? 1 : 0;
+
+      // COUNTERFACTUAL "BEFORE": had this same row instead graded `used` — the
+      // shape of the #254a bug, since fixed — the rate sits exactly at the 5%
+      // cold floor and the arm stays at its base cap; the spend below is well
+      // under it, so the lookup goes through.
+      await seedRates({ prompt: { hits: 20, used: usedAfter + 1, wrong: 19 } });
+      await seedLookups('prompt', COLD_CAP, 0);
+      const before = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(before)).toContain(BODY_MD);
+      expect(hits()).toBeGreaterThan(0);
+
+      // WITH THE REAL, CORRECTED COUNT: the same 20 graded rows, this one
+      // graded as `judge()` actually grades it. No other input changes — same
+      // trigger, same session, the lookup spend only one higher (the call
+      // above just spent one) — but the rate now clears the cold floor, the
+      // cap is cut to a third, and the next lookup this window is throttled.
+      await seedRates({ prompt: { hits: 20, used: usedAfter, wrong: 20 } });
+      const after = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(after.stdout).toBe('');
+      expect((await ledger()).at(-1)).toMatchObject({
+        session: SESSION,
+        trigger: 'prompt',
+        action: 'skipped',
+        reason: 'lookup-cap',
+      });
     });
 
     /**

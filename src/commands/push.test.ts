@@ -1393,8 +1393,19 @@ describe('runPushGrade', () => {
 
     expect(result.data).toMatchObject({
       since: '7d',
-      graded: { used: 1, rejected: 1, unobserved: 1, open: 1 },
+      graded: {
+        used: 1,
+        rejected: 1,
+        unobserved: 1,
+        open: 1,
+        byTier: { read: 1, span: 0, likely: 0 },
+      },
     });
+    // tenjin-agent#276 review (A1igator, minor 3): the tier behind `used` rides
+    // in the default line, not only under `--explain`.
+    expect(result.humanLines?.join('\n')).toContain(
+      'used=1 (read=1 span=0 likely=0) rejected=1 unobserved=1 open=1',
+    );
     const byUid = new Map(
       (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
         r.uid,
@@ -2193,7 +2204,13 @@ describe('runPushGrade', () => {
       { label: ['u-1', 'used'] },
       { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
     );
-    expect(result.data).toMatchObject({ graded: { used: 1 }, posted: 1 });
+    expect(result.data).toMatchObject({
+      graded: { used: 1, byTier: { read: 0, span: 0, likely: 0, hand: 1 } },
+      posted: 1,
+    });
+    // tenjin-agent#276 review round 2, minor: a hand verdict (`--label`) is a
+    // tier too — without it here the printed breakdown didn't sum to `used`.
+    expect(result.humanLines?.join('\n')).toContain('used=1 (read=0 span=0 likely=0 hand=1)');
     expect((JSON.parse(String(calls[0]?.init.body)) as { status: string }).status).toBe('used');
 
     await expect(
