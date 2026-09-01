@@ -1610,11 +1610,16 @@ function buildGradeData(
   // The tier behind `used`, broken out: #254 widened `used` with a whole new
   // tier (`likely`), and that tier is exactly the number an operator cannot
   // currently see without `--explain` — see tenjin-agent#276 review, minor 3.
-  const byTier = { read: 0, span: 0, likely: 0 };
+  // `hand` (a `--label` verdict) is a tier too, not a fifth outcome: without
+  // it here the breakdown silently stopped summing to `used` the moment
+  // anyone hand-labeled a row — tenjin-agent#276 review round 2, minor.
+  const byTier = { read: 0, span: 0, likely: 0, hand: 0 };
   for (const row of rows) {
     if (row.outcome === 'used') {
       counts.used += 1;
-      if (row.by === 'read' || row.by === 'span' || row.by === 'likely') byTier[row.by] += 1;
+      if (row.by === 'read' || row.by === 'span' || row.by === 'likely' || row.by === 'hand') {
+        byTier[row.by] += 1;
+      }
     } else if (row.outcome === 'rejected') counts.rejected += 1;
     else if (row.outcome === 'unobserved') counts.unobserved += 1;
     else counts.open += 1;
@@ -1650,15 +1655,20 @@ function gradeLines(
       rejected: number;
       unobserved: number;
       open: number;
-      byTier: { read: number; span: number; likely: number };
+      byTier: { read: number; span: number; likely: number; hand: number };
     };
   };
   const g = data.graded;
   // The tier breakdown rides alongside `used=`, not behind `--explain`: it is
   // the number that will be quoted back as evidence the arm works, so it
-  // should not take a flag to see.
+  // should not take a flag to see. `hand` only shows up when it is nonzero —
+  // it is rare enough that always printing it would be noise the common
+  // (read/span/likely-only) case doesn't need.
+  const hand = g.byTier.hand > 0 ? ` hand=${g.byTier.hand}` : '';
   const tiers =
-    g.used > 0 ? ` (read=${g.byTier.read} span=${g.byTier.span} likely=${g.byTier.likely})` : '';
+    g.used > 0
+      ? ` (read=${g.byTier.read} span=${g.byTier.span} likely=${g.byTier.likely}${hand})`
+      : '';
   const lines = [
     `graded ${rows.length} row(s) since ${since}: used=${g.used}${tiers} rejected=${g.rejected} unobserved=${g.unobserved} open=${g.open}`,
     posted.failed > 0

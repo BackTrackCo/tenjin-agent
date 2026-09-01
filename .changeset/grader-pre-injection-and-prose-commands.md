@@ -17,9 +17,13 @@ since both are weaker-than-a-followed-pointer evidence.
 
 Review follow-ups on the same fix: the pre-injection exclusion window is now
 bounded to the same `SPAN_WINDOW` on both sides instead of the whole session,
-and matches at a token boundary so a longer pre-injection token (e.g.
-`db:generate-types`) can no longer erase credit for a shorter genuine one
-(`db:generate`); the injection template's own opener and closing line are
-excluded from `used-likely` candidates so the grader never credits its own
-boilerplate; and `push grade`'s default line now breaks `used=` down by tier
-(`read`/`span`/`likely`) instead of only under `--explain`.
+and both the exclusion and the forward match now compare at a token boundary
+instead of by plain substring, so a longer token on either side
+(`db:generate-types`) can neither erase credit for nor manufacture credit
+against a shorter genuine one the note actually named (`db:generate`); the
+injection template's own opener, body fence and closing line are excluded
+from `used-likely` candidates so the grader never credits its own
+boilerplate; `push grade`'s default line now breaks `used=` down by tier
+(`read`/`span`/`likely`, plus `hand` when a `--label` verdict is present)
+instead of only under `--explain`, and the same breakdown is
+`data.graded.byTier` on `--json`.

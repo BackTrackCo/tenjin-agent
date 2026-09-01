@@ -2204,7 +2204,13 @@ describe('runPushGrade', () => {
       { label: ['u-1', 'used'] },
       { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
     );
-    expect(result.data).toMatchObject({ graded: { used: 1 }, posted: 1 });
+    expect(result.data).toMatchObject({
+      graded: { used: 1, byTier: { read: 0, span: 0, likely: 0, hand: 1 } },
+      posted: 1,
+    });
+    // tenjin-agent#276 review round 2, minor: a hand verdict (`--label`) is a
+    // tier too — without it here the printed breakdown didn't sum to `used`.
+    expect(result.humanLines?.join('\n')).toContain('used=1 (read=0 span=0 likely=0 hand=1)');
     expect((JSON.parse(String(calls[0]?.init.body)) as { status: string }).status).toBe('used');
 
     await expect(

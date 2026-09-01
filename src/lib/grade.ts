@@ -234,12 +234,14 @@ const LIKELY_GENERIC = new Set([
   'post-commit',
   'e.g',
   'i.e',
-  // The injection's OWN scaffolding, not anything a seller wrote: PUBLIC_OPENER
-  // and CLOSING_LINE in push-scripts.ts land in every full-form injection, so
-  // without these two `likelyTokens(fullForm(...))` always nets its own
-  // boilerplate as a candidate.
+  // The injection's OWN scaffolding, not anything a seller wrote: PUBLIC_OPENER,
+  // CLOSING_LINE and the body fence itself (`--- tenjin-body <nonce> ---`) in
+  // push-scripts.ts land in every full-form injection, so without these three
+  // `likelyTokens(fullForm(...))` always nets its own boilerplate as a
+  // candidate — tenjin-agent#276 review round 2, minor 1.
   'third-party',
   're-verifying',
+  'tenjin-body',
 ]);
 
 /**
@@ -253,8 +255,8 @@ const LIKELY_GENERIC = new Set([
  * its own) is exactly what the two-word floor on {@link backtickSpans} already
  * excludes as noise the agent was going to type anyway; a single-token net
  * that took bare words would reopen that hole wider than the floor closes it.
- * So a candidate must carry its own internal structure — a colon, dot, slash
- * or hyphen joining two word-shaped halves, the way a subcommand
+ * So a candidate must carry its own internal structure — a colon, dot, slash,
+ * underscore or hyphen joining two word-shaped halves, the way a subcommand
  * (`db:generate`), a filename (`ci.yml`), or a path segment does — which a
  * plain English word essentially never does, and it must be at least
  * {@link LIKELY_MIN_CHARS} long.
@@ -377,24 +379,32 @@ function judge(
       return { outcome: 'used', by: 'read', evidence: cap(row.text) };
     }
   }
-  // A TOKEN BOUNDARY MATCH, not a substring: `db:generate` is a plain substring
-  // of `db:generate-types`, so a pre-injection call to the latter must not
-  // erase credit for a genuine post-injection call to the former. The class in
-  // the lookaround is exactly {@link LIKELY_TOKEN_RE}'s own — a colon, dot,
-  // slash or hyphen still extends a token, so this only rules out landing
-  // inside a longer one, not a real reappearance next to punctuation.
-  const seenBefore = (candidate: string): boolean => {
-    const re = new RegExp(`(?<![A-Za-z0-9:_./-])${escapeRe(candidate)}(?![A-Za-z0-9:_./-])`);
-    return before.some((row) => re.test(row.text));
-  };
+  // A TOKEN BOUNDARY MATCH, not a substring, ON BOTH SIDES: `db:generate` is a
+  // plain substring of `db:generate-types`, so a pre-injection call to the
+  // latter must not erase credit for a genuine post-injection call to the
+  // former (the `before` side) — but by the same logic, a post-injection call
+  // to `db:generate-types` must not be credited as a hit for a note that only
+  // ever named `db:generate` (the `after` side): that is the identical
+  // boilerplate #254a exists to exclude, just spelled with the shorter token
+  // as the candidate instead of the longer one. Plain `includes` on one side
+  // and a boundary match on the other opens exactly that gap — fixed by
+  // sharing one boundary test both directions (tenjin-agent#276 review round
+  // 2, major). The class in the lookaround is exactly {@link
+  // LIKELY_TOKEN_RE}'s own — a colon, dot, slash, underscore or hyphen still
+  // extends a token, so this only rules out landing inside a longer one, not
+  // a real reappearance next to punctuation.
+  const atBoundary = (haystack: string, candidate: string): boolean =>
+    new RegExp(`(?<![A-Za-z0-9:_./-])${escapeRe(candidate)}(?![A-Za-z0-9:_./-])`).test(haystack);
+  const seenBefore = (candidate: string): boolean =>
+    before.some((row) => atBoundary(row.text, candidate));
   for (const row of after.slice(0, SPAN_WINDOW)) {
-    const hit = spans.find((span) => !seenBefore(span) && row.text.includes(span));
+    const hit = spans.find((span) => !seenBefore(span) && atBoundary(row.text, span));
     // Capped like every other evidence string here: the span is copied out of
     // injected text, which came off a shelf, and `--explain` prints it.
     if (hit !== undefined) return { outcome: 'used', by: 'span', evidence: cap(hit) };
   }
   for (const row of after.slice(0, SPAN_WINDOW)) {
-    const hit = likely.find((token) => !seenBefore(token) && row.text.includes(token));
+    const hit = likely.find((token) => !seenBefore(token) && atBoundary(row.text, token));
     if (hit !== undefined) return { outcome: 'used', by: 'likely', evidence: cap(hit) };
   }
   const evidence = after.slice(0, EVIDENCE_ROWS).map(cap);
