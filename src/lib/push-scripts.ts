@@ -2329,6 +2329,15 @@ function identityFromConsole(text) {
  * \`&&\` because each has the other adjacent. What remains is the shape neither
  * redirect form takes: an isolated \`&\` with plain text (ordinarily
  * whitespace) on both sides.
+ *
+ * FALSE-CLOSED ON THE OTHER COMMON \`&\` TOO, not just redirects: a quoted
+ * argument or a URL query string — \`-t 'a & b'\`, \`--outputFile=a?x=1&y=2\` —
+ * carries an \`&\` with plain text on both sides, indistinguishable to this
+ * regex from a real background operator, and costs the artifact leg on a
+ * command that has no second segment at all. Round 3's own rule covers this:
+ * no identity beats a wrong one, so losing precision on an over-matched \`&\`
+ * is the acceptable side to be wrong on, same as every other check in this
+ * lane that fails closed rather than parses shell syntax properly.
  */
 const BACKGROUND_OP_RE = /(?<![&>])&(?!&|>)/;
 
@@ -2345,13 +2354,26 @@ const BACKGROUND_OP_RE = /(?<![&>])&(?!&|>)/;
  * during this exact invocation, just not as the segment that failed. Rather
  * than parse WHICH segment a report belongs to (the whack-a-mole
  * \`looksLikeTestRun\` was built, and removed, for), the artifact leg is
- * trusted only when there is exactly one segment for it to belong to. Reuses
- * \`commandHeads\`'s own split for everything but the background operator, so
- * the two never disagree about what \`&&\`/\`||\`/\`;\`/\`|\`/newline count as.
+ * trusted only when there is exactly one segment for it to belong to.
+ *
+ * COUNTS RAW SEPARATOR-SPLIT SEGMENTS, not \`commandHeads\`'s own filtered
+ * output (round 3 follow-up review, minor): \`commandHeads\` silently DROPS a
+ * segment it cannot name a head for (\`if (head.length === 0) continue\`) — a
+ * bare head-runner, wrapper word, package-manager run sub or env assignment
+ * with nothing after it — so \`pnpm vitest run && npx\` (or \`&& sudo\`,
+ * \`&& FOO=1\`, \`&& pnpm exec\`) counted as ONE segment by
+ * \`commandHeads(text).length\` even though the text plainly has two, silently
+ * trusting the artifact leg on a genuinely compound command. Splitting on the
+ * SAME separators \`commandHeads\` uses, so the two never disagree about what
+ * \`&&\`/\`||\`/\`;\`/\`|\`/newline count as, then counting the non-blank pieces
+ * (a trailing or leading separator with nothing on the other side is not a
+ * second segment) makes this the exact single-segment claim the docs state,
+ * not an approximation of it.
  */
 function isSingleSegmentCommand(command) {
   const text = String(command);
-  return commandHeads(text).length <= 1 && !BACKGROUND_OP_RE.test(text);
+  const segments = text.split(/&&|\|\||[;|\n]/).filter((s) => s.trim().length > 0);
+  return segments.length <= 1 && !BACKGROUND_OP_RE.test(text);
 }
 
 /**

@@ -4607,6 +4607,56 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     }
   });
 
+  // tenjin-agent#278 round 3 review, new-in-delta minor: `isSingleSegmentCommand`
+  // used to ask `commandHeads(text).length <= 1`, but `commandHeads` silently
+  // DROPS a segment it cannot name a head for (a bare head-runner, wrapper
+  // word, package-manager run sub, or env assignment with nothing after it) —
+  // so a genuinely two-segment command counted as one, silently trusting the
+  // artifact leg on a compound command. Counting raw separator-split segments
+  // instead closes all four degenerate second-segment shapes at once.
+  it.each([
+    'pnpm vitest run && npx',
+    'pnpm vitest run && sudo',
+    'pnpm vitest run && FOO=1',
+    'pnpm vitest run && pnpm exec',
+  ])(
+    'treats %s as two segments even though the second resolves to no head, and skips the artifact leg',
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-headless-segment-'));
+      try {
+        await pushOn('http://127.0.0.1:1');
+        const since = await stashBashStart(SESSION, cwd);
+        await writeFile(
+          join(cwd, '.vitest-report.json'),
+          reportFixture(since + 10, since + 50, [
+            { file: join(cwd, 'src/real.test.ts'), suite: 'realSuite', test: 'a real failure' },
+          ]),
+        );
+        await runScript(
+          pushFailureHookScript(dataDir),
+          JSON.stringify({
+            session_id: `headless-${command}`,
+            cwd,
+            hook_event_name: 'PostToolUse',
+            tool_name: 'Bash',
+            tool_input: { command },
+            tool_response: {
+              stdout: '',
+              stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+              interrupted: false,
+            },
+          }),
+        );
+        expect(
+          (await pairings()).some((p) => p.kind === 'sig_v1_test'),
+          command,
+        ).toBe(false);
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('does not attribute a later build failure to an earlier, PASSING vitest run in the same chained command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-pass-'));
     try {
@@ -4666,6 +4716,36 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
           stdout:
             ' FAIL  src/scripted.test.ts > scriptedSuite > a scripted test\nAssertionError: z\n',
           stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    expect((await pairings()).find((p) => p.kind === 'sig_v1_test')?.error_files).toEqual([
+      'scripted.test.ts',
+    ]);
+  });
+
+  it('pins as DESIGNED, not a defect: a non-test head whose own output happens to carry a real FAIL breadcrumb still gets a test identity (tenjin-agent#278 round 3 review, nit)', async () => {
+    await pushOn('http://127.0.0.1:1');
+    // `pnpm build` is a TS build failure, but its output ALSO happens to carry
+    // a vitest-shaped `FAIL` breadcrumb (a monorepo build script that ran
+    // tests as one of its steps, output concatenated). The console leg is
+    // gated on nothing (round 3): the breadcrumb inside THIS command's own
+    // output is evidence enough on its own, whatever the command line says
+    // and whatever ELSE also failed. This is the documented tradeoff
+    // (docs/command-reference.md, "Identity comes from a structured
+    // artifact..."), not something to fix.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build' },
+        tool_response: {
+          stdout: ' FAIL  src/scripted.test.ts > scriptedSuite > a scripted test\n',
+          stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
           interrupted: false,
         },
       }),
