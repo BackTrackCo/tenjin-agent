@@ -4992,6 +4992,64 @@ describe('the sig_v1_test lane — team leg (tenjin-agent#267)', () => {
     expect(pub.hits()).toBe(0);
   });
 
+  /**
+   * tenjin-agent#278 round 4, corrected nit-1 decline: a failure carrying a
+   * test identity can spend a SECOND request (the coarse-only round on a
+   * genuine round-1 miss), so `lookupAllowed` now charges 2 legs for it
+   * rather than 1. At exactly one lookup left in the bucket, a two-leg fire
+   * must be refused outright — never a first request the second one then has
+   * no budget for.
+   */
+  it('a bucket with one lookup left stops a failure whose identity carries a test key, needing two legs', async () => {
+    const stub = sequencedResolveStub(['miss', 'miss']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const cap = PUSH_LOOKUP_CAPS_PER_WINDOW.failure ?? PUSH_LOOKUP_CAP_DEFAULT;
+    const store = await openStore(dataDir);
+    for (let i = 0; i < cap - 1; i += 1) {
+      store?.run(STORE_SQL.insertInjection, [
+        `seed-failure-${i}`,
+        null,
+        Date.now(),
+        SESSION,
+        null,
+        'machine',
+        'failure',
+        'team',
+        null,
+        null,
+        null,
+        null,
+        SEARCH_ID,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'skipped',
+        'miss',
+        null,
+        0,
+        null,
+      ]);
+    }
+    store?.close();
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    expect(run.stdout).toBe('');
+    // No request at all: refused before the first round, not after it.
+    expect(stub.bodies).toHaveLength(0);
+    expect(team.hits()).toBe(0);
+    const rows = await ledger();
+    expect(rows.at(-1)).toMatchObject({
+      session: SESSION,
+      trigger: 'failure',
+      action: 'skipped',
+      reason: 'lookup-cap',
+    });
+  });
+
   it('falls back to a coarse-only second request on a fine miss, and injects a pointer', async () => {
     const stub = sequencedResolveStub(['miss', 'hit']);
     const team = await serve(stub.handler);

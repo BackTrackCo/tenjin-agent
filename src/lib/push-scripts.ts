@@ -1789,6 +1789,12 @@ function skipWrapper(words, i, valueOpts, name) {
   return i;
 }
 
+/** The command-segment separators \`&&\`, \`||\`, \`;\`, \`|\` and newline — shared
+ *  by \`commandHeads\` and \`isSingleSegmentCommand\` so the "same separators"
+ *  claim in the latter's doc comment stays true by construction rather than
+ *  by two hand-kept copies agreeing (tenjin-agent#278 round 4 nit). */
+const COMMAND_SEPARATOR_RE = /&&|\|\||[;|\n]/;
+
 /**
  * Every command in \`command\`, as { head, sub }: the program each segment
  * actually runs and its first argument. Segments split on \`&&\`, \`||\`, \`;\`,
@@ -1803,7 +1809,7 @@ function skipWrapper(words, i, valueOpts, name) {
  */
 function commandHeads(command) {
   const out = [];
-  for (const segment of String(command).split(/&&|\|\||[;|\n]/)) {
+  for (const segment of String(command).split(COMMAND_SEPARATOR_RE)) {
     const words = segment.trim().split(/\s+/).filter((w) => w.length > 0);
     let i = 0;
     let head = '';
@@ -2364,15 +2370,16 @@ const BACKGROUND_OP_RE = /(?<![&>])&(?!&|>)/;
  * \`&& FOO=1\`, \`&& pnpm exec\`) counted as ONE segment by
  * \`commandHeads(text).length\` even though the text plainly has two, silently
  * trusting the artifact leg on a genuinely compound command. Splitting on the
- * SAME separators \`commandHeads\` uses, so the two never disagree about what
- * \`&&\`/\`||\`/\`;\`/\`|\`/newline count as, then counting the non-blank pieces
- * (a trailing or leading separator with nothing on the other side is not a
- * second segment) makes this the exact single-segment claim the docs state,
- * not an approximation of it.
+ * shared \`COMMAND_SEPARATOR_RE\` \`commandHeads\` also uses — one definition of
+ * what \`&&\`/\`||\`/\`;\`/\`|\`/newline count as, rather than two hand-kept copies
+ * that could drift — then counting the non-blank pieces (a trailing or
+ * leading separator with nothing on the other side is not a second segment)
+ * makes this the exact single-segment claim the docs state, not an
+ * approximation of it.
  */
 function isSingleSegmentCommand(command) {
   const text = String(command);
-  const segments = text.split(/&&|\|\||[;|\n]/).filter((s) => s.trim().length > 0);
+  const segments = text.split(COMMAND_SEPARATOR_RE).filter((s) => s.trim().length > 0);
   return segments.length <= 1 && !BACKGROUND_OP_RE.test(text);
 }
 
@@ -2934,7 +2941,14 @@ async function teamResolve(args) {
     recordDecision({ ...base, action: 'skipped', reason: 'keys-off' });
     return null;
   }
-  if (!lookupAllowed('failure', sessionId)) {
+  // TWO LEGS WHEN A TEST IDENTITY RIDES ALONG (tenjin-agent#278 round 4 nit,
+  // corrected decline): a genuine round-1 miss with \`testSig\` present issues
+  // a SECOND request below (the test lane's coarse key), so this fire spends
+  // 2 lookups, not 1 — and \`legs\` is read ONCE, in this same call, with no
+  // extra \`bumpState\` the way re-checking before that second request would
+  // have needed. Charging what the fire will actually spend, in one check,
+  // is what the earlier decline's \`legs\` parameter already exists for.
+  if (!lookupAllowed('failure', sessionId, testSig !== null ? 2 : 1)) {
     recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
     return null;
   }
