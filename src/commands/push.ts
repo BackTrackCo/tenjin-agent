@@ -991,7 +991,12 @@ function renderStatusLines(data: {
       lines.push(`server ${label}: unavailable`);
       continue;
     }
-    lines.push(`server ${label} (${stats.windowDays}d):`);
+    // The endpoint is cached server-side for several minutes (tenjin-agent#252),
+    // so a count that has not moved since the last `push grade` is routinely the
+    // cache, not proof grading never reached the shelf. `Age` says which.
+    const asOf =
+      stats.ageSeconds !== undefined ? ` — shelf stats as of ~${stats.ageSeconds}s ago` : '';
+    lines.push(`server ${label} (${stats.windowDays}d)${asOf}:`);
     for (const t of stats.triggers) {
       const rate = t.useRate === null ? 'n/a' : t.useRate.toFixed(2);
       // The one string in this block the shelf chose. Bounded by the response
@@ -1652,6 +1657,14 @@ function gradeLines(
   ];
   if (posted.skipped.length > 0) {
     lines.push(`${posted.skipped.length} verdict(s) not routed to any shelf; still unposted`);
+  }
+  // The endpoint `push status` reads is cached server-side for several minutes
+  // (tenjin-agent#252): a verdict this run just posted routinely will not move
+  // the server counts a `push status` right after this checks. Only worth
+  // saying when something was actually posted — an all-skipped or all-failed
+  // run has no fresh verdict for the cache to be behind on yet.
+  if (posted.posted > 0) {
+    lines.push('shelf stats can take several minutes to reflect what was just posted');
   }
   if (!explain) return lines;
   for (const row of rows) {

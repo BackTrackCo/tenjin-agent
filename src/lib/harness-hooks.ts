@@ -510,6 +510,91 @@ export async function stopHookIsCurrent(dataDir: string): Promise<boolean> {
   return onDisk === null || onDisk === spec.script;
 }
 
+/**
+ * Which of the generated hook/push scripts ON DISK do not match what THIS
+ * BUILD would write.
+ *
+ * The doctor equivalent of `compareWiredSkills` (commands/doctor.ts), same
+ * reason: `tenjin update` bumps the npm-installed binary and nothing else
+ * (lib/install-location.ts refuses the self-heal on a git checkout entirely,
+ * which is how this team runs `main`), so a script a merge changed keeps
+ * running whatever it was until someone re-runs `tenjin install`
+ * (tenjin-agent#252 — #242's hook-allowlist fix merged and kept producing junk
+ * pairings on this machine for hours because of exactly this). `stopHookIsCurrent`
+ * already does this for the one script `push status` cannot do without;
+ * this covers all eight, for doctor to report on generally.
+ *
+ * PLANNED WITH `push: true` (via `scriptPlan`), same as the writer: a body is
+ * generated whether or not the seven push entries are registered, so a stale
+ * push script is real drift even on a machine where `hooks.push` reads `off`.
+ *
+ * Absent scripts are not stale — nothing installed cannot have drifted, and a
+ * fresh machine that never ran `tenjin install` is not this check's business
+ * (the skills / push-hooks checks already cover "nothing wired"). A script
+ * that IS there but could not be READ (permissions, a device node standing in
+ * its place) is a third case distinct from both: `lstat` proves something is
+ * installed, so it is not absent, and an unreadable file cannot be compared
+ * byte-for-byte, so it is not "current" either. Reported back as
+ * {@link unreadable} rather than folded into either list, so the caller can
+ * say so rather than the file quietly vanishing from the report — the same
+ * silent-drop `compareWiredSkills` has for this exact case, which is a gap
+ * there too rather than a precedent to repeat here.
+ *
+ * TWO MORE "is gone" lies a bare `catch(() => null)` would tell here, both
+ * filed against this PR's review:
+ *
+ * 1. A hooks DIRECTORY that itself lost search (`+x`) permission fails EVERY
+ *    child `lstat` with EACCES, not ENOENT. Catching every code the same way
+ *    would read that as "nothing installed" and doctor would stay silent
+ *    instead of naming a permissions problem, so the catch below keeps ENOENT
+ *    (truly absent) and everything else (EACCES here, on the file or on the
+ *    directory above it) lands in {@link unreadable} instead.
+ * 2. `entry.isFile()` is checked before the read: a FIFO standing where a
+ *    script should be makes `readFile` block forever waiting for a writer
+ *    (verified: a `mkfifo` target hangs past any timeout this process sets),
+ *    and a symlink to an unbounded source is an unbounded read. `lstat`
+ *    (never `stat`) does not follow the link, so a symlink standing in for a
+ *    script — the "device node" case the doc above already named — fails
+ *    `isFile()` and lands in {@link unreadable} without `readFile` ever
+ *    touching it.
+ */
+export async function compareHookScripts(
+  dataDir: string,
+): Promise<{ stale: string[]; present: string[]; unreadable: string[] }> {
+  const dir = hooksDir(dataDir);
+  const seen = new Set<string>();
+  const present: string[] = [];
+  const stale: string[] = [];
+  const unreadable: string[] = [];
+  for (const spec of scriptPlan(dataDir)) {
+    if (seen.has(spec.scriptFile)) continue;
+    seen.add(spec.scriptFile);
+    const target = join(dir, spec.scriptFile);
+    // `lstat` first (as {@link writeOwnedScripts} does) so a script that
+    // exists but cannot be opened is told apart from one that is not there at
+    // all, rather than both landing on the same `catch (() => null)`. ENOENT
+    // is the only code that means absent; anything else (EACCES on the file,
+    // or on the directory above it) means something IS there and could not be
+    // looked at, which belongs in `unreadable`, not silence.
+    const entry = await lstat(target).catch((err: NodeJS.ErrnoException) =>
+      err.code === 'ENOENT' ? null : err,
+    );
+    if (entry === null) continue;
+    if (entry instanceof Error || !entry.isFile()) {
+      unreadable.push(spec.scriptFile);
+      continue;
+    }
+    const onDisk = await readFile(target, 'utf8').catch(() => null);
+    if (onDisk === null) {
+      unreadable.push(spec.scriptFile);
+      continue;
+    }
+    present.push(spec.scriptFile);
+    if (onDisk !== spec.script) stale.push(spec.scriptFile);
+  }
+  return { stale, present, unreadable };
+}
+
 export interface WireHooksOptions {
   homeDir: string;
   dataDir: string;

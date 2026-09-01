@@ -24,6 +24,8 @@ import {
   openSearches,
   openStore,
   probeSqlite,
+  assertSelectOnly,
+  queryStateReadOnly,
   recordSearch,
   removeRetiredState,
   projectIdOf,
@@ -661,6 +663,155 @@ function columns(table: string): string[] {
 
 /** The four tables version 2 puts `agent_id` on. */
 const V2_TABLES = ['events', 'injections', 'searches', 'pairing_closes'] as const;
+
+/**
+ * `tenjin state query` (tenjin-agent#252): read-only ad hoc SQL against the
+ * state db, for an operator who reaches for `sqlite3 -readonly` and hits
+ * "unable to open database file (14)" against the WAL-mode store.
+ */
+describe('queryStateReadOnly', () => {
+  it('runs a SELECT and returns rows as plain objects', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, ['', 'k1', 'v1', 1000]);
+    store.run(STORE_SQL.setState, ['', 'k2', 'v2', 2000]);
+    store.close();
+
+    const rows = await queryStateReadOnly(
+      dataDir,
+      "SELECT key, value FROM session_state WHERE session = '' ORDER BY key",
+    );
+    expect(rows).toEqual([
+      { key: 'k1', value: 'v1' },
+      { key: 'k2', value: 'v2' },
+    ]);
+  });
+
+  it('accepts a WITH ... SELECT statement and a single trailing semicolon', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, ['', 'k1', 'v1', 1000]);
+    store.close();
+
+    const rows = await queryStateReadOnly(
+      dataDir,
+      'WITH t AS (SELECT key FROM session_state) SELECT key FROM t;',
+    );
+    expect(rows).toEqual([{ key: 'k1' }]);
+  });
+
+  it('rejects a non-SELECT statement before opening the file', async () => {
+    await expect(queryStateReadOnly(dataDir, 'DELETE FROM session_state')).rejects.toMatchObject({
+      code: 'USAGE',
+    });
+    await expect(queryStateReadOnly(dataDir, '   ')).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  /** A SELECT smuggling a second statement after a `;` is still one write this
+   *  verb must never make room for. */
+  it('rejects a second statement riding after a semicolon', async () => {
+    await expect(
+      queryStateReadOnly(dataDir, 'SELECT 1; DROP TABLE session_state'),
+    ).rejects.toMatchObject({ code: 'USAGE' });
+  });
+
+  /** `readOnly: true` fails outright rather than creating the file — the right
+   *  answer for an inspection tool that must never materialize the store it was
+   *  asked to look inside. */
+  it('fails STATE_QUERY_FAILED against a data dir with no store yet', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'tenjin-state-query-'));
+    try {
+      await expect(queryStateReadOnly(empty, 'SELECT 1 AS one')).rejects.toMatchObject({
+        code: 'STATE_QUERY_FAILED',
+      });
+    } finally {
+      await rm(empty, { recursive: true, force: true });
+    }
+  });
+
+  it('fails STATE_QUERY_FAILED on a query the driver itself refuses', async () => {
+    const store = await openStore(dataDir);
+    if (store === null) throw new Error('no store');
+    store.close();
+    await expect(queryStateReadOnly(dataDir, 'SELECT * FROM no_such_table')).rejects.toMatchObject({
+      code: 'STATE_QUERY_FAILED',
+    });
+  });
+});
+
+/**
+ * Edge cases in the single-read-statement guard, filed against Greptile's PR
+ * 277 review: a semicolon or a write keyword sitting INSIDE a string literal
+ * or a comment must not be read as though it were outside one, and a `WITH`
+ * clause must not be allowed to lead into a write just because the leading
+ * keyword happens to be `WITH`.
+ */
+describe('assertSelectOnly: literals, comments, and WITH-prefixed writes', () => {
+  it('accepts a SELECT whose only ";" sits inside a string literal', () => {
+    expect(assertSelectOnly("SELECT * FROM t WHERE msg = 'a;b'")).toBe(
+      "SELECT * FROM t WHERE msg = 'a;b'",
+    );
+  });
+
+  it('still rejects a real second statement after a literal that contains a ";"', () => {
+    expect(() => assertSelectOnly("SELECT * FROM t WHERE msg = 'a;b'; DROP TABLE t")).toThrow(
+      /one statement/i,
+    );
+  });
+
+  it('accepts a SELECT preceded by a line comment', () => {
+    expect(assertSelectOnly('-- note\nSELECT 1')).toBe('-- note\nSELECT 1');
+  });
+
+  it('accepts a SELECT preceded by a block comment', () => {
+    expect(assertSelectOnly('/* note */ SELECT 1')).toBe('/* note */ SELECT 1');
+  });
+
+  it('rejects a WITH clause that leads into a DELETE rather than a SELECT', () => {
+    expect(() => assertSelectOnly('WITH x AS (SELECT 1) DELETE FROM session_state')).toThrow(
+      /read-only/i,
+    );
+  });
+
+  it('rejects a WITH clause that leads into an INSERT rather than a SELECT', () => {
+    expect(() =>
+      assertSelectOnly("WITH x AS (SELECT 1) INSERT INTO session_state VALUES ('', 'k', 'v', 0)"),
+    ).toThrow(/read-only/i);
+  });
+
+  it('does not misfire on a write keyword that only appears inside a string literal', () => {
+    expect(assertSelectOnly("SELECT * FROM injections WHERE reason = 'insert failed'")).toBe(
+      "SELECT * FROM injections WHERE reason = 'insert failed'",
+    );
+  });
+
+  it('does not misfire on a column name that merely contains a write keyword as a substring', () => {
+    expect(assertSelectOnly('SELECT deleted_at FROM pairings')).toBe(
+      'SELECT deleted_at FROM pairings',
+    );
+  });
+
+  it('still rejects a bare PRAGMA', () => {
+    expect(() => assertSelectOnly('PRAGMA journal_mode')).toThrow(/SELECT/i);
+  });
+
+  /**
+   * PR 277 review nit: an UNTERMINATED `[` used to be masked through to
+   * end-of-input on the (correct, for a CLOSED bracket) assumption that it
+   * opens a quoted identifier — which blanked out everything after it,
+   * including the real statement separator, so a second statement rode
+   * through undetected. An unmatched `[` is not a quoted identifier at all,
+   * so it now falls through as a literal character instead of eating the
+   * rest of the string.
+   */
+  it('still rejects a second statement hidden behind an unmatched "["', () => {
+    expect(() => assertSelectOnly('SELECT 1 [ ; DROP TABLE events')).toThrow(/one statement/i);
+  });
+
+  it('still masks a real quoted identifier, closing bracket and all', () => {
+    expect(assertSelectOnly('SELECT [my col] FROM pairings')).toBe('SELECT [my col] FROM pairings');
+  });
+});
 
 /**
  * A database that already exists is the ONLY interesting case for a schema

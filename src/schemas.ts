@@ -63,6 +63,11 @@ export const ErrorCodeSchema = z.enum([
   // registry publicly advertises for this resource (understood-but-refused, 3);
   // nothing was signed and nothing was spent.
   'REGISTRY_MISMATCH',
+  // `tenjin state query`: the state database could not be opened read-only (no
+  // store yet, an unreadable file) or the driver rejected the statement (bad
+  // SQL, an unknown column). Never a write-class code: this verb never mutates
+  // anything, so there is no post-decision failure to distinguish it from.
+  'STATE_QUERY_FAILED',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 
