@@ -269,6 +269,24 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
  */
 const InstallConfigSchema = z.object({
   harness: z.array(z.enum(HARNESS_TARGETS)),
+  /**
+   * The EXACT rule strings still pending the last time an install explicitly
+   * declined the free-verb allowlist (`--no-allow-free-verbs`, or "no" at the
+   * interactive prompt), so `--refresh` can subtract them from what it would
+   * otherwise report as pending instead of recomputing from the settings file
+   * and nagging about a settled "no" on every refresh (tenjin-agent#234).
+   *
+   * A LIST, NOT A FLAG, on purpose: a boolean has no way to say "these were
+   * declined" without also silencing every rule a LATER version might add, so a
+   * genuinely new suggestion would never be reported again either. Per-rule
+   * suppression means only the rules that were actually offered and refused
+   * stay quiet; a new one still surfaces.
+   *
+   * Cleared back to `[]` the next time an install actually wires the allowlist,
+   * or finds it already fully satisfied, so a later legitimate grant (manual or
+   * otherwise) is never shadowed by a stale decline.
+   */
+  freeVerbsDeclined: z.array(z.string()),
 });
 
 /**
@@ -344,6 +362,19 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 
 /**
+ * `install`'s raw shape, widened to still parse a `freeVerbsDeclined: true`
+ * left by an earlier revision of this same key (before tenjin-agent#234's
+ * rewrite from a suppress-everything boolean to a per-rule list): a stray
+ * boolean must not fail config.json with CONFIG_INVALID. See
+ * {@link resolveFreeVerbsDeclined} for how it is read back — treated the same
+ * as absent either way, never as "these specific rules were declined", because
+ * a boolean carries no per-rule information to recover.
+ */
+const RawInstallConfigSchema = InstallConfigSchema.partial()
+  .extend({ freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional() })
+  .passthrough();
+
+/**
  * Values as they may appear in config.json — every known key optional; absent =
  * default. `.passthrough()` PRESERVES unknown keys through load + persist: without
  * it an older binary's `config set` would strip (and re-serialize away) any newer
@@ -357,12 +388,27 @@ export const RawConfigSchema = ConfigSchema.partial()
   // outer object passes unknown keys through.
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
-    install: InstallConfigSchema.partial().passthrough().optional(),
+    install: RawInstallConfigSchema.optional(),
     hooks: HooksConfigSchema.partial().merge(LegacyHooksFields).passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
+
+/**
+ * Normalize `install.freeVerbsDeclined` as read from config.json: the current
+ * shape (an array of exact declined rule strings) passes through as-is; the
+ * boolean the key held before tenjin-agent#234, and an absent key, both read
+ * back as "nothing specific is known to be declined" — `[]`. That is the safe
+ * direction for the boolean: a stray `true` from before the rewrite silences
+ * nothing, so at worst a settled decline is reported pending once more (the
+ * exact bug this key exists to prevent, but the machine has already re-decided
+ * this by installing the version that made the rewrite); it never silently
+ * papers over a rule that this list should be naming.
+ */
+export function resolveFreeVerbsDeclined(value: string[] | boolean | undefined): string[] {
+  return Array.isArray(value) ? value : [];
+}
 
 /**
  * The resolved-view sentinel for an absent sendMaxAmount. Never a persistable
@@ -409,7 +455,7 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarPay: false,
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
-  install: { harness: [] },
+  install: { harness: [], freeVerbsDeclined: [] },
   // `auto` is the default because the hook exists to be useful without being
   // asked for; the disclosure and the undo ride the install output, and `off`
   // leaves the installed script inert without touching settings.json. Both hooks
@@ -558,7 +604,10 @@ export async function loadConfig(dir: string): Promise<Config> {
       ackServerWarnings:
         raw.publish?.ackServerWarnings ?? CONFIG_DEFAULTS.publish.ackServerWarnings,
     },
-    install: { harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness },
+    install: {
+      harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
+      freeVerbsDeclined: resolveFreeVerbsDeclined(raw.install?.freeVerbsDeclined),
+    },
     hooks: {
       webSearch: resolvedWebSearch,
       agentDispatch: resolvedAgentDispatch,

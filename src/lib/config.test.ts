@@ -232,14 +232,37 @@ describe('hooks block: push and capture (docs/command-reference.md#push-experime
 });
 
 describe('install block', () => {
-  it('defaults to no recorded harness', async () => {
-    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [] });
-    expect((await loadConfig(dir)).install).toEqual({ harness: [] });
+  it('defaults to no recorded harness and no recorded decline', async () => {
+    expect(CONFIG_DEFAULTS.install).toEqual({ harness: [], freeVerbsDeclined: [] });
+    expect((await loadConfig(dir)).install).toEqual({ harness: [], freeVerbsDeclined: [] });
   });
 
   it('reads back the recorded targets', async () => {
     await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'shared'] } }));
     expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'shared']);
+  });
+
+  it('reads back a recorded free-verb decline as the exact declined rules', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ install: { freeVerbsDeclined: ['Bash(tenjin search:*)'] } }),
+    );
+    expect((await loadConfig(dir)).install.freeVerbsDeclined).toEqual(['Bash(tenjin search:*)']);
+  });
+
+  // Before tenjin-agent#234's rewrite from a suppress-everything flag to a
+  // per-rule list, this key held a boolean. A machine that already wrote
+  // `true` must not fail CONFIG_INVALID on the next read, but a boolean has no
+  // per-rule information to recover, so it reads back as "nothing specific is
+  // known to be declined" either way — the safe direction (worst case a
+  // settled decline is reported pending once more; never a rule silently
+  // dropped from this list).
+  it('tolerates the old freeVerbsDeclined boolean and treats it as nothing declined', async () => {
+    await writeFile(configFile(), JSON.stringify({ install: { freeVerbsDeclined: true } }));
+    expect((await loadConfig(dir)).install.freeVerbsDeclined).toEqual([]);
+
+    await writeFile(configFile(), JSON.stringify({ install: { freeVerbsDeclined: false } }));
+    expect((await loadConfig(dir)).install.freeVerbsDeclined).toEqual([]);
   });
 
   it('rejects a harness name install could not have written', async () => {

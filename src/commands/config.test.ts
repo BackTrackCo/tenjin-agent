@@ -4,7 +4,13 @@ import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runConfigList, runConfigGet, runConfigSet, persistPublishMode } from './config';
+import {
+  runConfigList,
+  runConfigGet,
+  runConfigSet,
+  persistPublishMode,
+  persistFreeVerbsDeclined,
+} from './config';
 import { RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { fileURLToPath } from 'node:url';
@@ -168,6 +174,24 @@ describe('runConfigList', () => {
       baseUrl: 'https://seeded.example',
       maxAutoSpend: '500000',
       publish: { defaultPrice: '250000', mode: 'review' },
+    });
+  });
+
+  it('persistFreeVerbsDeclined preserves a sibling install.harness key', async () => {
+    // Seeded as a past `install --harness claude` would have left it; declining
+    // the allowlist on a later run must not clobber that record.
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude'] } }));
+    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)', 'Bash(tenjin read:*)']);
+    expect(await readRawFile()).toEqual({
+      install: {
+        harness: ['claude'],
+        freeVerbsDeclined: ['Bash(tenjin search:*)', 'Bash(tenjin read:*)'],
+      },
+    });
+    // A later grant clears it back, through the same merge.
+    await persistFreeVerbsDeclined(dir, []);
+    expect(await readRawFile()).toEqual({
+      install: { harness: ['claude'], freeVerbsDeclined: [] },
     });
   });
 
