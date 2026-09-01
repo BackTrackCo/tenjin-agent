@@ -125,6 +125,8 @@ Every search names the arm that fired it: this command (and the MCP `search` too
 
 Shows a candidate card and preview before purchase. It never pays.
 
+The piece's title surfaces in the output when it is available — from the 402 preview for a paid piece, or a live lookup when a ref resolved by id carries no preview to read one from. Absent, never guessed, when neither source has one.
+
 ### `tenjin read <url-or-resource-id>`
 
 Delivers free, local-library, or already-owned pieces. It refuses with exit 3 rather than paying.
@@ -519,6 +521,18 @@ tenjin push on
 tenjin push status --json
 tenjin push grade --explain
 tenjin push off
+```
+
+## State store
+
+`~/.tenjin/state.db` holds pairings, searches, and every hook's own bookkeeping. It runs in WAL mode, so **inspect it with `sqlite3 ~/.tenjin/state.db`, not `sqlite3 -readonly ~/.tenjin/state.db`** — the standalone binary's `-readonly` open still wants to touch the `-shm` sidecar, which fails from a subshell with `unable to open database file (14)`; a plain open works.
+
+### `tenjin state query "<sql>"`
+
+A read-only escape hatch that does not have that failure mode: one `SELECT` (or `WITH ... SELECT`) statement, run through the CLI's own `node:sqlite` driver opened `readOnly`, with rows printed as JSON. Anything else — a second `;`-separated statement, an INSERT/UPDATE/DELETE/PRAGMA — is refused before the file is ever opened.
+
+```bash
+tenjin state query "SELECT key, at FROM session_state WHERE key LIKE 'pairing_post:%' LIMIT 20"
 ```
 
 ## MCP

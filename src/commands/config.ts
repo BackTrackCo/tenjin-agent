@@ -729,6 +729,22 @@ export async function persistInstallHarness(
   }));
 }
 
+/**
+ * Record the EXACT free-verb rules `install` declined, through the same locked
+ * read-modify-write every `config set` uses. Set to whatever was pending at the
+ * moment of `--no-allow-free-verbs` or an interactive "no"; cleared back to
+ * `[]` the moment an install actually wires the allowlist, or finds it already
+ * fully satisfied. `--refresh` subtracts this list from what it would otherwise
+ * report as pending, so a settled no stays settled per rule — without also
+ * silencing a genuinely NEW rule a later version adds (tenjin-agent#234).
+ */
+export async function persistFreeVerbsDeclined(dir: string, declined: string[]): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    install: { ...existing.install, freeVerbsDeclined: declined },
+  }));
+}
+
 async function resolveFromContext(ctx: CommandContext): Promise<EffectiveSettings> {
   const config = await loadRawConfig(ctx.dataDir);
   // Feed the per-project `.tenjin.json` layer so the publish keys read out what a

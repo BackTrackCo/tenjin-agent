@@ -287,7 +287,13 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
           // no unsynced row for a future run to pick up. Leaving it unstamped
           // costs one duplicate POST at worst.
           if (
-            !setLink(store, row.id, { postId: result.resourceId, origin, at: now(), own: true })
+            !setLink(store, row.id, {
+              postId: result.resourceId,
+              origin,
+              at: now(),
+              own: true,
+              url: result.url,
+            })
           ) {
             continue;
           }
@@ -476,15 +482,104 @@ function discriminant(row: PairingRow): string {
   return row.errorFiles.length > 0 ? (row.errorFiles[0] ?? '') : '';
 }
 
+/** Shell scaffolding (`cd`, `echo`, `printf`) and pipe-tail text filters
+ *  (`grep`, `head`, ...) that never mark what actually FIXED a failure — only
+ *  what shaped or scaffolded a prior command's output. Kept separate from
+ *  push-scripts.ts's `FAILURE_HEADS`: that allowlist is generated hook-script
+ *  SOURCE (a string this module cannot import, not a real binding) and is
+ *  scoped to failure signatures, not to "what command passed". A denylist
+ *  answers the looser "Passed on:" question well enough without a schema
+ *  change to store a computed head at fix time. */
+const FIX_CMD_NOISE_HEADS = new Set([
+  'cd',
+  'echo',
+  'printf',
+  'true',
+  'false',
+  'grep',
+  'head',
+  'tail',
+  'sed',
+  'awk',
+  'sort',
+  'uniq',
+  'wc',
+  'cut',
+  'tr',
+  'xargs',
+]);
+
+/** A head coming out of `fixCmdHead` must look like a command/basename, not an
+ *  arbitrary token: `$(...)`, a backtick, a redirect, or a runaway-length
+ *  string are all rejected rather than published (PR 277 round-2 review, nit 2
+ *  under sync.ts:532). */
+const CMD_HEAD_SHAPE_RE = /^[\w.@+-]{1,40}$/;
+
+/** True when `word` — one candidate env-assignment word (`NAME=value...`) —
+ *  carries an odd number of `"` or `'` characters. A whitespace-split word
+ *  like that is not a whole assignment: the quoted value continues into the
+ *  next word(s), which the splitter has no way to reassemble, so the "next
+ *  word" `fixCmdHead` would otherwise treat as the command head is actually a
+ *  fragment of the quoted value (PR 277 round-2 review, new-in-delta finding
+ *  on sync.ts:526-529: `MYSQL_PWD="correct horse battery staple" pnpm test`
+ *  published `Passed on: horse`). */
+function hasUnbalancedQuote(word: string): boolean {
+  const dq = (word.match(/"/g) ?? []).length;
+  const sq = (word.match(/'/g) ?? []).length;
+  return dq % 2 !== 0 || sq % 2 !== 0;
+}
+
+/** The first non-noise command basename in `command`, for the `Passed on:`
+ *  line — the same "publish the head, not the whole line" treatment `cmdHead`
+ *  already gets for `Failed:`. `fixCmd` carries the WHOLE scrubbed successful
+ *  command (a scrubbed-to-`/` `cd /` prefix and pipeline tails included),
+ *  unlike `cmdHead`, which push-scripts.ts computes once at pairing-open time
+ *  and stores (tenjin-agent#252, PR 277 review). Returns null when nothing but
+ *  noise words remain, so the caller drops the line the same way it already
+ *  drops `Failed:` for a null `cmdHead` — and also returns null outright (the
+ *  whole line dropped, not just this segment) the moment a skipped assignment
+ *  word carries an unbalanced quote, since the words after it are unreliable
+ *  fragments of that quoted value rather than a real command. */
+function fixCmdHead(command: string): string | null {
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    const words = segment
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0);
+    let i = 0;
+    while (i < words.length && /^[A-Za-z_]\w*=/.test(words[i] ?? '')) {
+      if (hasUnbalancedQuote(words[i] ?? '')) return null;
+      i++;
+    }
+    if (i >= words.length) continue;
+    const word = words[i] ?? '';
+    const head = word.split('/').pop() || word;
+    if (FIX_CMD_NOISE_HEADS.has(head)) continue;
+    if (!CMD_HEAD_SHAPE_RE.test(head)) continue;
+    return head;
+  }
+  return null;
+}
+
 /** ≤300 chars: the failing head, the fix command and files, the verify command,
  *  and a `pkg:` line (which a later staleness read parses back). Every field
  *  already passed the local scrub on the way into the row; the whole thing is
  *  re-bounded here. */
 function bodyFor(row: PairingRow): string {
   const lines: string[] = [];
-  if (row.cmd !== null && row.cmd.length > 0) lines.push(`Failed: ${row.cmd}`);
+  // The HEAD, not `row.cmd`: the row keeps the whole scrubbed command line for
+  // `sig_v1` (the fingerprint hashes it), but a synced pairing's body is public
+  // team-shelf prose, and the full line routinely carries a pipeline tail
+  // (`| grep ...`) or a scrubbed-to-`/` cwd that reads as a bogus `cd /`
+  // (tenjin-agent#252). `cmdHead` is the same value the title and the
+  // `command_head` key already use.
+  if (row.cmdHead !== null && row.cmdHead.length > 0) lines.push(`Failed: ${row.cmdHead}`);
   if (row.fixFiles.length > 0) lines.push(`Changed: ${row.fixFiles.slice(0, 4).join(', ')}`);
-  if (row.fixCmd !== null && row.fixCmd.length > 0) lines.push(`Passed on: ${row.fixCmd}`);
+  // Same head-not-whole-line treatment as `Failed:` above, via a local
+  // derivation rather than `row.cmdHead` (`fixCmd` is a different capture with
+  // no stored head of its own).
+  const fixHead = row.fixCmd !== null && row.fixCmd.length > 0 ? fixCmdHead(row.fixCmd) : null;
+  if (fixHead !== null) lines.push(`Passed on: ${fixHead}`);
   const pkgs = Object.entries(row.pkgVersions)
     .slice(0, 3)
     .map(([name, ver]) => `${name}@${ver}`);
@@ -553,6 +648,25 @@ interface PairingLink {
   closedAt?: number;
   status?: string;
   fixFiles?: string[];
+  /**
+   * The read URL `publishPost` echoed back on an OWN publish
+   * (tenjin-agent#252): the read route is keyed by handle/slug, so an id
+   * alone cannot rebuild it later, and this is the one moment the CLI is
+   * ever handed the slug for a post it just created. Stored here so
+   * `findPairingCandidate` (state-store.ts) can answer `inspect`/`read` for an
+   * id `tenjin sync` published without ever having been searched for. Absent
+   * on a `held` link — this machine never fetched the holder's own slug.
+   *
+   * Title and price are deliberately NOT stored alongside it (PR 277 round-2
+   * review, nit on state-store.ts:4132): they were only ever read back as a
+   * synthesized `title: ''` / `price: '0'` default for a caller that reads
+   * only `.url`, and a stale or defaulted price is the wrong thing to hand a
+   * future spend-check. A caller that needs display metadata for a resolved
+   * id fetches it live off `GET /api/posts/<id>/public` (`getPostMetadata`,
+   * lib/agent-api.ts) instead, and gets "unknown" rather than an invented
+   * value when that call fails or the route predates the deployment.
+   */
+  url?: string;
 }
 
 function getLink(store: Store, pairingId: number): PairingLink | null {
@@ -577,6 +691,7 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
       ...(Array.isArray(link.fixFiles)
         ? { fixFiles: link.fixFiles.filter((f): f is string => typeof f === 'string') }
         : {}),
+      ...(typeof link.url === 'string' && link.url.length > 0 ? { url: link.url } : {}),
     };
   } catch {
     return null;

@@ -3,6 +3,7 @@ import {
   buildSearchRequest,
   buildOutcomeItem,
   getLookupStats,
+  getPostMetadata,
   postSearch,
   postOutcomes,
   type SearchResult,
@@ -678,6 +679,114 @@ describe('getLookupStats', () => {
     }
   });
 
+  /**
+   * tenjin-agent#252: `GET /api/lookups/stats` is cached server-side for
+   * several minutes, and the response's own `Age` header is the only thing
+   * that says so — a stale zero-`used` count otherwise reads as "grading
+   * never reached the shelf" rather than "the cache has not turned over yet".
+   */
+  it('captures the Age response header as ageSeconds', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '137' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBe(137);
+  });
+
+  /** Absent, never coerced to 0 — a freshness claim this CLI was never told. */
+  it('leaves ageSeconds undefined with no Age header', async () => {
+    const { fetch } = stubFetch(json(200, STATS));
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBeUndefined();
+  });
+
+  /**
+   * PR 277 review: `Number(raw)` alone accepts everything `Age` never
+   * legitimately carries. An empty header is the sharpest case — some proxies
+   * emit `Age: ""`, and `Number('') === 0` reads as a freshly-served answer,
+   * exactly inverting the signal this field exists to give.
+   */
+  it.each([
+    ['', 'empty'],
+    ['   ', 'whitespace-only'],
+    ['0x10', 'hex'],
+    ['+5', 'leading plus'],
+    ['1e300', 'exponent'],
+    ['1.5', 'fractional'],
+    ['-1', 'negative'],
+    ['12abc', 'trailing garbage'],
+  ])('leaves ageSeconds undefined for a non-integer Age header: %s (%s)', async (raw) => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: raw },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBeUndefined();
+  });
+
+  it('accepts a zero Age header (a genuinely fresh read, not the empty-string default)', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '0' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBe(0);
+  });
+
+  /**
+   * PR 277 round-2 review, nit 3: the digit-only shape check has no length
+   * cap of its own, so `Age: "99999999999999999999999999"` still parsed and
+   * rendered as "~1e+26s ago" — a proxy sending an absurd value should read as
+   * unparseable, not as a freshness claim past any real cache lifetime.
+   */
+  it('leaves ageSeconds undefined for an Age header past the sanity cap', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '99999999999999999999999999' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBeUndefined();
+  });
+
+  it('accepts an Age header at the sanity cap boundary', async () => {
+    const res = new Response(JSON.stringify(STATS), {
+      status: 200,
+      headers: { 'content-type': 'application/json', age: '10000000' },
+    });
+    const { fetch } = stubFetch(res);
+    const stats = await getLookupStats(7, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(stats.ageSeconds).toBe(10000000);
+  });
+
   /** A pattern rather than the arm names, so a shelf that grows an arm still
    *  renders instead of failing the whole block. */
   it('accepts an arm name this build has never heard of', async () => {
@@ -695,5 +804,121 @@ describe('getLookupStats', () => {
       fetchImpl: fetch,
     });
     expect(stats.triggers[0]?.trigger).toBe('newarm');
+  });
+});
+
+/**
+ * PR 277 round-2 review, nit on state-store.ts:4132: `findPairingCandidate`
+ * used to synthesize `title: ''` / `price: '0'` for a `pairing_post` link
+ * missing them — a false default a future spend-check could have trusted.
+ * `getPostMetadata` is the replacement: `GET /api/posts/<id>/public`
+ * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`
+ * route, serving `articleBase()`'s full shape (id, slug, title, excerpt,
+ * coverImageId, price, arbiterId, status, publishedAt, tags, creator) for
+ * PUBLISHED posts only. This CLI only reads title/price, so the schema
+ * asserts only `id`/`title`/`price`/`status` (PR 277 round-3 review nit) —
+ * a drift in a field it never reads, like `slug` or `creator.handle`, must
+ * not turn a good response into `null`. It must never invent a value, so
+ * every failure mode (404, any other non-200, a network error, or a body
+ * this CLI cannot read) collapses to the same `null`.
+ */
+describe('getPostMetadata', () => {
+  const POST = {
+    id: '11111111-1111-4111-8111-111111111111',
+    slug: 'fix-pnpm-enoent',
+    title: 'Fix: pnpm — ENOENT',
+    price: '100000',
+    status: 'published',
+    creator: { handle: 'iris' },
+  };
+
+  it('GETs the post by id off the /public sibling route and returns its title and price', async () => {
+    const { fetch, calls } = stubFetch(json(200, POST));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example/',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(calls[0]?.url).toBe(`https://preview.example/api/posts/${POST.id}/public`);
+    expect(calls[0]?.init.method).toBe('GET');
+    expect(meta).toEqual({ title: POST.title, price: POST.price });
+  });
+
+  it('tolerates extra fields the contract does not name', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, tags: ['x'], readCount: 12 }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toEqual({ title: POST.title, price: POST.price });
+  });
+
+  /** PR 277 round-3 review nit: `slug` and `creator.handle` are part of the
+   *  real `#803` response but this function never reads either, so a
+   *  response missing them (a future field rename, a leaner mock) must
+   *  still resolve rather than fail closed on a field this CLI does not use. */
+  it('does not require slug or creator, which it never reads', async () => {
+    const { fetch } = stubFetch(
+      json(200, { id: POST.id, title: POST.title, price: POST.price, status: POST.status }),
+    );
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toEqual({ title: POST.title, price: POST.price });
+  });
+
+  it('returns null on a 404 (draft, unknown id, or a deployment without the route)', async () => {
+    const { fetch } = stubFetch(json(404, { error: 'not found' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null on any other non-200 status', async () => {
+    const { fetch } = stubFetch(json(500, { error: 'boom' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null on a network failure rather than throwing', async () => {
+    const throwing = (async () => {
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: throwing,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null on a body that does not match the contract', async () => {
+    const { fetch } = stubFetch(json(200, { id: POST.id, title: 'x' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for a non-published status rather than trusting the body', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, status: 'draft' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
   });
 });

@@ -11,6 +11,7 @@ import {
   reply,
 } from '../lib/read-test-utils';
 import { libraryDir } from '../lib/library';
+import { recordSearch } from '../lib/state-store';
 import type { CommandContext, GlobalFlags } from '../context';
 
 let dir: string;
@@ -73,6 +74,209 @@ describe('runInspect', () => {
   });
 });
 
+/**
+ * The team lead's follow-up on tenjin-agent#252 item 1: (1) surface title
+ * from the 402 preview `inspect` already fetches (no new network call);
+ * (2) when no preview metadata exists at all — a title-less preview, or the
+ * `already_purchased` branch, which carries no preview whatsoever — fall
+ * back to the live `GET /api/posts/<id>/public` lookup (tenjin#803) for a
+ * ref resolved via a bare id; (3) never call it, and never invent a value,
+ * when there is no id to look up or the lookup itself fails.
+ */
+describe('runInspect, live metadata fallback for an id-resolved ref', () => {
+  const RES = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+
+  async function seedCandidate(): Promise<void> {
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000001',
+      at: new Date().toISOString(),
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [{ resourceId: RES, url: URL_, title: 't', price: '1' }],
+    });
+  }
+
+  /** Branches on the URL rather than the header-based phase `makeReadServer`
+   *  uses: the metadata lookup is a second, differently-pathed GET the read
+   *  route's phase classifier knows nothing about. */
+  function idResolvedFetch(config: { read: () => Response; postsPublic?: () => Response }): {
+    fetch: typeof fetch;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    const fn = (async (input: string | URL | Request) => {
+      const url = String(typeof input === 'string' || input instanceof URL ? input : input.url);
+      calls.push(url);
+      if (url.includes('/public')) {
+        if (config.postsPublic === undefined) throw new Error('no postsPublic mock configured');
+        return config.postsPublic();
+      }
+      return config.read();
+    }) as unknown as typeof fetch;
+    return { fetch: fn, calls };
+  }
+
+  function jsonRes(status: number, body: unknown): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('falls back to live metadata when the 402 preview carries no title', async () => {
+    await seedCandidate();
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { price: '100000', creator: { handle: 'iris' } }),
+      postsPublic: () =>
+        jsonRes(200, {
+          id: RES,
+          slug: 'slug',
+          title: 'Live Title',
+          price: '100000',
+          status: 'published',
+          creator: { handle: 'iris' },
+        }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    expect((res.data as { title?: string }).title).toBe('Live Title');
+    expect(res.humanLines?.[0]).toBe('Live Title, paid, 0.1 USD (100000 atomic).');
+    expect(calls.some((u) => u.includes(`/api/posts/${RES}/public`))).toBe(true);
+  });
+
+  it('leaves title absent, never invented, when the metadata lookup 404s', async () => {
+    await seedCandidate();
+    const pr = buildPaymentRequired();
+    const { fetch } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { price: '100000', creator: { handle: 'iris' } }),
+      postsPublic: () => jsonRes(404, { error: 'post_not_found' }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    expect(res.data).not.toHaveProperty('title');
+    expect(res.humanLines?.[0]).toBe('Paid resource, 0.1 USD (100000 atomic).');
+  });
+
+  it('never calls the metadata endpoint when the preview already names a title', async () => {
+    await seedCandidate();
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr),
+      // No postsPublic mock configured: a call here throws and fails the test.
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    expect((res.data as { title?: string }).title).toBe('The Answer');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('never calls the metadata endpoint for a ref resolved by URL, not id', async () => {
+    const pr = buildPaymentRequired();
+    const { fetch, calls } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { price: '100000', creator: { handle: 'iris' } }),
+      // No postsPublic mock configured: a call here throws and fails the test.
+    });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    expect(res.data).not.toHaveProperty('title');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('fills title/price on the already_purchased branch, which carries no preview at all', async () => {
+    await seedCandidate();
+    const { fetch } = idResolvedFetch({
+      read: () => reply.alreadyPurchased(),
+      postsPublic: () =>
+        jsonRes(200, {
+          id: RES,
+          slug: 'slug',
+          title: 'Owned Piece',
+          price: '100000',
+          status: 'published',
+          creator: { handle: 'iris' },
+        }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string; price?: { atomic: string } };
+    expect(data.title).toBe('Owned Piece');
+    expect(data.price?.atomic).toBe('100000');
+    expect(res.humanLines?.[0]).toBe('Owned Piece.');
+  });
+
+  it('reports already_purchased plainly when the metadata lookup also fails', async () => {
+    await seedCandidate();
+    const { fetch } = idResolvedFetch({
+      read: () => reply.alreadyPurchased(),
+      postsPublic: () => jsonRes(404, { error: 'post_not_found' }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    expect(res.data).not.toHaveProperty('title');
+    expect(res.data).not.toHaveProperty('price');
+    expect(res.humanLines?.[0]).toContain('Already purchased.');
+  });
+
+  /**
+   * PR 277 round-4 review: a title is a PUBLISHER's string on a public
+   * marketplace, unbounded on the wire (`postMetadataSchema.title` is a bare
+   * `z.string()`), and `inspect` is the command an agent runs before it has
+   * decided to trust the piece at all. Both the JSON field and the human
+   * line must be clipped the same way every other free-form field this
+   * command renders is (`CARD_BOUNDS`/`cardLine`).
+   */
+  it('caps an oversized title from the live metadata lookup, on both the JSON field and the human line', async () => {
+    await seedCandidate();
+    const pr = buildPaymentRequired();
+    const hugeTitle = 'A'.repeat(100_000);
+    const { fetch } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { price: '100000', creator: { handle: 'iris' } }),
+      postsPublic: () =>
+        jsonRes(200, {
+          id: RES,
+          slug: 'slug',
+          title: hugeTitle,
+          price: '100000',
+          status: 'published',
+          creator: { handle: 'iris' },
+        }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string };
+    expect(data.title?.length).toBeLessThan(300);
+    expect(data.title?.endsWith('...')).toBe(true);
+    expect(res.humanLines?.[0]?.length).toBeLessThan(350);
+  });
+
+  it('caps an oversized title from the 402 preview itself, with no live lookup involved', async () => {
+    const pr = buildPaymentRequired();
+    const hugeTitle = 'B'.repeat(100_000);
+    const { fetch } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { title: hugeTitle, price: '100000' }),
+    });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string };
+    expect(data.title?.length).toBeLessThan(300);
+    expect(data.title?.endsWith('...')).toBe(true);
+  });
+
+  it('caps an oversized title on the already_purchased branch too', async () => {
+    await seedCandidate();
+    const hugeTitle = 'C'.repeat(100_000);
+    const { fetch } = idResolvedFetch({
+      read: () => reply.alreadyPurchased(),
+      postsPublic: () =>
+        jsonRes(200, {
+          id: RES,
+          slug: 'slug',
+          title: hugeTitle,
+          price: '100000',
+          status: 'published',
+          creator: { handle: 'iris' },
+        }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string };
+    expect(data.title?.length).toBeLessThan(300);
+    expect(res.humanLines?.[0]?.length).toBeLessThan(300);
+  });
+});
+
 // Search v3 may inline a bounded rank-1 subset; this free 402 fetch is where an
 // agent reads the full public card for any paid candidate before paying.
 describe('runInspect, the 402 answer card', () => {
@@ -127,11 +331,11 @@ describe('runInspect, the 402 answer card', () => {
     }
   });
 
-  it('renders an uncarded piece exactly as before: no card key, no card lines', async () => {
+  it('renders an uncarded piece exactly as before, aside from the title line: no card key, no card lines', async () => {
     const res = await inspect402({ title: 'The Answer', price: '100000' });
     expect(res.data).not.toHaveProperty('card');
     expect(res.humanLines).toEqual([
-      'Paid resource, 0.1 USD (100000 atomic).',
+      'The Answer, paid, 0.1 USD (100000 atomic).',
       // The parenthetical is this branch's (#43): inspect tells humans up front
       // that the free verb refuses paid pieces.
       'This is the pre-purchase card; run `tenjin buy` to pay and read (`tenjin read` refuses paid pieces).',

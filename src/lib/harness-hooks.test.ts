@@ -40,12 +40,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     },
   };
 });
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { platform, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import {
   HOOK_EVENTS,
+  compareHookScripts,
   detectHookOwners,
   quoteForShell,
   refreshHooks,
@@ -55,6 +56,7 @@ import {
   PUSH_CONTEXT_READ_MATCHER,
   PUSH_FAILURE_MATCHER,
 } from './harness-hooks';
+import { hooksDir } from './paths';
 import { claudeSettingsPath } from './harness-permissions';
 import {
   DISPATCH_HOOK_FILE,
@@ -409,6 +411,98 @@ describe('wireSearchHooks: push experiment entries', () => {
     expect(entriesFor(settings, 'PostToolUse')).toHaveLength(2);
     expect(entriesFor(settings, 'PreToolUse')).toHaveLength(3);
   });
+});
+
+/**
+ * Filed against Greptile's PR 277 review: an installed script that exists but
+ * cannot be READ (permissions, a device node) must not read as though nothing
+ * were installed there at all.
+ */
+describe('compareHookScripts', () => {
+  it('reports present and up to date on a fresh install', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    const { stale, present, unreadable } = await compareHookScripts(data);
+    expect(stale).toEqual([]);
+    expect(unreadable).toEqual([]);
+    expect(present).toContain(WEBSEARCH_HOOK_FILE);
+  });
+
+  it('reports a hand-edited script as stale', async () => {
+    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    const target = join(hooksDir(data), WEBSEARCH_HOOK_FILE);
+    await writeFile(target, `${await readFile(target, 'utf8')}\n// hand-edited\n`);
+    const { stale, unreadable } = await compareHookScripts(data);
+    expect(stale).toEqual([WEBSEARCH_HOOK_FILE]);
+    expect(unreadable).toEqual([]);
+  });
+
+  // chmod 0o000 only blocks the owner's own read on a non-root process; CI and
+  // local dev both run as a normal user, but skip rather than false-fail on a
+  // setup (e.g. root) where it would not.
+  const canDenyOwnRead = platform() !== 'win32' && process.getuid?.() !== 0;
+  (canDenyOwnRead ? it : it.skip)(
+    'reports an unreadable script separately, neither present nor stale',
+    async () => {
+      await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+      const target = join(hooksDir(data), WEBSEARCH_HOOK_FILE);
+      await chmod(target, 0o000);
+      try {
+        const { stale, present, unreadable } = await compareHookScripts(data);
+        expect(unreadable).toEqual([WEBSEARCH_HOOK_FILE]);
+        expect(present).not.toContain(WEBSEARCH_HOOK_FILE);
+        expect(stale).not.toContain(WEBSEARCH_HOOK_FILE);
+      } finally {
+        // Restored so the temp dir can be cleaned up in afterEach.
+        await chmod(target, 0o755);
+      }
+    },
+  );
+
+  // A directory-level EACCES fails every child `lstat` inside it the same way
+  // ENOENT would (both throw); folding both into "absent" the way the fix
+  // above still could have (branching only on presence, not the error CODE)
+  // would report every script as not-installed instead of naming the real
+  // permissions problem.
+  (canDenyOwnRead ? it : it.skip)(
+    'reports scripts unreadable, not absent, when the hooks directory itself loses search permission',
+    async () => {
+      await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+      const dir = hooksDir(data);
+      await chmod(dir, 0o000);
+      try {
+        const { present, unreadable } = await compareHookScripts(data);
+        expect(present).toEqual([]);
+        expect(unreadable).toContain(WEBSEARCH_HOOK_FILE);
+      } finally {
+        // Restored so the temp dir (and its contents) can be cleaned up in afterEach.
+        await chmod(dir, 0o755);
+      }
+    },
+  );
+
+  // Filed against PR 277's review: without an `isFile()` check, `readFile` on
+  // a FIFO blocks forever waiting for a writer to open the other end, which
+  // would hang `tenjin doctor` (an unattended, agent-runnable command) rather
+  // than reporting the script unreadable.
+  const canMkfifo = platform() !== 'win32';
+  (canMkfifo ? it : it.skip)(
+    'reports a FIFO standing in for a script as unreadable, without hanging',
+    async () => {
+      await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+      const target = join(hooksDir(data), WEBSEARCH_HOOK_FILE);
+      await rm(target, { force: true });
+      const { execFileSync } = await import('node:child_process');
+      execFileSync('mkfifo', [target]);
+      const result = await Promise.race([
+        compareHookScripts(data),
+        new Promise<'TIMEOUT'>((resolve) => setTimeout(() => resolve('TIMEOUT'), 2000)),
+      ]);
+      expect(result).not.toBe('TIMEOUT');
+      const { present, unreadable } = result as Awaited<ReturnType<typeof compareHookScripts>>;
+      expect(present).not.toContain(WEBSEARCH_HOOK_FILE);
+      expect(unreadable).toContain(WEBSEARCH_HOOK_FILE);
+    },
+  );
 });
 
 describe('wireSearchHooks: idempotence', () => {

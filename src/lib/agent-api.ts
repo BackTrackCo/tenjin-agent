@@ -536,6 +536,18 @@ export interface TriggerStats {
 export interface LookupStats {
   windowDays: number;
   triggers: TriggerStats[];
+  /**
+   * The response's `Age` header (RFC 9111 §5.1), when the server sent one — how
+   * long ago the underlying answer was computed, not how long ago this CLI
+   * asked. `GET /api/lookups/stats` is cached for several minutes server-side
+   * (tenjin-agent#252), so a `push grade` run and the next `push status` can
+   * read the same stale count and look, wrongly, like grading never reached the
+   * shelf. Surfacing the header is what tells the two apart. Undefined when the
+   * header is absent (an uncached hit, or a deployment that never sends it) or
+   * unparseable — never coerced to 0, which would claim a freshness this CLI
+   * was never told.
+   */
+  ageSeconds?: number;
 }
 
 /**
@@ -551,6 +563,11 @@ export interface LookupStats {
  * a length bound is not an escape-sequence bound.
  */
 const TRIGGER_RE = /^[a-z]{1,16}$/;
+
+/** Sanity cap on an `Age` response header, in seconds (~115 days). Past this,
+ *  the value is treated the same as unparseable rather than rendered verbatim
+ *  (PR 277 round-2 review, nit 3). */
+const MAX_AGE_SECONDS = 1e7;
 
 const lookupStatsSchema = z.object({
   windowDays: z.number().int().positive(),
@@ -599,5 +616,78 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
       details: parsed.error.issues,
     });
   }
-  return parsed.data;
+  // `Number(...)` alone accepts what `Age` never legitimately carries: `''`
+  // and whitespace coerce to 0 (a false "fresh"), hex/leading-`+`/exponent
+  // forms all parse, and a fraction survives. RFC 9111 `Age` is delta-seconds,
+  // a plain non-negative integer, so requiring that shape BEFORE the numeric
+  // conversion is what keeps this "undefined when absent or unparseable,
+  // never coerced to a freshness this CLI was never told" (PR 277 review).
+  // The digit-only shape has no length cap of its own, so a proxy sending an
+  // absurd `Age` (`"99999999999999999999999999"`) still parsed and rendered
+  // as "~1e+26s ago" (PR 277 round-2 review, nit 3 on agent-api.ts:621);
+  // MAX_AGE_SECONDS rejects anything past ~115 days, well past any real cache.
+  const rawAge = res.header('age');
+  const parsedAge = rawAge !== undefined && /^\d+$/.test(rawAge) ? Number(rawAge) : NaN;
+  const age = parsedAge <= MAX_AGE_SECONDS ? parsedAge : NaN;
+  return {
+    ...parsed.data,
+    ...(Number.isFinite(age) ? { ageSeconds: age } : {}),
+  };
+}
+
+// `articleBase()`'s wire shape (tenjin PR #803) carries a lot more than this
+// reads (slug, excerpt, coverImageId, arbiterId, publishedAt, tags, the rest
+// of `creator`) — `.passthrough()` keeps all of it out of this schema's
+// required set. Only `id`/`title`/`price`/`status` are asserted, because
+// they're the only fields `getPostMetadata` returns; a shape drift in a field
+// this function never reads (PR 277 round-3 review nit) must not turn a good
+// response into `null`.
+const postMetadataSchema = z
+  .object({
+    id: z.string().regex(UUID_RE, 'id must be a uuid'),
+    title: z.string(),
+    price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
+    status: z.string(),
+  })
+  .passthrough();
+
+export interface PostMetadata {
+  title: string;
+  price: string;
+}
+
+/**
+ * GET /api/posts/<id>/public — the public id lookup for a PUBLISHED post
+ * (tenjin PR #803, sibling of the tenjin-agent#252 local-bookkeeping removal
+ * in PR 277 round-2 review: `state-store.ts`'s `findPairingCandidate` used to
+ * synthesize `title: ''` / `price: '0'` for a link missing them, which is
+ * exactly the "invented value" this function exists not to produce). A
+ * sibling route to the owner-scoped SIWX `GET /api/posts/<id>`, not a
+ * relaxation of it.
+ *
+ * Every failure collapses to `null`: a 404 (draft, unlisted, unknown id, a
+ * malformed id, or a deployment that predates this route — all
+ * indistinguishable from here, and all mean "no metadata"), any other
+ * non-200, a network or timeout error, a body that does not match the
+ * contract, or a `status` other than `published` (the route's own contract
+ * says this is always `published`, but this CLI checks rather than trusts
+ * it). This is the one function in this module that must never throw or
+ * guess — a resolved id with no metadata is UNKNOWN, never a default title
+ * or a free price.
+ */
+export async function getPostMetadata(
+  resourceId: string,
+  opts: AgentApiOptions,
+): Promise<PostMetadata | null> {
+  const url = `${trimSlash(opts.baseUrl)}/api/posts/${encodeURIComponent(resourceId)}/public`;
+  const res = await httpRequest(url, {
+    method: 'GET',
+    timeoutMs: opts.timeoutMs,
+    ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
+    fetchImpl: opts.fetchImpl,
+  });
+  if (!res.ok || res.status !== 200) return null;
+  const parsed = postMetadataSchema.safeParse(res.json);
+  if (!parsed.success || parsed.data.status !== 'published') return null;
+  return { title: parsed.data.title, price: parsed.data.price };
 }
