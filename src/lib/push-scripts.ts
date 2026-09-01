@@ -2313,29 +2313,57 @@ function identityFromConsole(text) {
 }
 
 /**
+ * Whether \`command\` is a SINGLE segment — no \`&&\`, \`||\`, \`;\`, \`|\` or newline
+ * joining a second one (tenjin-agent#278 round 3 follow-up, Greptile
+ * PRRT_kwDOTbH3JM6eQnm5). \`;\` (unlike \`&&\`) runs every segment regardless of
+ * an earlier one's exit status, so \`pnpm test; pnpm build\` can have a REAL,
+ * in-window test failure sitting in the artifact from the \`pnpm test\` half
+ * while the failure this hook is actually processing is the \`pnpm build\`
+ * half's — the window check alone cannot tell those apart, because the
+ * report's own \`startTime\` honestly does clear it; the test really did run
+ * during this exact invocation, just not as the segment that failed. Rather
+ * than parse WHICH segment a report belongs to (the whack-a-mole
+ * \`looksLikeTestRun\` was built, and removed, for), the artifact leg is
+ * trusted only when there is exactly one segment for it to belong to. Reuses
+ * \`commandHeads\`'s own split, so the two never disagree about what counts as
+ * a separator.
+ */
+function isSingleSegmentCommand(command) {
+  return commandHeads(command).length <= 1;
+}
+
+/**
  * The failure's test identity, artifact first (04, "Identity source,
  * preference order"). A repo with neither yields \`null\` — never a guessed
  * one: this whole lane exists because a guess (the sig_v1c that used to key on
  * the bare word ERROR) is worse than silence.
  *
- * NO COMMAND-TEXT GATE (tenjin-agent#278 round 3, replacing round 2's
- * \`looksLikeTestRun\`): that gate asked "does some token in this command line
- * look test-ish", which an argument to an unrelated program could satisfy
- * (\`echo vitest\`) and a chained command's EARLIER, non-test segment could
- * satisfy for a segment that never ran at all (\`pnpm build && pnpm test\`,
- * build failing first) — and which the single most common test invocation,
- * \`npm run test\`/\`pnpm run test\`, could NOT satisfy, silently producing no
- * identity for the common case while still missing the chain case it was
- * built for. Shipped systems (Datadog Test Optimization, Buildkite Test
- * Engine, dorny/test-reporter) attribute a result to the run that produced
- * it by having the run stamp itself, not by parsing the command that started
- * it — which is what \`sinceMs\` (this agent's own PreToolUse timestamp) and
- * the reporter's own \`startTime\` do together in \`testIdentityFromArtifact\`.
- * The console breadcrumb needs no such gate: \`TEST_FAIL_HEADER_RE\` matching
- * inside THIS command's own output is itself the evidence that a test ran.
+ * NO COMMAND-TEXT GATE ON *WHETHER TO LOOK AT ALL* (tenjin-agent#278 round 3,
+ * replacing round 2's \`looksLikeTestRun\`): that gate asked "does some token in
+ * this command line look test-ish", which an argument to an unrelated program
+ * could satisfy (\`echo vitest\`) — and which the single most common test
+ * invocation, \`npm run test\`/\`pnpm run test\`, could NOT satisfy, silently
+ * producing no identity for the common case. Shipped systems (Datadog Test
+ * Optimization, Buildkite Test Engine, dorny/test-reporter) attribute a result
+ * to the run that produced it by having the run stamp itself, not by parsing
+ * the command that started it — which is what \`sinceMs\` (this agent's own
+ * PreToolUse timestamp) and the reporter's own \`startTime\` do together in
+ * \`testIdentityFromArtifact\`.
+ *
+ * ONE STRUCTURAL CHECK REMAINS ON THE ARTIFACT LEG ONLY —
+ * \`isSingleSegmentCommand\` — because a compound command can run more than one
+ * program, and the report belongs to whichever one invoked the test runner,
+ * not necessarily the one whose failure this hook is processing. This is not
+ * command-shape recognition the way \`looksLikeTestRun\` was: it asks nothing
+ * about what a segment IS, only how many there are. The console breadcrumb
+ * needs no such check: a \`FAIL\` line is self-locating evidence about
+ * whichever line of THIS command's own output it appears on, one segment or
+ * many.
  */
-function testIdentityOf(text, cwd, sinceMs) {
-  const fromArtifact = testIdentityFromArtifact(cwd, sinceMs);
+function testIdentityOf(text, cwd, sinceMs, command) {
+  const fromArtifact = isSingleSegmentCommand(command)
+    ? testIdentityFromArtifact(cwd, sinceMs)
+    : null;
   return fromArtifact !== null ? fromArtifact : identityFromConsole(text);
 }
 
@@ -3102,7 +3130,7 @@ async function main() {
   // context hook never fired, or fired before this agent's first Bash call)
   // skips the artifact leg entirely rather than trusting an unbounded one.
   const bashStartedAt = getState(sessionId, STATE_BASH_START_PREFIX + agentKey(agentId, ''));
-  const testId = testIdentityOf(text, cwd, bashStartedAt);
+  const testId = testIdentityOf(text, cwd, bashStartedAt, command);
   const testSig = testId === null ? null : sigV1Test(testId);
   // The failure row carries the signature's fine key as \`error_hash\` (the
   // column has existed since #219 and was never written) and the SCRUBBED

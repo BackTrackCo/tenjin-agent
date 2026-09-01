@@ -4454,12 +4454,92 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     }
   });
 
+  it('ignores an in-window artifact with an EMPTY failed array, on a single-segment command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-empty-failed-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
+      // In-window (startTime clears the stash) but PASSING: success:true,
+      // failed: []. A single-segment command, so `isSingleSegmentCommand`
+      // does not exclude the artifact leg — the claim under test is
+      // `identityFromReport`'s own behavior on an empty `failed` array, not
+      // the segment gate (covered separately below).
+      await writeFile(join(cwd, '.vitest-report.json'), reportFixture(since + 10, since + 50, []));
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: 'AssertionError: expected 1 to be 2\n\n Tests  0 failed | 1 passed\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not attribute a REAL earlier-segment test failure to a later, unrelated build failure in the same compound command (tenjin-agent#278 round 3 follow-up, Greptile PRRT_kwDOTbH3JM6eQnm5)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-real-fail-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // One PreToolUse stamp for the WHOLE compound command, exactly as the
+      // real hook sees it — `pnpm test; pnpm build` is one Bash tool call.
+      // Unlike `&&`, `;` runs BOTH segments regardless of the first's exit
+      // status, so `pnpm test` can genuinely fail here (a REAL, non-empty
+      // `failed` array, honestly in-window) while the overall failure this
+      // hook processes is the LATER `pnpm build` segment's.
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          { file: join(cwd, 'src/real.test.ts'), suite: 'realSuite', test: 'a real failure' },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test; pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      // No sig_v1_test row: `pnpm test; pnpm build` is TWO segments
+      // (`isSingleSegmentCommand` is false), so the artifact leg is never
+      // consulted at all — the real test failure sitting in the artifact
+      // must not be attributed to this build failure just because its
+      // startTime honestly clears the window. The build's own TS error
+      // carries no FAIL breadcrumb either, so this failure gets no test
+      // identity — precision lost, never a wrong match gained.
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('does not attribute a later build failure to an earlier, PASSING vitest run in the same chained command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-pass-'));
     try {
       await pushOn('http://127.0.0.1:1');
       // One PreToolUse stamp for the WHOLE chained command, exactly as the real
-      // hook sees it — `pnpm test && pnpm build` is one Bash tool call.
+      // hook sees it — `pnpm test && pnpm build` is one Bash tool call, and
+      // ALSO two segments — this exercises the empty-`failed`-array path
+      // (identityFromReport) and the segment gate together, since either
+      // alone would already produce no identity here.
       const since = await stashBashStart(SESSION, cwd);
       // `pnpm test` ran first and PASSED (success:true, failed: []), so its
       // report's startTime clears the window check — the report genuinely is
