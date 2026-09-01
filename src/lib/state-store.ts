@@ -1270,6 +1270,17 @@ const STATE_RELAY_SLOT = 'relay:handoff';
 
 const STATE_CAPTURE_ASKED = 'capture_asked';
 /**
+ * Content-free evidence that the ROOT agent worked in the repository during
+ * this session. There are exactly three possible suffixes (inspection,
+ * mutation, shell), so repeated tool calls only refresh one of three rows.
+ *
+ * Deliberately no command, path, tool output or counter is stored. The marker
+ * exists only to let a team-shelf Stop ask distinguish a working session from
+ * an untouched one without copying operator-controlled content into state.
+ */
+const STATE_REPO_ACTIVITY_PREFIX = 'capture:activity:';
+const REPO_ACTIVITY_KINDS = new Set(['inspection', 'mutation', 'shell']);
+/**
  * Which CHILDREN this session has already asked for a finding, one row per
  * agent, holding the signal that earned the ask.
  *
@@ -2238,6 +2249,32 @@ function countStatePrefix(sessionId, prefix) {
     prefix,
     prefix + String.fromCharCode(0xffff),
   ]);
+}
+
+/**
+ * Mark one of the three bounded, content-free root activity categories.
+ *
+ * The state boundary repeats the call-site identity checks deliberately: these
+ * helpers ship into several independent hook scripts, and a future caller must
+ * not turn a child or session-less event into parent capture eligibility. Once
+ * capture has asked, activity is disposition/continuation and must not add a
+ * fresh category that could become re-arm state later.
+ */
+function markRootActivity(sessionId, agentId, kind) {
+  if (
+    sessionId === null ||
+    agentId !== null ||
+    !REPO_ACTIVITY_KINDS.has(kind) ||
+    getState(sessionId, STATE_CAPTURE_ASKED) !== null
+  ) {
+    return false;
+  }
+  return setState(sessionId, STATE_REPO_ACTIVITY_PREFIX + kind, true);
+}
+
+/** Whether this session carries any bounded root repository-activity marker. */
+function didRepoActivity(sessionId) {
+  return countStatePrefix(sessionId, STATE_REPO_ACTIVITY_PREFIX) > 0;
 }
 
 /** The search id of the newest dispatch MISS this session has left open inside
