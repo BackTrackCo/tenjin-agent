@@ -4531,6 +4531,82 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     }
   });
 
+  it("does not attribute a REAL earlier-segment test failure across a background `&`, which commandHeads's own split does not cover (tenjin-agent#278 round 3 follow-up, Greptile PRRT_kwDOTbH3JM6eRFpv)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-background-op-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // `pnpm test & pnpm build` is ONE segment by `commandHeads`'s own split
+      // (it only knows `&&`, `||`, `;`, `|` and newline) — the background `&`
+      // needs its own check, since it has the identical run-both-regardless
+      // ambiguity `;` has.
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          { file: join(cwd, 'src/real.test.ts'), suite: 'realSuite', test: 'a real failure' },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test & pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('still trusts a single-segment command whose own redirect happens to contain an &, like 2>&1 (tenjin-agent#278 round 3 follow-up)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-redirect-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // `2>&1`, `>&2` and `&>file` are redirect syntax, not job control — the
+      // background-operator check must not mistake this ordinary, extremely
+      // common redirect for a second segment and needlessly lose precision.
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          {
+            file: join(cwd, 'src/from-artifact.test.ts'),
+            suite: 'suite',
+            test: 'the real failure',
+          },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run 2>&1' },
+          tool_response: {
+            stdout: 'AssertionError: expected 1 to be 2\n\n Tests  1 failed | 0 passed\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.kind === 'sig_v1_test');
+      expect(row?.error_files).toEqual(['from-artifact.test.ts']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('does not attribute a later build failure to an earlier, PASSING vitest run in the same chained command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-pass-'));
     try {

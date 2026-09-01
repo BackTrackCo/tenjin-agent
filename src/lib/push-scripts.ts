@@ -2313,10 +2313,31 @@ function identityFromConsole(text) {
 }
 
 /**
- * Whether \`command\` is a SINGLE segment — no \`&&\`, \`||\`, \`;\`, \`|\` or newline
- * joining a second one (tenjin-agent#278 round 3 follow-up, Greptile
- * PRRT_kwDOTbH3JM6eQnm5). \`;\` (unlike \`&&\`) runs every segment regardless of
- * an earlier one's exit status, so \`pnpm test; pnpm build\` can have a REAL,
+ * A background \`&\` used as a job-control separator between two commands —
+ * \`cmd1 & cmd2\` runs BOTH, one merely detached from the foreground, the same
+ * did-it-really-run-as-part-of-this-failure ambiguity \`;\` has, and one
+ * \`commandHeads\`'s own split (\`&&\`, \`||\`, \`;\`, \`|\`, newline) does not cover at
+ * all — a lone \`&\` never splits it, so \`pnpm test & pnpm build\` reads as ONE
+ * segment (tenjin-agent#278 round 3 follow-up, Greptile PRRT_kwDOTbH3JM6eRFpv).
+ *
+ * DELIBERATELY NARROW, because a bare \`&\` is common in bytes that are NOT job
+ * control at all: \`2>&1\`, \`>&2\` and \`&>file\`/\`&>>file\` are redirect syntax,
+ * and by far the most frequent way an ordinary test/build command carries an
+ * \`&\` at all. This matches only an \`&\` with neither an \`&\` nor a \`>\`
+ * immediately on either side — \`2>&1\`'s \`&\` is excluded because a \`>\`
+ * precedes it, \`&>file\`'s because a \`>\` follows it, and both characters of
+ * \`&&\` because each has the other adjacent. What remains is the shape neither
+ * redirect form takes: an isolated \`&\` with plain text (ordinarily
+ * whitespace) on both sides.
+ */
+const BACKGROUND_OP_RE = /(?<![&>])&(?!&|>)/;
+
+/**
+ * Whether \`command\` is a SINGLE segment — no \`&&\`, \`||\`, \`;\`, \`|\`, newline or
+ * background \`&\` joining a second one (tenjin-agent#278 round 3 follow-up,
+ * Greptile PRRT_kwDOTbH3JM6eQnm5 and PRRT_kwDOTbH3JM6eRFpv). \`;\` and \`&\`
+ * (unlike \`&&\`) run every segment regardless of an earlier one's exit status,
+ * so \`pnpm test; pnpm build\` or \`pnpm test & pnpm build\` can have a REAL,
  * in-window test failure sitting in the artifact from the \`pnpm test\` half
  * while the failure this hook is actually processing is the \`pnpm build\`
  * half's — the window check alone cannot tell those apart, because the
@@ -2325,11 +2346,12 @@ function identityFromConsole(text) {
  * than parse WHICH segment a report belongs to (the whack-a-mole
  * \`looksLikeTestRun\` was built, and removed, for), the artifact leg is
  * trusted only when there is exactly one segment for it to belong to. Reuses
- * \`commandHeads\`'s own split, so the two never disagree about what counts as
- * a separator.
+ * \`commandHeads\`'s own split for everything but the background operator, so
+ * the two never disagree about what \`&&\`/\`||\`/\`;\`/\`|\`/newline count as.
  */
 function isSingleSegmentCommand(command) {
-  return commandHeads(command).length <= 1;
+  const text = String(command);
+  return commandHeads(text).length <= 1 && !BACKGROUND_OP_RE.test(text);
 }
 
 /**
