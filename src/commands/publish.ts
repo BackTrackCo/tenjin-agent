@@ -1159,7 +1159,7 @@ function receipt(
   const human = [
     `Published ${title} (${sanitizeForTerminal(result.status)}) for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
     result.cacheEligible === undefined
-      ? 'Published without an answer card: buyers have less public pre-paywall context for judging fit.'
+      ? 'Published without an answer card: buyers have less public pre-paywall context for judging fit, and with no stored claims to read the piece fails any `freshWithin` or `appliesTo` filter.'
       : missing.length > 0
         ? `Answer card preview incomplete. To improve its public pre-paywall fit context: ${missing.join(' ')}`
         : 'Answer card provides complete public pre-paywall fit context.',

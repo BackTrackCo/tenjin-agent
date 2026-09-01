@@ -450,7 +450,7 @@ function cardLines(card: OwnPostCard | undefined): string[] {
 
 function eligibilityLine(card: OwnPostCard | undefined): string {
   if (card === undefined)
-    return 'No answer card: buyers have less public pre-paywall context for judging fit.';
+    return 'No answer card: buyers have less public pre-paywall context for judging fit, and with no stored claims to read the piece fails any `freshWithin` or `appliesTo` filter.';
   const missing = missingSentences(card.cacheEligibleMissing).map(sanitizeForTerminal);
   if (missing.length === 0) return 'Answer card provides complete public pre-paywall fit context.';
   return `Answer card preview incomplete. To improve its public pre-paywall fit context: ${missing.join(' ')}`;

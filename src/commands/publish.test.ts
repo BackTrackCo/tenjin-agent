@@ -443,6 +443,12 @@ describe('runPublish — receipt + card echo', () => {
     );
     expect((res.data as { cacheEligible: boolean }).cacheEligible).toBe(false);
     expect((res.data as { missing: string[] }).missing).toEqual([]);
+    // The receipt is what an author reads to learn where their piece went, so it
+    // names BOTH costs of shipping card-less. Pinned here and in edit.test.ts
+    // against the same string, because the two surfaces drifted apart once.
+    expect((res.humanLines ?? []).join('\n')).toContain(
+      'Published without an answer card: buyers have less public pre-paywall context for judging fit, and with no stored claims to read the piece fails any `freshWithin` or `appliesTo` filter.',
+    );
   });
 });
 

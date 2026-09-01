@@ -581,7 +581,7 @@ describe('runEdit — show mode (no change flags)', () => {
     );
   });
 
-  it('a card-less post says buyers have less public fit context', async () => {
+  it('a card-less post names both costs: less public fit context AND the filter exclusion', async () => {
     const stub = stubServer({ get: { ...STORED, resource: undefined } });
     const res = await runEdit(
       args(),
@@ -589,7 +589,7 @@ describe('runEdit — show mode (no change flags)', () => {
       hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
     );
     expect((res.humanLines ?? []).join('\n')).toContain(
-      'No answer card: buyers have less public pre-paywall context for judging fit.',
+      'No answer card: buyers have less public pre-paywall context for judging fit, and with no stored claims to read the piece fails any `freshWithin` or `appliesTo` filter.',
     );
   });
 
