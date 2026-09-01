@@ -1811,8 +1811,15 @@ async function resolvePermissions(args: {
     await persistFreeVerbsDeclined(ctx.dataDir, probe.pending ?? []);
     return withRetraction(permissionsSkipped('claude', home, 'declined'));
   }
-  await persistFreeVerbsDeclined(ctx.dataDir, []);
-  return withRetraction(await wireFreeVerbAllowlist(home, publishMode));
+  // Same ordering as the grant branch above: wire first, and only clear the
+  // decline once the write actually lands (no `skipped`). An interactive yes
+  // whose settings write is then refused (Greptile #272 at :1815) must not
+  // erase the record that tells the next refresh these rules are still pending.
+  const wired = await wireFreeVerbAllowlist(home, publishMode);
+  if (wired.skipped === undefined) {
+    await persistFreeVerbsDeclined(ctx.dataDir, []);
+  }
+  return withRetraction(wired);
 }
 
 // --- Search hooks (decision 3) ----------------------------------------------------

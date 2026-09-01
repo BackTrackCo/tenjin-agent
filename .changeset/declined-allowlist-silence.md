@@ -21,5 +21,5 @@ settle with nobody there to answer, or finding the allowlist already fully
 satisfied — installing Tenjin is the operator's consent, per existing policy,
 so any of those is enough to retire a stale decline. It stays recorded when the
 write itself is refused (an unreadable or concurrently-changed settings file):
-the rules stay absent, so the next refresh still reports them pending instead
-of silently forgetting they were ever asked about.
+the next refresh still honors it instead of re-nagging about rules the
+operator already declined.

@@ -2025,6 +2025,73 @@ describe('runInstall: permissions decision', () => {
     for (const rule of declinedBefore ?? []) expect(pending).not.toContain(rule);
   });
 
+  /**
+   * Greptile's round-2 delta on the same P1 (tenjin-agent#272): the wire-then-
+   * clear fix above landed on the headless/grant branch but not on the
+   * interactive-yes branch eleven lines below it, which still cleared
+   * `freeVerbsDeclined` before `wireFreeVerbAllowlist` returned. An operator who
+   * says yes to the prompt but whose settings write is then refused loses the
+   * record just the same way, and the next refresh re-nags about rules the
+   * operator already declined. Same race, same `changed-since-read` interleave
+   * hook, but driven through `confirmPermissions: async () => true` instead of
+   * `allowFreeVerbs: true`.
+   */
+  it('a failed interactive grant leaves the decline on record, so refresh keeps honoring it', async () => {
+    await writeSettings({ permissions: { allow: [] } });
+    await runInstall(
+      { harness: ['claude'], publishMode: 'auto' },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        confirmPermissions: async () => false,
+        which: (bin) => bin === 'claude',
+      }),
+    );
+    const declinedBefore = await declinedList();
+    expect(declinedBefore?.length).toBeGreaterThan(0);
+
+    // The file changes the instant the grant's own snapshot read returns, so
+    // its later current-vs-raw compare sees a moved file and refuses to write.
+    fsHooks.settingsInterleave = `${JSON.stringify({ permissions: { allow: [] }, theirs: 1 }, null, 2)}\n`;
+    fsHooks.settingsInterleaveOnRead = 2;
+    fsHooks.settingsReads = 0;
+    let res;
+    try {
+      res = await runInstall(
+        { harness: ['claude'], publishMode: 'auto' },
+        makeCtx(),
+        deps({
+          isInteractive: true,
+          confirmPermissions: async () => true,
+          which: (bin) => bin === 'claude',
+        }),
+      );
+    } finally {
+      fsHooks.settingsInterleave = '';
+      fsHooks.settingsReads = 0;
+      fsHooks.settingsInterleaveOnRead = 1;
+    }
+    expect(wiredOf(res.data).skipped).toBe('changed-since-read');
+    // The rules never landed...
+    expect(await allowList()).toEqual([]);
+    // ...and the refusal must not have erased the record that told the
+    // operator so: it survives exactly as it was.
+    expect(await declinedList()).toEqual(declinedBefore);
+
+    // A follow-up refresh must still honor that surviving record rather than
+    // re-nagging: with the decline erased (the bug), these rules would be
+    // recomputed as freshly pending on every refresh, which is the #234
+    // regression this whole changeset exists to close.
+    const refreshRes = await runInstall(
+      { refresh: true },
+      makeCtx(),
+      deps({ which: (bin) => bin === 'claude' }),
+    );
+    const refreshPending = (refreshRes.data as { permissions: { pending: string[] } }).permissions
+      .pending;
+    for (const rule of declinedBefore ?? []) expect(refreshPending).not.toContain(rule);
+  });
+
   // Every skipped state names the command that changes it, the same contract a
   // CliError's `fix` carries, so a machine consumer never has to parse prose.
   it('carries a fix string on every skipped permissions state', async () => {
