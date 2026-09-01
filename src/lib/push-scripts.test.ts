@@ -35,6 +35,7 @@ import {
   sessionPrimerHookScript,
   stopHookScript,
   websearchHookScript,
+  withStdinCapturePublish,
 } from './hook-scripts';
 import {
   PUSH_CACHE_TTL_MS,
@@ -5138,7 +5139,13 @@ describe('the subagent arm (SubagentStop)', () => {
     // fallback closed it, through `inheritedSearchIds`) and the piece lands with
     // no question on its card, ranking below every carded piece.
     expect(reason).toContain('publish it YOURSELF now');
-    expect(reason).toContain('`tenjin publish <file> --agent a1 --search-id ' + SEARCH_ID + '`');
+    expect(reason).toContain('`tenjin publish - --agent a1 --search-id ' + SEARCH_ID + '`');
+    expect(reason).toContain(
+      '`tenjin publish <file> --agent a1 --search-id ' +
+        SEARCH_ID +
+        '` as its own bare shell/tool command',
+    );
+    expect(reason).toContain('never chained behind writing the file');
     // A rung for the child with no shell, on the same principle the child
     // pointer ladders on: one unrunnable rung is dead context.
     expect(reason).toContain('or call the tenjin_publish MCP tool with that file');
@@ -5889,8 +5896,8 @@ describe('the capture ask (Stop)', () => {
 
   /** The ask as the hook renders it: the mode is spliced into the text, because
    *  it is what decides whether the agent may run the command it was handed. */
-  const publicAsk = CAPTURE_REASON.replace('<mode>', 'review');
-  const teamAsk = CAPTURE_REASON_TEAM.replace('<mode>', 'review');
+  const publicAsk = withStdinCapturePublish(CAPTURE_REASON).replace('<mode>', 'review');
+  const teamAsk = withStdinCapturePublish(CAPTURE_REASON_TEAM).replace('<mode>', 'review');
 
   /** A recorded search stamped with this session: the research signal. */
   async function writeSearchSignal(): Promise<void> {

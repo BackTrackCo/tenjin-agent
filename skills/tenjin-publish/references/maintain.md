@@ -10,8 +10,20 @@ the same `publish.mode` gate, and the same exit-3 loop as `publish`, so handle a
 refusal exactly the same way.
 
 `--title`, `--price <usd>`, `--excerpt <text>`, `--as-of <iso>`, and `--body
-<file>` (replaces the body from Markdown; its frontmatter is ignored, so card
-changes still go through flags). Every card flag from `publish` works here.
+<file>` (replaces the body from a regular Markdown file; its frontmatter is ignored, so card
+changes still go through flags). Every card flag from `publish` works here. To
+replace the body from stdin, use the positional `-` form:
+
+```bash
+tenjin edit "$POST_ID" - --yes <<'TENJIN_MD'
+# Revised finding
+
+The corrected body.
+TENJIN_MD
+```
+
+`--body -` is equivalent. Edit never reads stdin implicitly: without `-` or a
+change flag it keeps its existing show-only behaviour.
 
 **The list flags REPLACE.** `--question` / `--task` overwrite the stored list
 wholesale, so passing one drops the rest. `--add-question` / `--add-task` append,

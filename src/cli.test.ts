@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { Readable } from 'node:stream';
 
 /**
  * Where the self-heal resolves its packaged skills from. Empty means the real
@@ -54,7 +55,7 @@ afterAll(async () => {
   await rm(sandbox, { recursive: true, force: true });
 });
 
-function captureIo(isTTY = false) {
+function captureIo(isTTY = false, stdin?: { stream: NodeJS.ReadableStream; isTTY: boolean }) {
   const out: string[] = [];
   const err: string[] = [];
   const mk = (sink: string[]) =>
@@ -64,7 +65,12 @@ function captureIo(isTTY = false) {
         return true;
       },
     }) as unknown as NodeJS.WritableStream;
-  const io: Io = { stdout: mk(out), stderr: mk(err), isTTY };
+  const io: Io = {
+    ...(stdin !== undefined ? { stdin } : {}),
+    stdout: mk(out),
+    stderr: mk(err),
+    isTTY,
+  };
   return { io, stdout: () => out.join(''), stderr: () => err.join('') };
 }
 
@@ -491,6 +497,72 @@ describe('publish --finding', () => {
     const cap = captureIo();
     expect(await main(['publish', 'post.md', '--finding', 'abc', '--json'], cap.io)).toBe(2);
     expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  });
+});
+
+describe('stdin command routing', () => {
+  const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const markdown = '# Stdin probe\n\nA plain body from the pipe.\n';
+
+  it('routes `publish -` and bare non-TTY publish through the same dry-run pipeline', async () => {
+    for (const argv of [
+      ['publish', '-', '--dry-run', '--json'],
+      ['publish', '--dry-run', '--json'],
+    ]) {
+      const cap = captureIo(false, { stream: Readable.from([markdown]), isTTY: false });
+      expect(await main(argv, cap.io)).toBe(0);
+      const parsed = JSON.parse(cap.stdout());
+      expect(parsed.command).toBe('publish');
+      expect(parsed.data).toMatchObject({
+        dryRun: true,
+        published: false,
+        title: 'Stdin probe',
+        body: markdown,
+      });
+    }
+  });
+
+  it('a bare publish with TTY stdin returns usage without reading it', async () => {
+    let reads = 0;
+    const stream = new Readable({
+      read() {
+        reads += 1;
+      },
+    });
+    const cap = captureIo(false, { stream, isTTY: true });
+    expect(await main(['publish', '--json'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toBe('Nothing to publish.');
+    expect(reads).toBe(0);
+  });
+
+  it('an injected Io with no stdin capability never borrows the test runner input', async () => {
+    const cap = captureIo();
+    expect(await main(['publish', '--json'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toBe('Nothing to publish.');
+  });
+
+  it('registers `edit <postId> -`, keeps trailing flags, and refuses two body sources', async () => {
+    const accepted = captureIo(false, { stream: Readable.from([]), isTTY: false });
+    expect(await main(['edit', POST_ID, '-', '--json'], accepted.io)).toBe(2);
+    expect(JSON.parse(accepted.stdout()).error.message).toBe('No Markdown received on stdin.');
+
+    const bodyFlag = captureIo(false, { stream: Readable.from([]), isTTY: false });
+    expect(await main(['edit', POST_ID, '--body', '-', '--json'], bodyFlag.io)).toBe(2);
+    expect(JSON.parse(bodyFlag.stdout()).error.message).toBe('No Markdown received on stdin.');
+
+    const flags = captureIo(false, { stream: Readable.from([markdown]), isTTY: false });
+    expect(await main(['edit', POST_ID, '-', '--mode', 'reveiw', '--json'], flags.io)).toBe(2);
+    expect(JSON.parse(flags.stdout()).error.message).toContain('Invalid --mode');
+
+    const conflict = captureIo();
+    expect(await main(['edit', POST_ID, '-', '--body', 'post.md', '--json'], conflict.io)).toBe(2);
+    expect(JSON.parse(conflict.stdout()).error.message).toBe('Pass stdin or --body, not both.');
+  });
+
+  it('keeps positional file paths out of edit; files still use --body', async () => {
+    const cap = captureIo();
+    expect(await main(['edit', POST_ID, 'post.md', '--json'], cap.io)).toBe(2);
+    expect(JSON.parse(cap.stdout()).error.message).toContain('must be `-`');
   });
 });
 

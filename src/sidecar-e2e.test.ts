@@ -6,7 +6,12 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CAPTURE_REASON_TEAM, stopHookScript, websearchHookScript } from './lib/hook-scripts';
+import {
+  CAPTURE_REASON_TEAM,
+  stopHookScript,
+  websearchHookScript,
+  withStdinCapturePublish,
+} from './lib/hook-scripts';
 import { pushFailureHookScript, pushPromptHookScript } from './lib/push-scripts';
 import { STATE_DB_FILE, STORE_SQL, openStore } from './lib/state-store';
 import { readLedgerTallies, runPushStatus } from './commands/push';
@@ -398,7 +403,9 @@ describe('the sidecar, end to end over one session', () => {
     expect(stop.code).toBe(0);
     const blocked = JSON.parse(stop.stdout) as { decision?: string; reason?: string };
     expect(blocked.decision).toBe('block');
-    expect(blocked.reason).toBe(CAPTURE_REASON_TEAM.replace('<mode>', 'review'));
+    expect(blocked.reason).toBe(
+      withStdinCapturePublish(CAPTURE_REASON_TEAM).replace('<mode>', 'review'),
+    );
     const asked = await openStore(dataDir);
     expect(asked?.get(STORE_SQL.getState, [SESSION, 'capture_asked'])).not.toBeNull();
     asked?.close();

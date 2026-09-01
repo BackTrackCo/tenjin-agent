@@ -304,6 +304,30 @@ export const CAPTURE_REASON =
 export const CAPTURE_REASON_TEAM =
   'Before ending: if this session settled anything a teammate on this project would want to know (a quirk of this codebase, a probe result, a version-specific gotcha, a workaround, a decision and why), publish it to the team shelf now: write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
 
+const FILE_CAPTURE_PUBLISH_RE =
+  /write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file \((one per finding(?:; publish\.mode is <mode>)?)\)/i;
+
+/**
+ * Upgrade either capture template to the CLI's permission-safe stdin form.
+ *
+ * The raw public and team templates deliberately retain the file instruction
+ * that older builds understand. Applying the upgrade while generating the hook
+ * keeps this PR independent from the repo-activity PR: if that PR supplies a
+ * richer team template later, the same stable sentence is upgraded without
+ * either branch having to own the other's wording.
+ */
+export function withStdinCapturePublish(text: string): string {
+  const upgraded = text.replace(FILE_CAPTURE_PUBLISH_RE, (_match, cadence: string) =>
+    [
+      'pass the Markdown on stdin to `tenjin publish -`, with the title as its first `# ` heading',
+      `(${cadence}).`,
+      'If it is already in a file, run `tenjin publish <file>` as its own bare shell/tool command, never chained behind writing the file',
+    ].join(' '),
+  );
+  if (upgraded === text) throw new Error('capture publish instruction drifted');
+  return upgraded;
+}
+
 /**
  * The dispatch hook's bounds. The slice is a PRIVACY bound, not a display one: a
  * subagent prompt is the most sensitive payload any of these hooks sees, so no
@@ -2476,8 +2500,8 @@ function syncFallbackLine() {
 }
 const TRANSCRIPT_TAIL_BYTES = ${TRANSCRIPT_TAIL_BYTES};
 const SUBAGENT_STALE_MS = ${SUBAGENT_STALE_MS};
-const CAPTURE_REASON = ${JSON.stringify(CAPTURE_REASON)};
-const CAPTURE_REASON_TEAM = ${JSON.stringify(CAPTURE_REASON_TEAM)};
+const CAPTURE_REASON = ${JSON.stringify(withStdinCapturePublish(CAPTURE_REASON))};
+const CAPTURE_REASON_TEAM = ${JSON.stringify(withStdinCapturePublish(CAPTURE_REASON_TEAM))};
 
 /** The ask for this machine's mode, with the resolved publish.mode spliced in.
  *  The mode is in the ask itself rather than on a line above it because it is
@@ -3240,9 +3264,11 @@ function strongLine(s) {
   return (
     "Open Tenjin loop: '" +
     clean(s.question, 160) +
-    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it: tenjin publish <file> --search-id " +
+    "' was a MISS. Solved it with a public, reusable, rights-clean finding? Publish it from stdin: tenjin publish - --search-id " +
     id +
-    '. If not, close it: tenjin outcome --search-id ' +
+    '. If it is already in a file, run tenjin publish <file> --search-id ' +
+    id +
+    ' as its own bare shell/tool command, never chained behind writing the file. If not, close it: tenjin outcome --search-id ' +
     id +
     ' --status regenerated.'
   );
@@ -3260,7 +3286,7 @@ function weakLine(batch) {
     String(batch.length) +
     ' web search(es) this session had no Tenjin answer: ' +
     items +
-    ". Durable public finding among them? Publish it: tenjin publish <file> --search-id <id>. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
+    ". Durable public finding among them? Publish it from stdin: tenjin publish - --search-id <id>. If it is already in a file, run tenjin publish <file> --search-id <id> as its own bare shell/tool command, never chained behind writing the file. If not, close this session's in one call: tenjin outcome --all-open --status regenerated."
   );
 }
 

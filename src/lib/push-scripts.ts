@@ -213,10 +213,13 @@ export const PUSH_FINDING_TAG = 'tenjin-finding';
  * that would poison the queue.
  */
 export const SUBAGENT_CAPTURE_REASON =
-  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: write it to a file and run `tenjin publish <file>' +
+  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
   '<agent-flag>' +
   '<search-flag>' +
-  '` with the title as the first `# ` heading of the file (one finding per publish), or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
+  '` with the title as the first `# ` heading (one finding per publish). If it is already in a file, run `tenjin publish <file>' +
+  '<agent-flag>' +
+  '<search-flag>' +
+  '` as its own bare shell/tool command, never chained behind writing the file; or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   PUSH_FINDING_TAG +
   ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
@@ -248,8 +251,8 @@ export function subagentCaptureReason(
   const flag = agentId !== null && AGENT_ID_RE.test(agentId) ? ` --agent ${agentId}` : '';
   const search =
     searchId !== null && CAPTURE_SEARCH_ID_RE.test(searchId) ? ` --search-id ${searchId}` : '';
-  return SUBAGENT_CAPTURE_REASON.replace('<agent-flag>', flag)
-    .replace('<search-flag>', search)
+  return SUBAGENT_CAPTURE_REASON.replaceAll('<agent-flag>', flag)
+    .replaceAll('<search-flag>', search)
     .replace('<mode>', publishMode);
 }
 
@@ -2477,8 +2480,8 @@ function captureAskText(agentId, publishMode, searchId) {
     typeof agentId === 'string' && AGENT_ID_RE.test(agentId) ? ' --agent ' + agentId : '';
   const search =
     typeof searchId === 'string' && UUID_RE.test(searchId) ? ' --search-id ' + searchId : '';
-  return CAPTURE_ASK.replace('<agent-flag>', flag)
-    .replace('<search-flag>', search)
+  return CAPTURE_ASK.replaceAll('<agent-flag>', flag)
+    .replaceAll('<search-flag>', search)
     .replace('<mode>', publishMode);
 }
 
