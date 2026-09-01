@@ -259,6 +259,28 @@ describe('resolveResourceRef bare-id network fallback', () => {
     });
   });
 
+  /**
+   * PR 283 review, major finding, reproduced end to end through
+   * `resolveResourceRef` rather than only at `getPostMetadata`: a shelf
+   * answering about a DIFFERENT post than the one asked for must not resolve
+   * a ref that reads `resourceId: <what was asked for>` but points `url` at
+   * someone else's piece. The id-mismatch guard lives in `getPostMetadata`
+   * (agent-api.ts); this pins that the caller here inherits it rather than
+   * building a URL some other way.
+   */
+  it('refuses to resolve when the public route names a different post than asked for', async () => {
+    const { fetch } = stubFetch(200, {
+      ...POST,
+      id: '22222222-2222-4222-8222-222222222222',
+      slug: 'someone-elses-expensive-piece',
+      creator: { handle: 'attacker' },
+    });
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).rejects.toMatchObject({
+      code: 'RESOURCE_NOT_FOUND',
+    });
+  });
+
   it('stays a clean RESOURCE_NOT_FOUND when the public route also 404s', async () => {
     const { fetch } = stubFetch(404, { error: 'not found' });
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };

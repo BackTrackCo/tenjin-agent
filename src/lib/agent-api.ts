@@ -635,6 +635,18 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
   };
 }
 
+/**
+ * A single literal, non-parent path segment: no `/` (so it can never introduce
+ * a second segment), and not `.` or `..` (PR 283 review, major finding).
+ * `encodeURIComponent` does not escape dots, so a `slug`/`creator.handle` of
+ * `..` survives into the read URL this module hands `resolveResourceRef`, and
+ * `new URL`/`fetch` then resolve `/api/read/../..%2Fetc` right out of the read
+ * route while the origin — the one thing `assertOnBaseOrigin` checks — never
+ * changes. `[^/]+` also rejects the empty string, closing the same response
+ * shape's `/api/read//` case.
+ */
+const PATH_SEGMENT_RE = /^(?!\.{1,2}$)[^/]+$/;
+
 // `articleBase()`'s wire shape (tenjin PR #803) carries a lot more than this
 // reads (excerpt, coverImageId, arbiterId, publishedAt, tags, the rest of
 // `creator`) — `.passthrough()` keeps all of it out of this schema's required
@@ -645,11 +657,13 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
 const postMetadataSchema = z
   .object({
     id: z.string().regex(UUID_RE, 'id must be a uuid'),
-    slug: z.string(),
+    slug: z.string().regex(PATH_SEGMENT_RE, 'slug must be a single path segment'),
     title: z.string(),
     price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
     status: z.string(),
-    creator: z.object({ handle: z.string() }).passthrough(),
+    creator: z
+      .object({ handle: z.string().regex(PATH_SEGMENT_RE, 'handle must be a single path segment') })
+      .passthrough(),
   })
   .passthrough();
 
@@ -683,6 +697,15 @@ export interface PostMetadata {
  * (lib/resource-ref.ts) uses this as its own last-resort id resolver: the
  * read route is keyed by handle/slug, not by id, so those two fields are what
  * let a bare id with no local record still resolve to a payable URL.
+ *
+ * The response's OWN `id` is checked against `resourceId` before any of that
+ * is trusted (PR 283 review, major finding). `assertOnBaseOrigin` downstream
+ * proves the HOST; nothing else proves the RESOURCE — a schema requiring `id`
+ * to be A uuid is not the same as requiring it to be THIS uuid, and without
+ * the compare a 200 naming a different post's slug/handle/price resolves a
+ * ref that reads `resourceId: <what was asked for>` but pays for, delivers,
+ * and (in `buy`) writes the library receipt under a completely different
+ * piece.
  */
 export async function getPostMetadata(
   resourceId: string,
@@ -698,6 +721,10 @@ export async function getPostMetadata(
   if (!res.ok || res.status !== 200) return null;
   const parsed = postMetadataSchema.safeParse(res.json);
   if (!parsed.success || parsed.data.status !== 'published') return null;
+  // Postgres' uuid type compares case-insensitively (tenjin#803's own route
+  // relies on the same fact), so this compare does too — a caller passing an
+  // uppercase id must not fail the join a lowercase one would pass.
+  if (parsed.data.id.toLowerCase() !== resourceId.toLowerCase()) return null;
   return {
     slug: parsed.data.slug,
     title: parsed.data.title,

@@ -156,13 +156,20 @@ export async function resolveResourceRef(
       // capability — see `ResourceRefNetOptions`.
       const remote = net !== undefined ? await getPostMetadata(trimmed, { baseUrl, ...net }) : null;
       if (remote === null) {
+        // The shelf-consulted branch gets its own fix line (PR 283 review nit):
+        // "run `tenjin search`" is no help once the shelf itself has already
+        // 404'd the id, and would send an agent back around a loop that cannot
+        // change the answer.
         throw new CliError(
           'RESOURCE_NOT_FOUND',
           net !== undefined
             ? `Resource ${trimmed} is not known locally or on the shelf.`
             : `No local search knows resource ${trimmed}.`,
           {
-            fix: 'Run `tenjin search` to surface it first, or pass the full read URL.',
+            fix:
+              net !== undefined
+                ? 'Check the id and the configured base URL (`tenjin config get baseUrl`), or pass the full read URL.'
+                : 'Run `tenjin search` to surface it first, or pass the full read URL.',
           },
         );
       }

@@ -902,6 +902,75 @@ describe('getPostMetadata', () => {
     expect(meta).toBeNull();
   });
 
+  /**
+   * PR 283 review, major finding: `resolveResourceRef` builds a payable read
+   * URL straight out of this response's `slug`/`creator.handle`, and asserts
+   * a uuid-shaped `id` without ever checking WHICH uuid. A response naming a
+   * different post's id, or unsafe path segments `encodeURIComponent` does
+   * not escape, must fail closed to `null` — a schema requiring "a uuid" is
+   * not the same as requiring "the uuid asked for", and the URL built from an
+   * unvalidated slug/handle is what a wallet-signed payment goes to.
+   */
+  it('returns null when the response names a different post than the one asked for', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, id: '22222222-2222-4222-8222-222222222222' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('matches the requested id case-insensitively, like the route itself', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, id: POST.id.toUpperCase() }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toEqual(EXPECTED);
+  });
+
+  it('returns null for a slug of ".." rather than building a traversal out of it', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, slug: '..' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for a creator.handle of "." rather than building a traversal out of it', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, creator: { handle: '.' } }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for an empty slug', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, slug: '' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for an empty creator.handle', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, creator: { handle: '' } }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
   it('returns null on a 404 (draft, unknown id, or a deployment without the route)', async () => {
     const { fetch } = stubFetch(json(404, { error: 'not found' }));
     const meta = await getPostMetadata(POST.id, {
