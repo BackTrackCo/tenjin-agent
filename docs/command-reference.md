@@ -125,6 +125,8 @@ Every search names the arm that fired it: this command (and the MCP `search` too
 
 Shows a candidate card and preview before purchase. It never pays.
 
+The piece's title surfaces in the output when it is available — from the 402 preview for a paid piece, or a live lookup when a ref resolved by id carries no preview to read one from. Absent, never guessed, when neither source has one.
+
 ### `tenjin read <url-or-resource-id>`
 
 Delivers free, local-library, or already-owned pieces. It refuses with exit 3 rather than paying.

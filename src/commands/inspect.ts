@@ -98,8 +98,12 @@ export async function runInspect(
     // one that omits it for some other reason — falls back to the live
     // GET /api/posts/<id>/public lookup. Never a default: `title` stays
     // undefined, and the line below reads exactly as it always has, when
-    // neither source has one.
-    const title = result.preview.title ?? (await displayMetadata())?.title;
+    // neither source has one. Either source is a PUBLISHER's string on a
+    // public marketplace, so it is bounded the same as every other server
+    // string this command renders (`boundedTitle`), not trusted at whatever
+    // length it arrives.
+    const rawTitle = result.preview.title ?? (await displayMetadata())?.title;
+    const title = rawTitle !== undefined ? boundedTitle(rawTitle) : undefined;
     return {
       data: {
         url: ref.url,
@@ -129,7 +133,7 @@ export async function runInspect(
       },
       humanLines: [
         title !== undefined
-          ? `${sanitizeForTerminal(title)}, paid${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`
+          ? `${title}, paid${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`
           : `Paid resource${price !== undefined ? `, ${price.usd} USD (${price.atomic} atomic)` : ''}.`,
         ...cardLines(card),
         // Three distinct states behind an absent card, and they call for three
@@ -155,18 +159,27 @@ export async function runInspect(
   // Owned means delivery is free, so this branch points at `read` too. No 402
   // preview exists on this path at all (the result carries only a message), so
   // title/price come only from the live metadata lookup below when the ref
-  // resolved via id — absent, never invented, when it doesn't.
+  // resolved via id — absent, never invented, when it doesn't. Bounded the
+  // same way the payment_required branch's title is (`boundedTitle`): this is
+  // a publisher's string, not this CLI's.
+  //
+  // `price` here is the piece's LISTED price off `#803`'s metadata, not an
+  // amount due — this branch never asks for payment, so there is no amount to
+  // report. A consumer reading `data.price` on this `access: 'entitled'` row
+  // should read it as "what this piece lists for", same as the free branch's.
   const metadata = await displayMetadata();
+  const ownedTitle = metadata !== null ? boundedTitle(metadata.title) : undefined;
   return {
     data: {
       url: ref.url,
       access: 'entitled',
-      ...(metadata !== null ? { title: metadata.title, price: toMoney(metadata.price) } : {}),
+      ...(ownedTitle !== undefined ? { title: ownedTitle } : {}),
+      ...(metadata !== null ? { price: toMoney(metadata.price) } : {}),
       message: result.message,
       nextCommand: `tenjin read ${ref.url}`,
     },
     humanLines: [
-      ...(metadata !== null ? [`${sanitizeForTerminal(metadata.title)}.`] : []),
+      ...(ownedTitle !== undefined ? [`${ownedTitle}.`] : []),
       `${sanitizeForTerminal(result.message)} Read it with \`tenjin read ${sanitizeForTerminal(ref.url)}\`.`,
     ],
   };
@@ -213,6 +226,10 @@ const CARD_BOUNDS = {
   // artifactType and temporalMode are open strings on the wire, so the composed
   // freshness line gets a bound of its own rather than trusting them.
   freshness: 200,
+  // A piece's title, off either the 402 preview or the live metadata lookup —
+  // a PUBLISHER's string, on a public marketplace, read by `inspect` before an
+  // agent has decided to trust the piece at all (PR 277 round-4 review).
+  title: 200,
 } as const;
 
 const CLIP_MARKER = '...';
@@ -222,6 +239,22 @@ function cardLine(label: string, value: string | null, max: number): string[] {
   const text = sanitizeForTerminal(value).trim();
   if (text.length === 0) return [];
   return [`${label}: ${text.length > max ? `${text.slice(0, max)}${CLIP_MARKER}` : text}`];
+}
+
+/** A server-supplied title, bounded like every other free-form field this
+ *  command renders (`CARD_BOUNDS`) rather than trusted at whatever length a
+ *  publisher sent — unlike the answer card's own JSON copy, which stays
+ *  verbatim because an agent judges a purchase on its full text; a title is
+ *  display text, not decision content. Empty after sanitizing/trimming reads
+ *  as "no title", same as an empty card field. Applied uniformly to both the
+ *  `--json` field and the human line: this is identifying text, not the
+ *  once-per-purchase judgment call the card's own bound docblock is about. */
+function boundedTitle(title: string): string | undefined {
+  const text = sanitizeForTerminal(title).trim();
+  if (text.length === 0) return undefined;
+  return text.length > CARD_BOUNDS.title
+    ? `${text.slice(0, CARD_BOUNDS.title)}${CLIP_MARKER}`
+    : text;
 }
 
 /**

@@ -211,6 +211,70 @@ describe('runInspect, live metadata fallback for an id-resolved ref', () => {
     expect(res.data).not.toHaveProperty('price');
     expect(res.humanLines?.[0]).toContain('Already purchased.');
   });
+
+  /**
+   * PR 277 round-4 review: a title is a PUBLISHER's string on a public
+   * marketplace, unbounded on the wire (`postMetadataSchema.title` is a bare
+   * `z.string()`), and `inspect` is the command an agent runs before it has
+   * decided to trust the piece at all. Both the JSON field and the human
+   * line must be clipped the same way every other free-form field this
+   * command renders is (`CARD_BOUNDS`/`cardLine`).
+   */
+  it('caps an oversized title from the live metadata lookup, on both the JSON field and the human line', async () => {
+    await seedCandidate();
+    const pr = buildPaymentRequired();
+    const hugeTitle = 'A'.repeat(100_000);
+    const { fetch } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { price: '100000', creator: { handle: 'iris' } }),
+      postsPublic: () =>
+        jsonRes(200, {
+          id: RES,
+          slug: 'slug',
+          title: hugeTitle,
+          price: '100000',
+          status: 'published',
+          creator: { handle: 'iris' },
+        }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string };
+    expect(data.title?.length).toBeLessThan(300);
+    expect(data.title?.endsWith('...')).toBe(true);
+    expect(res.humanLines?.[0]?.length).toBeLessThan(350);
+  });
+
+  it('caps an oversized title from the 402 preview itself, with no live lookup involved', async () => {
+    const pr = buildPaymentRequired();
+    const hugeTitle = 'B'.repeat(100_000);
+    const { fetch } = idResolvedFetch({
+      read: () => reply.paymentRequired(pr, { title: hugeTitle, price: '100000' }),
+    });
+    const res = await runInspect({ ref: URL_ }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string };
+    expect(data.title?.length).toBeLessThan(300);
+    expect(data.title?.endsWith('...')).toBe(true);
+  });
+
+  it('caps an oversized title on the already_purchased branch too', async () => {
+    await seedCandidate();
+    const hugeTitle = 'C'.repeat(100_000);
+    const { fetch } = idResolvedFetch({
+      read: () => reply.alreadyPurchased(),
+      postsPublic: () =>
+        jsonRes(200, {
+          id: RES,
+          slug: 'slug',
+          title: hugeTitle,
+          price: '100000',
+          status: 'published',
+          creator: { handle: 'iris' },
+        }),
+    });
+    const res = await runInspect({ ref: RES }, makeCtx(), { fetchImpl: fetch });
+    const data = res.data as { title?: string };
+    expect(data.title?.length).toBeLessThan(300);
+    expect(res.humanLines?.[0]?.length).toBeLessThan(300);
+  });
 });
 
 // The answer card left the search candidate in search v2, so this free 402 fetch
