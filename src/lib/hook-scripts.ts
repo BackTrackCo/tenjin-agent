@@ -1465,13 +1465,22 @@ function paramWords(url) {
 /**
  * The question a WebFetch is really asking: the url's own words (path segments,
  * plus the values of the few query keys that hold a topic) and the prompt the
- * agent attached. Scrubbed like every other push query, so the host itself never
- * leaves the machine — only the shape of what was wanted from it.
+ * agent attached.
  *
- * PARAM VALUES ARE NOT SENT WHOLESALE. A url's query string is where an api key,
- * an account id and a presigned signature live, and \`scrub\` is a backstop, not
- * a licence to ship the whole string at it: only {@link SAFE_PARAM_KEY_RE} keys
- * are read at all.
+ * SECRETS ONLY, NOW (tenjin-agent#197 rework, round 2, owner-approved): a path
+ * segment is not just a topic word — \`acme.com/download/sk-abc.../file.pdf\`
+ * puts a credential-shaped value in the PATH rather than the query string, and
+ * {@link paramWords}'s allow-list only ever guarded the query string, so that
+ * shape rode this marketplace query whole. The url has still already left the
+ * machine via the fetch itself, so \`scrub(combined, 'secretsOnly')\` is not
+ * about hiding the address: paths and hostnames still ship unchanged, and only
+ * a credential, control byte or email is dropped — the same floor every other
+ * search-query and published-knowledge arm now holds to.
+ *
+ * PARAM VALUES ARE STILL NOT SENT WHOLESALE, independent of scrub: a url's
+ * query string is where an api key, an account id and a presigned signature
+ * live, and only {@link SAFE_PARAM_KEY_RE} keys are read at all — an allow-list
+ * on which VALUES are eligible, not a scrub of what they contain.
  */
 function fetchQuestion(toolInput) {
   const raw = typeof toolInput.url === 'string' ? toolInput.url : '';
@@ -1479,9 +1488,8 @@ function fetchQuestion(toolInput) {
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
-    // Segments become WORDS before anything else looks at them: left as a path
-    // they are exactly the shape \`scrub\` strips, and the topic would leave with
-    // the address. Splitting them first keeps the topic and loses the path.
+    // Segments become WORDS before anything else looks at them: a hostname
+    // never enters \`words\` at all, only the path and the allow-listed params.
     const path = decodeURIComponent(url.pathname)
       .replace(/\\.(html?|php|aspx?|md|txt)$/i, '')
       .replace(/[/_]+/g, ' ');
@@ -1491,7 +1499,10 @@ function fetchQuestion(toolInput) {
     return '';
   }
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.slice(0, 400) : '';
-  return clean(scrub(words + ' ' + prompt), ${QUESTION_MAX});
+  // Whitespace-collapsed and trimmed, the same cleanup scrub used to do as a
+  // side effect, so a run of url-word spacing doesn't read as content.
+  const combined = (words + ' ' + prompt).replace(/\\s+/g, ' ').trim();
+  return clean(scrub(combined, 'secretsOnly'), ${QUESTION_MAX});
 }
 
 async function main() {
@@ -1620,20 +1631,23 @@ export function dispatchHookScript(dataDir: string): string {
 const HEALTH_PATH = join(DATA_DIR, 'hook-health.json');
 
 /** What a subagent was sent to find out. Too short to hold a research question
- *  and nothing is sent. Scrubbed exactly as the WebSearch arm scrubs its own
- *  query: a dispatch prompt is a work order, and a work order names paths,
- *  hostnames and ids that must ride to NEITHER shelf. The one scrubbed string
- *  built here is what askTenjin sends on both legs, what recordSearch stores,
- *  and what the event row keeps. */
+ *  and nothing is sent. SECRETS ONLY are scrubbed here (tenjin-agent#197
+ *  rework, reversing what this arm used to do): a dispatch prompt is a work
+ *  order, and its paths and hostnames are the best search key the server has,
+ *  so they now ride to both shelves same as the WebFetch arm. What still
+ *  cannot ride is a credential — a work order can embed an api key that is not
+ *  otherwise outbound, and a team-shelf miss forwards this same string to the
+ *  PUBLIC marketplace. The one scrubbed string built here is what askTenjin
+ *  sends on both legs, what recordSearch stores, and what the event row
+ *  keeps. */
 function dispatchQuestion(toolInput) {
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.trim() : '';
   if (prompt.length < ${DISPATCH_PROMPT_MIN}) return '';
   // SCRUB BEFORE SLICING, over a BOUNDED prefix. Slicing first cuts a secret at
   // the boundary into a fragment that no longer matches scrub's whole-token
   // patterns, and the fragment ships. Scrubbing the whole prompt fixes that but
-  // pays for it: the path rule is quadratic on one unbroken path-like token, and
-  // a work order can be tens of KB (measured 388ms at 45KB). 4x the slice is
-  // more than any single token that can straddle the boundary.
+  // pays for it: a work order can be tens of KB. 4x the slice is more than any
+  // single token that can straddle the boundary.
   // Cut the window back to the last whitespace first, so scrub only ever sees
   // WHOLE tokens: a token that starts inside the slice and runs past the window
   // is dropped entirely rather than handed over truncated, which is the one way
@@ -1641,13 +1655,22 @@ function dispatchQuestion(toolInput) {
   const window = prompt.slice(0, ${DISPATCH_PROMPT_SLICE * 4});
   const whole =
     window.length < prompt.length ? window.slice(0, window.search(/\\s\\S*$/) + 1) : window;
-  const head = clean(scrub(whole).slice(0, ${DISPATCH_PROMPT_SLICE}), ${DISPATCH_PROMPT_SLICE});
-  // THE DESCRIPTION TAKES THE SAME TREATMENT, for the same reason and in the
-  // same order. It is a caller-chosen string with no length bound of its own,
-  // and bounding it AFTER \`scrub\` is what made the prompt above cubic in the
-  // first place. This arm is worse to get wrong than the harvest is: it runs on
-  // every Task/Agent PreToolUse on a default install, with no push and no
-  // capture, and it BLOCKS the tool call while it runs.
+  const head = clean(
+    scrub(whole, 'secretsOnly').slice(0, ${DISPATCH_PROMPT_SLICE}),
+    ${DISPATCH_PROMPT_SLICE},
+  );
+  // NO HEAD, NO DISPATCH — whatever the description says. A description is a
+  // caller-chosen label, never a question on its own: a prompt that is nothing
+  // but a secret (or nothing but whitespace) scrubs and cleans to '', and
+  // \`description + ': ' + head\` must not turn that into a description-only
+  // query with a dangling colon (tenjin-agent#197).
+  if (head === '') return '';
+  // THE DESCRIPTION TAKES THE SAME SECRETS-ONLY TREATMENT, for the same reason
+  // and in the same order. It is a caller-chosen string with no length bound of
+  // its own, and bounding it AFTER \`scrub\` is what made the prompt above cubic
+  // in the first place. This arm is worse to get wrong than the harvest is: it
+  // runs on every Task/Agent PreToolUse on a default install, with no push and
+  // no capture, and it BLOCKS the tool call while it runs.
   const raw = typeof toolInput.description === 'string' ? toolInput.description : '';
   const descWindow = raw.slice(0, ${DISPATCH_DESCRIPTION_MAX * 4});
   // A DESCRIPTION OVER THE WINDOW WITH NO WHITESPACE IN IT DROPS TO ''. The
@@ -1660,7 +1683,8 @@ function dispatchQuestion(toolInput) {
     descWindow.length < raw.length
       ? descWindow.slice(0, descWindow.search(/\\s\\S*$/) + 1)
       : descWindow;
-  const description = raw === '' ? '' : clean(scrub(descWhole), ${DISPATCH_DESCRIPTION_MAX});
+  const description =
+    raw === '' ? '' : clean(scrub(descWhole, 'secretsOnly'), ${DISPATCH_DESCRIPTION_MAX});
   return description === '' ? head : description + ': ' + head;
 }
 

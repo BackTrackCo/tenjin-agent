@@ -1006,8 +1006,10 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(sent).toContain('error-handling');
     expect(sent).toContain('optional-chain');
     expect(sent).toContain('does parse throw here');
-    // The host is exactly what scrub() takes out: what leaves is the shape of the
-    // question, never the address it was going to.
+    // The host never enters `words` at all — fetchQuestion reads only the
+    // pathname and allow-listed query params, never `url.hostname` — so it is
+    // absent whether or not the arm scrubs (tenjin-agent#197 rework: as of
+    // this arm, it no longer does).
     expect(sent).not.toContain('zod.dev');
     expect(injected(run)).toContain(BODY_MD);
   });
@@ -1015,7 +1017,16 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
   /**
    * A url's query string is where an api key and an account id live. The path
    * segments are the topic and they are what gets sent; a param value rides
-   * along only under a key that names a topic.
+   * along only under a key that names a topic — an ALLOW-LIST on which
+   * VALUES are even read, independent of scrub and unaffected by the
+   * tenjin-agent#197 rework below: `api_key` and `account` are simply never
+   * on {@link SAFE_PARAM_KEY_RE}, so their values never enter `words` at all.
+   *
+   * THE PROMPT ITSELF IS A DIFFERENT STORY (owner policy, tenjin-agent#197
+   * rework): this arm no longer scrubs at all, so a secret an agent typed into
+   * the WebFetch prompt now rides along too — the url has already left the
+   * machine via the fetch itself, and search availability wins over
+   * sanitizing a copy of it that protects nothing.
    */
   it('sends a WebFetch url path without the credentials in its query string', async () => {
     const { baseUrl, queries } = await serve(echo());
@@ -1029,8 +1040,7 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
         tool_name: 'WebFetch',
         tool_input: {
           url: 'https://api.internal.acme.com/v1/usage/report?api_key=sk-live-9f3QQAbCdEfGhIjK&account=acct_882&q=monthly+revenue',
-          prompt:
-            'Summarise the revenue for this account, my key is sk-ant-api03-AbC_dEf-1234567890',
+          prompt: 'Summarise the revenue for this account',
         },
       }),
     );
@@ -1039,12 +1049,11 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect(sent).toContain('usage');
     expect(sent).toContain('report');
     // The one allow-listed key's value survives; everything else in the query
-    // string does not, whatever it looks like.
+    // string does not, because it is never read at all.
     expect(sent).toContain('monthly');
     expect(sent).not.toContain('sk-live');
     expect(sent).not.toContain('9f3QQ');
     expect(sent).not.toContain('acct_882');
-    expect(sent).not.toContain('sk-ant');
     expect(sent).not.toContain('acme.com');
   });
 
@@ -1616,7 +1625,7 @@ describe('scrub', () => {
   // The data dir is only baked into the prelude; any string will do here.
   const source = pushPromptHookScript('/tmp/scrub-probe');
   const start = source.indexOf('const SECRET_TOKEN_RE');
-  const fn = source.indexOf('function scrub(text)');
+  const fn = source.indexOf('function scrub(text, mode)');
   const end = source.indexOf('\n}\n', fn) + 3;
   const scrub =
     start > -1 && fn > start
@@ -1902,7 +1911,14 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect((await events())[0]!.data).toMatchObject({ query: thin });
   });
 
-  it('keeps a file basename and an env name, drops the path, the host and the key', async () => {
+  /**
+   * secretsOnly (owner policy, tenjin-agent#197 rework) never runs the
+   * full-mode path/host/stem rules — those are exercised in the `scrub`
+   * describe block below, for the callers still passing no second argument.
+   * The prompt arm's query and identifiers keep the whole path and host now;
+   * only a literal credential value is a search key not worth keeping.
+   */
+  it('keeps the whole path and host, and only drops the key', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
     await runScript(
@@ -1918,15 +1934,26 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       'push-scripts.test.ts',
       'DATABASE_URL',
       'NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1',
+      'acme-bank',
+      'prod.acme.com',
+      'workflows/migrate.yml',
+      'customers/acme-bank/keys.ts',
     ]) {
       expect(sent).toContain(kept);
     }
-    for (const gone of ['acme-bank', '.github/workflows', 'prod.acme.com', 'ghp_', 'u:p@']) {
+    for (const gone of ['ghp_', 'u:p@']) {
       expect(sent).not.toContain(gone);
     }
   });
 
-  it('never keeps a secret-shaped basename', async () => {
+  /**
+   * The mirror of the test above: a credential-SHAPED file name (an id_rsa
+   * key, a .pem, a .env.production, a customer's own name in the path) is
+   * still just a path under secretsOnly, and a path ships whole. Before
+   * #197's rework this basename would have been salvaged or dropped by the
+   * full-mode stem rules; now nothing in the prompt arm ever reaches them.
+   */
+  it('ships a credential-shaped file name too — secretsOnly never reads the stem', async () => {
     const { baseUrl, queries, bodies } = await serve(echo());
     await pushOn(baseUrl);
     await runScript(
@@ -1936,13 +1963,13 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       ),
     );
     const wire = JSON.stringify(bodies()[0]);
-    for (const gone of ['.pem', 'id_rsa', '.env', 'acme-bank']) {
-      expect(wire).not.toContain(gone);
-      expect(queries()[0]).not.toContain(gone);
+    for (const kept of ['.pem', 'id_rsa', '.env', 'acme-bank']) {
+      expect(wire).toContain(kept);
+      expect(queries()[0]).toContain(kept);
     }
   });
 
-  it('injects on the same turn, and scrubs the paths out of what it sends', async () => {
+  it('injects on the same turn, and keeps the path in what it sends', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
 
@@ -1952,12 +1979,83 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     );
     expect(run.code).toBe(0);
     expect(injected(run)).toContain(BODY_MD);
-    expect(queries()[0]).not.toContain('/Users/vraspar');
+    // secretsOnly (owner policy, tenjin-agent#197 rework): a path is a search
+    // key the server's identifier-aware BM25 lane ranks on, not an address to
+    // hide, so it now ships rather than being scrubbed away. condense()'s own
+    // token normalization strips a LEADING separator from every word it
+    // keeps (the same rule that turns "PR 751" into "751" without its own
+    // punctuation), so the leading `/` is gone; the rest of the absolute
+    // path is not.
+    expect(queries()[0]).toContain('Users/vraspar/work/app/src/thing.ts');
     expect((await ledger())[0]).toMatchObject({
       trigger: 'prompt',
       event: 'UserPromptSubmit',
       action: 'injected',
     });
+  });
+
+  /**
+   * The credential/PII floor still holds even though the path floor is gone:
+   * a git SHA and a path are search keys and ship, but a secret-shaped token
+   * and an email address are exactly what `secretsOnly` still strips.
+   */
+  it('keeps a path and a git SHA in the query, and strips a key and an email', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9021324354';
+    const key = 'sk-abcdefghijklmnopqrstuvwxyz012345';
+    const run = await runScript(
+      pushPromptHookScript(dataDir),
+      prompt(
+        `${QUESTION} at commit ${sha} in src/lib/thing.ts, key ${key}, contact vraspar@example.com`,
+      ),
+    );
+    expect(run.code).toBe(0);
+    expect(injected(run)).toContain(BODY_MD);
+    const query = queries()[0]!;
+    expect(query).toContain(sha);
+    expect(query).toContain('src/lib/thing.ts');
+    expect(query).not.toContain(key);
+    expect(query).not.toContain('vraspar@example.com');
+  });
+
+  /**
+   * SECURITY CHECK (tenjin-agent#197 x #262 reconciliation): #262's condense
+   * pipeline runs identifiersOf()/condense() straight over whatever scrub()
+   * handed back. Before this merge that was a FULL scrub, so the identifier
+   * extractor never saw a credential at all — full mode drops it upstream of
+   * condense. Under the merged secretsOnly-first pipeline the credential
+   * rules (SECRET_TOKEN_RE, SECRET_ASSIGN_RE, SECRET_USERINFO_RE and the
+   * entropy rule) still run before the mode branch, so an sk-/ghp_/JWT/AWS-
+   * shaped token or a mixed-case entropy run is gone from `scrubbed` before
+   * `identifiersOf`/`condense` ever run over it — it cannot ride either the
+   * condensed `query` string or the `identifiers` array it is built from.
+   */
+  it('keeps an sk-style key out of both the condensed query and the identifiers array', async () => {
+    const { baseUrl, queries, bodies } = await serve(echo());
+    await pushOn(baseUrl);
+
+    const key = 'sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ';
+    const run = await runScript(
+      pushPromptHookScript(dataDir),
+      prompt(
+        `${QUESTION} the api key is ${key} in src/lib/thing.ts, PR 751, contact vraspar@example.com`,
+      ),
+    );
+    expect(run.code).toBe(0);
+    expect(injected(run)).toContain(BODY_MD);
+    const query = queries()[0]!;
+    const wire = JSON.stringify(bodies()[0]);
+    // The identifiers a credential-free prompt should still carry.
+    expect(query).toContain('src/lib/thing.ts');
+    expect(wire).toContain('src/lib/thing.ts');
+    expect(bodies()[0]!.identifiers).toContain('pr-751');
+    // The key and the email reach neither field.
+    for (const gone of [key, 'vraspar@example.com']) {
+      expect(query).not.toContain(gone);
+      expect(wire).not.toContain(gone);
+    }
   });
 
   /**
@@ -6442,6 +6540,38 @@ describe('the subagent arm (SubagentStop)', () => {
   });
 
   /**
+   * secretsOnly (owner policy, tenjin-agent#197 rework): a finding is
+   * published knowledge, and a path or a git SHA in it is a search key for the
+   * team/public shelf, not an address to hide. Only a credential-shaped token
+   * still comes out; `tenjin publish`'s own `scanDraft()` is the backstop that
+   * runs later, at actual publish time.
+   */
+  it('keeps paths and a git SHA in a harvested finding, and strips a key', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9021324354';
+    const key = 'sk-abcdefghijklmnopqrstuvwxyz012345';
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({
+        stop_hook_active: true,
+        last_assistant_message: answer(
+          `${FINDING} The fix landed in src/lib/thing.ts at commit ${sha}. Key was ${key}.`,
+        ),
+      }),
+    );
+    expect(run.stdout).toBe('');
+
+    const finding = (await stopRows()).find((r) => r.kind === 'finding');
+    const body = String(finding?.body);
+    expect(body).toContain('src/lib/thing.ts');
+    expect(body).toContain(sha);
+    expect(body).not.toContain(key);
+  });
+
+  /**
    * ROUND-4 MINOR 4: THE HARVEST CLAIM GUARDS DATA, NOT A TURN.
    *
    * The two budget claims are right to fail closed on a swallowed write: what
@@ -6897,6 +7027,51 @@ describe('the context arm (log-only)', () => {
     expect(rows[0]!.query).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
     expect(queries().join('\n')).toContain('checkout');
     expect(queries().join('\n')).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
+  });
+
+  /**
+   * A REAL BUG, fixed by the same secretsOnly switch — but NOT the one a
+   * `.sh`/`.io` basename would suggest. This arm's own extension gate (the
+   * `main()` guard above, shared with the read arm) only lets
+   * `.js/.jsx/.ts/.tsx/.mjs/.mts/.cjs/.py` files reach scrub at all, and none
+   * of those extensions is itself a TLD `SECRET_HOST_RE` knows about — so a
+   * literal `deploy.sh` or `index.io` never reaches this arm's scrub call in
+   * the first place; it is filtered out one line earlier, for an unrelated
+   * reason (the arm only understands JS/TS/Python imports).
+   *
+   * THE SAME COLLISION STILL FIRES ONE LEVEL IN, because `SECRET_HOST_RE` has
+   * no anchors and matches a TLD-shaped label ANYWHERE in the basename, not
+   * just at the end. `test`, `dev`, `app`, `co`, `local` and `internal` are
+   * all in that TLD list AND all common naming segments in an allowed
+   * extension — `checkout.test.ts` (this very suite's own naming pattern),
+   * `app.config.dev.ts`, `login.local.ts` all scrub to nothing under full
+   * mode: `checkout.test.ts` -> \` .ts\` -> (extension stripped) -> \`\` ->
+   * \`wordCount(query) < 1\` -> silence, with no error and no row. secretsOnly
+   * does not run the host rule at all, so the segment survives and the arm
+   * ships \`checkout test\` instead of going quiet.
+   */
+  it('sends a request for a churned checkout.test.ts, which used to scrub to nothing', async () => {
+    const { baseUrl, queries } = await serve(echo());
+    await pushOn(baseUrl);
+    const file = join(scriptDir, 'checkout.test.ts');
+    await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
+
+    const edit = JSON.stringify({
+      session_id: SESSION,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: file },
+    });
+    for (let i = 0; i < 4; i += 1) {
+      const run = await runScript(pushContextHookScript(dataDir), edit);
+      expect(run.stdout).toBe('');
+    }
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ trigger: 'churn', action: 'logged' });
+    expect(rows[0]!.query).toContain('checkout');
+    expect(queries().join('\n')).toContain('checkout');
   });
 
   /**
