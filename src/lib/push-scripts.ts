@@ -26,6 +26,11 @@ export const PUSH_PROMPT_HOOK_FILE = 'tenjin-push-prompt.mjs';
 export const PUSH_FAILURE_HOOK_FILE = 'tenjin-push-failure.mjs';
 export const PUSH_SUBAGENT_HOOK_FILE = 'tenjin-push-subagent.mjs';
 export const PUSH_CONTEXT_HOOK_FILE = 'tenjin-push-context.mjs';
+/** NOT a Claude Code hook — a vitest reporter (tenjin-agent#278 round 3),
+ *  written to the same hooks directory so a repo's own vitest/vite config can
+ *  reference it by a stable absolute path. Never registered in settings.json:
+ *  vitest invokes it directly, from inside the user's own test run. */
+export const PUSH_VITEST_REPORTER_FILE = 'tenjin-vitest-reporter.mjs';
 
 /** Injections a session may receive at full form; past it the short form only. */
 export const PUSH_INJECT_MAX_PER_SESSION = 5;
@@ -1728,26 +1733,10 @@ function sigV1(line, text) {
 // of wire keys, when a test identity is found beside it — a repo that never
 // has one runs exactly the code it ran before this issue.
 
-/** The default path the README's opt-in reporter snippet writes to, relative
- *  to the failing command's cwd: \`reporters: ['default', ['json', {
- *  outputFile: '.vitest-report.json' }]]\`. */
+/** The default path the doctor hint's reporter snippet writes to, relative
+ *  to the failing command's cwd: \`reporters: ['default', ['<path to
+ *  tenjin-vitest-reporter.mjs>', { outputFile: '.vitest-report.json' }]]\`. */
 const TEST_ARTIFACT_DEFAULT_PATH = '.vitest-report.json';
-
-/**
- * How stale a report file may be and still count as evidence about THIS
- * failure. The hook fires within milliseconds of the command's own exit, so a
- * report older than this is a leftover from an earlier run in the same
- * checkout — using it would pin today's failure to yesterday's identity, or
- * worse, to a run that PASSED (a report vitest overwrote is gone; one from a
- * run that crashed before writing it is simply absent — this bound is about
- * the ordinary case, an artifact from two commands ago that nothing removed).
- * Two minutes is generous next to "milliseconds" on purpose: a slow CI
- * runner's clock and the hook's are not perfectly synced, and rejecting a
- * genuinely fresh report is the worse of the two mistakes (04's rule for the
- * whole lane: no identity beats a wrong one, but a real one should not be
- * thrown away over a few seconds of skew).
- */
-const TEST_ARTIFACT_MAX_AGE_MS = 2 * 60 * 1000;
 
 /** A vitest/vite config file this arm may read as TEXT — never imported, never
  *  executed, never \`require\`d: a hook must not run a repo's own build config.
@@ -1766,17 +1755,21 @@ const TEST_CONFIG_FILES = [
   'vite.config.mjs',
 ];
 
-/** A \`['json', { outputFile: '...' }]\` reporter entry, read off a config's raw
- *  TEXT rather than its evaluated shape. Conservative on purpose: a config
- *  this cannot see into (a computed path, a spread, a helper function) means
- *  "nothing configured", never a guess, and the arm falls back to the
- *  documented default path — the one a repo that used the README's snippet
- *  verbatim actually wrote. */
+/** A \`[<path to tenjin-vitest-reporter.mjs>, { outputFile: '...' }]\` entry,
+ *  read off a config's raw TEXT rather than its evaluated shape. Anchored on
+ *  the reporter's own filename, not on \`'json'\` (tenjin-agent#278 round 3):
+ *  the doctor hint now recommends OUR reporter, referenced by path rather
+ *  than by the built-in name, and a bare \`outputFile\` check with no anchor
+ *  at all would happily match an unrelated reporter's own output option.
+ *  Conservative on purpose otherwise: a config this cannot see into (a
+ *  computed path, a spread, a helper function) means "nothing configured",
+ *  never a guess, and the arm falls back to the documented default path —
+ *  the one the doctor hint's snippet verbatim actually writes. */
 const TEST_OUTPUT_FILE_RE =
-  /reporters\s*:[\s\S]{0,600}?['"]json['"][\s\S]{0,300}?outputFile\s*:\s*['"]([^'"]+)['"]/;
+  /reporters\s*:[\s\S]{0,600}?['"][^'"]*tenjin-vitest-reporter[^'"]*['"][\s\S]{0,300}?outputFile\s*:\s*['"]([^'"]+)['"]/;
 
-/** The \`outputFile\` a repo's own vitest/vite config names for its \`json\`
- *  reporter, or null when there is no config, no \`json\` reporter in it, or the
+/** The \`outputFile\` a repo's own vitest/vite config names for the tenjin
+ *  reporter, or null when there is no config, no tenjin reporter in it, or the
  *  regex cannot see the path. A repo WITH a recognized config but no match
  *  stops here rather than trying the next file in the list — a project that
  *  has decided is not a reason to guess from a sibling config. */
@@ -1847,55 +1840,64 @@ function relTestFile(cwd, path) {
  * legs of THIS run agree with each other.
  */
 function identityFromReport(report, cwd) {
-  if (!isRecord(report) || !Array.isArray(report.testResults)) return null;
+  if (!isRecord(report) || !Array.isArray(report.failed)) return null;
   let found = null;
-  for (const file of report.testResults) {
-    if (!isRecord(file) || !Array.isArray(file.assertionResults)) continue;
-    const name = typeof file.name === 'string' ? file.name : '';
-    if (name.length === 0) continue;
-    for (const a of file.assertionResults) {
-      if (!isRecord(a) || a.status !== 'failed') continue;
-      const title = typeof a.title === 'string' ? a.title : '';
-      if (title.length === 0) continue;
-      const ancestors = Array.isArray(a.ancestorTitles)
-        ? a.ancestorTitles.filter((t) => typeof t === 'string')
-        : [];
-      found = { file: relTestFile(cwd, name), suite: ancestors.join(' > '), test: title };
-    }
+  for (const entry of report.failed) {
+    if (!isRecord(entry)) continue;
+    const file = typeof entry.file === 'string' ? entry.file : '';
+    const test = typeof entry.test === 'string' ? entry.test : '';
+    if (file.length === 0 || test.length === 0) continue;
+    const suite = typeof entry.suite === 'string' ? entry.suite : '';
+    found = { file: relTestFile(cwd, file), suite, test };
   }
   return found;
 }
 
 /**
  * The artifact leg (04's preference order, "structured artifact" first): read,
- * freshness-check, parse, extract — each step failing closed to \`null\` rather
- * than throwing, because a torn write (the hook can fire while vitest is still
+ * window-check, extract — each step failing closed to \`null\` rather than
+ * throwing, because a torn write (the hook can fire while vitest is still
  * flushing the file) is exactly as uninformative as no file at all.
  *
- * NO USABLE cwd, NO ARTIFACT LEG: \`cwdOf\` returns \`null\` for a payload with no
- * (or an oversized) \`cwd\` field — the common shape for a failure this arm has
- * always handled — and \`join(null, name)\` throws rather than failing closed.
- * An uncaught throw here is caught only by \`main().catch(quiet)\`, which exits
- * with NOTHING written: no event row, no pairing, for a failure that has
- * nothing to do with this lane at all. Console parsing needs no path, so it is
- * unaffected.
+ * THE WINDOW CHECK, not a file-mtime guess (tenjin-agent#278 round 3, "Decide
+ * which segment failed"). The report's own \`startTime\` — stamped by
+ * \`tenjin-vitest-reporter.mjs\`'s \`onInit\`, before a single test runs — is
+ * trusted only when it is AT OR AFTER \`sinceMs\`, this agent's own PreToolUse
+ * stamp for the Bash call that just failed. A build failure with a fresh
+ * report sitting in the checkout from the test run before it used to open a
+ * pairing under that unrelated test's identity, because file MTIME cannot
+ * tell "this run" from "the run before it" — CONTENT can, once the content
+ * carries its own clock. This is also why the reporter DELETES any existing
+ * artifact in \`onInit\`: a stale file cannot survive into a run whose own
+ * \`startTime\` this check would otherwise have to trust blindly.
+ *
+ * NO sinceMs, NO ARTIFACT LEG: a session whose Bash calls have never been
+ * timestamped (the context arm's PreToolUse half did not fire, or fired
+ * before this agent's first Bash call) has nothing to check the artifact's
+ * \`startTime\` against, and the console breadcrumb — evidence already inside
+ * THIS command's own output, timestamped by nothing — is the only leg left.
+ *
+ * NO USABLE cwd, NO ARTIFACT LEG either: \`cwdOf\` returns \`null\` for a payload
+ * with no (or an oversized) \`cwd\` field — the common shape for a failure this
+ * arm has always handled — and \`join(null, name)\` throws rather than failing
+ * closed. An uncaught throw here is caught only by \`main().catch(quiet)\`,
+ * which exits with NOTHING written: no event row, no pairing, for a failure
+ * that has nothing to do with this lane at all.
  */
-function testIdentityFromArtifact(cwd, nowMs) {
+function testIdentityFromArtifact(cwd, sinceMs) {
   if (typeof cwd !== 'string' || cwd.length === 0) return null;
+  if (typeof sinceMs !== 'number' || !Number.isFinite(sinceMs)) return null;
   for (const rel of testReportCandidates(cwd)) {
     const path = isAbsoluteTestPath(rel) ? rel : join(cwd, rel);
-    let stat;
-    try {
-      stat = statSync(path);
-    } catch {
-      continue;
-    }
-    // STALE MTIME REJECTED, not just a missing file: a report left over from an
-    // earlier run in this checkout is evidence about THAT run, and using it
-    // would key this failure under a file (or a PASS) the earlier run happened
-    // to produce.
-    if (nowMs - stat.mtimeMs > TEST_ARTIFACT_MAX_AGE_MS) continue;
     const raw = readJsonFile(path);
+    if (!isRecord(raw)) continue;
+    const { startTime, endTime } = raw;
+    // MALFORMED OR OUT OF WINDOW, same branch: a report missing either
+    // timestamp (a hand-edited file, an old stock-\`json\`-reporter artifact
+    // from before this redesign, neither of which carries one) is exactly as
+    // untrustworthy as one that predates this command.
+    if (typeof startTime !== 'number' || typeof endTime !== 'number' || endTime < startTime) continue;
+    if (startTime < sinceMs) continue;
     const identity = identityFromReport(raw, cwd);
     if (identity !== null) return identity;
   }
@@ -1953,40 +1955,26 @@ function identityFromConsole(text) {
  * preference order"). A repo with neither yields \`null\` — never a guessed
  * one: this whole lane exists because a guess (the sig_v1c that used to key on
  * the bare word ERROR) is worse than silence.
- */
-function testIdentityOf(text, cwd, nowMs) {
-  const fromArtifact = testIdentityFromArtifact(cwd, nowMs);
-  return fromArtifact !== null ? fromArtifact : identityFromConsole(text);
-}
-
-/** Test-runner binaries this lane recognizes directly, wherever they land as
- *  either the HEAD (\`vitest\`, and \`npx vitest\`/\`pnpm exec vitest\` once
- *  \`commandHeads\` has stepped past the runner) or the SUB (\`pnpm vitest run\`,
- *  the package-manager-script spelling this repo's own tests use). */
-const TEST_RUNNER_NAMES = new Set(['vitest', 'jest', 'mocha', 'pytest', 'unittest', 'tox', 'nox']);
-
-/**
- * Whether \`command\` actually ran a test, not merely an allowlisted build/test
- * head (tenjin-agent#278, major 1). \`testIdentityOf\` used to run behind ANY
- * allowlisted failure regardless of what the command was: a failing
- * \`pnpm build\` with a two-minute-old \`.vitest-report.json\` left over from the
- * test run before it opened a \`sig_v1_test\` row keyed on that unrelated
- * test — closeable by an edit to a file the build failure never named, and
- * later published under that test's fingerprint as the build error's fix. The
- * freshness check in \`testIdentityFromArtifact\` cannot catch this: the report
- * really is fresh, just about a different command.
  *
- * THE SUB, not just the head: \`pnpm vitest run\` and \`pnpm build\` are both
- * \`pnpm\` at the head, so the runner's own name or the package-manager's
- * \`test\`/\`test:*\` script convention has to be read off the word after it.
+ * NO COMMAND-TEXT GATE (tenjin-agent#278 round 3, replacing round 2's
+ * \`looksLikeTestRun\`): that gate asked "does some token in this command line
+ * look test-ish", which an argument to an unrelated program could satisfy
+ * (\`echo vitest\`) and a chained command's EARLIER, non-test segment could
+ * satisfy for a segment that never ran at all (\`pnpm build && pnpm test\`,
+ * build failing first) — and which the single most common test invocation,
+ * \`npm run test\`/\`pnpm run test\`, could NOT satisfy, silently producing no
+ * identity for the common case while still missing the chain case it was
+ * built for. Shipped systems (Datadog Test Optimization, Buildkite Test
+ * Engine, dorny/test-reporter) attribute a result to the run that produced
+ * it by having the run stamp itself, not by parsing the command that started
+ * it — which is what \`sinceMs\` (this agent's own PreToolUse timestamp) and
+ * the reporter's own \`startTime\` do together in \`testIdentityFromArtifact\`.
+ * The console breadcrumb needs no such gate: \`TEST_FAIL_HEADER_RE\` matching
+ * inside THIS command's own output is itself the evidence that a test ran.
  */
-function looksLikeTestRun(command) {
-  for (const { head, sub } of commandHeads(command)) {
-    if (TEST_RUNNER_NAMES.has(head) || TEST_RUNNER_NAMES.has(sub)) return true;
-    if (RUNTIME_HEADS.has(head) && RUNTIME_TEST_SUBS.has(sub)) return true;
-    if (PM_HEADS.has(head) && (sub === 'test' || sub.startsWith('test:'))) return true;
-  }
-  return false;
+function testIdentityOf(text, cwd, sinceMs) {
+  const fromArtifact = testIdentityFromArtifact(cwd, sinceMs);
+  return fromArtifact !== null ? fromArtifact : identityFromConsole(text);
 }
 
 /**
@@ -2671,16 +2659,17 @@ async function main() {
   // The test-identity lane (tenjin-agent#267): tried whatever \`sig\` came back
   // with, because it answers a DIFFERENT question — "was this exact TEST seen
   // before", not "was this exact MESSAGE seen before" — and the two can
-  // disagree in either direction. \`Date.now()\` here, not a stored start time:
-  // no hook payload this arm reads carries the command's own start, and the
-  // hook fires within milliseconds of the command's exit, so "now" is the
-  // tight upper bound the freshness check (\`testIdentityFromArtifact\`) needs.
+  // disagree in either direction.
   //
-  // GATED ON \`looksLikeTestRun\`, not just on the head being allowlisted
-  // (tenjin-agent#278, major 1): without it, a failing \`pnpm build\` with a
-  // stale-but-fresh \`.vitest-report.json\` sitting in the checkout from the
-  // test run before it opened a row for a test this build failure never ran.
-  const testId = looksLikeTestRun(command) ? testIdentityOf(text, cwd, Date.now()) : null;
+  // THIS AGENT'S OWN PreToolUse STAMP, not \`Date.now()\` (tenjin-agent#278
+  // round 3, replacing round 2's command-text gate): the context arm's Bash
+  // half (\`PUSH_CONTEXT_EDIT_MATCHER\`) stashes \`Date.now()\` right before this
+  // very command ran, and \`testIdentityFromArtifact\` trusts a report's own
+  // \`startTime\` only at or after it — a \`null\` here (no stash at all: the
+  // context hook never fired, or fired before this agent's first Bash call)
+  // skips the artifact leg entirely rather than trusting an unbounded one.
+  const bashStartedAt = getState(sessionId, STATE_BASH_START_PREFIX + agentKey(agentId, ''));
+  const testId = testIdentityOf(text, cwd, bashStartedAt);
   const testSig = testId === null ? null : sigV1Test(testId);
   // The failure row carries the signature's fine key as \`error_hash\` (the
   // column has existed since #219 and was never written) and the SCRUBBED
@@ -3762,11 +3751,23 @@ async function main() {
   if (invalid) return quiet();
   if (sessionId === null) return quiet();
   const cwd = cwdOf(input);
+  const tool = input.tool_name;
+  const event = input.hook_event_name;
+  // THE BASH TIMING STASH (tenjin-agent#278 round 3, "Decide which segment
+  // failed"): one write per Bash call, keyed per agent so parallel subagents
+  // cannot clobber each other's stamp, read back by the failure arm to decide
+  // whether a test-report artifact could possibly be about THIS command. NO
+  // file_path GATE below this branch — Bash carries none — and no store means
+  // no stamp, the same fail-open posture every arm here takes, not a reason to
+  // guess a timestamp the failure arm would then trust wrongly.
+  if (event === 'PreToolUse' && tool === 'Bash') {
+    if ((await openStore()) === null) return quiet();
+    setState(sessionId, STATE_BASH_START_PREFIX + agentKey(agentId, ''), Date.now());
+    return quiet();
+  }
   const toolInput = isRecord(input.tool_input) ? input.tool_input : {};
   const filePath = typeof toolInput.file_path === 'string' ? toolInput.file_path : '';
   if (filePath.length === 0 || filePath.length > 4096) return quiet();
-  const tool = input.tool_name;
-  const event = input.hook_event_name;
   const isEdit = event === 'PreToolUse' && (tool === 'Edit' || tool === 'Write' || tool === 'MultiEdit');
   const isRead = event === 'PostToolUse' && tool === 'Read';
   if (!isEdit && !isRead) return quiet();
@@ -3898,6 +3899,105 @@ main().catch(quiet);
 
 export function pushContextHookScript(dataDir: string): string {
   return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${CONTEXT_JS.replaceAll('__CHURN_EDITS__', String(PUSH_CHURN_EDITS)).replaceAll('__READ_PACKAGES_MAX__', String(PUSH_READ_PACKAGES_MAX))}`;
+}
+
+/**
+ * Tenjin's own vitest reporter (tenjin-agent#278 round 3, "Decide which
+ * segment failed"): the run stamps ITSELF, the way Datadog Test Optimization,
+ * Buildkite Test Engine and dorny/test-reporter all attribute a result to the
+ * run that produced it — never by having the failure hook infer "was this a
+ * test run" from the command's own text, which is neither soundly nor
+ * completely doable (an argument can look like a runner's name; a chained
+ * command's earlier, failing segment can look like a later one that never
+ * ran; the single most common test invocation, \`npm run test\`, does not
+ * even mention a recognizable runner name at all).
+ *
+ * NO PRELUDE, NO STORE. Unlike every other script in this file, this one
+ * never touches Tenjin's config or its state store: it runs inside the
+ * user's OWN \`vitest\` process, as an ordinary reporter, and its only job is
+ * to write a small JSON file. Importing nothing but \`node:fs\` keeps it that
+ * way — a hook must not run a repo's own build config, and a reporter must
+ * not depend on Tenjin ever being installed correctly.
+ *
+ * DELETE ON INIT, ATOMIC WRITE ON FINISH. \`onInit\` fires before a single test
+ * runs and removes any file already at \`outputFile\`: a stale artifact from an
+ * earlier run — or from a run that crashed before writing its own — cannot
+ * structurally survive into this one. \`onTestRunEnd\` then writes the WHOLE
+ * report to a temp file and \`rename\`s it into place, so a reader can never
+ * observe a half-written file: a same-filesystem \`rename\` is atomic, and
+ * \`outputFile\` and its \`.tmp-<pid>\` sibling always share one.
+ *
+ * \`startTime\`/\`endTime\` are what \`push-scripts.ts\`'s \`testIdentityFromArtifact\`
+ * checks against the failure hook's own PreToolUse stamp for the Bash call
+ * that just failed — CONTENT the report carries about ITSELF, not a guess
+ * from the file's mtime or from what the command line happened to say.
+ */
+const VITEST_REPORTER_JS = String.raw`
+import { unlinkSync, writeFileSync, renameSync } from 'node:fs';
+
+export default class TenjinVitestReporter {
+  #outputFile;
+  #startTime = 0;
+
+  constructor(options) {
+    this.#outputFile =
+      options && typeof options.outputFile === 'string' && options.outputFile.length > 0
+        ? options.outputFile
+        : '.vitest-report.json';
+  }
+
+  onInit() {
+    this.#startTime = Date.now();
+    try {
+      unlinkSync(this.#outputFile);
+    } catch {
+      // No file yet, or a permissions issue this reporter cannot fix either
+      // way: silence, because a reporter that throws breaks the very test
+      // run it is supposed to be reporting on.
+    }
+  }
+
+  onTestRunEnd(testModules, unhandledErrors) {
+    const endTime = Date.now();
+    const failed = [];
+    for (const testModule of testModules) {
+      // ALL TESTS, EVERY NESTED SUITE: \`allTests\` walks the whole tree under
+      // this module, not just its direct children, so a deeply nested
+      // \`describe\` block's failures are named exactly as vitest's own
+      // console output names them.
+      for (const testCase of testModule.children.allTests('failed')) {
+        const parent = testCase.parent;
+        failed.push({
+          file: testModule.moduleId,
+          suite: parent && parent.type === 'suite' ? parent.fullName : '',
+          test: testCase.name,
+        });
+      }
+    }
+    const report = {
+      startTime: this.#startTime,
+      endTime,
+      failed,
+      success: failed.length === 0 && unhandledErrors.length === 0,
+    };
+    const tmp = this.#outputFile + '.tmp-' + process.pid;
+    try {
+      writeFileSync(tmp, JSON.stringify(report));
+      renameSync(tmp, this.#outputFile);
+    } catch {
+      // A write failure here (a read-only filesystem, a full disk) leaves no
+      // artifact at all, which the failure hook already treats as "no
+      // evidence" rather than as a wrong one.
+      try {
+        unlinkSync(tmp);
+      } catch {}
+    }
+  }
+}
+`;
+
+export function pushVitestReporterScript(): string {
+  return VITEST_REPORTER_JS;
 }
 
 export { jsBody as _jsBodyForTests };

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -3241,6 +3241,48 @@ describe('the sig_v1_test lane — local matching (tenjin-agent#267)', () => {
 describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () => {
   const TESTID_CWD = '/repo/testid';
 
+  /** The context arm's Bash half (tenjin-agent#278 round 3): fires PreToolUse
+   *  for a Bash call, stamping this agent's own pre-command timestamp so a
+   *  later failure's artifact leg has something to check a report's
+   *  `startTime` against. Returns the REAL stashed value read back from the
+   *  store, not an approximation from this side of the child-process
+   *  boundary: `runScript` spawns a real node process, whose own startup can
+   *  easily cost more than a small fixed offset would assume. */
+  async function stashBashStart(session: string, cwd: string): Promise<number> {
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: session,
+        cwd,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'irrelevant — only the event/tool matter' },
+      }),
+    );
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      const row = db
+        .prepare("SELECT value FROM session_state WHERE session = ? AND key = 'bashstart::'")
+        .get(session) as { value?: string } | undefined;
+      const value = row?.value === undefined ? null : (JSON.parse(row.value) as unknown);
+      if (typeof value !== 'number') throw new Error('stashBashStart: no stash landed');
+      return value;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** The report tenjin-vitest-reporter.mjs itself would write: `startTime`
+   *  before any test ran, `endTime` after, `failed` already flattened to
+   *  `{file, suite, test}`. */
+  function reportFixture(
+    startTime: number,
+    endTime: number,
+    failed: Array<{ file: string; suite: string; test: string }>,
+  ): string {
+    return JSON.stringify({ startTime, endTime, failed, success: failed.length === 0 });
+  }
+
   it('parses file, suite and test off a nested describe chain', async () => {
     await pushOn('http://127.0.0.1:1');
     await runScript(
@@ -3305,29 +3347,21 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
   });
 
-  it('prefers a fresh JSON report artifact over the console breadcrumb', async () => {
+  it("prefers a fresh JSON report artifact over the console breadcrumb, once its own startTime clears this command's PreToolUse stamp", async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-'));
     try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
       await writeFile(
         join(cwd, '.vitest-report.json'),
-        JSON.stringify({
-          testResults: [
-            {
-              name: join(cwd, 'src/from-artifact.test.ts'),
-              status: 'failed',
-              assertionResults: [
-                { status: 'passed', title: 'an unrelated pass', ancestorTitles: ['suite'] },
-                {
-                  status: 'failed',
-                  title: 'the real failure',
-                  ancestorTitles: ['fromArtifactSuite'],
-                },
-              ],
-            },
-          ],
-        }),
+        reportFixture(since + 10, since + 50, [
+          {
+            file: join(cwd, 'src/from-artifact.test.ts'),
+            suite: 'fromArtifactSuite',
+            test: 'the real failure',
+          },
+        ]),
       );
-      await pushOn('http://127.0.0.1:1');
       await runScript(
         pushFailureHookScript(dataDir),
         JSON.stringify({
@@ -3353,29 +3387,20 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     }
   });
 
-  it('rejects a stale report artifact and falls back to the console breadcrumb', async () => {
+  it("rejects a report whose own startTime predates this command's PreToolUse stamp, and falls back to the console breadcrumb (tenjin-agent#278 round 3)", async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-stale-'));
     try {
-      const reportPath = join(cwd, '.vitest-report.json');
-      await writeFile(
-        reportPath,
-        JSON.stringify({
-          testResults: [
-            {
-              name: join(cwd, 'src/stale.test.ts'),
-              status: 'failed',
-              assertionResults: [
-                { status: 'failed', title: 'a stale failure', ancestorTitles: ['staleSuite'] },
-              ],
-            },
-          ],
-        }),
-      );
-      // Older than TEST_ARTIFACT_MAX_AGE_MS (two minutes): a leftover from an
-      // earlier run in the same checkout, not evidence about this failure.
-      const old = new Date(Date.now() - 5 * 60 * 1000);
-      await utimes(reportPath, old, old);
       await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
+      // A report that finished BEFORE this command's own PreToolUse stamp — a
+      // leftover from an earlier run in the same checkout, not evidence about
+      // this one, however recent its mtime looks.
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since - 5000, since - 4000, [
+          { file: join(cwd, 'src/stale.test.ts'), suite: 'staleSuite', test: 'a stale failure' },
+        ]),
+      );
       await runScript(
         pushFailureHookScript(dataDir),
         JSON.stringify({
@@ -3398,25 +3423,26 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     }
   });
 
-  it('ignores a fresh report artifact when the failing command was not a test run (tenjin-agent#278, major 1)', async () => {
+  it('ignores a fresh-looking report artifact left over from the test run before a build failure, even with a PreToolUse stamp for THIS command (tenjin-agent#278, major 1 / round 3)', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-nontest-'));
     try {
-      // A fresh report, left over from the test run BEFORE this build failure.
+      await pushOn('http://127.0.0.1:1');
+      // This command (the build) gets its own PreToolUse stamp, same as any
+      // other Bash call — there is no more command-text gate to skip it.
+      const since = await stashBashStart(SESSION, cwd);
+      // The report's OWN startTime is from the test run that finished before
+      // this build command even started: on disk it looks brand new (mtime
+      // "now"), but its startTime is well before this command's own stamp.
       await writeFile(
         join(cwd, '.vitest-report.json'),
-        JSON.stringify({
-          testResults: [
-            {
-              name: join(cwd, 'src/unrelated.test.ts'),
-              status: 'failed',
-              assertionResults: [
-                { status: 'failed', title: 'an unrelated failure', ancestorTitles: ['suite'] },
-              ],
-            },
-          ],
-        }),
+        reportFixture(since - 2000, since - 1000, [
+          {
+            file: join(cwd, 'src/unrelated.test.ts'),
+            suite: 'suite',
+            test: 'an unrelated failure',
+          },
+        ]),
       );
-      await pushOn('http://127.0.0.1:1');
       await runScript(
         pushFailureHookScript(dataDir),
         JSON.stringify({
@@ -3433,15 +3459,21 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
         }),
       );
       // No sig_v1_test row at all: a TS build failure must never claim a test's
-      // identity, however fresh the report artifact sitting in the checkout is.
+      // identity, however fresh the report artifact sitting in the checkout
+      // looks — the window check catches it by CONTENT, not by recognizing
+      // `pnpm build` as a non-test command.
       expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   });
 
-  it('recognizes `pnpm test`/`pnpm test:unit` as test runs, not just `pnpm vitest run` (tenjin-agent#278, major 1)', async () => {
+  it('recognizes any command whatsoever as a candidate, since round 3 dropped the command-text gate entirely (tenjin-agent#278, major 1)', async () => {
     await pushOn('http://127.0.0.1:1');
+    // `pnpm test:unit` would not have satisfied round 2's own `sub === 'test'`
+    // check either way, but the point here is that NO check runs at all: the
+    // console breadcrumb inside a failure's own output is evidence enough on
+    // its own, whatever the command line says.
     await runScript(
       pushFailureHookScript(dataDir),
       JSON.stringify({
@@ -3463,25 +3495,57 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     ]);
   });
 
+  // tenjin-agent#278 round 2's own `looksLikeTestRun` gate silently produced
+  // NO test identity at all for every one of these — the single most common
+  // ways people actually invoke a test suite — while claiming to fix a
+  // narrower bug (`pnpm build && echo vitest`, an unrelated command whose
+  // ARGUMENT merely mentioned a runner's name, used to satisfy it instead).
+  // Round 3 has no command-text gate of any kind, so the console breadcrumb
+  // (which needs no timing at all) picks all of them up.
+  it.each([
+    'npm run test',
+    'pnpm run test',
+    'pnpm run test:unit',
+    'npm t',
+    'turbo test',
+    'pnpm --filter web test',
+    'pnpm build && pnpm test',
+    'pnpm build && echo vitest',
+  ])('yields a test identity from the console breadcrumb behind %s', async (command) => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: `regression-${command}`,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: {
+          stdout: ' FAIL  src/regression.test.ts > regressionSuite > it works\nAssertionError: r\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const row = (await pairings()).find(
+      (p) => p.kind === 'sig_v1_test' && p.session === `regression-${command}`,
+    );
+    expect(row?.error_files, command).toEqual(['regression.test.ts']);
+  });
+
   it("takes the LAST failed assertion in the report, matching the console leg's own recency rule (tenjin-agent#278, major 2)", async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-multi-'));
     try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
       await writeFile(
         join(cwd, '.vitest-report.json'),
-        JSON.stringify({
-          testResults: [
-            {
-              name: join(cwd, 'src/multi.test.ts'),
-              status: 'failed',
-              assertionResults: [
-                { status: 'failed', title: 'the first failure', ancestorTitles: ['suite'] },
-                { status: 'failed', title: 'the last failure', ancestorTitles: ['suite'] },
-              ],
-            },
-          ],
-        }),
+        reportFixture(since + 10, since + 50, [
+          { file: join(cwd, 'src/multi.test.ts'), suite: 'suite', test: 'the first failure' },
+          { file: join(cwd, 'src/multi.test.ts'), suite: 'suite', test: 'the last failure' },
+        ]),
       );
-      await pushOn('http://127.0.0.1:1');
       // Run 1: the artifact leg is the only source of identity (no FAIL
       // breadcrumb the console leg could parse), so whichever of the two
       // failed assertions it picks becomes this row's fine key.

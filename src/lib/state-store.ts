@@ -1203,6 +1203,16 @@ const STATE_EDITS_PREFIX = 'edits:';
 const STATE_EDITED_PREFIX = 'edited:';
 const STATE_PACKAGES_PREFIX = 'package:';
 const STATE_SIGNATURES_PREFIX = 'sig:';
+/** The wall-clock moment THIS agent's most recent Bash command was about to
+ *  run, stamped by the context arm's PreToolUse half and read by the failure
+ *  arm (tenjin-agent#278 round 3, "Decide which segment failed"). Scoped by
+ *  agent, not just session, because parallel subagents each run their own
+ *  Bash calls: \`replayed:\` above is the precedent for the same scoping. This
+ *  is what lets the failure arm trust a test-report artifact by CONTENT — its
+ *  own \`startTime\` at or after this stamp — rather than by guessing from the
+ *  command's text or the file's mtime, which is what let a build failure
+ *  claim an unrelated test's identity off a stale-but-fresh report. */
+const STATE_BASH_START_PREFIX = 'bashstart:';
 /** Which pairings ONE AGENT was SHOWN behind a given command head — the key is
  *  \`replayed:<agent>:<head>\` and the value a JSON array of pairing ids. It is
  *  what lets the agent that was replayed a pairing be its second independent
