@@ -1122,6 +1122,15 @@ async function askTenjin(question, config, opts) {
       ...(typeof o.packageName === 'string' && o.packageName.length > 0
         ? { filters: { appliesTo: { packages: [o.packageName] } } }
         : {}),
+      // The prompt arm's identifiers (tenjin-agent#255): at most 12 strings of
+      // at most 80 characters, \`pr-751\` spelling. A shelf that does not read
+      // the key strips it and echoes the name under \`warnings\`
+      // (tenjin lib/search/understand.ts, \`unknownRequestKeys\`), which
+      // parseSearchBody never reads, so this is inert until the shelf's
+      // identifier leg lands.
+      ...(Array.isArray(o.identifiers) && o.identifiers.length > 0
+        ? { identifiers: o.identifiers.slice(0, 12).map((s) => clean(s, 80)) }
+        : {}),
     }),
     signal: AbortSignal.timeout(
       typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : SEARCH_TIMEOUT_MS,
