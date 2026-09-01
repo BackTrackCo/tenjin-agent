@@ -538,6 +538,26 @@ function sessionState(session: string, key: string): unknown {
   }
 }
 
+/** All state under a prefix, for fixed-cardinality/content-free assertions. */
+function sessionStateRows(session: string, prefix: string): Array<{ key: string; value: unknown }> {
+  const path = join(dataDir, STATE_DB_FILE);
+  if (!existsSync(path)) return [];
+  const db = new DatabaseSync(path);
+  try {
+    const rows = db
+      .prepare(
+        'SELECT key, value FROM session_state WHERE session = ? AND key >= ? AND key < ? ORDER BY key',
+      )
+      .all(session, prefix, prefix + String.fromCharCode(0xffff)) as unknown as Array<{
+      key: string;
+      value: string;
+    }>;
+    return rows.map((row) => ({ key: row.key, value: JSON.parse(row.value) }));
+  } finally {
+    db.close();
+  }
+}
+
 /**
  * Backdate everything the relay window is measured against, by `ms`.
  *
@@ -1642,6 +1662,80 @@ describe('the failure arm (PostToolUse Bash)', () => {
         interrupted: false,
       },
     });
+
+  it('marks root shell activity before the failure allowlist, with fixed content-free state', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const secretCommand = 'git status --short /repo/customer-alpha/private.ts';
+    const input = JSON.stringify({
+      session_id: SESSION,
+      cwd: '/repo/customer-alpha',
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: secretCommand },
+      tool_response: { stdout: 'private.ts', stderr: '', exit_code: 0 },
+    });
+
+    await runScript(pushFailureHookScript(dataDir), input);
+    await runScript(pushFailureHookScript(dataDir), input);
+
+    const rows = sessionStateRows(SESSION, 'capture:activity:');
+    expect(rows).toEqual([{ key: 'capture:activity:shell', value: true }]);
+    expect(JSON.stringify(rows)).not.toContain(secretCommand);
+    expect(JSON.stringify(rows)).not.toContain('customer-alpha');
+    expect(JSON.stringify(rows)).not.toContain('private.ts');
+    expect(await events()).toEqual([]);
+  });
+
+  it('requires a project cwd and a root agent before marking shell activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const base = {
+      session_id: SESSION,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git status' },
+      tool_response: { stdout: '', stderr: '', exit_code: 0 },
+    };
+
+    await runScript(pushFailureHookScript(dataDir), JSON.stringify(base));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({ ...base, cwd: '/repo/project', agent_id: 'child-1' }),
+    );
+
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
+  it('excludes Tenjin publish/edit Bash events without excluding other Tenjin commands', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const input = (command: string): string =>
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: '/repo/project',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: { stdout: '', stderr: '', exit_code: 0 },
+      });
+
+    for (const command of [
+      'tenjin publish finding.md',
+      'tenjin --json publish finding.md',
+      '/usr/local/bin/tenjin edit post-1 --body finding.md',
+      '/usr/local/bin/tenjin --timeout 500 edit post-1 --body finding.md',
+      'env NOTE=safe tenjin publish finding.md && git status',
+      'env NOTE=safe tenjin --base-url https://team.example publish finding.md && git status',
+      'pnpm exec tenjin edit post-1 --body finding.md',
+      'pnpm exec tenjin --base-url=https://team.example --json edit post-1 --body finding.md',
+    ]) {
+      await runScript(pushFailureHookScript(dataDir), input(command));
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+
+    await runScript(pushFailureHookScript(dataDir), input('tenjin search resolver'));
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([
+      { key: 'capture:activity:shell', value: true },
+    ]);
+  });
 
   /**
    * THE ERROR NEVER LEAVES THE MACHINE (tenjin-agent#212). This arm used to
@@ -5622,6 +5716,97 @@ describe('the subagent arm (SubagentStop)', () => {
 });
 
 describe('the context arm (log-only)', () => {
+  it('keeps root inspection/mutation activity to two content-free rows', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    const privatePath = join(scriptDir, 'customer-alpha', 'private-notes.txt');
+    const fire = async (
+      tool: string,
+      hook_event_name: string,
+      agent_id?: string,
+    ): Promise<void> => {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd: '/repo/customer-alpha',
+          ...(agent_id === undefined ? {} : { agent_id }),
+          hook_event_name,
+          tool_name: tool,
+          tool_input: { file_path: privatePath },
+        }),
+      );
+    };
+
+    await fire('Read', 'PostToolUse');
+    for (const tool of ['Edit', 'Write', 'MultiEdit', 'Edit']) await fire(tool, 'PreToolUse');
+
+    const rows = sessionStateRows(SESSION, 'capture:activity:');
+    expect(rows).toEqual([
+      { key: 'capture:activity:inspection', value: true },
+      { key: 'capture:activity:mutation', value: true },
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('customer-alpha');
+    expect(JSON.stringify(rows)).not.toContain('private-notes');
+  });
+
+  it('does not turn subagent context work into root activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    for (const [tool, hook_event_name] of [
+      ['Read', 'PostToolUse'],
+      ['Edit', 'PreToolUse'],
+    ]) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          agent_id: 'child-1',
+          cwd: '/repo/project',
+          hook_event_name,
+          tool_name: tool,
+          tool_input: { file_path: join(scriptDir, 'child.txt') },
+        }),
+      );
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
+  it('requires a project cwd before root Read/Edit can mark activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    for (const [tool, hook_event_name] of [
+      ['Read', 'PostToolUse'],
+      ['Edit', 'PreToolUse'],
+    ]) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          hook_event_name,
+          tool_name: tool,
+          tool_input: { file_path: join(scriptDir, 'root.txt') },
+        }),
+      );
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
+  it('requires a valid file path before root context can mark activity', async () => {
+    await writeConfig({ hooks: { push: 'on' } });
+    for (const input of [
+      { tool_name: 'Read', hook_event_name: 'PostToolUse', tool_input: {} },
+      {
+        tool_name: 'Edit',
+        hook_event_name: 'PreToolUse',
+        tool_input: { file_path: 'x'.repeat(4097) },
+      },
+    ]) {
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({ session_id: SESSION, cwd: '/repo/project', ...input }),
+      );
+    }
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([]);
+  });
+
   /**
    * The upserted `edited:<path>` state row keeps only the LAST timestamp per
    * path, so "the same file edited before and after a user turn" was
@@ -5904,12 +6089,134 @@ describe('the capture ask (Stop)', () => {
     await seedSearch();
   }
 
+  /** A non-allowlisted root Bash event: activity only, never research. */
+  async function writeShellActivity(cwd: string | undefined = '/repo/project'): Promise<void> {
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        ...(cwd === undefined ? {} : { cwd }),
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'git status --short' },
+        tool_response: { stdout: '', stderr: '', exit_code: 0 },
+      }),
+    );
+  }
+
   /** Forget that this session was asked, so the next Stop asks again. */
   async function clearCaptureAsked(): Promise<void> {
     const store = await openStore(dataDir);
     store?.run(STORE_SQL.deleteState, [SESSION, 'capture_asked']);
     store?.close();
   }
+
+  it('gives the team ask a retrievable, bounded and privacy-safe capture brief', () => {
+    expect(teamAsk).toContain('conclusion-first finding or durable code map');
+    expect(teamAsk).toContain('repository and commit/version where known');
+    expect(teamAsk).toContain('repo-relative paths and components only');
+    expect(teamAsk).toContain('evidence and explicit exclusions');
+    expect(teamAsk).toContain('natural-language questions');
+    expect(teamAsk).toContain(
+      'exact repository, component, file, identifier, and error-symbol terms',
+    );
+    expect(teamAsk).toContain('visible title/body as well as the card');
+    expect(teamAsk).toContain('Treat repo findings as snapshots');
+    expect(teamAsk).toContain('`temporalMode=snapshot`');
+    expect(teamAsk).toContain('`asOf`');
+    expect(teamAsk).toContain('`validUntil` 14 days later by default');
+    expect(teamAsk).toContain('never more than 30 days later');
+    expect(teamAsk).toContain('credentials, wallet identifiers, requester identifiers');
+    expect(teamAsk).toContain('personal data, customer data');
+    expect(teamAsk).toContain('private or restricted third-party data/material');
+    expect(teamAsk).toContain('Never paste raw shell/tool output, logs, transcripts, or diffs');
+    expect(teamAsk).toContain('Do not present unmerged or unverified work as shipped behaviour');
+    // This capture-only branch keeps the raw template compatible with the
+    // current CLI. The independent stdin PR upgrades this stable sentence when
+    // it generates the hook, so the two branches can merge in either order.
+    expect(CAPTURE_REASON_TEAM).toContain('Write it to a file and run `tenjin publish <file>`');
+    expect(CAPTURE_REASON_TEAM).not.toContain('tenjin publish -');
+  });
+
+  it('uses root repository activity as a first-ask signal only for a team shelf', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
+    });
+    await writeShellActivity();
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([
+      { key: 'capture:activity:shell', value: true },
+    ]);
+  });
+
+  it.each([
+    ['Read', 'PostToolUse', 'inspection'],
+    ['Edit', 'PreToolUse', 'mutation'],
+    ['Write', 'PreToolUse', 'mutation'],
+    ['MultiEdit', 'PreToolUse', 'mutation'],
+  ])('lets root %s activity make a team Stop eligible', async (tool, event, kind) => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
+    });
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: '/repo/project',
+        hook_event_name: event,
+        tool_name: tool,
+        tool_input: { file_path: join(scriptDir, 'activity.txt') },
+      }),
+    );
+
+    expect(sessionState(SESSION, `capture:activity:${kind}`)).toBe(true);
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
+  });
+
+  it('does not treat repository activity as public-marketplace research', async () => {
+    await writeConfig({ hooks: { push: 'on', capture: 'block' } });
+    await writeShellActivity();
+
+    const run = await runScript(stopHookScript(dataDir), stopInput);
+    expect(run.stdout).toBe('');
+    expect(sessionState(SESSION, 'capture_asked')).toBeNull();
+  });
+
+  it('does not re-arm a team ask when another root activity category arrives', async () => {
+    await writeConfig({
+      baseUrl: 'https://backtrack.tenjin.sh',
+      shelfBypassSecret: SECRET,
+      hooks: { push: 'on', capture: 'block' },
+    });
+    await writeShellActivity();
+    const first = await runScript(stopHookScript(dataDir), stopInput);
+    expect(JSON.parse(first.stdout)).toEqual({ decision: 'block', reason: teamAsk });
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: '/repo/project',
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        tool_input: { file_path: join(scriptDir, 'README.txt') },
+      }),
+    );
+    // The boundary helper sees capture_asked and refuses the continuation
+    // marker; activity is first-ask evidence, never optional re-arm state.
+    expect(sessionStateRows(SESSION, 'capture:activity:')).toEqual([
+      { key: 'capture:activity:shell', value: true },
+    ]);
+    expect((await runScript(stopHookScript(dataDir), stopInput)).stdout).toBe('');
+  });
 
   it('blocks once, with nothing else on stdout, then lets the session end', async () => {
     await writeConfig({ hooks: { capture: 'block' } });
@@ -5936,8 +6243,8 @@ describe('the capture ask (Stop)', () => {
     const run = await runScript(stopHookScript(dataDir), stopInput);
     expect(JSON.parse(run.stdout)).toEqual({ decision: 'block', reason: teamAsk });
     const reason = (JSON.parse(run.stdout) as { reason: string }).reason;
-    expect(reason).toContain('a teammate on this project would want to know');
-    expect(reason).toContain('publish it to the team shelf');
+    expect(reason).toContain('a teammate on this project would reuse');
+    expect(reason).toContain('to the team shelf');
     // The public bar is not applied to a shelf that is not public.
     expect(reason).not.toContain('rights-clean');
   });
