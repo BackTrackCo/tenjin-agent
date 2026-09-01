@@ -4341,6 +4341,44 @@ describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () =
     }
   });
 
+  it('does not attribute a later build failure to an earlier, PASSING vitest run in the same chained command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-pass-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // One PreToolUse stamp for the WHOLE chained command, exactly as the real
+      // hook sees it — `pnpm test && pnpm build` is one Bash tool call.
+      const since = await stashBashStart(SESSION, cwd);
+      // `pnpm test` ran first and PASSED (success:true, failed: []), so its
+      // report's startTime clears the window check — the report genuinely is
+      // about this command. The claim under test is that this must not matter:
+      // there is no failed entry to extract an identity from.
+      await writeFile(join(cwd, '.vitest-report.json'), reportFixture(since + 10, since + 50, []));
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test && pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      // No sig_v1_test row: an in-window but EMPTY `failed` array yields no
+      // identity from `identityFromReport` (the loop simply never assigns
+      // `found`), so `testIdentityFromArtifact` moves on and finds nothing,
+      // and the build's own TS error carries no FAIL breadcrumb the console
+      // leg could use either.
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('recognizes any command whatsoever as a candidate, since round 3 dropped the command-text gate entirely (tenjin-agent#278, major 1)', async () => {
     await pushOn('http://127.0.0.1:1');
     // `pnpm test:unit` would not have satisfied round 2's own `sub === 'test'`
