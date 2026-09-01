@@ -41,6 +41,11 @@ export async function runInspect(
     // is a shelf nothing falls through to, so widening on it would accept a URL
     // from an origin no search on this machine can even surface.
     settings.teamMode ? settings.publicShelfUrl : undefined,
+    {
+      timeoutMs: ctx.flags.timeout,
+      ...(settings.bypass !== undefined ? { bypass: settings.bypass } : {}),
+      ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    },
   );
 
   const result = await fetchRead(ref.url, {

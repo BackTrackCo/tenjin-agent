@@ -636,24 +636,28 @@ export async function getLookupStats(days: number, opts: AgentApiOptions): Promi
 }
 
 // `articleBase()`'s wire shape (tenjin PR #803) carries a lot more than this
-// reads (slug, excerpt, coverImageId, arbiterId, publishedAt, tags, the rest
-// of `creator`) — `.passthrough()` keeps all of it out of this schema's
-// required set. Only `id`/`title`/`price`/`status` are asserted, because
-// they're the only fields `getPostMetadata` returns; a shape drift in a field
-// this function never reads (PR 277 round-3 review nit) must not turn a good
-// response into `null`.
+// reads (excerpt, coverImageId, arbiterId, publishedAt, tags, the rest of
+// `creator`) — `.passthrough()` keeps all of it out of this schema's required
+// set. Only `id`/`slug`/`title`/`price`/`status`/`creator.handle` are
+// asserted, because they're the only fields `getPostMetadata` returns; a shape
+// drift in a field this function never reads (PR 277 round-3 review nit) must
+// not turn a good response into `null`.
 const postMetadataSchema = z
   .object({
     id: z.string().regex(UUID_RE, 'id must be a uuid'),
+    slug: z.string(),
     title: z.string(),
     price: z.string().regex(ATOMIC_RE, 'price must be an atomic integer string'),
     status: z.string(),
+    creator: z.object({ handle: z.string() }).passthrough(),
   })
   .passthrough();
 
 export interface PostMetadata {
+  slug: string;
   title: string;
   price: string;
+  creator: { handle: string };
 }
 
 /**
@@ -674,6 +678,11 @@ export interface PostMetadata {
  * it). This is the one function in this module that must never throw or
  * guess — a resolved id with no metadata is UNKNOWN, never a default title
  * or a free price.
+ *
+ * `slug` and `creator.handle` ride along because `resolveResourceRef`
+ * (lib/resource-ref.ts) uses this as its own last-resort id resolver: the
+ * read route is keyed by handle/slug, not by id, so those two fields are what
+ * let a bare id with no local record still resolve to a payable URL.
  */
 export async function getPostMetadata(
   resourceId: string,
@@ -689,5 +698,10 @@ export async function getPostMetadata(
   if (!res.ok || res.status !== 200) return null;
   const parsed = postMetadataSchema.safeParse(res.json);
   if (!parsed.success || parsed.data.status !== 'published') return null;
-  return { title: parsed.data.title, price: parsed.data.price };
+  return {
+    slug: parsed.data.slug,
+    title: parsed.data.title,
+    price: parsed.data.price,
+    creator: { handle: parsed.data.creator.handle },
+  };
 }
