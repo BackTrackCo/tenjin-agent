@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
@@ -3837,6 +3837,119 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts', child));
     await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate', child));
     expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+  });
+
+  /**
+   * THE JUNK SHAPE ITSELF (tenjin-agent#268): a team-shelf post recorded a note
+   * under `~/.claude/...` as the fix for an ELIFECYCLE failure, because the
+   * failing and passing command were the identical string — the sameCommand
+   * branch of the close rule, which takes ANY tracked edit as corroboration
+   * once the error named no file of its own to match against. `isTrackedPath`
+   * now excludes a home dotfile directory for exactly this: the pairing must
+   * stay open, and nothing should land in `pairing_closes`.
+   */
+  it('does not close a pairing on an edit under a home dotfile directory (#268)', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm install', ENOENT));
+    await runScript(
+      pushContextHookScript(dataDir),
+      edit(join(homedir(), '.claude', 'memory', 'some-note.md')),
+    );
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm install'));
+
+    expect(await closes()).toEqual([]);
+    expect((await pairings())[0]).toMatchObject({ status: 'open' });
+  });
+
+  /**
+   * THE NAMED-FILE BRANCH GETS THE SAME GUARD. A home-dotfile edit is filtered
+   * in `editedSince`, upstream of the basename match against the error's own
+   * frame, so a same-named decoy under `~/.claude` never reaches that
+   * comparison either — it never counts as "changed" at all.
+   */
+  it('does not close a pairing on a home-dotfile edit even when its basename matches the error (#268)', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit(join(homedir(), '.claude', 'migrate.ts')));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm build'));
+
+    expect(await closes()).toEqual([]);
+    expect((await pairings())[0]).toMatchObject({ status: 'open' });
+  });
+
+  /**
+   * AN IN-PROJECT EDIT IS UNAFFECTED. The new guard only excludes a home
+   * dotfile directory, so an ordinary repo-relative fix still closes exactly
+   * as before — this is the regression check for the #268 fix.
+   */
+  it('still closes a pairing on an ordinary in-project edit (#268 regression)', async () => {
+    const { baseUrl } = await serve(echo());
+    await pushOn(baseUrl);
+
+    await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/migrate.ts'));
+    await runScript(pushFailureHookScript(dataDir), passing('pnpm db:migrate'));
+
+    expect(await closes()).toHaveLength(1);
+    expect((await pairings())[0]).toMatchObject({ status: 'unverified', closes: 1 });
+  });
+
+  /**
+   * WIN32/DARWIN CASING + SEPARATORS (review on #268's PR: A1igator/greptile,
+   * round 1 and round 2). `homedir()` on Windows can come back with different
+   * casing than the path a tool call names for the very same directory, and
+   * NTFS treats the two as identical; a default APFS (or HFS+) volume on
+   * macOS is the same way. `isHomeDotDirPath`'s prefix check folds case on
+   * both of those platforms and normalizes `\` to `/` before comparing, so a
+   * forward-slash Windows path classifies the same as a backslash one. Linux
+   * keeps the exact-case compare. This drives all three branches directly,
+   * since spawning the real hook (as the other #268 tests do) only ever runs
+   * it on whatever platform CI is, never on win32 or darwin.
+   *
+   * EXTRACTED BY SENTINEL, not brace-counted (as `repoSlugSource` already does
+   * for the same reason: round-1 nit 4 of #256).
+   */
+  it('folds case and separators for a home dotfile path on win32 and darwin, but not linux', () => {
+    const source = pushFailureHookScript(dataDir);
+    const start = source.indexOf('// isHomeDotDirPath:begin');
+    const end = source.indexOf('// isHomeDotDirPath:end');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = source.slice(start, end);
+    expect(body).toContain('function isHomeDotDirPath(path)');
+    const generated = new Function('homedir', `${body}; return isHomeDotDirPath;`)(
+      () => 'C:\\Users\\Ali',
+    ) as (path: string) => boolean;
+
+    const originalPlatform = process.platform;
+    try {
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(true);
+      expect(generated('C:\\Users\\Ali\\.claude\\memory\\x.md')).toBe(true);
+      expect(generated('C:\\Users\\Alison\\.claude\\x')).toBe(false);
+      // FORWARD-SLASH ON WIN32 (round 2, new minor 2): routine on Windows and
+      // what most tooling there emits — must classify the same as backslash.
+      expect(generated('C:/Users/Ali/.claude/x')).toBe(true);
+      expect(generated('c:/users/ali/.claude/x')).toBe(true);
+
+      // DARWIN NOW FOLDS TOO (round 2, new minor 1): a default APFS/HFS+
+      // volume is case-insensitive the same way NTFS is, so this can no
+      // longer stay exact-case the way it did before round 2.
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+      expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(true);
+      expect(generated('C:\\Users\\Alison\\.claude\\x')).toBe(false);
+
+      // LINUX STAYS EXACT-CASE: this is the regression check for both fixes
+      // above — they must not turn every platform case-insensitive.
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+      expect(generated('c:\\users\\ali\\.claude\\memory\\x.md')).toBe(false);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+    }
   });
 
   it("marks the linked post on this machine's own close, for sync to verify", async () => {
