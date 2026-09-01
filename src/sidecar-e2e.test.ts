@@ -301,7 +301,9 @@ describe('the sidecar, end to end over one session', () => {
     expect(injected(teamPrompt)).toContain('your team shelf');
 
     const afterFailure = await ledger();
-    expect(afterFailure).toHaveLength(1);
+    // Both shelves are asked at once (#258); the team answer is the one
+    // delivered and the public leg's miss is on the record beside it.
+    expect(afterFailure).toHaveLength(2);
     expect(afterFailure[0]).toMatchObject({
       session: SESSION,
       trigger: 'prompt',
@@ -310,9 +312,17 @@ describe('the sidecar, end to end over one session', () => {
       action: 'injected',
       candidate: { resourceId: TEAM_RESOURCE_ID },
     });
-    // TEAM FIRST IS THE WHOLE ORDER: a team hit costs the public shelf nothing.
-    expect(pub.hits()).toBe(0);
-    expect(pub.queries()).toEqual([]);
+    expect(afterFailure[1]).toMatchObject({
+      session: SESSION,
+      trigger: 'prompt',
+      shelf: 'public',
+      action: 'skipped',
+      reason: 'miss',
+    });
+    // TEAM FIRST IS THE WHOLE ORDER: the public shelf was asked, in parallel,
+    // and its answer (none here) never displaces the team's.
+    expect(pub.hits()).toBe(1);
+    expect(pub.queries()).toHaveLength(1);
     // And the door key went to the team shelf, on every request it made.
     expect(team.headers().length).toBeGreaterThan(0);
     for (const h of team.headers()) expect(h[BYPASS_HEADER]).toBe(SECRET);
@@ -340,15 +350,15 @@ describe('the sidecar, end to end over one session', () => {
 
     const afterSearch = await ledger();
     // The team leg missed and is on the record; the public leg answered.
-    expect(afterSearch).toHaveLength(3);
-    expect(afterSearch[1]).toMatchObject({
+    expect(afterSearch).toHaveLength(4);
+    expect(afterSearch[2]).toMatchObject({
       session: SESSION,
       trigger: 'research',
       shelf: 'team',
       action: 'skipped',
       reason: 'miss',
     });
-    expect(afterSearch[2]).toMatchObject({
+    expect(afterSearch[3]).toMatchObject({
       session: SESSION,
       trigger: 'research',
       shelf: 'public',
@@ -371,9 +381,9 @@ describe('the sidecar, end to end over one session', () => {
     expect(prompt.stdout).toBe('');
 
     const afterPrompt = await ledger();
-    expect(afterPrompt).toHaveLength(5);
-    expect(afterPrompt.slice(3).map((r) => r.shelf)).toEqual(['team', 'public']);
-    for (const row of afterPrompt.slice(3)) {
+    expect(afterPrompt).toHaveLength(6);
+    expect(afterPrompt.slice(4).map((r) => r.shelf)).toEqual(['team', 'public']);
+    for (const row of afterPrompt.slice(4)) {
       expect(row).toMatchObject({ session: SESSION, trigger: 'prompt', action: 'skipped' });
     }
 
@@ -396,7 +406,7 @@ describe('the sidecar, end to end over one session', () => {
     // no decision row says otherwise: the arm wrote its event row and stopped.
     expect(team.hits()).toBe(teamHitsBefore);
     expect(pub.hits()).toBe(pubHitsBefore);
-    expect(await ledger()).toHaveLength(5);
+    expect(await ledger()).toHaveLength(6);
 
     // ---- (d) the capture ask, once, in the team shelf's words ---------------
     const stop = await runScript(stopHookScript(dataDir), stopInput);
@@ -417,11 +427,11 @@ describe('the sidecar, end to end over one session', () => {
 
     // ---- (e) what `tenjin push status` reports about all of it --------------
     const tallies: PushLedgerTallies = await readLedgerTallies(dataDir, Date.now());
-    expect(tallies.rows).toBe(5);
-    expect(tallies.byShelf).toEqual({ team: 3, public: 2 });
+    expect(tallies.rows).toBe(6);
+    expect(tallies.byShelf).toEqual({ team: 3, public: 3 });
     expect(tallies.byTriggerAction).toMatchObject({
       research: { injected: 1, skipped: 1 },
-      prompt: { injected: 1, skipped: 2 },
+      prompt: { injected: 1, skipped: 3 },
     });
     // The failure arm wrote no decision row at all: it asked nothing.
     expect(tallies.byTriggerAction).not.toHaveProperty('failure');
@@ -432,9 +442,9 @@ describe('the sidecar, end to end over one session', () => {
     const status = await runPushStatus(makeCtx());
     expect(status.data).toMatchObject({ mode: 'on', captureMode: 'block' });
     const human = status.humanLines?.join('\n') ?? '';
-    expect(human).toContain('5 row(s)');
+    expect(human).toContain('6 row(s)');
     expect(human).toContain('2 finding(s)');
-    expect(human).toContain('shelf: team=3, public=2');
+    expect(human).toContain('shelf: team=3, public=3');
     expect(human).toContain('reasons:');
     // The whole walk runs in well under a second alone. The explicit budget is
     // for the full suite, where six spawned node processes and two loopback

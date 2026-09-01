@@ -585,7 +585,18 @@ export const STORE_SQL = {
   injectedCount: `SELECT COUNT(*) AS n FROM injections WHERE session = ? AND action = 'injected'`,
 
   /**
-   * This arm's machine-wide lookup count for the current window.
+   * One session's lookup count on one arm for the current window.
+   *
+   * PER SESSION, NOT PER MACHINE (tenjin-agent#258, owner decision). This
+   * counted every session on the laptop into one bucket, and ten concurrent
+   * sessions then shared one hourly allowance and burned it in the first half
+   * hour, so the sessions that started later were capped before they had asked
+   * anything. The unit is now (session, trigger): a long-lived loop session
+   * cannot starve itself, and a fan-out cannot starve its neighbours.
+   *
+   * `session` LEADS THE PREDICATE because `injections(session, at)` is the
+   * index it seeks on — still one indexed COUNT, not a scan, which is what
+   * makes this affordable in front of every tool call.
    *
    * A LOOKUP IS AN ATTEMPT, NOT AN ANSWER: counting only rows that carry a
    * search_id made a FAILING lookup free, so during an outage the counter stayed
@@ -593,7 +604,8 @@ export const STORE_SQL = {
    * call. `no-answer` rows count too.
    */
   bucketCount: `SELECT COUNT(*) AS n FROM injections
-     WHERE hook = ? AND at >= ? AND (search_id IS NOT NULL OR reason = 'no-answer')`,
+     WHERE session = ? AND hook = ? AND at >= ?
+       AND (search_id IS NOT NULL OR reason = 'no-answer')`,
   /** The trailing run of unanswered lookups for one session, newest first. */
   recentReasons: `SELECT reason, at FROM injections
      WHERE session = ? ORDER BY at DESC LIMIT ?`,
@@ -1892,9 +1904,10 @@ function injectedCount(sessionId) {
   return storeCount(STORE_SQL.injectedCount, [storeSession(sessionId)]);
 }
 
-/** This arm's machine-wide lookups since \`sinceMs\`. */
-function bucketCount(hook, sinceMs) {
-  return storeCount(STORE_SQL.bucketCount, [String(hook), sinceMs]);
+/** This session's lookups on this arm since \`sinceMs\`. Per session, not per
+ *  machine: see STORE_SQL.bucketCount for why the unit moved. */
+function bucketCount(sessionId, hook, sinceMs) {
+  return storeCount(STORE_SQL.bucketCount, [storeSession(sessionId), String(hook), sinceMs]);
 }
 
 /**

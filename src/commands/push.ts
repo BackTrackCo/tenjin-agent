@@ -249,8 +249,11 @@ export interface PushLedgerTallies {
   rows: number;
   byTriggerAction: Record<string, Record<string, number>>;
   byShelf: Record<string, number>;
-  /** Why a row did not inject. The ten the shipped core writes are
-   *  `lookup-cap`, `quiet`, `no-time`, `no-answer`, `miss`, `weak`,
+  /** Why a row did not inject. The eleven the shipped core writes are
+   *  `lookup-cap`, `quiet`, `no-time` (a push-arm leg handed no wall clock;
+   *  a defensive clamp that no longer fires now that each leg is minted its
+   *  own deadline), `no-answer`, `miss`, `weak`, `shadowed`
+   *  (a strong public answer under a strong team answer on the same fire),
    *  `already-injected`, `already-relayed` (this session already handed the
    *  same piece to a subagent and that handoff has not expired),
    *  `already-claimed` (a second agent in the session hit the same failure

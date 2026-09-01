@@ -843,6 +843,147 @@ describe('the research arm (PreToolUse WebSearch|WebFetch)', () => {
     expect((await ledger())[0]).toMatchObject({ strength: 'strong', confidence: null });
   });
 
+  /** A shelf whose search answer is exactly `items`, in that order, with the
+   *  free body behind every one of them. */
+  const ranked =
+    (items: Array<(base: string) => Record<string, unknown>>) =>
+    (req: StubRequest): { status: number; json: unknown } =>
+      req.url.startsWith('/api/search')
+        ? {
+            status: 200,
+            json: { schemaVersion: 3, searchId: SEARCH_ID, items: items.map((c) => c(req.base)) },
+          }
+        : { status: 200, json: { bodyMd: BODY_MD } };
+  // The url is on the shelf's own origin, which is what the parser insists on.
+  const card =
+    (resourceId: string, n: number, over: Record<string, unknown> = {}) =>
+    (base: string) => ({
+      resourceId,
+      url: `${base}/@a/p${n}`,
+      title: `candidate ${n}`,
+      price: '0',
+      excerpt: 'the excerpt',
+      creator: { handle: 'vraspar' },
+      ...over,
+    });
+  const THIRD_RESOURCE_ID = '55555555-5555-4555-8555-555555555555';
+
+  it('takes the first strong candidate among the top three', async () => {
+    // Rank 1 is uncorroborated, rank 2 is corroborated but low, rank 3 is the
+    // shelf's real yes. Ranking is by similarity; corroboration is the verdict.
+    const { baseUrl } = await serve(
+      ranked([
+        card(RESOURCE_ID, 1, { confidence: 'high', corroborated: false }),
+        card(SECOND_RESOURCE_ID, 2, { confidence: 'low', corroborated: true }),
+        card(THIRD_RESOURCE_ID, 3, { confidence: 'medium', corroborated: true }),
+      ]),
+    );
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(injected(run)).toContain(BODY_MD);
+    expect(injected(run)).toContain('candidate 3');
+    expect((await ledger())[0]).toMatchObject({
+      action: 'injected',
+      strength: 'strong',
+      confidence: 'medium',
+      corroborated: true,
+      candidate: { resourceId: THIRD_RESOURCE_ID },
+    });
+  });
+
+  it('takes the FIRST strong candidate, not the most confident one', async () => {
+    // Rank 2 and rank 3 are both strong; rank 3 is the more confident. Ranking
+    // is by similarity and the verdict walks it in order, so rank 2 is the hit.
+    const { baseUrl } = await serve(
+      ranked([
+        card(RESOURCE_ID, 1, { confidence: 'high', corroborated: false }),
+        card(SECOND_RESOURCE_ID, 2, { confidence: 'medium', corroborated: true }),
+        card(THIRD_RESOURCE_ID, 3, { confidence: 'high', corroborated: true }),
+      ]),
+    );
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(injected(run)).toContain('candidate 2');
+    expect((await ledger())[0]).toMatchObject({
+      action: 'injected',
+      strength: 'strong',
+      confidence: 'medium',
+      candidate: { resourceId: SECOND_RESOURCE_ID },
+    });
+  });
+
+  it('records rank 1 when no candidate is strong', async () => {
+    const { baseUrl } = await serve(
+      ranked([
+        card(RESOURCE_ID, 1, { confidence: 'high', corroborated: false }),
+        card(SECOND_RESOURCE_ID, 2, { confidence: 'low', corroborated: true }),
+        card(THIRD_RESOURCE_ID, 3),
+      ]),
+    );
+    await pushOn(baseUrl);
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(injected(run)).toBeNull();
+    expect((await ledger())[0]).toMatchObject({
+      action: 'skipped',
+      reason: 'weak',
+      strength: 'none',
+      confidence: 'high',
+      corroborated: false,
+      candidate: { resourceId: RESOURCE_ID },
+    });
+  });
+
+  it('asks the shelf for three candidates', async () => {
+    const { baseUrl, bodies } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(
+      websearchHookScript(dataDir),
+      webSearch('zod resolver parse throws optional chain'),
+    );
+    expect(bodies()[0]).toMatchObject({ limit: 3 });
+  });
+
+  it('a strong rank 1 already injected does not fall to rank 2', async () => {
+    // Both strong. The first fire injects rank 1; the second is silenced as
+    // already-injected rather than promoting rank 2, which the already-shown set
+    // exists to prevent (a piece said twice), not to enable (a runner-up said
+    // because the winner was).
+    const { baseUrl } = await serve(
+      ranked([
+        card(RESOURCE_ID, 1, { confidence: 'high', corroborated: true }),
+        card(SECOND_RESOURCE_ID, 2, { confidence: 'high', corroborated: true }),
+      ]),
+    );
+    await pushOn(baseUrl);
+    const q = webSearch('zod resolver parse throws optional chain');
+
+    const first = await runScript(websearchHookScript(dataDir), q);
+    expect(injected(first)).toContain('candidate 1');
+    const second = await runScript(websearchHookScript(dataDir), q);
+    expect(second.stdout).toBe('');
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ action: 'injected', candidate: { resourceId: RESOURCE_ID } });
+    expect(rows[1]).toMatchObject({
+      action: 'skipped',
+      reason: 'already-injected',
+      candidate: { resourceId: RESOURCE_ID },
+    });
+  });
+
   it('reads a WebFetch as the question the page was meant to answer', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
@@ -1058,7 +1199,7 @@ async function teamMode(team: Stub, pub: Stub, hooks: Record<string, unknown> = 
 }
 
 describe('the two shelves', () => {
-  it('answers from the team shelf and never asks the public one', async () => {
+  it('answers from the team shelf, and records the public answer as shadowed', async () => {
     const team = await serve(answersOnly(/beacon/i, TEAM_RESOURCE_ID, TEAM_BODY_MD));
     const pub = await serve(echo());
     await teamMode(team, pub);
@@ -1069,15 +1210,25 @@ describe('the two shelves', () => {
     );
     expect(run.code).toBe(0);
     expect(injected(run)).toContain(TEAM_BODY_MD);
+    expect(injected(run)).not.toContain(BODY_MD);
     // The opener says whose shelf it is: a team finding is framed as the team's
     // own record, not as third-party marketplace text.
     expect(injected(run)).toContain('your team shelf');
     expect(team.hits()).toBeGreaterThan(0);
-    // THE POINT OF THE ORDER: a team hit costs the public shelf nothing.
-    expect(pub.hits()).toBe(0);
+    // BOTH SHELVES ARE ASKED, AT ONCE: the public search ran, and only the
+    // search — its strong answer lost to the team's and no body was fetched.
+    expect(pub.queries()).toHaveLength(1);
+    expect(pub.hits()).toBe(1);
 
     const rows = await ledger();
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({
+      shelf: 'public',
+      action: 'skipped',
+      reason: 'shadowed',
+      strength: 'strong',
+      candidate: { resourceId: RESOURCE_ID },
+    });
     expect(rows[0]).toMatchObject({
       trigger: 'research',
       shelf: 'team',
@@ -1116,7 +1267,8 @@ describe('the two shelves', () => {
   });
 
   it('sends the bypass header to the team shelf and to nothing else', async () => {
-    const team = await serve(answersOnly(/nothing-matches-this/, TEAM_RESOURCE_ID, TEAM_BODY_MD));
+    const teamMiss = answersOnly(/nothing-matches-this/, TEAM_RESOURCE_ID, TEAM_BODY_MD);
+    const team = await serve((req) => ({ ...teamMiss(req), delayMs: 600 }));
     const pub = await serve(echo());
     await teamMode(team, pub);
 
@@ -1124,6 +1276,9 @@ describe('the two shelves', () => {
       websearchHookScript(dataDir),
       webSearch('stripe webhook signature clock skew verification'),
     );
+    // Concurrency is pinned by 'asks both shelves at once' above through the
+    // ledger; this test is about the header alone, whatever the leg order.
+    expect(pub.queries()).toHaveLength(1);
     expect(team.headers().length).toBeGreaterThan(0);
     for (const h of team.headers()) expect(h[BYPASS_HEADER]).toBe(SECRET);
     // Including the free-body GET, which is a second request to a second path.
@@ -1513,10 +1668,10 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       PUSH_PROMPT_BUDGET_MS,
     );
     expect(PUSH_PROMPT_BUDGET_MS).toBeLessThan(PUSH_PROMPT_WATCHDOG_MS);
-    // AND THAT SUM DOES NOT GROW WITH A SECOND SHELF. The team leg and the
-    // public leg divide one search-plus-body wall clock; if a two-shelf lookup
-    // were allowed a second full search, this arm's worst case would be 1500 +
-    // 1500 + 800 against a 2700ms budget, which is a lookup paid for and killed.
+    // AND THIS IS WHY THE TWO LEGS RUN SIDE BY SIDE. Two full searches in a row
+    // plus a body do NOT fit the budget — 1500 + 1500 + 800 against 2700 is a
+    // lookup paid for and killed — so a team-mode fire asks both shelves at
+    // once and its wall clock is the slower leg, not the sum.
     expect(2 * PUSH_PROMPT_SEARCH_TIMEOUT_MS + PUSH_PROMPT_BODY_TIMEOUT_MS).toBeGreaterThan(
       PUSH_PROMPT_BUDGET_MS,
     );
@@ -1526,20 +1681,24 @@ describe('the prompt arm (UserPromptSubmit)', () => {
    * THE TWO-SHELF TAIL. A team shelf that answers late and a public shelf that
    * then answers at all used to overrun the arm together: the overrun timer
    * fired at 2700ms, wrote `watchdog`, and exited while the public hit was still
-   * being turned into text. The legs now share one deadline, so the arm gives up
-   * on the second shelf instead of on itself.
+   * being turned into text. Sharing one deadline fixed the overrun by dropping
+   * the public leg (`no-time`), which threw the answer away instead. The legs
+   * now run at once, so the public answer is home while the team leg is still
+   * missing.
    */
-  it('drops the second shelf rather than overrunning, when the first leg was slow', async () => {
+  it('answers from the public shelf while a slow team leg is still missing', async () => {
     const team = await serve((req) =>
       req.url.startsWith('/api/search')
         ? { status: 200, json: { schemaVersion: 3, searchId: SEARCH_ID, items: [] }, delayMs: 1400 }
         : { status: 200, json: {} },
     );
-    // Slow too, which is the reproduction: 1400 + 1300 used to land past the
-    // 2700ms overrun timer, so the arm wrote `watchdog` and exited while this
-    // shelf's hit was being turned into text.
+    // The search is slow too, which is the reproduction: 1400 + 1300 in
+    // sequence landed past the 2700ms overrun timer. The body GET answers at
+    // once, so the form is the full one the fast fallback gets.
     const slow = echo();
-    const pub = await serve((req) => ({ ...slow(req), delayMs: 1300 }));
+    const pub = await serve((req) =>
+      req.url.startsWith('/api/search') ? { ...slow(req), delayMs: 1300 } : slow(req),
+    );
     await teamMode(team, pub);
 
     const startedAt = Date.now();
@@ -1547,14 +1706,169 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(run.code).toBe(0);
     // Home before the arm's own overrun timer, which is the whole point.
     expect(Date.now() - startedAt).toBeLessThan(PUSH_PROMPT_BUDGET_MS);
+    expect(injected(run)).toContain(BODY_MD);
 
     const rows = await ledger();
     expect(rows.map((r) => r.reason)).not.toContain('watchdog');
-    // The team leg missed; the public leg was never asked, and says so on its
-    // own reason rather than as an outage that would quiet the arm.
-    expect(rows[0]).toMatchObject({ shelf: 'team', reason: 'miss' });
-    expect(rows[1]).toMatchObject({ shelf: 'public', action: 'skipped', reason: 'no-time' });
-    expect(pub.hits()).toBe(0);
+    // Team first, public second, whichever leg answered first. The team stub
+    // answers 100ms inside the leg's own 1500ms timeout, so on a loaded box its
+    // row is the miss it sent or the `no-answer` the abort filed — either is
+    // the same scenario: the public answer home while the team leg had nothing.
+    expect(rows[0]).toMatchObject({ shelf: 'team', action: 'skipped' });
+    expect(['miss', 'no-answer']).toContain(rows[0]!.reason);
+    expect(rows[1]).toMatchObject({ shelf: 'public', action: 'injected', form: 'full' });
+  });
+
+  it('the team leg times out and the public leg still answers inside the watchdog', async () => {
+    // A team shelf that never answers costs its own leg's timeout and nothing
+    // else: the public leg was asked in parallel and its hit is delivered once
+    // the team leg has given up.
+    const team = await serve(() => 'hang');
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const startedAt = Date.now();
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(run.code).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(PUSH_PROMPT_BUDGET_MS);
+    expect(injected(run)).toContain(BODY_MD);
+
+    const rows = await ledger();
+    expect(rows.map((r) => r.reason)).not.toContain('watchdog');
+    expect(rows[0]).toMatchObject({ shelf: 'team', action: 'skipped', reason: 'no-answer' });
+    expect(rows[1]).toMatchObject({ shelf: 'public', action: 'injected' });
+  });
+
+  it('asks both shelves at once', async () => {
+    // Two 1200ms misses in sequence would take 2400ms; side by side they take
+    // one leg's worth. The bound is 1800ms, not 2400: at 2400 a fully
+    // sequential pair passes on any machine that shaves 1ms off either leg, so
+    // the assertion has to sit between one leg and two, not at two.
+    const team = await serve((req) => ({ ...miss(req), delayMs: 1200 }));
+    const pub = await serve((req) => ({ ...miss(req), delayMs: 1200 }));
+    await teamMode(team, pub);
+
+    const startedAt = Date.now();
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(run.code).toBe(0);
+    expect(Date.now() - startedAt).toBeLessThan(1800);
+    expect(team.queries()).toHaveLength(1);
+    expect(pub.queries()).toHaveLength(1);
+    expect((await ledger()).map((r) => [r.shelf, r.reason])).toEqual([
+      ['team', 'miss'],
+      ['public', 'miss'],
+    ]);
+  });
+
+  it('prefers the team answer when both shelves are strong', async () => {
+    // The public shelf answers first and strongly; the team shelf answers
+    // later and strongly. The team answer is the one spoken, the public one is
+    // on the record as shadowed, and the rows keep shelf order regardless of
+    // which leg came home first.
+    const teamStrong = answersOnly(/./, TEAM_RESOURCE_ID, TEAM_BODY_MD);
+    const team = await serve((req) => ({ ...teamStrong(req), delayMs: 400 }));
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(run.code).toBe(0);
+    expect(injected(run)).toContain(TEAM_BODY_MD);
+    expect(injected(run)).not.toContain(BODY_MD);
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      shelf: 'team',
+      action: 'injected',
+      candidate: { resourceId: TEAM_RESOURCE_ID },
+    });
+    expect(rows[1]).toMatchObject({
+      shelf: 'public',
+      action: 'skipped',
+      reason: 'shadowed',
+      strength: 'strong',
+      candidate: { resourceId: RESOURCE_ID },
+    });
+  });
+
+  /**
+   * A TEAM HIT THAT CANNOT BE SPOKEN IS NOT AN ANSWER. `shelfDeliver` returns
+   * null for a piece this session has already been given, and shadowing the
+   * public hit behind that spent the fire on two strong answers and emitted
+   * neither: the agent got nothing, and the ledger said the public shelf had
+   * been out-answered by a delivery that never happened. The public leg now
+   * stands on its own exactly as it does under a team miss.
+   */
+  it('delivers the public hit when the team hit was already injected this session', async () => {
+    const team = await serve(answersOnly(/./, TEAM_RESOURCE_ID, TEAM_BODY_MD));
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    // Fire one: the team piece is injected and the public one is shadowed.
+    const first = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(injected(first)).toContain(TEAM_BODY_MD);
+
+    // Fire two, same session: the team shelf answers with the same piece, which
+    // the once-per-session set refuses.
+    const second = await runScript(pushPromptHookScript(dataDir), prompt(QUESTION));
+    expect(injected(second)).toContain(BODY_MD);
+    expect(injected(second)).not.toContain(TEAM_BODY_MD);
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(4);
+    expect(rows[2]).toMatchObject({
+      shelf: 'team',
+      action: 'skipped',
+      reason: 'already-injected',
+      candidate: { resourceId: TEAM_RESOURCE_ID },
+    });
+    expect(rows[3]).toMatchObject({
+      shelf: 'public',
+      action: 'injected',
+      candidate: { resourceId: RESOURCE_ID },
+    });
+  });
+
+  /**
+   * A LEG THAT THROWS MUST NOT TAKE THE OTHER ONE DOWN. Both legs are handed to
+   * one `Promise.all`, so a rejection inside either rejects the pair, and
+   * `main().catch(quiet)` then swallows it: the fire emits nothing and writes no
+   * row for EITHER shelf, even with a strong public answer already in hand. So
+   * `shelfAsk` holds the whole leg — the fetch, the search record and the
+   * verdict — inside one try, and a throw is the `no-answer` an unanswered leg
+   * always was.
+   *
+   * The fault is INJECTED INTO THE REAL GENERATED BYTES rather than simulated
+   * with a stub, because the claim is about what the shipped `shelfAsk` does
+   * when the code that walks a shelf's body throws. `verdict` is the cheapest
+   * place to put it: it runs after the fetch has resolved, on one leg's
+   * candidates, so keying it to the piece only the team shelf answers with
+   * breaks exactly one leg.
+   */
+  it('files a thrown leg as no-answer and still delivers the other shelf', async () => {
+    const team = await serve(answersOnly(/./, TEAM_RESOURCE_ID, TEAM_BODY_MD));
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const real = pushPromptHookScript(dataDir);
+    const faulty = real.replace(
+      'function verdict(found) {',
+      `function verdict(found) {
+         if (found && found.rich.some((c) => c.resourceId === '${TEAM_RESOURCE_ID}')) {
+           throw new TypeError('walking a body the shelf sent');
+         }`,
+    );
+    expect(faulty).not.toBe(real);
+
+    const run = await runScript(faulty, prompt(QUESTION));
+    expect(run.code).toBe(0);
+    // The public leg's answer survived the team leg's throw.
+    expect(injected(run)).toContain(BODY_MD);
+
+    const rows = await ledger();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({ shelf: 'team', action: 'skipped', reason: 'no-answer' });
+    expect(rows[1]).toMatchObject({ shelf: 'public', action: 'injected' });
   });
 
   it('still falls through to the public shelf when the first leg was quick', async () => {
@@ -2565,12 +2879,14 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
       }),
       Date.now(),
     ]);
+    // THIS session's spend: the bucket is per (session, trigger), so another
+    // session's rows are not what stops this arm (#258).
     for (let i = 0; i < FAILURE_COLD_CAP; i += 1) {
       store?.run(STORE_SQL.insertInjection, [
         `seed-failure-${i}`,
         null,
         Date.now(),
-        'sess-someone-else',
+        SESSION,
         null,
         'machine',
         'failure',
@@ -2594,11 +2910,13 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
     }
     store?.close();
 
+    const seeded = (await ledger()).length;
     const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
     expect(run.stdout).toBe('');
     expect(stub.bodies).toHaveLength(0);
     expect(team.hits()).toBe(0);
-    const rows = (await ledger()).filter((r) => r.session === SESSION);
+    // The rows THIS FIRE wrote, past the seeded spend above.
+    const rows = (await ledger()).slice(seeded);
     expect(rows.at(-1)).toMatchObject({
       trigger: 'failure',
       shelf: 'team',
@@ -3375,12 +3693,14 @@ describe('the lookup budget (rolling window, per trigger)', () => {
   /**
    * THE GUARD IS THE NUMBER. Every other assertion in this block reads the
    * constants, so it agrees with any value — including one that removes the
-   * guard in practice. This one pins the band, over the machine-wide total
-   * rather than one bucket, so raising a single arm or adding a seventh
-   * cannot slip past it: six arms at 60 is 360 lookups an hour, 720 with the
-   * hot rule doubling every arm, and that is the ceiling this shipped with.
+   * guard in practice. This one pins the band, over one session's total across
+   * every arm rather than one bucket, so raising a single arm or adding a
+   * seventh cannot slip past it: six arms at 60 is 360 lookups an hour for one
+   * session, 720 with the hot rule doubling every arm, and that is the ceiling
+   * this shipped with. Concurrent sessions multiply it, deliberately — see
+   * PUSH_LOOKUP_WINDOW_MS for why there is no machine ceiling over the top.
    */
-  it('keeps the machine-wide ceiling inside the band the guard was sized for', () => {
+  it('keeps the per-session ceiling inside the band the guard was sized for', () => {
     const caps = Object.values(PUSH_LOOKUP_CAPS_PER_WINDOW);
     const total = caps.reduce((sum, cap) => sum + cap, 0);
     expect(caps).toHaveLength(6);
@@ -3391,6 +3711,8 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     for (const cap of caps) expect(cap).toBe(60);
   });
 
+  /** The other session in the room. The bucket is per session, so what it
+   *  spends is its own and never this one's. */
   const OTHER_SESSION = 'sess-someone-else';
   const QUESTION =
     'The zod resolver throws on an optional chain during parse and I need to know whether pinning helps';
@@ -3400,8 +3722,20 @@ describe('the lookup budget (rolling window, per trigger)', () => {
     prompt: QUESTION,
   });
 
-  /** `count` spent lookups on `trigger`, `ageMs` old, from another session. */
-  async function seedLookups(trigger: string, count: number, ageMs: number): Promise<void> {
+  /**
+   * `count` spent lookups on `trigger`, `ageMs` old, charged to `session`.
+   *
+   * THE DEFAULT IS THE SESSION UNDER TEST, which is the unit change of #258:
+   * the bucket is per (session, trigger), so a spend from anywhere else is not
+   * what stops this arm. The `session` argument is here for the one case that
+   * is about the boundary itself.
+   */
+  async function seedLookups(
+    trigger: string,
+    count: number,
+    ageMs: number,
+    session: string = SESSION,
+  ): Promise<void> {
     const store = await openStore(dataDir);
     const at = Date.now() - ageMs;
     for (let i = 0; i < count; i += 1) {
@@ -3409,7 +3743,7 @@ describe('the lookup budget (rolling window, per trigger)', () => {
         `seed-${trigger}-${i}`,
         null,
         at,
-        OTHER_SESSION,
+        session,
         null,
         'machine',
         trigger,
@@ -3526,17 +3860,24 @@ describe('the lookup budget (rolling window, per trigger)', () => {
   });
 
   /**
-   * The bucket is MACHINE-WIDE and always was: concurrent sessions on one laptop
-   * are one machine's worth of requests however many session ids they carry. The
-   * per-session cap cache used to make a second session re-discover the cap for
-   * itself; without it the second session simply reads the same count.
+   * THE BUCKET IS PER SESSION (#258, owner decision). It was machine-wide, and
+   * a fan-out then shared one hourly allowance between ten sessions and burned
+   * it in the first half hour, so every session that started later was capped
+   * before it had asked anything. A second session now carries its own full
+   * allowance and is not answerable for what the first one spent — which is the
+   * whole point, so it is asserted from both sides: the exhausted session is
+   * still stopped, and the fresh one still injects.
    */
-  it('is machine-wide: a second session sees the same exhausted bucket', async () => {
-    const { baseUrl, hits } = await serve(echo());
+  it('is per session: a second session has its own full bucket', async () => {
+    const { baseUrl } = await serve(echo());
     await pushOn(baseUrl);
     await seedLookups('prompt', PROMPT_CAP, 0);
-    await runScript(pushPromptHookScript(dataDir), promptInput);
 
+    // Session A spent its allowance and is capped.
+    const spent = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(spent.stdout).toBe('');
+
+    // Session B, on the same machine, in the same hour, on the same arm.
     const other = await runScript(
       pushPromptHookScript(dataDir),
       JSON.stringify({
@@ -3545,11 +3886,66 @@ describe('the lookup budget (rolling window, per trigger)', () => {
         prompt: QUESTION,
       }),
     );
-    expect(other.stdout).toBe('');
-    expect(hits()).toBe(0);
-    expect(await ledger()).toContainEqual(
+    expect(injected(other)).toContain(BODY_MD);
+
+    const rows = await ledger();
+    expect(rows).toContainEqual(
+      expect.objectContaining({ session: SESSION, reason: 'lookup-cap' }),
+    );
+    expect(rows).toContainEqual(expect.objectContaining({ session: 'sess-2', action: 'injected' }));
+    expect(rows).not.toContainEqual(
       expect.objectContaining({ session: 'sess-2', reason: 'lookup-cap' }),
     );
+  });
+
+  /**
+   * The other side of the same boundary: what another session spent is not this
+   * one's to answer for. Under the machine-wide count this arm was silent.
+   */
+  it("does not charge this session for another session's spend", async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    // Well past the cap, all of it someone else's.
+    await seedLookups('prompt', PROMPT_CAP * 5, 0, OTHER_SESSION);
+
+    const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(injected(run)).toContain(BODY_MD);
+    expect(hits()).toBeGreaterThan(0);
+    expect(await ledger()).not.toContainEqual(
+      expect.objectContaining({ session: SESSION, reason: 'lookup-cap' }),
+    );
+  });
+
+  it('in team mode, a bucket with one lookup left stops the two-shelf fire', async () => {
+    // Both legs count against the bucket and both are asked at once, so the
+    // gate is sized to two: at cap-1 the fire is `lookup-cap` in one row, not
+    // two searches against a cap that says one.
+    const team = await serve(echo());
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await seedLookups('prompt', PROMPT_CAP - 1, 0);
+
+    const seeded = (await ledger()).length;
+    const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(run.stdout).toBe('');
+    expect(team.hits()).toBe(0);
+    expect(pub.hits()).toBe(0);
+    // The rows THIS FIRE wrote: the seeded spend is under this session too now.
+    const rows = (await ledger()).slice(seeded);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ trigger: 'prompt', action: 'skipped', reason: 'lookup-cap' });
+  });
+
+  it('in team mode, a bucket with two lookups left lets the fire through', async () => {
+    const team = await serve(echo());
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    await seedLookups('prompt', PROMPT_CAP - 2, 0);
+
+    const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+    expect(injected(run)).toContain(BODY_MD);
+    expect(team.hits()).toBeGreaterThan(0);
+    expect(pub.hits()).toBeGreaterThan(0);
   });
 
   /**
@@ -3646,6 +4042,33 @@ describe('the lookup budget (rolling window, per trigger)', () => {
       const tenth = await runScript(pushPromptHookScript(dataDir), promptInput);
       expect(injected(tenth)).toContain(BODY_MD);
       expect(hits()).toBeGreaterThan(0);
+      expect(sessionState(SESSION, 'cooldown:prompt')).toBe(10);
+      expect(
+        (await ledger()).filter((r) => r.session === SESSION && r.reason === 'lookup-cap'),
+      ).toHaveLength(9);
+    });
+
+    it('counts a team-mode fire once, so the 10th pass lands on a fire that is asked', async () => {
+      // The gate runs once per fire, not once per leg: a per-leg bump made the
+      // team leg the 9th and the public leg the 10th, so the public shelf was
+      // searched while the team leg's stop threw the answer away.
+      const team = await serve(echo());
+      const pub = await serve(echo());
+      await teamMode(team, pub);
+      await seedRates({ prompt: { hits: 30, used: 1, wrong: 29 } });
+      await seedLookups('prompt', COLD_CAP, 0);
+
+      for (let i = 1; i <= 9; i += 1) {
+        const run = await runScript(pushPromptHookScript(dataDir), promptInput);
+        expect(run.stdout, `fire ${i}`).toBe('');
+        expect(sessionState(SESSION, 'cooldown:prompt'), `fire ${i}`).toBe(i);
+      }
+      expect(team.hits()).toBe(0);
+      expect(pub.hits()).toBe(0);
+      const tenth = await runScript(pushPromptHookScript(dataDir), promptInput);
+      expect(injected(tenth)).toContain(BODY_MD);
+      expect(team.hits()).toBeGreaterThan(0);
+      expect(pub.hits()).toBeGreaterThan(0);
       expect(sessionState(SESSION, 'cooldown:prompt')).toBe(10);
       expect(
         (await ledger()).filter((r) => r.session === SESSION && r.reason === 'lookup-cap'),

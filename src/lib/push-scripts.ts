@@ -32,37 +32,52 @@ export const PUSH_INJECT_MAX_PER_SESSION = 5;
 /**
  * The lookup budget's window, and each trigger's allowance inside it.
  *
- * THE UNIT IS TIME AND TRIGGER, NOT SESSION. A flat per-session cap starved the
- * case this sidecar exists for: an always-on loop session keeps one session id
- * for hours, so its opening minutes spend the whole allowance on whatever fires
- * most often — ordinary prompts — and every later failure or research lookup is
- * skipped for the rest of the run. So: a rolling window that recovers on its
- * own, and one bucket per trigger so a prompt flood cannot spend the failure
- * arm's allowance. The buckets are counted MACHINE-WIDE rather than per
- * session: concurrent sessions on one laptop are one machine's worth of
- * requests however many session ids they carry. The per-session `seen` set is
- * untouched: once-per-piece is a property of the conversation being injected
- * into, not of the machine.
+ * THE UNIT IS (SESSION, TRIGGER) PER ROLLING HOUR (tenjin-agent#258, owner
+ * decision). Two earlier units both failed, in opposite directions, and the
+ * rolling window is what lets this one avoid both:
  *
- * THE NUMBER IS A RUNAWAY GUARD, NOT A BUDGET (tenjin-agent#258). At 8 an hour
- * machine-wide, four or five concurrent sessions left each one ~2 prompt
- * lookups an hour: 65 `lookup-cap` skips in a week on one machine, eleven in a
- * row inside the one confusion a teammate's note would have answered
- * (tenjin-agent#255). A lookup is one ~0.4 s search and one embedding call, so
- * fifteen an hour is noise for a shelf, and while the team experiment is being
- * measured every skipped lookup is a data point lost. 60 an hour still stops a
- * stuck loop from hammering a shelf, and the adaptive cooldown below still
- * scales it on evidence once anything is graded.
+ *  - A FLAT PER-SESSION cap, with no window, starved the case this sidecar
+ *    exists for: an always-on loop session keeps one session id for hours, so
+ *    its opening minutes spent the whole allowance on whatever fires most often
+ *    — ordinary prompts — and every later failure or research lookup was
+ *    skipped for the rest of the run. The window fixes that on its own: 60 an
+ *    hour that recovers on the clock is not an allowance a long-lived session
+ *    can exhaust for good, and one bucket per trigger means a prompt flood
+ *    cannot spend the failure arm's share either.
+ *  - COUNTING MACHINE-WIDE then over-corrected. Concurrent sessions on one
+ *    laptop are one machine's worth of requests, which is true and is not the
+ *    property that should be rationed: ten sessions in a fan-out shared ONE
+ *    hourly allowance and burned it in the first half hour, so every session
+ *    that started later was capped before it had asked anything, and the arm
+ *    went quiet exactly when the machine was busiest.
  *
- * THE MACHINE-WIDE CEILING, so the next reader decides on the same number: six
- * arms at 60 is 360 lookups an hour, 720 with the hot rule doubling every arm
- * — about 1,440 shelf requests an hour at one search plus one embedding each,
- * nine times the 80 this shipped with. It is a guard against a runaway loop,
- * not against a merely chatty one; the shelf's own rate limit is the bound on
- * that, and this constant is the only client-side bound on shelf egress. An
- * arm added to this table raises the ceiling by 60; the test that pins the
- * band (push-scripts.test.ts, "keeps the machine-wide ceiling") is what makes
- * that a decision rather than a drift.
+ * So the count is per session and per trigger, over the last
+ * PUSH_LOOKUP_WINDOW_MS. THERE IS DELIBERATELY NO MACHINE CEILING on top of it.
+ * A per-machine bound is the thing that just failed, and what it was guarding
+ * against — a stuck loop hammering a shelf — is still bounded here: that loop is
+ * one session, and one session gets 60 an hour per trigger however long it runs.
+ * The per-session `seen` set is untouched, and always was: once-per-piece is a
+ * property of the conversation being injected into.
+ *
+ * THE NUMBER IS A RUNAWAY GUARD, NOT A BUDGET. At 8 an hour machine-wide, four
+ * or five concurrent sessions left each one ~2 prompt lookups an hour: 65
+ * `lookup-cap` skips in a week on one machine, eleven in a row inside the one
+ * confusion a teammate's note would have answered (tenjin-agent#255). A lookup
+ * is one ~0.4 s search and one embedding call, so a handful an hour is noise for
+ * a shelf, and while the team experiment is being measured every skipped lookup
+ * is a data point lost. 60 an hour still stops a stuck loop from hammering a
+ * shelf, and the adaptive cooldown below still scales it on evidence once
+ * anything is graded.
+ *
+ * THE PER-SESSION CEILING, so the next reader decides on the same number: six
+ * arms at 60 is 360 lookups an hour for one session, 720 with the hot rule
+ * doubling every arm — about 1,440 shelf requests an hour at one search plus one
+ * embedding each. Concurrent sessions multiply that, by design: the shelf's own
+ * rate limit is the bound on a busy machine, and this constant is the only
+ * client-side bound on one session's egress. An arm added to this table raises
+ * the per-session ceiling by 60; the test that pins the band
+ * (push-scripts.test.ts, "keeps the per-session ceiling") is what makes that a
+ * decision rather than a drift.
  */
 export const PUSH_LOOKUP_WINDOW_MS = 60 * 60 * 1000;
 export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
@@ -75,7 +90,7 @@ export const PUSH_LOOKUP_CAPS_PER_WINDOW: Readonly<Record<string, number>> = {
 };
 /** What a trigger not named above may spend: the same guard, since the guard
  *  is about a stuck loop, not about which arm is worth the spend. Note that
- *  it also means an unsized arm raises the machine-wide ceiling by 60; size
+ *  it also means an unsized arm raises the per-session ceiling by 60; size
  *  a new arm in the table above deliberately rather than falling through. */
 export const PUSH_LOOKUP_CAP_DEFAULT = 60;
 /**
@@ -264,13 +279,14 @@ export const PUSH_READ_PACKAGES_MAX = 10;
  * Watchdogs: a search plus a body fetch must fit under the settings.json
  * timeout, which is set from this with headroom.
  *
- * "A SEARCH" IS THE WHOLE LOOKUP, NOT ONE REQUEST. Team mode asks two shelves,
- * and they divide one search-plus-body wall clock between them (`legTimeoutMs`
- * in lib/hook-scripts.ts), precisely so this arithmetic does not have to grow a
- * second search term: a two-shelf lookup costs what a one-shelf lookup always
- * cost. Sizing the watchdog for search + search + body instead would mean making
- * the prompt arm's own budget long enough to be felt by the human waiting
- * behind it.
+ * "A SEARCH" IS THE SLOWEST LEG, NOT THE SUM OF THEM. Team mode asks two
+ * shelves, and the push arms ask them SIDE BY SIDE (`pushDecide`), each on its
+ * own search-plus-body clock, so the lookup's wall clock is max(team, public) +
+ * body — the one-shelf sum this arithmetic was sized for — while the requests
+ * double. Sizing the watchdog for search + search + body instead would mean
+ * making the prompt arm's own budget long enough to be felt by the human waiting
+ * behind it. The dispatch hook still runs its legs one after the other and
+ * divides the same clock between them (`legTimeoutMs` in lib/hook-scripts.ts).
  */
 export const PUSH_WATCHDOG_MS = 4500;
 export const PUSH_HOOK_TIMEOUT_SECONDS = 8;
@@ -282,10 +298,10 @@ export const PUSH_PROMPT_SEARCH_TIMEOUT_MS = 1500;
 /** The prompt arm's own body budget, half the other arms'. THE WATCHDOG MUST
  *  EXCEED SEARCH + BODY + SLACK, or the arm pays for a lookup, blocks the human
  *  for it, and is killed before it can say or record anything: 1500 + 800 fits
- *  under 3000 with room for the search write in between. SEARCH is the
- *  lookup's whole budget however many shelves it asks — the two legs share the
- *  1500 rather than taking it each, which is what keeps this sum true in team
- *  mode. */
+ *  under 3000 with room for the search write in between. SEARCH is one leg's
+ *  budget, and in team mode the two legs run at once, so the lookup's clock is
+ *  the slower leg's 1500, not 1500 + 1500 — which is what keeps this sum true
+ *  in team mode. */
 export const PUSH_PROMPT_BODY_TIMEOUT_MS = 800;
 /** When the prompt arm gives up on its own and writes the row saying so. Under
  *  the watchdog, so a run that overruns is VISIBLE in the ledger rather than
@@ -308,6 +324,10 @@ const PUSH_FAILURE_STOP = __FAILURE_STOP__;
 const PUSH_QUIET_MS = __QUIET_MS__;
 const PUSH_BODY_MAX = __BODY_MAX__;
 const PUSH_BODY_TIMEOUT = __BODY_TIMEOUT__;
+/** Candidates a push arm asks a shelf for: three, so \`verdict\` can take a
+ *  corroborated rank 2 or 3 over an uncorroborated rank 1. The WebSearch hint
+ *  keeps its own SEARCH_LIMIT. */
+const PUSH_SEARCH_LIMIT = 3;
 
 /** Whole words of \`text\` long enough to be a topic word. Not a scorer — the
  *  shelf decides strength — just the floor that keeps an arm from spending a
@@ -321,9 +341,19 @@ function wordCount(text) {
  * and nothing at all is scored on this machine.
  *
  * \`corroborated\` is whether the shelf's own two retrieval legs agreed on the
- * piece, and \`confidence\` is its coarse match bucket. A hit is 'strong' only
- * when the shelf both corroborated it AND did not call it 'low'; everything else
- * is 'none', which injects nothing and falls through to the next shelf.
+ * piece, and \`confidence\` is its coarse match bucket. A candidate is 'strong'
+ * only when the shelf both corroborated it AND did not call it 'low'; everything
+ * else is 'none', which injects nothing.
+ *
+ * THE FIRST STRONG CANDIDATE AMONG THE ONES ASKED FOR (PUSH_SEARCH_LIMIT, three)
+ * is the hit. Ranking is by similarity, corroboration is a separate signal, and
+ * a corroborated piece at rank 2 or 3 under an uncorroborated rank 1 is exactly
+ * the case the rank-1-only read threw away. When none is strong, rank 1 is the
+ * row's candidate, so the weak rows still record what the shelf put first.
+ *
+ * A strong rank 1 that this session already injected STAYS the hit and is
+ * recorded as 'already-injected'; it does not fall through to rank 2. The set
+ * exists to stop a piece from being said twice, not to promote the runner-up.
  *
  * WHY NOTHING LOCAL IS LEFT. The local word-overlap scorer this replaces judged
  * a query against a title and an excerpt, which is the one comparison a hook can
@@ -342,10 +372,13 @@ function verdict(found) {
   if (found === null || found.rich.length === 0) {
     return { top: null, strength: 'none', confidence: null, corroborated: null };
   }
-  const top = found.rich[0];
+  const strongIdx = found.rich.findIndex(
+    (c) => c.corroborated === true && c.confidence !== 'low',
+  );
+  const top = strongIdx >= 0 ? found.rich[strongIdx] : found.rich[0];
   const confidence = typeof top.confidence === 'string' ? top.confidence : null;
   const corroborated = typeof top.corroborated === 'boolean' ? top.corroborated : null;
-  const strength = corroborated === true && confidence !== 'low' ? 'strong' : 'none';
+  const strength = strongIdx >= 0 ? 'strong' : 'none';
   return { top, strength, confidence, corroborated };
 }
 
@@ -404,31 +437,45 @@ function lookupCapFor(trigger) {
 /**
  * Whether \`trigger\` has anything left in the current window.
  *
- * TWO UNITS, DELIBERATELY. This one is a machine-wide count per trigger over the
- * last PUSH_LOOKUP_WINDOW_MS: it bounds requests, and requests are a property of
- * the machine and of the clock, not of a session id that an always-on loop holds
- * for a day. The inject cap, the once-per-piece set and the outage brake stay
- * per session, because each is a property of the one conversation being injected
- * into.
+ * ONE UNIT: (session, trigger) over the last PUSH_LOOKUP_WINDOW_MS. It is the
+ * CLOCK that does the work a machine-wide count was reaching for — an allowance
+ * that refills means a long-lived session cannot exhaust it for good — and
+ * keeping the count per session is what stops a fan-out's sessions from eating
+ * each other's. See PUSH_LOOKUP_WINDOW_MS for why the unit moved off the
+ * machine. The inject cap, the once-per-piece set and the outage brake were
+ * already per session, so this is now the same scope as every other bound here.
  *
  * ONE INDEXED COUNT, not a parse. This used to mean reading the last 256 KB of
  * an append-only ledger in front of every tool call and tallying it in memory —
  * which also meant the window could only ever be UNDERCOUNTED, since a machine
  * writing more than the tail inside one window lost its oldest rows from the
- * count. The count is now exact, and cheap enough that the per-session "this
- * bucket is full" cache the file version needed is gone with it.
+ * count. The count is now exact (\`injections(session, at)\` is the index it
+ * seeks on), and cheap enough that the per-session "this bucket is full" cache
+ * the file version needed is gone with it.
  */
-function lookupAllowed(trigger, sessionId) {
-  const spent = bucketCount(triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
+function lookupAllowed(trigger, sessionId, legs = 1) {
+  const spent = bucketCount(sessionId, triggerKey(trigger), Date.now() - PUSH_LOOKUP_WINDOW_MS);
   const base = lookupCapFor(trigger);
   const cap = cooldownCap(trigger, base, sessionId);
-  if (spent < cap) return true;
+  // \`legs\` IS WHAT THIS FIRE WILL SPEND, checked once: a team-mode fire asks
+  // two shelves at once, and both rows count against the bucket, so the gate
+  // asks whether both fit rather than letting each leg read the same stale
+  // count and pass at one lookup left. A two-shelf fire is two lookups.
+  //
+  // WITHIN ONE FIRE. Across fires the count can still overshoot: the read arm
+  // runs two \`pushDecide\` calls under one \`Promise.all\`, and each of them
+  // gates before either has written a row, so both can read the same count and
+  // both pass at one fire's worth left. The overshoot is bounded by one fire —
+  // two lookups in team mode — which a runaway guard can afford; serializing the
+  // pair to close it would cost the arm the parallelism it exists for.
+  if (spent + legs <= cap) return true;
   // THE COLD ARM'S ESCAPE. Under the reduced cap, and under the base cap it
   // replaced, every Nth suppressed fire goes through: an arm nothing grades
   // never warms, and a cap that only ever shrinks is a switch, not a cooldown.
-  // Counted per session and per trigger, in one statement, so two concurrent
-  // fires cannot both be the Nth.
-  if (cap < base && spent < base) {
+  // Counted per session and per trigger, in one statement, ONCE PER FIRE
+  // whatever the leg count, so two concurrent fires cannot both be the Nth and
+  // one fire's two legs cannot be the (N-1)th and the Nth.
+  if (cap < base && spent + legs <= base) {
     const n = bumpState(sessionId, STATE_COOLDOWN_PREFIX + triggerKey(trigger));
     return n > 0 && n % PUSH_COOLDOWN.passEvery === 0;
   }
@@ -608,10 +655,10 @@ function fullForm(opener, header, body) {
 }
 
 /**
- * The push core: look \`query\` up on the team shelf and then, only if that had
- * nothing, on the public one; read the shelf's verdict, pick a form, write the
- * ledger row. Returns { text, form } for an arm to emit, or null when there is
- * nothing to say. \`mode\` is 'inject' or 'log': a log-only arm does everything
+ * The push core: look \`query\` up on the team shelf and the public one AT ONCE
+ * in team mode, prefer the team answer, and fall back to the public one; read the
+ * shelf's verdict, pick a form, write the ledger rows. Returns { text, form } for
+ * an arm to emit, or null when there is nothing to say. \`mode\` is 'inject' or 'log': a log-only arm does everything
  * but speak, which is how a new trigger earns its precision number before it is
  * allowed to interrupt anyone.
  *
@@ -623,14 +670,16 @@ function fullForm(opener, header, body) {
  * initiative, nobody asked, and it records 'push-hook' so those three never
  * mistake a sidecar's curiosity for the agent's own research.
  *
- * TEAM FIRST IS THE WHOLE ORDER, and in team mode the team shelf IS
- * \`baseUrl\`: a second deployment of this same app, with its own database, that
- * only this team can reach. The public marketplace does not cover what a working
- * day looks like (README v3: a framework module error matches nothing) and the
- * team's own findings do, so the public shelf is consulted only when the team
- * shelf had nothing. In PUBLIC mode (no bypass secret configured) there is one
- * shelf, \`baseUrl\`, and this behaves exactly as it did before the team shelf
- * existed.
+ * TEAM WINS, PUBLIC IS ASKED ANYWAY. In team mode the team shelf IS \`baseUrl\`:
+ * a second deployment of this same app, with its own database, that only this
+ * team can reach. The public marketplace does not cover what a working day looks
+ * like (README v3: a framework module error matches nothing) and the team's own
+ * findings do, so a strong team answer is the one delivered and a strong public
+ * answer under it is recorded as \`shadowed\`. Both shelves are asked on every
+ * team-mode fire, side by side: sequential legs made the public answer wait on
+ * the team leg's whole timeout, and the arm that paid was the prompt one. In
+ * PUBLIC mode (no bypass secret configured) there is one shelf, \`baseUrl\`, and
+ * this behaves exactly as it did before the team shelf existed.
  */
 async function pushDecide(args) {
   const { query, config, sessionId, mode } = args;
@@ -672,139 +721,214 @@ async function pushDecide(args) {
   // baseUrl still on the marketplace there is no second shelf to fall through
   // to, only the same origin asked twice and filed as a team hit.
   const teamMode = teamShelfOrigin(config) !== null;
-  // ONE WALL CLOCK FOR THE WHOLE LOOKUP: EXACTLY WHAT ONE SHELF ALWAYS COST, a
-  // search plus a body, which is the sum every arm's watchdog and the harness
-  // \`timeout\` were sized against. Two legs on fixed timeouts instead made the
-  // worst case search + search + body, and the arm that paid for it was the
-  // prompt one: a slow team shelf spent its 1500ms, the public leg answered
-  // inside its own, and the 2700ms overrun timer had already written a
-  // \`watchdog\` row and exited — the hit computed, never emitted. Each leg is
-  // clamped to what is left before this deadline, less the body that still has
-  // to fit; the FIRST leg is unaffected by construction (at t=0 the clamp is
-  // exactly SEARCH_TIMEOUT_MS), so only a second shelf can be squeezed, and it
-  // is squeezed rather than allowed to overrun the arm.
-  const deadline = Date.now() + SEARCH_TIMEOUT_MS + PUSH_BODY_TIMEOUT;
-  const first = await shelfDecide(
-    args,
-    base,
-    teamMode ? 'team' : 'public',
-    config.baseUrl,
-    deadline,
-  );
-  if (first.kind !== 'miss') return first.decided ?? null;
-  if (!teamMode) return null;
-  // Shelf 2, team mode only: the public marketplace, consume-only. Its budget is
-  // re-read inside \`shelfDecide\` rather than carried over, because the team leg
-  // just spent a lookup and wrote a row; a stale count would let one fire spend
-  // two lookups against a cap that says one.
-  const second = await shelfDecide(args, base, 'public', config.publicShelfUrl, deadline);
-  return second.decided ?? null;
+  // EACH LEG GETS ITS OWN WALL CLOCK, one search plus one body, which is what
+  // every arm's watchdog and the harness \`timeout\` were sized against. The two
+  // legs run side by side rather than dividing that clock: sequentially, a slow
+  // team shelf spent the whole search budget and the public leg was squeezed to
+  // nothing (\`no-time\`), or on fixed timeouts the pair overran the prompt arm's
+  // own 2700ms budget and the hit was computed and never emitted. Joined, the
+  // lookup takes max(team, public) + body, the sum the watchdogs already hold.
+  const legDeadline = () => Date.now() + SEARCH_TIMEOUT_MS + PUSH_BODY_TIMEOUT;
+  // THE GATES RUN ONCE PER FIRE, before any leg. The cap and quiet gates are per
+  // trigger and per session, not per shelf, and they have side effects: the cap
+  // check bumps the cold arm's escape counter, and a gate run per leg bumped it
+  // twice per fire, so every other escape pass landed on a leg whose result the
+  // team leg's stop then threw away. One check, sized to the legs this fire
+  // will spend, and one \`lookup-cap\` row when it says no, as it always did.
+  const legs = teamMode ? 2 : 1;
+  const gate = shelfGate({ ...base, shelf: teamMode ? 'team' : 'public' }, sessionId, legs);
+  if (gate !== null) {
+    recordDecision(gate);
+    return null;
+  }
+  if (!teamMode) {
+    const only = await shelfAsk(args, base, 'public', config.baseUrl, legDeadline());
+    if (only.kind !== 'hit') {
+      recordDecision(only.row);
+      return null;
+    }
+    return shelfDeliver(args, only);
+  }
+  // Team mode: both shelves, at once. The rows are then written in a FIXED
+  // order, team then public, whichever leg answered first — \`push status\` and
+  // the grader read the ledger positionally by shelf, and a row order that
+  // depended on network timing would be two ledgers for one behaviour.
+  const [team, pub] = await Promise.all([
+    shelfAsk(args, base, 'team', config.baseUrl, legDeadline()),
+    shelfAsk(args, base, 'public', config.publicShelfUrl, legDeadline()),
+  ]);
+  if (team.kind === 'hit') {
+    const decided = await shelfDeliver(args, team);
+    // THE TEAM LEG WON AND DELIVERED NOTHING. \`shelfDeliver\` answers null for a
+    // piece this session has already been given (already-injected, or relayed to
+    // a child), and shadowing the public hit behind that spent the fire on two
+    // strong answers and emitted neither. A team hit that could not be spoken is
+    // not an answer, so the public one stands on its own exactly as it does under
+    // a team miss. Its row is written by \`shelfDeliver\` after the team leg's
+    // own, so shelf order holds.
+    if (decided === null && pub.kind === 'hit') return await shelfDeliver(args, pub);
+    // The public leg was asked, so it is on the record: a public hit under a
+    // team hit is \`shadowed\`, and a public miss is the miss it was on that
+    // shelf (the research arm's open-loop accounting reads it as one).
+    //
+    // A PUBLIC MISS UNDER A TEAM HIT STILL OPENS A LOOP, deliberately. The
+    // research arm's Stop-hook accounting reads that row as the miss it is, and
+    // it is a real one: the team shelf answering does not mean the marketplace
+    // has this, and a piece the team wrote for itself is the piece worth
+    // publishing publicly. Recording it as anything softer would close a loop
+    // that publishing is the only thing that closes.
+    recordDecision(
+      pub.kind === 'hit' ? { ...pub.row, action: 'skipped', reason: 'shadowed' } : pub.row,
+    );
+    return decided;
+  }
+  // A team miss, or the \`no-time\` clamp on a leg handed no wall clock: either
+  // way its row is written and the public leg's answer stands on its own.
+  recordDecision(team.row);
+  if (pub.kind === 'hit') return shelfDeliver(args, pub);
+  recordDecision(pub.row);
+  return null;
 }
 
 /**
- * One shelf's half of {@link pushDecide}: ask \`shelfBaseUrl\`, read its verdict,
- * pick a form, write the ledger row. The return says what the OTHER shelf may do
- * next, which is the only reason this is not just inlined twice:
- *
- *  - \`miss\`   nothing worth saying was found (no answer, no candidate, or a
- *              candidate too weak to offer). The next shelf may be asked.
- *  - \`stop\`   this trigger has spent its lookup budget for the window, or the
- *              marketplace is in its quiet window. Asking a second shelf would
- *              spend the budget the stop exists to protect, so nothing else is
- *              asked.
- *  - \`done\`   this shelf answered — injected, logged, or deliberately skipped
- *              because the same piece already landed this session. \`decided\` is
- *              what the arm emits (null for a log-only or skipped outcome).
+ * The per-fire gates for {@link pushDecide}: the row to record and stop on, or
+ * null to go ahead. Run ONCE per fire, never per leg, because the cap check
+ * counts (the cold arm's escape counter) and the count is per trigger and per
+ * session, not per shelf. \`legs\` is how many lookups the fire will spend, so
+ * the cap is held exactly rather than read twice and overshot by one.
  */
-async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
-  const { query, config, sessionId, mode } = args;
-  const source = typeof args.source === 'string' ? args.source : 'push-hook';
-  const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
-  const base = { ...outerBase, shelf };
-
+function shelfGate(base, sessionId, legs) {
   // This arm's OWN bucket for the current window, not a shared pool: a prompt
   // flood spends the prompt allowance and leaves the failure arm's untouched.
   // The row already carries \`trigger\`, so \`push status\` shows which bucket
   // filled up without a new field.
-  if (!lookupAllowed(base.trigger, sessionId)) {
-    recordDecision({ ...base, action: 'skipped', reason: 'lookup-cap' });
-    return { kind: 'stop' };
+  if (!lookupAllowed(base.trigger, sessionId, legs)) {
+    return { ...base, action: 'skipped', reason: 'lookup-cap' };
   }
   // The shelf is not answering: stop asking it for a while. Self-healing, and
   // recorded, so \`push status\` shows an outage as an outage rather than as a
   // sidecar that quietly did nothing.
   const outage = failStreak(sessionId);
   if (outage.streak >= PUSH_FAILURE_STOP && Date.now() - outage.lastAt < PUSH_QUIET_MS) {
-    recordDecision({ ...base, action: 'skipped', reason: 'quiet' });
-    return { kind: 'stop' };
+    return { ...base, action: 'skipped', reason: 'quiet' };
   }
-  // Out of wall clock: the first leg spent what this one would have needed.
-  // Recorded on its own reason rather than as \`no-answer\`, because this shelf
-  // was never asked — filing it as an outage would build a failure streak
-  // against a shelf that may be perfectly healthy and quiet the arm for the rest
-  // of the session.
+  return null;
+}
+
+/**
+ * One shelf's ask, for {@link pushDecide}: the search, the search record and
+ * the verdict. THE GATES ARE NOT HERE — {@link shelfGate} ran them once for the
+ * fire, before any leg — and IT WRITES NO DECISION ROW. Two of these run side
+ * by side in team mode and the caller writes their rows in shelf order, so the
+ * row an ask would have written comes back as \`row\`, ready to record:
+ *
+ *  - \`stop\`   the leg has no wall clock left. Nothing was asked.
+ *  - \`miss\`   asked, and nothing worth saying was found (no answer, no
+ *              candidate, or a candidate too weak to offer).
+ *  - \`hit\`    a strong candidate; \`v\` is the verdict and {@link shelfDeliver}
+ *              turns it into text and the injected row.
+ *
+ * IT NEVER REJECTS. Two of these are handed to \`Promise.all\`, so one leg that
+ * throws would reject the pair and take the OTHER shelf's answer down with it —
+ * a fire that had a good answer in hand emits nothing and writes no row. The
+ * whole leg is therefore inside one try: the fetch, the search record and the
+ * verdict alike, since everything after the fetch reads a body an untrusted
+ * origin sent. A throw comes back as the \`no-answer\` miss, which is what an
+ * unanswered leg already meant.
+ */
+async function shelfAsk(args, outerBase, shelf, shelfBaseUrl, deadline) {
+  const { query, config, sessionId } = args;
+  const source = typeof args.source === 'string' ? args.source : 'push-hook';
+  const base = { ...outerBase, shelf };
+
+  // Out of wall clock before the leg even starts: the caller handed this leg a
+  // deadline it cannot fit a search and a body under. Cannot happen with the
+  // fresh per-leg deadline \`pushDecide\` mints, but the clamp is what keeps a
+  // caller honest, and the reason stays its own rather than \`no-answer\`: this
+  // shelf was never asked, and filing it as an outage would build a failure
+  // streak against a shelf that may be perfectly healthy.
   const leg = legTimeoutMs(deadline, PUSH_BODY_TIMEOUT);
   if (leg < SEARCH_MIN_LEG_MS) {
-    recordDecision({ ...base, action: 'skipped', reason: 'no-time' });
-    return { kind: 'stop' };
+    return { kind: 'stop', row: { ...base, action: 'skipped', reason: 'no-time' } };
   }
-  let found = null;
+  // A MISS, NOT A STOP. A protected team shelf that refuses the bypass header
+  // answers nothing, and silencing the public shelf for the rest of the session
+  // on the strength of that would turn one misconfigured secret into a sidecar
+  // that never speaks again. The failure streak above is the brake that handles
+  // a real outage. It is also what a THROWN leg comes back as, below.
+  const noAnswer = { kind: 'miss', row: { ...base, action: 'skipped', reason: 'no-answer' } };
   try {
-    found = await askTenjin(query, config, {
+    const found = await askTenjin(query, config, {
       shelfBaseUrl,
       timeoutMs: leg,
       trigger: base.trigger,
       packageName: args.packageName,
+      limit: PUSH_SEARCH_LIMIT,
     });
+    if (found === null) return noAnswer;
+    recordSearch(
+      found.searchId,
+      query,
+      found.decision,
+      found.stored,
+      sessionId,
+      base.agentId,
+      source,
+      shelfBaseUrl,
+    );
+    const v = verdict(found);
+    const row = {
+      ...base,
+      searchId: found.searchId,
+      candidate:
+        v.top === null
+          ? null
+          : {
+              resourceId: v.top.resourceId,
+              title: v.top.title,
+              price: v.top.price,
+              url: v.top.url,
+            },
+      strength: v.strength,
+      // Both server fields, on EVERY row including the misses and the weak ones:
+      // the rows a rule would have changed are exactly the ones a rule has to be
+      // judged against, so recording only the rows that injected would answer the
+      // question with the cases that already agreed.
+      confidence: v.confidence ?? null,
+      corroborated: v.corroborated ?? null,
+    };
+    if (v.top === null) {
+      return { kind: 'miss', row: { ...row, action: 'skipped', reason: 'miss' } };
+    }
+    if (v.strength === 'none') {
+      return { kind: 'miss', row: { ...row, action: 'skipped', reason: 'weak' } };
+    }
+    return { kind: 'hit', row, v };
   } catch {
-    found = null;
+    // EVERYTHING AFTER THE FETCH IS IN HERE TOO, not just the fetch. \`found\` is
+    // a body an untrusted origin sent, and the record and the verdict walk it;
+    // outside the try, one leg's throw rejected the \`Promise.all\` in
+    // {@link pushDecide} and the OTHER shelf's answer was lost with it — the arm
+    // emitted nothing and wrote no row for either leg. This leg is unanswered,
+    // which is what \`no-answer\` has always meant.
+    return noAnswer;
   }
-  if (found === null) {
-    // A MISS, NOT A STOP. A protected team shelf that refuses the bypass header
-    // answers nothing, and silencing the public shelf for the rest of the
-    // session on the strength of that would turn one misconfigured secret into a
-    // sidecar that never speaks again. The failure streak above is the brake
-    // that handles a real outage.
-    recordDecision({ ...base, action: 'skipped', reason: 'no-answer' });
-    return { kind: 'miss' };
-  }
-  recordSearch(
-    found.searchId,
-    query,
-    found.decision,
-    found.stored,
-    sessionId,
-    base.agentId,
-    source,
-    shelfBaseUrl,
-  );
-  const v = verdict(found);
-  const row = {
-    ...base,
-    searchId: found.searchId,
-    candidate:
-      v.top === null
-        ? null
-        : { resourceId: v.top.resourceId, title: v.top.title, price: v.top.price, url: v.top.url },
-    strength: v.strength,
-    // Both server fields, on EVERY row including the misses and the weak ones:
-    // the rows a rule would have changed are exactly the ones a rule has to be
-    // judged against, so recording only the rows that injected would answer the
-    // question with the cases that already agreed.
-    confidence: v.confidence ?? null,
-    corroborated: v.corroborated ?? null,
-  };
-  if (v.top === null) {
-    recordDecision({ ...row, action: 'skipped', reason: 'miss' });
-    return { kind: 'miss' };
-  }
-  if (v.strength === 'none') {
-    recordDecision({ ...row, action: 'skipped', reason: 'weak' });
-    return { kind: 'miss' };
-  }
+}
+
+/**
+ * The delivery half of one shelf's ask: given a \`hit\` from {@link shelfAsk},
+ * pick a form, fetch the free body, claim the injected row, and return
+ * { text, form } for the arm to emit — or null when the arm is log-only or the
+ * piece already landed this session. Every ledger row a hit produces is written
+ * here, so the caller can order it against the other shelf's row.
+ */
+async function shelfDeliver(args, asked) {
+  const { config, sessionId, mode } = args;
+  const { row, v } = asked;
+  const opener = row.shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
   if (mode === 'log') {
     recordDecision({ ...row, action: 'logged', form: isFree(v.top) ? 'full' : 'short' });
-    return { kind: 'done' };
+    return null;
   }
   // THE 6x FIX. One already-shown set across every hook, not one per script:
   // the WebSearch and dispatch hint paths write to the same table, so a note
@@ -825,7 +949,7 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
       // needs.
       reason: alreadyShown(sessionId, v.top.resourceId) ? 'already-injected' : 'already-relayed',
     });
-    return { kind: 'done' };
+    return null;
   }
   let form = 'short';
   let text = shortForm(v.top, opener);
@@ -859,9 +983,9 @@ async function shelfDecide(args, outerBase, shelf, shelfBaseUrl, deadline) {
   });
   if (!mayShow(claimed)) {
     recordDecision({ ...row, action: 'skipped', reason: 'already-injected' });
-    return { kind: 'done' };
+    return null;
   }
-  return { kind: 'done', decided: { text, form } };
+  return { text, form };
 }
 
 // ---- per-session state (edits seen, packages seen, error signatures seen) ----
