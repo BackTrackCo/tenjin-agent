@@ -229,11 +229,15 @@ same question again somewhere the mode cannot answer it, so the agent stops and
 the mode you chose does nothing. That is why two rules track the mode:
 
 - `Bash(tenjin publish:*)` puts new content on the marketplace under your identity.
-  It publishes the contents of any local file the agent can read, gated only by the
-  deterministic scan below. It also opens your wallet keystore unattended and mints
-  a `read+write` session credential to disk when no usable one exists, which is a
-  strictly broader credential than the read-only one `tenjin session start` asks
-  for as an explicit opt-in.
+  It publishes Markdown supplied on stdin or the contents of any regular local file the
+  agent can read, gated only by the deterministic scan below. The prefix rule
+  matches a stdin heredoc because its shell/tool command uses `tenjin publish` as
+  the command prefix. A file publish must likewise run as its own bare command:
+  chaining it after `cat`, `cd`, or the command that writes the file can put a
+  different prefix in front and therefore fall outside this rule. Publishing also
+  opens your wallet keystore unattended and mints a `read+write` session credential
+  to disk when no usable one exists, which is a strictly broader credential than
+  the read-only one `tenjin session start` asks for as an explicit opt-in.
 - `Bash(tenjin edit:*)` updates posts your wallet already owns: reprices, refreshes
   an as-of date, repairs an answer card, and flips status both ways, so it can
   promote a draft to published under the same mode gate (a promotion re-runs the

@@ -336,6 +336,35 @@ describe('tenjin-publish: publish denials are the gate working', () => {
   });
 });
 
+describe('tenjin-publish: stdin is the permission-safe authoring path', () => {
+  const text = flat('tenjin-publish');
+  const raw = read('tenjin-publish');
+  const maintain = flat('tenjin-publish', 'references/maintain.md');
+  const maintainRaw = read('tenjin-publish', 'references/maintain.md');
+
+  it('gives a heredoc whose shell command starts with explicit stdin publish', () => {
+    expect(raw).toMatch(/^tenjin publish - --json <<'TENJIN_MD'$/m);
+    expect(text).toMatch(/bare `tenjin publish` also reads stdin when it is non-interactive/i);
+  });
+
+  it('keeps file publishing as its own bare prefix-matched command', () => {
+    expect(text).toMatch(
+      /run `tenjin publish <file\.md> \.\.\.` as its own bare shell\/tool command/i,
+    );
+    expect(text).toMatch(/Never chain it behind `cat`, `cd`, or the file-writing command/i);
+    expect(text).toMatch(/installed publish prefix permission/i);
+    expect(text).toMatch(/command itself starts with `tenjin publish`/i);
+  });
+
+  it('teaches body replacement through positional stdin without changing show-only edit', () => {
+    expect(maintainRaw).toMatch(/^tenjin edit "\$POST_ID" - --yes <<'TENJIN_MD'$/m);
+    expect(maintain).toContain('`--body -` is equivalent');
+    expect(maintain).toMatch(
+      /without `-` or a change flag it keeps its existing show-only behaviour/i,
+    );
+  });
+});
+
 /**
  * The two card fields that decide whether a published piece is reachable at all.
  * Server-side `evaluateCacheEligibility` requires `exclusions` AND one of
@@ -959,10 +988,16 @@ describe('the public render did not move', () => {
   // inside a bash fence as `a|b|c`, which a shell reads as three piped commands
   // whose first one posts `used`. It is spelled out below the fence now, the
   // same fix the child rung already carries. tenjin-publish is untouched.
+  //
+  // Re-pinned for stdin publishing (#260): the canonical publish example is a
+  // heredoc whose command begins with `tenjin publish -`, and the file fallback
+  // explicitly stays a standalone prefix-matched command. The follow-up regular-
+  // file boundary names that constraint on the fallback without changing either
+  // publish mode's policy.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': 'a4c4370e5b0b95da4cfbd05846090012',
+      'tenjin-publish': '8b985882e49990bd941fe0f8751658f2',
     });
   });
 
