@@ -233,8 +233,8 @@ const strongHit = (baseUrl: string, over: Record<string, unknown> = {}) => ({
   items: [at(baseUrl, { confidence: 'high', corroborated: true, ...over }), FILLER(baseUrl)],
 });
 
-/** The same shape with the shelf's corroboration withheld: a high-confidence,
- *  dense-only hit, which is 'none'. */
+/** The same shape with strong lexical corroboration withheld: fused confidence
+ * alone is still `none` to the hook. */
 const weakHit = (baseUrl: string) => ({
   schemaVersion: 3,
   searchId: SEARCH_ID,

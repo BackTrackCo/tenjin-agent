@@ -433,7 +433,7 @@ describe('runPublish — receipt + card echo', () => {
     expect((res.data as { url: string }).url).toBe('https://preview.example/a/iris/\u202egpj.exe');
   });
 
-  it('an ineligible-but-published post still succeeds (card-less, bottom-tier in search)', async () => {
+  it('a card-less post still succeeds and preserves compatibility fields', async () => {
     const { fetch } = stubServer(CREATED); // no resource echo
     const { provider } = spyProvider();
     const res = await runPublish(
@@ -443,6 +443,12 @@ describe('runPublish — receipt + card echo', () => {
     );
     expect((res.data as { cacheEligible: boolean }).cacheEligible).toBe(false);
     expect((res.data as { missing: string[] }).missing).toEqual([]);
+    // The receipt is what an author reads to learn where their piece went, so it
+    // names BOTH costs of shipping card-less. Pinned here and in edit.test.ts
+    // against the same string, because the two surfaces drifted apart once.
+    expect((res.humanLines ?? []).join('\n')).toContain(
+      'Published without an answer card: buyers have less public pre-paywall context for judging fit, and with no stored claims to read the piece fails any `freshWithin` or `appliesTo` filter.',
+    );
   });
 });
 

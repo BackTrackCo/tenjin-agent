@@ -14,9 +14,9 @@ import type { CommandContext, CommandResult } from '../context';
  * preview plus the advertised price/network, and the answer card when the piece
  * carries one. Never signs, never pays, never saves.
  *
- * The card is the depth half of the search/inspect split: search v2 candidates are
- * lean, so this free call is where an agent gets what it answers, what it applies
- * to, what it excludes, and how it is dated, before spending anything.
+ * The card is the depth half of the search/inspect split: search v3 candidates
+ * stay lean and inline only a bounded rank-1 subset, so this free call is where
+ * an agent gets the full public card for any candidate before spending anything.
  */
 
 export interface InspectArgs {

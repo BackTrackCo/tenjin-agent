@@ -474,8 +474,8 @@ export function localCardEligibility(card: ResourceCardInput | undefined): {
   const tokens: string[] = [];
   // Parity with the server rubric: presence is trim().length > 0, so a bare
   // `scope:` ('' after parse) or `--scope " "` counts as MISSING, not present —
-  // otherwise the needs_confirmation preview claims eligible for a card the
-  // server will echo ineligible.
+  // otherwise the needs_confirmation preview claims complete for a card the
+  // server will report as incomplete.
   const hasQuestionsOrTasks =
     (card?.questionsAnswered?.some(hasText) ?? false) ||
     (card?.tasksSupported?.some(hasText) ?? false);

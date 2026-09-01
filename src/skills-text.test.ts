@@ -365,20 +365,16 @@ describe('tenjin-publish: stdin is the permission-safe authoring path', () => {
   });
 });
 
-/**
- * The two card fields that decide whether a published piece is reachable at all.
- * Server-side `evaluateCacheEligibility` requires `exclusions` AND one of
- * provenance/methodology, and the embeddings indexer skips an ineligible card
- * outright — so a piece missing either never enters agent decision search
- * (15 of 241 posts in 30 days, PR #164 comment).
- */
-describe('tenjin-publish tells the agent to earn card eligibility', () => {
+/** The public card is buyer context, not a retrieval gate. Keep the legacy
+ * completeness authoring rubric while pinning the post-#797 promise that neither
+ * card prose nor completeness changes any retrieval or answer-source decision. */
+describe('tenjin-publish teaches complete public card context', () => {
   const text = flat('tenjin-publish');
 
-  // ONE block, naming every condition the server actually checks. Spreading them
+  // ONE block, naming every legacy completeness condition the server reports. Spreading them
   // across bullets is how `asOf` went unmentioned while the section claimed to be
-  // about eligibility (PR #164 round 2, minor 2).
-  it('names all five conditions the server gate checks, in one place', () => {
+  // complete (PR #164 round 2, minor 2).
+  it('names all five legacy completeness conditions in one place', () => {
     expect(text).toMatch(/Fill all five, every time/i);
     for (const field of [
       '`questionsAnswered`',
@@ -392,17 +388,32 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     }
   });
 
-  it('states the stake once, and states it as a bottom tier rather than absence', () => {
-    // Until tenjin#691 an ineligible card kept the piece out of decision search
-    // entirely; it now ranks in a bottom tier below every eligible candidate and
-    // is labelled in matchReasons. The skill must not promise the older claim.
-    expect(text).toMatch(/Leave any one empty and the card is ineligible/i);
-    expect(text).toMatch(/bottom tier below every eligible candidate/i);
+  /**
+   * #797 removes legacy completeness from every retrieval decision, not only
+   * from the text match. The explicit claim filters and expiry gate remain, so
+   * this also pins the narrower value-dependent behavior that is easy to erase
+   * while correcting the old rank-tier language.
+   */
+  it('keeps completeness out of relevance, placement, candidacy, and answer sources', () => {
+    expect(text).toMatch(
+      /never change search relevance, rank (or|\/) placement, candidacy, or whether `POST \/api\/answer` may use the piece/i,
+    );
+    expect(text).toMatch(/a card-less piece fails `freshWithin` and `appliesTo`/i);
+    expect(text).toMatch(/snapshot must carry an in-window `asOf` for `freshWithin`/i);
+    expect(text).toMatch(/`appliesTo` requires every requested value/i);
+    expect(text).toMatch(/present, expired `validUntil` always excludes/i);
     expect(text).toMatch(/`incomplete answer card`/);
+    expect(text).toMatch(/describe preview state only/i);
+    expect(text).toMatch(/visible title, excerpt, or body/i);
     expect(text).not.toMatch(/out of agent decision search/i);
-    expect(text).not.toMatch(/not ranked lower/i);
-    // Said once: the earlier shape repeated the stake in the exclusions bullet.
-    expect(text.match(/bottom tier/gi)).toHaveLength(1);
+    expect(text).not.toMatch(/ranks below|eligible cards rank ahead|only an eligible card/i);
+  });
+
+  it('separates the listing excerpt from the paywall-controlled in-page preview', () => {
+    expect(text).toMatch(/Put `<!--paywall-->` on its own line/i);
+    expect(text).toMatch(/no marker means a paid piece has NO free preview/i);
+    expect(text).toMatch(/`--excerpt`.*separate, optional LISTING teaser/i);
+    expect(text).toMatch(/does not\s*affect the in-page preview/i);
   });
 
   /**
@@ -431,8 +442,8 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
 
   // `provenance` and `methodology` are FLAG names; the frontmatter keys are the
   // long ones, and deriveCard has no unknown-key check, so a draft written from
-  // the short spelling loses the field silently and lands ineligible: exactly the
-  // failure this block exists to prevent (PR #164 round 3, major 5).
+  // the short spelling loses the field silently and leaves the preview incomplete:
+  // exactly the failure this block exists to prevent (PR #164 round 3, major 5).
   it('names the frontmatter keys, not just the flags that set them', () => {
     expect(text).toMatch(/`provenanceSummary` \(flag `--provenance`\)/);
     expect(text).toMatch(/`methodologySummary` \(flag `--methodology`\)/);
@@ -441,8 +452,8 @@ describe('tenjin-publish tells the agent to earn card eligibility', () => {
     expect(text).toMatch(/a draft carrying `provenance:` has\s*it silently dropped/i);
   });
 
-  // The server gate is provenance OR methodology, and asOf only binds on a
-  // snapshot; the text must not overstate either.
+  // The legacy completeness report accepts provenance OR methodology, and asOf
+  // is requested only for a snapshot; the text must not overstate either.
   it('keeps the two conditional conditions conditional', () => {
     expect(text).toMatch(/`methodologySummary` \(flag `--methodology`\) counts\s*instead/i);
     expect(text).toMatch(/required when `temporalMode` is `snapshot`/i);
@@ -955,11 +966,9 @@ describe('the public render did not move', () => {
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
-  // Re-pinned when #203's skill resync landed on main: it changed the PUBLIC
-  // guidance on purpose (an incomplete card "just ranks below every complete one
-  // in agent search" rather than the older browse-only wording), so the else arm
-  // carries main's sentence and the public render is byte-for-byte main's
-  // unshaped SKILL.md again. The team arm keeps its own browse-only line.
+  // Re-pinned when #203's skill resync landed on main. The answer-card overhaul
+  // later removed card completeness as a ranking/candidacy signal in both modes;
+  // compatibility fields remain public fit-context guidance only.
   //
   // Re-pinned again for the scan hardening: the public arm's warn triage now names
   // the detectors that branch added (`private-network-endpoint`, `high-entropy-string`,
@@ -994,10 +1003,17 @@ describe('the public render did not move', () => {
   // explicitly stays a standalone prefix-matched command. The follow-up regular-
   // file boundary names that constraint on the fallback without changing either
   // publish mode's policy.
+  //
+  // Re-pinned for tenjin#733 and the post-#797 card contract: `--excerpt` is a
+  // listing teaser rather than the in-page preview boundary, and legacy card
+  // completeness no longer claims any relevance, placement, candidacy, or
+  // answer-source effect. tenjin-search is untouched, so its digest still carries
+  // the value the stdin rung pinned; tenjin-publish's is this merge's own bytes,
+  // both chains applied.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': '8b985882e49990bd941fe0f8751658f2',
+      'tenjin-publish': '584c3e507794957238f180a56278163a',
     });
   });
 

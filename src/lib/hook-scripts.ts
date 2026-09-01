@@ -1301,9 +1301,10 @@ function parseSearchBody(body, url, limit) {
         c.confidence === 'high' || c.confidence === 'medium' || c.confidence === 'low'
           ? c.confidence
           : null,
-      // Whether the server's own retrieval agreed with itself — a hit both legs
-      // found, rather than dense-only. THE VERDICT THE PUSH CORE REACHES IS
-      // THIS FIELD AND \`confidence\`, and nothing else: see verdict() in
+      // Whether strong identifier/title/excerpt text corroborates the result.
+      // Identifiers may come from the full body, so this is not a preview
+      // visibility claim. THE VERDICT THE PUSH CORE REACHES IS THIS FIELD AND
+      // \`confidence\`, and nothing else: see verdict() in
       // lib/push-scripts.ts. A non-boolean reads as absent, never as false —
       // "the deployment did not say" and "the deployment said no" are different
       // facts, and only a said-yes is strong.

@@ -71,7 +71,7 @@ import type { CommandContext, CommandResult } from '../context';
  * never-bypassable block tier, and pricing. A second publish path for it would
  * be a second set of gates to keep in step with these.
  *
- * Exit codes: 0 success (incl. an ineligible-but-published card and every
+ * Exit codes: 0 success (incl. an incomplete-but-published card and every
  * `--dry-run`), 2 usage, 3 needs_confirmation / non-bypassable publish_blocked, 4
  * a write failure after approval.
  */
@@ -1158,11 +1158,11 @@ function receipt(
   // line is what an author reads to learn where their piece went.
   const human = [
     `Published ${title} (${sanitizeForTerminal(result.status)}) for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
-    cacheEligible
-      ? 'Answer card is search-eligible.'
+    result.cacheEligible === undefined
+      ? 'Published without an answer card: buyers have less public pre-paywall context for judging fit, and with no stored claims to read the piece fails any `freshWithin` or `appliesTo` filter.'
       : missing.length > 0
-        ? `Answer card incomplete, ranks below every complete card in agent search. To fix: ${missing.join(' ')}`
-        : 'Published without an answer card: ranks below every carded piece in agent search.',
+        ? `Answer card preview incomplete. To improve its public pre-paywall fit context: ${missing.join(' ')}`
+        : 'Answer card provides complete public pre-paywall fit context.',
     ...searches.filter((s) => s.closed).map(closeLine),
     undoLine(undo),
     ...(finding === undefined
