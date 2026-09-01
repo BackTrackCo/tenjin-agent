@@ -65,6 +65,8 @@ function ctx(): CommandContext {
 async function seedPairing(opts: {
   cwd: string;
   key: string;
+  /** `'sig_v1'` (default) or `'sig_v1_test'` (tenjin-agent#267). */
+  kind?: string;
   coarseKey?: string | null;
   cmdHead?: string;
   cmd?: string;
@@ -89,7 +91,7 @@ async function seedPairing(opts: {
     'sess-a',
     project,
     'machine-a',
-    'sig_v1',
+    opts.kind ?? 'sig_v1',
     opts.key,
     opts.coarseKey ?? null,
     opts.cmdHead ?? 'pnpm',
@@ -273,6 +275,43 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     const row = await pairingRow(id);
     expect(row.synced_at).not.toBeNull();
+  });
+
+  /**
+   * A row the failure arm's sig_v1_test lane opened (tenjin-agent#267) carries
+   * that as its `kind`, and `keysFor` has to read it back: the wire prefix
+   * names which lane a hash belongs to, so `sig_v1` and `sig_v1_test` keys
+   * never collide on the shelf even though both are opaque hex hashes to it.
+   */
+  it('publishes sig_v1_test/sig_v1_test_c keys for a row opened by the test-identity lane', async () => {
+    await writeTeamConfig();
+    await seedPairing({
+      cwd: dir,
+      kind: 'sig_v1_test',
+      key: 'test-fine-hash',
+      coarseKey: 'test-coarse-hash',
+      errorFiles: ['a.test.ts'],
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1 });
+    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string; verified: boolean }>;
+    expect(keys).toEqual([
+      { kind: 'fingerprint', key: 'sig_v1_test:test-fine-hash', verified: false },
+      {
+        kind: 'fingerprint',
+        key: 'sig_v1_test_c:' + teamCoarseKey('test-coarse-hash', 'github.com/acme/api'),
+        verified: false,
+      },
+      { kind: 'command_head', key: 'pnpm', verified: false },
+    ]);
+    // Never the sig_v1 prefix for this row.
+    expect(JSON.stringify(keys)).not.toContain('"sig_v1:');
+    expect(JSON.stringify(keys)).not.toContain('"sig_v1c:');
   });
 
   /**

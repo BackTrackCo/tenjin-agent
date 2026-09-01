@@ -921,7 +921,17 @@ export const STORE_SQL = {
        cmd_head, cmd, error_line, error_files, pkg_versions, scope, status
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')`,
   /**
-   * A local match, best first: verified outranks unverified, then most recent.
+   * A local match, best first: an EXACT key match outranks a coarse-only one,
+   * then verified outranks unverified, then most recent.
+   *
+   * FINE BEFORE VERIFIED (tenjin-agent#278, minor 2). `coarse_key` is never
+   * null for `sig_v1_test` (unlike `sig_v1`'s own, which needs an errno), so
+   * with the status tiebreaker ranked first a VERIFIED row for a DIFFERENT
+   * test — matching only on `coarse_key` — outranked an UNVERIFIED row that
+   * matched the query's own `key` exactly, and the caller's `isFine` check
+   * (`match.key === testSig.key`) then read the exact-test hit as a mere
+   * coarse one and downgraded it to the one-line pointer. A verified fix for
+   * a different test is not stronger evidence about this one.
    *
    * SCOPED TO THE PROJECT. 04's whole close rule is about a fix that changed a
    * file in the repo the failure happened in, so a pairing from a different
@@ -933,7 +943,9 @@ export const STORE_SQL = {
      WHERE project IS ?
        AND (key = ? OR (coarse_key IS NOT NULL AND coarse_key = ?))
        AND status IN ('unverified', 'verified')
-     ORDER BY CASE status WHEN 'verified' THEN 0 ELSE 1 END, closes DESC, at DESC
+     ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END,
+              CASE status WHEN 'verified' THEN 0 ELSE 1 END,
+              closes DESC, at DESC
      LIMIT 1`,
   /** Pairings this success could be closing: same project, same command head,
    *  still open. Without the project predicate a passing `pnpm test` in one repo
@@ -1204,6 +1216,16 @@ const STATE_EDITS_PREFIX = 'edits:';
 const STATE_EDITED_PREFIX = 'edited:';
 const STATE_PACKAGES_PREFIX = 'package:';
 const STATE_SIGNATURES_PREFIX = 'sig:';
+/** The wall-clock moment THIS agent's most recent Bash command was about to
+ *  run, stamped by the context arm's PreToolUse half and read by the failure
+ *  arm (tenjin-agent#278 round 3, "Decide which segment failed"). Scoped by
+ *  agent, not just session, because parallel subagents each run their own
+ *  Bash calls: \`replayed:\` above is the precedent for the same scoping. This
+ *  is what lets the failure arm trust a test-report artifact by CONTENT — its
+ *  own \`startTime\` at or after this stamp — rather than by guessing from the
+ *  command's text or the file's mtime, which is what let a build failure
+ *  claim an unrelated test's identity off a stale-but-fresh report. */
+const STATE_BASH_START_PREFIX = 'bashstart:';
 /** Which pairings ONE AGENT was SHOWN behind a given command head — the key is
  *  \`replayed:<agent>:<head>\` and the value a JSON array of pairing ids. It is
  *  what lets the agent that was replayed a pairing be its second independent
@@ -2656,6 +2678,11 @@ function searchRow(row) {
  * Open a pairing on an allowlisted failure. Mechanical, no model: the key is the
  * failure's signature and the row is what a later success closes. Returns the
  * new row's id, or null when the store refused the write.
+ *
+ * \`row.kind\` defaults to \`'sig_v1'\`: every caller before tenjin-agent#267 opened
+ * that one lane, so an omitted field reproduces exactly what they always wrote.
+ * The failure arm's \`sig_v1_test\` lane (file+suite+test identity, keyed
+ * alongside sig_v1 rather than instead of it) is the first caller to pass one.
  */
 function openPairing(row) {
   const result = storeRun(STORE_SQL.insertPairing, [
@@ -2664,7 +2691,7 @@ function openPairing(row) {
     storeSession(row.session),
     projectId(row.cwd),
     machineId(),
-    'sig_v1',
+    typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v1',
     String(row.key),
     typeof row.coarseKey === 'string' ? row.coarseKey : null,
     typeof row.cmdHead === 'string' ? row.cmdHead : null,
@@ -2681,11 +2708,12 @@ function openPairing(row) {
   return Number.isSafeInteger(rowid) ? rowid : null;
 }
 
-/** The best local match for a signature: verified first, then most closed, then
- *  most recent. Fine key, then coarse — one indexed query does both. */
+/** The best local match for a signature: an exact key match first, then
+ *  verified over unverified, then most closed, then most recent. Fine key,
+ *  then coarse — one indexed query does both. */
 function findPairing(cwd, key, coarseKey) {
   const coarse = typeof coarseKey === 'string' && coarseKey.length > 0 ? coarseKey : '';
-  const row = storeGet(STORE_SQL.findPairing, [projectId(cwd), String(key), coarse]);
+  const row = storeGet(STORE_SQL.findPairing, [projectId(cwd), String(key), coarse, String(key)]);
   return row === null ? null : pairingRow(row);
 }
 

@@ -3,7 +3,10 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**'] },
+  // .tenjin-dogfood-reporter.mjs (gitignored) is vitest.config.ts's own
+  // generated copy of pushVitestReporterScript() — never authored, never
+  // linted, same as dist/.
+  { ignores: ['dist/**', 'node_modules/**', '.tenjin-dogfood-reporter.mjs'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   prettier,

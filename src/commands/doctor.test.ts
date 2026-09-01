@@ -2795,6 +2795,83 @@ describe('runDoctor — push hook wiring', () => {
 });
 
 /**
+ * The `sig_v1_test` lane (tenjin-agent#267, redesigned round 3) reads a
+ * report `tenjin-vitest-reporter.mjs` wrote when one exists; this is the hint
+ * that tells an operator whose project has no such reporter that they are
+ * losing precision. Silent unless there is something to report, so most of
+ * these assert the check is ABSENT.
+ */
+describe('runDoctor — test reporter hint', () => {
+  async function reporterCheck(): Promise<CheckResult | undefined> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+      cwd: dir,
+    });
+    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'test-reporters');
+  }
+
+  it('stays quiet when the project has no vitest at all', async () => {
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  it('detects a vitest config with no tenjin reporter', async () => {
+    await writeFile(
+      join(dir, 'vitest.config.ts'),
+      "export default { test: { environment: 'node' } };",
+    );
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.required).toBe(false);
+    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
+    expect(check?.fix).toContain("reporters: ['default', ['");
+    expect(check?.fix).toContain('tenjin-vitest-reporter.mjs');
+    expect(check?.fix).toContain("{ outputFile: '.vitest-report.json' }]]");
+  });
+
+  it('detects vitest as a bare devDependency with no config file', async () => {
+    await writeFile(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: 'x', devDependencies: { vitest: '^2.0.0' } }),
+    );
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
+  });
+
+  it('a vite.config.* with no test block is not read as an unconfigured vitest', async () => {
+    await writeFile(join(dir, 'vite.config.ts'), 'export default { plugins: [] };');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  it('stays quiet when the config already wires the tenjin reporter', async () => {
+    await writeFile(
+      join(dir, 'vitest.config.ts'),
+      "export default { test: { reporters: ['default', ['/home/x/.tenjin/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }]] } };",
+    );
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  // tenjin-agent#278 round 3: the stock `json` reporter carries no
+  // `startTime`/`endTime`, so an artifact it writes now fails the failure
+  // arm's window check outright — a config still wired to it is exactly as
+  // unwired, precision-wise, as one with no reporter at all, and the hint
+  // must say so rather than reading the old shape as "already fixed".
+  it('still warns when the config only wires the stock json reporter, not the tenjin one', async () => {
+    await writeFile(
+      join(dir, 'vitest.config.ts'),
+      "export default { test: { reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]] } };",
+    );
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
+  });
+});
+
+/**
  * tenjin-agent#252: `tenjin update` bumps the npm-installed binary and nothing
  * else, so the generated hook/push scripts under `<dataDir>/hooks` stay
  * whatever bytes `tenjin install` last wrote until an operator reinstalls —

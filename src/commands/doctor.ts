@@ -3,6 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import {
   OPTIONAL_PAY_SKILL,
   OPTIONAL_SKILL_NAMES,
@@ -43,7 +44,7 @@ import {
   resolveShelfBypass,
 } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
-import { configPath, sessionPath } from '../lib/paths';
+import { configPath, hooksDir, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
@@ -56,6 +57,7 @@ import {
   countPushHookEntries,
   pushScriptsPresent,
 } from '../lib/harness-hooks';
+import { PUSH_VITEST_REPORTER_FILE } from '../lib/push-scripts';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -231,7 +233,8 @@ export async function collectDoctorChecks(
    * Here it degrades to the global answer rather than taking down every unrelated
    * check on the page.
    */
-  const project = await loadProjectConfig(deps.cwd ?? process.cwd()).catch(() => null);
+  const cwd = deps.cwd ?? process.cwd();
+  const project = await loadProjectConfig(cwd).catch(() => null);
   const settings = resolveSettings({
     config,
     flags: { baseUrl: ctx.flags.baseUrl },
@@ -316,6 +319,11 @@ export async function collectDoctorChecks(
   // default machine gets no check about a feature it never turned on.
   const teamShelf = checkTeamShelf(settings, bypass);
   if (teamShelf !== null) built.push(teamShelf);
+
+  // Same rule again: silent when this project has no vitest, or already wires
+  // the reporter the failure arm's test-identity lane (tenjin-agent#267) prefers.
+  const testReporterHint = await checkTestReporterHints(cwd, ctx.dataDir);
+  if (testReporterHint !== null) built.push(testReporterHint);
 
   const hermes = await checkHermes({
     home,
@@ -1250,6 +1258,152 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
       fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
     },
   };
+}
+
+/**
+ * One test framework's reporter hint: how to spot its config, how to tell
+ * whether the tenjin reporter is already wired, and what to suggest when it
+ * is not. A row here is worth adding only once a reporter exists for that
+ * framework — `sig_v1_test` (tenjin-agent#267) ships `tenjin-vitest-reporter`
+ * today and has no pytest/jest equivalent yet, so this table carries exactly
+ * one row until one does.
+ */
+interface TestReporterFramework {
+  /** Name used in the hint text. */
+  name: string;
+  /** Dedicated config filenames to look for in cwd, in priority order. */
+  configFiles: string[];
+  /** package.json dependency key that marks this framework present with no dedicated config file. */
+  depName: string;
+  /**
+   * A config file shared with other tooling (`vite.config.*`) only counts when
+   * its source matches this pattern; otherwise a Vite-only project with no
+   * test block at all would be misread as an unconfigured vitest.
+   */
+  sharedConfigNeedsPattern?: RegExp;
+  /**
+   * Heuristic, plain-text scan of the config source — never a config
+   * evaluation. Answers whether the tenjin reporter looks already wired.
+   */
+  hasJsonReporter: (source: string) => boolean;
+  /** Doctor detail line for a framework detected without that reporter. */
+  detail: string;
+  /** Doctor fix line: the snippet to add. */
+  fix: (reporterPath: string) => string;
+}
+
+const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
+  {
+    name: 'vitest',
+    // Kept in step with push-scripts.ts's own TEST_CONFIG_FILES (tenjin-agent#278
+    // nit 2): a repo on `vitest.config.cts`/`.cjs` cleared the failure arm's own
+    // read but never got this hint, since this list was a strict subset.
+    configFiles: [
+      'vitest.config.ts',
+      'vitest.config.mts',
+      'vitest.config.cts',
+      'vitest.config.js',
+      'vitest.config.mjs',
+      'vitest.config.cjs',
+      'vite.config.ts',
+      'vite.config.mts',
+      'vite.config.js',
+      'vite.config.mjs',
+    ],
+    depName: 'vitest',
+    sharedConfigNeedsPattern: /\btest\s*:/,
+    // ANCHORED ON THE REPORTER'S OWN FILENAME (tenjin-agent#278 round 3), not on
+    // a bare `json`/`outputFile` pair: the stock `json` reporter this used to
+    // recommend carries no `startTime`/`endTime`, so an artifact it writes now
+    // fails the failure arm's window check outright and is worth exactly as
+    // little as no reporter at all — this check has to tell "wired" from
+    // "wired to the wrong thing", not just spot an `outputFile` option.
+    hasJsonReporter: (source) =>
+      /reporters\s*:/.test(source) && /tenjin-vitest-reporter/.test(source),
+    detail:
+      'vitest detected without the tenjin reporter — test-failure matching falls back to console parsing (lower precision)',
+    // The reporter's own path, not a relative guess: `tenjin install`/`push on`
+    // always writes it to this exact spot, so the snippet works pasted verbatim.
+    // Also names WHERE the report lands: it holds every failure's full message
+    // and stack, absolute paths included (tenjin-agent#278, round 1 verdict
+    // note) — worth telling an operator adopting this for the first time.
+    fix: (reporterPath) =>
+      `Add to vitest.config.ts: reporters: ['default', ['${reporterPath}', { outputFile: '.vitest-report.json' }]] — and add .vitest-report.json to .gitignore (it holds full failure messages and absolute paths)`,
+  },
+];
+
+/** What {@link detectFrameworkConfig} found, or 'dep-only' for a dependency with no dedicated config file. */
+type FrameworkConfigFound = { path: string; source: string } | 'dep-only';
+
+/**
+ * Does this project have `fw` at all, and if so, from what? A dedicated config
+ * file wins over a bare dependency, since only the file's source can be
+ * scanned for a reporter; a `vite.config.*` file only counts once its source
+ * matches {@link TestReporterFramework.sharedConfigNeedsPattern}, so a Vite
+ * project with no `test:` block is not read as unconfigured vitest.
+ */
+async function detectFrameworkConfig(
+  cwd: string,
+  fw: TestReporterFramework,
+): Promise<FrameworkConfigFound | null> {
+  for (const file of fw.configFiles) {
+    let source: string;
+    try {
+      source = await readFile(join(cwd, file), 'utf8');
+    } catch {
+      continue;
+    }
+    if (
+      file.startsWith('vite.config') &&
+      fw.sharedConfigNeedsPattern !== undefined &&
+      !fw.sharedConfigNeedsPattern.test(source)
+    ) {
+      continue;
+    }
+    return { path: join(cwd, file), source };
+  }
+  try {
+    const pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as {
+      devDependencies?: Record<string, unknown>;
+      dependencies?: Record<string, unknown>;
+    };
+    if (fw.depName in (pkg.devDependencies ?? {}) || fw.depName in (pkg.dependencies ?? {})) {
+      return 'dep-only';
+    }
+  } catch {
+    // No package.json, or it does not parse; nothing more to detect from.
+  }
+  return null;
+}
+
+/**
+ * WARN-level (never fails doctor), and silent unless there is something to
+ * say: a project with no vitest, or one whose config already wires the
+ * tenjin reporter the `sig_v1_test` lane (tenjin-agent#267, redesigned round
+ * 3) prefers, gets no line at all — the same "nothing to report" posture as
+ * {@link checkStoreJournal}. Detection is a plain-text scan of config source,
+ * described as heuristic in every doc that mentions it: never a config
+ * evaluation, so it can both miss a reporter wired through a shared helper
+ * and mistake a commented-out one for live.
+ */
+async function checkTestReporterHints(cwd: string, dataDir: string): Promise<BuiltCheck | null> {
+  const reporterPath = join(hooksDir(dataDir), PUSH_VITEST_REPORTER_FILE);
+  for (const fw of TEST_REPORTER_FRAMEWORKS) {
+    const found = await detectFrameworkConfig(cwd, fw);
+    if (found === null) continue;
+    const hasReporter = found !== 'dep-only' && fw.hasJsonReporter(found.source);
+    if (hasReporter) continue;
+    return {
+      result: {
+        name: 'test-reporters',
+        status: 'warn',
+        required: false,
+        detail: fw.detail,
+        fix: fw.fix(reporterPath),
+      },
+    };
+  }
+  return null;
 }
 
 /**

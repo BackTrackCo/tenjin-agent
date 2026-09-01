@@ -21,10 +21,12 @@ import {
   PUSH_HOOK_TIMEOUT_SECONDS,
   PUSH_PROMPT_HOOK_FILE,
   PUSH_SUBAGENT_HOOK_FILE,
+  PUSH_VITEST_REPORTER_FILE,
   pushContextHookScript,
   pushFailureHookScript,
   pushPromptHookScript,
   pushSubagentHookScript,
+  pushVitestReporterScript,
 } from './push-scripts';
 import type { WebSearchMode } from './config';
 
@@ -132,8 +134,13 @@ export const PUSH_FAILURE_MATCHER = 'Bash';
  *  read. */
 export const PUSH_CONTEXT_READ_MATCHER = 'Read';
 
-/** The push context arm's churn half: the Nth edit to one file in one session. */
-export const PUSH_CONTEXT_EDIT_MATCHER = 'Edit|Write|MultiEdit';
+/** The push context arm's churn half: the Nth edit to one file in one session.
+ *  Also carries Bash (tenjin-agent#278 round 3): the same PreToolUse entry
+ *  stamps a per-agent timing mark before each Bash call, which the failure
+ *  arm reads back to decide whether a test-report artifact could be about
+ *  THIS command rather than an earlier one — no new event, no new entry,
+ *  just a wider matcher on the one already wired. */
+export const PUSH_CONTEXT_EDIT_MATCHER = 'Edit|Write|MultiEdit|Bash';
 
 export type HooksSkipReason =
   | 'harness-not-claude'
@@ -704,6 +711,11 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // up to date. This is the path a re-run takes after an upgrade changed a body.
   if (added.length === 0 && updated.length === 0) {
     const scripts = await writeScripts(scriptPlan(dataDir), scriptsDir);
+    // NOT FOLDED INTO `scripts`: the vitest reporter is never a settings.json
+    // entry, and several callers assert `scripts` exactly (`toEqual([])` on a
+    // clean re-run) — a shared array would make this write, alone, fail those
+    // on its very first run.
+    await writeVitestReporter(scriptsDir);
     return {
       harness: 'claude',
       path,
@@ -730,6 +742,7 @@ export async function wireSearchHooks(opts: WireHooksOptions): Promise<HooksResu
   // Past the first guard, and still before the entry that points at them, so a
   // harness never reads an entry naming a file that is not on disk yet.
   const scripts = await writeScripts(scriptPlan(dataDir), scriptsDir);
+  await writeVitestReporter(scriptsDir);
 
   // The SECOND compare sits ADJACENT to the commit, because the writes above are
   // two read/write/rename sequences wide and this is a whole-file replacement
@@ -808,6 +821,28 @@ async function writeScripts(plan: HookSpec[], scriptsDir: string): Promise<strin
     written.push(target);
   }
   return written;
+}
+
+/**
+ * The vitest reporter asset (tenjin-agent#278 round 3), brought up to date
+ * alongside the push scripts but NOT through {@link writeScripts}: it is not a
+ * {@link HookSpec} because it is never a settings.json entry — vitest imports
+ * it directly from a repo's own config, by the stable absolute path this
+ * write gives it. Bodies never gate on `push` here either, for the same
+ * reason {@link scriptPlan} says the push bodies do not: a repo's config can
+ * reference this file before `push on` is ever run, and it does nothing
+ * whatever `push`'s state is — the failure hook is what reads its output, and
+ * that gates on the config key at run time like every other push arm.
+ * READ-ONLY, NOT EXECUTABLE (`0o644`): unlike a hook script, this file is
+ * never spawned as a process, only `import()`ed by vitest itself.
+ */
+async function writeVitestReporter(scriptsDir: string): Promise<string | null> {
+  const target = join(scriptsDir, PUSH_VITEST_REPORTER_FILE);
+  const script = pushVitestReporterScript();
+  const onDisk = await readFile(target, 'utf8').catch(() => null);
+  if (onDisk === script) return null;
+  await writeFileAtomic(target, script, { mode: 0o644, dirMode: 0o700 });
+  return target;
 }
 
 /**

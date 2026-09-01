@@ -373,7 +373,7 @@ describe('the hot-path queries never scan', () => {
         ['alreadyShown', STORE_SQL.alreadyShown, ['s', 'r']],
         ['alreadyShownOrLiveRelay', STORE_SQL.alreadyShownOrLiveRelay, ['s', 'r', 0]],
         ['bucketCount', STORE_SQL.bucketCount, ['s', 'prompt', 0]],
-        ['findPairing', STORE_SQL.findPairing, ['p', 'k', 'c']],
+        ['findPairing', STORE_SQL.findPairing, ['p', 'k', 'c', 'k']],
         ['openForHead', STORE_SQL.openForHead, ['p', 'h', 0, 8]],
         ['openLoops', STORE_SQL.openLoops, [0, '', '', 25]],
         ['researchedBySession', STORE_SQL.researchedBySession, ['s']],

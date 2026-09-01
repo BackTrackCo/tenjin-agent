@@ -4097,6 +4097,1140 @@ describe("the failure arm's team leg (POST /api/keys/resolve)", () => {
 });
 
 /**
+ * THE TEST-IDENTITY LANE (tenjin-agent#267): sig_v1's coarse key needs an
+ * errno, and a vitest assertion failure almost never has one, so the shelf
+ * held 0 `sig_v1c` keys among 46 test-shaped pairings and a cross-machine
+ * match needed byte-identical assertion text. `sig_v1_test` keys on the file,
+ * the suite and the test name instead — identity the runner already names —
+ * so a fine match survives a different expected value and a coarse match
+ * (same file/suite, different test) still says something, just less: a
+ * one-line pointer, never the fix body (06, "Injection tiering").
+ */
+describe('the sig_v1_test lane — local matching (tenjin-agent#267)', () => {
+  const TESTID_CWD = '/repo/testid';
+  const TEST_FILE = `${TESTID_CWD}/src/a.test.ts`;
+
+  /** A vitest console failure: the recap header this lane parses, plus a stack
+   *  frame so sig_v1 ALSO clears its own floor — the point of these cases is
+   *  that sig_v1's OWN lane still misses across two runs even though this one
+   *  does not, not that sig_v1 is absent. */
+  const vitestFailure = (
+    file: string,
+    suite: string,
+    test: string,
+    message: string,
+  ): { stdout: string; stderr: string; interrupted: boolean } => ({
+    stdout: ` FAIL  ${file} > ${suite} > ${test}\n${message}\n    at Object.<anonymous> (${file}:12:5)\n`,
+    stderr: '',
+    interrupted: false,
+  });
+
+  const run = (session: string, tool_response: unknown): string =>
+    JSON.stringify({
+      session_id: session,
+      cwd: TESTID_CWD,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'pnpm vitest run' },
+      tool_response,
+    });
+
+  const edit = (path: string, session: string): string =>
+    JSON.stringify({
+      session_id: session,
+      cwd: TESTID_CWD,
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Edit',
+      tool_input: { file_path: path },
+    });
+
+  /** `findPairing` only ever returns `unverified`/`verified` rows (never
+   *  `open`), so every case here has to close what run 1 opens before run 2
+   *  can find it — the same edit-then-pass flow the sig_v1 local-match cases
+   *  use, run once for both rows a vitest failure opens. */
+  async function closeIt(session: string): Promise<void> {
+    await runScript(pushContextHookScript(dataDir), edit(TEST_FILE, session));
+    await runScript(
+      pushFailureHookScript(dataDir),
+      run(session, { stdout: 'ok', stderr: '', interrupted: false }),
+    );
+  }
+
+  it('matches FINE across two runs with different assertion text, where sig_v1 alone opens a new row each time', async () => {
+    await pushOn('http://127.0.0.1:1'); // public mode: no team leg is ever reached
+    const first = await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-a',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles null',
+          'AssertionError: expected undefined to be null',
+        ),
+      ),
+    );
+    expect(injected(first)).toBeNull();
+
+    const opened = await pairings();
+    expect(opened.filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1);
+    expect(opened.filter((p) => p.kind === 'sig_v1')).toHaveLength(1);
+    await closeIt('sess-a');
+    expect((await pairings()).map((p) => p.status)).toEqual(['unverified', 'unverified']);
+
+    // A second, independent failure: the SAME test, a DIFFERENT expected
+    // value, so sig_v1's own message hash is a different key — its own lane
+    // finds no local match and opens a SECOND `sig_v1` row.
+    const second = await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-b',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles null',
+          'AssertionError: expected undefined to be 1970-01-01',
+        ),
+      ),
+    );
+    const text = injected(second);
+    expect(text).not.toBeNull();
+    expect(text).toContain('this machine has already seen this failure fixed');
+    expect(text).toContain('a.test.ts');
+    // FULL treatment, not the pointer: a FINE test-key match.
+    expect(text).not.toContain('has been fixed here before');
+
+    const after = await pairings();
+    expect(after.filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1); // matched, not duplicated
+    expect(after.filter((p) => p.kind === 'sig_v1')).toHaveLength(2); // sig_v1 missed both times
+  });
+
+  it('matches COARSE across two DIFFERENT tests in the same file/suite, and injects a pointer only', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-a',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles null',
+          'AssertionError: expected undefined to be null',
+        ),
+      ),
+    );
+    await closeIt('sess-a');
+
+    const second = await runScript(
+      pushFailureHookScript(dataDir),
+      run(
+        'sess-b',
+        vitestFailure(
+          'src/a.test.ts',
+          'formatDate',
+          'handles undefined',
+          'AssertionError: expected 1 to be undefined',
+        ),
+      ),
+    );
+    const text = injected(second);
+    expect(text).not.toBeNull();
+    expect(text).toContain('has been fixed here before');
+    expect(text).toContain('a.test.ts');
+    expect(text).toContain('tenjin push status');
+    // Never the fine match's wording or its file list.
+    expect(text).not.toContain('Someone once fixed this by touching');
+
+    const rows = await pairings();
+    const testRows = rows.filter((p) => p.kind === 'sig_v1_test');
+    expect(testRows).toHaveLength(1); // one row, matched coarse on the second run
+    expect(testRows[0]!.status).toBe('unverified');
+  });
+
+  it('an exact-test match is not downgraded to a pointer by a VERIFIED row for a different test in the same file/suite (tenjin-agent#278, minor 2)', async () => {
+    await pushOn('http://127.0.0.1:1');
+
+    const failA = (session: string, message: string) =>
+      run(session, vitestFailure('src/a.test.ts', 'formatDate', 'handles null', message));
+    const failB = (session: string, message: string) =>
+      run(session, vitestFailure('src/a.test.ts', 'formatDate', 'handles undefined', message));
+
+    // Test A opens and closes once, from sess-1 (unverified).
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failA('sess-1', 'AssertionError: expected undefined to be null'),
+    );
+    await closeIt('sess-1');
+
+    // sess-1 is SHOWN test A's row again (a different message each time —
+    // `signatureOf`'s own claim-dedup collapses digits, so the wording itself
+    // has to differ — so sig_v1's own message hash always misses and this
+    // exercises the sig_v1_test lane specifically) — marking that row
+    // "already shown" to sess-1, and closing it again is a same-session
+    // no-op for promotion.
+    const replay1 = await runScript(
+      pushFailureHookScript(dataDir),
+      failA('sess-1', 'AssertionError: expected undefined to equal null'),
+    );
+    expect(injected(replay1)).not.toBeNull();
+    await closeIt('sess-1');
+
+    // Test B, a DIFFERENT test sharing test A's coarse key, fails under
+    // sess-1: because sess-1 has already been SHOWN test A's row, the coarse
+    // match is skipped (`!alreadyShown`) and sess-1 opens test B's OWN row
+    // instead — the only way, through the ordinary hook flow, for a second
+    // test in one file/suite to get a row of its own rather than perpetually
+    // matching the first test's coarse key.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      failB('sess-1', 'AssertionError: expected 1 to be undefined'),
+    );
+    await closeIt('sess-1');
+    expect((await pairings()).filter((p) => p.kind === 'sig_v1_test')).toHaveLength(2);
+
+    // A FRESH session (sess-2) is shown test A's row — the exact-key match
+    // outranks test B's row unconditionally regardless of status, so this is
+    // deterministic even before either row is verified — and promotes it to
+    // VERIFIED as the second independent closer.
+    const replay2 = await runScript(
+      pushFailureHookScript(dataDir),
+      failA('sess-2', 'AssertionError: expected undefined to strictly equal null'),
+    );
+    expect(injected(replay2)).not.toBeNull();
+    await closeIt('sess-2');
+    const rows = await pairings();
+    const rowA = rows.find((p) => p.kind === 'sig_v1_test' && p.status === 'verified');
+    const rowB = rows.find((p) => p.kind === 'sig_v1_test' && p.status === 'unverified');
+    expect(rowA).toBeDefined();
+    expect(rowB).toBeDefined();
+    expect(rowA?.coarse_key).toBe(rowB?.coarse_key); // same file/suite
+
+    // Test B fails again, in a BRAND NEW session: an exact-test UNVERIFIED
+    // match exists (its own row) alongside a coarse-only VERIFIED match (test
+    // A's row). The exact match must win — a verified fix for a DIFFERENT
+    // test is not stronger evidence about this one.
+    const third = await runScript(
+      pushFailureHookScript(dataDir),
+      failB('sess-3', 'AssertionError: expected 1 to strictly equal undefined'),
+    );
+    const text = injected(third);
+    expect(text).not.toBeNull();
+    expect(text).toContain('this machine has already seen this failure fixed');
+    // FULL treatment, not the coarse pointer, even though a VERIFIED coarse
+    // match for a different test exists and ranked first under the old
+    // status-before-key ordering.
+    expect(text).not.toContain('has been fixed here before');
+  });
+});
+
+describe('the sig_v1_test lane — identity extraction (tenjin-agent#267)', () => {
+  const TESTID_CWD = '/repo/testid';
+
+  /** The context arm's Bash half (tenjin-agent#278 round 3): fires PreToolUse
+   *  for a Bash call, stamping this agent's own pre-command timestamp so a
+   *  later failure's artifact leg has something to check a report's
+   *  `startTime` against. Returns the REAL stashed value read back from the
+   *  store, not an approximation from this side of the child-process
+   *  boundary: `runScript` spawns a real node process, whose own startup can
+   *  easily cost more than a small fixed offset would assume. */
+  async function stashBashStart(session: string, cwd: string): Promise<number> {
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: session,
+        cwd,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'irrelevant — only the event/tool matter' },
+      }),
+    );
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      const row = db
+        .prepare("SELECT value FROM session_state WHERE session = ? AND key = 'bashstart::'")
+        .get(session) as { value?: string } | undefined;
+      const value = row?.value === undefined ? null : (JSON.parse(row.value) as unknown);
+      if (typeof value !== 'number') throw new Error('stashBashStart: no stash landed');
+      return value;
+    } finally {
+      db.close();
+    }
+  }
+
+  /** The report tenjin-vitest-reporter.mjs itself would write: `startTime`
+   *  before any test ran, `endTime` after, `failed` already flattened to
+   *  `{file, suite, test}`. */
+  function reportFixture(
+    startTime: number,
+    endTime: number,
+    failed: Array<{ file: string; suite: string; test: string }>,
+  ): string {
+    return JSON.stringify({ startTime, endTime, failed, success: failed.length === 0 });
+  }
+
+  it('parses file, suite and test off a nested describe chain', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run' },
+        tool_response: {
+          stdout:
+            ' FAIL  src/deep.test.ts > outer > inner > handles the deep case\nAssertionError: expected 1 to be 2\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = await pairings();
+    const row = rows.find((p) => p.kind === 'sig_v1_test');
+    expect(row?.error_files).toEqual(['deep.test.ts']);
+  });
+
+  it('parses a top-level test with no describe block at all', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm vitest run' },
+        tool_response: {
+          stdout: ' FAIL  src/flat.test.ts > a bare test\nAssertionError: expected 1 to be 2\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = await pairings();
+    expect(rows.find((p) => p.kind === 'sig_v1_test')?.error_files).toEqual(['flat.test.ts']);
+  });
+
+  it('yields no test identity, and no sig_v1_test row, when the output has no FAIL breadcrumb', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build' },
+        tool_response: {
+          stdout: '',
+          stderr: "Error: ENOENT: no such file, open 'x.ts'",
+          interrupted: false,
+        },
+      }),
+    );
+    expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+  });
+
+  it("prefers a fresh JSON report artifact over the console breadcrumb, once its own startTime clears this command's PreToolUse stamp", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          {
+            file: join(cwd, 'src/from-artifact.test.ts'),
+            suite: 'fromArtifactSuite',
+            test: 'the real failure',
+          },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            // A console breadcrumb that names a DIFFERENT file/test — if this
+            // fires instead of the artifact, the row below would say so.
+            stdout:
+              ' FAIL  src/from-console.test.ts > wrongSuite > wrong test\nAssertionError: x\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.kind === 'sig_v1_test');
+      expect(row?.error_files).toEqual(['from-artifact.test.ts']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a report whose own startTime predates this command's PreToolUse stamp, and falls back to the console breadcrumb (tenjin-agent#278 round 3)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-stale-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
+      // A report that finished BEFORE this command's own PreToolUse stamp — a
+      // leftover from an earlier run in the same checkout, not evidence about
+      // this one, however recent its mtime looks.
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since - 5000, since - 4000, [
+          { file: join(cwd, 'src/stale.test.ts'), suite: 'staleSuite', test: 'a stale failure' },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: ' FAIL  src/fresh.test.ts > freshSuite > a fresh test\nAssertionError: y\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.kind === 'sig_v1_test');
+      expect(row?.error_files).toEqual(['fresh.test.ts']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores a fresh-looking report artifact left over from the test run before a build failure, even with a PreToolUse stamp for THIS command (tenjin-agent#278, major 1 / round 3)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-nontest-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // This command (the build) gets its own PreToolUse stamp, same as any
+      // other Bash call — there is no more command-text gate to skip it.
+      const since = await stashBashStart(SESSION, cwd);
+      // The report's OWN startTime is from the test run that finished before
+      // this build command even started: on disk it looks brand new (mtime
+      // "now"), but its startTime is well before this command's own stamp.
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since - 2000, since - 1000, [
+          {
+            file: join(cwd, 'src/unrelated.test.ts'),
+            suite: 'suite',
+            test: 'an unrelated failure',
+          },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      // No sig_v1_test row at all: a TS build failure must never claim a test's
+      // identity, however fresh the report artifact sitting in the checkout
+      // looks — the window check catches it by CONTENT, not by recognizing
+      // `pnpm build` as a non-test command.
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores an in-window artifact with an EMPTY failed array, on a single-segment command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-empty-failed-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
+      // In-window (startTime clears the stash) but PASSING: success:true,
+      // failed: []. A single-segment command, so `isSingleSegmentCommand`
+      // does not exclude the artifact leg — the claim under test is
+      // `identityFromReport`'s own behavior on an empty `failed` array, not
+      // the segment gate (covered separately below).
+      await writeFile(join(cwd, '.vitest-report.json'), reportFixture(since + 10, since + 50, []));
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: 'AssertionError: expected 1 to be 2\n\n Tests  0 failed | 1 passed\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('does not attribute a REAL earlier-segment test failure to a later, unrelated build failure in the same compound command (tenjin-agent#278 round 3 follow-up, Greptile PRRT_kwDOTbH3JM6eQnm5)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-real-fail-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // One PreToolUse stamp for the WHOLE compound command, exactly as the
+      // real hook sees it — `pnpm test; pnpm build` is one Bash tool call.
+      // Unlike `&&`, `;` runs BOTH segments regardless of the first's exit
+      // status, so `pnpm test` can genuinely fail here (a REAL, non-empty
+      // `failed` array, honestly in-window) while the overall failure this
+      // hook processes is the LATER `pnpm build` segment's.
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          { file: join(cwd, 'src/real.test.ts'), suite: 'realSuite', test: 'a real failure' },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test; pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      // No sig_v1_test row: `pnpm test; pnpm build` is TWO segments
+      // (`isSingleSegmentCommand` is false), so the artifact leg is never
+      // consulted at all — the real test failure sitting in the artifact
+      // must not be attributed to this build failure just because its
+      // startTime honestly clears the window. The build's own TS error
+      // carries no FAIL breadcrumb either, so this failure gets no test
+      // identity — precision lost, never a wrong match gained.
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attribute a REAL earlier-segment test failure across a background `&`, which commandHeads's own split does not cover (tenjin-agent#278 round 3 follow-up, Greptile PRRT_kwDOTbH3JM6eRFpv)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-background-op-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // `pnpm test & pnpm build` is ONE segment by `commandHeads`'s own split
+      // (it only knows `&&`, `||`, `;`, `|` and newline) — the background `&`
+      // needs its own check, since it has the identical run-both-regardless
+      // ambiguity `;` has.
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          { file: join(cwd, 'src/real.test.ts'), suite: 'realSuite', test: 'a real failure' },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test & pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('still trusts a single-segment command whose own redirect happens to contain an &, like 2>&1 (tenjin-agent#278 round 3 follow-up)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-redirect-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // `2>&1`, `>&2` and `&>file` are redirect syntax, not job control — the
+      // background-operator check must not mistake this ordinary, extremely
+      // common redirect for a second segment and needlessly lose precision.
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          {
+            file: join(cwd, 'src/from-artifact.test.ts'),
+            suite: 'suite',
+            test: 'the real failure',
+          },
+        ]),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run 2>&1' },
+          tool_response: {
+            stdout: 'AssertionError: expected 1 to be 2\n\n Tests  1 failed | 0 passed\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.kind === 'sig_v1_test');
+      expect(row?.error_files).toEqual(['from-artifact.test.ts']);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  // tenjin-agent#278 round 3 review, new-in-delta minor: `isSingleSegmentCommand`
+  // used to ask `commandHeads(text).length <= 1`, but `commandHeads` silently
+  // DROPS a segment it cannot name a head for (a bare head-runner, wrapper
+  // word, package-manager run sub, or env assignment with nothing after it) —
+  // so a genuinely two-segment command counted as one, silently trusting the
+  // artifact leg on a compound command. Counting raw separator-split segments
+  // instead closes all four degenerate second-segment shapes at once.
+  it.each([
+    'pnpm vitest run && npx',
+    'pnpm vitest run && sudo',
+    'pnpm vitest run && FOO=1',
+    'pnpm vitest run && pnpm exec',
+  ])(
+    'treats %s as two segments even though the second resolves to no head, and skips the artifact leg',
+    async (command) => {
+      const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-headless-segment-'));
+      try {
+        await pushOn('http://127.0.0.1:1');
+        const since = await stashBashStart(SESSION, cwd);
+        await writeFile(
+          join(cwd, '.vitest-report.json'),
+          reportFixture(since + 10, since + 50, [
+            { file: join(cwd, 'src/real.test.ts'), suite: 'realSuite', test: 'a real failure' },
+          ]),
+        );
+        await runScript(
+          pushFailureHookScript(dataDir),
+          JSON.stringify({
+            session_id: `headless-${command}`,
+            cwd,
+            hook_event_name: 'PostToolUse',
+            tool_name: 'Bash',
+            tool_input: { command },
+            tool_response: {
+              stdout: '',
+              stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+              interrupted: false,
+            },
+          }),
+        );
+        expect(
+          (await pairings()).some((p) => p.kind === 'sig_v1_test'),
+          command,
+        ).toBe(false);
+      } finally {
+        await rm(cwd, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('does not attribute a later build failure to an earlier, PASSING vitest run in the same chained command (tenjin-agent#278 round 3, Greptile PRRT_kwDOTbH3JM6ePvWy)', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-chain-pass-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      // One PreToolUse stamp for the WHOLE chained command, exactly as the real
+      // hook sees it — `pnpm test && pnpm build` is one Bash tool call, and
+      // ALSO two segments — this exercises the empty-`failed`-array path
+      // (identityFromReport) and the segment gate together, since either
+      // alone would already produce no identity here.
+      const since = await stashBashStart(SESSION, cwd);
+      // `pnpm test` ran first and PASSED (success:true, failed: []), so its
+      // report's startTime clears the window check — the report genuinely is
+      // about this command. The claim under test is that this must not matter:
+      // there is no failed entry to extract an identity from.
+      await writeFile(join(cwd, '.vitest-report.json'), reportFixture(since + 10, since + 50, []));
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test && pnpm build' },
+          tool_response: {
+            stdout: '',
+            stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+            interrupted: false,
+          },
+        }),
+      );
+      // No sig_v1_test row: an in-window but EMPTY `failed` array yields no
+      // identity from `identityFromReport` (the loop simply never assigns
+      // `found`), so `testIdentityFromArtifact` moves on and finds nothing,
+      // and the build's own TS error carries no FAIL breadcrumb the console
+      // leg could use either.
+      expect((await pairings()).some((p) => p.kind === 'sig_v1_test')).toBe(false);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('recognizes any command whatsoever as a candidate, since round 3 dropped the command-text gate entirely (tenjin-agent#278, major 1)', async () => {
+    await pushOn('http://127.0.0.1:1');
+    // `pnpm test:unit` would not have satisfied round 2's own `sub === 'test'`
+    // check either way, but the point here is that NO check runs at all: the
+    // console breadcrumb inside a failure's own output is evidence enough on
+    // its own, whatever the command line says.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm test:unit' },
+        tool_response: {
+          stdout:
+            ' FAIL  src/scripted.test.ts > scriptedSuite > a scripted test\nAssertionError: z\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    expect((await pairings()).find((p) => p.kind === 'sig_v1_test')?.error_files).toEqual([
+      'scripted.test.ts',
+    ]);
+  });
+
+  it('pins as DESIGNED, not a defect: a non-test head whose own output happens to carry a real FAIL breadcrumb still gets a test identity (tenjin-agent#278 round 3 review, nit)', async () => {
+    await pushOn('http://127.0.0.1:1');
+    // `pnpm build` is a TS build failure, but its output ALSO happens to carry
+    // a vitest-shaped `FAIL` breadcrumb (a monorepo build script that ran
+    // tests as one of its steps, output concatenated). The console leg is
+    // gated on nothing (round 3): the breadcrumb inside THIS command's own
+    // output is evidence enough on its own, whatever the command line says
+    // and whatever ELSE also failed. This is the documented tradeoff
+    // (docs/command-reference.md, "Identity comes from a structured
+    // artifact..."), not something to fix.
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build' },
+        tool_response: {
+          stdout: ' FAIL  src/scripted.test.ts > scriptedSuite > a scripted test\n',
+          stderr: "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable",
+          interrupted: false,
+        },
+      }),
+    );
+    expect((await pairings()).find((p) => p.kind === 'sig_v1_test')?.error_files).toEqual([
+      'scripted.test.ts',
+    ]);
+  });
+
+  // tenjin-agent#278 round 2's own `looksLikeTestRun` gate silently produced
+  // NO test identity at all for every one of these — the single most common
+  // ways people actually invoke a test suite — while claiming to fix a
+  // narrower bug (`pnpm build && echo vitest`, an unrelated command whose
+  // ARGUMENT merely mentioned a runner's name, used to satisfy it instead).
+  // Round 3 has no command-text gate of any kind, so the console breadcrumb
+  // (which needs no timing at all) picks all of them up.
+  it.each([
+    'npm run test',
+    'pnpm run test',
+    'pnpm run test:unit',
+    'npm t',
+    'turbo test',
+    'pnpm --filter web test',
+    'pnpm build && pnpm test',
+    'pnpm build && echo vitest',
+  ])('yields a test identity from the console breadcrumb behind %s', async (command) => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: `regression-${command}`,
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command },
+        tool_response: {
+          stdout: ' FAIL  src/regression.test.ts > regressionSuite > it works\nAssertionError: r\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const row = (await pairings()).find(
+      (p) => p.kind === 'sig_v1_test' && p.session === `regression-${command}`,
+    );
+    expect(row?.error_files, command).toEqual(['regression.test.ts']);
+  });
+
+  it("takes the LAST failed assertion in the report, matching the console leg's own recency rule (tenjin-agent#278, major 2)", async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tenjin-push-artifact-multi-'));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(SESSION, cwd);
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        reportFixture(since + 10, since + 50, [
+          { file: join(cwd, 'src/multi.test.ts'), suite: 'suite', test: 'the first failure' },
+          { file: join(cwd, 'src/multi.test.ts'), suite: 'suite', test: 'the last failure' },
+        ]),
+      );
+      // Run 1: the artifact leg is the only source of identity (no FAIL
+      // breadcrumb the console leg could parse), so whichever of the two
+      // failed assertions it picks becomes this row's fine key.
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: 'AssertionError: expected 1 to be 2\n\n Tests  2 failed | 0 passed\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      expect((await pairings()).filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1);
+
+      // Close run 1's row (open -> unverified) so `findPairing` can match it
+      // at all — an `open` row is excluded from the local-match query on
+      // purpose (it has no closer yet), same as every other pairing.
+      await runScript(
+        pushContextHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PreToolUse',
+          tool_name: 'Edit',
+          tool_input: { file_path: join(cwd, 'src/multi.test.ts') },
+        }),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: { stdout: 'ok', stderr: '', interrupted: false },
+        }),
+      );
+
+      // Run 2: the artifact is gone, so this leg falls back to a console
+      // breadcrumb naming "the last failure" explicitly — the same failure
+      // the console leg's OWN recency rule (take the LAST `FAIL` line) would
+      // pick on a real multi-failure run.
+      await rm(join(cwd, '.vitest-report.json'));
+      const second = await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: SESSION,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm vitest run' },
+          tool_response: {
+            stdout: ' FAIL  src/multi.test.ts > suite > the last failure\nAssertionError: z\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      // ONE row, MATCHED — not two. If run 1's artifact leg had kept the
+      // FIRST failed assertion instead, this console breadcrumb (naming the
+      // LAST one) would have missed and opened a second, disagreeing row.
+      expect((await pairings()).filter((p) => p.kind === 'sig_v1_test')).toHaveLength(1);
+      expect(injected(second)).not.toBeNull();
+    } finally {
+      await rm(cwd, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+});
+
+describe('the sig_v1_test lane — team leg (tenjin-agent#267)', () => {
+  const REPO_TESTID = join(tmpdir(), `tenjin-push-testid-repo-${process.pid}`);
+  beforeEach(async () => {
+    await mkdir(join(REPO_TESTID, '.git'), { recursive: true });
+    await writeFile(
+      join(REPO_TESTID, '.git', 'config'),
+      '[core]\n\tbare = false\n[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
+    );
+  });
+  afterEach(async () => {
+    await rm(REPO_TESTID, { recursive: true, force: true });
+  });
+
+  const TESTID_TEAM_POST_ID = '66666666-6666-4666-8666-666666666666';
+
+  interface WireBody {
+    keys: { kind: string; key: string }[];
+  }
+
+  /** A shelf whose resolve answers, call by call, from \`answers\` (the last
+   *  entry repeats once exhausted) — the two-round test-lane request needs a
+   *  stub that can miss on round 1 and hit on round 2. */
+  function sequencedResolveStub(
+    answers: Array<'hit' | 'miss'>,
+    bodyMd = 'Fix: pnpm — src/a.test.ts. Edited a.ts, passed on pnpm vitest run.',
+  ): { bodies: WireBody[]; handler: (req: StubRequest) => { status: number; json: unknown } } {
+    const bodies: WireBody[] = [];
+    let call = 0;
+    return {
+      bodies,
+      handler: (req) => {
+        if (req.url.startsWith('/api/keys/resolve')) {
+          bodies.push(JSON.parse(req.body) as WireBody);
+          const answer = answers[Math.min(call, answers.length - 1)];
+          call += 1;
+          if (answer === 'miss') {
+            return {
+              status: 200,
+              json: { schemaVersion: 3, searchId: SEARCH_ID, items: [], matched: 0 },
+            };
+          }
+          return {
+            status: 200,
+            json: {
+              schemaVersion: 3,
+              searchId: SEARCH_ID,
+              items: [
+                {
+                  resourceId: TESTID_TEAM_POST_ID,
+                  url: `${req.base}/@team/fix`,
+                  title: 'Fix: pnpm — src/a.test.ts',
+                  price: '0',
+                  excerpt: '',
+                  creator: { handle: 'teammate' },
+                  confidence: 'high',
+                  corroborated: true,
+                },
+              ],
+              matched: 1,
+            },
+          };
+        }
+        if (req.url.startsWith('/api/search')) {
+          return { status: 200, json: { schemaVersion: 3, searchId: SEARCH_ID, items: [] } };
+        }
+        return { status: 200, json: { bodyMd } };
+      },
+    };
+  }
+
+  const vitestFail = (session: string): string =>
+    JSON.stringify({
+      session_id: session,
+      cwd: REPO_TESTID,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'pnpm vitest run' },
+      tool_response: {
+        // The stack frame matters: without one, sig_v1's OWN floor is not
+        // cleared (no errno either), `sig` is null, and the team leg — which
+        // teamResolve builds its first request around `sig.key` — never runs
+        // at all. A real vitest assertion error carries a frame.
+        stdout:
+          ' FAIL  src/a.test.ts > formatDate > handles null\nAssertionError: expected undefined to be null\n    at Object.<anonymous> (src/a.test.ts:12:5)\n',
+        stderr: '',
+        interrupted: false,
+      },
+    });
+
+  it('sends the test fine key beside sig_v1 on round 1, and stops there on a hit', async () => {
+    const stub = sequencedResolveStub(['hit']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    const text = injected(run);
+    expect(text).not.toBeNull();
+    expect(text).toContain("a teammate's machine has seen this failure fixed");
+
+    // ONE request: sig_v1's own fine key (no sig_v1 coarse — there is no
+    // errno here) plus the test lane's FINE key, never its coarse one.
+    expect(stub.bodies).toHaveLength(1);
+    const keys = stub.bodies[0]!.keys.map((k) => k.key);
+    expect(keys.some((k) => k.startsWith('sig_v1:'))).toBe(true);
+    expect(keys.some((k) => k.startsWith('sig_v1_test:'))).toBe(true);
+    expect(keys.some((k) => k.startsWith('sig_v1_test_c:'))).toBe(false);
+    expect(pub.hits()).toBe(0);
+  });
+
+  /**
+   * tenjin-agent#278 round 4, corrected nit-1 decline: a failure carrying a
+   * test identity can spend a SECOND request (the coarse-only round on a
+   * genuine round-1 miss), so `lookupAllowed` now charges 2 legs for it
+   * rather than 1. At exactly one lookup left in the bucket, a two-leg fire
+   * must be refused outright — never a first request the second one then has
+   * no budget for.
+   */
+  it('a bucket with one lookup left stops a failure whose identity carries a test key, needing two legs', async () => {
+    const stub = sequencedResolveStub(['miss', 'miss']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+    const cap = PUSH_LOOKUP_CAPS_PER_WINDOW.failure ?? PUSH_LOOKUP_CAP_DEFAULT;
+    const store = await openStore(dataDir);
+    for (let i = 0; i < cap - 1; i += 1) {
+      store?.run(STORE_SQL.insertInjection, [
+        `seed-failure-${i}`,
+        null,
+        Date.now(),
+        SESSION,
+        null,
+        'machine',
+        'failure',
+        'team',
+        null,
+        null,
+        null,
+        null,
+        SEARCH_ID,
+        null,
+        null,
+        null,
+        null,
+        null,
+        'skipped',
+        'miss',
+        null,
+        0,
+        null,
+      ]);
+    }
+    store?.close();
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    expect(run.stdout).toBe('');
+    // No request at all: refused before the first round, not after it.
+    expect(stub.bodies).toHaveLength(0);
+    expect(team.hits()).toBe(0);
+    const rows = await ledger();
+    expect(rows.at(-1)).toMatchObject({
+      session: SESSION,
+      trigger: 'failure',
+      action: 'skipped',
+      reason: 'lookup-cap',
+    });
+  });
+
+  it('falls back to a coarse-only second request on a fine miss, and injects a pointer', async () => {
+    const stub = sequencedResolveStub(['miss', 'hit']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    const text = injected(run);
+    expect(text).not.toBeNull();
+    expect(text).toContain("a teammate's machine has seen this failure fixed");
+    // POINTER, not the fix body: never fetched, so the free-body GET the
+    // fine-hit case makes was never called for this one.
+    expect(text).toContain('A teammate hit a similar failure in this file/suite');
+    expect(text).toContain('tenjin push status');
+    expect(text).not.toContain('Edited a.ts');
+
+    expect(stub.bodies).toHaveLength(2);
+    const round1 = stub.bodies[0]!.keys.map((k) => k.key);
+    expect(round1.some((k) => k.startsWith('sig_v1_test_c:'))).toBe(false);
+    // ROUND 2: the coarse test key, and ONLY it.
+    expect(stub.bodies[1]!.keys).toHaveLength(1);
+    expect(stub.bodies[1]!.keys[0]!.key).toMatch(/^sig_v1_test_c:[0-9a-f]{16}$/);
+
+    const rows = await ledger();
+    expect(rows.map((r) => [r.action, r.reason])).toEqual([
+      ['skipped', 'miss'],
+      ['injected', 'key-match'],
+    ]);
+  });
+
+  it('links BOTH the sig_v1 and sig_v1_test rows to the post on a round-1 hit (tenjin-agent#278)', async () => {
+    const stub = sequencedResolveStub(['hit']);
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), vitestFail(SESSION));
+    expect(injected(run)).not.toBeNull();
+
+    // TWO local rows opened for this one event: sig_v1 (the frame-keyed
+    // signature) and sig_v1_test (the test identity), because the wire's OR
+    // never says which of round 1's three keys the teammate's post actually
+    // matched. Both describe the same failure, so both must be linked —
+    // whichever this machine closes first is the second independent close
+    // the cross-machine `verified` promotion depends on.
+    const opened = await pairings();
+    expect(opened.map((p) => p.kind).sort()).toEqual(['sig_v1', 'sig_v1_test']);
+    for (const row of opened) {
+      expect(sessionState('', `pairing_post:${row.id}`)).toMatchObject({
+        postId: TESTID_TEAM_POST_ID,
+      });
+    }
+    // AND BOTH REPLAYED behind the head, so a later pass can close either one.
+    const replayed = sessionState(SESSION, 'replayed::pnpm') as number[];
+    expect([...replayed].sort()).toEqual(opened.map((p) => p.id as number).sort());
+  });
+
+  it('makes no second request, and asks the same single request as before #267, on an ordinary (non-test) failure', async () => {
+    const stub = sequencedResolveStub(['miss', 'hit']); // round 2 would hit if it fired
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const ENOENT_NO_TEST =
+      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (/repo/one/src/migrate.ts:12:3)\n";
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: REPO_TESTID,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm db:migrate' },
+        tool_response: { stdout: '', stderr: ENOENT_NO_TEST, interrupted: false },
+      }),
+    );
+    expect(injected(run)).toBeNull(); // a genuine miss with no test lane to fall back on
+    expect(stub.bodies).toHaveLength(1);
+  });
+});
+
+/**
  * The lookup budget, after a live run reported 62% of fires skipped on
  * `lookup-cap`: a flat per-session cap starved an always-on session, because the
  * session id never turned over and nothing aged a row out of the count. Both
