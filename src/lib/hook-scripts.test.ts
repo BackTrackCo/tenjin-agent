@@ -11,6 +11,7 @@ import {
   HOOK_SCRIPT_STAMP,
   HOOK_TIMEOUT_SECONDS,
   PRIMER_TEXT,
+  PRIMER_TEXT_TEAM,
   REMIND_LINE,
   dispatchHookScript,
   prelude,
@@ -2311,6 +2312,71 @@ describe('SessionStart hook: the primer', () => {
     const run = await runScript(sessionPrimerHookScript(dataDir), 'not json');
     expect(run.code).toBe(0);
     expect(injected(run)).toBe(PRIMER_TEXT);
+  });
+
+  /**
+   * THE WORDING IS CHOSEN AT RUN TIME, from the config the script reads, and the
+   * team paragraph inverts the public one's bar: the public text tells the agent
+   * to skip private-repo questions and warns that a hit costs cents, which on a
+   * machine with a team shelf points away from exactly what the shelf holds. One
+   * generated script has to reach both answers, because a machine joins a team
+   * shelf by editing config.json and nothing rewrites its installed hooks.
+   */
+  describe('team mode', () => {
+    const teamConfig = {
+      baseUrl: 'https://team.example',
+      publicShelfUrl: 'https://public.example',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    };
+
+    it('prints the team paragraph when a team shelf is configured', async () => {
+      await writeConfig(teamConfig);
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT_TEAM);
+    });
+
+    it('asks for this project, and drops the public text that points away from it', () => {
+      expect(PRIMER_TEXT_TEAM).toContain('this codebase, its services, or a past decision');
+      expect(PRIMER_TEXT_TEAM).toContain('tenjin search');
+      expect(PRIMER_TEXT_TEAM).not.toContain('private-repo questions');
+      expect(PRIMER_TEXT_TEAM).not.toContain('costs cents');
+    });
+
+    // A team miss re-asks the same sentence of the public marketplace, so the
+    // one warning the public wording has no reason to carry is the one this
+    // paragraph must.
+    it('warns that the question travels', () => {
+      expect(PRIMER_TEXT_TEAM).toContain(
+        'Never put a secret, credential, customer, or account name',
+      );
+    });
+
+    // Team mode is a secret AND a shelf of the team's own; a secret with baseUrl
+    // still on the marketplace is public mode, and gets the public paragraph.
+    it.each([
+      [PRODUCTION_ORIGIN, 'the production marketplace'],
+      ['https://public.example', 'whatever publicShelfUrl names'],
+    ])('keeps the public paragraph when baseUrl is %s (%s)', async (baseUrl) => {
+      await writeConfig({ ...teamConfig, baseUrl });
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+    });
+
+    it('keeps the public paragraph when there is no bypass secret', async () => {
+      await writeConfig({ ...teamConfig, shelfBypassSecret: '' });
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+    });
+
+    // Same rule as public mode: the switch decides the wording, never whether
+    // the paragraph is printed at all.
+    it('says nothing when hooks.sessionPrimer is off', async () => {
+      await writeConfig({ ...teamConfig, hooks: { sessionPrimer: 'off' } });
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+    });
   });
 });
 
