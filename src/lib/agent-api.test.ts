@@ -815,12 +815,16 @@ describe('getLookupStats', () => {
  * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`
  * route, serving `articleBase()`'s full shape (id, slug, title, excerpt,
  * coverImageId, price, arbiterId, status, publishedAt, tags, creator) for
- * PUBLISHED posts only. This CLI only reads title/price, so the schema
- * asserts only `id`/`title`/`price`/`status` (PR 277 round-3 review nit) —
- * a drift in a field it never reads, like `slug` or `creator.handle`, must
- * not turn a good response into `null`. It must never invent a value, so
- * every failure mode (404, any other non-200, a network error, or a body
- * this CLI cannot read) collapses to the same `null`.
+ * PUBLISHED posts only. The schema asserts `id`/`slug`/`title`/`price`/
+ * `status`/`creator.handle` — `slug` and `creator.handle` joined the
+ * required set once `resolveResourceRef` (lib/resource-ref.ts) started using
+ * this as its own by-id fallback: the read route is keyed by handle/slug, so
+ * those two are what let a resolved id become a payable URL. Every other
+ * field stays passthrough (PR 277 round-3 review nit) — a drift in a field
+ * nothing here reads must not turn a good response into `null`. It must
+ * never invent a value, so every failure mode (404, any other non-200, a
+ * network error, or a body this CLI cannot read) collapses to the same
+ * `null`.
  */
 describe('getPostMetadata', () => {
   const POST = {
@@ -831,8 +835,15 @@ describe('getPostMetadata', () => {
     status: 'published',
     creator: { handle: 'iris' },
   };
+  const EXPECTED = {
+    id: POST.id,
+    slug: POST.slug,
+    title: POST.title,
+    price: POST.price,
+    creator: { handle: POST.creator.handle },
+  };
 
-  it('GETs the post by id off the /public sibling route and returns its title and price', async () => {
+  it('GETs the post by id off the /public sibling route and returns its metadata', async () => {
     const { fetch, calls } = stubFetch(json(200, POST));
     const meta = await getPostMetadata(POST.id, {
       baseUrl: 'https://preview.example/',
@@ -841,7 +852,7 @@ describe('getPostMetadata', () => {
     });
     expect(calls[0]?.url).toBe(`https://preview.example/api/posts/${POST.id}/public`);
     expect(calls[0]?.init.method).toBe('GET');
-    expect(meta).toEqual({ title: POST.title, price: POST.price });
+    expect(meta).toEqual(EXPECTED);
   });
 
   it('tolerates extra fields the contract does not name', async () => {
@@ -851,23 +862,121 @@ describe('getPostMetadata', () => {
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect(meta).toEqual({ title: POST.title, price: POST.price });
+    expect(meta).toEqual(EXPECTED);
   });
 
-  /** PR 277 round-3 review nit: `slug` and `creator.handle` are part of the
-   *  real `#803` response but this function never reads either, so a
-   *  response missing them (a future field rename, a leaner mock) must
-   *  still resolve rather than fail closed on a field this CLI does not use. */
-  it('does not require slug or creator, which it never reads', async () => {
+  it('tolerates an unread field on creator, keeping only handle', async () => {
     const { fetch } = stubFetch(
-      json(200, { id: POST.id, title: POST.title, price: POST.price, status: POST.status }),
+      json(200, { ...POST, creator: { handle: POST.creator.handle, avatarUrl: 'x' } }),
     );
     const meta = await getPostMetadata(POST.id, {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect(meta).toEqual({ title: POST.title, price: POST.price });
+    expect(meta).toEqual(EXPECTED);
+  });
+
+  /** `slug` and `creator.handle` are what `resolveResourceRef` needs to build
+   *  a read URL out of this response; a body missing either cannot resolve
+   *  one, so it must fail closed to `null` rather than resolve with a URL
+   *  this CLI made up. */
+  it('returns null when slug is missing', async () => {
+    const { id, title, price, status, creator } = POST;
+    const { fetch } = stubFetch(json(200, { id, title, price, status, creator }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null when creator.handle is missing', async () => {
+    const { id, slug, title, price, status } = POST;
+    const { fetch } = stubFetch(json(200, { id, slug, title, price, status }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  /**
+   * PR 283 review, major finding: `resolveResourceRef` builds a payable read
+   * URL straight out of this response's `slug`/`creator.handle`, and asserts
+   * a uuid-shaped `id` without ever checking WHICH uuid. A response naming a
+   * different post's id, or unsafe path segments `encodeURIComponent` does
+   * not escape, must fail closed to `null` — a schema requiring "a uuid" is
+   * not the same as requiring "the uuid asked for", and the URL built from an
+   * unvalidated slug/handle is what a wallet-signed payment goes to.
+   */
+  it('returns null when the response names a different post than the one asked for', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, id: '22222222-2222-4222-8222-222222222222' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  /** The compare is case-insensitive, but the returned `id` is NOT lowercased
+   *  to match — it is the shelf's own spelling, verbatim, because that is what
+   *  `resolveResourceRef` carries forward as the ref's canonical `resourceId`
+   *  (PR 283 round-2 review: the caller's original casing must not survive
+   *  past this point, or a later case-sensitive lookup like `findDelivered`
+   *  can miss a delivery saved under the shelf's casing). */
+  it('matches the requested id case-insensitively, and returns the shelf spelling verbatim', async () => {
+    const upper = POST.id.toUpperCase();
+    const { fetch } = stubFetch(json(200, { ...POST, id: upper }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toEqual({ ...EXPECTED, id: upper });
+  });
+
+  it('returns null for a slug of ".." rather than building a traversal out of it', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, slug: '..' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for a creator.handle of "." rather than building a traversal out of it', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, creator: { handle: '.' } }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for an empty slug', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, slug: '' }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
+  });
+
+  it('returns null for an empty creator.handle', async () => {
+    const { fetch } = stubFetch(json(200, { ...POST, creator: { handle: '' } }));
+    const meta = await getPostMetadata(POST.id, {
+      baseUrl: 'https://preview.example',
+      timeoutMs: 5000,
+      fetchImpl: fetch,
+    });
+    expect(meta).toBeNull();
   });
 
   it('returns null on a 404 (draft, unknown id, or a deployment without the route)', async () => {

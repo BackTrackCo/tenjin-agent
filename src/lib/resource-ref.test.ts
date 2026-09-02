@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { assertOnBaseOrigin, resolveResourceRef } from './resource-ref';
+import { assertOnBaseOrigin, resolveResourceRef, type ResourceRefNetOptions } from './resource-ref';
 import { CliError } from './errors';
 import {
   openStore,
@@ -212,6 +212,146 @@ describe('resolveResourceRef', () => {
     await expect(resolveResourceRef('iris/slug', dir, BASE)).rejects.toMatchObject({
       code: 'USAGE',
     });
+  });
+});
+
+/** A fetch stub for the `getPostMetadata` fallback: records calls and answers
+ *  one canned JSON response. */
+function stubFetch(status: number, body: unknown): { fetch: typeof fetch; calls: string[] } {
+  const calls: string[] = [];
+  const fn = (async (url: string | URL | Request) => {
+    calls.push(String(url));
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+  return { fetch: fn, calls };
+}
+
+/**
+ * tenjin-agent#252 item 1 / tenjin#803: `tenjin publish` returns a resourceId
+ * neither `findStoredCandidate` (no search ever ran) nor `findPairingCandidate`
+ * (that link is for a machine's own `tenjin sync`, not `publish`) knows about,
+ * so a bare `tenjin inspect <that-id>` used to refuse with RESOURCE_NOT_FOUND
+ * even though the CLI itself had just printed the id. This is the fallback:
+ * when a caller supplies network capability, a double local miss on a bare
+ * uuid is checked against the public `GET /api/posts/<id>/public` route
+ * (`getPostMetadata`) before giving up.
+ */
+describe('resolveResourceRef bare-id network fallback', () => {
+  const POST = {
+    id: RES,
+    slug: 'fix-pnpm-enoent',
+    title: 'Fix: pnpm — ENOENT',
+    price: '100000',
+    status: 'published',
+    creator: { handle: 'iris' },
+  };
+
+  it('resolves via the public by-id route when both local sources miss', async () => {
+    const { fetch } = stubFetch(200, POST);
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toEqual({
+      url: `${BASE}/api/read/${POST.creator.handle}/${POST.slug}`,
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
+  });
+
+  /**
+   * PR 283 round-2 review (Greptile P1, confirmed independently by A1igator):
+   * the id compare in `getPostMetadata` is case-insensitive, so a caller
+   * spelling the id differently than the shelf still resolves — but the ref
+   * must then carry the SHELF's spelling forward, not the caller's. Downstream,
+   * `findDelivered`'s receipt-directory lookup is case-sensitive, so a ref
+   * that kept the caller's casing could miss a delivery already saved under
+   * the shelf's casing and pay twice for the same piece.
+   */
+  it("resolves an upper-cased request to a ref carrying the shelf's own id casing", async () => {
+    const upper = RES.toUpperCase();
+    const { fetch } = stubFetch(200, POST);
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(upper, dir, BASE, undefined, net)).resolves.toEqual({
+      url: `${BASE}/api/read/${POST.creator.handle}/${POST.slug}`,
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
+  });
+
+  /**
+   * PR 283 review, major finding, reproduced end to end through
+   * `resolveResourceRef` rather than only at `getPostMetadata`: a shelf
+   * answering about a DIFFERENT post than the one asked for must not resolve
+   * a ref that reads `resourceId: <what was asked for>` but points `url` at
+   * someone else's piece. The id-mismatch guard lives in `getPostMetadata`
+   * (agent-api.ts); this pins that the caller here inherits it rather than
+   * building a URL some other way.
+   */
+  it('refuses to resolve when the public route names a different post than asked for', async () => {
+    const { fetch } = stubFetch(200, {
+      ...POST,
+      id: '22222222-2222-4222-8222-222222222222',
+      slug: 'someone-elses-expensive-piece',
+      creator: { handle: 'attacker' },
+    });
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).rejects.toMatchObject({
+      code: 'RESOURCE_NOT_FOUND',
+    });
+  });
+
+  it('stays a clean RESOURCE_NOT_FOUND when the public route also 404s', async () => {
+    const { fetch } = stubFetch(404, { error: 'not found' });
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).rejects.toMatchObject({
+      code: 'RESOURCE_NOT_FOUND',
+    });
+  });
+
+  it('never calls the network when a stored search candidate already resolves it', async () => {
+    await recordSearch(dir, {
+      searchId: '0197aaaa-bbbb-cccc-dddd-000000000006',
+      at: agoIso(2 * DAY),
+      question: 'q',
+      decision: 'CANDIDATES',
+      candidates: [
+        { resourceId: RES, url: 'https://tenjin.blog/api/read/iris/slug', title: 't', price: '1' },
+      ],
+    });
+    const { fetch, calls } = stubFetch(200, POST);
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toMatchObject({
+      resourceId: RES,
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('never calls the network when a pairing_post link already resolves it', async () => {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    try {
+      store.run(STORE_SQL.setState, [
+        '',
+        STATE_PAIRING_POST_PREFIX + '3',
+        JSON.stringify({
+          postId: RES,
+          origin: BASE,
+          at: Date.now(),
+          own: true,
+          url: 'https://tenjin.blog/api/read/team/fix-pairing',
+        }),
+        Date.now(),
+      ]);
+    } finally {
+      store.close();
+    }
+    const { fetch, calls } = stubFetch(200, POST);
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toMatchObject({
+      resourceId: RES,
+    });
+    expect(calls).toHaveLength(0);
   });
 });
 

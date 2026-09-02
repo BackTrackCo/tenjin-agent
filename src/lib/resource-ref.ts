@@ -3,13 +3,18 @@ import { findPairingCandidate, findStoredCandidate } from './state-store';
 import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
 import { isSameDeployment } from './production-origin';
+import { getPostMetadata } from './agent-api';
+import { trimSlash } from './url';
+import type { ShelfBypass } from './http';
 
 /**
  * Resolve a `<resource-url-or-id>` CLI argument to the payable read URL. A full
  * http(s) URL must live on the configured deployment; a bare uuid is a
- * resourceId, resolved to its URL through the local search store (the read route
- * is keyed by handle/slug, so an id alone cannot build the URL). Anything else is
- * a usage error with a clear fix.
+ * resourceId, resolved to its URL first through the local search store (the read
+ * route is keyed by handle/slug, so an id alone cannot build the URL on its own),
+ * then — when a caller supplies `net` — through the public by-id route
+ * (`getPostMetadata`), for an id neither local source has ever seen. Anything
+ * else is a usage error with a clear fix.
  *
  * The origin pin is a MONEY-PATH trust boundary, not pedantry: `buy` sends a
  * wallet-signed SIWX header (a bearer credential scoped to the configured
@@ -100,11 +105,22 @@ function onOrigin(origin: string, baseUrl: string): boolean {
   }
 }
 
+/** The network capability a bare-id resolution falls back on (see below). Left
+ *  optional and threaded through explicitly rather than defaulted to the
+ *  global `fetch`, so a caller that omits it gets exactly today's local-only
+ *  resolution — no test or seam has to stub a network it never asked for. */
+export interface ResourceRefNetOptions {
+  timeoutMs: number;
+  bypass?: ShelfBypass;
+  fetchImpl?: typeof fetch;
+}
+
 export async function resolveResourceRef(
   arg: string,
   dataDir: string,
   baseUrl: string,
   publicShelfUrl?: string,
+  net?: ResourceRefNetOptions,
 ): Promise<ResourceRef> {
   // The second shelf only widens anything when it is a DIFFERENT origin; in
   // public mode the two are the same and this is a no-op.
@@ -132,9 +148,48 @@ export async function resolveResourceRef(
       (await findStoredCandidate(dataDir, trimmed)) ??
       (await findPairingCandidate(dataDir, trimmed));
     if (candidate === null) {
-      throw new CliError('RESOURCE_NOT_FOUND', `No local search knows resource ${trimmed}.`, {
-        fix: 'Run `tenjin search` to surface it first, or pass the full read URL.',
-      });
+      // Both local sources miss. The one id-only route left is the public
+      // by-id lookup (tenjin#803, `getPostMetadata`): it is what lets an id
+      // this CLI's own `tenjin publish` just returned resolve immediately,
+      // without a `tenjin search` round trip to plant it in the local store
+      // first. Only attempted when a caller actually supplied network
+      // capability — see `ResourceRefNetOptions`.
+      const remote = net !== undefined ? await getPostMetadata(trimmed, { baseUrl, ...net }) : null;
+      if (remote === null) {
+        // The shelf-consulted branch gets its own fix line (PR 283 review nit):
+        // "run `tenjin search`" is no help once the shelf itself has already
+        // 404'd the id, and would send an agent back around a loop that cannot
+        // change the answer.
+        throw new CliError(
+          'RESOURCE_NOT_FOUND',
+          net !== undefined
+            ? `Resource ${trimmed} is not known locally or on the shelf.`
+            : `No local search knows resource ${trimmed}.`,
+          {
+            fix:
+              net !== undefined
+                ? 'Check the id and the configured base URL (`tenjin config get baseUrl`), or pass the full read URL.'
+                : 'Run `tenjin search` to surface it first, or pass the full read URL.',
+          },
+        );
+      }
+      // The read route is keyed by handle/slug, never by id, so this is the
+      // one place that shape is built rather than read off a stored/served
+      // candidate. Re-asserted like every other arm below: the metadata came
+      // back on `baseUrl`, but the origin check is what makes that a proof
+      // rather than an assumption.
+      const url = canonicalReadUrl(
+        `${trimSlash(baseUrl)}/api/read/${encodeURIComponent(remote.creator.handle)}/${encodeURIComponent(remote.slug)}`,
+      );
+      assertOnBaseOrigin(url, baseUrl, 'resolved candidate URL', alsoAllow);
+      // `remote.id`, not `trimmed` (PR 283 round-2 review): the id compare
+      // above is case-insensitive, so a differently-cased request still gets
+      // here, and `trimmed` would carry the CALLER's casing into a ref that
+      // downstream code treats as canonical — `findDelivered`'s
+      // receipt-directory path is case-sensitive, so a `buy` under one
+      // casing would miss a delivery saved under another and pay twice for
+      // the same piece.
+      return { url, resourceId: remote.id, shelfBaseUrl: shelfFor(url) };
     }
     // The stored url was origin-checked at search time, but the config can have
     // changed since; re-assert against the CURRENT base URL before any send.
