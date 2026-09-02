@@ -296,6 +296,18 @@ export const PUSH_READ_PACKAGES_MAX = 10;
  */
 export const PUSH_WATCHDOG_MS = 4500;
 export const PUSH_HOOK_TIMEOUT_SECONDS = 8;
+/**
+ * How late into a SubagentStart fire a team-shelf body fetch may still be
+ * STARTED. Past it the arm hands the child the pointer instead and records why,
+ * because a body it cannot finish reading costs the child its whole delivery:
+ * the watchdog exits the process mid-fetch, after the slot has already been
+ * taken and deleted.
+ *
+ * DERIVED, NOT PICKED, so it cannot drift away from the two bounds it sits
+ * between: the fetch's own timeout plus half a second for the ledger write and
+ * the emit must both fit under the process watchdog.
+ */
+export const PUSH_SUBAGENT_BODY_DEADLINE_MS = PUSH_WATCHDOG_MS - PUSH_BODY_TIMEOUT_MS - 500;
 /** The prompt arm's own budgets, tighter than every other arm's: it runs between
  *  the human pressing enter and the model starting, so the whole point is lost
  *  if it is felt. A lookup that does not fit is simply not made. */
@@ -961,9 +973,20 @@ async function shelfDeliver(args, asked) {
     });
     return null;
   }
+  // A TEAM HIT IS THE FINDING ITSELF, WHATEVER THE CAP HAS LEFT. The
+  // per-session cap rations how much of a session's context the PUBLIC
+  // marketplace may spend: a stranger's piece is a lead, and five of them is
+  // already generous. A team piece is not a lead — a teammate wrote it about
+  // this repository — and the pointer form bought almost nothing when it was
+  // measured: 56 of 60 deliveries were pointers, the id was followed 4 times,
+  // and the 4 bodies that did land read as answers. So the cap still governs
+  // the public shelf and no longer gags the team one. THE PAID RULE IS
+  // UNCHANGED on both shelves: \`isFree\` is the other half of this gate, and
+  // nothing paid is ever fetched here.
+  const teamHit = row.shelf === 'team';
   let form = 'short';
   let text = shortForm(v.top, opener);
-  if (isFree(v.top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
+  if (isFree(v.top) && (teamHit || injectedCount(sessionId) < PUSH_INJECT_MAX)) {
     const body = await fetchFreeBody(v.top, config);
     if (body !== null) {
       form = 'full';
@@ -3070,7 +3093,11 @@ async function teamResolve(args) {
     let text = pointerOnly
       ? clean(TEAM_PAIRING_OPENER + '\n' + TEAM_TEST_COARSE_LINE, PAIRING_BODY_MAX)
       : shortForm(top, TEAM_PAIRING_OPENER);
-    if (!pointerOnly && isFree(top) && injectedCount(sessionId) < PUSH_INJECT_MAX) {
+    // NO CAP HERE EITHER: every row this arm writes is on the team shelf, and a
+    // team finding is delivered whole. \`pointerOnly\` is a different rule and
+    // stays — a COARSE test-key match says "this file/suite", not "this test"
+    // (tenjin-agent#267), and it is deliberately one line whatever the cap says.
+    if (!pointerOnly && isFree(top)) {
       const body = await fetchFreeBody(top, config);
       if (body !== null) {
         form = 'full';
@@ -3547,6 +3574,7 @@ export function pushFailureHookScript(dataDir: string): string {
  */
 const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
+const BODY_DEADLINE_MS = __BODY_DEADLINE__;
 const SIGNAL_WINDOW_MS = __SIGNAL_WINDOW__;
 const FINDING_MAX_CHARS = __FINDING_MAX__;
 const MESSAGE_TAIL = __MESSAGE_TAIL__;
@@ -3626,23 +3654,55 @@ function childPointer(candidate, opener, marker, shelf, searchId) {
     rungs.push('or carry that resource id into your final answer');
     lines.push(rungs.join('; ') + ' and let your parent decide.');
   }
-  // THE ONE VALID OUTCOME ASK. '--last' resolves through latestDeliberate,
-  // whose filter is source IS NULL OR source = 'cli', which by construction
-  // EXCLUDES the dispatch-hook search this delivery came from: it would either
-  // throw SEARCH_NOT_FOUND or bind to the machine's most recent CLI search in
-  // some other project and post against that. The id is right here, so name
-  // it; with no id there is no valid ask and the rung is omitted rather than
-  // guessed at. The statuses are the three of OUTCOME_STATUSES a reader can
-  // report; anything outside that set throws USAGE. Spelled out rather than
-  // pipe-separated: the line is framed as runnable, and 'a|b|c' copied verbatim
-  // into a shell is three piped commands whose first one posts 'used'.
-  if (searchId !== '') {
-    lines.push(
-      'Afterwards report whether it helped: tenjin outcome --search-id ' + searchId +
-        ' --status <status>, where <status> is one of: used, partially_used, rejected. ' +
-        'Or state in your final answer whether you used it.',
-    );
-  }
+  const ask = outcomeAsk(searchId);
+  if (ask !== null) lines.push(ask);
+  lines.push('[tenjin-delivery ' + marker + ']');
+  return lines.join('\n');
+}
+
+/**
+ * THE ONE VALID OUTCOME ASK, or null when there is no id to ask against.
+ * '--last' resolves through latestDeliberate,
+ * whose filter is source IS NULL OR source = 'cli', which by construction
+ * EXCLUDES the dispatch-hook search this delivery came from: it would either
+ * throw SEARCH_NOT_FOUND or bind to the machine's most recent CLI search in
+ * some other project and post against that. The id is right here, so name
+ * it; with no id there is no valid ask and the rung is omitted rather than
+ * guessed at. The statuses are the three of OUTCOME_STATUSES a reader can
+ * report; anything outside that set throws USAGE. Spelled out rather than
+ * pipe-separated: the line is framed as runnable, and 'a|b|c' copied verbatim
+ * into a shell is three piped commands whose first one posts 'used'.
+ *
+ * SHARED BY BOTH CHILD FORMS. A child that was handed the body still has to
+ * report whether it helped, and the grading reads the same row either way.
+ */
+function outcomeAsk(searchId) {
+  if (searchId === '') return null;
+  return (
+    'Afterwards report whether it helped: tenjin outcome --search-id ' + searchId +
+    ' --status <status>, where <status> is one of: used, partially_used, rejected. ' +
+    'Or state in your final answer whether you used it.'
+  );
+}
+
+/**
+ * The child's FULL form: the same opener, header and fenced body a parent arm
+ * gets, then the two lines that make a child delivery answerable — the outcome
+ * ask and the correlation marker.
+ *
+ * NO CAPABILITY LADDER HERE, and nothing to resolve: the ladder in
+ * {@link childPointer} exists because a pointer is only as good as the child's
+ * ability to follow it (tenjin-agent#228), and a child holding the body has
+ * already been given what the rungs were for. The id is still on the header
+ * line, so a child that wants the canonical piece can still name it.
+ *
+ * THE FENCE COMES FROM {@link fullForm} UNCHANGED. A team body is a teammate's
+ * text, not ours, and it is no more trusted in a child than in a parent.
+ */
+function childFull(candidate, opener, marker, searchId, body) {
+  const lines = [fullForm(opener, headerLine(candidate), body)];
+  const ask = outcomeAsk(searchId);
+  if (ask !== null) lines.push(ask);
   lines.push('[tenjin-delivery ' + marker + ']');
   return lines.join('\n');
 }
@@ -4255,26 +4315,55 @@ async function main() {
 
   const { top, query, slotId, searchId, shelf, base } = readSlot(cache);
 
-  // POINTER ONLY, whatever the strength (tenjin-agent#228). The full-body
-  // upgrade this arm ran on a strong free hit had zero confirmed uses in the
-  // 19 sampled injections, at up to 6k chars each, while the one verified win
-  // was a short pointer; the body fetch is retired for child delivery until
-  // receipts prove a child reads more than the pointer.
-  const form = 'short';
   // The definite opener, not a hedged one: the short openers said "may match"
   // for the 'moderate' strength the shelf verdict retired, and only a strong
   // hit is ever parked for a child.
-  const text = childPointer(
-    top,
-    shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER,
-    marker,
-    shelf,
-    searchId,
-  );
+  const opener = shelf === 'team' ? TEAM_OPENER : PUBLIC_OPENER;
+  // A PUBLIC HIT IS STILL A POINTER (tenjin-agent#228): the full-body upgrade
+  // this arm once ran on any strong free hit had zero confirmed uses in the 19
+  // sampled injections, at up to 6k chars each, while the one verified win was
+  // a short pointer.
+  //
+  // A TEAM HIT IS THE FINDING. That measurement is now the argument FOR this,
+  // not against it: 56 of 60 deliveries were pointers and 4 of them were
+  // followed, so the pointer is what nobody read. A teammate's finding about
+  // this repository is the answer to the work order the child is starting on,
+  // and the child is the context that was dispatched to go and find it.
+  let form = 'short';
+  let text = childPointer(top, opener, marker, shelf, searchId);
+  // Why a FREE team hit went out as a pointer anyway, recorded ON THE INJECTED
+  // ROW rather than inferred from the form: 'body-budget' (no room left in the
+  // fire to finish a fetch) and 'body-unavailable' (the shelf answered without
+  // one) are different problems, and the ledger is the only place that
+  // difference can be counted. A PAID team hit carries no reason: the pointer
+  // is what it is designed to get, in a context with no spend authority, and it
+  // is not a fallback from anything.
+  let reason;
+  if (shelf === 'team' && isFree(top)) {
+    // THE ARM'S OWN CLOCK, against the process watchdog armed in the prelude.
+    // \`process.uptime()\` counts from process start, which is BEFORE that timer
+    // was armed, so this errs toward the pointer rather than toward a fetch the
+    // watchdog kills mid-flight — and a killed fire has already taken and
+    // deleted the slot, so it costs the child the delivery outright.
+    if (process.uptime() * 1000 > BODY_DEADLINE_MS) {
+      reason = 'body-budget';
+    } else {
+      // Same fetch a parent arm makes, with the same byte cap and the same
+      // timeout: one keyless GET of a free piece's own url.
+      const body = await fetchFreeBody(top, config);
+      if (body === null) {
+        reason = 'body-unavailable';
+      } else {
+        form = 'full';
+        text = childFull(top, opener, marker, searchId, body);
+      }
+    }
+  }
   const claimed = recordDecision({
     ...base,
     action: 'injected',
     form,
+    reason,
     tokens: Math.ceil(text.length / 4),
   });
   // Same rule as every other arm: the unique index is the bound, so a piece a
@@ -4285,7 +4374,7 @@ async function main() {
     return quiet();
   }
   // BEFORE the emit, because emit exits the process.
-  heartbeat('delivered', { query, slotId, marker });
+  heartbeat('delivered', { query, slotId, marker, form, ...(reason === undefined ? {} : { reason }) });
   emit('SubagentStart', text);
 }
 
@@ -4294,6 +4383,7 @@ main().catch(quiet);
 
 export function pushSubagentHookScript(dataDir: string): string {
   const js = SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))
+    .replaceAll('__BODY_DEADLINE__', String(PUSH_SUBAGENT_BODY_DEADLINE_MS))
     .replaceAll('__SIGNAL_WINDOW__', String(PUSH_CAPTURE_SIGNAL_WINDOW_MS))
     .replaceAll('__FINDING_MAX__', String(PUSH_FINDING_MAX_CHARS))
     .replaceAll('__MESSAGE_TAIL__', String(PUSH_FINDING_MESSAGE_TAIL))

@@ -50,6 +50,10 @@ import {
   PUSH_PROMPT_BUDGET_MS,
   PUSH_PROMPT_SEARCH_TIMEOUT_MS,
   PUSH_PROMPT_WATCHDOG_MS,
+  PUSH_BODY_TIMEOUT_MS,
+  PUSH_INJECT_MAX_PER_SESSION,
+  PUSH_SUBAGENT_BODY_DEADLINE_MS,
+  PUSH_WATCHDOG_MS,
   subagentCaptureReason,
   pushContextHookScript,
   pushFailureHookScript,
@@ -265,6 +269,49 @@ async function writeConfig(config: Record<string, unknown>): Promise<void> {
 /** Push on, pointed at the stub. */
 async function pushOn(baseUrl: string, hooks: Record<string, unknown> = {}): Promise<void> {
   await writeConfig({ baseUrl, hooks: { push: 'on', ...hooks } });
+}
+
+/**
+ * Spend this session's whole full-form allowance, without running the arms that
+ * would spend it. The rows are what {@link PUSH_INJECT_MAX_PER_SESSION} counts —
+ * `action = 'injected'` for the session — and each names a resource of its own,
+ * so nothing here can also trip the once-per-session dedup. The store has to
+ * exist already: a fire that opened it is what every caller does first.
+ */
+function fillInjectCap(session: string = SESSION, count = PUSH_INJECT_MAX_PER_SESSION): void {
+  const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+  try {
+    for (let i = 0; i < count; i += 1) {
+      db.prepare(STORE_SQL.insertInjection).run(
+        `filler-uid-${i}`,
+        null,
+        Date.now(),
+        session,
+        'project',
+        'machine',
+        'prompt',
+        'public',
+        `filler-resource-${i}`,
+        'a piece this session was already shown',
+        null,
+        '0',
+        null,
+        null,
+        null,
+        'strong',
+        'high',
+        1,
+        'injected',
+        null,
+        'full',
+        0,
+        20,
+        null,
+      );
+    }
+  } finally {
+    db.close();
+  }
 }
 
 interface LedgerRow {
@@ -1245,6 +1292,60 @@ describe('the two shelves', () => {
       action: 'injected',
       form: 'full',
     });
+  });
+
+  /**
+   * THE CAP IS A PUBLIC-SHELF RULE. It rations how much of a session's context
+   * a stranger's piece may spend; a teammate's finding about this repository is
+   * not a lead to follow but the answer to the step being taken, so the team
+   * shelf delivers the whole body however many injections came before it.
+   */
+  it('delivers a team hit in full with the per-session cap already spent', async () => {
+    const team = await serve(answersOnly(/beacon/i, TEAM_RESOURCE_ID, TEAM_BODY_MD));
+    const pub = await serve(answersOnly(/nothing-matches-this/, RESOURCE_ID, BODY_MD));
+    await teamMode(team, pub);
+
+    // A fire that misses both shelves, to open the store the filler writes to.
+    await runScript(
+      websearchHookScript(dataDir),
+      webSearch('stripe webhook signature clock skew verification'),
+    );
+    fillInjectCap();
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('read beacon hand-seeded posts tenjin'),
+    );
+    expect(injected(run)).toContain(TEAM_BODY_MD);
+    expect(injected(run)).toContain('your team shelf');
+    const teamRows = (await ledger()).filter((r) => r.trigger === 'research' && r.shelf === 'team');
+    const row = teamRows[teamRows.length - 1];
+    expect(row).toMatchObject({ action: 'injected', form: 'full' });
+  });
+
+  /** And the half that does not change: the same spent cap still cuts a public
+   *  hit back to the pointer, which is the whole reason the cap exists. */
+  it('still cuts a public hit to the pointer with the cap spent', async () => {
+    const { baseUrl } = await serve(answersOnly(/beacon/i, RESOURCE_ID, BODY_MD));
+    await pushOn(baseUrl);
+
+    await runScript(
+      websearchHookScript(dataDir),
+      webSearch('stripe webhook signature clock skew verification'),
+    );
+    fillInjectCap();
+
+    const run = await runScript(
+      websearchHookScript(dataDir),
+      webSearch('read beacon hand-seeded posts tenjin'),
+    );
+    const text = injected(run) ?? '';
+    expect(text).toContain('Read it free: tenjin read');
+    expect(text).not.toContain(BODY_MD);
+    expect(text).not.toContain('tenjin-body');
+    const researchRows = (await ledger()).filter((r) => r.trigger === 'research');
+    const row = researchRows[researchRows.length - 1];
+    expect(row).toMatchObject({ action: 'injected', form: 'short' });
   });
 
   it('falls through to the public shelf when the team shelf has nothing', async () => {
@@ -6356,7 +6457,8 @@ describe('the subagent arm (SubagentStart)', () => {
       agentId: 'a1',
       candidate: { resourceId: RESOURCE_ID },
       action: 'injected',
-      // Pointer only for a child, whatever the strength (tenjin-agent#228).
+      // A PUBLIC hit reaches a child as a pointer, whatever the strength
+      // (tenjin-agent#228). The team shelf is the exception, below.
       form: 'short',
     });
 
@@ -6664,13 +6766,55 @@ describe('the subagent arm (SubagentStart)', () => {
   });
 
   /**
-   * A team shelf exists only behind a protected deployment, and the bypass
-   * header that opens it is origin-pinned CLI config a child's WebFetch cannot
-   * send, so the fetch rung would hand back the Vercel interstitial. The CLI
-   * and MCP rungs still work, because they carry the header.
+   * THE CHILD GETS THE FINDING, NOT A LEAD TO IT, on the team shelf. The
+   * pointer was measured and it was not read: 56 of 60 deliveries were
+   * pointers and the id was followed 4 times, while the bodies that landed
+   * read as answers. A child dispatched to go and find this out is the context
+   * with the most use for it, so a team hit is fetched and fenced exactly as a
+   * parent's is, and everything that makes the delivery answerable afterwards —
+   * the outcome ask and the correlation marker — rides along with it.
    */
-  it('drops the fetch rung on a team-shelf delivery', async () => {
-    const { baseUrl } = await serve(echo());
+  it('hands a team-shelf finding to the child in full, fenced and still gradable', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    patchCache({ shelf: 'team' });
+    const afterDispatch = hits();
+
+    const run = await runScript(pushSubagentHookScript(dataDir), start);
+    const text = injected(run) ?? '';
+    // The body itself, inside the fence that is the trust boundary for it.
+    expect(text).toContain(BODY_MD);
+    expect(text).toMatch(/--- tenjin-body \S+ ---/);
+    expect(text).toContain('your team shelf');
+    // The two lines the grading and the receipt read.
+    expect(text).toContain(`tenjin outcome --search-id ${SEARCH_ID}`);
+    expect(text).toMatch(/\[tenjin-delivery [0-9A-HJKMNP-TV-Z]{26}\]/);
+    // The capability ladder is what a pointer needs and a body does not.
+    expect(text).not.toContain('tenjin_inspect MCP tool');
+    // One request, and it is the body GET: the child's own delivery.
+    expect(hits()).toBe(afterDispatch + 1);
+
+    expect((await ledger()).find((r) => r.trigger === 'subagent')).toMatchObject({
+      action: 'injected',
+      shelf: 'team',
+      form: 'full',
+    });
+  });
+
+  /**
+   * The fallback, and the rung it keeps alive. A team shelf exists only behind
+   * a protected deployment, and the bypass header that opens it is origin-pinned
+   * CLI config a child's WebFetch cannot send, so the fetch rung would hand back
+   * the Vercel interstitial; the CLI and MCP rungs still work, because they carry
+   * the header. Reached here by a shelf that answers the search and not the body,
+   * which is also the case the ledger has to be able to count.
+   */
+  it('falls back to the pointer, minus the fetch rung, when a team body does not come back', async () => {
+    const search = echo();
+    const { baseUrl } = await serve((req) =>
+      req.url.startsWith('/api/search') ? search(req) : { status: 404, json: {} },
+    );
     await pushOn(baseUrl);
     await runScript(dispatchHookScript(dataDir), dispatch());
     patchCache({ shelf: 'team' });
@@ -6679,6 +6823,14 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(text).toContain(`tenjin read ${RESOURCE_ID}`);
     expect(text).toContain('tenjin_inspect MCP tool');
     expect(text).not.toContain('or fetch ');
+    expect(text).not.toContain('tenjin-body');
+    // WHY it is a pointer, on the row: a body that never arrived and a body
+    // there was no time to fetch are different problems.
+    expect((await ledger()).find((r) => r.trigger === 'subagent')).toMatchObject({
+      action: 'injected',
+      form: 'short',
+      reason: 'body-unavailable',
+    });
   });
 
   /**
@@ -6858,14 +7010,42 @@ describe('the subagent arm (SubagentStart)', () => {
     expect(STORE_RELAY_WINDOW_MS).toBe(PUSH_CACHE_TTL_MS);
   });
 
-  /** The full-body arm is retired for child delivery: no code path from the
-   *  SubagentStart arm reaches a body fetch or the fenced full form. */
-  it('has no route from the subagent arm to a body fetch', () => {
-    const source = pushSubagentHookScript(dataDir);
-    const arm = source.slice(source.lastIndexOf('const CACHE_TTL_MS'));
-    expect(arm.length).toBeGreaterThan(0);
-    expect(arm).not.toContain('fetchFreeBody');
-    expect(arm).not.toContain('fullForm(');
+  /**
+   * THE PUBLIC SHELF IS UNCHANGED (tenjin-agent#228): a stranger's piece
+   * reaches a child as a pointer, and this arm makes no request at all for it.
+   * Asserted on the wire rather than on the source, because "no body fetch" is
+   * a property of what the fire does, not of what the file says.
+   */
+  it('fetches nothing and hands a pointer on a public-shelf delivery', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    await runScript(dispatchHookScript(dataDir), dispatch());
+    const afterDispatch = hits();
+
+    const text = injected(await runScript(pushSubagentHookScript(dataDir), start)) ?? '';
+    expect(text).toContain(`tenjin read ${RESOURCE_ID}`);
+    expect(text).not.toContain(BODY_MD);
+    expect(text).not.toContain('tenjin-body');
+    expect(hits()).toBe(afterDispatch);
+    expect((await ledger()).find((r) => r.trigger === 'subagent')).toMatchObject({
+      action: 'injected',
+      form: 'short',
+      // No fallback happened, so there is nothing to explain.
+      reason: undefined,
+    });
+  });
+
+  /**
+   * The budget the team body fetch is started against. A fetch the watchdog
+   * kills mid-flight costs the child its delivery outright — the slot has
+   * already been taken and deleted — so the deadline plus the fetch's own
+   * timeout plus the ledger write and the emit have to fit under the process
+   * watchdog. Pinned as arithmetic because the failure it guards against is a
+   * later edit to one of the three numbers, not a bug in a branch.
+   */
+  it('starts a team body fetch only where the fetch can still finish', () => {
+    expect(PUSH_SUBAGENT_BODY_DEADLINE_MS).toBeGreaterThan(0);
+    expect(PUSH_SUBAGENT_BODY_DEADLINE_MS + PUSH_BODY_TIMEOUT_MS).toBeLessThan(PUSH_WATCHDOG_MS);
   });
 
   /**
