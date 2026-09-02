@@ -668,6 +668,13 @@ const postMetadataSchema = z
   .passthrough();
 
 export interface PostMetadata {
+  /** The shelf's own spelling of the id, not necessarily the caller's
+   *  (PR 283 round-2 review): the compare against the requested `resourceId`
+   *  is case-insensitive, so a caller's differently-cased id still resolves,
+   *  and this is what lets the ref it resolves to carry the canonical
+   *  casing instead — the one `findDelivered`'s case-sensitive filesystem
+   *  path has to agree with on every later lookup. */
+  id: string;
   slug: string;
   title: string;
   price: string;
@@ -726,6 +733,7 @@ export async function getPostMetadata(
   // uppercase id must not fail the join a lowercase one would pass.
   if (parsed.data.id.toLowerCase() !== resourceId.toLowerCase()) return null;
   return {
+    id: parsed.data.id,
     slug: parsed.data.slug,
     title: parsed.data.title,
     price: parsed.data.price,

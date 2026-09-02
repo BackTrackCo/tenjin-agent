@@ -182,7 +182,14 @@ export async function resolveResourceRef(
         `${trimSlash(baseUrl)}/api/read/${encodeURIComponent(remote.creator.handle)}/${encodeURIComponent(remote.slug)}`,
       );
       assertOnBaseOrigin(url, baseUrl, 'resolved candidate URL', alsoAllow);
-      return { url, resourceId: trimmed, shelfBaseUrl: shelfFor(url) };
+      // `remote.id`, not `trimmed` (PR 283 round-2 review): the id compare
+      // above is case-insensitive, so a differently-cased request still gets
+      // here, and `trimmed` would carry the CALLER's casing into a ref that
+      // downstream code treats as canonical — `findDelivered`'s
+      // receipt-directory path is case-sensitive, so a `buy` under one
+      // casing would miss a delivery saved under another and pay twice for
+      // the same piece.
+      return { url, resourceId: remote.id, shelfBaseUrl: shelfFor(url) };
     }
     // The stored url was origin-checked at search time, but the config can have
     // changed since; re-assert against the CURRENT base URL before any send.

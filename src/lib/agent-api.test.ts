@@ -836,6 +836,7 @@ describe('getPostMetadata', () => {
     creator: { handle: 'iris' },
   };
   const EXPECTED = {
+    id: POST.id,
     slug: POST.slug,
     title: POST.title,
     price: POST.price,
@@ -921,14 +922,21 @@ describe('getPostMetadata', () => {
     expect(meta).toBeNull();
   });
 
-  it('matches the requested id case-insensitively, like the route itself', async () => {
-    const { fetch } = stubFetch(json(200, { ...POST, id: POST.id.toUpperCase() }));
+  /** The compare is case-insensitive, but the returned `id` is NOT lowercased
+   *  to match — it is the shelf's own spelling, verbatim, because that is what
+   *  `resolveResourceRef` carries forward as the ref's canonical `resourceId`
+   *  (PR 283 round-2 review: the caller's original casing must not survive
+   *  past this point, or a later case-sensitive lookup like `findDelivered`
+   *  can miss a delivery saved under the shelf's casing). */
+  it('matches the requested id case-insensitively, and returns the shelf spelling verbatim', async () => {
+    const upper = POST.id.toUpperCase();
+    const { fetch } = stubFetch(json(200, { ...POST, id: upper }));
     const meta = await getPostMetadata(POST.id, {
       baseUrl: 'https://preview.example',
       timeoutMs: 5000,
       fetchImpl: fetch,
     });
-    expect(meta).toEqual(EXPECTED);
+    expect(meta).toEqual({ ...EXPECTED, id: upper });
   });
 
   it('returns null for a slug of ".." rather than building a traversal out of it', async () => {

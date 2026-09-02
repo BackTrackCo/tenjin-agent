@@ -260,6 +260,26 @@ describe('resolveResourceRef bare-id network fallback', () => {
   });
 
   /**
+   * PR 283 round-2 review (Greptile P1, confirmed independently by A1igator):
+   * the id compare in `getPostMetadata` is case-insensitive, so a caller
+   * spelling the id differently than the shelf still resolves — but the ref
+   * must then carry the SHELF's spelling forward, not the caller's. Downstream,
+   * `findDelivered`'s receipt-directory lookup is case-sensitive, so a ref
+   * that kept the caller's casing could miss a delivery already saved under
+   * the shelf's casing and pay twice for the same piece.
+   */
+  it("resolves an upper-cased request to a ref carrying the shelf's own id casing", async () => {
+    const upper = RES.toUpperCase();
+    const { fetch } = stubFetch(200, POST);
+    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
+    await expect(resolveResourceRef(upper, dir, BASE, undefined, net)).resolves.toEqual({
+      url: `${BASE}/api/read/${POST.creator.handle}/${POST.slug}`,
+      resourceId: RES,
+      shelfBaseUrl: BASE,
+    });
+  });
+
+  /**
    * PR 283 review, major finding, reproduced end to end through
    * `resolveResourceRef` rather than only at `getPostMetadata`: a shelf
    * answering about a DIFFERENT post than the one asked for must not resolve
