@@ -412,7 +412,7 @@ describe('runPushStatus', () => {
         'sess',
         'proj',
         'machine',
-        'sig_v1',
+        'sig_v2',
         `key-${uid}`,
         null,
         head,

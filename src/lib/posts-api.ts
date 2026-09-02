@@ -60,7 +60,7 @@ export interface PublishInput {
   scanAck?: string;
   /**
    * Exact-match keys `POST /api/keys/resolve` answers on (tenjin#774): a
-   * failure fingerprint (`sig_v1:<hash>`), a `name@version`, a command head, a
+   * failure fingerprint (`sig_v2:<hash>`), a `name@version`, a command head, a
    * repo. Its own top-level field, not a card field, because a mechanical
    * pairing carries keys and no card. `verified` is the writer's own claim and
    * defaults to false; see {@link normalizePostKeys} for the bounds.
@@ -429,6 +429,12 @@ export interface PublishResult {
   /** Present only when a card was sent (and echoed). */
   cacheEligible?: boolean;
   cacheEligibleMissing: string[];
+  /**
+   * The server replayed a previous publish under the same `Idempotency-Key`
+   * rather than creating anything: `Idempotency-Replayed: true` on a 200. The
+   * post in this result is the ORIGINAL one, unchanged.
+   */
+  replayed?: boolean;
   /** Server-dropped external image refs (spec: owned-uploads-only). */
   warnings: string[];
   /**
@@ -442,6 +448,14 @@ export interface PublishClientOptions {
   baseUrl: string;
   timeoutMs: number;
   fetchImpl?: typeof fetch;
+  /**
+   * Extra request headers, merged UNDER the auth headers so nothing here can
+   * displace a signature. `tenjin publish` uses it for `Idempotency-Key`
+   * (tenjin#763): the key is a header rather than a body field because it must
+   * not change the bytes the signature covers, and because the server's replay
+   * answer is a header too.
+   */
+  headers?: Record<string, string>;
   /** The team shelf's bypass secret and its origin; the transport attaches the
    *  header only for that origin. Writes only ever go to `baseUrl`, so this is
    *  what gets a publish past a protected team deployment. */
@@ -475,7 +489,8 @@ export async function publishPost(
     const res = await httpRequest(url, {
       method: 'POST',
       timeoutMs: opts.timeoutMs,
-      headers: { ...authHeaders },
+      // AUTH LAST, so a caller-supplied header can never displace a signature.
+      headers: { ...(opts.headers ?? {}), ...authHeaders },
       jsonBody: body,
       ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
       ...(opts.fetchImpl !== undefined ? { fetchImpl: opts.fetchImpl } : {}),
@@ -497,6 +512,21 @@ export async function publishPost(
     // tier, acknowledge), not an opaque server failure.
     const gate = parseScanRejection(res.status, res.json);
     if (gate !== null) throw new ScanGateError(gate);
+    // THE SAME KEY WITH DIFFERENT BYTES. The server refuses rather than
+    // guessing which body the caller meant, and this is the one publish
+    // failure whose remedy is not "retry": the key is derived from the body,
+    // so a mismatch means two different bodies hashed the same key or a key
+    // was reused by hand.
+    if (res.status === 422 && bodyErrorCode(res.json) === 'idempotency_key_reused') {
+      throw new CliError(
+        'PUBLISH_FAILED',
+        serverMessage(res.json) ?? 'That idempotency key is already used by a different post.',
+        {
+          fix: 'Nothing was published. Change the body, or publish without reusing the key.',
+          details: { status: res.status, ...(res.json !== undefined ? { server: res.json } : {}) },
+        },
+      );
+    }
     if (res.status !== 201 && res.status !== 200) throw publishFailed(res, body.keys);
 
     const parsed = ownPostSchema.safeParse(res.json);
@@ -516,6 +546,9 @@ export async function publishPost(
       priceAtomic: post.price,
       url: post.url,
       ...(post.resource !== undefined ? { cacheEligible: post.resource.cacheEligible } : {}),
+      // The server's own word for it, never inferred from the status code: a
+      // 200 is also what a deployment that predates the header answers with.
+      ...(res.header('idempotency-replayed') === 'true' ? { replayed: true } : {}),
       cacheEligibleMissing: post.resource?.cacheEligibleMissing ?? [],
       warnings: post.warnings ?? [],
       ...(scan !== null ? { scan } : {}),

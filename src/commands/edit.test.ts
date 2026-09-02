@@ -5,12 +5,40 @@ import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
 import { runPublish } from './publish';
-import { publishedUrlFor } from '../lib/publish-dedup';
-import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
+import { PUBLISHED_KEY_PREFIX, publishBodyHash } from '../lib/publish-dedup';
+import {
+  loadSearches,
+  markSearchResolved,
+  openStore,
+  recordSearch,
+  STORE_SQL,
+} from '../lib/state-store';
 import { testSigner } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
+
+/**
+ * The `published:<body hash>` row `recordPublished` writes, read back.
+ *
+ * A LOCAL HELPER, not a library export any more (tenjin#763): the read side of
+ * that ledger was `publishedUrlFor`, a publish pre-flight, and the pre-flight
+ * moved to the server as `Idempotency-Key`. The WRITE is still what these cases
+ * are about — a promotion records what it took public — so the assertion reads
+ * the row directly rather than keeping a production export alive for tests.
+ */
+async function publishedUrlFor(dataDir: string, bodyMd: string): Promise<string | null> {
+  const store = await openStore(dataDir);
+  if (store === null) return null;
+  try {
+    const row = store.get(STORE_SQL.getState, ['', PUBLISHED_KEY_PREFIX + publishBodyHash(bodyMd)]);
+    if (row === null || typeof row.value !== 'string') return null;
+    const url: unknown = JSON.parse(row.value);
+    return typeof url === 'string' && url.length > 0 ? url : null;
+  } finally {
+    store.close();
+  }
+}
 
 let dir: string;
 beforeEach(async () => {

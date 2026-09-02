@@ -2098,7 +2098,7 @@ describe('pairings: open, close, replay', () => {
     const opened = rows('SELECT * FROM pairings');
     expect(opened).toHaveLength(1);
     expect(opened[0]?.status).toBe('open');
-    expect(opened[0]?.kind).toBe('sig_v1');
+    expect(opened[0]?.kind).toBe('sig_v2');
     expect(opened[0]?.cmd_head).toBe('pnpm');
     expect(JSON.parse(String(opened[0]?.error_files))).toContain('migrate.ts');
 
@@ -2114,7 +2114,9 @@ describe('pairings: open, close, replay', () => {
     expect(closed[0]?.status).toBe('unverified');
     expect(closed[0]?.closes).toBe(1);
     expect(closed[0]?.scope).toBe('code');
-    expect(JSON.parse(String(closed[0]?.fix_files))).toEqual(['migrate.ts']);
+    // REPO-RELATIVE (tenjin-agent#269): the fix record's payload has to be a
+    // path a teammate can open, not a basename two files in a monorepo share.
+    expect(JSON.parse(String(closed[0]?.fix_files))).toEqual(['src/migrate.ts']);
   });
 
   /**
@@ -2144,11 +2146,12 @@ describe('pairings: open, close, replay', () => {
 
   it('never opens a pairing below the specificity floor', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
-    // No errno, no frame: a bare test-runner verdict that would key identically
-    // in every repo on earth.
+    // No errno, no frame: a bare verdict that would key identically in every
+    // repo on earth. Fired behind a NON-runner head, so this is the ERROR
+    // lane's own floor rather than the test lane's local-only row.
     await runScript(
       pushFailureHookScript(dataDir),
-      failure('pnpm test', 'FAIL  some suite\n\n2 failed\n'),
+      failure('pnpm build', 'FAIL  some suite\n\n2 failed\n'),
     );
     expect(rows('SELECT * FROM pairings')).toHaveLength(0);
     // The fire is still recorded — it just has no key worth storing.
@@ -2171,7 +2174,7 @@ describe('pairings: open, close, replay', () => {
     ]) {
       await runScript(
         pushFailureHookScript(dataDir),
-        failure('pnpm test', output, 'sess-' + output.length),
+        failure('pnpm build', output, 'sess-' + output.length),
       );
     }
     expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 0 });
@@ -2191,10 +2194,12 @@ describe('pairings: open, close, replay', () => {
    */
   it('stores no coarse key when only the frame cleared the floor', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
+    // A BUILD, not a test run: the error lane is where a coarse key exists at
+    // all, and it is the one this case is about.
     await runScript(
       pushFailureHookScript(dataDir),
       failure(
-        'pnpm test',
+        'pnpm build',
         'FAIL  src/a.test.ts\n Tests  2 failed | 5 passed (7)\n    at run (/repo/one/src/a.test.ts:12:3)\n',
       ),
     );
@@ -2206,19 +2211,19 @@ describe('pairings: open, close, replay', () => {
     expect(opened[0]?.coarse_key).toBeNull();
   });
 
-  /** A different test file, same vitest summary line: the two must not match. */
-  it('does not replay one test failure at another', async () => {
+  /** A different file, same summary line: the two must not match. */
+  it('does not replay one failure at another that shares its summary line', async () => {
     await writeConfig({ baseUrl: 'http://127.0.0.1:1' });
     const summary = (file: string) =>
       `FAIL  src/${file}\n Tests  2 failed | 5 passed (7)\n    at run (/repo/one/src/${file}:12:3)\n`;
-    await runScript(pushFailureHookScript(dataDir), failure('pnpm test', summary('a.test.ts')));
+    await runScript(pushFailureHookScript(dataDir), failure('pnpm build', summary('a.test.ts')));
     await runScript(pushContextHookScript(dataDir), edit('/repo/one/src/a.test.ts'));
-    await runScript(pushFailureHookScript(dataDir), success('pnpm test'));
+    await runScript(pushFailureHookScript(dataDir), success('pnpm build'));
     expect(rows('SELECT status FROM pairings')[0]?.status).toBe('unverified');
 
     const other = await runScript(
       pushFailureHookScript(dataDir),
-      failure('pnpm test', summary('b.test.ts'), 's2'),
+      failure('pnpm build', summary('b.test.ts'), 's2'),
     );
     expect(other.stdout).toBe('');
     expect(rows('SELECT COUNT(*) AS n FROM pairings')[0]).toEqual({ n: 2 });
@@ -2234,7 +2239,7 @@ describe('pairings: open, close, replay', () => {
       ['e4', 'error[E0412]: cannot find type `Foo`\n'],
     ];
     for (const [session, output] of cases) {
-      await runScript(pushFailureHookScript(dataDir), failure('pnpm test', output, session));
+      await runScript(pushFailureHookScript(dataDir), failure('pnpm build', output, session));
     }
     // Every one clears the floor: the failure row carries its signature. Only
     // the tsc case names a file, so only it OPENS a pairing (#212: a row whose
@@ -2372,7 +2377,7 @@ describe('pairings: open, close, replay', () => {
     });
     // And the wording still names only what the corroborating closers touched.
     expect(JSON.parse(String(rows('SELECT fix_files FROM pairings')[0]?.fix_files))).toEqual([
-      'migrate.ts',
+      'src/migrate.ts',
     ]);
     const third = await runScript(
       pushFailureHookScript(dataDir),

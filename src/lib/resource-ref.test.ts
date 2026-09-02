@@ -8,7 +8,7 @@ import {
   openStore,
   recordSearch,
   searchFingerprint,
-  STATE_PAIRING_POST_PREFIX,
+  STATE_PAIRING_FIX_PREFIX,
   STORE_SQL,
 } from './state-store';
 import { knownDeploymentOrigins } from './production-origin';
@@ -151,53 +151,21 @@ describe('resolveResourceRef', () => {
   });
 
   /**
-   * tenjin-agent#252: `tenjin sync` publishes a pairing to the team shelf and
-   * links it under `pairing_post:<n>` (own: true), but never records it as a
-   * search — so `inspect <id>`/`read <id>` on a post this machine's own CLI
-   * just published refused with RESOURCE_NOT_FOUND, because `findStoredCandidate`
-   * only ever looks at `searches`. This is the fallback: a pairing link that
-   * carries a `url` (stamped from `publishPost`'s own response) resolves too.
+   * tenjin-agent#252's pairing-link fallback is GONE, and this pins the
+   * replacement posture. `tenjin sync` no longer publishes a POST at all: a
+   * synced pairing is a FIX RECORD, which has no slug, no read route and no
+   * url, so there is nothing for an id lookup to resolve and the
+   * `pairing_fix:<n>` link carries none. A bare id this machine has never
+   * searched for now falls through to the public by-id route, or refuses.
    */
-  it('resolves a uuid via an own-published pairing_post link when no search knows it', async () => {
+  it('does not resolve a uuid from a pairing_fix link, which names a fix and not a post', async () => {
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
     try {
       store.run(STORE_SQL.setState, [
         '',
-        STATE_PAIRING_POST_PREFIX + '1',
-        JSON.stringify({
-          postId: RES,
-          origin: BASE,
-          at: Date.now(),
-          own: true,
-          url: 'https://tenjin.blog/api/read/team/fix-pairing',
-          title: 'Fix: pnpm vitest run — TS2345',
-          price: '0',
-        }),
-        Date.now(),
-      ]);
-    } finally {
-      store.close();
-    }
-    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({
-      url: 'https://tenjin.blog/api/read/team/fix-pairing',
-      resourceId: RES,
-      shelfBaseUrl: BASE,
-    });
-  });
-
-  /** A `held` link (a teammate's post whose slug this machine never fetched)
-   *  carries no `url`, and there is no unauthenticated by-id route to fall
-   *  through to — it stays RESOURCE_NOT_FOUND rather than inventing a request
-   *  the server has nowhere to answer. */
-  it('does not resolve a pairing_post link with no stored url', async () => {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.setState, [
-        '',
-        STATE_PAIRING_POST_PREFIX + '2',
-        JSON.stringify({ postId: RES, origin: BASE, at: Date.now(), held: true }),
+        STATE_PAIRING_FIX_PREFIX + '1',
+        JSON.stringify({ fixId: RES, origin: BASE, at: Date.now(), own: true }),
         Date.now(),
       ]);
     } finally {
@@ -231,8 +199,7 @@ function stubFetch(status: number, body: unknown): { fetch: typeof fetch; calls:
 
 /**
  * tenjin-agent#252 item 1 / tenjin#803: `tenjin publish` returns a resourceId
- * neither `findStoredCandidate` (no search ever ran) nor `findPairingCandidate`
- * (that link is for a machine's own `tenjin sync`, not `publish`) knows about,
+ * that `findStoredCandidate` does not know about (no search ever ran),
  * so a bare `tenjin inspect <that-id>` used to refuse with RESOURCE_NOT_FOUND
  * even though the CLI itself had just printed the id. This is the fallback:
  * when a caller supplies network capability, a double local miss on a bare
@@ -327,20 +294,14 @@ describe('resolveResourceRef bare-id network fallback', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('never calls the network when a pairing_post link already resolves it', async () => {
+  it('does call the network for an id only a pairing_fix link names: a fix is not a post', async () => {
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
     try {
       store.run(STORE_SQL.setState, [
         '',
-        STATE_PAIRING_POST_PREFIX + '3',
-        JSON.stringify({
-          postId: RES,
-          origin: BASE,
-          at: Date.now(),
-          own: true,
-          url: 'https://tenjin.blog/api/read/team/fix-pairing',
-        }),
+        STATE_PAIRING_FIX_PREFIX + '3',
+        JSON.stringify({ fixId: RES, origin: BASE, at: Date.now(), own: true }),
         Date.now(),
       ]);
     } finally {
@@ -351,7 +312,8 @@ describe('resolveResourceRef bare-id network fallback', () => {
     await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toMatchObject({
       resourceId: RES,
     });
-    expect(calls).toHaveLength(0);
+    // The link is not a local answer any more, so the by-id route is asked.
+    expect(calls).toHaveLength(1);
   });
 });
 

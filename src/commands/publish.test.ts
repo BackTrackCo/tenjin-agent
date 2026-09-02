@@ -6,6 +6,7 @@ import { Readable } from 'node:stream';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
 import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
 import { openStore } from '../lib/state-store';
+import { publishBodyHash } from '../lib/publish-dedup';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -114,6 +115,53 @@ function stubServer(post: Record<string, unknown> = CREATED): {
     });
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, calls };
+}
+
+/**
+ * A shelf that HONOURS `Idempotency-Key`, which is where publish dedup lives
+ * now (tenjin#763): the first body under a key creates (201), the same body
+ * under the same key replays the original (200 + `Idempotency-Replayed: true`),
+ * and a DIFFERENT body under a key already used is refused (422
+ * `idempotency_key_reused`) rather than guessed at.
+ */
+function idempotentServer(post: Record<string, unknown> = CREATED): {
+  fetch: typeof fetch;
+  calls: string[];
+  keys: () => Array<string | undefined>;
+} {
+  const calls: string[] = [];
+  const keys: Array<string | undefined> = [];
+  const seen = new Map<string, string>();
+  const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+    calls.push(String(url));
+    const headers = new Headers(init?.headers ?? {});
+    const key = headers.get('idempotency-key') ?? undefined;
+    keys.push(key);
+    const body = typeof init?.body === 'string' ? init.body : '';
+    if (key !== undefined) {
+      const prior = seen.get(key);
+      if (prior !== undefined && prior !== body) {
+        return new Response(
+          JSON.stringify({
+            error: { code: 'idempotency_key_reused', message: 'That key names a different post.' },
+          }),
+          { status: 422, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (prior !== undefined) {
+        return new Response(JSON.stringify(post), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'idempotency-replayed': 'true' },
+        });
+      }
+      seen.set(key, body);
+    }
+    return new Response(JSON.stringify(post), {
+      status: 201,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as unknown as typeof fetch;
+  return { fetch: fetchFn, calls, keys: () => keys };
 }
 
 /** A stub server that also captures the parsed request body. */
@@ -1098,13 +1146,13 @@ describe('runPublish — publish <file> --key', () => {
     await runPublish(
       baseArgs(await writeDoc(CLEAN), {
         mode: 'auto',
-        key: ['fingerprint=sig_v1:0f3a9c1d2b4e5f60', 'repo=github.com/a/b?ref=main'],
+        key: ['fingerprint=sig_v2:0f3a9c1d2b4e5f60', 'repo=github.com/a/b?ref=main'],
       }),
       makeCtx(),
       hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
     );
     expect(body()?.keys).toEqual([
-      { kind: 'fingerprint', key: 'sig_v1:0f3a9c1d2b4e5f60', verified: false },
+      { kind: 'fingerprint', key: 'sig_v2:0f3a9c1d2b4e5f60', verified: false },
       { kind: 'repo', key: 'github.com/a/b?ref=main', verified: false },
     ]);
   });
@@ -1121,7 +1169,7 @@ describe('runPublish — publish <file> --key', () => {
 
   it('refuses a bad kind or a bare value at the edge, before anything is signed', async () => {
     const file = await writeDoc(CLEAN);
-    for (const key of ['errno=ENOENT', 'sig_v1:abc', '=x']) {
+    for (const key of ['errno=ENOENT', 'sig_v2:abc', '=x']) {
       const { fetch, calls } = stubServer();
       const { provider, signCount } = spyProvider();
       await expect(
@@ -2035,58 +2083,81 @@ describe('runPublish on a team shelf', () => {
  * Publishing the same finding twice.
  *
  * A live run published five findings twice: the Stop hook's capture ask is
- * guarded once per session, but the marker guards the ASK and nothing downstream
- * dedups the publish. Two agents watching related sessions are two session ids
- * and both are asked; one agent whose turn ends twice around a retry is one id
- * and asked twice. What every duplicate shares is the body, so that is the key.
+ * guarded once per session, but the marker guards the ASK and nothing
+ * downstream deduped the publish. Two agents watching related sessions are two
+ * session ids and both are asked; one agent whose turn ends twice around a
+ * retry is one id and asked twice. What every duplicate shares is the body, so
+ * that is the key — and the KEY IS NOW THE SERVER'S (tenjin#763). The local
+ * pre-flight this replaces could only ever cover one machine, and the duplicate
+ * worth stopping is two machines publishing the same finding.
  */
-describe('runPublish — the same body is published once per machine', () => {
-  it('reports the existing url and makes no request at all', async () => {
+describe('runPublish — the same body is published once, by idempotency key', () => {
+  it('sends the body hash as Idempotency-Key and reports a replay as success', async () => {
     const file = await writeDoc(CLEAN);
-    const { fetch, calls } = stubServer();
-    const { provider, getSignerCount } = spyProvider();
+    const { fetch, calls, keys } = idempotentServer();
+    const { provider } = spyProvider();
     const deps = hermetic({ fetchImpl: fetch, provider });
 
     const first = await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps);
     expect((first.data as { url: string }).url).toBe(CREATED.url);
-    expect(calls).toHaveLength(1);
-    const unlocksAfterFirst = getSignerCount();
 
     const second = await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps);
     // Success, not an error: a capture ask that fires twice must not turn a
     // clean turn end into a failure for a piece that is already up.
     expect(second.data).toEqual({ alreadyPublished: true, url: CREATED.url });
     expect(second.humanLines).toEqual([`Already published: ${CREATED.url}`]);
-    // Nothing on the wire, and no keystore unlock either: the check runs before
-    // the scan, the consent gate and the wallet.
-    expect(calls).toHaveLength(1);
-    expect(getSignerCount()).toBe(unlocksAfterFirst);
+
+    // THE REQUEST IS MADE, which is the change: the server is the authority on
+    // whether this body is already up, so the second publish asks it.
+    expect(calls).toHaveLength(2);
+    // ONE KEY, THE SAME BOTH TIMES, and it is the normalized body's own hash.
+    expect(keys()[0]).toBe(publishBodyHash(CLEAN));
+    expect(keys()[1]).toBe(keys()[0]);
   });
 
   /**
-   * The duplicate is a RE-RENDER of the same finding, not a byte-for-byte copy
-   * of one file: the second agent writes the same prose with CRLF line endings,
-   * a trailing blank line, or a space left at the end of a wrapped line. None of
-   * those is a different finding.
+   * A RE-RENDER OF THE SAME FINDING IS ONE KEY, AND THE SERVER STILL SEES TWO
+   * BODIES. ⚠ THE SEAM BETWEEN THE TWO HALVES OF THIS FEATURE, pinned here
+   * rather than left to be discovered in production.
+   *
+   * The key is `sha256(normalizePublishBody(body))`, so the second agent's copy
+   * of one finding — the same prose with CRLF, a trailing blank line, or a space
+   * left at the end of a wrapped line — hashes to the SAME key, which is the
+   * whole point: none of those is a different finding.
+   *
+   * The server's own replay check is a fingerprint over the canonical JSON of
+   * the create body (the fixes contract, "Posts: idempotency"), and that body
+   * carries the RAW bytes — the CLI does not rewrite what an author wrote, since
+   * a trailing double space is a markdown hard break. So a re-render arrives as
+   * "same key, different fingerprint", which the contract says is 422
+   * `idempotency_key_reused`: the server refuses rather than guessing which body
+   * was meant, and NOTHING IS PUBLISHED — no silent duplicate.
+   *
+   * That is the safe side to be wrong on, and it is not the last word: making a
+   * re-render replay instead of refuse means fingerprinting the normalized body
+   * on the server too, which is a change to the server half's own contract.
    */
-  it('sees through trailing whitespace, CRLF and a trailing blank line', async () => {
-    const { fetch, calls } = stubServer();
+  it('refuses a re-render under the same key rather than publishing a duplicate', async () => {
+    const { fetch, calls, keys } = idempotentServer();
     const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
 
     await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
     const rerendered = `${CLEAN.replace(/\n/g, '\r\n').replace('sensitive.', 'sensitive.   ')}\r\n\r\n`;
-    const again = await runPublish(
+    const err = (await runPublish(
       baseArgs(await writeDoc(rerendered), { mode: 'auto' }),
       makeCtx(),
       deps,
-    );
+    ).catch((e: unknown) => e)) as { code: string };
 
-    expect(again.data).toEqual({ alreadyPublished: true, url: CREATED.url });
-    expect(calls).toHaveLength(1);
+    // ONE KEY for both, which is what `normalizePublishBody` buys...
+    expect(keys()[1]).toBe(keys()[0]);
+    // ... and the server's byte fingerprint is what refuses the second.
+    expect(err.code).toBe('PUBLISH_FAILED');
+    expect(calls).toHaveLength(2);
   });
 
   it('is not fooled into swallowing a genuinely different body', async () => {
-    const { fetch, calls } = stubServer();
+    const { fetch, calls, keys } = idempotentServer();
     const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
 
     await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
@@ -2099,30 +2170,55 @@ describe('runPublish — the same body is published once per machine', () => {
 
     expect(res.data).toHaveProperty('resourceId');
     expect(calls).toHaveLength(2);
+    expect(keys()[1]).not.toBe(keys()[0]);
+  });
+
+  /**
+   * THE SAME KEY WITH DIFFERENT BYTES is the one publish failure whose remedy is
+   * not "retry": the server refuses rather than guessing which body was meant,
+   * and nothing was published. Reachable only when a key is reused by hand or
+   * two different bodies hash alike, so the message the server wrote is what the
+   * operator needs to see.
+   */
+  it('surfaces a 422 idempotency_key_reused with the server message, publishing nothing', async () => {
+    const file = await writeDoc(CLEAN);
+    const deps = hermetic({
+      fetchImpl: (async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'idempotency_key_reused',
+              message: 'That key already names a different post.',
+            },
+          }),
+          { status: 422, headers: { 'content-type': 'application/json' } },
+        )) as unknown as typeof fetch,
+      provider: spyProvider().provider,
+    });
+
+    const err = (await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps).catch(
+      (e: unknown) => e,
+    )) as { code: string; message: string; exitCode: number };
+    expect(err.code).toBe('PUBLISH_FAILED');
+    expect(err.message).toBe('That key already names a different post.');
   });
 
   /**
    * A draft is the one case where publishing the same body twice is the point: a
-   * draft writes no marker, so parking the same text again is legitimate and the
-   * publish that takes it public is not held back by either draft. Deduping in
-   * either direction would make that publish silently do nothing.
+   * draft parks privately, so parking the same text again is legitimate and the
+   * publish that takes it public must not be held back by either draft. So a
+   * draft reserves no key at all.
    */
-  it('never dedups a draft, in either direction', async () => {
+  it('sends no key for a draft, and never dedups one', async () => {
     const file = await writeDoc(CLEAN);
-    const { fetch, calls } = stubServer({ ...CREATED, status: 'draft' });
+    const { fetch, calls, keys } = idempotentServer({ ...CREATED, status: 'draft' });
     const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
 
     await runPublish(baseArgs(file, { mode: 'auto', draft: true }), makeCtx(), deps);
-    // A second draft of the same body still goes to the wire: the first wrote no
-    // marker.
     const second = await runPublish(baseArgs(file, { mode: 'auto', draft: true }), makeCtx(), deps);
     expect(second.data).toHaveProperty('resourceId');
     expect(calls).toHaveLength(2);
-
-    // And the real publish that promotes it is not blocked by either draft.
-    const promoted = await runPublish(baseArgs(file, { mode: 'auto' }), makeCtx(), deps);
-    expect(promoted.data).toHaveProperty('resourceId');
-    expect(calls).toHaveLength(3);
+    expect(keys()).toEqual([undefined, undefined]);
   });
 });
 
@@ -3188,12 +3284,12 @@ describe('runPublish — publish --finding', () => {
 
     // The remediation the refusal names still works, and still writes nothing.
     const dry = await runPublish({ finding: id, dryRun: true }, makeCtx(), deps);
-    expect((dry.data as { alreadyPublished?: boolean }).alreadyPublished).toBe(true);
+    expect((dry.data as { dryRun?: boolean }).dryRun).toBe(true);
     expect(await queuedIds()).toContain(id);
 
-    // And somebody saying so clears it, dedup answer and dequeue included.
+    // And somebody saying so clears it: the publish goes through and dequeues.
     const said = await runPublish({ finding: id, mode: 'full-auto', yes: true }, makeCtx(), deps);
-    expect((said.data as { alreadyPublished?: boolean }).alreadyPublished).toBe(true);
+    expect(said.data).toHaveProperty('resourceId');
     expect(await queuedIds()).not.toContain(id);
   });
 
@@ -3220,21 +3316,22 @@ describe('runPublish — publish --finding', () => {
   });
 
   /**
-   * MINOR (round 2): the already-published short circuit called `dequeueFinding`
-   * ABOVE the dry-run return, so inspecting an already-published finding
-   * silently took it off the queue. The test that covers the promise seeded a
-   * body this machine had never published, so it could not see it.
+   * `--dry-run` WRITES NOTHING, and that is now a property of the dry run alone
+   * rather than of where an already-published short circuit sat relative to it.
+   * The short circuit is gone (tenjin#763): the server decides whether a body is
+   * already up, and a dry run never asks it.
    */
-  it('a dry run over an ALREADY PUBLISHED body still leaves it on the queue', async () => {
+  it('a dry run over an already published body still leaves it on the queue', async () => {
     const id = await seedFinding({ uid: 'FND-DRY-PUBLISHED' });
-    const deps = hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider });
-    // Publish a second finding carrying the same body, so the dedup record is
-    // the one this machine wrote and the short circuit is the path taken.
+    const deps = hermetic({
+      fetchImpl: idempotentServer().fetch,
+      provider: spyProvider().provider,
+    });
     const twin = await seedFinding({ uid: 'FND-DRY-TWIN' });
     await runPublish({ finding: twin, mode: 'full-auto' }, makeCtx(), deps);
 
     const result = await runPublish({ finding: id, dryRun: true }, makeCtx(), deps);
-    expect(result.data).toMatchObject({ alreadyPublished: true });
+    expect(result.data).toMatchObject({ dryRun: true });
     expect(await queuedIds()).toContain(id);
   });
 

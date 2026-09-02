@@ -1143,40 +1143,36 @@ async function askTenjin(question, config, opts) {
 }
 
 /**
- * Ask a shelf by EXACT KEY (\`POST /api/keys/resolve\`, tenjin#774): no
+ * Ask a shelf's FIX STORE by exact key (\`POST /api/fixes/resolve\`): no
  * question, no text legs, no fuzzy fallback. The push failure arm's team leg
- * sends the two fingerprint hashes of a failure and nothing else about it.
+ * sends one or two fingerprint hashes and nothing else about the failure.
  *
- * The answer is the same envelope \`/api/search\` returns, field \`items\`,
- * so it goes through the same fail-closed validation as a search. What differs
- * is the STATUS CODES A CALLER HAS TO TELL APART, which askTenjin folds into
- * one null: a shelf with \`KNOWLEDGE_KEYS\` off answers 404 \`not_enabled\`,
- * and a deployment too old to have the route answers 404 too — both mean
- * "stop asking this shelf for a while", not "the shelf is down". Everything
- * else that is not a 200 (a refused bypass, a 5xx, a timeout) is \`no-answer\`,
- * which feeds the outage brake exactly as a failed search does. Never throws.
+ * NOT \`/api/keys/resolve\`, and not the search envelope. A fix is not a post:
+ * it has no title, slug, body, card or url, so there is nothing to fetch,
+ * nothing to price and nothing to judge — the answer is the fix record itself,
+ * and the injection is built from its fields. What survives from the key
+ * route is the STATUS CODES A CALLER HAS TO TELL APART: a shelf with
+ * \`KNOWLEDGE_KEYS\` off answers 404 \`not_enabled\`, and a deployment too old to
+ * have the route answers 404 too — both mean "stop asking this shelf for a
+ * while", not "the shelf is down". Everything else that is not a 200 (a refused
+ * bypass, a 5xx, a timeout) is \`no-answer\`, which feeds the outage brake
+ * exactly as a failed search does. Never throws.
  *
- *  - \`{ kind: 'hit', searchId, rich, stored }\`  at least one piece carries a key
- *  - \`{ kind: 'miss', searchId }\`                 200, nothing carried any key
- *  - \`{ kind: 'off' }\`                            404: keys are not on here
- *  - \`{ kind: 'no-answer' }\`                      anything else
- *
- * \`opts\` IS THE SAME BAG \`askTenjin\` TAKES — \`shelfBaseUrl\`,
- * \`timeoutMs\`, \`trigger\`, \`limit\` — because these two are the only two
- * legs a hook can spend its deadline on and a caller should not have to
- * remember which one wants them positionally.
+ *  - \`{ kind: 'hit', items }\`   at least one fix matched a key
+ *  - \`{ kind: 'miss' }\`         200, nothing matched
+ *  - \`{ kind: 'off' }\`          404: fixes are not on here
+ *  - \`{ kind: 'no-answer' }\`    anything else
  */
-async function askTenjinKeys(keys, config, opts) {
+async function askTenjinFixes(keys, config, opts) {
   const o = isRecord(opts) ? opts : {};
   const shelfBaseUrl = o.shelfBaseUrl;
   const timeoutMs = o.timeoutMs;
-  const trigger = o.trigger;
   const limit = o.limit;
   const target =
     typeof shelfBaseUrl === 'string' && shelfBaseUrl.length > 0 ? shelfBaseUrl : config.baseUrl;
   let url;
   try {
-    url = new URL('/api/keys/resolve', target);
+    url = new URL('/api/fixes/resolve', target);
   } catch {
     return { kind: 'no-answer' };
   }
@@ -1192,11 +1188,7 @@ async function askTenjinKeys(keys, config, opts) {
         ...bypass,
       },
       ...bypassRedirect(bypass),
-      body: JSON.stringify({
-        keys,
-        limit: want,
-        ...(typeof trigger === 'string' && trigger.length > 0 ? { trigger } : {}),
-      }),
+      body: JSON.stringify({ keys }),
       signal: AbortSignal.timeout(
         typeof timeoutMs === 'number' && timeoutMs > 0 ? timeoutMs : SEARCH_TIMEOUT_MS,
       ),
@@ -1204,14 +1196,57 @@ async function askTenjinKeys(keys, config, opts) {
     if (res.status === 404) return { kind: 'off' };
     if (res.status !== 200) return { kind: 'no-answer' };
     const body = await res.json();
-    if (!isRecord(body)) return { kind: 'no-answer' };
-    const parsed = parseSearchBody(body, url, want);
-    if (parsed === null) return { kind: 'no-answer' };
-    if (parsed.rich.length === 0) return { kind: 'miss', searchId: parsed.searchId };
-    return { kind: 'hit', searchId: parsed.searchId, rich: parsed.rich, stored: parsed.stored };
+    if (!isRecord(body) || !Array.isArray(body.items)) return { kind: 'no-answer' };
+    const items = [];
+    for (const item of body.items.slice(0, want)) {
+      const fix = parseFix(item);
+      if (fix !== null) items.push(fix);
+    }
+    return items.length === 0 ? { kind: 'miss' } : { kind: 'hit', items };
   } catch {
     return { kind: 'no-answer' };
   }
+}
+
+/**
+ * One \`/api/fixes/resolve\` item, validated.
+ *
+ * FAIL-CLOSED, IT DROPS AND NEVER REPAIRS, exactly as \`parseSearchBody\` does
+ * for a search: this script talks to whatever origin \`baseUrl\` names, so the
+ * response is untrusted input. \`fixId\` is the actionable field (it is the
+ * once-per-session dedup key and the id \`tenjin sync\` attests against), so a
+ * malformed one drops the whole item; the display fields are bounded rather
+ * than dropped, since none of them is ever acted on.
+ *
+ * \`tier\` decides how strongly the injection reads, so an unrecognised value is
+ * treated as the WEAKER one rather than defaulted to \`fine\`.
+ */
+function parseFix(item) {
+  if (!isRecord(item)) return null;
+  if (typeof item.id !== 'string' || !UUID_RE.test(item.id)) return null;
+  const matched = isRecord(item.matched) ? item.matched : {};
+  const files = Array.isArray(item.fixFiles) ? item.fixFiles : [];
+  const versions = isRecord(item.pkgVersions) ? item.pkgVersions : {};
+  const pkgVersions = {};
+  for (const [name, version] of Object.entries(versions).slice(0, 8)) {
+    if (typeof version === 'string') pkgVersions[name] = version;
+  }
+  return {
+    fixId: item.id,
+    tier: matched.tier === 'fine' ? 'fine' : 'coarse',
+    kind: typeof matched.kind === 'string' ? clean(matched.kind, 20) : '',
+    cmdHead: typeof item.cmdHead === 'string' ? clean(item.cmdHead, 64) : '',
+    passedOnHead: typeof item.passedOnHead === 'string' ? clean(item.passedOnHead, 64) : '',
+    fixFiles: files.filter((f) => typeof f === 'string').slice(0, 16),
+    pkgVersions,
+    attestations: typeof item.attestations === 'number' && item.attestations > 0
+      ? Math.floor(item.attestations)
+      : 0,
+    // Not spent on, not displayed as money, and reserved by the contract — but
+    // carried through unlaundered for the same reason a search's is: a
+    // defaulted price is local business state nobody wrote.
+    price: typeof item.price === 'string' ? item.price : '0',
+  };
 }
 
 /**

@@ -1262,11 +1262,16 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
 
 /**
  * One test framework's reporter hint: how to spot its config, how to tell
- * whether the tenjin reporter is already wired, and what to suggest when it
- * is not. A row here is worth adding only once a reporter exists for that
- * framework — `sig_v1_test` (tenjin-agent#267) ships `tenjin-vitest-reporter`
- * today and has no pytest/jest equivalent yet, so this table carries exactly
- * one row until one does.
+ * whether a machine-readable report is already wired, and what to suggest when
+ * it is not.
+ *
+ * EVERY RUNNER IN THE TEST LANE HAS A ROW, because the lane is
+ * runner-agnostic now: the structured identity leg reads JUnit XML, which
+ * vitest, jest, pytest, go and cargo-nextest can all write, so the hint is a
+ * one-line reporter setup per runner rather than a vitest-only note. vitest
+ * keeps its dedicated `tenjin-vitest-reporter` row as well — it carries its
+ * own `startTime`, which is a stronger window check than a file mtime — and is
+ * checked first.
  */
 interface TestReporterFramework {
   /** Name used in the hint text. */
@@ -1312,24 +1317,81 @@ const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
     ],
     depName: 'vitest',
     sharedConfigNeedsPattern: /\btest\s*:/,
-    // ANCHORED ON THE REPORTER'S OWN FILENAME (tenjin-agent#278 round 3), not on
-    // a bare `json`/`outputFile` pair: the stock `json` reporter this used to
-    // recommend carries no `startTime`/`endTime`, so an artifact it writes now
-    // fails the failure arm's window check outright and is worth exactly as
-    // little as no reporter at all — this check has to tell "wired" from
-    // "wired to the wrong thing", not just spot an `outputFile` option.
+    // EITHER STRUCTURED REPORT COUNTS. The tenjin reporter is preferred (it
+    // stamps its own `startTime`, which tells "this run" from "the run before
+    // it" without trusting a file mtime), but a `junit` reporter writing an
+    // outputFile is read by the same lane and is a perfectly good answer, so a
+    // repo that already has one is not nagged about the other.
     hasJsonReporter: (source) =>
-      /reporters\s*:/.test(source) && /tenjin-vitest-reporter/.test(source),
+      /reporters\s*:/.test(source) &&
+      (/tenjin-vitest-reporter/.test(source) || /['"]junit['"]/.test(source)),
     detail:
-      'vitest detected without the tenjin reporter — test-failure matching falls back to console parsing (lower precision)',
+      'vitest detected without a machine-readable report — test-failure matching falls back to console parsing (lower precision)',
     // The reporter's own path, not a relative guess: `tenjin install`/`push on`
     // always writes it to this exact spot, so the snippet works pasted verbatim.
     // Also names WHERE the report lands: it holds every failure's full message
     // and stack, absolute paths included (tenjin-agent#278, round 1 verdict
     // note) — worth telling an operator adopting this for the first time.
     fix: (reporterPath) =>
-      `Add to vitest.config.ts: reporters: ['default', ['${reporterPath}', { outputFile: '.vitest-report.json' }]] — and add .vitest-report.json to .gitignore (it holds full failure messages and absolute paths)`,
+      `Add to vitest.config.ts: reporters: ['default', ['${reporterPath}', { outputFile: '.vitest-report.json' }]] — or, for the portable JUnit path, reporters: ['default', ['junit', { outputFile: '.tenjin/junit.xml' }]]. Add the report to .gitignore (it holds full failure messages and absolute paths)`,
   },
+  {
+    name: 'jest',
+    configFiles: ['jest.config.ts', 'jest.config.js', 'jest.config.mjs', 'jest.config.cjs'],
+    depName: 'jest',
+    hasJsonReporter: (source) => /jest-junit/.test(source),
+    detail:
+      'jest detected without a JUnit report — test-failure matching falls back to console parsing (lower precision)',
+    fix: () =>
+      "Add to jest.config.js: reporters: ['default', ['jest-junit', { outputDirectory: '.tenjin', outputName: 'junit.xml' }]] (pnpm add -D jest-junit) — and add .tenjin/junit.xml to .gitignore",
+  },
+  {
+    name: 'pytest',
+    configFiles: ['pytest.ini', 'pyproject.toml', 'setup.cfg', 'tox.ini'],
+    depName: 'pytest',
+    // A shared config only counts once it actually configures pytest.
+    sharedConfigNeedsPattern: /\[(?:tool\.)?pytest/,
+    hasJsonReporter: (source) => /--junitxml/.test(source),
+    detail:
+      'pytest detected without a JUnit report — test-failure matching falls back to console parsing (lower precision)',
+    fix: () =>
+      'Add to pytest.ini (or [tool.pytest.ini_options] in pyproject.toml): addopts = --junitxml=.tenjin/junit.xml — and add .tenjin/junit.xml to .gitignore',
+  },
+  {
+    name: 'go',
+    configFiles: ['go.mod'],
+    depName: '',
+    // go's report is a FLAG, not config, so nothing in the repo says "wired".
+    // The existing-report check in {@link checkTestReporterHints} is what
+    // silences this row once the repo actually produces one.
+    hasJsonReporter: () => false,
+    detail:
+      'go tests write no machine-readable report by default — test-failure matching falls back to console parsing (lower precision)',
+    fix: () =>
+      'Run tests through gotestsum: gotestsum --junitfile .tenjin/junit.xml ./... — and add .tenjin/junit.xml to .gitignore',
+  },
+  {
+    name: 'cargo',
+    configFiles: ['Cargo.toml'],
+    depName: '',
+    // Same as go: nextest's `--junit` is a flag. A `junit` profile key in
+    // Cargo.toml counts, and the existing-report check does the rest.
+    hasJsonReporter: (source) => /junit/.test(source),
+    detail:
+      'cargo tests write no machine-readable report by default — test-failure matching falls back to console parsing (lower precision)',
+    fix: () =>
+      'Run tests through cargo-nextest: cargo nextest run --junit .tenjin/junit.xml — and add .tenjin/junit.xml to .gitignore',
+  },
+];
+
+/** ⚠ MIRRORED with `JUNIT_DEFAULT_PATHS` in lib/push-scripts.ts: the paths the
+ *  failure arm's structured identity leg actually reads. A report sitting at
+ *  one of them is what silences every row of the table above. */
+const JUNIT_DOCTOR_PATHS = [
+  '.tenjin/junit.xml',
+  'junit.xml',
+  'test-results/junit.xml',
+  'reports/junit.xml',
 ];
 
 /** What {@link detectFrameworkConfig} found, or 'dep-only' for a dependency with no dedicated config file. */
@@ -1378,15 +1440,27 @@ async function detectFrameworkConfig(
 
 /**
  * WARN-level (never fails doctor), and silent unless there is something to
- * say: a project with no vitest, or one whose config already wires the
- * tenjin reporter the `sig_v1_test` lane (tenjin-agent#267, redesigned round
- * 3) prefers, gets no line at all — the same "nothing to report" posture as
+ * say: a project with no recognized test framework, or one whose config
+ * already wires a report the test lane can read, gets no line at all — the same "nothing to report" posture as
  * {@link checkStoreJournal}. Detection is a plain-text scan of config source,
  * described as heuristic in every doc that mentions it: never a config
  * evaluation, so it can both miss a reporter wired through a shared helper
  * and mistake a commented-out one for live.
  */
 async function checkTestReporterHints(cwd: string, dataDir: string): Promise<BuiltCheck | null> {
+  // A REPORT THAT ALREADY EXISTS SETTLES IT, whatever the config says. For go
+  // and cargo the report is a command-line flag rather than a config key, so
+  // there is nothing in the repo to detect — and for every runner, a file at
+  // one of the paths the failure arm actually reads is better evidence than a
+  // regex over a config. Silent when one is there.
+  for (const rel of JUNIT_DOCTOR_PATHS) {
+    try {
+      await readFile(join(cwd, rel), 'utf8');
+      return null;
+    } catch {
+      // Not there; keep looking.
+    }
+  }
   const reporterPath = join(hooksDir(dataDir), PUSH_VITEST_REPORTER_FILE);
   for (const fw of TEST_REPORTER_FRAMEWORKS) {
     const found = await detectFrameworkConfig(cwd, fw);

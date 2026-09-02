@@ -809,7 +809,7 @@ describe('getLookupStats', () => {
 
 /**
  * PR 277 round-2 review, nit on state-store.ts:4132: `findPairingCandidate`
- * used to synthesize `title: ''` / `price: '0'` for a `pairing_post` link
+ * used to synthesize `title: ''` / `price: '0'` for a pairing link
  * missing them — a false default a future spend-check could have trusted.
  * `getPostMetadata` is the replacement: `GET /api/posts/<id>/public`
  * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`

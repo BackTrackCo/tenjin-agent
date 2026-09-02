@@ -12,11 +12,11 @@ import {
   storeSession,
   teamCoarseKey,
   GIT_WALK_MAX,
-  STATE_PAIRING_POST_PREFIX,
+  STATE_PAIRING_FIX_PREFIX,
   STORE_SQL,
   type Store,
 } from '../lib/state-store';
-import { publishPost, updatePost, type PostKeyInput } from '../lib/posts-api';
+import { attestFix, isSelfAttest, upsertFix, type FixKeyInput } from '../lib/fixes-api';
 import { scan, survivesTeamDrop, type ScanFinding } from '../lib/scan';
 import { resolveWriteAuth } from '../lib/consent';
 import {
@@ -29,18 +29,24 @@ import type { CommandContext, CommandResult } from '../context';
 
 /**
  * `tenjin sync` (docs/command-reference.md, "Team shelf"): hand this checkout's
- * closed, code-scoped error→fix pairings to the team shelf, so a fix a teammate's
- * machine already made travels to the next machine that hits the same failure
- * beside its error — without anyone writing a note. The Stop hook spawns it
- * detached after a session that closed such a pairing (see spawnSyncIfNeeded in
- * lib/hook-scripts.ts); it is also runnable by hand, which is the fallback the
- * Stop ask prints when a spawned run could not sign.
+ * closed, code-scoped failure→fix pairings to the team shelf's FIX STORE, so a
+ * fix a teammate's machine already made travels to the next machine that hits
+ * the same failure beside its error — without anyone writing a note. The Stop
+ * hook spawns it detached after a session that closed such a pairing (see
+ * spawnSyncIfNeeded in lib/hook-scripts.ts); it is also runnable by hand, which
+ * is the fallback the Stop ask prints when a spawned run could not sign.
  *
- * TEAM MODE ONLY. A synced pairing is a keyed, card-less, price-0 post, and the
- * `POST /api/keys/resolve` route it is reachable through is a team-shelf feature;
- * a public-mode machine has no private shelf to hold it and no route to read it
- * back, so this hard-refuses rather than posting a team's build failures to the
- * public marketplace.
+ * A FIX IS NOT A POST (the fixes contract, v1). It has no title, no body, no
+ * card and no price: the record is the keys, the files that changed, the head
+ * that passed and the versions it was true at. Nothing it writes reaches
+ * `posts` or the search gate, and the titles this command used to synthesize
+ * ("Fix: pnpm — TS2304") are gone with them.
+ *
+ * TEAM MODE ONLY. `POST /api/fixes` and `POST /api/fixes/resolve` are gated on
+ * the same `KNOWLEDGE_KEYS` flag as the team shelf's by-key lookup; a
+ * public-mode machine has no private shelf to hold a fix and no route to read
+ * it back, so this hard-refuses rather than pushing a team's build failures at
+ * the public marketplace.
  */
 export interface SyncDeps {
   fetchImpl?: typeof fetch;
@@ -67,8 +73,9 @@ export interface SyncDeps {
 /** One pairing as `tenjin sync` reads it back out of the store (raw columns). */
 interface PairingRow {
   id: number;
-  /** `'sig_v1'` (the default every row before tenjin-agent#267 has) or
-   *  `'sig_v1_test'` — which wire prefix `keysFor` puts on this row's keys. */
+  /** The lane: `'test'` (a file+suite+test identity) or `'sig_v2'` (a
+   *  message+errno+frame signature, the default). It decides the fix record's
+   *  `primary.kind` and whether a coarse key travels at all. */
   kind: string;
   key: string;
   coarseKey: string | null;
@@ -93,8 +100,11 @@ class SyncSigningError extends Error {
   }
 }
 
-const TITLE_MAX = 120;
-const BODY_MAX = 300;
+/** At most this many fix files travel with one record; the contract caps it at
+ *  16 and each entry at 200 characters. */
+const FIX_FILES_MAX = 16;
+/** At most this many keys per fix record (contract: ≤ 8). */
+const FIX_KEYS_MAX = 8;
 
 export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise<CommandResult> {
   const env = deps.env ?? process.env;
@@ -107,7 +117,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
   if (!runtime.teamMode) {
     throw new CliError(
       'REFUSED',
-      'tenjin sync only runs in team mode: it publishes fixed failures to your team shelf, reachable only through the team shelf’s by-key lookup.',
+      'tenjin sync only runs in team mode: it records fixed failures in your team shelf’s fix store, reachable only through that shelf’s by-key lookup.',
       {
         fix: 'Set a team shelf (config set baseUrl <your shelf>, config set shelfBypassSecret <secret>); see docs/command-reference.md, "Team shelf".',
       },
@@ -119,7 +129,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // Fail open, same as every other store consumer: an unreadable store is not a
     // reason to exit nonzero, there is simply nothing to sync.
     return {
-      data: { synced: 0, verified: 0, held: 0, skipped: 0, local: 0, pending: 0 },
+      data: { synced: 0, attested: 0, skipped: 0, local: 0, pending: 0 },
       humanLines: ['Nothing to sync.'],
     };
   }
@@ -131,7 +141,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
       .filter((r): r is PairingRow => r !== null);
     if (rows.length === 0) {
       return {
-        data: { synced: 0, verified: 0, held: 0, skipped: 0, local: 0, pending: 0 },
+        data: { synced: 0, attested: 0, skipped: 0, local: 0, pending: 0 },
         humanLines: ['Nothing to sync.'],
       };
     }
@@ -143,7 +153,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // NO REMOTE, NO SHELF (#256, owner decision). '' is what stands in for a
     // repo scope this checkout does not have — a clone from a local path, a
     // scratch directory, a mirror under another remote name — and it is not a
-    // salt. Publishing under it would put every origin-less checkout on the
+    // salt. Recording under it would put every origin-less checkout on the
     // team's shelf into ONE coarse bucket, and a coarse hit is rank 1 with no
     // relevance check to run, so a scratch directory's fix would come back
     // beside an unrelated one as a strong teammate match. The failure arm's
@@ -151,18 +161,11 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     //
     // NOTHING IS STAMPED: `synced_at` stays NULL on every row, because these
     // pairings are not synced, they are local. If the checkout later gains an
-    // origin, the next run publishes them. The Stop hook does not spawn a sync
+    // origin, the next run records them. The Stop hook does not spawn a sync
     // here at all (it reads the same slug first), so this path is a hand run.
     if (repo === '') {
       return {
-        data: {
-          synced: 0,
-          verified: 0,
-          held: 0,
-          skipped: 0,
-          local: rows.length,
-          pending: 0,
-        },
+        data: { synced: 0, attested: 0, skipped: 0, local: rows.length, pending: 0 },
         humanLines: [
           `Nothing to sync: this checkout has no git origin, so its ${rows.length} fixed ${
             rows.length === 1 ? 'pairing stays' : 'pairings stay'
@@ -171,7 +174,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
       };
     }
     // The shelf a link row names: the team shelf, which is the only place a
-    // synced pairing ever goes.
+    // fix record ever goes.
     const origin = new URL(runtime.baseUrl).origin;
 
     // The wallet, lazily. describe() gives the address WITHOUT unlocking the
@@ -200,144 +203,110 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     };
 
     let synced = 0;
-    let verified = 0;
-    let held = 0;
+    let attested = 0;
     let skipped = 0;
     const now = () => Date.now();
     try {
       for (const row of rows) {
-        // The link row (`pairing_post:<id>`, written by the failure arm's team
-        // leg when it opened this pairing beside a teammate's post, or by a
-        // previous run of this command when it POSTed the row) says which shelf
-        // post this pairing is tied to. Three cases:
-        //  - a HELD row (a 400 named the holder): re-stamp so it is not
-        //    reconsidered until it changes again, and touch nothing on the shelf;
-        //  - OUR post, and the row was promoted to `verified` by a close that
-        //    landed after the last sync: PUT verified:true on it;
-        //  - a TEAMMATE's post that this machine has now closed locally: that is
-        //    the second, independent close 04 asks for, and the shelf has no
-        //    close endpoint. Their post cannot be PUT from this wallet (every
-        //    post route is owner-scoped: a foreign id is a 404), so this
-        //    machine POSTs its OWN record of the fix with the keys `verified`
-        //    — two machines closed it independently, which is exactly what
-        //    verified means. If the teammate's post already holds the key
-        //    verified, the shelf's holder 400 says so and the row is held.
+        // The link row (`pairing_fix:<id>`, written by the failure arm's team
+        // leg when it opened this pairing beside a teammate's fix, or by a
+        // previous run of this command when it upserted the row) decides which
+        // of the two writes this row earns:
+        //  - NO LINK, or OUR OWN fix: upsert. The server's holder rule
+        //    (creator, kind, key, repo) is the dedup, so a repeat is a 200
+        //    `created: false` rather than a duplicate.
+        //  - A TEAMMATE's fix that this machine has now closed locally: that is
+        //    the second, independent confirmation, and the shelf has no close
+        //    endpoint. Their record is theirs — every write route is
+        //    owner-scoped — so this machine ATTESTS to it with its own fix
+        //    files instead of publishing a near-duplicate under its own name.
         const link = getLink(store, row.id);
-        if (link !== null && link.held) {
-          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-          continue;
-        }
-        if (link === null && row.syncedAt !== null) {
-          // Synced, promoted, but the link is gone (a store that lost the
-          // mapping): nothing of ours to update. Re-stamp and move on.
-          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-          continue;
-        }
-        const own = link !== null && link.own === true;
-        // A row synced under our own post with nothing to promote: re-stamp.
-        if (own && row.status !== 'verified') {
-          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-          continue;
-        }
-        // Two independent closes — a teammate's (their post) and ours — read
-        // as verified on the wire whatever the local status says.
-        const verifiedOnWire = row.status === 'verified' || (link !== null && !own);
+        const own = link === null || link.own === true;
 
         // THE SAME SCAN EVERY PUBLISH RUNS, minus the warn tier a team shelf
         // drops (survivesTeamDrop, as commands/publish.ts filters it). The
         // fields are scrubbed on the way into the row, so this is the second
         // look: a credential that survived the scrub in a command line or a
         // filename stays on this machine. Nobody can --yes an automatic run,
-        // and the body is the same next run, so a finding marks the row synced
-        // (never retried) rather than blocking every row behind it.
+        // and the payload is the same next run, so a finding marks the row
+        // synced (never retried) rather than blocking every row behind it.
         if (scanFindings(row).length > 0) {
           store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
           skipped += 1;
           continue;
         }
 
+        const files = fixFilesFor(row);
+        // NO FILES, NO RECORD. A fix record's whole payload is "these files
+        // changed"; one with an empty list asserts nothing a teammate could
+        // act on. The close rule already requires at least one tracked edit,
+        // so this is the backstop for a row written by an older build.
+        if (files.length === 0) {
+          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
+          skipped += 1;
+          continue;
+        }
+
         try {
-          if (own && link !== null) {
-            await updatePost(
-              link.postId,
-              { keys: keysFor(row, repo, verifiedOnWire) },
-              auth,
-              client,
-            );
+          if (!own && link !== null) {
+            await attestFix(link.fixId, files, auth, client);
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-            verified += 1;
+            attested += 1;
             continue;
           }
-          const result = await publishPost(
+          const result = await upsertFix(
             {
-              title: titleFor(row),
-              bodyMd: bodyFor(row),
-              priceAtomic: '0',
-              status: 'published',
-              keys: keysFor(row, repo, verifiedOnWire),
+              primary: primaryFor(row),
+              keys: keysFor(row, repo),
+              repo,
+              cmdHead: row.cmdHead ?? '',
+              fixFiles: files,
+              ...(passedOnHead(row) !== null ? { passedOnHead: passedOnHead(row) as string } : {}),
+              pkgVersions: row.pkgVersions,
             },
             auth,
             client,
           );
           // Link first, then stamp: a crash between the two leaves a row that is
-          // still unsynced and re-publishes (dedup on the shelf side), never a
-          // synced row whose post id is lost and can never be promoted.
+          // still unsynced and re-upserts (the holder rule dedups it on the
+          // shelf side), never a synced row whose fix id is lost.
           //
           // AND THE SAME IS TRUE OF A FAILED WRITE, which is not a crash and
           // used to fall through to the stamp anyway. `store.run` swallows a
           // SQLite error and returns false, so the row would have been marked
-          // synced with no link: nothing to PUT the verified keys on later, and
-          // no unsynced row for a future run to pick up. Leaving it unstamped
-          // costs one duplicate POST at worst.
+          // synced with no link: nothing to attest against later, and no
+          // unsynced row for a future run to pick up.
           if (
             !setLink(store, row.id, {
-              postId: result.resourceId,
+              fixId: result.fixId,
               origin,
               at: now(),
               own: true,
-              url: result.url,
             })
           ) {
             continue;
           }
           store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-          synced += 1;
+          // `created: false` is the server saying this machine ALREADY HOLDS
+          // this fix — the holder rule matched and nothing changed. The row is
+          // stamped either way (there is nothing left to do with it); the
+          // counter says what actually happened on the shelf.
+          if (result.created) synced += 1;
+          else skipped += 1;
         } catch (err) {
           if (err instanceof SyncSigningError) throw err; // aborts the whole run, below
-          const holder = verifiedHolderId(err);
-          if (holder !== null) {
-            // A teammate's post already holds this fingerprint verified. The row is
-            // theirs on the shelf now; stamp synced_at so it is never retried and
-            // record who holds it (`held`, so no later run PUTs on their post).
-            // Unstamped if the link did not land, for the reason the publish
-            // path gives: a synced row with no `held` link would be retried by
-            // no run and PUT by none either.
-            if (!setLink(store, row.id, { postId: holder, origin, at: now(), held: true })) {
-              continue;
-            }
-            store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-            held += 1;
-            continue;
-          }
-          if (err instanceof CliError && err.code === 'RESOURCE_NOT_FOUND') {
-            // Our post is gone from the shelf (deleted, or the link is stale):
-            // nothing to promote, and a PUT on it will 404 on every future run
-            // too. Stamp and move on so one dead link cannot block the queue.
+          if (isSelfAttest(err)) {
+            // The link says a teammate holds this fix and the server says it is
+            // ours. The link is stale (a fix we upserted before the link was
+            // rewritten); stamp and move on rather than retrying forever.
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
             skipped += 1;
             continue;
           }
-          if (
-            err instanceof CliError &&
-            (err.code === 'PUBLISH_BLOCKED' || err.code === 'NEEDS_CONFIRMATION')
-          ) {
-            // The server's own ingest gate refused THIS row's content. Sync has
-            // nobody to hand a --yes to, and a scrubbed command/filename body
-            // will refuse identically on every future run — so, like a holder
-            // collision, this is marked synced (never retried) rather than
-            // permanently blocking every pairing behind it in `ORDER BY at`. No
-            // events row: that field is reserved for a SIGNING failure, which is
-            // the one case the Stop hook's fallback line looks for.
+          if (err instanceof CliError && err.code === 'RESOURCE_NOT_FOUND') {
+            // The fix we meant to attest to is gone from the shelf (deleted, or
+            // the link is stale): attesting will 404 on every future run too.
+            // Stamp and move on so one dead link cannot block the queue.
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
             skipped += 1;
             continue;
@@ -355,10 +324,10 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
         // record it so the Stop hook can print the by-hand fallback, leave every
         // remaining row's synced_at NULL, and exit with the code. The next Stop
         // retries.
-        recordSyncEvent(store, project, { code: err.code, synced, verified, held, skipped });
+        recordSyncEvent(store, project, { code: err.code, synced, attested, skipped });
         throw new CliError(
           'PUBLISH_FAILED',
-          `tenjin sync could not sign (${err.code}); ${synced + verified + held + skipped} of ${rows.length} pairings synced before it stopped.`,
+          `tenjin sync could not sign (${err.code}); ${synced + attested + skipped} of ${rows.length} pairings synced before it stopped.`,
           {
             fix: 'Run tenjin sync in a terminal where the wallet can unlock (the OS keychain or TENJIN_WALLET_PASSPHRASE), or start a session first.',
           },
@@ -371,8 +340,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
       recordSyncEvent(store, project, {
         error: err instanceof CliError ? err.code : 'UNKNOWN',
         synced,
-        verified,
-        held,
+        attested,
         skipped,
       });
       throw err;
@@ -381,18 +349,17 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // A run that finished writes its own `hook: 'sync'` row WITHOUT a code, so
     // the Stop hook's fallback line (which reads the LAST sync row) goes quiet
     // the moment a later run succeeds, rather than outliving the failure.
-    recordSyncEvent(store, project, { synced, verified, held, skipped });
+    recordSyncEvent(store, project, { synced, attested, skipped });
     return {
       data: {
         synced,
-        verified,
-        held,
+        attested,
         skipped,
         local: 0,
-        pending: rows.length - synced - verified - held - skipped,
+        pending: rows.length - synced - attested - skipped,
       },
       humanLines: [
-        `Synced ${synced} new, updated ${verified} verified, ${held} already held by a teammate, ${skipped} skipped.`,
+        `Recorded ${synced} new ${synced === 1 ? 'fix' : 'fixes'}, attested to ${attested}, skipped ${skipped}.`,
       ],
     };
   } finally {
@@ -423,81 +390,89 @@ function lazySigner(provider: WalletProvider, address: TenjinSigner['address']):
   };
 }
 
-/** The wire prefix for one row's kind: `'sig_v1'` (every row before
- *  tenjin-agent#267) gets the original `sig_v1`/`sig_v1c` pair; the test-identity
- *  lane's own rows (`kind: 'sig_v1_test'`, file+suite+test hashes) get
- *  `sig_v1_test`/`sig_v1_test_c` so a resolve query can ask for either lane by
- *  name without the two ever colliding on the wire. */
-function keyPrefixFor(kind: string): { fine: string; coarse: string } {
-  return kind === 'sig_v1_test'
-    ? { fine: 'sig_v1_test', coarse: 'sig_v1_test_c' }
-    : { fine: 'sig_v1', coarse: 'sig_v1c' };
+/**
+ * The fix record's PRIMARY key: the lane the pairing was opened in, and its
+ * fine hash. `'test'` rows carry a file+suite+test identity; everything else is
+ * the `sig_v2` error signature. The two are exclusive — the failure arm picks
+ * one from the command — so there is never a choice to make here.
+ */
+function primaryFor(row: PairingRow): { kind: 'test' | 'error'; key: string } {
+  return { kind: row.kind === 'test' ? 'test' : 'error', key: row.key };
 }
 
-/** The wire keys for one pairing: the fine fingerprint verbatim, the coarse
- *  fingerprint SALTED with the repo slug (so an ERR_PNPM_OUTDATED_LOCKFILE-class
- *  error does not match across every repo the team has), and the command head for
- *  a future ranking to use — never queried, only stored. `verified` mirrors the
- *  local close status; a hand publish never claims verified, but sync IS the
- *  close rule's own report and may. `repo` is never '' here: a checkout with no
- *  remote returns before this is reached, publishing nothing at all (#249). */
-function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput[] {
-  const prefix = keyPrefixFor(row.kind);
-  const keys: PostKeyInput[] = [
-    { kind: 'fingerprint', key: `${prefix.fine}:${row.key}`, verified },
-  ];
-  if (row.coarseKey !== null && row.coarseKey.length > 0) {
+/**
+ * Every key this fix answers.
+ *
+ * THE PRIMARY AT TIER `fine`, ALWAYS — the contract requires it. The coarse
+ * key is sent ONLY for the error lane, salted with the repo slug so an
+ * `ERR_PNPM_OUTDATED_LOCKFILE`-class message does not match a fix from every
+ * repo the team has.
+ *
+ * ⚠ THE TEST LANE'S COARSE KEY IS NEVER SENT. It is file+suite, which every
+ * failing test in a busy file shares: as a lookup key on a shared shelf it
+ * would answer "somebody fixed something in this file" to every failure in it.
+ * It stays a local replay hint, and the failure arm's resolve leg does not ask
+ * for it either, so the two sides agree.
+ *
+ * The command head rides along as `command_head` metadata. It is never a lookup
+ * key on its own — the server rejects a resolve request that asks for one — and
+ * exists so a later ranking can use it.
+ *
+ * `repo` is never '' here: a checkout with no remote returns before this is
+ * reached, recording nothing at all (#249).
+ */
+function keysFor(row: PairingRow, repo: string): FixKeyInput[] {
+  const kind = row.kind === 'test' ? 'test' : 'error';
+  const keys: FixKeyInput[] = [{ kind, key: row.key, tier: 'fine' }];
+  if (kind === 'error' && row.coarseKey !== null && row.coarseKey.length > 0) {
     // Salt the coarse HASH, not the raw message+errno: the CLI has only the
     // stored hashes (message/errno exist only transiently inside the failure
-    // arm's sigV1() call, never as columns), so `teamCoarseKey` — shared with
-    // the resolve leg via lib/push-scripts.ts — salts what both sides actually
-    // have (06, "Team-shelf coarse keys"). The SAME salting formula serves both
-    // lanes; only the wire prefix names which one a hash belongs to.
-    //
-    // NO `repo.length > 0` GUARD, and none is needed (tenjin-agent#249). The
-    // guard that used to live here dropped the coarse key while the resolve leg
-    // went on asking for `sig_v1c:teamCoarseKey(coarse, '')`, so a no-origin
-    // checkout could only ever match on the fine key and the miss looked like
-    // "no teammate has hit this". The asymmetry is closed at the other end now:
-    // a checkout with no remote publishes NOTHING and the resolve leg asks for
-    // nothing, so the two sides agree and '' never reaches this line.
-    keys.push({
-      kind: 'fingerprint',
-      key: `${prefix.coarse}:${teamCoarseKey(row.coarseKey, repo)}`,
-      verified,
-    });
+    // arm's sigV2() call, never as columns), so `teamCoarseKey` — shared with
+    // the resolve leg via lib/state-store.ts — salts what both sides actually
+    // have (06, "Team-shelf coarse keys").
+    keys.push({ kind: 'error', key: teamCoarseKey(row.coarseKey, repo), tier: 'coarse' });
   }
   if (row.cmdHead !== null && row.cmdHead.length > 0) {
-    keys.push({ kind: 'command_head', key: row.cmdHead });
+    keys.push({ kind: 'command_head', key: row.cmdHead, tier: 'coarse' });
   }
-  return keys;
+  return keys.slice(0, FIX_KEYS_MAX);
 }
 
-/** The publish scan over what would go on the wire — title and body — with
- *  the warn tier filtered exactly as `tenjin publish` filters it on a team
- *  shelf (this command only runs in team mode). No project markers: the row
- *  holds basenames and a command line, and the shelf is the team's own. */
+/** The payload's file list: repo-relative paths as the close rule recorded
+ *  them, bounded by the contract's own limits. */
+function fixFilesFor(row: PairingRow): string[] {
+  return row.fixFiles
+    .filter((f) => typeof f === 'string' && f.length > 0 && f.length <= 200)
+    .slice(0, FIX_FILES_MAX);
+}
+
+/** The head of the command that passed, or null. `fixCmd` carries the WHOLE
+ *  scrubbed successful command (a scrubbed-to-`/` `cd /` prefix and pipeline
+ *  tails included), so the head is derived rather than published raw. */
+function passedOnHead(row: PairingRow): string | null {
+  return row.fixCmd !== null && row.fixCmd.length > 0 ? fixCmdHead(row.fixCmd) : null;
+}
+
+/**
+ * The publish scan over what would go on the wire — the file list, the command
+ * head, the package versions — with the warn tier filtered exactly as
+ * `tenjin publish` filters it on a team shelf (this command only runs in team
+ * mode).
+ *
+ * THE PAYLOAD, NOT A RENDERED BODY. There is no title and no prose any more, so
+ * what is scanned is the joined fields themselves: that is the whole of what
+ * leaves the machine.
+ */
 function scanFindings(row: PairingRow): ScanFinding[] {
-  return scan(titleFor(row) + '\n' + bodyFor(row)).filter(survivesTeamDrop);
-}
-
-/** `Fix: <cmd_head> — <errno|frame>`. The signature's errno and frame are not
- *  stored (the row keeps only the hashes), so the discriminant is re-derived from
- *  the scrubbed error line and the named files — the same two sources sig_v1 read. */
-function titleFor(row: PairingRow): string {
-  const head = row.cmdHead !== null && row.cmdHead.length > 0 ? row.cmdHead : 'command';
-  const disc = discriminant(row);
-  const title = disc.length > 0 ? `Fix: ${head} — ${disc}` : `Fix: ${head}`;
-  return title.slice(0, TITLE_MAX);
-}
-
-const ERRNO_TOKEN_RE = /\b(ERR_[A-Z0-9]+(?:_[A-Z0-9]+)*|TS\d{3,5}|E\d{3,4}|E[A-Z]{3,})\b/;
-function discriminant(row: PairingRow): string {
-  if (row.errorLine !== null) {
-    const m = ERRNO_TOKEN_RE.exec(row.errorLine);
-    if (m !== null && m[1] !== undefined) return m[1];
-  }
-  return row.errorFiles.length > 0 ? (row.errorFiles[0] ?? '') : '';
+  const parts = [
+    row.cmdHead ?? '',
+    passedOnHead(row) ?? '',
+    fixFilesFor(row).join('\n'),
+    Object.entries(row.pkgVersions)
+      .map(([name, version]) => `${name}@${version}`)
+      .join('\n'),
+  ];
+  return scan(parts.join('\n')).filter(survivesTeamDrop);
 }
 
 /** Shell scaffolding (`cd`, `echo`, `printf`) and pipe-tail text filters
@@ -579,137 +554,52 @@ function fixCmdHead(command: string): string | null {
   return null;
 }
 
-/** ≤300 chars: the failing head, the fix command and files, the verify command,
- *  and a `pkg:` line (which a later staleness read parses back). Every field
- *  already passed the local scrub on the way into the row; the whole thing is
- *  re-bounded here. */
-function bodyFor(row: PairingRow): string {
-  const lines: string[] = [];
-  // The HEAD, not `row.cmd`: the row keeps the whole scrubbed command line for
-  // `sig_v1` (the fingerprint hashes it), but a synced pairing's body is public
-  // team-shelf prose, and the full line routinely carries a pipeline tail
-  // (`| grep ...`) or a scrubbed-to-`/` cwd that reads as a bogus `cd /`
-  // (tenjin-agent#252). `cmdHead` is the same value the title and the
-  // `command_head` key already use.
-  if (row.cmdHead !== null && row.cmdHead.length > 0) lines.push(`Failed: ${row.cmdHead}`);
-  if (row.fixFiles.length > 0) lines.push(`Changed: ${row.fixFiles.slice(0, 4).join(', ')}`);
-  // Same head-not-whole-line treatment as `Failed:` above, via a local
-  // derivation rather than `row.cmdHead` (`fixCmd` is a different capture with
-  // no stored head of its own).
-  const fixHead = row.fixCmd !== null && row.fixCmd.length > 0 ? fixCmdHead(row.fixCmd) : null;
-  if (fixHead !== null) lines.push(`Passed on: ${fixHead}`);
-  const pkgs = Object.entries(row.pkgVersions)
-    .slice(0, 3)
-    .map(([name, ver]) => `${name}@${ver}`);
-  if (pkgs.length > 0) lines.push(`pkg: ${pkgs.join(', ')}`);
-  return lines.join('\n').slice(0, BODY_MAX);
-}
-
-/** The verified-holder 400 the keys route draws when another PUBLISHED piece
- *  already holds this fingerprint verified: the server names the holder's post
- *  id. Read off the CliError posts-api mapped (details.server), so a held row is
- *  recorded and skipped rather than crashing the run. A keys_disabled 400, or any
- *  other error, is not a holder and propagates. */
-function verifiedHolderId(err: unknown): string | null {
-  if (!(err instanceof CliError) || !/already verified/i.test(err.message)) return null;
-  const server = readServerBody(err);
-  const fromBody = holderFromServer(server);
-  if (fromBody !== null) return fromBody;
-  const m = /on (?:post )?`?([A-Za-z0-9_-]+)`?/.exec(err.message);
-  return m !== null && m[1] !== undefined ? m[1] : 'another-piece';
-}
-
-function readServerBody(err: CliError): unknown {
-  const details = err.details;
-  if (typeof details !== 'object' || details === null) return null;
-  return (details as { server?: unknown }).server ?? null;
-}
-
-function holderFromServer(json: unknown): string | null {
-  if (typeof json !== 'object' || json === null) return null;
-  const error = (json as { error?: unknown }).error;
-  if (typeof error !== 'object' || error === null) return null;
-  const details = (error as { details?: unknown }).details;
-  if (typeof details !== 'object' || details === null) return null;
-  const fieldErrors = (details as { fieldErrors?: unknown }).fieldErrors;
-  if (typeof fieldErrors !== 'object' || fieldErrors === null) return null;
-  const keys = (fieldErrors as { keys?: unknown }).keys;
-  if (!Array.isArray(keys)) return null;
-  for (const message of keys) {
-    if (typeof message !== 'string') continue;
-    const m = /on post ([A-Za-z0-9_-]+)/.exec(message);
-    if (m !== null && m[1] !== undefined) return m[1];
-  }
-  return null;
-}
-
-// ---- the link from a local pairing to its shelf post -------------------------
-// `pairings` has no post-id column; the link is the `session_state` row
-// `pairing_post:<row id>` under the machine bucket, SHARED with the failure
-// arm's team leg (push core, STATE_PAIRING_POST_PREFIX, mirrored as the TS
-// export imported here), which writes `{ postId, origin, at }` when it opens a
-// pairing beside a teammate's post and stamps `closedAt`/`status`/`fixFiles`
-// when this machine closes it. This command adds `own: true` on a post it
-// published and `held: true` on a holder it lost to.
+// ---- the link from a local pairing to its fix record ------------------------
+// `pairings` has no fix-id column; the link is the `session_state` row
+// `pairing_fix:<row id>` under the machine bucket, SHARED with the failure
+// arm's team leg (push core, STATE_PAIRING_FIX_PREFIX, mirrored as the TS
+// export imported here), which writes `{ fixId, origin, at }` when it opens a
+// pairing beside a teammate's fix and stamps `closedAt`/`status`/`fixFiles`
+// when this machine closes it. This command adds `own: true` on a fix it
+// upserted.
 
 const MACHINE_SESSION = '';
 
 interface PairingLink {
-  postId: string;
+  fixId: string;
   origin: string;
   at: number;
-  /** This machine published the post (a previous `tenjin sync`). */
+  /** This machine holds the fix record (a previous `tenjin sync` upserted it).
+   *  A link WITHOUT it names a teammate's fix, which this machine attests to
+   *  rather than duplicating. */
   own?: boolean;
-  /** A teammate's PUBLISHED piece held the key verified; the shelf refused ours. */
-  held?: boolean;
   /** Stamped by the failure arm when this machine's pass closed the pairing. */
   closedAt?: number;
   status?: string;
   fixFiles?: string[];
-  /**
-   * The read URL `publishPost` echoed back on an OWN publish
-   * (tenjin-agent#252): the read route is keyed by handle/slug, so an id
-   * alone cannot rebuild it later, and this is the one moment the CLI is
-   * ever handed the slug for a post it just created. Stored here so
-   * `findPairingCandidate` (state-store.ts) can answer `inspect`/`read` for an
-   * id `tenjin sync` published without ever having been searched for. Absent
-   * on a `held` link — this machine never fetched the holder's own slug.
-   *
-   * Title and price are deliberately NOT stored alongside it (PR 277 round-2
-   * review, nit on state-store.ts:4132): they were only ever read back as a
-   * synthesized `title: ''` / `price: '0'` default for a caller that reads
-   * only `.url`, and a stale or defaulted price is the wrong thing to hand a
-   * future spend-check. A caller that needs display metadata for a resolved
-   * id fetches it live off `GET /api/posts/<id>/public` (`getPostMetadata`,
-   * lib/agent-api.ts) instead, and gets "unknown" rather than an invented
-   * value when that call fails or the route predates the deployment.
-   */
-  url?: string;
 }
 
 function getLink(store: Store, pairingId: number): PairingLink | null {
   const row = store.get(STORE_SQL.getState, [
     MACHINE_SESSION,
-    STATE_PAIRING_POST_PREFIX + pairingId,
+    STATE_PAIRING_FIX_PREFIX + pairingId,
   ]);
   if (row === null || typeof row.value !== 'string') return null;
   try {
     const parsed: unknown = JSON.parse(row.value);
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
     const link = parsed as Record<string, unknown>;
-    if (typeof link.postId !== 'string' || link.postId.length === 0) return null;
+    if (typeof link.fixId !== 'string' || link.fixId.length === 0) return null;
     return {
-      postId: link.postId,
+      fixId: link.fixId,
       origin: typeof link.origin === 'string' ? link.origin : '',
       at: typeof link.at === 'number' ? link.at : 0,
       ...(link.own === true ? { own: true } : {}),
-      ...(link.held === true ? { held: true } : {}),
       ...(typeof link.closedAt === 'number' ? { closedAt: link.closedAt } : {}),
       ...(typeof link.status === 'string' ? { status: link.status } : {}),
       ...(Array.isArray(link.fixFiles)
         ? { fixFiles: link.fixFiles.filter((f): f is string => typeof f === 'string') }
         : {}),
-      ...(typeof link.url === 'string' && link.url.length > 0 ? { url: link.url } : {}),
     };
   } catch {
     return null;
@@ -717,17 +607,18 @@ function getLink(store: Store, pairingId: number): PairingLink | null {
 }
 
 /**
- * Write the pairing → post link. RETURNS WHETHER IT LANDED, and every caller
- * checks: the link is the only record that this pairing has a post, and
- * `synced_at` is the flag that says never publish this row again. Stamping the
- * second without the first strands the pairing forever — no id to PUT on, no
- * unsynced row to re-publish — so a failed write has to leave the row alone and
- * let the next run try again. The shelf dedups the repeat.
+ * Write the pairing → fix link. RETURNS WHETHER IT LANDED, and every caller
+ * checks: the link is the only record that this pairing has a fix record, and
+ * `synced_at` is the flag that says never write this row again. Stamping the
+ * second without the first strands the pairing forever — no id to attest
+ * against, no unsynced row to re-upsert — so a failed write has to leave the
+ * row alone and let the next run try again. The shelf's holder rule dedups the
+ * repeat.
  */
 function setLink(store: Store, pairingId: number, link: PairingLink): boolean {
   return store.run(STORE_SQL.setState, [
     MACHINE_SESSION,
-    STATE_PAIRING_POST_PREFIX + pairingId,
+    STATE_PAIRING_FIX_PREFIX + pairingId,
     JSON.stringify(link),
     Date.now(),
   ]);
@@ -765,7 +656,7 @@ function readPairing(row: Record<string, unknown>): PairingRow | null {
   if (id === null || key === null) return null;
   return {
     id,
-    kind: typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v1',
+    kind: typeof row.kind === 'string' && row.kind.length > 0 ? row.kind : 'sig_v2',
     key,
     coarseKey: typeof row.coarse_key === 'string' ? row.coarse_key : null,
     cmdHead: typeof row.cmd_head === 'string' ? row.cmd_head : null,
