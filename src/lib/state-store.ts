@@ -1031,12 +1031,27 @@ export const STORE_SQL = {
    * row per distinct failure, on the one hook whose budget is silent.
    */
   unsyncedPairings: `SELECT * FROM pairings
-     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+     WHERE project IS ? AND scope = 'code' AND kind IN ('test', 'sig_v2')
+       AND status IN ('unverified', 'verified')
        AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))
      ORDER BY at`,
   countUnsyncedPairings: `SELECT COUNT(*) AS n FROM pairings
-     WHERE project IS ? AND scope = 'code' AND status IN ('unverified', 'verified')
+     WHERE project IS ? AND scope = 'code' AND kind IN ('test', 'sig_v2')
+       AND status IN ('unverified', 'verified')
        AND (synced_at IS NULL OR (status = 'verified' AND closed_at > synced_at))`,
+  /**
+   * Rows from a build BEFORE the lane split: `sig_v1` (a message+errno+frame
+   * signature computed differently) and `sig_v1_test` (whose coarse key is
+   * file+suite, which must never go on the wire). Neither can be published as
+   * either of the two kinds the fix store knows, and `primaryFor`'s fallback
+   * would have sent a `sig_v1_test` row as `kind: 'error'` carrying its
+   * file+suite hash — a key every failing test in that file shares, offered to
+   * the whole team as a fine match. Stamped synced so they leave the queue
+   * without travelling, which is also what stops the Stop hook re-spawning a
+   * sync for rows no run will ever publish.
+   */
+  stampLegacyPairingsSynced: `UPDATE pairings SET synced_at = ?
+     WHERE project IS ? AND synced_at IS NULL AND kind NOT IN ('test', 'sig_v2')`,
   /** Stamp a pairing as synced (or as re-synced after a promotion). */
   markPairingSynced: 'UPDATE pairings SET synced_at = ? WHERE id = ?',
   /** What the last `tenjin sync` run reported, for the Stop hook's fallback line. */

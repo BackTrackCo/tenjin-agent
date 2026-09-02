@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import type { IncomingMessage, Server } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +20,7 @@ import {
   recordSearch,
   repoSlug,
   repoSlugSource,
+  shortHash,
   teamCoarseKey,
   type StoredSearch,
 } from './state-store';
@@ -4841,6 +4842,27 @@ describe('the test lane — identity extraction', () => {
     'python3 -m pytest',
     'go test ./...',
     'cargo nextest run',
+    // WRAPPED, which is how CI and half of local practice spell a test run.
+    // `commandHeads` strips these for the head it reports, but the word scan
+    // that finds a package-manager SCRIPT was reading raw words, so every one
+    // of these took the error lane and published a key over its assertion text.
+    'timeout 600 pnpm test',
+    'nice pnpm test',
+    'env CI=1 pnpm test',
+    'sudo -u builder pnpm test',
+    'timeout -k 5 30s pnpm run test:unit',
+    'nohup pnpm test',
+    // QUIET FLAGS, which are boolean: eating a value for every flag swallowed
+    // the word `test` itself and sent the two commonest quiet spellings down
+    // the error lane.
+    'pnpm --silent test',
+    'pnpm -s test',
+    'pnpm -r test',
+    'pnpm --recursive --stream test',
+    // ...while a value option really does take its value.
+    'pnpm --filter web test',
+    'pnpm --filter=web test',
+    'pnpm -C packages/api test',
   ])('yields a test identity from the console breadcrumb behind %s', async (command) => {
     await pushOn('http://127.0.0.1:1');
     await runScript(
@@ -5210,6 +5232,332 @@ describe('the test lane — team leg', () => {
 });
 
 /**
+ * THE JUNIT LEG, AGAINST REAL REPORTS FROM EVERY RUNNER IN THE CORPUS.
+ *
+ * The structured leg reads JUnit XML because every runner here can write it,
+ * and each of them names a case DIFFERENTLY: pytest puts the file on the case
+ * and `pkg.module.Class` in `classname`; jest-junit puts the describe chain in
+ * `classname` and the test name in `name`; vitest's junit reporter puts the
+ * FILE PATH in `classname` and the whole `describe > test` chain in `name`;
+ * gotestsum puts the package on the suite; nextest puts `crate::module` in
+ * `classname`. A parser that reads one of them correctly and the rest by luck
+ * produces keys that look fine and match nothing, so every writer gets a
+ * fixture and an asserted (file, suite, test) triple.
+ */
+describe('the test lane — JUnit reports', () => {
+  const JUNIT_CWD_PREFIX = 'tenjin-push-junit-';
+
+  /** The context arm's Bash half, which stamps this agent's own pre-command
+   *  timestamp — the JUnit leg checks the report's MTIME against it. Returns
+   *  the REAL stashed value read back from the store, since a spawned node
+   *  process's own startup easily outruns a fixed offset. (A local twin of the
+   *  identity-extraction block's helper: these two blocks are siblings, and
+   *  hoisting it would put a helper above both describes that only they use.) */
+  async function stashBashStart(session: string, cwd: string): Promise<number> {
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: session,
+        cwd,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'irrelevant — only the event/tool matter' },
+      }),
+    );
+    const db = new DatabaseSync(join(dataDir, STATE_DB_FILE));
+    try {
+      const row = db
+        .prepare("SELECT value FROM session_state WHERE session = ? AND key = 'bashstart::'")
+        .get(session) as { value?: string } | undefined;
+      const value = row?.value === undefined ? null : (JSON.parse(row.value) as unknown);
+      if (typeof value !== 'number') throw new Error('stashBashStart: no stash landed');
+      return value;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Run one failure whose identity can only have come from the report at
+   * `.tenjin/junit.xml`, and hand back the pairing row it opened.
+   *
+   * A FRESH SESSION PER FIRE, because the arm claims a signature once per
+   * session: two fires whose console output is identical (which is the point
+   * here — the console must contribute nothing) would otherwise have the second
+   * exit as `already-claimed` with no row at all. And the LAST test row, since
+   * these share one store.
+   */
+  let junitFire = 0;
+  async function fireWithReport(
+    xml: string,
+    command = 'pnpm test',
+    stdout = 'Tests  1 failed | 2 passed (3)\n',
+  ): Promise<Record<string, unknown> & { error_files: string[] }> {
+    junitFire += 1;
+    const session = `junit-${junitFire}`;
+    const cwd = await mkdtemp(join(tmpdir(), JUNIT_CWD_PREFIX));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart(session, cwd);
+      await mkdir(join(cwd, '.tenjin'), { recursive: true });
+      await writeFile(join(cwd, '.tenjin', 'junit.xml'), xml);
+      // The window check is on MTIME for JUnit, so stamp it inside the run.
+      await utimes(join(cwd, '.tenjin', 'junit.xml'), new Date(), new Date(since + 10));
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: session,
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command },
+          tool_response: { stdout, stderr: '', interrupted: false },
+        }),
+      );
+      const row = (await pairings())
+        .filter((p) => p.kind === 'test' && p.session === session)
+        .at(-1);
+      if (row === undefined) throw new Error('no test pairing opened');
+      return row;
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  }
+
+  /** The fine key the arm would compute for one identity, so a fixture can
+   *  assert the KEY and not merely the row. ⚠ Mirrors `testSigOf`. */
+  function fineKeyFor(file: string, suite: string, test: string): string {
+    return shortHash(`test|${file}|${suite}|${test}`);
+  }
+
+  const PYTEST_XML = `<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pytest" tests="3" failures="1">
+    <testcase classname="tests.test_date.TestDate" name="test_handles_none" file="tests/test_date.py" time="0.01">
+      <failure message="assert 1 == 2">E  AssertionError</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+  const JEST_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="jest tests">
+  <testsuite name="src/date.test.js" file="src/date.test.js" tests="2" failures="1">
+    <testcase classname="formatDate" name="handles null" time="0.004">
+      <failure>expect(received).toBe(expected)</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+  const VITEST_XML = `<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests">
+  <testsuite name="src/date.test.ts" timestamp="2026-09-02T10:00:00" tests="2" failures="1">
+    <testcase classname="src/date.test.ts" name="formatDate &gt; handles null" time="0.004">
+      <failure message="expected undefined to be null"></failure>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+  const GOTESTSUM_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="2" failures="1">
+  <testsuite tests="2" failures="1" name="github.com/acme/api/date">
+    <testcase classname="github.com/acme/api/date" name="TestFormatDate" time="0.000">
+      <failure message="Failed">date_test.go:14: expected 1, got 2</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+  const NEXTEST_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="2" failures="1">
+  <testsuite name="api" tests="2" failures="1">
+    <testcase name="date::formats_null" classname="api::date" time="0.003">
+      <failure type="test failure">assertion failed</failure>
+    </testcase>
+  </testsuite>
+</testsuites>`;
+
+  it.each([
+    [
+      'pytest',
+      PYTEST_XML,
+      { file: 'tests/test_date.py', suite: 'tests.test_date.TestDate', test: 'test_handles_none' },
+    ],
+    [
+      'jest-junit',
+      JEST_XML,
+      { file: 'src/date.test.js', suite: 'formatDate', test: 'handles null' },
+    ],
+    // vitest writes classname = the file PATH and name = the whole chain, so
+    // the canonicaliser splits it into the same triple the console leg yields.
+    [
+      'vitest junit',
+      VITEST_XML,
+      { file: 'src/date.test.ts', suite: 'formatDate', test: 'handles null' },
+    ],
+    [
+      'gotestsum',
+      GOTESTSUM_XML,
+      { file: '', suite: 'github.com/acme/api/date', test: 'TestFormatDate' },
+    ],
+    ['cargo-nextest', NEXTEST_XML, { file: '', suite: 'api::date', test: 'date::formats_null' }],
+  ])('reads the identity %s writes, and keys on it', async (name, xml, want) => {
+    const row = await fireWithReport(xml);
+    expect(String(row.key), name).toBe(fineKeyFor(want.file, want.suite, want.test));
+    // The row's own `error_files` is the basename of whatever file it named,
+    // and a runner that names none falls back to the error text's files.
+    if (want.file !== '') {
+      expect(row.error_files, name).toEqual([want.file.split('/').pop()]);
+    }
+  });
+
+  /**
+   * ⚠ THE BOUNDARY BUG THIS PINS: without `(?:^|\s)` before the attribute name,
+   * a lookup for `name` matches inside `classname=`, and since every writer
+   * above puts `classname` FIRST, every failing case in one class read back the
+   * class as its test. Two different tests in one class must be two keys.
+   */
+  it('does not read classname as name: two tests in one class are two keys', async () => {
+    const caseXml = (test: string): string => `<?xml version="1.0"?>
+<testsuites><testsuite name="pytest">
+  <testcase classname="tests.test_date.TestDate" name="${test}" file="tests/test_date.py">
+    <failure message="assert 1 == 2">E  AssertionError</failure>
+  </testcase>
+</testsuite></testsuites>`;
+    const a = await fireWithReport(caseXml('test_handles_none'));
+    const b = await fireWithReport(caseXml('test_handles_zero'));
+    expect(String(a.key)).not.toBe(String(b.key));
+    expect(String(a.key)).toBe(
+      fineKeyFor('tests/test_date.py', 'tests.test_date.TestDate', 'test_handles_none'),
+    );
+    // And the class itself is never the test name.
+    expect(String(a.key)).not.toBe(
+      fineKeyFor('tests/test_date.py', 'tests.test_date.TestDate', 'tests.test_date.TestDate'),
+    );
+  });
+
+  /** A nested `<testsuites><testsuite><testsuite>` document (pytest-xdist and
+   *  several CI aggregators write one): the INNERMOST suite opening before the
+   *  case is the one whose `file` stands in. */
+  it('takes the innermost enclosing suite in a nested document', async () => {
+    const row = await fireWithReport(`<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="outer" file="wrong/outer.py">
+    <testsuite name="inner" file="pkg/inner.py">
+      <testcase classname="pkg.inner.Cls" name="test_thing">
+        <failure message="boom">E boom</failure>
+      </testcase>
+    </testsuite>
+  </testsuite>
+</testsuites>`);
+    expect(String(row.key)).toBe(fineKeyFor('pkg/inner.py', 'pkg.inner.Cls', 'test_thing'));
+  });
+
+  /** `<error>` is a failure this lane keys on (a fixture that raised, a panic);
+   *  `<skipped>` is not a failure at all and must never become the identity. */
+  it('keys on an errored case and never on a skipped one', async () => {
+    const row = await fireWithReport(`<?xml version="1.0"?>
+<testsuites><testsuite name="pytest">
+  <testcase classname="pkg.Cls" name="errored" file="pkg/a.py">
+    <error message="fixture raised">E RuntimeError</error>
+  </testcase>
+  <testcase classname="pkg.Cls" name="skipped_one" file="pkg/a.py">
+    <skipped message="needs network"/>
+  </testcase>
+</testsuite></testsuites>`);
+    expect(String(row.key)).toBe(fineKeyFor('pkg/a.py', 'pkg.Cls', 'errored'));
+  });
+
+  /** Several failures: the LAST in document order wins, the same recency rule
+   *  every other leg follows, and it is deterministic across runs. */
+  it('takes the last failing case, deterministically', async () => {
+    const xml = `<?xml version="1.0"?>
+<testsuites><testsuite name="pytest">
+  <testcase classname="pkg.Cls" name="first" file="pkg/a.py"><failure message="a">E a</failure></testcase>
+  <testcase classname="pkg.Cls" name="middle" file="pkg/a.py"><failure message="b">E b</failure></testcase>
+  <testcase classname="pkg.Cls" name="last" file="pkg/a.py"><failure message="c">E c</failure></testcase>
+</testsuite></testsuites>`;
+    const first = await fireWithReport(xml);
+    const again = await fireWithReport(xml);
+    expect(String(first.key)).toBe(fineKeyFor('pkg/a.py', 'pkg.Cls', 'last'));
+    expect(String(again.key)).toBe(String(first.key));
+  });
+
+  /**
+   * ONE TEST, ONE KEY, WHICHEVER LEG READ IT. A teammate with the junit
+   * reporter wired and a teammate without it must compute the SAME fine key for
+   * the same failing test, or the shelf holds two records for one failure and
+   * neither machine ever matches the other.
+   */
+  it('agrees with the console leg on the identity of one vitest failure', async () => {
+    const fromReport = await fireWithReport(VITEST_XML);
+
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'junit-console',
+        cwd: '/repo/console',
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm test' },
+        tool_response: {
+          stdout: ' FAIL  src/date.test.ts > formatDate > handles null\nAssertionError: x\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const fromConsole = (await pairings()).find(
+      (p) => p.kind === 'test' && p.session === 'junit-console',
+    );
+    expect(String(fromConsole?.key)).toBe(String(fromReport.key));
+  });
+
+  /**
+   * A repo-relative `file` attribute STAYS repo-relative. `relTestFile` falls
+   * back to the basename for a path outside `cwd`, and pytest writes
+   * `tests/test_date.py` — relative already — so a fallback that fired on it
+   * would drop the directory and collide two same-named files in one repo.
+   */
+  it('keeps a repo-relative file attribute whole', async () => {
+    const row = await fireWithReport(`<?xml version="1.0"?>
+<testsuites><testsuite name="pytest">
+  <testcase classname="pkg.Cls" name="t" file="tests/deep/nested/test_date.py">
+    <failure message="x">E x</failure>
+  </testcase>
+</testsuite></testsuites>`);
+    expect(String(row.key)).toBe(fineKeyFor('tests/deep/nested/test_date.py', 'pkg.Cls', 't'));
+  });
+
+  /**
+   * A BIG REPORT MUST NOT STALL THE HOOK. The suite lookup was a linear scan
+   * per failing case over every suite in the document — quadratic, synchronous,
+   * and in front of the agent's next tool call, where the watchdog is an
+   * event-loop timer that cannot pre-empt it. Indexed offsets plus a binary
+   * search plus a tail parse window bound it.
+   */
+  it('parses a report at the read cap well inside the hook budget', async () => {
+    const filler = Array.from(
+      { length: 16000 },
+      (_, i) =>
+        `  <testsuite name="s${i}" file="pkg/s${i}.py"><testcase classname="pkg.S${i}" name="ok${i}"/></testsuite>`,
+    ).join('\n');
+    const xml = `<?xml version="1.0"?>\n<testsuites>\n${filler}\n  <testsuite name="last" file="pkg/last.py">\n    <testcase classname="pkg.Last" name="the_failure" file="pkg/last.py"><failure message="x">E x</failure></testcase>\n  </testsuite>\n</testsuites>`;
+    // Just under `JUNIT_READ_MAX` (2 MB), which is the largest report this leg
+    // ever parses — a bigger file is skipped at the stat, unread.
+    expect(xml.length).toBeGreaterThan(1_500_000);
+    expect(xml.length).toBeLessThan(2 * 1024 * 1024);
+
+    const started = Date.now();
+    const row = await fireWithReport(xml);
+    const elapsed = Date.now() - started;
+
+    expect(String(row.key)).toBe(fineKeyFor('pkg/last.py', 'pkg.Last', 'the_failure'));
+    // The whole hook fire, process spawn included, not just the parse.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+});
+
+/**
  * THE ERROR LINE, ACROSS THE RUNNERS THAT ACTUALLY PRINT ONE.
  *
  * `errorLine` used to take the LAST marker in the output, and every runner in
@@ -5356,6 +5704,23 @@ describe('the error line: a corpus of real runner output', () => {
     await pushOn('http://127.0.0.1:1');
     await fire(command, out, `corpus-${name}`);
     expect(await errorLineOf(), name).toBe(want);
+  });
+
+  /**
+   * THE LINTER'S PATH HEADER IS THE FRAME. eslint's `stylish` formatter prints
+   * the file once on its own line and the problems under it as `12:5  error …`,
+   * so the error line this lane picks carries a line:column and NO filename —
+   * and every other frame shape needs the two together. Without the header
+   * read, the eslint marker produced a line and then always fell below the
+   * specificity floor: never a key, so never a pairing.
+   */
+  it('keys a lint failure on the file its path header named', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await fire('pnpm eslint .', ESLINT, 'corpus-eslint-key');
+    const rows = await pairings();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'sig_v2', cmd_head: 'pnpm' });
+    expect(String(rows[0]!.key)).toMatch(/^[0-9a-f]{16}$/);
   });
 
   /**
@@ -5677,7 +6042,8 @@ describe('what the arms put on the wire', () => {
    * likely to carry a credential or a path. So there is no `trigger: 'failure'`
    * body to assert on, and the arm's own describe block proves the rest of what
    * it does from local pairings alone. The team leg by fingerprint (`POST
-   * /api/fixes/resolve`, one or two hashes) arrives in the following PR.
+   * /api/fixes/resolve`, one or two hashes) has its own describe block above;
+   * this one is about the public shelf, which a failure never touches.
    */
   it('asks nothing at all on a failure, whatever the error names', async () => {
     const { baseUrl, bodies, hits } = await serve(echo());

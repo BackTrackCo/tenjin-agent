@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
 import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
 import { openStore } from '../lib/state-store';
-import { publishBodyHash } from '../lib/publish-dedup';
+import { normalizePublishBody, publishBodyHash } from '../lib/publish-dedup';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -128,9 +128,11 @@ function idempotentServer(post: Record<string, unknown> = CREATED): {
   fetch: typeof fetch;
   calls: string[];
   keys: () => Array<string | undefined>;
+  bodies: () => Array<Record<string, unknown>>;
 } {
   const calls: string[] = [];
   const keys: Array<string | undefined> = [];
+  const parsed: Array<Record<string, unknown>> = [];
   const seen = new Map<string, string>();
   const fetchFn = (async (url: string | URL, init?: RequestInit) => {
     calls.push(String(url));
@@ -138,6 +140,7 @@ function idempotentServer(post: Record<string, unknown> = CREATED): {
     const key = headers.get('idempotency-key') ?? undefined;
     keys.push(key);
     const body = typeof init?.body === 'string' ? init.body : '';
+    parsed.push(body === '' ? {} : (JSON.parse(body) as Record<string, unknown>));
     if (key !== undefined) {
       const prior = seen.get(key);
       if (prior !== undefined && prior !== body) {
@@ -161,7 +164,7 @@ function idempotentServer(post: Record<string, unknown> = CREATED): {
       headers: { 'content-type': 'application/json' },
     });
   }) as unknown as typeof fetch;
-  return { fetch: fetchFn, calls, keys: () => keys };
+  return { fetch: fetchFn, calls, keys: () => keys, bodies: () => parsed };
 }
 
 /** A stub server that also captures the parsed request body. */
@@ -277,7 +280,11 @@ describe('runPublish — Markdown from stdin', () => {
     );
     expect(body()).toMatchObject({
       title: 'The Answer',
-      bodyMd: CLEAN,
+      // NORMALIZED (tenjin#763): what is published is the bytes the
+      // `Idempotency-Key` is taken over, so the server's replay fingerprint and
+      // the client's key agree. Here that trims the document's trailing
+      // newline; interior whitespace is untouched.
+      bodyMd: normalizePublishBody(CLEAN),
       price: '250000',
       excerpt: 'stdin preview',
       resource: {
@@ -2116,44 +2123,49 @@ describe('runPublish — the same body is published once, by idempotency key', (
   });
 
   /**
-   * A RE-RENDER OF THE SAME FINDING IS ONE KEY, AND THE SERVER STILL SEES TWO
-   * BODIES. ⚠ THE SEAM BETWEEN THE TWO HALVES OF THIS FEATURE, pinned here
-   * rather than left to be discovered in production.
+   * A RE-RENDER OF THE SAME FINDING REPLAYS, which is the whole point of the
+   * key. The second agent's copy — the same prose with CRLF, a trailing blank
+   * line, or a space left at the end of a wrapped line — hashes to the same
+   * key, and now sends the same BYTES too, so the server's own fingerprint
+   * agrees and it replays the original instead of refusing.
    *
-   * The key is `sha256(normalizePublishBody(body))`, so the second agent's copy
-   * of one finding — the same prose with CRLF, a trailing blank line, or a space
-   * left at the end of a wrapped line — hashes to the SAME key, which is the
-   * whole point: none of those is a different finding.
-   *
-   * The server's own replay check is a fingerprint over the canonical JSON of
-   * the create body (the fixes contract, "Posts: idempotency"), and that body
-   * carries the RAW bytes — the CLI does not rewrite what an author wrote, since
-   * a trailing double space is a markdown hard break. So a re-render arrives as
-   * "same key, different fingerprint", which the contract says is 422
-   * `idempotency_key_reused`: the server refuses rather than guessing which body
-   * was meant, and NOTHING IS PUBLISHED — no silent duplicate.
-   *
-   * That is the safe side to be wrong on, and it is not the last word: making a
-   * re-render replay instead of refuse means fingerprinting the normalized body
-   * on the server too, which is a change to the server half's own contract.
+   * WHAT MAKES THE TWO AGREE: the body that is published is the NORMALIZED one,
+   * the same bytes the key is taken over. Sending the raw body while keying on
+   * the normalized one made a re-render arrive as "same key, different
+   * fingerprint" — a 422 on the exact duplicate the mechanism exists to
+   * collapse. The visible cost is a markdown hard break spelled as two trailing
+   * spaces; interior whitespace is untouched, so a reflowed paragraph is still
+   * a different finding (the case below).
    */
-  it('refuses a re-render under the same key rather than publishing a duplicate', async () => {
-    const { fetch, calls, keys } = idempotentServer();
+  it('replays a re-render instead of duplicating or refusing it', async () => {
+    const { fetch, calls, keys, bodies } = idempotentServer();
     const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
 
     await runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'auto' }), makeCtx(), deps);
     const rerendered = `${CLEAN.replace(/\n/g, '\r\n').replace('sensitive.', 'sensitive.   ')}\r\n\r\n`;
-    const err = (await runPublish(
+    const again = await runPublish(
       baseArgs(await writeDoc(rerendered), { mode: 'auto' }),
       makeCtx(),
       deps,
-    ).catch((e: unknown) => e)) as { code: string };
+    );
 
-    // ONE KEY for both, which is what `normalizePublishBody` buys...
-    expect(keys()[1]).toBe(keys()[0]);
-    // ... and the server's byte fingerprint is what refuses the second.
-    expect(err.code).toBe('PUBLISH_FAILED');
+    expect(again.data).toEqual({ alreadyPublished: true, url: CREATED.url });
     expect(calls).toHaveLength(2);
+    // ONE KEY, and the same bytes under it both times — which is what turns the
+    // server's fingerprint check from a refusal into a replay.
+    expect(keys()[1]).toBe(keys()[0]);
+    expect(bodies()[1]!.bodyMd).toBe(bodies()[0]!.bodyMd);
+  });
+
+  it('publishes the normalized body, so what is stored is what the key covers', async () => {
+    const { fetch, bodies } = idempotentServer();
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+    const raw = `${CLEAN.replace(/\n/g, '\r\n')}   \r\n\r\n`;
+    await runPublish(baseArgs(await writeDoc(raw), { mode: 'auto' }), makeCtx(), deps);
+    const sent = bodies()[0]!.bodyMd as string;
+    expect(sent).toBe(normalizePublishBody(raw));
+    expect(sent).not.toContain('\r');
+    expect(sent.endsWith('\n')).toBe(false);
   });
 
   it('is not fooled into swallowing a genuinely different body', async () => {

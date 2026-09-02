@@ -1666,7 +1666,8 @@ const ERROR_MARKERS = [
   // eslint/oxlint/biome's per-problem line: \`  12:5  error  <rule text>\`. The
   // TOTALS row a linter ends with (\`✖ 3 problems\`) is an aggregate, so without
   // this the only marker in a lint failure was the one line that says nothing
-  // specific at all.
+  // specific at all. The filename comes from the formatter's own path header
+  // one line up, which \`SIG_PATH_HEADER_RE\` reads off the same block.
   /^[ \t]*\d+:\d+[ \t]+error[ \t]/m,
   /ERR_PNPM_/,
   /error TS\d+:/,
@@ -2225,10 +2226,26 @@ function errnoOf(text) {
  *  must key the same across two checkouts of one repo. */
 const SIG_PY_FRAME_RE = /File "([^"]+)", line \d+/;
 const SIG_FRAME_RE = /([A-Za-z0-9_.+-]+(?:[/\\][A-Za-z0-9_.+-]+)*\.[A-Za-z]{1,5})[:(]\d+/;
+/**
+ * A LINTER'S FILE HEADER, which is a whole line and nothing else.
+ *
+ * eslint's default \`stylish\` formatter (and oxlint's, and biome's) prints the
+ * path once on its own line and then the problems under it as \`12:5  error  …\`
+ * — so the error line this lane picks carries a line:column and NO filename,
+ * and every other frame shape needs the two together. Without this the eslint
+ * marker cleared the marker test and then always fell below the specificity
+ * floor: a line, never a key. Anchored to the WHOLE line so an ordinary
+ * sentence that happens to mention a file cannot be read as a frame, and only
+ * consulted when the real frame shapes found nothing.
+ */
+const SIG_PATH_HEADER_RE = /^[ \t]*((?:[A-Za-z]:)?[^\s:()]*[/\\]?[A-Za-z0-9_.+-]+\.[A-Za-z]{1,5})[ \t]*$/m;
 function topFrameFile(text) {
-  const py = SIG_PY_FRAME_RE.exec(String(text));
-  const framed = SIG_FRAME_RE.exec(String(text));
-  const raw = py !== null ? py[1] : framed !== null ? framed[1] : null;
+  const body = String(text);
+  const py = SIG_PY_FRAME_RE.exec(body);
+  const framed = SIG_FRAME_RE.exec(body);
+  const header = py === null && framed === null ? SIG_PATH_HEADER_RE.exec(body) : null;
+  const raw =
+    py !== null ? py[1] : framed !== null ? framed[1] : header !== null ? header[1] : null;
   if (raw === null) return '';
   const base = raw.split(/[/\\]/).pop();
   return typeof base === 'string' && base.length > 0 && base.length <= 80 ? base : '';
@@ -2374,6 +2391,30 @@ const PM_HEADS_TEST_WORDS = new Set(['test', 't']);
 /** Words a package-manager invocation may carry BEFORE its script name and
  *  that say nothing about which script it is. */
 const PM_PASSTHROUGH_SUBS = new Set(['run', 'exec', 'dlx', 'x']);
+/**
+ * Package-manager options that TAKE A VALUE, so the value is stepped over with
+ * them and never read as the script name.
+ *
+ * ⚠ A TABLE, NOT "every flag eats one word" — the same rule
+ * \`WRAPPER_VALUE_OPTS\` already follows, and for the same reason. Eating a value
+ * unconditionally made \`pnpm --silent test\` and \`pnpm -s test\` swallow the
+ * word \`test\` itself, so the two commonest quiet spellings of a test run went
+ * down the ERROR lane and published a key over their assertion text. A boolean
+ * flag consumes ONE word, an unknown flag is treated as boolean (which errs
+ * toward reading the next word, and the next word is only accepted when it IS
+ * a test script or a known runner).
+ */
+const PM_VALUE_OPTS = new Set([
+  '--filter',
+  '-F',
+  '-C',
+  '--dir',
+  '-w',
+  '--workspace',
+  '--prefix',
+  '--workspace-root',
+  '--reporter',
+]);
 
 /**
  * The test script or runner a package-manager segment invokes, or null.
@@ -2381,10 +2422,16 @@ const PM_PASSTHROUGH_SUBS = new Set(['run', 'exec', 'dlx', 'x']);
  * A WORD SCAN, NOT \`commandHeads\`'s \`sub\`. \`commandHeads\` reports the word
  * immediately after the program, which for \`pnpm --filter web test\` is
  * \`--filter\` — so the single most common monorepo test invocation looked like
- * an unknown script. This steps over \`run\`/\`exec\` and over flags (and,
- * conservatively, one value each) to the first real word, and accepts either a
- * test SCRIPT name (\`test\`, \`t\`, \`test:unit\`) or a known runner spelled
- * behind the manager (\`pnpm vitest run\`, \`yarn jest\`).
+ * an unknown script. This steps over \`run\`/\`exec\`, over value options and
+ * their values, and over boolean flags, to the first real word, and accepts
+ * either a test SCRIPT name (\`test\`, \`t\`, \`test:unit\`) or a known runner
+ * spelled behind the manager (\`pnpm vitest run\`, \`yarn jest\`).
+ *
+ * \`words\` ARRIVES WRAPPER-STRIPPED (see \`isRunnerCommand\`): \`timeout 600 pnpm
+ * test\`, \`nice pnpm test\`, \`env CI=1 pnpm test\` and \`sudo -u builder pnpm
+ * test\` all reach here as \`pnpm test\`. Reading raw words instead meant every
+ * wrapped invocation — which is how CI and half of local practice spell a test
+ * run — took the error lane.
  */
 function pmTestWord(words) {
   let i = 0;
@@ -2396,13 +2443,49 @@ function pmTestWord(words) {
     const word = words[i];
     if (PM_PASSTHROUGH_SUBS.has(word)) continue;
     if (word.startsWith('-')) {
-      i += 1;
+      // \`--filter=web\` carries its value in the same word; \`--filter web\` takes
+      // the next one. Anything else is boolean and consumes only itself.
+      if (!word.includes('=') && PM_VALUE_OPTS.has(word)) i += 1;
       continue;
     }
     if (PM_HEADS_TEST_WORDS.has(word) || word.startsWith('test:')) return word;
     return TEST_RUNNER_HEADS.has(word) ? word : null;
   }
   return null;
+}
+
+/**
+ * One command segment's words with any WRAPPERS stepped over, so the first word
+ * is the program that actually runs.
+ *
+ * ⚠ THE SAME TABLES \`commandHeads\` USES (\`WRAPPER_VALUE_OPTS\`, \`skipWrapper\`,
+ * \`HEAD_RUNNERS\`, \`PM_RUN_SUBS\`), rather than a second hand-kept copy: a
+ * wrapper this understood and that did not would put the two halves of the lane
+ * decision into disagreement. Leading \`NAME=value\` assignments are left in
+ * place because \`pmTestWord\` skips them itself.
+ */
+function unwrappedWords(words) {
+  let i = 0;
+  let guard = 0;
+  while (i < words.length && guard < 32) {
+    guard += 1;
+    const word = words[i];
+    const name = word.split('/').pop() || word;
+    if (/^[A-Za-z_]\w*=/.test(word)) {
+      i += 1;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(WRAPPER_VALUE_OPTS, name)) {
+      i = skipWrapper(words, i, WRAPPER_VALUE_OPTS[name], name);
+      continue;
+    }
+    if (HEAD_RUNNERS.has(name)) {
+      i += 1;
+      continue;
+    }
+    break;
+  }
+  return words.slice(i);
 }
 
 /**
@@ -2424,7 +2507,7 @@ function isRunnerCommand(command) {
   }
   for (const segment of String(command).split(COMMAND_SEPARATOR_RE)) {
     const words = segment.trim().split(/\s+/).filter((w) => w.length > 0);
-    if (pmTestWord(words) !== null) return true;
+    if (pmTestWord(unwrappedWords(words)) !== null) return true;
   }
   return false;
 }
@@ -2441,6 +2524,12 @@ const JUNIT_DEFAULT_PATHS = [
   'junit.xml',
   'test-results/junit.xml',
   'reports/junit.xml',
+  // cargo-nextest cannot be told a path on the command line — JUnit is a
+  // PROFILE setting (\`.config/nextest.toml\`, \`[profile.default.junit] path =
+  // "junit.xml"\`), and it writes under \`target/nextest/<profile>/\`. Without
+  // this entry the doctor hint told an operator to wire something the failure
+  // arm would then never look at.
+  'target/nextest/default/junit.xml',
 ];
 /** How much of a report is read. A JUnit file for a large suite is mostly
  *  passing cases; the failures this needs are elements, not a tail, so the cap
@@ -2552,17 +2641,34 @@ function testReportCandidates(cwd) {
   return out;
 }
 
-/** An absolute path AS THE REPO NAMES IT: relative to \`cwd\`, forward-slashed,
- *  so the same test file hashes the same across a Windows and a POSIX
- *  checkout, and across two clones sitting at different absolute paths. Falls
- *  back to the basename when \`path\` is not under \`cwd\` at all (a monorepo test
- *  run from a parent directory) — still stable across machines, just coarser. */
+/**
+ * A path AS THE REPO NAMES IT: relative to \`cwd\`, forward-slashed, so the same
+ * test file hashes the same across a Windows and a POSIX checkout, and across
+ * two clones sitting at different absolute paths.
+ *
+ * ⚠ AN ALREADY-RELATIVE PATH IS RETURNED WHOLE. pytest, jest-junit and vitest's
+ * junit reporter all write \`tests/test_date.py\`-shaped, repo-relative
+ * attributes, and the basename fallback below fired on every one of them —
+ * because a relative path does not start with \`cwd\` — so the directory was
+ * thrown away and two same-named test files in one repo collided on one key.
+ * It also disagreed with the CONSOLE leg, which keeps whatever the runner
+ * printed: one test, two keys, depending on whether a reporter was wired.
+ *
+ * The basename fallback survives for the case it was written for: an ABSOLUTE
+ * path that is not under \`cwd\` at all (a monorepo test run from a parent
+ * directory) — still stable across machines, just coarser.
+ */
 function relTestFile(cwd, path) {
-  if (typeof cwd === 'string' && cwd.length > 0 && path.startsWith(cwd)) {
-    const rest = path.slice(cwd.length).replace(/^[/\\]+/, '');
+  const text = String(path);
+  if (typeof cwd === 'string' && cwd.length > 0 && text.startsWith(cwd)) {
+    const rest = text.slice(cwd.length).replace(/^[/\\]+/, '');
     if (rest.length > 0) return rest.split(/[/\\]/).join('/');
   }
-  return path.split(/[/\\]/).pop() || path;
+  if (!isAbsoluteTestPath(text)) {
+    const rel = text.replace(/^\.[/\\]+/, '').split(/[/\\]/).join('/');
+    if (rel.length > 0) return rel;
+  }
+  return text.split(/[/\\]/).pop() || text;
 }
 
 /**
@@ -2627,11 +2733,20 @@ function identityFromReport(report, cwd) {
  * which exits with NOTHING written: no event row, no pairing, for a failure
  * that has nothing to do with this lane at all.
  */
-/** One XML attribute off an element's raw attribute text. Both quote styles,
- *  and the five XML entities, which is the whole of what a JUnit writer escapes
- *  into \`name\`/\`classname\`. */
+/**
+ * One XML attribute off an element's raw attribute text. Both quote styles,
+ * and the five XML entities, which is the whole of what a JUnit writer escapes
+ * into \`name\`/\`classname\`.
+ *
+ * ⚠ THE BOUNDARY IS LOAD-BEARING. Without \`(?:^|\s)\` in front of the name, a
+ * lookup for \`name\` matched inside \`classname="…"\` — and pytest, jest-junit,
+ * vitest's junit reporter and gotestsum ALL write \`classname\` before \`name\`,
+ * so every failing case in one class read back the class as its test name and
+ * hashed to a single key. That is the whole file collapsing to one fingerprint,
+ * silently, on every runner in the corpus.
+ */
 function xmlAttr(attrs, name) {
-  const m = new RegExp(name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\')').exec(attrs);
+  const m = new RegExp('(?:^|\\s)' + name + '\\s*=\\s*("([^"]*)"|\'([^\']*)\')').exec(attrs);
   if (m === null) return '';
   const raw = typeof m[2] === 'string' ? m[2] : typeof m[3] === 'string' ? m[3] : '';
   return raw
@@ -2649,12 +2764,93 @@ const JUNIT_CASE_RE = /<testcase\b([^>]*?)(?:\/>|>([\s\S]*?)<\/testcase>)/g;
  *  itself: pytest puts the file on the case, jest-junit on neither, and
  *  gotestsum on the suite. */
 const JUNIT_SUITE_RE = /<testsuite\b([^>]*)>/g;
+/** How many \`<testsuite>\` openings are indexed. A report with more than this
+ *  is a monorepo-wide run; the tail window below is what bounds it. */
+const JUNIT_SUITE_MAX = 4096;
+/**
+ * How much of a report is PARSED, from the end.
+ *
+ * The answer this leg wants is the LAST failing case, so the tail is where it
+ * is — and a hook runs synchronously in front of a tool call, where the
+ * watchdog is an event-loop timer that cannot pre-empt a long regex walk. A
+ * monorepo report is mostly passing cases, so the window costs nothing in
+ * practice and bounds the worst case regardless of \`JUNIT_READ_MAX\`. A case
+ * whose enclosing \`<testsuite>\` opened above the window loses only the suite's
+ * \`file\` fallback; the case's own \`file\` attribute is unaffected.
+ */
+const JUNIT_PARSE_WINDOW = 256 * 1024;
+
+/**
+ * The suite whose opening tag most recently precedes \`index\`, by BINARY SEARCH
+ * over a sorted offset index built once.
+ *
+ * IT WAS A LINEAR SCAN PER FAILING CASE, over every suite in a report bounded
+ * only by JUNIT_READ_MAX. On a large report that is quadratic work inside a
+ * SYNCHRONOUS hook, where the watchdog is an event-loop timer and cannot
+ * pre-empt it — the process would simply sit in front of the agent's next tool
+ * call. Offsets are non-decreasing by construction (matchAll walks forward), so
+ * a binary search is exact rather than approximate.
+ */
+function suiteBefore(suites, index) {
+  let lo = 0;
+  let hi = suites.length - 1;
+  let found = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (suites[mid].at <= index) {
+      found = suites[mid].attrs;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
+}
+
+/**
+ * vitest's junit reporter writes \`classname\` = the FILE PATH and \`name\` = the
+ * whole \` > \`-joined describe chain ending in the test — which is the console
+ * leg's \`file > suite > test\` breadcrumb, spelled across two attributes. Left
+ * alone, one test hashed one way through the console leg and another through
+ * the report, so the same failure on two machines (one with a reporter wired,
+ * one without) never matched.
+ *
+ * The split is the console leg's own: last segment is the test, the rest is the
+ * suite. Applied only when \`classname\` looks like a PATH (it carries a \`/\` or a
+ * file extension) and \`name\` carries the separator — pytest's
+ * \`pkg.module.Class\` and nextest's \`crate::module\` are not paths and keep
+ * their own shape.
+ */
+const JUNIT_PATH_CLASSNAME_RE = /[/\\]|\.[A-Za-z0-9]{1,5}$/;
+function canonicalJunitIdentity(file, suite, test, cwd) {
+  if (suite.length > 0 && JUNIT_PATH_CLASSNAME_RE.test(suite) && / > /.test(test)) {
+    const parts = test.split(/\s*>\s*/).filter((p) => p.length > 0);
+    if (parts.length > 1) {
+      return {
+        file: relTestFile(cwd, file.length > 0 ? file : suite),
+        suite: parts.slice(0, -1).join(' > '),
+        test: parts[parts.length - 1],
+      };
+    }
+  }
+  return {
+    file: file.length > 0 ? relTestFile(cwd, file) : '',
+    suite,
+    test,
+  };
+}
 
 /**
  * The LAST failing \`<testcase>\` in a JUnit XML report, as \`{ file, suite, test }\`.
  *
  * LAST, for the same recency rule every other leg of this lane follows: the
- * tail of a run is where the failure the agent is looking at lives.
+ * tail of a run is where the failure the agent is looking at lives. It is also
+ * DETERMINISTIC — the last failing case in document order, whatever else the
+ * report holds — so two machines reading one report agree.
+ *
+ * \`<failure>\` AND \`<error>\`, NOT \`<skipped>\`: an errored case (a fixture that
+ * raised, a panic) is a failure this lane can key on; a skipped one is not a
+ * failure at all and must never become the identity.
  *
  * THE IDENTITY IS THE RUNNER'S OWN NAMING, not a guess. \`file\` is the case's
  * \`file\` attribute when it has one, else the enclosing suite's; \`suite\` is
@@ -2664,18 +2860,14 @@ const JUNIT_SUITE_RE = /<testsuite\b([^>]*)>/g;
  * follows.
  */
 function identityFromJunit(xml, cwd) {
-  const text = String(xml);
+  const whole = String(xml);
+  const text = whole.length > JUNIT_PARSE_WINDOW ? whole.slice(-JUNIT_PARSE_WINDOW) : whole;
   const suites = [];
   JUNIT_SUITE_RE.lastIndex = 0;
-  for (const m of text.matchAll(JUNIT_SUITE_RE)) suites.push({ at: m.index, attrs: m[1] });
-  const suiteAt = (index) => {
-    let found = null;
-    for (const s of suites) {
-      if (s.at > index) break;
-      found = s.attrs;
-    }
-    return found;
-  };
+  for (const m of text.matchAll(JUNIT_SUITE_RE)) {
+    suites.push({ at: m.index, attrs: m[1] });
+    if (suites.length >= JUNIT_SUITE_MAX) break;
+  }
   let identity = null;
   JUNIT_CASE_RE.lastIndex = 0;
   for (const m of text.matchAll(JUNIT_CASE_RE)) {
@@ -2684,14 +2876,9 @@ function identityFromJunit(xml, cwd) {
     const attrs = typeof m[1] === 'string' ? m[1] : '';
     const test = xmlAttr(attrs, 'name');
     if (test.length === 0) continue;
-    const enclosing = suiteAt(m.index);
+    const enclosing = suiteBefore(suites, m.index);
     const file = xmlAttr(attrs, 'file') || (enclosing === null ? '' : xmlAttr(enclosing, 'file'));
-    const suite = xmlAttr(attrs, 'classname');
-    identity = {
-      file: file.length > 0 ? relTestFile(cwd, file) : '',
-      suite,
-      test,
-    };
+    identity = canonicalJunitIdentity(file, xmlAttr(attrs, 'classname'), test, cwd);
   }
   return identity;
 }
@@ -2966,7 +3153,12 @@ function testSigOf(identity) {
  *  match (\`pairingText\`) gets, so it is one line naming where to look and
  *  nothing else: no files, no command, no staleness note. */
 function testPointerText(pairing) {
-  const where = pairing.errorFiles.length > 0 ? pairing.errorFiles[0] : 'this file';
+  // BOUNDED AND CONTROL-STRIPPED, like every other stored string that reaches
+  // model-visible text: this one comes off a row whose \`error_files\` a test
+  // runner named, and \`filesInError\` caps its own items at 80 while the test
+  // lane's own entry had no cap of its own.
+  const raw = pairing.errorFiles.length > 0 ? pairing.errorFiles[0] : 'this file';
+  const where = clean(raw, 80) || 'this file';
   return clean(
     PAIRING_OPENER +
       '\n' +
@@ -2977,8 +3169,20 @@ function testPointerText(pairing) {
   );
 }
 
-/** File basenames the error itself named — what the close rule checks a change
- *  against. Frames, tsc/rustc locations, and Python tracebacks. */
+/**
+ * File basenames the error itself named — what the close rule checks a change
+ * against, and the gate on whether the error lane opens a pairing at all.
+ * Frames, tsc/rustc locations, Python tracebacks — and, when none of those
+ * matched, a LINTER'S PATH HEADER.
+ *
+ * THE HEADER IS A FALLBACK, NOT AN ADDITION. eslint's \`stylish\` output names
+ * its file on a line of its own and its problems as \`12:5  error …\`, so a lint
+ * failure matched none of the shapes above: the lane computed a key (once
+ * \`topFrameFile\` learned the same header) and then opened nothing, because a
+ * row whose \`error_files\` is empty can be closed by nothing but the
+ * same-command branch. Consulted only when the framed shapes found NOTHING, so
+ * no output that already names a frame changes behaviour.
+ */
 function filesInError(text) {
   const found = new Set();
   const body = String(text);
@@ -2986,6 +3190,12 @@ function filesInError(text) {
   for (const m of body.matchAll(/File "([^"]+)", line \d+/g)) {
     const base = m[1].split(/[/\\]/).pop();
     if (typeof base === 'string' && base.length > 0) found.add(base);
+  }
+  if (found.size === 0) {
+    for (const m of body.matchAll(new RegExp(SIG_PATH_HEADER_RE.source, 'gm'))) {
+      const base = m[1].split(/[/\\]/).pop();
+      if (typeof base === 'string' && base.length > 0) found.add(base);
+    }
   }
   return [...found].filter((f) => f.length <= 80 && !NOT_A_FILE.has(f)).slice(0, 8);
 }
@@ -3096,13 +3306,14 @@ function pairingScope(errorLine, fixFiles) {
  * did, so the same \`scrub()\` every query goes through runs here too.
  *
  * secretsOnly, not full: this string is not local-only. \`openPairing\` stores
- * it as \`pairings.cmd\` / \`pairings.fix_cmd\`, and \`tenjin sync\` (commands/
- * sync.ts, \`bodyFor\`) reads those columns straight into a Fix post's body —
- * "Failed: <cmd>" / "Passed on: <fix cmd>" on the team shelf. The owner wants
- * a Fix post to keep the command as written, path arguments included, so full
- * redaction here would erase exactly what makes the post findable. The
- * publish-time \`scan()\`/\`survivesTeamDrop\` gate in sync.ts is the backstop
- * that still blocks or warns on an actual secret shape reaching the wire.
+ * it as \`pairings.cmd\` / \`pairings.fix_cmd\`, and \`tenjin sync\` derives the
+ * fix record's \`passedOnHead\` from \`fix_cmd\` (commands/sync.ts,
+ * \`passedOnHead\`/\`fixCmdHead\`). Only the HEAD travels now — a fix record has
+ * no body for a whole command line to land in — but the whole line is still
+ * read back into a later session's context by \`pairingText\`, so full
+ * redaction here would erase exactly what makes a replay legible. The
+ * \`scan()\`/\`survivesTeamDrop\` gate in sync.ts is the backstop that still
+ * blocks an actual secret shape reaching the wire.
  */
 function safeCommand(command) {
   return clean(scrub(command, 'secretsOnly'), 300);
@@ -3867,7 +4078,8 @@ async function main() {
       // \`error_files\`, so a directory-qualified entry would never close.
       // A runner that names no file at all (cargo, mocha) falls back to
       // whatever the error text named.
-      const testFileBase = testSig.file === '' ? null : testSig.file.split('/').pop();
+      const testFileBase =
+        testSig.file === '' ? null : clean(testSig.file.split('/').pop() || '', 80);
       const pairingId = openPairing({
         session: sessionId,
         cwd,
@@ -3877,7 +4089,8 @@ async function main() {
         cmdHead: head,
         cmd: safeCommand(command),
         errorLine: clean(scrubbed, 300),
-        errorFiles: testFileBase === null ? errorFiles : [testFileBase],
+        errorFiles:
+          testFileBase === null || testFileBase.length === 0 ? errorFiles : [testFileBase],
         pkgVersions: pkgVersions(cwd, packages),
         scope: 'ambiguous',
       });

@@ -135,6 +135,9 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
   }
   try {
     const project = projectId(cwd);
+    // BEFORE THE READ: retire the rows an older build wrote under a kind the
+    // fix store has no lane for, so they stop being counted as unsynced work.
+    store.run(STORE_SQL.stampLegacyPairingsSynced, [Date.now(), project]);
     const rows = store
       .all(STORE_SQL.unsyncedPairings, [project])
       .map(readPairing)
@@ -173,6 +176,24 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
         ],
       };
     }
+    /**
+     * The `repo` FIELD on the wire: the slug HASHED, never the cleartext
+     * `host/full/path`.
+     *
+     * The server treats it as an opaque scope string — the contract says so and
+     * caps it at 64 characters — and it is not the server's business which
+     * forge, org or repository a team's fixes come from. `shortHash` is the
+     * same 16-character reduction the COARSE KEY salt already goes through, so
+     * two checkouts of one repo still agree and two repos still separate; what
+     * changes is only that a private repository name stops travelling with
+     * every fix a team records.
+     *
+     * ⚠ THE SALT ITSELF STAYS CLEARTEXT (`repo` below, into `teamCoarseKey`).
+     * That formula is mirrored in the generated hook, which salts with
+     * `originSlug(cwd)`; hashing one side and not the other would make every
+     * resolve query miss every fix, silently.
+     */
+    const repoScope = shortHash(repo);
     // The shelf a link row names: the team shelf, which is the only place a
     // fix record ever goes.
     const origin = new URL(runtime.baseUrl).origin;
@@ -205,6 +226,8 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     let synced = 0;
     let attested = 0;
     let skipped = 0;
+    /** Rows the shelf refused terminally, for the run's events row. */
+    const refusals: Array<{ id: number; status: number }> = [];
     const now = () => Date.now();
     try {
       for (const row of rows) {
@@ -258,7 +281,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             {
               primary: primaryFor(row),
               keys: keysFor(row, repo),
-              repo,
+              repo: repoScope,
               cmdHead: row.cmdHead ?? '',
               fixFiles: files,
               ...(passedOnHead(row) !== null ? { passedOnHead: passedOnHead(row) as string } : {}),
@@ -303,12 +326,22 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
             skipped += 1;
             continue;
           }
-          if (err instanceof CliError && err.code === 'RESOURCE_NOT_FOUND') {
-            // The fix we meant to attest to is gone from the shelf (deleted, or
-            // the link is stale): attesting will 404 on every future run too.
-            // Stamp and move on so one dead link cannot block the queue.
+          // EVERY 4xx EXCEPT 429 IS TERMINAL FOR THIS ROW. A refusal about the
+          // CONTENT — a malformed key, a payload the server will not take, a
+          // fix that is gone (404) — refuses identically on every future run,
+          // so leaving `synced_at` NULL means this row blocks the rows behind
+          // it in `ORDER BY at` forever AND keeps `countUnsyncedPairings`
+          // non-zero, which re-spawns a sync at the end of every session for
+          // the life of the checkout. A 429 is the one 4xx that is about
+          // TIMING rather than about the row, so it falls through to the abort
+          // below with the 5xx and the network failures.
+          const status = statusOf(err);
+          if (status !== null && status >= 400 && status < 500 && status !== 429) {
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
             skipped += 1;
+            // Named on the run's own events row, so a row the shelf refused is
+            // countable rather than silently absent.
+            refusals.push({ id: row.id, status });
             continue;
           }
           // Anything else (network, 5xx, rate limit) may well succeed next run:
@@ -349,7 +382,12 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // A run that finished writes its own `hook: 'sync'` row WITHOUT a code, so
     // the Stop hook's fallback line (which reads the LAST sync row) goes quiet
     // the moment a later run succeeds, rather than outliving the failure.
-    recordSyncEvent(store, project, { synced, attested, skipped });
+    recordSyncEvent(store, project, {
+      synced,
+      attested,
+      skipped,
+      ...(refusals.length > 0 ? { refused: refusals } : {}),
+    });
     return {
       data: {
         synced,
@@ -365,6 +403,22 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
   } finally {
     store.close();
   }
+}
+
+/**
+ * The HTTP status a fix-store failure carries, or null when it is not an HTTP
+ * failure at all (a transport error, a contract mismatch, a signing failure).
+ *
+ * Every error `lib/fixes-api.ts` raises from a response stamps `details.status`;
+ * anything without one is not a refusal the shelf made about this row, so it
+ * must not be treated as terminal.
+ */
+function statusOf(err: unknown): number | null {
+  if (!(err instanceof CliError)) return null;
+  const details = err.details;
+  if (typeof details !== 'object' || details === null) return null;
+  const status = (details as { status?: unknown }).status;
+  return typeof status === 'number' ? status : null;
 }
 
 /** A signer that unlocks the keystore only when a signature is actually needed,

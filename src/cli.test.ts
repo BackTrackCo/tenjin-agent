@@ -794,7 +794,8 @@ describe('sync --cwd, end to end through the dispatcher', () => {
   });
 
   it('salts the published coarse key with the --cwd checkout’s own origin', async () => {
-    const { openStore, projectId, teamCoarseKey, STORE_SQL } = await import('./lib/state-store');
+    const { openStore, projectId, shortHash, teamCoarseKey, STORE_SQL } =
+      await import('./lib/state-store');
 
     // A wallet the dispatcher can actually sign with, created through the CLI.
     expect(await main(['wallet', 'create'], captureIo().io)).toBe(0);
@@ -864,7 +865,9 @@ describe('sync --cwd, end to end through the dispatcher', () => {
     });
     // And the fine key rode along unsalted, as it always does.
     expect(keys).toContainEqual({ kind: 'error', key: 'fine-hash-abc', tier: 'fine' });
-    expect(post!.body!.repo).toBe('github.com/acme/api');
+    // The scope FIELD is the slug hashed; the coarse-key SALT above is the
+    // cleartext slug, which is what the generated hook salts with too.
+    expect(post!.body!.repo).toBe(shortHash('github.com/acme/api'));
     expect(JSON.parse(cap.stdout()).data).toMatchObject({ synced: 1 });
   });
 });

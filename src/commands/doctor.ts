@@ -1374,13 +1374,17 @@ const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
     name: 'cargo',
     configFiles: ['Cargo.toml'],
     depName: '',
-    // Same as go: nextest's `--junit` is a flag. A `junit` profile key in
-    // Cargo.toml counts, and the existing-report check does the rest.
-    hasJsonReporter: (source) => /junit/.test(source),
+    // NOT A FLAG, unlike go's: cargo-nextest has no `--junit` option at all.
+    // JUnit is a PROFILE setting in `.config/nextest.toml`, and the report
+    // lands under `target/nextest/<profile>/`. `detectFrameworkConfig` reads
+    // `Cargo.toml`, which never carries it, so this row is silenced by the
+    // existing-report check (which now knows nextest's own output path) rather
+    // than by anything in the config it scanned.
+    hasJsonReporter: () => false,
     detail:
       'cargo tests write no machine-readable report by default — test-failure matching falls back to console parsing (lower precision)',
     fix: () =>
-      'Run tests through cargo-nextest: cargo nextest run --junit .tenjin/junit.xml — and add .tenjin/junit.xml to .gitignore',
+      'Run tests through cargo-nextest and turn its JUnit profile on: add [profile.default.junit] path = "junit.xml" to .config/nextest.toml, then `cargo nextest run` writes target/nextest/default/junit.xml (already gitignored with target/)',
   },
 ];
 
@@ -1392,7 +1396,55 @@ const JUNIT_DOCTOR_PATHS = [
   'junit.xml',
   'test-results/junit.xml',
   'reports/junit.xml',
+  'target/nextest/default/junit.xml',
 ];
+
+/**
+ * Whether `.gitignore` covers `rel`, and whether git already tracks it.
+ *
+ * A FILE READ, NEVER A GIT SPAWN — the same rule the failure arm and
+ * `tenjin sync` both follow for reading `origin`. So this is a deliberately
+ * simple `.gitignore` reader: exact lines, a leading `/`, and a directory
+ * prefix (`target/` covering `target/nextest/default/junit.xml`). It does not
+ * implement negation, `**` globbing or nested `.gitignore` files, so it can
+ * only ever be WRONG IN THE NOISY DIRECTION — a warn on a path some pattern
+ * this cannot read does cover — and a warn names the remedy rather than
+ * blocking anything.
+ */
+async function isGitIgnored(cwd: string, rel: string): Promise<boolean> {
+  let text: string;
+  try {
+    text = await readFile(join(cwd, '.gitignore'), 'utf8');
+  } catch {
+    return false;
+  }
+  const path = rel.split('\\').join('/');
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line.length === 0 || line.startsWith('#') || line.startsWith('!')) continue;
+    const pattern = line.replace(/^\//, '');
+    if (pattern === path) return true;
+    if (pattern.endsWith('/') && path.startsWith(pattern)) return true;
+    if (!pattern.includes('/') && path.split('/').includes(pattern)) return true;
+  }
+  return false;
+}
+
+/** Whether git's index already holds `rel`, read straight out of `.git/index`'s
+ *  path table rather than by spawning git. A false negative reads as "not
+ *  committed", which is the quiet answer. */
+async function isTrackedByGit(cwd: string, rel: string): Promise<boolean> {
+  let index: Buffer;
+  try {
+    index = await readFile(join(cwd, '.git', 'index'));
+  } catch {
+    return false;
+  }
+  // Index entries store the path followed by NUL padding, so the terminator is
+  // what makes this a whole-path match rather than a prefix one: without it
+  // `junit.xml` would also match a tracked `reports/junit.xml.bak`.
+  return index.includes(`${rel.split('\\').join('/')}\0`);
+}
 
 /** What {@link detectFrameworkConfig} found, or 'dep-only' for a dependency with no dedicated config file. */
 type FrameworkConfigFound = { path: string; source: string } | 'dep-only';
@@ -1448,18 +1500,47 @@ async function detectFrameworkConfig(
  * and mistake a commented-out one for live.
  */
 async function checkTestReporterHints(cwd: string, dataDir: string): Promise<BuiltCheck | null> {
-  // A REPORT THAT ALREADY EXISTS SETTLES IT, whatever the config says. For go
-  // and cargo the report is a command-line flag rather than a config key, so
-  // there is nothing in the repo to detect — and for every runner, a file at
-  // one of the paths the failure arm actually reads is better evidence than a
-  // regex over a config. Silent when one is there.
+  // A REPORT THAT ALREADY EXISTS SETTLES IT, whatever the config says. go's
+  // report comes from a command-line flag and cargo-nextest's from a profile in
+  // a file this never scans, so for neither is there anything in the repo to
+  // detect — and for every runner, a file at one of the paths the failure arm
+  // actually reads is better evidence than a regex over a config.
+  //
+  // ...BUT AN IGNORED ONE. A JUnit report holds every failure's full message
+  // and stack with absolute paths in it, so a report that is not gitignored is
+  // one commit away from being pushed, and a report ALREADY COMMITTED is worse
+  // than none: it silences this row forever while the failure arm's mtime check
+  // rejects it on every run, so the operator is told nothing and gets nothing.
   for (const rel of JUNIT_DOCTOR_PATHS) {
     try {
       await readFile(join(cwd, rel), 'utf8');
-      return null;
     } catch {
-      // Not there; keep looking.
+      continue;
     }
+    const committed = await isTrackedByGit(cwd, rel);
+    if (committed) {
+      return {
+        result: {
+          name: 'test-reporters',
+          status: 'warn',
+          required: false,
+          detail: `${rel} is committed to git — it holds every failure's full message and stack, absolute paths included, and a committed report is never fresh enough for test-failure matching to read`,
+          fix: `Run \`git rm --cached ${rel}\` and add ${rel} to .gitignore.`,
+        },
+      };
+    }
+    if (!(await isGitIgnored(cwd, rel))) {
+      return {
+        result: {
+          name: 'test-reporters',
+          status: 'warn',
+          required: false,
+          detail: `${rel} is not gitignored — it holds every failure's full message and stack, absolute paths included`,
+          fix: `Add ${rel} to .gitignore.`,
+        },
+      };
+    }
+    return null;
   }
   const reporterPath = join(hooksDir(dataDir), PUSH_VITEST_REPORTER_FILE);
   for (const fw of TEST_REPORTER_FRAMEWORKS) {

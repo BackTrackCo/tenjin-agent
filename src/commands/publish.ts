@@ -46,7 +46,12 @@ import {
   throughScanGate,
   writeModeNotices,
 } from '../lib/consent';
-import { dequeueFinding, publishBodyHash, recordPublished } from '../lib/publish-dedup';
+import {
+  dequeueFinding,
+  normalizePublishBody,
+  publishBodyHash,
+  recordPublished,
+} from '../lib/publish-dedup';
 import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
@@ -567,9 +572,28 @@ export async function runPublish(
     env,
   });
 
+  /**
+   * THE BYTES THAT ARE PUBLISHED ARE THE BYTES THE KEY IS OVER.
+   *
+   * `Idempotency-Key` is `sha256(normalizePublishBody(body))` and the server's
+   * replay check fingerprints the create body it receives, so sending the raw
+   * body made a RE-RENDER of one finding — the same prose with CRLF, a trailing
+   * blank line, or a space left at the end of a wrapped line — arrive as "same
+   * key, different fingerprint" and take the 422. That is the exact duplicate
+   * the mechanism exists to collapse, turned into a hard failure with no
+   * remedy the caller could act on.
+   *
+   * WHAT NORMALIZING ACTUALLY CHANGES: CRLF becomes LF, trailing whitespace
+   * comes off each line, and the document is trimmed at both ends. The only
+   * visible casualty is a markdown hard break spelled as two trailing spaces,
+   * which is worth less than a working dedup — and interior whitespace is
+   * untouched, so a reflowed paragraph is still a different finding.
+   */
+  const publishedBody = normalizePublishBody(body);
+
   const input: PublishInput = {
     ...(title !== undefined ? { title } : {}),
-    bodyMd: body,
+    bodyMd: publishedBody,
     ...(excerpt !== undefined ? { excerpt } : {}),
     ...(tags !== undefined ? { tags } : {}),
     priceAtomic,
@@ -600,7 +624,9 @@ export async function runPublish(
     // finding and hashes differently, which is the line that mechanism has
     // always drawn. Not sent for a draft: a draft may legitimately be parked
     // twice.
-    ...(status !== 'draft' ? { headers: { 'Idempotency-Key': publishBodyHash(body) } } : {}),
+    ...(status !== 'draft'
+      ? { headers: { 'Idempotency-Key': publishBodyHash(publishedBody) } }
+      : {}),
   };
   // The server ingest gate runs the same rule corpus in the marketplace's write
   // path, so its warn tier joins this command's exit-3 flow rather than arriving

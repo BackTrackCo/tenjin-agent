@@ -127,8 +127,11 @@ export async function attestFix(
 ): Promise<number> {
   const url = `${trimSlash(opts.baseUrl)}/api/fixes/${encodeURIComponent(fixId)}/attest`;
   const res = await signedPost(url, { fixFiles }, auth, opts);
-  if (res.status === 404)
-    throw new CliError('RESOURCE_NOT_FOUND', `No fix ${fixId} on this shelf.`);
+  if (res.status === 404) {
+    throw new CliError('RESOURCE_NOT_FOUND', `No fix ${fixId} on this shelf.`, {
+      details: { status: 404 },
+    });
+  }
   if (res.status !== 200 && res.status !== 201) throw fixWriteFailed(res, 'attest to the fix');
   const parsed = attestSchema.safeParse(res.json);
   return parsed.success ? parsed.data.attestations : 0;
@@ -178,6 +181,12 @@ async function signedPost(
         continue;
       }
     }
+    // ⚠ NO `details.status` HERE, DELIBERATELY. `tenjin sync` treats a 4xx
+    // carrying one as terminal FOR THAT ROW and stamps it synced; a 401 is not
+    // about the row at all, it is the wallet or the session, and every row
+    // behind it would be silently marked synced without ever reaching the
+    // shelf. Left statusless so it aborts the run instead, and the next run
+    // retries the lot.
     if (res.status === 401) {
       throw new CliError(
         'PUBLISH_FAILED',

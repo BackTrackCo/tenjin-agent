@@ -3,7 +3,14 @@ import { mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSync } from './sync';
-import { openStore, projectId, repoSlug, teamCoarseKey, STORE_SQL } from '../lib/state-store';
+import {
+  openStore,
+  projectId,
+  repoSlug,
+  shortHash,
+  teamCoarseKey,
+  STORE_SQL,
+} from '../lib/state-store';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import { CliError } from '../lib/errors';
@@ -248,7 +255,12 @@ describe('tenjin sync: upserting a fix record', () => {
     expect(body).not.toHaveProperty('price');
     expect(body).not.toHaveProperty('status');
     expect(body.primary).toEqual({ kind: 'error', key: 'fine-hash-abc' });
-    expect(body.repo).toBe('github.com/acme/api');
+    // THE SCOPE IS HASHED, never the cleartext `host/full/path`. The server
+    // treats it as an opaque string and caps it at 64 characters; which forge,
+    // org and repository a team's fixes come from is not its business.
+    expect(body.repo).toBe(shortHash('github.com/acme/api'));
+    expect(body.repo).not.toContain('acme');
+    expect(body.repo).not.toContain('github');
     expect(body.cmdHead).toBe('pnpm');
     expect(body.fixFiles).toEqual(['src/widget.ts']);
     expect(body.passedOnHead).toBe('pnpm');
@@ -567,6 +579,30 @@ describe('tenjin sync: the repo salt', () => {
     ).toBe(true);
   });
 
+  /** ⚠ THE SALT ITSELF STAYS CLEARTEXT. `teamCoarseKey` is mirrored in the
+   *  generated hook, which salts with `originSlug(cwd)`; hashing one side and
+   *  not the other would make every resolve query miss every fix, silently. */
+  it('salts the coarse key with the cleartext slug even though the scope field is hashed', async () => {
+    await writeTeamConfig();
+    const repoDir = join(dir, 'salt-vs-scope');
+    await writeGitOrigin(repoDir, 'https://github.com/acme/widgets.git');
+    await seedPairing({
+      cwd: repoDir,
+      key: 'fine-scope',
+      coarseKey: 'coarse-scope',
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+    await runSync(ctx(), { cwd: repoDir, provider, fetchImpl: fetch });
+    const body = sent[0]!.body!;
+    const keys = body.keys as Array<{ kind: string; key: string; tier: string }>;
+    const coarse = keys.find((k) => k.kind === 'error' && k.tier === 'coarse')!.key;
+    expect(coarse).toBe(teamCoarseKey('coarse-scope', 'github.com/acme/widgets'));
+    expect(coarse).not.toBe(teamCoarseKey('coarse-scope', shortHash('github.com/acme/widgets')));
+    expect(body.repo).toBe(shortHash('github.com/acme/widgets'));
+  });
+
   it('records the same coarse key from an ssh clone and an https clone', async () => {
     await writeTeamConfig();
     const keyFor = async (origin: string, key: string): Promise<string> => {
@@ -619,6 +655,108 @@ describe('tenjin sync: the repo salt', () => {
 
     expect(result.data).toMatchObject({ synced: 1 });
     expect(sent[0]!.body!.primary).toEqual({ kind: 'error', key: 'fine-symlinked' });
+  });
+});
+
+/**
+ * A 4xx THE SHELF MEANT. A refusal about the CONTENT of a row — a malformed
+ * key, a payload the server will not take — refuses identically on every
+ * future run, so leaving `synced_at` NULL blocks the rows behind it in
+ * `ORDER BY at` AND keeps `countUnsyncedPairings` non-zero, which re-spawns a
+ * sync at the end of every session for the life of the checkout. 429 is the one
+ * 4xx that is about timing rather than about the row.
+ */
+describe('tenjin sync: a terminal refusal', () => {
+  it('stamps a 400 as skipped, records it, and reaches the rows behind it', async () => {
+    await writeTeamConfig();
+    const bad = await seedPairing({ cwd: dir, key: 'fine-bad', status: 'unverified' });
+    const good = await seedPairing({ cwd: dir, key: 'fine-good', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer((req) =>
+      (req.body as { primary?: { key?: string } } | undefined)?.primary?.key === 'fine-bad'
+        ? { status: 400, json: { error: { code: 'invalid_key' } } }
+        : { status: 201, json: { fix: { id: FIX_ID }, created: true } },
+    );
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(2);
+    expect(result.data).toMatchObject({ synced: 1, skipped: 1 });
+    expect((await pairingRow(bad)).synced_at).not.toBeNull();
+    expect((await pairingRow(good)).synced_at).not.toBeNull();
+
+    const store = await openStore(dir);
+    const row = store!.get(STORE_SQL.lastSyncEvent, []) as { data: string };
+    store!.close();
+    const data = JSON.parse(row.data) as { refused?: Array<{ id: number; status: number }> };
+    expect(data.refused).toEqual([{ id: bad, status: 400 }]);
+  });
+
+  /** A 401 is the wallet or the session, not the row: every row behind it
+   *  would be stamped synced without ever reaching the shelf. */
+  it('does NOT stamp a 401, and aborts the run instead', async () => {
+    await writeTeamConfig();
+    const first = await seedPairing({ cwd: dir, key: 'fine-401-a', status: 'unverified' });
+    const second = await seedPairing({ cwd: dir, key: 'fine-401-b', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch } = shelfServer(() => ({ status: 401, json: { error: 'unauthorized' } }));
+
+    await expect(runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch })).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+    });
+    expect((await pairingRow(first)).synced_at).toBeNull();
+    expect((await pairingRow(second)).synced_at).toBeNull();
+  });
+
+  it('does NOT stamp a 429, which is about timing and not about the row', async () => {
+    await writeTeamConfig();
+    const id = await seedPairing({ cwd: dir, key: 'fine-429', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch } = shelfServer(() => ({ status: 429, json: { error: 'rate_limited' } }));
+
+    await expect(runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch })).rejects.toMatchObject({
+      code: 'RATE_LIMITED',
+    });
+    expect((await pairingRow(id)).synced_at).toBeNull();
+  });
+});
+
+/**
+ * ROWS FROM BEFORE THE LANE SPLIT never travel. `sig_v1` computed its signature
+ * differently, and `sig_v1_test`'s coarse key is file+suite — a key every
+ * failing test in that file shares, which the fallback would have offered to
+ * the whole team as an `error` fine key.
+ */
+describe('tenjin sync: legacy pairing kinds', () => {
+  it('stamps them synced without sending anything, and syncs the current ones beside them', async () => {
+    await writeTeamConfig();
+    const legacyError = await seedPairing({
+      cwd: dir,
+      kind: 'sig_v1',
+      key: 'legacy-error',
+      status: 'unverified',
+    });
+    const legacyTest = await seedPairing({
+      cwd: dir,
+      kind: 'sig_v1_test',
+      key: 'legacy-test',
+      coarseKey: 'legacy-file-suite',
+      status: 'unverified',
+    });
+    const current = await seedPairing({ cwd: dir, key: 'fine-current', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.body!.primary).toEqual({ kind: 'error', key: 'fine-current' });
+    expect(JSON.stringify(sent)).not.toContain('legacy');
+    expect(result.data).toMatchObject({ synced: 1 });
+    // Off the queue, so the Stop hook stops counting them as work to do.
+    expect((await pairingRow(legacyError)).synced_at).not.toBeNull();
+    expect((await pairingRow(legacyTest)).synced_at).not.toBeNull();
+    expect((await pairingRow(current)).synced_at).not.toBeNull();
   });
 });
 

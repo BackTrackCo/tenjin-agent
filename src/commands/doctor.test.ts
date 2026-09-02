@@ -2902,8 +2902,73 @@ describe('runDoctor — test reporter hint', () => {
     expect((await reporterCheck())?.fix).toContain('gotestsum --junitfile .tenjin/junit.xml');
     await rm(join(dir, 'go.mod'));
 
+    // ⚠ cargo-nextest has NO `--junit` flag: JUnit is a PROFILE setting, and
+    // the report lands under `target/nextest/<profile>/`. The old hint told an
+    // operator to pass an option that does not exist, and named a path the
+    // failure arm would then never look at.
     await writeFile(join(dir, 'Cargo.toml'), '[package]\nname = "x"\n');
-    expect((await reporterCheck())?.fix).toContain('cargo nextest run --junit .tenjin/junit.xml');
+    const cargo = await reporterCheck();
+    expect(cargo?.fix).toContain('[profile.default.junit]');
+    expect(cargo?.fix).toContain('.config/nextest.toml');
+    expect(cargo?.fix).toContain('target/nextest/default/junit.xml');
+    expect(cargo?.fix).not.toContain('--junit');
+  });
+
+  /** The path nextest actually writes to is one the failure arm reads, so a
+   *  repo already producing one is not nagged. */
+  it('stays quiet once nextest has written its own report path', async () => {
+    await writeFile(join(dir, 'Cargo.toml'), '[package]\nname = "x"\n');
+    expect(await reporterCheck()).toBeDefined();
+    await mkdir(join(dir, 'target', 'nextest', 'default'), { recursive: true });
+    await writeFile(join(dir, 'target', 'nextest', 'default', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), 'target/\n');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  /**
+   * A JUNIT REPORT HOLDS EVERY FAILURE'S FULL MESSAGE AND STACK, absolute paths
+   * included. A report that is not gitignored is one commit away from being
+   * pushed — and one already COMMITTED is worse than none, since it silences
+   * this row forever while the failure arm's mtime check rejects it on every
+   * run, so the operator hears nothing and gets nothing.
+   */
+  it('warns when an existing report is not gitignored', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/not gitignored/);
+    expect(check?.fix).toContain('.gitignore');
+  });
+
+  it('goes quiet once that report is gitignored', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), '# reports\n.tenjin/junit.xml\n');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  it('accepts a directory pattern, not just the exact path', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), '.tenjin/\n');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  it('warns louder when the report is already committed', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), '.tenjin/junit.xml\n');
+    // A git index naming the path: read as bytes, never by spawning git.
+    await mkdir(join(dir, '.git'), { recursive: true });
+    await writeFile(
+      join(dir, '.git', 'index'),
+      Buffer.from(`DIRC\u0000\u0000\u0000.tenjin/junit.xml\u0000\u0000`, 'utf8'),
+    );
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/committed to git/);
+    expect(check?.fix).toContain('git rm --cached');
   });
 
   it('stays quiet once a JUnit report already exists at a path the arm reads', async () => {
@@ -2911,6 +2976,8 @@ describe('runDoctor — test reporter hint', () => {
     expect(await reporterCheck()).toBeDefined();
     await mkdir(join(dir, '.tenjin'), { recursive: true });
     await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    // Gitignored, since an existing report that is NOT is its own warn.
+    await writeFile(join(dir, '.gitignore'), '.tenjin/junit.xml\n');
     expect(await reporterCheck()).toBeUndefined();
   });
 });
