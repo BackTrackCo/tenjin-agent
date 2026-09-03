@@ -55,7 +55,9 @@
       "3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
     ],
     ["wJalrXUtnFEMI", "/K7MDENG/bPxR", "fiCYEXAMPLEKEY1"],
-    ["GITHUB_TOKEN_AB", "CDEF1234567890A", "BCDEF1234567890"]
+    ["GITHUB_TOKEN_AB", "CDEF1234567890A", "BCDEF1234567890"],
+    ["8f3a9b2c", "1d4e5f6a", "7b8c9d0e"],
+    ["a1b2c3d4", "e5f6a7b8", "c9d0e1f2"]
   ],
   "cases": [
     {
@@ -1072,6 +1074,22 @@
       "secret": "%%t34%%"
     },
     {
+      "id": "secret-assignment/pos-header-ocp",
+      "scope": "publish",
+      "label": "positive",
+      "input": "curl -H 'Ocp-Apim-Subscription-Key: %%t39%%' https://api.acme.io",
+      "expect_ids": ["secret-assignment"],
+      "secret": "%%t39%%"
+    },
+    {
+      "id": "secret-assignment/pos-flag-prefixed",
+      "scope": "publish",
+      "label": "positive",
+      "input": "Failed: curl --client-secret %%t40%% https://api.acme.io/v1/ping",
+      "expect_ids": ["secret-assignment"],
+      "secret": "%%t40%%"
+    },
+    {
       "id": "secret-assignment/neg-bare-hex",
       "scope": "publish",
       "label": "negative",
@@ -1154,6 +1172,20 @@
       "label": "positive",
       "input": "curl --api-key Zx9QmT7bV2pL4aRe https://api.acme.io fails 401",
       "expect_text": "curl https://api.acme.io fails 401"
+    },
+    {
+      "id": "strip-secret-assignment/pos-flag-prefixed",
+      "scope": "query",
+      "label": "positive",
+      "input": "curl --db-password Zx9QmT7bV2pL4aRe https://api.acme.io fails 401",
+      "expect_text": "curl https://api.acme.io fails 401"
+    },
+    {
+      "id": "strip-secret-assignment/pos-quoted-spaces",
+      "scope": "query",
+      "label": "positive",
+      "input": "run --password \"correct horse battery\" done",
+      "expect_text": "run done"
     },
     {
       "id": "strip-secret-assignment/priced-design-colon",
