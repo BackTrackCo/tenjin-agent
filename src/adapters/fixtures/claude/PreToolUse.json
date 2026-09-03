@@ -1,0 +1,14 @@
+{
+  "session_id": "6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04.jsonl",
+  "cwd": "/Users/dev/proj",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PreToolUse",
+  "prompt_id": "01J9X4M2K7Q8R3T5V6W7Y8Z9A0",
+  "tool_name": "WebFetch",
+  "tool_input": {
+    "url": "https://node.testcontainers.org/configuration/",
+    "prompt": "Find the reuse and ryuk settings"
+  },
+  "tool_use_id": "toolu_01HxTz8k3Qm2Vn9Yp4Rw6Sd7"
+}

@@ -42,20 +42,29 @@ export interface HookServer {
   drain(): Promise<void>;
 }
 
+/**
+ * Read the body up to `max`; past it, keep DRAINING but stop keeping, and
+ * resolve null at the end. Never `req.destroy()` here: Node's
+ * `IncomingMessage._destroy` tears down the socket when the body has not
+ * ended, and the response shares that socket, so the 413 the caller sends
+ * would arrive as ECONNRESET (found by the smoke test).
+ */
 function readBody(req: IncomingMessage, max: number): Promise<string | null> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let over = false;
     req.on('data', (c: Buffer) => {
+      if (over) return;
       size += c.length;
       if (size > max) {
-        resolve(null);
-        req.destroy();
+        over = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => resolve(over ? null : Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
 }

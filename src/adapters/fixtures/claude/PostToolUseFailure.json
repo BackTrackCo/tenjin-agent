@@ -1,0 +1,16 @@
+{
+  "session_id": "6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04.jsonl",
+  "cwd": "/Users/dev/proj",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUseFailure",
+  "prompt_id": "01J9X4M2K7Q8R3T5V6W7Y8Z9A0",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "pnpm typecheck",
+    "description": "Type-check the project"
+  },
+  "tool_use_id": "toolu_01Mv6Rt2Yk8Pq3Xw5Nz7Lb4H",
+  "error": "Exit code 2\nsrc/hooks/gates.ts(41,7): error TS2322: Type 'string | undefined' is not assignable to type 'string'.",
+  "is_interrupt": false
+}

@@ -137,10 +137,15 @@ export function decode(raw: unknown): HookInput | null {
       // Decided here, never by an arm reading the text: PostToolUseFailure is
       // a distinct event literal in the 2.1.259 schema.
       tool.ok = native === 'PostToolUseFailure' ? false : true;
-      const result = toolResult(native === 'PostToolUseFailure' ? raw.error : raw.tool_response);
-      if (result !== undefined) tool.result = result;
-      if (native === 'PostToolUseFailure' && typeof raw.error === 'string') {
-        tool.result = { ...(tool.result ?? {}), error: raw.error };
+      if (native === 'PostToolUseFailure') {
+        if (typeof raw.error === 'string') tool.result = { error: raw.error };
+        else {
+          const result = toolResult(raw.error);
+          if (result !== undefined) tool.result = result;
+        }
+      } else {
+        const result = toolResult(raw.tool_response);
+        if (result !== undefined) tool.result = result;
       }
       if (typeof raw.is_interrupt === 'boolean') tool.interrupted = raw.is_interrupt;
     }
