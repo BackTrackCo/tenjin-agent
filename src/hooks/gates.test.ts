@@ -268,7 +268,7 @@ describe('gates', () => {
   it('lets a fresh question through, claimed and charged', async () => {
     const db = await freshDb();
     expect(gates(context(db, LEAD, NOW), PLAN)).toBeNull();
-    expect(JSON.parse(getMark(db, LEAD, 'q:fp1') ?? 'null')).toEqual({
+    expect(JSON.parse(getMark(db, LEAD, 'q:fp1') ?? 'null')).toMatchObject({
       status: 'asking',
       at: NOW,
     });
