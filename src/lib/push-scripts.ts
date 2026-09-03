@@ -2640,7 +2640,7 @@ function pairingScope(errorLine, fixFiles) {
  * "Failed: <cmd>" / "Passed on: <fix cmd>" on the team shelf. The owner wants
  * a Fix post to keep the command as written, path arguments included, so full
  * redaction here would erase exactly what makes the post findable. The
- * publish-time \`scan()\`/\`survivesTeamDrop\` gate in sync.ts is the backstop
+ * publish-time \`findings(text, 'team')\` gate in sync.ts is the backstop
  * that still blocks or warns on an actual secret shape reaching the wire.
  */
 function safeCommand(command) {

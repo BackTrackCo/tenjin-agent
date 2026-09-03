@@ -97,18 +97,29 @@ export function findings(
   context: FindingsContext = {},
 ): Finding[] {
   const lines = text.split('\n');
-  const on = (algorithm: string): boolean => ALGORITHM_SCOPES.get(algorithm)?.has(scope) === true;
+  // EVERY detector runs whatever the scope, and the scope filters the RESULT.
+  // The entropy catch-all suppresses itself against the spans the named
+  // detectors claimed, and that set has to be the full one: a checksummed
+  // wallet address or a Google Docs id is a publish-only warn, and on a team
+  // shelf it must stay silent rather than resurface as high-entropy-string
+  // because the detector that knows what it is was switched off.
   const found: Finding[] = [
-    ...(on('hex64') ? scanHex64(lines) : []),
-    ...scanLineDetectors(lines, scope),
-    ...(on('pemBlock') ? scanPemBlocks(lines) : []),
-    ...(on('bip39') ? scanSeedPhrases(lines) : []),
-    ...(on('envDump') ? scanEnvDumpBlocks(lines) : []),
-    ...(on('longVerbatim') ? scanLongVerbatim(lines) : []),
-    ...(on('projectMarkers') ? scanProjectMarkers(lines, context.projectMarkers ?? []) : []),
+    ...scanHex64(lines),
+    ...scanLineDetectors(lines),
+    ...scanPemBlocks(lines),
+    ...scanSeedPhrases(lines),
+    ...scanEnvDumpBlocks(lines),
+    ...scanLongVerbatim(lines),
+    ...scanProjectMarkers(lines, context.projectMarkers ?? []),
   ];
   const named = dedupeAndSort(suppressEmailsInDbUris(found));
-  return dedupeAndSort([...named, ...(on('entropy') ? scanHighEntropy(lines, named) : [])]);
+  const all = dedupeAndSort([...named, ...scanHighEntropy(lines, named)]);
+  if (scope === 'publish') return all;
+  // Filtered by the EMITTING rule's scopes, never by a list of check names:
+  // `checksFor` maps an emitted check (hex32-value) through the rule it comes
+  // from, so dropping `team` from a rule's scopes drops everything it emits.
+  const keep = CHECKS[scope];
+  return all.filter((f) => keep.has(f.check));
 }
 
 /** The strip rows fit in this many characters; a longer input is cut back to
@@ -318,11 +329,10 @@ function compileRegex(rule: Rule): RegExp {
   return new RegExp(rule.match.pattern, rule.match.flags ?? 'g');
 }
 
-function compileLineDetectors(rules: Rule[], scope: ReportScope): LineDetector[] {
+function compileLineDetectors(rules: Rule[]): LineDetector[] {
   const out: LineDetector[] = [];
   for (const rule of rules) {
-    if (isStripRow(rule) || !rule.scopes.includes(scope)) continue;
-    if (rule.match.kind === 'algorithm') continue;
+    if (isStripRow(rule) || rule.match.kind === 'algorithm') continue;
     out.push({
       check: rule.id,
       severity: rule.tier as FindingSeverity,
@@ -379,14 +389,20 @@ function validateCorpus(rules: Rule[]): void {
     }
     compileRegex(rule);
   }
+  // The converse: every algorithm this file implements has exactly one row,
+  // because the row's scopes are what let its findings through. A deleted
+  // bip39 row would otherwise turn the seed-phrase block into silence.
+  for (const algorithm of ALGORITHMS) {
+    const rows = rules.filter(
+      (r) => r.match.kind === 'algorithm' && r.match.algorithm === algorithm,
+    );
+    if (rows.length !== 1) {
+      throw new Error(
+        `redact-rules.json: algorithm ${algorithm} has ${rows.length} rows, needs exactly one`,
+      );
+    }
+  }
 }
-
-/** The scopes each algorithmic detector runs for, read off its rule row. */
-const ALGORITHM_SCOPES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
-  CORPUS.rules
-    .filter((r) => r.match.kind === 'algorithm')
-    .map((r) => [r.match.algorithm ?? '', new Set(r.scopes)]),
-);
 
 function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
   const policy = rule.excerpt;
@@ -419,17 +435,14 @@ function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
 }
 
 validateCorpus(CORPUS.rules);
-const LINE_DETECTORS: Record<ReportScope, LineDetector[]> = {
-  publish: compileLineDetectors(CORPUS.rules, 'publish'),
-  team: compileLineDetectors(CORPUS.rules, 'team'),
-};
+const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
 const STRIP_ROWS: StripRow[] = compileStripRows(CORPUS.rules);
 
-function scanLineDetectors(lines: string[], scope: ReportScope): Finding[] {
+function scanLineDetectors(lines: string[]): Finding[] {
   const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
-    for (const detector of LINE_DETECTORS[scope]) {
+    for (const detector of LINE_DETECTORS) {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
@@ -953,6 +966,11 @@ export function checksFor(scope: ReportScope): ReadonlySet<string> {
   for (const [check, rule] of Object.entries(EMITTED_CHECKS)) if (ids.has(rule)) ids.add(check);
   return ids;
 }
+
+const CHECKS: Record<ReportScope, ReadonlySet<string>> = {
+  publish: checksFor('publish'),
+  team: checksFor('team'),
+};
 
 const FENCE = /^(\s*)(`{3,}|~{3,})/;
 

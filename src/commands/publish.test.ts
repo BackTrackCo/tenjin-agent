@@ -1895,7 +1895,7 @@ describe('runPublish on a team shelf', () => {
     await writeShelfConfig();
     // Kept as a warn rather than promoted to block, so the consent cascade still
     // governs it: `full-auto` clears it unseen here exactly as it already does in
-    // public mode (scan.ts concedes that price at the detector). Promoting it
+    // public mode (redact.ts concedes that price at the detector). Promoting it
     // would have made a team shelf STRICTER than the marketplace on this check.
     const file = await writeDoc(SECRET_ASSIGN);
     const { fetch, sent } = shelfServer();
@@ -3068,7 +3068,7 @@ describe('runPublish — publish --finding', () => {
    * error, which `emitFailure` prints, the JSON envelope carries and MCP
    * `structuredContent` relays. Reachable: a BIP-39 mnemonic is a block-tier
    * detector and passes all eleven scrub rules whole (no digit, no assignment
-   * shape, no hex run, no hostname). `scan.ts` promises a block excerpt is never
+   * shape, no hex run, no hostname). `redact.ts` promises a block excerpt is never
    * the matched secret; the file path honours that and this one now does too.
    */
   it('withholds the body on PUBLISH_BLOCKED while still naming the finding', async () => {

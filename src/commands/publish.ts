@@ -507,7 +507,7 @@ export async function runPublish(
   // assignment shape, no hex run, no hostname — as does a PEM header. Attaching
   // the body here restated that secret into the parent's transcript, the JSON
   // envelope and the MCP `structuredContent`, on the one path that exists
-  // because the secret is live. `scan.ts` promises a block excerpt is never the
+  // because the secret is live. `redact.ts` promises a block excerpt is never the
   // matched secret; the file path honours it and this one now does too. The
   // confirm below keeps the body, where it is the READ GATE rather than a leak,
   // as does `--dry-run` above, which the operator asked for by name.

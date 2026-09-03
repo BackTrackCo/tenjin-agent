@@ -503,11 +503,11 @@
       "id": "secret-assignment",
       "tier": "warn",
       "scopes": ["publish", "team"],
-      "description": "Secret-named command-line flag (--api-key <v>, --token <v>) or API-key header (X-Api-Key: <v>, also inside a curl -H '...') with a literal value. The same detector as the assignment form above, for the shapes a recorded command line takes (tenjin-agent#281): a hex-only key has no vendor prefix, and bare hex is deliberately never reported so a commit SHA still syncs, so the credential POSITION is the signal.",
+      "description": "Secret-named command-line flag with a SPACE-separated literal value (--api-key <v>, --token <v>): the one credential position the assignment form above cannot see, since it needs `=` or `:` after the name. `X-Api-Key: <v>` and `--api-key=<v>` already match above (Api-Key, api-key) and are deliberately not repeated here, so one value yields one finding. For the shapes a recorded command line takes (tenjin-agent#281): a hex-only key has no vendor prefix, and bare hex is deliberately never reported so a commit SHA still syncs, so the credential POSITION is the signal.",
       "source": "tenjin (closes tenjin-agent#281)",
       "match": {
         "kind": "regex",
-        "pattern": "(--(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|secret|token|password|passwd)|\\b(?:X-Api-Key|X-Auth-Token|X-Api-Token|Api-Key|Ocp-Apim-Subscription-Key))(?:\\s*:\\s*|[=\\s]\\s*)(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "pattern": "(--(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|secret|token|password|passwd))\\s+(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
         "flags": "gi"
       },
       "excerpt": {
@@ -900,11 +900,11 @@
     {
       "id": "strip-userinfo-url",
       "scopes": ["query"],
-      "description": "scheme://user:pass@... : the userinfo half of a url and EVERYTHING glued to it up to the next whitespace, because three review rounds of parsing the query string after the credential each closed one shape and missed the next (?apikey[0]=..., ;;ref=..., ;%73ig=...). Only the trailing closers, quotes and sentence punctuation come back, so the sentence around the url still reads; `=` is base64 padding and stays out of that set. A url with no credential never engages this row. Linear: the class before `:` stops at the first `:` and the one before `@` at the first `/`.",
+      "description": "scheme://user:pass@... : the userinfo half of a url and EVERYTHING glued to it up to the next whitespace, because three review rounds of parsing the query string after the credential each closed one shape and missed the next (?apikey[0]=..., ;;ref=..., ;%73ig=...). Only the trailing closers, quotes and sentence punctuation come back, so the sentence around the url still reads; `=` is base64 padding and stays out of that set. A url with no credential never engages this row. Linear: the lookbehind makes only a run's first character a start position (with `\\b`, every character of an `a-a-a` run was one and each attempt scanned to the end of the window: 19 ms per 8 kB, 154 ms for the whole verb on the CI runner), the class before `:` stops at the first `:` and the one before `@` at the first `/`.",
       "source": "tenjin (push-scripts scrub, tenjin-agent#273)",
       "match": {
         "kind": "regex",
-        "pattern": "\\b[a-z][a-z0-9+.-]*:\\/\\/[^\\s:@/]+:[^\\s@/]+@\\S*",
+        "pattern": "(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\\/\\/[^\\s:@/]+:[^\\s@/]+@\\S*",
         "flags": "gi"
       },
       "replace": {
@@ -914,11 +914,11 @@
     {
       "id": "strip-secret-assignment",
       "scopes": ["query"],
-      "description": "password=..., api_key: ..., bearer <8+>, sig=...: the NAME says the value is a secret, so the value goes whatever it looks like. No leading name class and a bounded trailing one, both load-bearing: unbounded, a keyword-dotted run backtracks super-linearly (14.6 s at 8 kB), and a bounded LEADING class hid the keyword behind a 64+ character prefix. `sig`, `signature`, `nonce` and `hmac` are on the list because a presigned url carries a credential under them; `sig` inside design: or assignee: is the priced cost (design: dark -> de mode), cheaper than the leak.",
+      "description": "password=..., api_key: ..., bearer <8+>, sig=...: the NAME says the value is a secret, so the value goes whatever it looks like. No leading name class and a bounded trailing one, both load-bearing: unbounded, a keyword-dotted run backtracks super-linearly (14.6 s at 8 kB), and a bounded LEADING class hid the keyword behind a 64+ character prefix. `sig`, `signature`, `nonce` and `hmac` are on the list because a presigned url carries a credential under them; `sig` inside design: or assignee: is the priced cost (design: dark -> de mode), cheaper than the leak. The third alternative is the space-separated flag form (--api-key <v>, --token <v>), the credential position tenjin-agent#281 added to the publish rows: over-stripping `--token` and its next word from a query costs one topic word.",
       "source": "tenjin (push-scripts scrub, tenjin-agent#273)",
       "match": {
         "kind": "regex",
-        "pattern": "(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\\w.-]{0,64}\\s*[=:]\\s*\\S+|bearer\\s+\\S{8,})",
+        "pattern": "(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\\w.-]{0,64}\\s*[=:]\\s*\\S+|bearer\\s+\\S{8,}|--(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|secret|token|password|passwd)\\s+\\S+)",
         "flags": "gi"
       }
     },
@@ -950,11 +950,11 @@
     {
       "id": "strip-email",
       "scopes": ["query"],
-      "description": "An email address is near-never a search key, so it goes from queries alongside the credentials rather than with the hosts and paths the query scope keeps.",
+      "description": "An email address is near-never a search key, so it goes from queries alongside the credentials rather than with the hosts and paths the query scope keeps. The lookbehind, not `\\b`, opens the match: with `\\b` every character of a dotted or hyphenated run was a start position and the row went quadratic on `a-a-a` (36 ms per 8 kB).",
       "source": "tenjin (push-scripts scrub)",
       "match": {
         "kind": "regex",
-        "pattern": "\\b[\\w.-]+@[\\w.-]+\\.[a-z]{2,}\\b",
+        "pattern": "(?<![\\w.-])[\\w.-]+@[\\w.-]+\\.[a-z]{2,}\\b",
         "flags": "gi"
       }
     }

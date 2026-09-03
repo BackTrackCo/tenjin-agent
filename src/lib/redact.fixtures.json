@@ -860,6 +860,13 @@
       "expect_ids": ["wallet-address"]
     },
     {
+      "id": "wallet-address/pos-checksummed",
+      "scope": "publish",
+      "label": "positive",
+      "input": "Refund went to 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (USDC on Base).",
+      "expect_ids": ["wallet-address"]
+    },
+    {
       "id": "wallet-address/neg",
       "scope": "publish",
       "label": "negative",
@@ -1057,7 +1064,7 @@
       "secret": "%%t33%%"
     },
     {
-      "id": "secret-assignment/pos-header",
+      "id": "secret-assignment/pos-header-entry1",
       "scope": "publish",
       "label": "positive",
       "input": "Passed on: curl -H 'X-Api-Key: %%t34%%' https://api.acme.io/v1/ping",
@@ -1093,6 +1100,20 @@
       "expect_text": "fails at after deploy"
     },
     {
+      "id": "strip-userinfo-url/no-padding-handback",
+      "scope": "query",
+      "label": "positive",
+      "input": "postgres://u:p@h/db?k=aGVsbG93b3JsZGhlbGxvd29ybGQx== failed",
+      "expect_text": "failed"
+    },
+    {
+      "id": "strip-userinfo-url/keeps-space-separated-param",
+      "scope": "query",
+      "label": "positive",
+      "input": "postgres://admin:hunter2@db.acme.com/prod ref=abc123 failed",
+      "expect_text": "ref=abc123 failed"
+    },
+    {
       "id": "strip-userinfo-url/neg-no-credential",
       "scope": "query",
       "label": "negative",
@@ -1126,6 +1147,13 @@
       "label": "positive",
       "input": "presigned url ;sig=abc123 expired early",
       "expect_text": "presigned url ; expired early"
+    },
+    {
+      "id": "strip-secret-assignment/pos-flag",
+      "scope": "query",
+      "label": "positive",
+      "input": "curl --api-key Zx9QmT7bV2pL4aRe https://api.acme.io fails 401",
+      "expect_text": "curl https://api.acme.io fails 401"
     },
     {
       "id": "strip-secret-assignment/priced-design-colon",
@@ -1184,6 +1212,13 @@
       "expect_text": "NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 is unset in CI"
     },
     {
+      "id": "strip-entropy/drops-env-name-over-64",
+      "scope": "query",
+      "label": "positive",
+      "input": "A1_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_C3 leaked",
+      "expect_text": "leaked"
+    },
+    {
       "id": "strip-entropy/drops-env-name-glued-to-value",
       "scope": "query",
       "label": "positive",
@@ -1239,6 +1274,10 @@
       "note": "assignment separators (the #273 userinfo enumerator)"
     },
     {
+      "seed": "a.",
+      "note": "dotted runs (userinfo scheme class and email local part)"
+    },
+    {
       "seed": "x://",
       "note": "scheme runs with no userinfo"
     },
@@ -1270,6 +1309,10 @@
     {
       "seed": "user@",
       "note": "email at-sign runs"
+    },
+    {
+      "seed": "a-b.",
+      "note": "mixed separator run"
     }
   ]
 }
