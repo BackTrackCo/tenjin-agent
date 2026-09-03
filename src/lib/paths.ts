@@ -126,3 +126,48 @@ export function passphraseBlobPathFor(account: string, dir: string = dataDir()):
 export function archivedWalletPath(account: string, dir: string = dataDir()): string {
   return join(dir, `wallet.${account}.json.bak`);
 }
+
+/**
+ * The loop daemon's own state, all under the data dir (tenjin-notes
+ * loop-redesign/02-redesign.md §4, §10). `loop.db` is a NEW file beside
+ * `state.db`, never a rename: the old hook scripts keep writing `state.db`
+ * until PR E deletes them, and a rename would strand their WAL frames.
+ */
+export function loopDbPath(dir: string = dataDir()): string {
+  return join(dir, 'loop.db');
+}
+
+/** 32 random bytes, hex, 0600. Minted by `tenjin daemon start`, rotated only by
+ *  reinstall, NEVER deleted by the daemon: every transport reads it, and an idle
+ *  exit that removed it would strand them all. */
+export function daemonTokenPath(dir: string = dataDir()): string {
+  return join(dir, 'daemon.token');
+}
+
+/** `{ pid, port, started_at, data_dir }`, advisory: written after the bind,
+ *  removed at exit only by the process whose pid it names. Liveness is
+ *  `GET /health`, never this file alone. */
+export function daemonPidPath(dir: string = dataDir()): string {
+  return join(dir, 'daemon.pid');
+}
+
+/** Where a detached daemon's stdout and stderr go, and where the shim writes its
+ *  one `daemon-down` line when it cannot reach one. */
+export function daemonLogPath(dir: string = dataDir()): string {
+  return join(dir, 'daemon.log');
+}
+
+/** An empty file whose mtime is the last spawn attempt; the shim's backoff. */
+export function daemonSpawnPath(dir: string = dataDir()): string {
+  return join(dir, 'daemon.spawn');
+}
+
+/** The single-file daemon bundle `tenjin daemon start` copies from `dist`. */
+export function daemonBundlePath(dir: string = dataDir()): string {
+  return join(hooksDir(dir), 'tenjin-daemon.mjs');
+}
+
+/** The ensure-and-forward shim the two `command` hook entries run. */
+export function shimBundlePath(dir: string = dataDir()): string {
+  return join(hooksDir(dir), 'tenjin-shim.mjs');
+}
