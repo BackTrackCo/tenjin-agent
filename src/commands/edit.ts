@@ -4,7 +4,7 @@ import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
-import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
+import { findings as scanFindings, type FindingsContext, type Finding } from '../lib/redact';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { sanitizeForTerminal } from '../lib/output';
 import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/state-store';
@@ -248,7 +248,8 @@ export async function runEdit(
   // working directory — never from wherever the shell happens to be.
   const markerRoot =
     args.body !== undefined && args.body !== '-' ? dirname(resolve(cwd, args.body)) : cwd;
-  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
+  const scanContext: FindingsContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
+  const scope = runtime.teamMode ? 'team' : 'publish';
   // The scan covers exactly what this edit SHIPS: the typed text behind the keys
   // that survived pruning, plus the body file only when the body itself survived.
   // Scanning the raw flags instead would block on a value that prunes away — a
@@ -256,8 +257,8 @@ export async function runEdit(
   // unrelated title change while the same flags alone exit 0. A secret in a
   // surviving value still blocks in every mode, never cleared by --yes.
   const scanned = dedupeFindings([
-    ...(input.bodyMd !== undefined ? scan(bodyFile?.raw ?? '', scanContext) : []),
-    ...scan(shippedTypedText(args, input), scanContext),
+    ...(input.bodyMd !== undefined ? scanFindings(bodyFile?.raw ?? '', scope, scanContext) : []),
+    ...scanFindings(shippedTypedText(args, input), scope, scanContext),
     // A promotion ships the STORED body to the public page, and "scanned when it
     // was written" holds only for drafts this CLI wrote: one made on the web desk
     // or by a raw API call was never scanned locally. So the body that is about
@@ -267,21 +268,20 @@ export async function runEdit(
     // for. Skipped when this same edit replaces the body, which the first line
     // already scanned in full.
     ...(promotes && input.bodyMd === undefined
-      ? scan(stored.bodyMd ?? '', scanContext).filter((f) => f.severity === 'block')
+      ? scanFindings(stored.bodyMd ?? '', scope, scanContext).filter((f) => f.severity === 'block')
       : []),
   ]);
-  // THE SAME TEAM-MODE NARROWING PUBLISH DOES, and for the same reason: the warn
-  // tier asks "is this safe to make PUBLIC", and a team shelf is not public, so a
-  // repo slug is the point of a team note rather than a leak. The credential checks
-  // survive with the block tier because they ask a question the audience does not
-  // change; which ones those are is a `teamSurvives` flag on the rule in
-  // scan-rules.json rather than a list in code. Without this, an author publishes a team note carrying its
-  // own repo slug silently under `auto` and then gets NEEDS_CONFIRMATION on that
-  // same string when fixing a typo in it — the --yes round trip the drop exists to
-  // remove, moved to the second command. The two filters are the one
-  // `survivesTeamDrop` predicate (lib/scan.ts) so they cannot disagree; publish.ts
-  // is where the full reasoning lives.
-  const findings = runtime.teamMode ? scanned.filter(survivesTeamDrop) : scanned;
+  // THE SAME SCOPE PUBLISH PASSES, and for the same reason: the warn tier asks
+  // "is this safe to make PUBLIC", and a team shelf is not public, so a repo slug
+  // is the point of a team note rather than a leak. The credential checks survive
+  // with the block tier because they ask a question the audience does not change;
+  // which ones those are is `scopes` on the rule in redact-rules.json, applied
+  // inside `findings()` rather than by a filter here. Without this, an author
+  // publishes a team note carrying its own repo slug silently under `auto` and
+  // then gets NEEDS_CONFIRMATION on that same string when fixing a typo in it —
+  // the --yes round trip the drop exists to remove, moved to the second command.
+  // publish.ts is where the full reasoning lives.
+  const findings = scanned;
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
   if (blocking.length > 0) {
@@ -1111,7 +1111,7 @@ function shippedTypedText(args: EditArgs, input: PostUpdateInput): string {
   return parts.join('\n');
 }
 
-function blockMessage(blocking: ScanFinding[]): string {
+function blockMessage(blocking: Finding[]): string {
   return `Edit blocked: the new content contains ${describeFindings(blocking)}.`;
 }
 

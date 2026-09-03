@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { scan, type ScanFinding } from './scan';
+import { findings, type Finding, type FindingsContext } from './redact';
+
+/** Every case here is the marketplace audience; the team scope is pinned in redact.fixtures.test.ts. */
+const scan = (text: string, context?: FindingsContext): Finding[] =>
+  findings(text, 'publish', context);
 
 function checks(text: string): string[] {
   return scan(text).map((f) => f.check);
 }
-function find(text: string, check: string): ScanFinding | undefined {
+function find(text: string, check: string): Finding | undefined {
   return scan(text).find((f) => f.check === check);
 }
 

@@ -48,8 +48,8 @@ adapted from the [gitleaks](https://github.com/gitleaks/gitleaks) ruleset (MIT),
 by Zachary Rice: AWS access keys, GitHub classic and fine-grained tokens,
 Slack/Stripe/npm/Anthropic/OpenAI/Google/Supabase/Twilio/SendGrid/Hugging Face
 tokens, JWTs, and the PEM private-key marker. They live as data in
-`src/lib/scan-rules.json`, one entry per detector, each naming its gitleaks rule
-in its `source` field; `src/lib/scan.ts` compiles that data. The regexes are
+`src/lib/redact-rules.json`, one entry per detector, each naming its gitleaks rule
+in its `source` field; `src/lib/redact.ts` compiles that data. The regexes are
 vendored and adapted, not imported: gitleaks is not a runtime dependency (the
 scan is pure and offline by design).
 
@@ -85,7 +85,7 @@ The gitleaks port above was diffed against
 [secretlint](https://github.com/secretlint/secretlint)'s
 `@secretlint/secretlint-rule-preset-recommend` (MIT), by azu. Eight token shapes
 present there and absent from the gitleaks subset are adapted from its rule
-packages, each credited in its `source` field in `src/lib/scan-rules.json`:
+packages, each credited in its `source` field in `src/lib/redact-rules.json`:
 Vercel platform tokens, Notion, Linear, Figma, GitLab, Docker Hub, Cloudflare,
 and Databricks. secretlint is not a runtime dependency.
 

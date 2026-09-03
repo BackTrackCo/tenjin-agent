@@ -1,11 +1,28 @@
 /**
- * The deterministic, offline redaction/rights scan (B3, Q14). Pure: identical
- * input yields an identical `findings[]`, no network and no model call. It runs
- * in every publish mode — it gates the explicit-approval gate, it does not
- * replace it. `block` findings refuse a publish in every mode and are never
- * `--yes`-clearable; `warn` findings are surfaced for review.
+ * The one redaction module: every surface that decides what text may leave
+ * this machine reads the same rule table (`redact-rules.json`) through this
+ * file. Two verbs, one table, one fixed order:
  *
- * Three invariants, all pinned by scan.corpus.test.ts and scan.test.ts:
+ * `findings(text, scope)` is the deterministic, offline publish scan (B3, Q14).
+ * Pure: identical input yields an identical `Finding[]`, no network and no model
+ * call. It runs in every publish mode — it gates the explicit-approval gate, it
+ * does not replace it. `block` findings refuse a publish in every mode and are
+ * never `--yes`-clearable; `warn` findings are surfaced for review. The scope
+ * is the audience: `publish` is the marketplace and reports every row, `team`
+ * is the team shelf and reports only the rows whose `scopes` include it (the
+ * block tier whole, plus the warns that ask the credential or the injection
+ * question rather than the public-safety one). WHICH rows is data on the rule,
+ * never a list in a caller: publish.ts, edit.ts and sync.ts cannot disagree
+ * because none of them filters.
+ *
+ * `redact(text)` is the destructive scrub for hook queries and ledger text: it
+ * bounds the input, strips the `query`-scoped rows in table order and squashes
+ * whitespace, so no caller re-implements bound-before-scrub or
+ * scrub-before-squash again. Hosts, paths, IPv4 literals and git SHAs stay in a
+ * query on purpose (owner policy, tenjin-agent#197 rework: search availability
+ * over scrubbing); credentials, control bytes and emails always go.
+ *
+ * Three invariants, all pinned by redact.fixtures.test.ts and redact.test.ts:
  *
  * REDACTION: a `block` excerpt is masked — a type-identifying prefix plus a
  * redaction count, never the matched secret. `pem-private-key` is the one
@@ -19,25 +36,34 @@
  *
  * ReDoS: no pattern may contain a quantified group whose body can also match the
  * group's own separator while a further obligation follows it. Audited against a
- * single line of hundreds of kilobytes, the shape a JSONL transcript record takes.
+ * single line of hundreds of kilobytes, the shape a JSONL transcript record takes,
+ * and the strip rows against the query seeds that bit before (#273).
  *
- * The detector corpus lives as DATA in `scan-rules.json` so the tenjin
- * server-side ingest gate can vendor it verbatim; this file compiles that data
- * and implements the handlers and algorithmic detectors it names. Per-rule
- * attribution is in the data file's `source` field and in NOTICE.md. No pattern
- * set is a runtime dependency: this is a wallet-holding CLI, kept offline with a
- * tight dep tree by design.
+ * The rule corpus lives as DATA in `redact-rules.json` so the tenjin server-side
+ * ingest gate can vendor it verbatim (it reads the `publish` rows and skips the
+ * rest); this file compiles that data and implements the handlers and
+ * algorithmic detectors it names. Per-rule attribution is in the data file's
+ * `source` field and in NOTICE.md. No pattern set is a runtime dependency: this
+ * is a wallet-holding CLI, kept offline with a tight dep tree by design.
  */
 
-import corpusJson from './scan-rules.json';
+import corpusJson from './redact-rules.json';
 import wordlistJson from './bip39-wordlist.json';
 
-export type ScanSeverity = 'block' | 'warn';
+/**
+ * Where a rule applies. `query` rows are strip rows for `redact()`; `publish`
+ * and `team` rows are report rows for `findings()`. A row is never both.
+ */
+export type Scope = 'query' | 'publish' | 'team';
+/** The audiences `findings()` reports for. */
+export type ReportScope = Exclude<Scope, 'query'>;
 
-export interface ScanFinding {
+export type FindingSeverity = 'block' | 'warn';
+
+export interface Finding {
   /** Stable machine id for the detector, e.g. "aws-access-key". */
   check: string;
-  severity: ScanSeverity;
+  severity: FindingSeverity;
   /** 1-based line number of the match (its start line, for multi-line matches). */
   line: number;
   /** [startColumn, endColumn) within `line`, 0-based (the start line for spans). */
@@ -52,7 +78,7 @@ export interface ScanFinding {
  * facts the caller already holds (the source project's git remote slugs/paths at
  * publish time, per the open-questions publishing-safety check-set).
  */
-export interface ScanContext {
+export interface FindingsContext {
   /**
    * Source-project identifiers treated as private-by-default: git remote
    * `org/repo` slugs and project paths. Matched case-insensitively as literal
@@ -65,23 +91,67 @@ export interface ScanContext {
 /** Contiguous quoted/fenced runs at or above this word count read as copied. */
 const LONG_QUOTE_WORDS = 80;
 
-export function scan(text: string, context: ScanContext = {}): ScanFinding[] {
+export function findings(
+  text: string,
+  scope: ReportScope,
+  context: FindingsContext = {},
+): Finding[] {
   const lines = text.split('\n');
-  const findings: ScanFinding[] = [
-    ...scanHex64(lines),
-    ...scanLineDetectors(lines),
-    ...scanPemBlocks(lines),
-    ...scanSeedPhrases(lines),
-    ...scanEnvDumpBlocks(lines),
-    ...scanLongVerbatim(lines),
-    ...scanProjectMarkers(lines, context.projectMarkers ?? []),
+  const on = (algorithm: string): boolean => ALGORITHM_SCOPES.get(algorithm)?.has(scope) === true;
+  const found: Finding[] = [
+    ...(on('hex64') ? scanHex64(lines) : []),
+    ...scanLineDetectors(lines, scope),
+    ...(on('pemBlock') ? scanPemBlocks(lines) : []),
+    ...(on('bip39') ? scanSeedPhrases(lines) : []),
+    ...(on('envDump') ? scanEnvDumpBlocks(lines) : []),
+    ...(on('longVerbatim') ? scanLongVerbatim(lines) : []),
+    ...(on('projectMarkers') ? scanProjectMarkers(lines, context.projectMarkers ?? []) : []),
   ];
-  const named = dedupeAndSort(suppressEmailsInDbUris(findings));
-  return dedupeAndSort([...named, ...scanHighEntropy(lines, named)]);
+  const named = dedupeAndSort(suppressEmailsInDbUris(found));
+  return dedupeAndSort([...named, ...(on('entropy') ? scanHighEntropy(lines, named) : [])]);
+}
+
+/** The strip rows fit in this many characters; a longer input is cut back to
+ *  the last whitespace before it so no token is handed over truncated (a
+ *  secret cut at the boundary is a fragment no whole-token rule matches, and
+ *  the fragment ships). 4x any slice a caller takes afterwards. */
+export const REDACT_INPUT_MAX = 8192;
+
+/**
+ * Destructively remove what must never leave the machine in a query: control
+ * bytes, credentials and emails. The fixed order is the contract — bound, then
+ * the pre-pass, then the strip rows in table order, then squash — and it lives
+ * here once rather than in every caller.
+ *
+ * ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so stripping
+ * the block first would leave `[31m` behind as text. C0 is DELETED rather than
+ * spaced, and before every whole-token rule: a control byte inside a name is a
+ * splitter (`api_key<0x01>=hunter2` reads as two tokens to every rule below).
+ * Whitespace controls are real text here and the squash at the end handles
+ * them. The same sequences `sanitizeForTerminal` (output.ts) removes, minus
+ * the newline it drops for single-line display.
+ */
+export function redact(text: string): string {
+  const window = String(text).slice(0, REDACT_INPUT_MAX);
+  const whole =
+    window.length < String(text).length ? window.slice(0, window.search(/\s\S*$/) + 1) : window;
+  let out = whole
+    // eslint-disable-next-line no-control-regex
+    .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g, ' ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
+  for (const row of STRIP_ROWS) {
+    out = out.replace(row.re, (...args) => {
+      const m = args as unknown as RegExpExecArray;
+      if (row.skip?.(m) === true) return m[0];
+      return row.replace(m);
+    });
+  }
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 // ---------------------------------------------------------------------------
-// Rule corpus: scan-rules.json compiled into executable detectors.
+// Rule corpus: redact-rules.json compiled into executable detectors.
 // ---------------------------------------------------------------------------
 
 interface RuleExcerpt {
@@ -95,14 +165,25 @@ interface RuleExcerpt {
 
 interface Rule {
   id: string;
-  tier: string;
+  /** Report rows only; a strip row (`scopes: ['query']`) carries none. */
+  tier?: string;
+  scopes: string[];
   description: string;
   source: string;
-  /** Warn rules only: this check outlives the team-shelf warn drop. See `survivesTeamDrop`. */
-  teamSurvives?: boolean;
   match: { kind: string; pattern?: string; flags?: string; algorithm?: string };
-  excerpt: RuleExcerpt;
+  /** Report rows only. */
+  excerpt?: RuleExcerpt;
+  /** Report rows: drop the match without a finding. Strip rows: keep the match. */
   skip?: { handler: string };
+  /** Strip rows only: what stands in for the match (default one space). */
+  replace?: { handler: string };
+}
+
+const SCOPES: ReadonlySet<string> = new Set(['query', 'publish', 'team']);
+
+/** A query-scoped row is a strip row; every other row is a report row. */
+function isStripRow(rule: Rule): boolean {
+  return rule.scopes.includes('query');
 }
 
 const CORPUS = corpusJson as unknown as {
@@ -136,11 +217,47 @@ const SKIP_HANDLERS: Record<string, (m: RegExpExecArray) => boolean> = {
   nonLiteralValue: skipNonLiteralValue,
   placeholderUsername: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
   reservedExampleEmail: (m) => RESERVED_EXAMPLE_DOMAIN.test(m[0]),
+  notKeyMaterial: (m) =>
+    !/\d/.test(m[0]) || !/[A-Za-z]/.test(m[0]) || isPureLowercaseHex(m[0]) || isEnvVarName(m[0]),
 };
+
+/** Strip-row replacements; the default is one space. */
+const REPLACE_HANDLERS: Record<string, (m: RegExpExecArray) => string> = {
+  urlTrail: (m) => {
+    const tail = STRIP_URL_TRAIL_RE.exec(m[0]);
+    return tail === null ? ' ' : ` ${tail[0]}`;
+  },
+};
+
+/** The trailing punctuation a blanked userinfo url hands back to the sentence
+ *  it was written inside. Closers, quotes and sentence punctuation only: no
+ *  alphanumeric, and no `=` (base64 padding; a key may end on it). */
+const STRIP_URL_TRAIL_RE = /[)\]}>'"\u0060*.,;:!?]+$/;
+
+/** A pure lowercase-hex run: the shape of a git SHA, kept in a query so a
+ *  commit is not collateral damage. Deliberately also the shape of a hex-only
+ *  token (tenjin-agent#281); the publish rows catch that one in credential
+ *  position. */
+function isPureLowercaseHex(token: string): boolean {
+  return /^[0-9a-f]+$/.test(token);
+}
+
+/** All caps and digits with at least one underscore, at most 64 characters and
+ *  no piece of 16+ between the underscores: a name somebody typed, never a
+ *  base64 secret, and the exact token a shelf lookup keys on.
+ *  `GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890` is a name glued to its
+ *  value and fails the piece bound. */
+function isEnvVarName(token: string): boolean {
+  return (
+    token.length <= 64 &&
+    /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(token) &&
+    !/[A-Z0-9]{16}/.test(token)
+  );
+}
 
 interface LineDetector {
   check: string;
-  severity: ScanSeverity;
+  severity: FindingSeverity;
   /** Global regex; `lastIndex` is reset per line. */
   re: RegExp;
   /** Build the (possibly masked) excerpt from a single match. */
@@ -154,43 +271,127 @@ interface LineDetector {
  * handler this build does not implement is a vendoring mistake, and a scan that
  * silently drops a block-tier detector is worse than one that refuses to start.
  */
-function compileLineDetectors(rules: Rule[]): LineDetector[] {
-  const out: LineDetector[] = [];
-  for (const rule of rules) {
-    if (rule.tier !== 'block' && rule.tier !== 'warn') {
-      throw new Error(`scan-rules.json: rule ${rule.id} has unknown tier ${rule.tier}`);
-    }
-    if (rule.teamSurvives === true && rule.tier !== 'warn') {
+function validateScopes(rule: Rule): void {
+  if (!Array.isArray(rule.scopes) || rule.scopes.length === 0) {
+    throw new Error(`redact-rules.json: rule ${rule.id} has no scopes`);
+  }
+  for (const scope of rule.scopes) {
+    if (!SCOPES.has(scope))
+      throw new Error(`redact-rules.json: rule ${rule.id} names unknown scope ${scope}`);
+  }
+  if (isStripRow(rule)) {
+    if (rule.scopes.length !== 1 || rule.tier !== undefined || rule.excerpt !== undefined) {
       throw new Error(
-        `scan-rules.json: rule ${rule.id} flags teamSurvives on the ${rule.tier} tier, which survives whole`,
+        `redact-rules.json: rule ${rule.id} is a strip row (scopes: query) and must carry no other scope, tier or excerpt`,
       );
     }
-    if (rule.match.kind === 'algorithm') {
-      if (!ALGORITHMS.has(rule.match.algorithm ?? '')) {
-        throw new Error(`scan-rules.json: rule ${rule.id} names unknown algorithm`);
-      }
-      continue;
-    }
-    if (rule.match.kind !== 'regex' || rule.match.pattern === undefined) {
-      throw new Error(`scan-rules.json: rule ${rule.id} has unknown match kind ${rule.match.kind}`);
-    }
-    const skip = rule.skip === undefined ? undefined : SKIP_HANDLERS[rule.skip.handler];
-    if (rule.skip !== undefined && skip === undefined) {
-      throw new Error(`scan-rules.json: rule ${rule.id} names unknown skip ${rule.skip.handler}`);
-    }
+    return;
+  }
+  if (rule.tier !== 'block' && rule.tier !== 'warn') {
+    throw new Error(`redact-rules.json: rule ${rule.id} has unknown tier ${String(rule.tier)}`);
+  }
+  if (!rule.scopes.includes('publish')) {
+    throw new Error(`redact-rules.json: rule ${rule.id} reports for team but not publish`);
+  }
+  // The block tier survives on every shelf: that invariant is stated to
+  // operators (lib/permissions.ts) and to models (mcp/server.ts).
+  if (rule.tier === 'block' && !rule.scopes.includes('team')) {
+    throw new Error(`redact-rules.json: block rule ${rule.id} must be scoped to team as well`);
+  }
+  if (rule.replace !== undefined) {
+    throw new Error(`redact-rules.json: report rule ${rule.id} names a replace handler`);
+  }
+}
+
+function compileSkip(rule: Rule): ((m: RegExpExecArray) => boolean) | undefined {
+  const skip = rule.skip === undefined ? undefined : SKIP_HANDLERS[rule.skip.handler];
+  if (rule.skip !== undefined && skip === undefined) {
+    throw new Error(`redact-rules.json: rule ${rule.id} names unknown skip ${rule.skip.handler}`);
+  }
+  return skip;
+}
+
+function compileRegex(rule: Rule): RegExp {
+  if (rule.match.kind !== 'regex' || rule.match.pattern === undefined) {
+    throw new Error(`redact-rules.json: rule ${rule.id} has unknown match kind ${rule.match.kind}`);
+  }
+  return new RegExp(rule.match.pattern, rule.match.flags ?? 'g');
+}
+
+function compileLineDetectors(rules: Rule[], scope: ReportScope): LineDetector[] {
+  const out: LineDetector[] = [];
+  for (const rule of rules) {
+    if (isStripRow(rule) || !rule.scopes.includes(scope)) continue;
+    if (rule.match.kind === 'algorithm') continue;
     out.push({
       check: rule.id,
-      severity: rule.tier,
-      re: new RegExp(rule.match.pattern, rule.match.flags ?? 'g'),
+      severity: rule.tier as FindingSeverity,
+      re: compileRegex(rule),
       excerpt: compileExcerpt(rule),
-      skip,
+      skip: compileSkip(rule),
     });
   }
   return out;
 }
 
+interface StripRow {
+  id: string;
+  re: RegExp;
+  /** Keep the match as it stands. */
+  skip?: (m: RegExpExecArray) => boolean;
+  replace: (m: RegExpExecArray) => string;
+}
+
+function compileStripRows(rules: Rule[]): StripRow[] {
+  const out: StripRow[] = [];
+  for (const rule of rules) {
+    if (!isStripRow(rule)) continue;
+    const replace = rule.replace === undefined ? undefined : REPLACE_HANDLERS[rule.replace.handler];
+    if (rule.replace !== undefined && replace === undefined) {
+      throw new Error(
+        `redact-rules.json: rule ${rule.id} names unknown replace ${rule.replace.handler}`,
+      );
+    }
+    out.push({
+      id: rule.id,
+      re: compileRegex(rule),
+      skip: compileSkip(rule),
+      replace: replace ?? (() => ' '),
+    });
+  }
+  return out;
+}
+
+/**
+ * Validate every row once, whatever scope asks first. Throws rather than
+ * degrading: a corpus entry naming a handler this build does not implement is
+ * a vendoring mistake, and a scan that silently drops a block-tier detector is
+ * worse than one that refuses to start.
+ */
+function validateCorpus(rules: Rule[]): void {
+  for (const rule of rules) {
+    validateScopes(rule);
+    if (rule.match.kind === 'algorithm') {
+      if (isStripRow(rule) || !ALGORITHMS.has(rule.match.algorithm ?? '')) {
+        throw new Error(`redact-rules.json: rule ${rule.id} names unknown algorithm`);
+      }
+      continue;
+    }
+    compileRegex(rule);
+  }
+}
+
+/** The scopes each algorithmic detector runs for, read off its rule row. */
+const ALGORITHM_SCOPES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+  CORPUS.rules
+    .filter((r) => r.match.kind === 'algorithm')
+    .map((r) => [r.match.algorithm ?? '', new Set(r.scopes)]),
+);
+
 function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
   const policy = rule.excerpt;
+  if (policy === undefined)
+    throw new Error(`redact-rules.json: rule ${rule.id} has no excerpt policy`);
   switch (policy.kind) {
     case 'mask': {
       const keep = policy.keep ?? 0;
@@ -208,22 +409,27 @@ function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
     case 'custom': {
       const handler = EXCERPT_HANDLERS[policy.handler ?? ''];
       if (handler === undefined) {
-        throw new Error(`scan-rules.json: rule ${rule.id} names unknown excerpt handler`);
+        throw new Error(`redact-rules.json: rule ${rule.id} names unknown excerpt handler`);
       }
       return handler;
     }
     default:
-      throw new Error(`scan-rules.json: rule ${rule.id} has unknown excerpt kind ${policy.kind}`);
+      throw new Error(`redact-rules.json: rule ${rule.id} has unknown excerpt kind ${policy.kind}`);
   }
 }
 
-const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
+validateCorpus(CORPUS.rules);
+const LINE_DETECTORS: Record<ReportScope, LineDetector[]> = {
+  publish: compileLineDetectors(CORPUS.rules, 'publish'),
+  team: compileLineDetectors(CORPUS.rules, 'team'),
+};
+const STRIP_ROWS: StripRow[] = compileStripRows(CORPUS.rules);
 
-function scanLineDetectors(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanLineDetectors(lines: string[], scope: ReportScope): Finding[] {
+  const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
-    for (const detector of LINE_DETECTORS) {
+    for (const detector of LINE_DETECTORS[scope]) {
       detector.re.lastIndex = 0;
       let m: RegExpExecArray | null;
       while ((m = detector.re.exec(line)) !== null) {
@@ -285,7 +491,7 @@ const PLACEHOLDER_USERNAME = /^(?:user(?:name)?|you(?:rname)?|example|foo|me|myu
  * excerpt. Drop any email finding whose span sits inside a db-connection-uri
  * span on the same line so the masking cannot be bypassed.
  */
-function suppressEmailsInDbUris(findings: ScanFinding[]): ScanFinding[] {
+function suppressEmailsInDbUris(findings: Finding[]): Finding[] {
   const uris = findings.filter((f) => f.check === 'db-connection-uri');
   if (uris.length === 0) return findings;
   return findings.filter(
@@ -320,14 +526,14 @@ function truncate(value: string, max: number): string {
  * matched marker: it is the publisher's own project name, shown locally so they
  * can find and generalize the reference, not key material.
  */
-function scanProjectMarkers(lines: string[], markers: string[]): ScanFinding[] {
+function scanProjectMarkers(lines: string[], markers: string[]): Finding[] {
   const cleaned = [...new Set(markers.filter((m) => m.trim().length >= 3))];
   if (cleaned.length === 0) return [];
   const needles = cleaned.map((marker) => ({
     marker,
     re: new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(marker)}(?![A-Za-z0-9_-])`, 'gi'),
   }));
-  const out: ScanFinding[] = [];
+  const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     for (const { marker, re } of needles) {
@@ -481,13 +687,13 @@ const HEX64_RE = /(?<![0-9a-fx])0x[0-9a-fA-F]{64}(?![0-9a-fA-F])/gi;
 const HASH_LABEL_RE =
   /(?:^|[^a-z0-9])(?:blockhash|txhash|txn|tx|hash|salt|id|topic\d*|root|digest|commitment)(?:[\s:=/,._'"`‘’“”-]*[A-Za-z0-9_]{1,12}){0,2}[\s:=/,._'"`‘’“”-]*$/i;
 
-/** Public 64-hex values that are never key material; see scan-rules.json. */
+/** Public 64-hex values that are never key material; see redact-rules.json. */
 const PUBLIC_HEX_CONSTANTS = new Set(
   (CORPUS.publicHexConstants ?? []).map((c) => c.value.toLowerCase()),
 );
 
-function scanHex64(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanHex64(lines: string[]): Finding[] {
+  const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     HEX64_RE.lastIndex = 0;
@@ -532,8 +738,8 @@ function isHashContext(line: string, matchIndex: number, match: string): boolean
 const PEM_BEGIN = /-----BEGIN[ A-Z0-9]*PRIVATE KEY(?: BLOCK)?-----/;
 
 /** A PEM private-key block is a single block finding on its BEGIN marker line. */
-function scanPemBlocks(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanPemBlocks(lines: string[]): Finding[] {
+  const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     const m = PEM_BEGIN.exec(line);
@@ -566,8 +772,8 @@ const SEED_PHRASE_MIN_WORDS = 12;
  * sentence. Tokens are walked rather than matched by one regex so the span is
  * exact and the pass stays linear on a transcript-length line.
  */
-function scanSeedPhrases(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanSeedPhrases(lines: string[]): Finding[] {
+  const out: Finding[] = [];
   const token = /\S+/g;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
@@ -612,8 +818,8 @@ const ENV_BLOCK_MIN_LINES = 3;
 /** A run of short values is configuration (PORT=3000); a long literal is a payload. */
 const ENV_SUBSTANTIAL_VALUE = 12;
 
-function scanEnvDumpBlocks(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanEnvDumpBlocks(lines: string[]): Finding[] {
+  const out: Finding[] = [];
   let i = 0;
   while (i < lines.length) {
     const keys: string[] = [];
@@ -669,8 +875,8 @@ const MAX_SAME_CASE_RUN = 8;
  * token overlaps a finding a named detector already produced, so a JWT or an AWS
  * key is reported once, by the detector that knows what it is.
  */
-function scanHighEntropy(lines: string[], named: ScanFinding[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanHighEntropy(lines: string[], named: Finding[]): Finding[] {
+  const out: Finding[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? '';
     ENTROPY_CANDIDATE.lastIndex = 0;
@@ -729,71 +935,23 @@ function shannonBits(token: string): number {
 }
 
 /**
- * The one survivor no rule entry can carry the flag for: `hex32-value` is not a
- * rule id but the warn form `scanHex64` demotes `raw-private-key` to in hash
- * context. Named here, and pinned by scan.corpus.test.ts so renaming the emitting
- * literal fails loudly rather than shrinking the survivor set in silence.
+ * `hex32-value` is not a rule id: it is the warn form `scanHex64` demotes
+ * `raw-private-key` to in hash context, so it follows that rule's scopes. A
+ * team shelf keeps it because the emitting rule is scoped to team, never
+ * because anything filters on `finding.check`. Exported for the fixture test
+ * that pins the survivor set.
  */
-const EMITTED_TEAM_SURVIVORS = ['hex32-value'];
+export const EMITTED_CHECKS: Readonly<Record<string, string>> = {
+  'hex32-value': 'raw-private-key',
+};
 
-/** Warn checks a team shelf keeps. Exported so a test can resolve every name in it. */
-export const TEAM_SURVIVOR_CHECKS: ReadonlySet<string> = new Set([
-  ...CORPUS.rules.filter((r) => r.teamSurvives === true).map((r) => r.id),
-  ...EMITTED_TEAM_SURVIVORS,
-]);
-
-/**
- * Does this finding survive the team-shelf warn drop?
- *
- * A team shelf is not public, so the warn tier's "is this safe to make PUBLIC"
- * question stops applying: a repo slug is the POINT of a team note. Two OTHER
- * questions do not stop applying, so the block tier survives whole plus the warns
- * that ask one of them rather than the public-safety one.
- *
- * WHICH warns is data, not a list in this function: `teamSurvives: true` on the
- * rule in scan-rules.json. A hardcoded list is how the two catch-alls below spent a
- * release filtered out: they landed beside a predicate written before they
- * existed, and nothing in a data-driven set can arrive that way again.
- *
- * "Is this a live credential?" — a team shelf is a hosted Postgres with logs and a
- * static shared door key, and a leaked key there is leaked.
- *
- * - `secret-assignment` — DEPLOY_API_KEY="pk_live_…" is a live key whose shape no
- *   block detector matches.
- * - `high-entropy-string` — the catch-all BEHIND the named shapes, firing only
- *   where no named detector did. It is what is left for `SEGMENT_WRITE_KEY=…` or
- *   `Authorization: Basic …`, whose key name `secret-assignment` does not
- *   recognize and whose value shape no block detector knows.
- * - `env-dump-block` — a pasted .env file. The Stop hook captures from transcripts
- *   and tool output, so a config paste is the exact input this detector is for.
- * - `hex32-value` — the SAME 0x+64-hex private-key detector as `raw-private-key`
- *   above, demoted to warn only because a block finding is permanently
- *   non-bypassable and a post carrying a tx hash must not be hard-blocked. Warn is
- *   the surfaced-for-review tier there, not the safe tier, so on a team shelf the
- *   finding still has to be seen.
- *
- * "Would this text steer the agent that reads it?" — injection risk does not move
- * with audience the way a rights or third-party-data concern does, because the body
- * is fed to a model either way, and team-shelf bodies are the ones the push sidecar
- * injects into teammates' agents unasked.
- *
- * - `embedded-instruction` — imperative "ignore all previous instructions" shapes
- *   and BEGIN SYSTEM/HIDDEN PROMPT headers. The per-injection nonce fence
- *   (push-scripts.ts) is the real reader-side boundary and is identical in both
- *   arms; keeping the check is what puts a human in front of the laundering path,
- *   where an already-poisoned agent captures at turn end and publishes to the very
- *   shelf the sidecar re-injects (review r6).
- *
- * All are kept as warns rather than promoted to block, so the consent cascade still
- * governs them: `review` and `auto` confirm, `full-auto` clears them unseen exactly
- * as it already does on the marketplace. What a wrongly dropped warn costs differs
- * by mode: `review` stops once per note either way and loses only the finding from
- * the prompt body, but `auto` goes promptless and `full-auto` publishes unattended.
- * Callers: commands/publish.ts and commands/edit.ts, which must never disagree —
- * this predicate is why they can't.
- */
-export function survivesTeamDrop(f: ScanFinding): boolean {
-  return f.severity === 'block' || TEAM_SURVIVOR_CHECKS.has(f.check);
+/** Every rule id `findings()` can report for a scope, emitted checks included. */
+export function checksFor(scope: ReportScope): ReadonlySet<string> {
+  const ids = new Set(
+    CORPUS.rules.filter((r) => !isStripRow(r) && r.scopes.includes(scope)).map((r) => r.id),
+  );
+  for (const [check, rule] of Object.entries(EMITTED_CHECKS)) if (ids.has(rule)) ids.add(check);
+  return ids;
 }
 
 const FENCE = /^(\s*)(`{3,}|~{3,})/;
@@ -803,8 +961,8 @@ const FENCE = /^(\s*)(`{3,}|~{3,})/;
  * block or a contiguous `>` blockquote whose content reaches LONG_QUOTE_WORDS
  * reads as copied third-party material. Reported once on the run's first line.
  */
-function scanLongVerbatim(lines: string[]): ScanFinding[] {
-  const out: ScanFinding[] = [];
+function scanLongVerbatim(lines: string[]): Finding[] {
+  const out: Finding[] = [];
   let i = 0;
   while (i < lines.length) {
     const line = lines[i] ?? '';
@@ -842,12 +1000,7 @@ function closesFence(line: string, marker: string): boolean {
   return m !== null && (m[2] ?? '').startsWith(marker);
 }
 
-function pushIfLong(
-  out: ScanFinding[],
-  body: string[],
-  startLine: number,
-  firstLine: string,
-): void {
+function pushIfLong(out: Finding[], body: string[], startLine: number, firstLine: string): void {
   const text = body.join(' ').trim();
   const words = text.length === 0 ? 0 : text.split(/\s+/).length;
   if (words < LONG_QUOTE_WORDS) return;
@@ -864,7 +1017,7 @@ function pushIfLong(
  * Deterministic order: line, then start column, then check name. Exact duplicate
  * spans of the same check (e.g. two detectors on the same offset) collapse to one.
  */
-function dedupeAndSort(findings: ScanFinding[]): ScanFinding[] {
+function dedupeAndSort(findings: Finding[]): Finding[] {
   const seen = new Set<string>();
   const unique = findings.filter((f) => {
     const key = `${f.check}:${f.line}:${f.span[0]}:${f.span[1]}`;

@@ -1812,7 +1812,7 @@ describe('runPublish on a team shelf', () => {
     // non-bypassable and a receipt or basescan tx hash must not be unpublishable
     // forever — warn is the surfaced-for-review tier there, not the safe one. So
     // the credential question is still open on a team shelf, and `auto` asks it.
-    // Before survivesTeamDrop this body published promptless under `auto`.
+    // Before the team scope kept it, this body published promptless under `auto`.
     const file = await writeDoc(HEX32);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();

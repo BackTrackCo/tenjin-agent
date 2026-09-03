@@ -9,7 +9,12 @@ import {
   markSearchResolved,
   type StoredSearch,
 } from '../lib/state-store';
-import { scan, survivesTeamDrop, type ScanContext, type ScanFinding } from '../lib/scan';
+import {
+  findings as scanFindings,
+  type FindingsContext,
+  type Finding,
+  type ReportScope,
+} from '../lib/redact';
 import { deriveProjectMarkers } from '../lib/scan-context';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';
@@ -445,38 +450,24 @@ export async function runPublish(
   // The scan runs in EVERY publish mode (D38) and on EVERY shelf: it gates the
   // gate, it does not replace it. What it covers and why is on `scanDraft` below.
   //
-  // TEAM MODE DROPS THE WARN TIER, MINUS ONE CHECK. The scan asks two different
-  // questions under one name. "Is this safe to make PUBLIC" is the warn tier — a
-  // repo slug, an internal hostname, an employer's name — and on a second
-  // deployment only this team can reach, every one of those is a false positive
-  // on exactly the findings the loop exists to capture ("a quirk of THIS
-  // codebase"), each costing a --yes round trip the agent has to be taught to do.
-  // "Is this a live credential" is the block tier, and that question has the same
-  // answer on every shelf: a team shelf is a hosted Postgres with logs and a
-  // static shared door key, and a leaked key there is leaked. It is also silent
-  // on a clean note, so keeping it costs the capture loop nothing. The block tier
-  // is therefore NEVER skipped and never clearable by --yes, here or anywhere:
-  // that invariant is stated to operators (lib/permissions.ts) and to models
-  // (mcp/server.ts) and it holds in team mode too.
-  //
-  // TWO WARNS SURVIVE THE DROP: `secret-assignment` and `hex32-value`. Both ask
-  // the credential question rather than the public-safety one — DEPLOY_API_KEY=
-  // "pk_live_…" is a live key whose shape no block detector matches, and a
-  // 0x+64-hex is the raw-private-key detector demoted to warn only because a block
-  // finding is permanently non-bypassable — so "a leaked key there is leaked"
-  // applies to both verbatim, and to the two catch-alls behind them
-  // (`high-entropy-string`, `env-dump-block`). They are kept as warns rather than
-  // promoted to block, so the consent cascade still governs them: `review` and
-  // `auto` confirm, and `full-auto` clears them unseen on a team shelf exactly as
-  // it already does on the marketplace (the price scan.ts concedes at the
-  // detector). Every other warn is dropped. WHICH warns survive is a `teamSurvives`
-  // flag on the rule in scan-rules.json, read by `survivesTeamDrop` (lib/scan.ts),
-  // so this filter and edit.ts cannot drift (they did once) and a new credential
-  // detector joins by marking itself rather than by an edit here. The two other
-  // surfaces that characterise this drop say the same:
+  // THE SCOPE IS THE AUDIENCE. The scan asks two different questions under one
+  // name. "Is this safe to make PUBLIC" is the warn tier — a repo slug, an
+  // internal hostname, an employer's name — and on a second deployment only this
+  // team can reach, every one of those is a false positive on exactly the
+  // findings the loop exists to capture ("a quirk of THIS codebase"), each
+  // costing a --yes round trip the agent has to be taught to do. "Is this a live
+  // credential" is the block tier, and that question has the same answer on
+  // every shelf: a team shelf is a hosted Postgres with logs and a static shared
+  // door key, and a leaked key there is leaked. So the `team` scope reports the
+  // block tier whole plus the warns that ask the credential or the injection
+  // question (`secret-assignment`, `hex32-value`, `high-entropy-string`,
+  // `env-dump-block`, `embedded-instruction`), kept as warns so the consent
+  // cascade still governs them. WHICH rows is `scopes` on the rule in
+  // lib/redact-rules.json, applied inside `findings()`: this command, edit.ts and
+  // sync.ts pass a scope and filter nothing, so they cannot drift (they did once).
+  // The two other surfaces that characterise the drop say the same:
   // docs/command-reference.md and skills/tenjin-publish/SKILL.md.
-  const scanned = await scanDraft(args, cwd, raw, card);
-  const findings = runtime.teamMode ? scanned.filter(survivesTeamDrop) : scanned;
+  const findings = await scanDraft(args, cwd, raw, card, runtime.teamMode ? 'team' : 'publish');
   const blocking = findings.filter((f) => f.severity === 'block');
   const warns = findings.filter((f) => f.severity === 'warn');
 
@@ -893,13 +884,14 @@ async function scanDraft(
   cwd: string,
   raw: string,
   card: ResourceCardInput | undefined,
-): Promise<ScanFinding[]> {
+  scope: ReportScope,
+): Promise<Finding[]> {
   const markerRoot = args.file !== undefined ? dirname(resolve(cwd, args.file)) : cwd;
-  const scanContext: ScanContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
+  const scanContext: FindingsContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
   return dedupeFindings([
-    ...scan(raw, scanContext),
-    ...scan(args.excerpt ?? '', scanContext),
-    ...scan(cardScanText(card), scanContext),
+    ...scanFindings(raw, scope, scanContext),
+    ...scanFindings(args.excerpt ?? '', scope, scanContext),
+    ...scanFindings(cardScanText(card), scope, scanContext),
   ]);
 }
 
@@ -1080,7 +1072,7 @@ function findingDetail(finding: ChildFinding): Record<string, unknown> {
  * remediation the refusal itself prints: a block means scrub missed a live
  * credential, and the operator cannot act on what they cannot see.
  *
- * MASKING THE BLOCK SPANS WAS CONSIDERED AND REFUSED. `ScanFinding` carries
+ * MASKING THE BLOCK SPANS WAS CONSIDERED AND REFUSED. `Finding` carries
  * `line` and `span`, but `line` is the START line of a multi-line match and
  * `span` covers only that line — so masking from them redacts the first line of
  * a PEM block or a wrapped BIP-39 phrase and prints the remaining lines under a
@@ -1097,11 +1089,11 @@ function dryRunReceipt(input: {
   title: string | undefined;
   status: PublishStatus;
   price: ReturnType<typeof toMoney>;
-  warns: ScanFinding[];
+  warns: Finding[];
   /** Block-tier findings. A dry run REPORTS them rather than refusing on them:
    *  it is the read path a blocked finding's own remediation names, and reading
    *  is how the operator learns what the block is about. */
-  blocking: ScanFinding[];
+  blocking: Finding[];
   searchIds: string[];
 }): CommandResult {
   const { body, finding, title, status, price, warns, blocking, searchIds } = input;
@@ -1419,7 +1411,7 @@ function cardScanText(card: ResourceCardInput | undefined): string {
 // Finding + message shaping.
 // ---------------------------------------------------------------------------
 
-function blockMessage(blocking: ScanFinding[], finding: ChildFinding | undefined): string {
+function blockMessage(blocking: Finding[], finding: ChildFinding | undefined): string {
   const what = finding === undefined ? 'the file' : `finding ${finding.id}`;
   return `Publish blocked: ${what} contains ${describeFindings(blocking)}.`;
 }

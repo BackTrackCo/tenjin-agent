@@ -36,9 +36,9 @@ const SKILLS = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)))
 /** This file's own directory: `src/`, where the code the skills describe lives. */
 const SRC_DIR = fileURLToPath(new URL('.', import.meta.url));
 
-/** The shape this file reads out of `lib/scan-rules.json`; scan.ts owns the full type. */
+/** The shape this file reads out of `lib/redact-rules.json`; redact.ts owns the full type. */
 interface ScanRuleCorpus {
-  rules: Array<{ id: string; tier: string }>;
+  rules: Array<{ id: string; tier?: string }>;
 }
 
 /**
@@ -423,12 +423,12 @@ describe('tenjin-publish teaches complete public card context', () => {
    * split was exhaustive and the first half ignorable. The instance was two
    * names; the cause is that nothing tied the lists to the detector set, so the
    * next warn detector would land outside them the same silent way. The set now
-   * lives as data in `scan-rules.json`, so this reads it directly instead of
+   * lives as data in `redact-rules.json`, so this reads it directly instead of
    * scraping source and inferring each detector's tier from proximity.
    */
   it('the warn-triage lists cover every warn detector in the scan rule corpus', () => {
     const corpus = JSON.parse(
-      readFileSync(join(SRC_DIR, 'lib', 'scan-rules.json'), 'utf8'),
+      readFileSync(join(SRC_DIR, 'lib', 'redact-rules.json'), 'utf8'),
     ) as ScanRuleCorpus;
     const warns = new Set(corpus.rules.filter((r) => r.tier === 'warn').map((r) => r.id));
     expect(warns.size, 'no warn detectors found; the corpus read is broken').toBeGreaterThan(5);
