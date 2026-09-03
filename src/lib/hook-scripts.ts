@@ -297,11 +297,18 @@ export const PRIMER_TEXT =
  * drops the file name, the component, the version — and a hedged sentence is a
  * worse query against BOTH shelves, so the warning would cost hits on the shelf
  * it was written to protect. Searches are not published, the team is two people,
- * and the search availability rule holds: paths and hosts stay in queries, and
- * secret-shaped strings are stripped by the dispatch scrub, which is code and
- * needs no sentence here. When `team.publicFallback: off` lands (loop redesign
- * decision Q2), a team question stops leaving the machine at all and the
- * question of a warning is moot.
+ * and the search availability rule holds: paths and hosts stay in queries.
+ * NOT BECAUSE A SCRUB CATCHES THE REST — `scrub()` runs only inside the
+ * generated hook scripts, and the hand-run `tenjin search` this paragraph
+ * prescribes sends `buildSearchRequest(input)` as typed to both shelves
+ * (`src/commands/search.ts`). The control is the tenjin-search skill, which
+ * states the rule where the agent reads it at use time: a team shelf relaxes the
+ * topic and never the wording, so name the component, the version, the symptom,
+ * the internal service, and never a secret, a credential, a customer or an
+ * account name (`skills/tenjin-search/SKILL.md`). That sentence stays; this
+ * paragraph is not the place to repeat it. When `team.publicFallback: off` lands
+ * (loop redesign decision Q2), a team question stops leaving the machine at all
+ * and the question of a warning is moot.
  */
 export const PRIMER_TEXT_TEAM =
   'Tenjin team mode: a shelf of findings about this project, with the public marketplace behind it. Before real effort on any durable question — this codebase, its services, or a past decision — run `tenjin search "<one sentence>" --json`; a team read is free and a miss takes a second. Use it in research and subagent prompts too. Skip live data and what the docs answer in a line.';
