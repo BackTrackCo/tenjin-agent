@@ -1318,6 +1318,22 @@ const STATE_AGENT_ASKED_PREFIX = 'capture:agent:';
  *  \`SubagentStop\` cannot queue the same block twice. */
 const STATE_AGENT_FINDING_PREFIX = 'finding:agent:';
 /**
+ * That the harness told this session a child by this id STARTED.
+ *
+ * THE LIFECYCLE ROW THE STOP ARM CHECKS ITSELF AGAINST. \`SubagentStop\` fires
+ * for agent ids this machine never saw start: 2,297 of 2,588 stop rows in a
+ * week of two \`/loop\` sessions carried an empty \`agent_type\` and a transcript
+ * path with no file behind it, and none of their ids appear in either
+ * transcript (tenjin-agent#228, plan \`2026-09-02-child-loop-close.md\`). A stop
+ * with no start is not a child, so it gets no ask, no claim and no row.
+ *
+ * A ROW, NOT A SCAN. The same fact is in \`events\`, whose only index is
+ * \`(session, at)\`; a hook that may block must not be the one place that scans
+ * a table that never shrinks, so the start arm leaves a primary-key row and
+ * the stop arm reads it by key.
+ */
+const STATE_AGENT_START_PREFIX = 'start:agent:';
+/**
  * That this SESSION has already spent its one child ask.
  *
  * THE PER-AGENT CLAIM ABOVE IS NOT A BUDGET. Its signal is session-wide (an
@@ -2578,6 +2594,62 @@ function childPublishedSince(sessionId, windowStart, limit) {
   const asks = new Map();
   for (const row of asked) asks.set(agentOfKey(row.key), row.at);
   return agentPublishes(windowStart, limit, asks).size > 0;
+}
+
+/** The start row for one child, written by the \`SubagentStart\` arm and read
+ *  by the \`SubagentStop\` arm. The type rides along because it is what the stop
+ *  arm would otherwise have to trust the stop payload for. */
+function markAgentStart(sessionId, agentId, agentType) {
+  return setState(sessionId, STATE_AGENT_START_PREFIX + agentKey(agentId, ''), {
+    agentType: typeof agentType === 'string' ? agentType : '',
+  });
+}
+
+/** Has this agent's finding already been filed inside the window? The read the
+ *  \`SubagentStop\` harvest takes before it parses anything, so an agent that
+ *  stops again and again after it answered costs one key read and not a fence
+ *  parse and a scrub per fire. */
+function agentHarvested(sessionId, agentId, sinceMs) {
+  return (
+    statePrefixSince(sessionId, STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''), sinceMs, 1)
+      .length > 0
+  );
+}
+
+/** Did this session see the harness start this agent? A key read, never a scan. */
+function agentStarted(sessionId, agentId) {
+  return getState(sessionId, STATE_AGENT_START_PREFIX + agentKey(agentId, '')) !== null;
+}
+
+/**
+ * Did THIS agent do work in this session inside the window?
+ *
+ * ONE PREDICATE, DEFINED ONCE (tenjin-agent#228 PR 1). The capture gate at a
+ * child's own Stop asks about the child, not about the session it shares with
+ * every sibling: a session-wide arming signal plus a first-come budget claim
+ * sent 26 of 29 asks in a week to stops that had done nothing at all. The lead's
+ * Stop keeps its own #266 activity classes for now and adopts this later
+ * (tenjin-agent#293), which is why the predicate takes an agent and a window
+ * rather than reading either off a global.
+ *
+ * EVIDENCE IS THE \`edited:\` MARKERS, and they are the only agent-keyed evidence
+ * the store holds: the context arm writes one row per path per agent on every
+ * Edit/Write/MultiEdit, and a \`pass\` leaves an \`events\` row with no marker
+ * behind it. Pass evidence therefore waits for a marker of its own; edits cover
+ * the 45 measured children that held a finding and were never asked.
+ *
+ * INDEX-BACKED AND BOUNDED AT ONE ROW. This is a primary-key range read under
+ * \`(session, key)\` and it stops at the first row inside the window, which is
+ * what makes it safe in a hook that can block. It applies no \`isTrackedPath\`
+ * filter: that rule belongs to the failure arm's close ("the thing that failed
+ * here is the thing that was fixed here"), while the question here is only
+ * whether this child touched anything, and filtering would cost the read its
+ * one-row bound.
+ */
+function agentHasActivity(sessionId, agentId, sinceMs) {
+  return (
+    statePrefixSince(sessionId, STATE_EDITED_PREFIX + agentKey(agentId, ''), sinceMs, 1).length > 0
+  );
 }
 
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */
