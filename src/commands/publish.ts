@@ -659,8 +659,35 @@ export async function runPublish(
       agentId,
       ...(finding === undefined ? {} : { findingId: finding.id }),
     });
+    // AND THE LOOP THIS ANSWERED IS STILL CLOSED. A replay means the piece IS
+    // on the shelf, so a search that named it has been answered — by this body,
+    // at this url. Returning early without closing left the loop open forever
+    // for the commonest replay there is: a capture ask that fired twice, where
+    // the second run carries the same inherited `--search-id` as the first and
+    // is the one whose receipt the caller reads. The close is local
+    // bookkeeping, so it is safe to run again on an already-closed row.
+    const replaySearches: SearchReceipt[] = [];
+    for (const id of searchIds) {
+      if (foreignIds.includes(id)) {
+        replaySearches.push({ id, closed: false, otherShelf: true, prefill: 'none' });
+        continue;
+      }
+      replaySearches.push(
+        await closeNamedSearch(
+          ctx,
+          id,
+          stored.get(id) ?? null,
+          null,
+          id === prefillFrom ? prefill : 'none',
+        ),
+      );
+    }
     return {
-      data: { alreadyPublished: true, url: result.url },
+      data: {
+        alreadyPublished: true,
+        url: result.url,
+        ...(replaySearches.length > 0 ? { searches: replaySearches } : {}),
+      },
       humanLines: [`Already published: ${sanitizeForTerminal(result.url)}`],
     };
   }

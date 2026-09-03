@@ -867,6 +867,39 @@ describe('runPublish — publish <file> --search-id', () => {
     expect(res.humanLines).toContain(`Closed the loop on search ${SEARCH}.`);
   });
 
+  /**
+   * A REPLAY STILL CLOSES THE LOOP, AND SAYS SO ON THE RECEIPT. The piece IS on
+   * the shelf and it answers the search, so returning early on the replay left
+   * the loop unclosed and the receipt silent — and `--json` suppresses the
+   * stderr notes, so that receipt is the only signal an agent gets.
+   *
+   * ⚠ THE SAME ID BOTH TIMES, which is the real shape: a capture ask that fires
+   * twice inherits one search id, and the second run is the one whose receipt
+   * the caller reads. It is also the only shape that CAN replay — `searchId` is
+   * part of the create body, so naming a different loop under the same body
+   * changes the bytes and earns the 422, which is the safe side of that seam.
+   */
+  it('closes the named search on a REPLAYED publish, and says so on the receipt', async () => {
+    await seed();
+    const { fetch, calls } = idempotentServer();
+    const deps = hermetic({ fetchImpl: fetch, provider: spyProvider().provider });
+    const file = await writeDoc(CLEAN);
+    const args = baseArgs(file, { searchId: SEARCH, mode: 'auto' });
+
+    await runPublish(args, makeCtx(), deps);
+    const res = await runPublish(args, makeCtx(), deps);
+
+    expect(calls).toHaveLength(2);
+    expect((res.data as { alreadyPublished?: boolean }).alreadyPublished).toBe(true);
+    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('publish');
+    // `alreadyAnswered` because the first run closed this same loop: the
+    // receipt says the loop IS closed and that it was not this run that first
+    // closed it, which is exactly what the caller needs to know.
+    expect((res.data as { searches?: unknown }).searches).toEqual([
+      { id: SEARCH, closed: true, alreadyAnswered: true, prefill: 'applied' },
+    ]);
+  });
+
   // The #161 loop: a research agent closes the MISS as `regenerated` because the
   // synthesis is still in flight, finishes it minutes later, and names the same
   // search on the publish. The publish takes the loop over rather than bouncing.

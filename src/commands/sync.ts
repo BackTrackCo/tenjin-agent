@@ -103,6 +103,16 @@ class SyncSigningError extends Error {
 /** At most this many fix files travel with one record; the contract caps it at
  *  16 and each entry at 200 characters. */
 const FIX_FILES_MAX = 16;
+/**
+ * The statuses that abort the whole run rather than retiring one row.
+ *
+ * 401 and 403 are about the CALLER — an expired session, a shelf bypass secret
+ * that is wrong or missing — so every row behind them would be stamped synced
+ * without ever reaching the shelf, and fixing the secret would not bring them
+ * back. 429 is about timing. Everything else in the 4xx range is a refusal of
+ * the row's own content and refuses identically on every future run.
+ */
+const ABORTING_STATUSES = new Set([401, 403, 429]);
 /** At most this many keys per fix record (contract: ≤ 8). */
 const FIX_KEYS_MAX = 8;
 
@@ -129,22 +139,25 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // Fail open, same as every other store consumer: an unreadable store is not a
     // reason to exit nonzero, there is simply nothing to sync.
     return {
-      data: { synced: 0, attested: 0, skipped: 0, local: 0, pending: 0 },
+      data: { synced: 0, attested: 0, skipped: 0, refused: 0, local: 0, pending: 0 },
       humanLines: ['Nothing to sync.'],
     };
   }
   try {
     const project = projectId(cwd);
     // BEFORE THE READ: retire the rows an older build wrote under a kind the
-    // fix store has no lane for, so they stop being counted as unsynced work.
+    // fix store has no lane for, so they stop being counted as unsynced work,
+    // and drop the `pairing_post:` link rows that went with them — nothing
+    // reads those any more, and each one names a post id.
     store.run(STORE_SQL.stampLegacyPairingsSynced, [Date.now(), project]);
+    store.run(STORE_SQL.deleteLegacyPairingLinks, []);
     const rows = store
       .all(STORE_SQL.unsyncedPairings, [project])
       .map(readPairing)
       .filter((r): r is PairingRow => r !== null);
     if (rows.length === 0) {
       return {
-        data: { synced: 0, attested: 0, skipped: 0, local: 0, pending: 0 },
+        data: { synced: 0, attested: 0, skipped: 0, refused: 0, local: 0, pending: 0 },
         humanLines: ['Nothing to sync.'],
       };
     }
@@ -168,7 +181,7 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     // here at all (it reads the same slug first), so this path is a hand run.
     if (repo === '') {
       return {
-        data: { synced: 0, attested: 0, skipped: 0, local: rows.length, pending: 0 },
+        data: { synced: 0, attested: 0, skipped: 0, refused: 0, local: rows.length, pending: 0 },
         humanLines: [
           `Nothing to sync: this checkout has no git origin, so its ${rows.length} fixed ${
             rows.length === 1 ? 'pairing stays' : 'pairings stay'
@@ -226,7 +239,16 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
     let synced = 0;
     let attested = 0;
     let skipped = 0;
-    /** Rows the shelf refused terminally, for the run's events row. */
+    /**
+     * Rows the shelf refused terminally (a 4xx that is about the row), kept
+     * apart from `skipped`.
+     *
+     * `skipped` is the ordinary, expected outcomes — a fix this machine already
+     * holds, a stale self-attest link, a payload the local scan kept back. A
+     * REFUSAL is the shelf saying no to something this build sent, which is the
+     * one of the two an operator might want to act on, so folding them together
+     * hid it.
+     */
     const refusals: Array<{ id: number; status: number }> = [];
     const now = () => Date.now();
     try {
@@ -336,11 +358,18 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
           // TIMING rather than about the row, so it falls through to the abort
           // below with the 5xx and the network failures.
           const status = statusOf(err);
-          if (status !== null && status >= 400 && status < 500 && status !== 429) {
+          // ⚠ 401 AND 403 ABORT, they do not stamp. Both are about the CALLER —
+          // an expired session, a shelf bypass secret that is wrong or missing
+          // — not about this row, so stamping would mark every row behind it
+          // synced without any of them ever reaching the shelf, and fixing the
+          // secret would not bring them back. 429 is about timing and aborts
+          // for the same reason. Everything else in the 4xx range (400, 404,
+          // 409, 422) is a refusal of THIS row's content and refuses
+          // identically on every future run.
+          if (status !== null && ABORTING_STATUSES.has(status)) throw err;
+          if (status !== null && status >= 400 && status < 500) {
             store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-            skipped += 1;
-            // Named on the run's own events row, so a row the shelf refused is
-            // countable rather than silently absent.
+            // Counted as `refused`, NOT as `skipped`: see the declaration.
             refusals.push({ id: row.id, status });
             continue;
           }
@@ -388,16 +417,26 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
       skipped,
       ...(refusals.length > 0 ? { refused: refusals } : {}),
     });
+    const refused = refusals.length;
     return {
       data: {
         synced,
         attested,
         skipped,
+        refused,
         local: 0,
-        pending: rows.length - synced - attested - skipped,
+        pending: rows.length - synced - attested - skipped - refused,
       },
       humanLines: [
-        `Recorded ${synced} new ${synced === 1 ? 'fix' : 'fixes'}, attested to ${attested}, skipped ${skipped}.`,
+        `Recorded ${synced} new ${synced === 1 ? 'fix' : 'fixes'}, attested to ${attested}, skipped ${skipped}.` +
+          // NAMED SEPARATELY, and only when there are any: a refusal is the
+          // shelf saying no to something this build sent, which is the one
+          // outcome here an operator might want to act on.
+          (refused > 0
+            ? ` ${refused} ${refused === 1 ? 'row was' : 'rows were'} refused by the shelf (${[
+                ...new Set(refusals.map((r) => r.status)),
+              ].join(', ')}).`
+            : ''),
       ],
     };
   } finally {
@@ -495,9 +534,17 @@ function keysFor(row: PairingRow, repo: string): FixKeyInput[] {
 /** The payload's file list: repo-relative paths as the close rule recorded
  *  them, bounded by the contract's own limits. */
 function fixFilesFor(row: PairingRow): string[] {
-  return row.fixFiles
-    .filter((f) => typeof f === 'string' && f.length > 0 && f.length <= 200)
-    .slice(0, FIX_FILES_MAX);
+  return (
+    row.fixFiles
+      .filter((f) => typeof f === 'string' && f.length > 0 && f.length <= 200)
+      // ⚠ NEVER A LEADING DASH. These paths are read back by agents and pasted
+      // into commands; a path that begins with `-` is parsed as an OPTION by
+      // every ordinary CLI, so `cat -rf.ts` is not a file read. A repo-relative
+      // path never legitimately starts with one, so a row carrying it is
+      // malformed rather than interesting.
+      .filter((f) => !f.startsWith('-'))
+      .slice(0, FIX_FILES_MAX)
+  );
 }
 
 /** The head of the command that passed, or null. `fixCmd` carries the WHOLE

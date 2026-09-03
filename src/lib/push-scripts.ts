@@ -1853,10 +1853,24 @@ function skipWrapper(words, i, valueOpts, name) {
   return i;
 }
 
-/** The command-segment separators \`&&\`, \`||\`, \`;\`, \`|\` and newline — shared
- *  by \`commandHeads\`, so every caller splits a command line the same way
- *  rather than keeping its own copy of the separator list. */
-const COMMAND_SEPARATOR_RE = /&&|\|\||[;|\n]/;
+/**
+ * The command-segment separators \`&&\`, \`||\`, \`;\`, \`|\`, newline — and a
+ * BACKGROUND \`&\` — shared by \`commandHeads\`, so every caller splits a command
+ * line the same way rather than keeping its own copy of the separator list.
+ *
+ * \`cmd1 & cmd2\` runs BOTH, one merely detached from the foreground, so a lone
+ * \`&\` joins two segments exactly as \`;\` does. Without it \`pnpm build & pnpm
+ * test\` read as ONE segment whose head was \`pnpm build\`, and whether that
+ * command counted as a test run depended on which half the author wrote first.
+ *
+ * DELIBERATELY NARROW, because a bare \`&\` is common in bytes that are NOT job
+ * control: \`2>&1\`, \`>&2\` and \`&>file\` are redirect syntax, and by far the most
+ * frequent way an ordinary command carries an \`&\` at all. This matches only an
+ * \`&\` with neither an \`&\` nor a \`>\` immediately on either side — \`2>&1\`'s is
+ * excluded by the \`>\` before it, \`&>file\`'s by the \`>\` after it, and both
+ * characters of \`&&\` by each other.
+ */
+const COMMAND_SEPARATOR_RE = /&&|\|\||[;|\n]|(?<![&>])&(?!&|>)/;
 
 /**
  * Every command in \`command\`, as { head, sub }: the program each segment
@@ -1957,15 +1971,26 @@ function isTenjinContentCommand(command) {
  * fact (no errno, no frame ⇒ no key at all), but "no key" is not the right
  * answer when the real cause is sitting three lines above, unread.
  *
- * A COUNT IS NOT ENOUGH TO BE AGGREGATE. A line that also carries a
- * \`:\`-separated error class (\`error: could not compile foo due to 2 previous
- * errors\`), an errno-shaped token (\`error TS2304\`) or a frame
- * (\`src/x.ts(12,3)\`) is describing one specific failure and merely happens to
- * mention a number; those are exactly the lines worth keying on, so any of the
- * three disqualifies the line from being treated as a total.
+ * A COUNT IS NOT ENOUGH TO BE AGGREGATE. A line that also carries an
+ * errno-shaped token (\`error TS2304\`) or a frame (\`src/x.ts(12,3)\`) is
+ * describing one specific failure and merely happens to mention a number;
+ * those are exactly the lines worth keying on.
+ *
+ * ⚠ AND THE ERROR-CLASS RULE HAS AN EXCEPTION, which rustc is: \`error: could
+ * not compile \\\`x\\\` (lib) due to 2 previous errors\` and \`error: aborting due
+ * to 3 previous errors\` open with \`error:\` and are TOTALS ROWS all the same —
+ * cargo's equivalent of "2 failed". They are also the LAST marker cargo
+ * prints, so treating them as specific meant every rust build in a crate keyed
+ * on one line whose only variable is a number, and two unrelated compile
+ * errors collapsed to one fingerprint. \`AGGREGATE_RUSTC_RE\` names the two
+ * shapes exactly rather than loosening the error-class rule for everyone; note
+ * the count and the noun are NOT adjacent in either ("2 previous errors"), so
+ * the generic count pattern does not see them.
  */
 const AGGREGATE_COUNT_RE = /\b[1-9]\d* (?:failed|failing|errors?|problems?)\b/i;
 const AGGREGATE_FOUND_RE = /\bFound [1-9]\d* errors?\b/i;
+const AGGREGATE_RUSTC_RE =
+  /^[ \t]*error: (?:could not compile\b.*\bdue to [1-9]\d* previous error|aborting due to [1-9]\d* previous error)/;
 /** jest's own summary block, whose rows carry the count after the label. */
 const AGGREGATE_SUMMARY_RE = /^(?:Tests|Test Suites|Snapshots|Time|Test files)\b/;
 /** go's own verdict rows: a bare \`FAIL\` alone on its line, and the
@@ -1986,6 +2011,9 @@ const AGGREGATE_FRAME_RE =
   /([A-Za-z0-9_.+-]+(?:[/\\][A-Za-z0-9_.+-]+)*\.[A-Za-z]{1,5})[:(]\d+|File "([^"]+)", line \d+/;
 
 function isAggregateLine(line) {
+  // rustc's totals rows carry an error class of their own, so they are decided
+  // before the class rule can rescue them.
+  if (AGGREGATE_RUSTC_RE.test(line)) return true;
   const counts =
     AGGREGATE_COUNT_RE.test(line) ||
     AGGREGATE_FOUND_RE.test(line) ||
@@ -2404,17 +2432,42 @@ const PM_PASSTHROUGH_SUBS = new Set(['run', 'exec', 'dlx', 'x']);
  * toward reading the next word, and the next word is only accepted when it IS
  * a test script or a known runner).
  */
-const PM_VALUE_OPTS = new Set([
-  '--filter',
-  '-F',
-  '-C',
-  '--dir',
-  '-w',
-  '--workspace',
-  '--prefix',
-  '--workspace-root',
-  '--reporter',
-]);
+const PM_VALUE_OPTS_SHARED = new Set(['--filter', '-F', '-C', '--dir', '--prefix', '--reporter']);
+/**
+ * ...AND THE ONES THAT DIFFER BY MANAGER, which is why this is keyed rather
+ * than one flat set.
+ *
+ * \`-w\` is the collision: npm spells \`--workspace\` \`-w\` and it TAKES a
+ * workspace name, while pnpm spells \`--workspace-root\` \`-w\` and it is a
+ * BOOLEAN. One shared table had to pick a side, and picking npm's made
+ * \`pnpm -w test\` and \`pnpm --workspace-root test\` eat the word \`test\` and
+ * take the error lane — a monorepo root's ordinary test spelling.
+ */
+const PM_VALUE_OPTS_BY_HEAD = {
+  npm: new Set(['-w', '--workspace']),
+  yarn: new Set(['--cwd']),
+  bun: new Set([]),
+  pnpm: new Set([]),
+};
+/** The boolean options a manager spells the same way another spells a value
+ *  option; listed so the shared table cannot be widened past them by accident. */
+const PM_BOOLEAN_OPTS_BY_HEAD = {
+  pnpm: new Set(['-w', '--workspace-root']),
+};
+
+/** Whether \`option\` takes a value for \`head\`, consulting the manager's own
+ *  table before the shared one. */
+function pmOptionTakesValue(head, option) {
+  const booleans = Object.prototype.hasOwnProperty.call(PM_BOOLEAN_OPTS_BY_HEAD, head)
+    ? PM_BOOLEAN_OPTS_BY_HEAD[head]
+    : null;
+  if (booleans !== null && booleans.has(option)) return false;
+  const own = Object.prototype.hasOwnProperty.call(PM_VALUE_OPTS_BY_HEAD, head)
+    ? PM_VALUE_OPTS_BY_HEAD[head]
+    : null;
+  if (own !== null && own.has(option)) return true;
+  return PM_VALUE_OPTS_SHARED.has(option);
+}
 
 /**
  * The test script or runner a package-manager segment invokes, or null.
@@ -2445,7 +2498,7 @@ function pmTestWord(words) {
     if (word.startsWith('-')) {
       // \`--filter=web\` carries its value in the same word; \`--filter web\` takes
       // the next one. Anything else is boolean and consumes only itself.
-      if (!word.includes('=') && PM_VALUE_OPTS.has(word)) i += 1;
+      if (!word.includes('=') && pmOptionTakesValue(head, word)) i += 1;
       continue;
     }
     if (PM_HEADS_TEST_WORDS.has(word) || word.startsWith('test:')) return word;
@@ -3116,10 +3169,74 @@ function identityFromConsole(text) {
  * itself, not by parsing the command that started it.
  */
 function testIdentityOf(text, cwd, sinceMs, command) {
-  const fromJunit = testIdentityFromJunit(cwd, sinceMs, command);
-  if (fromJunit !== null) return fromJunit;
+  // THE TENJIN ARTIFACT FIRST, which is what the docs have always said. Its
+  // window check reads the report's OWN \`startTime\`, stamped before a single
+  // test ran, while the JUnit leg has only the file's mtime to go on — content
+  // the run carries about itself beats a filesystem timestamp, so when a repo
+  // has both the stronger check wins.
   const fromArtifact = testIdentityFromArtifact(cwd, sinceMs);
-  return fromArtifact !== null ? fromArtifact : identityFromConsole(text);
+  if (fromArtifact !== null) return fromArtifact;
+  const fromJunit = testIdentityFromJunit(cwd, sinceMs, command);
+  return fromJunit !== null ? fromJunit : identityFromConsole(text);
+}
+
+/**
+ * Whether a report written INSIDE this command's own window exists at all,
+ * whatever it says.
+ *
+ * The identity legs answer "is there a failing test named in a fresh report";
+ * this answers the weaker "did a runner get far enough to write one". A run
+ * that PASSED while a later step failed writes a report with an empty failure
+ * list, and that is still proof the runner ran — so this must not look at the
+ * contents.
+ */
+function freshReportExists(cwd, sinceMs, command) {
+  if (typeof cwd !== 'string' || cwd.length === 0) return false;
+  if (typeof sinceMs !== 'number' || !Number.isFinite(sinceMs)) return false;
+  for (const rel of testReportCandidates(cwd)) {
+    const raw = readJsonFile(isAbsoluteTestPath(rel) ? rel : join(cwd, rel));
+    if (!isRecord(raw)) continue;
+    const { startTime } = raw;
+    if (typeof startTime === 'number' && startTime >= sinceMs) return true;
+  }
+  if (!isRunnerCommand(command)) return false;
+  for (const rel of junitCandidates(cwd)) {
+    const path = isAbsoluteTestPath(rel) ? rel : join(cwd, rel);
+    try {
+      const stat = statSync(path);
+      if (stat.isFile() && stat.mtimeMs >= sinceMs) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether a test runner ACTUALLY RAN, for a command that names one.
+ *
+ * A command like \`pnpm build && pnpm test\` names a runner and can still fail
+ * before the runner starts — the build step, a type check, an install. Treating
+ * that as a test failure with no identity opened a LOCAL-ONLY pairing: no key,
+ * nothing that syncs, nothing a teammate hitting the same broken build could
+ * ever match. It is a build failure, and the error lane is exactly the lane for
+ * one.
+ *
+ * The evidence that a runner ran, in either of two forms:
+ *  - it PRINTED something only a runner prints — a \`FAIL\`/\`PASS\` header, a
+ *    jest bullet, go's \`--- FAIL\`, cargo's \`test result:\`, or one of the
+ *    summary rows; or
+ *  - it WROTE a report inside this command's own window, which covers the run
+ *    that failed with output this table cannot read and the run that passed
+ *    while a later step failed.
+ *
+ * Absent both, the runner never got as far as saying anything.
+ */
+const RUNNER_RAN_RE =
+  /^[ \t]{0,4}(?:FAIL\b|PASS\b|●|---\s+(?:FAIL|PASS)\b)|^[ \t]*(?:Tests|Test Suites|Test Files|Snapshots)\b|\bFAILED\b|\btest result:/m;
+function runnerRan(text, cwd, sinceMs, command) {
+  if (RUNNER_RAN_RE.test(String(text))) return true;
+  return freshReportExists(cwd, sinceMs, command);
 }
 
 /**
@@ -3636,6 +3753,20 @@ function replayedPairings(sessionId, agentId, head) {
 }
 
 /**
+ * A path that cannot be read as an OPTION.
+ *
+ * These strings come off the wire from a shelf this machine merely points at,
+ * and they land in an agent's context as file names it will act on — \`cat\`,
+ * \`sed -i\`, an editor. A path beginning with \`-\` is parsed as a flag by every
+ * ordinary CLI, so \`-rf.ts\` is not a file at all; \`./\` in front restores the
+ * only reading that names a file, and costs nothing on a path that never had
+ * the problem.
+ */
+function dashSafePath(path) {
+  return path.startsWith('-') ? './' + path : path;
+}
+
+/**
  * What a fix record from the team shelf says, as model-visible text.
  *
  * NO TITLE, ANYWHERE. A fix is a fact — "this exact failure was fixed by
@@ -3654,9 +3785,15 @@ function fixText(fix) {
   const files = fix.fixFiles
     .slice(0, 4)
     .map((file) => clean(file, 200))
+    .map(dashSafePath)
     .filter((file) => file.length > 0);
   if (files.length > 0) lines.push('Changed: ' + files.join(', '));
-  if (fix.passedOnHead.length > 0) lines.push('It passed afterwards on: ' + fix.passedOnHead);
+  // A HEAD IS PASTED AS A COMMAND, so a leading dash is not something to
+  // rescue with a \`./\` — there is no safe reading of it. Dropped instead.
+  const head = clean(fix.passedOnHead, 64);
+  if (head.length > 0 && !head.startsWith('-')) {
+    lines.push('It passed afterwards on: ' + head);
+  }
   const pkgs = Object.entries(fix.pkgVersions)
     .slice(0, 3)
     .map(([name, version]) => clean(name, 80) + '@' + clean(version, 40));
@@ -3967,9 +4104,19 @@ async function main() {
   // EXCLUSIVE, not ordered. Running both was the old shape: the error lane went first,
   // a local match returned before the test lane was ever reached, and every
   // test failure published two keys of which one was noise.
-  const testLane = isRunnerCommand(command);
-  const testId = testLane ? testIdentityOf(text, cwd, bashStartedAt, command) : null;
+  const namesRunner = isRunnerCommand(command);
+  const testId = namesRunner ? testIdentityOf(text, cwd, bashStartedAt, command) : null;
   const testSig = testId === null ? null : testSigOf(testId);
+  // THE RUNNER HAS TO HAVE RUN. \`pnpm build && pnpm test\` names a runner and
+  // can still fail in the build, the type check or the install ahead of it —
+  // and that is a BUILD failure, whose message IS its identity, not a test
+  // failure with no identity. Sending it down the test lane opened a
+  // local-only pairing: no key, nothing that syncs, nothing the next machine
+  // to hit the same broken build could match. An identity settles it outright;
+  // otherwise the question is whether the runner printed or wrote anything at
+  // all.
+  const testLane =
+    namesRunner && (testSig !== null || runnerRan(text, cwd, bashStartedAt, command));
   // NOT KEYABLE, NO ERROR KEY. A totals row is the whole of what this failure
   // said, and its bytes are identical in every repo on earth.
   const sig = testLane || !keyable ? null : sigV2(line, block);

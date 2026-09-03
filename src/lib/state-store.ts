@@ -1052,6 +1052,17 @@ export const STORE_SQL = {
    */
   stampLegacyPairingsSynced: `UPDATE pairings SET synced_at = ?
      WHERE project IS ? AND synced_at IS NULL AND kind NOT IN ('test', 'sig_v2')`,
+  /**
+   * The `pairing_post:<id>` link rows an older build wrote, which nothing reads
+   * any more: the link is `pairing_fix:<id>` now and carries a `fixId` rather
+   * than a `postId`. They are dead weight in a table every prefix reader scans,
+   * and each one names a post id this machine published — so they are deleted
+   * rather than left to age out on a retention sweep the machine bucket has no
+   * such thing as. Run beside {@link stampLegacyPairingsSynced}, whose rows they
+   * belong to.
+   */
+  deleteLegacyPairingLinks: `DELETE FROM session_state
+     WHERE session = '' AND key >= 'pairing_post:' AND key < 'pairing_post:\uffff'`,
   /** Stamp a pairing as synced (or as re-synced after a promotion). */
   markPairingSynced: 'UPDATE pairings SET synced_at = ? WHERE id = ?',
   /** What the last `tenjin sync` run reported, for the Stop hook's fallback line. */

@@ -391,6 +391,28 @@ describe('tenjin sync: upserting a fix record', () => {
 
   /** A fix record's whole payload is "these files changed"; one with an empty
    *  list asserts nothing a teammate could act on. */
+  /**
+   * NEVER A LEADING DASH ON A PATH. These are read back by agents and pasted
+   * into commands, and a path beginning with `-` is parsed as an OPTION by
+   * every ordinary CLI — `cat -rf.ts` is not a file read. A repo-relative path
+   * never legitimately starts with one.
+   */
+  it('drops a fix file whose name would be read as an option', async () => {
+    await writeTeamConfig();
+    await seedPairing({
+      cwd: dir,
+      key: 'fine-dash',
+      fixFiles: ['-rf.ts', 'src/real.ts'],
+      status: 'unverified',
+    });
+    const { provider } = spyProvider();
+    const { fetch, sent } = shelfServer();
+
+    await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(sent[0]!.body!.fixFiles).toEqual(['src/real.ts']);
+  });
+
   it('skips a row with no fix files rather than recording an empty payload', async () => {
     await writeTeamConfig();
     const id = await seedPairing({
@@ -482,7 +504,7 @@ describe("tenjin sync: a pairing closed beside a teammate's fix", () => {
   /** The fix is gone from the shelf (deleted, or the link is stale): attesting
    *  will 404 on every future run too, so one dead link must not block the
    *  queue behind it. */
-  it('stamps and skips a 404, and reaches the rows behind it', async () => {
+  it('stamps and refuses a 404, and reaches the rows behind it', async () => {
     await writeTeamConfig();
     const dead = await seedPairing({ cwd: dir, key: 'fine-dead', status: 'unverified' });
     await seedTeammateLink(dead);
@@ -496,7 +518,8 @@ describe("tenjin sync: a pairing closed beside a teammate's fix", () => {
 
     const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
 
-    expect(result.data).toMatchObject({ synced: 1, attested: 0, skipped: 1 });
+    // A 404 on an attest is a REFUSAL of that row, not an ordinary skip.
+    expect(result.data).toMatchObject({ synced: 1, attested: 0, refused: 1 });
     expect(sent.map((r) => r.url)).toEqual([
       `${TEAM}/api/fixes/99999999-9999-4999-8999-999999999999/attest`,
       `${TEAM}/api/fixes`,
@@ -667,7 +690,7 @@ describe('tenjin sync: the repo salt', () => {
  * 4xx that is about timing rather than about the row.
  */
 describe('tenjin sync: a terminal refusal', () => {
-  it('stamps a 400 as skipped, records it, and reaches the rows behind it', async () => {
+  it('stamps a 400 as refused, records it, and reaches the rows behind it', async () => {
     await writeTeamConfig();
     const bad = await seedPairing({ cwd: dir, key: 'fine-bad', status: 'unverified' });
     const good = await seedPairing({ cwd: dir, key: 'fine-good', status: 'unverified' });
@@ -681,7 +704,7 @@ describe('tenjin sync: a terminal refusal', () => {
     const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
 
     expect(sent).toHaveLength(2);
-    expect(result.data).toMatchObject({ synced: 1, skipped: 1 });
+    expect(result.data).toMatchObject({ synced: 1, skipped: 0, refused: 1 });
     expect((await pairingRow(bad)).synced_at).not.toBeNull();
     expect((await pairingRow(good)).synced_at).not.toBeNull();
 
@@ -692,8 +715,48 @@ describe('tenjin sync: a terminal refusal', () => {
     expect(data.refused).toEqual([{ id: bad, status: 400 }]);
   });
 
+  /**
+   * `refused` IS NOT `skipped`. `skipped` is the ordinary, expected outcomes —
+   * a fix this machine already holds, a stale self-attest link, a payload the
+   * local scan kept back. A refusal is the shelf saying no to something this
+   * build sent, which is the one of the two an operator might want to act on.
+   */
+  it('reports refusals apart from skips, on both surfaces', async () => {
+    await writeTeamConfig();
+    await seedPairing({ cwd: dir, key: 'fine-refused', status: 'unverified' });
+    // A row the server says it already holds: an ordinary skip, not a refusal.
+    await seedPairing({ cwd: dir, key: 'fine-held', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch } = shelfServer((req) =>
+      (req.body as { primary?: { key?: string } } | undefined)?.primary?.key === 'fine-refused'
+        ? { status: 422, json: { error: { code: 'invalid_payload' } } }
+        : { status: 200, json: { fix: { id: FIX_ID }, created: false } },
+    );
+
+    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
+
+    expect(result.data).toMatchObject({ synced: 0, attested: 0, skipped: 1, refused: 1 });
+    expect(result.humanLines?.[0]).toContain('skipped 1');
+    expect(result.humanLines?.[0]).toContain('1 row was refused by the shelf (422)');
+  });
+
   /** A 401 is the wallet or the session, not the row: every row behind it
    *  would be stamped synced without ever reaching the shelf. */
+  it('does NOT stamp a 403 either: a wrong shelf secret is not the row', async () => {
+    await writeTeamConfig();
+    const first = await seedPairing({ cwd: dir, key: 'fine-403-a', status: 'unverified' });
+    const second = await seedPairing({ cwd: dir, key: 'fine-403-b', status: 'unverified' });
+    const { provider } = spyProvider();
+    const { fetch } = shelfServer(() => ({ status: 403, json: { error: 'forbidden' } }));
+
+    await expect(runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch })).rejects.toMatchObject({
+      code: 'PUBLISH_FAILED',
+    });
+    // Both rows stay unsynced, so fixing the secret brings them back.
+    expect((await pairingRow(first)).synced_at).toBeNull();
+    expect((await pairingRow(second)).synced_at).toBeNull();
+  });
+
   it('does NOT stamp a 401, and aborts the run instead', async () => {
     await writeTeamConfig();
     const first = await seedPairing({ cwd: dir, key: 'fine-401-a', status: 'unverified' });

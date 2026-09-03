@@ -3369,6 +3369,32 @@ describe("the failure arm's team leg (POST /api/fixes/resolve)", () => {
     });
   });
 
+  /**
+   * A PATH FROM THE WIRE MUST NOT READ AS AN OPTION. These names land in an
+   * agent's context as files it will act on, and every ordinary CLI parses a
+   * leading `-` as a flag — `cat -rf.ts` is not a file read. A `./` in front
+   * restores the only reading that names a file; a HEAD gets no such rescue,
+   * because there is no safe reading of a command that starts with a dash.
+   */
+  it('neutralises a leading dash on anything the shelf returned', async () => {
+    const stub = resolveStub('hit', {
+      ...TEAM_FIX,
+      fixFiles: ['-rf.ts', 'src/real.ts'],
+      passedOnHead: '--exec',
+    });
+    const team = await serve(stub.handler);
+    const pub = await serve(echo());
+    await teamMode(team, pub);
+
+    const run = await runScript(pushFailureHookScript(dataDir), failing('pnpm db:migrate', ENOENT));
+    const text = injected(run) ?? '';
+    expect(text).toContain('./-rf.ts');
+    expect(text).toContain('src/real.ts');
+    expect(text).not.toMatch(/Changed: -rf\.ts/);
+    // The head is dropped outright rather than prefixed.
+    expect(text).not.toContain('It passed afterwards on:');
+  });
+
   it('reads a COARSE match as the weaker claim it is', async () => {
     const stub = resolveStub('hit', TEAM_FIX, 'coarse');
     const team = await serve(stub.handler);
@@ -4767,6 +4793,87 @@ describe('the test lane — identity extraction', () => {
     }
   });
 
+  /**
+   * A COMMAND THAT NAMES A RUNNER CAN STILL FAIL BEFORE THE RUNNER RUNS, and
+   * that is a BUILD failure: its message IS its identity. Reading it as a test
+   * failure with no identity opened a LOCAL-ONLY pairing — no key, nothing that
+   * syncs, nothing the next machine to hit the same broken build could match.
+   *
+   * The evidence is what the runner would have printed or written: a
+   * `FAIL`/`PASS` header, a jest bullet, go's `--- FAIL`, cargo's
+   * `test result:`, a summary row — or a report inside this command's own
+   * window. Absent all of them, the runner never got as far as saying anything.
+   */
+  it('routes a runner-named command that failed in a BUILD step down the error lane', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'prestep-tsc',
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build && pnpm test' },
+        tool_response: {
+          stdout: '',
+          stderr:
+            "src/app.ts(42,7): error TS2345: argument of type 'string' is not assignable\n\nFound 1 error in 1 file.\n",
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = (await pairings()).filter((p) => p.session === 'prestep-tsc');
+    expect(rows.map((p) => p.kind)).toEqual(['sig_v2']);
+    // A REAL key, not the local-only row's: this failure travels.
+    expect(rows[0]).toMatchObject({ scope: 'ambiguous' });
+    expect(rows[0]!.error_files).toEqual(['app.ts']);
+  });
+
+  it('leaves the test lane alone when the same command failed IN the runner', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'prestep-vitest',
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build && pnpm test' },
+        tool_response: {
+          stdout: ' FAIL  src/a.test.ts > suite > one\nAssertionError: expected 1 to be 2\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = (await pairings()).filter((p) => p.session === 'prestep-vitest');
+    expect(rows.map((p) => p.kind)).toEqual(['test']);
+  });
+
+  /** A runner that DID run and named no test still gets the local-only row: a
+   *  summary row is proof it ran, even when the table cannot read the failure. */
+  it('keeps the local-only row when a summary row proves the runner ran', async () => {
+    await pushOn('http://127.0.0.1:1');
+    await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: 'prestep-summary',
+        cwd: TESTID_CWD,
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'pnpm build && pnpm test' },
+        tool_response: {
+          stdout: 'Tests  2 failed | 5 passed (7)\n',
+          stderr: '',
+          interrupted: false,
+        },
+      }),
+    );
+    const rows = (await pairings()).filter((p) => p.session === 'prestep-summary');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: 'test', scope: 'local' });
+  });
+
   it('takes the console breadcrumb behind a package script named test:unit', async () => {
     await pushOn('http://127.0.0.1:1');
     await runScript(
@@ -4863,6 +4970,16 @@ describe('the test lane — identity extraction', () => {
     'pnpm --filter web test',
     'pnpm --filter=web test',
     'pnpm -C packages/api test',
+    // ⚠ `-w` MEANS DIFFERENT THINGS PER MANAGER: npm's takes a workspace name,
+    // pnpm's `--workspace-root` is boolean. One shared table had to pick a
+    // side, and picking npm's ate the word `test` for pnpm.
+    'pnpm -w test',
+    'pnpm --workspace-root test',
+    'npm -w packages/api test',
+    'npm --workspace packages/api test',
+    // A lone `&` joins two segments the way `;` does, in either order.
+    'pnpm build & pnpm test',
+    'pnpm test & pnpm build',
   ])('yields a test identity from the console breadcrumb behind %s', async (command) => {
     await pushOn('http://127.0.0.1:1');
     await runScript(
@@ -5410,6 +5527,55 @@ describe('the test lane — JUnit reports', () => {
   });
 
   /**
+   * THE TENJIN ARTIFACT WINS WHEN BOTH EXIST, which is what the docs have
+   * always said. Its window check reads the report's OWN `startTime`, stamped
+   * before a single test ran; the JUnit leg has only the file's mtime. Content
+   * the run carries about itself beats a filesystem timestamp, and an mtime is
+   * the easier of the two to be wrong about (a copy, a checkout, a `touch`).
+   */
+  it('prefers the tenjin JSON artifact over a JUnit file when both are fresh', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), JUNIT_CWD_PREFIX));
+    try {
+      await pushOn('http://127.0.0.1:1');
+      const since = await stashBashStart('junit-vs-artifact', cwd);
+      await mkdir(join(cwd, '.tenjin'), { recursive: true });
+      await writeFile(join(cwd, '.tenjin', 'junit.xml'), PYTEST_XML);
+      await utimes(join(cwd, '.tenjin', 'junit.xml'), new Date(), new Date(since + 10));
+      await writeFile(
+        join(cwd, '.vitest-report.json'),
+        JSON.stringify({
+          startTime: since + 10,
+          endTime: since + 50,
+          failed: [
+            { file: join(cwd, 'src/from-artifact.test.ts'), suite: 'suite', test: 'the one' },
+          ],
+          success: false,
+        }),
+      );
+      await runScript(
+        pushFailureHookScript(dataDir),
+        JSON.stringify({
+          session_id: 'junit-vs-artifact',
+          cwd,
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'pnpm test' },
+          tool_response: {
+            stdout: 'Tests  1 failed | 2 passed (3)\n',
+            stderr: '',
+            interrupted: false,
+          },
+        }),
+      );
+      const row = (await pairings()).find((p) => p.session === 'junit-vs-artifact');
+      expect(row?.error_files).toEqual(['from-artifact.test.ts']);
+      expect(String(row?.key)).toBe(fineKeyFor('src/from-artifact.test.ts', 'suite', 'the one'));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  /**
    * ⚠ THE BOUNDARY BUG THIS PINS: without `(?:^|\s)` before the attribute name,
    * a lookup for `name` matches inside `classname=`, and since every writer
    * above puts `classname` FIRST, every failing case in one class read back the
@@ -5691,7 +5857,9 @@ describe('the error line: a corpus of real runner output', () => {
     // collapsed on the way in — the same treatment every other stored string
     // gets.
     ['eslint', 'pnpm eslint .', ESLINT, '12:5 error Unexpected console statement no-console'],
-    ['cargo', 'cargo build', CARGO, 'error: could not compile `demo` due to 2 previous errors'],
+    // rustc's `could not compile … due to N previous errors` is a TOTALS row
+    // wearing an error class, so the scan lands on the diagnostic above it.
+    ['cargo', 'cargo build', CARGO, 'error[E0308]: mismatched types'],
     ['go', 'go test ./...', GO, '--- FAIL: TestFormatDate (0.00s)'],
     ['tsc', 'pnpm tsc --noEmit', TSC, "src/app.ts(12,3): error TS2304: Cannot find name 'foo'."],
     [
@@ -5739,6 +5907,49 @@ describe('the error line: a corpus of real runner output', () => {
     const row = (await events()).filter((e) => e.hook === 'failure').at(-1);
     expect(row?.error_hash).toBeNull();
     expect(row?.data.error).toBe('Tests 2 failed | 5 passed (7)');
+  });
+
+  /**
+   * ⚠ RUSTC'S TOTALS ROWS ARE TOTALS, whatever they open with. Both
+   * `error: could not compile \`x\` (lib) due to N previous errors` and
+   * `error: aborting due to N previous errors` carry an error class AND are the
+   * last marker cargo prints, so reading them as specific meant every rust
+   * build in a crate keyed on one line whose only variable is a number.
+   */
+  it.each([
+    ['could not compile', 'error: could not compile `demo` (lib) due to 2 previous errors'],
+    ['aborting', 'error: aborting due to 3 previous errors'],
+  ])("scans past rustc's %s totals row to the diagnostic", async (name, totals) => {
+    await pushOn('http://127.0.0.1:1');
+    await fire(
+      'cargo build',
+      [
+        'error[E0425]: cannot find value `foo` in this scope',
+        ' --> src/main.rs:4:5',
+        '',
+        totals,
+        '',
+      ].join('\n'),
+      `corpus-rustc-${name}`,
+    );
+    expect(await errorLineOf(), name).toBe('error[E0425]: cannot find value `foo` in this scope');
+  });
+
+  it('gives two different rustc diagnostics in one crate two different keys', async () => {
+    await pushOn('http://127.0.0.1:1');
+    const build = (code: string, message: string): string =>
+      [
+        `error[${code}]: ${message}`,
+        ' --> src/main.rs:4:5',
+        '',
+        'error: could not compile `demo` (lib) due to 2 previous errors',
+        '',
+      ].join('\n');
+    await fire('cargo build', build('E0425', 'cannot find value `foo` in this scope'), 'rustc-a');
+    await fire('cargo build', build('E0308', 'mismatched types'), 'rustc-b');
+    const keys = (await pairings()).map((p) => String(p.key));
+    expect(keys).toHaveLength(2);
+    expect(new Set(keys).size).toBe(2);
   });
 
   /**
