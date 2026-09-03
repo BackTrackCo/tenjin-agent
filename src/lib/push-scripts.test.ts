@@ -50,6 +50,7 @@ import {
   PUSH_PROMPT_BUDGET_MS,
   PUSH_PROMPT_SEARCH_TIMEOUT_MS,
   PUSH_PROMPT_WATCHDOG_MS,
+  PUSH_WORKFLOW_AGENT_TYPE,
   subagentCaptureReason,
   pushContextHookScript,
   pushFailureHookScript,
@@ -7462,15 +7463,64 @@ describe('the subagent arm (SubagentStop)', () => {
   const FINDING =
     'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.';
 
+  /**
+   * A child's own transcript file. A real stop names one that EXISTS; a phantom
+   * names one nothing ever wrote, which is one of the three marks the arm
+   * refuses on before it writes anything.
+   */
+  let transcript: string;
+  beforeEach(async () => {
+    transcript = join(scriptDir, 'agent-a1.jsonl');
+    await writeFile(transcript, '{"type":"user"}\n');
+  });
+
   const stop = (over: Record<string, unknown> = {}): string =>
     JSON.stringify({
       session_id: SESSION,
       hook_event_name: 'SubagentStop',
       agent_id: 'a1',
       agent_type: 'general-purpose',
+      agent_transcript_path: transcript,
       stop_hook_active: false,
       ...over,
     });
+
+  /** The child's own `SubagentStart`, run as the real fire that writes the row:
+   *  a stop with no start behind it is a phantom and leaves nothing. */
+  const started = async (agentId = 'a1', agentType = 'general-purpose'): Promise<void> => {
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'SubagentStart',
+        agent_id: agentId,
+        agent_type: agentType,
+      }),
+    );
+  };
+
+  /** One edit by THIS child, written by the real context arm: the agent-keyed
+   *  evidence the ask is gated on (tenjin-agent#228 PR 1). */
+  const edited = async (agentId = 'a1'): Promise<void> => {
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: dataDir,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        agent_id: agentId,
+        tool_input: { file_path: join(dataDir, 'src', 'resolver.ts') },
+      }),
+    );
+  };
+
+  /** A child the harness started and that then did work: both marks the arm
+   *  needs before it will spend a turn asking one. */
+  const workingChild = async (agentId = 'a1', agentType = 'general-purpose'): Promise<void> => {
+    await started(agentId, agentType);
+    await edited(agentId);
+  };
 
   /** A child's final answer with the marked block in it. */
   const answer = (body: string): string =>
@@ -7504,9 +7554,10 @@ describe('the subagent arm (SubagentStop)', () => {
     return parsed.decision === 'block' ? (parsed.reason ?? '') : null;
   }
 
-  it('asks the child once, on a signal, at its first stop', async () => {
+  it('asks the child once, on its own edits, at its first stop', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
 
     const first = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(first.code).toBe(0);
@@ -7518,7 +7569,13 @@ describe('the subagent arm (SubagentStop)', () => {
         kind: 'lifecycle',
         reason: 'asked',
         agentId: 'a1',
-        signal: 'dispatch-miss',
+        // The evidence that earned the ask, and it is this child's own. The
+        // session-wide signal that used to sit here armed the arm for every
+        // sibling behind it.
+        evidence: 'edited',
+        // Still recorded, and attribution only now: the loop the child's own
+        // publish should close.
+        searchId: SEARCH_ID,
       },
     ]);
 
@@ -7545,6 +7602,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('asks the child to publish, and names the block as the fallback', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
 
     const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop())) ?? '';
     // The command, with this child's own id riding along for attribution and the
@@ -7573,6 +7631,11 @@ describe('the subagent arm (SubagentStop)', () => {
     );
     expect(reason).not.toContain('needs_confirmation');
     expect(reason).toContain('```' + PUSH_FINDING_TAG);
+    // AND THE FENCE CARRIES ITS OWN TITLE. The harvest stores the block as one
+    // line, so `publish --finding` has nothing to derive a title from unless the
+    // child writes one: the publish then failed with `A published post needs a
+    // title` and the one finding captured in a week lost its attribution.
+    expect(reason).toContain('Make its FIRST line inside the fence `# ` and a short title');
     expect(reason).toContain('recorded locally for your parent');
     // And doing nothing stays as easy as either, so no child invents a finding.
     expect(reason).toContain('If you settled nothing durable, ignore this');
@@ -7592,6 +7655,7 @@ describe('the subagent arm (SubagentStop)', () => {
       publish: { mode: 'auto' },
     });
     await seedDispatchMiss();
+    await workingChild();
     const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop())) ?? '';
     expect(reason).toContain('resolves publish.mode to auto');
   });
@@ -7645,6 +7709,7 @@ describe('the subagent arm (SubagentStop)', () => {
     await captureOn();
     await seedDispatchMiss();
     const long = 'a'.repeat(100);
+    await workingChild(long);
     const reason = blocked(
       await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: long })),
     );
@@ -7660,22 +7725,25 @@ describe('the subagent arm (SubagentStop)', () => {
   it('never asks on a push-on machine with capture off, the default', async () => {
     await pushOn('https://tenjin.test');
     await seedDispatchMiss();
+    await workingChild();
     const run = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(run.stdout).toBe('');
     expect(await stopRows()).toMatchObject([{ kind: 'lifecycle', reason: 'capture-off' }]);
   });
 
   /**
-   * BOTH signals are session-wide, so without a session budget one MISS arms
-   * this arm for every child that stops in the hour behind it and the one extra
-   * turn tenjin-agent#228 costed is paid per child instead of per session.
+   * THE BUDGET IS UNTOUCHED BY PR 1 (tenjin-agent#228): re-keying the shared
+   * gates per agent is the cap rework. Five children that all did work still
+   * share one ask per session per hour; what changed above it is that every one
+   * of the five is a child that actually edited something.
    */
-  it('asks once per session however many children stop on the same signal', async () => {
+  it('asks once per session however many working children stop', async () => {
     await captureOn();
     await seedDispatchMiss();
 
     const runs = [];
     for (const id of ['a1', 'a2', 'a3', 'a4', 'a5']) {
+      await workingChild(id);
       runs.push(await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: id })));
     }
     expect(runs.filter((r) => blocked(r) !== null)).toHaveLength(1);
@@ -7688,11 +7756,22 @@ describe('the subagent arm (SubagentStop)', () => {
     ]);
   });
 
-  it('leaves a child with no signal one lifecycle row and nothing else', async () => {
+  /**
+   * THE GATE IS THIS CHILD'S OWN WORK. A dispatch MISS anywhere in the session
+   * used to arm the ask for every child behind it, so the first to stop took it
+   * — a phantom 26 times out of 29 in the week measured. A child that started,
+   * stopped, and edited nothing is counted and asked nothing, whatever the
+   * session around it was doing.
+   */
+  it('leaves a child that edited nothing one lifecycle row and nothing else', async () => {
     await captureOn();
+    await seedDispatchMiss();
+    await started();
     const run = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(run.stdout).toBe('');
-    expect(await stopRows()).toMatchObject([{ reason: 'no-signal', agentId: 'a1' }]);
+    expect(await stopRows()).toMatchObject([{ reason: 'no-evidence', agentId: 'a1' }]);
+    // And the session's one ask is unspent, for a child that did do work.
+    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
   });
 
   /**
@@ -7704,6 +7783,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('blocks exactly once per agent when two fires race', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
 
     const runs = await Promise.all([
       runScript(pushSubagentHookScript(dataDir), stop()),
@@ -7727,6 +7807,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('harvests the fenced block from the next fire, scrubbed and bounded', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const secret = 'AKIAIOSFODNN7EXAMPLEKEYX ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -7735,7 +7816,6 @@ describe('the subagent arm (SubagentStop)', () => {
       pushSubagentHookScript(dataDir),
       stop({
         stop_hook_active: true,
-        agent_transcript_path: '/tmp/child.jsonl',
         last_assistant_message: answer(FINDING + ' ' + secret + ' ' + long),
       }),
     );
@@ -7747,7 +7827,7 @@ describe('the subagent arm (SubagentStop)', () => {
       agentId: 'a1',
       agentType: 'general-purpose',
       searchId: SEARCH_ID,
-      agentTranscriptPath: '/tmp/child.jsonl',
+      agentTranscriptPath: transcript,
     });
     const body = String(finding?.body);
     expect(body).toContain('Pinning the resolver to 4.1');
@@ -7755,14 +7835,26 @@ describe('the subagent arm (SubagentStop)', () => {
     expect(body).not.toContain('ghp_aaaa');
     expect(body).not.toContain('AKIAIOSFODNN7EXAMPLEKEYX');
     expect(body.length).toBeLessThanOrEqual(PUSH_FINDING_MAX_CHARS);
-    // Bounded, not truncated silently into the next row: one finding per child.
+    // ONE HARVEST PER ASK. A long-lived agent stops again and again after it
+    // answered, and every one of those fires used to re-read the message and run
+    // the fence parse and the scrub over it before the dedupe claim refused the
+    // row. The already-harvested read comes first now, so the later stop is one
+    // key read and a row that says so.
     const again = await runScript(
       pushSubagentHookScript(dataDir),
       stop({ stop_hook_active: true, last_assistant_message: answer('a second finding') }),
     );
     expect(again.stdout).toBe('');
     expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(1);
-    expect((await stopRows()).map((r) => r.reason)).toContain('duplicate-finding');
+    expect((await stopRows()).map((r) => r.reason)).toContain('harvested');
+    expect((await stopRows()).map((r) => r.reason)).not.toContain('duplicate-finding');
+    // And a third stop is the same read again, not a growing pile of parses.
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer('a third finding') }),
+    );
+    expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(1);
+    expect((await stopRows()).filter((r) => r.reason === 'harvested')).toHaveLength(2);
   });
 
   /**
@@ -7775,6 +7867,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('keeps paths and a git SHA in a harvested finding, and strips a key', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9021324354';
@@ -7814,6 +7907,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('files the finding when the dedupe claim is swallowed, and names that', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
     const store = await openStore(dataDir);
     store?.run(
@@ -7854,24 +7948,32 @@ describe('the subagent arm (SubagentStop)', () => {
   it('fails open and quiet when an undocumented field is absent', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
 
     // No stop_hook_active: the re-block fuse is missing, so the ask cannot fire.
+    // The two marks a real child's stop carries are still here, or this fire
+    // would be read as a phantom and leave no row to count.
     const noFuse = await runScript(
       pushSubagentHookScript(dataDir),
       JSON.stringify({
         session_id: SESSION,
         hook_event_name: 'SubagentStop',
         agent_id: 'a1',
+        agent_type: 'general-purpose',
+        agent_transcript_path: transcript,
       }),
     );
     expect(noFuse.stdout).toBe('');
 
-    // No agent_id: nothing to make the ask once-per-child.
+    // No agent_id: nothing to make the ask once-per-child, and nothing to look
+    // a start row up by either, so the other two marks are what decide.
     const noAgent = await runScript(
       pushSubagentHookScript(dataDir),
       JSON.stringify({
         session_id: SESSION,
         hook_event_name: 'SubagentStop',
+        agent_type: 'general-purpose',
+        agent_transcript_path: transcript,
         stop_hook_active: false,
       }),
     );
@@ -7913,6 +8015,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('bounds the block before scrub, not after', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     // ~2900 characters that scrub collapses to a few hundred, so under the old
@@ -7941,6 +8044,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('keeps a code snippet inside the finding rather than closing on its fence', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const body = [
@@ -7968,6 +8072,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('harvests the real block, not a child quoting the marker on the way to it', async () => {
     await captureOn();
     await seedDispatchMiss();
+    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const message =
@@ -8007,6 +8112,9 @@ describe('the subagent arm (SubagentStop)', () => {
   it('drops the ask rather than blocking a child on a claim that did not stick', async () => {
     await captureOn();
     await seedDispatchMiss();
+    // Both marks written BEFORE the trigger below refuses every later write, so
+    // what this case exercises is the claim and not the phantom filter.
+    await workingChild();
     const store = await openStore(dataDir);
     store?.run(
       "CREATE TRIGGER refuse_state BEFORE INSERT ON session_state BEGIN SELECT RAISE(ABORT, 'refused'); END",
@@ -8033,6 +8141,7 @@ describe('the subagent arm (SubagentStop)', () => {
   it('never spends a child turn under capture nudge', async () => {
     await pushOn('https://tenjin.test', { capture: 'nudge' });
     await seedDispatchMiss();
+    await workingChild();
 
     const run = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(run.stdout).toBe('');
@@ -8046,12 +8155,84 @@ describe('the subagent arm (SubagentStop)', () => {
    *  session's own ask produced. */
   it('never harvests from a child it did not ask', async () => {
     await captureOn();
+    await workingChild();
     const run = await runScript(
       pushSubagentHookScript(dataDir),
       stop({ stop_hook_active: true, last_assistant_message: answer(FINDING) }),
     );
     expect(run.stdout).toBe('');
     expect(await stopRows()).toMatchObject([{ kind: 'lifecycle', reason: 'stop-active' }]);
+  });
+
+  /**
+   * PHANTOM STOPS LEAVE NOTHING (tenjin-agent#228, plan
+   * `2026-09-02-child-loop-close.md`).
+   *
+   * 2,297 of 2,588 `SubagentStop` fires in a week of two `/loop` sessions
+   * belonged to no child: an empty `agent_type`, a transcript path with no file
+   * behind it, no `SubagentStart` row, and an agent id in neither transcript.
+   * They took 26 of the 29 asks that week, because the arming signal was
+   * session-wide and the budget claim was first-come. Each of the three marks
+   * refuses on its own, because each is a harness detail a release may change.
+   */
+  it('writes nothing at all for a phantom stop', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    // The session has evidence to spare: only the phantom marks refuse here.
+    await edited('p1');
+    await edited('p2');
+    await edited('p3');
+
+    // 1. No SubagentStart row for this agent id.
+    const noStart = await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: 'p1' }));
+    // 2. An empty agent_type.
+    await started('p2');
+    const noType = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ agent_id: 'p2', agent_type: '' }),
+    );
+    // 3. A transcript path with no file behind it.
+    await started('p3');
+    const noFile = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ agent_id: 'p3', agent_transcript_path: join(scriptDir, 'never-written.jsonl') }),
+    );
+
+    for (const run of [noStart, noType, noFile]) {
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+      expect(run.stderr).toBe('');
+    }
+    // Not one row: a phantom opened no lifecycle, so it has nothing to count,
+    // and this is the largest writer to a table nothing prunes.
+    expect(await stopRows()).toEqual([]);
+    // And nothing was claimed, so the session's one ask is still there for a
+    // real child. This is the 26-of-29 defect, as a property.
+    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
+  });
+
+  /**
+   * A WORKFLOW CHILD IS COUNTED, NOT BLOCKED. This harness stops a
+   * `workflow-subagent` once its structured output is written, so the turn a
+   * block buys does not exist: the one ask that reached a real child and
+   * produced nothing went to one of these. It still starts, edits and stops, so
+   * it is counted rather than dropped.
+   */
+  it('counts a workflow child under no-turn and asks it nothing', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await workingChild('w1', PUSH_WORKFLOW_AGENT_TYPE);
+
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ agent_id: 'w1', agent_type: PUSH_WORKFLOW_AGENT_TYPE }),
+    );
+    expect(run.stdout).toBe('');
+    expect(await stopRows()).toMatchObject([
+      { kind: 'lifecycle', reason: 'no-turn', agentId: 'w1' },
+    ]);
+    // The budget is intact: a child with a turn left may still spend it.
+    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
   });
 
   it('says nothing and records nothing with push off', async () => {
@@ -9125,6 +9306,31 @@ describe('the capture ask (Stop)', () => {
     await pushOn('https://tenjin.test', { capture: 'block' });
     await seedSearch({ decision: 'MISS', source: 'dispatch-hook', sessionId: SESSION });
 
+    // A REAL CHILD, with the start row and the edit the ask is now gated on
+    // (tenjin-agent#228 PR 1), and a transcript that exists.
+    const childTranscript = join(scriptDir, 'agent-a1.jsonl');
+    await writeFile(childTranscript, '{"type":"user"}\n');
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'SubagentStart',
+        agent_id: 'a1',
+        agent_type: 'general-purpose',
+      }),
+    );
+    await runScript(
+      pushContextHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        cwd: dataDir,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Edit',
+        agent_id: 'a1',
+        tool_input: { file_path: join(dataDir, 'src', 'resolver.ts') },
+      }),
+    );
+
     const ask = await runScript(
       pushSubagentHookScript(dataDir),
       JSON.stringify({
@@ -9132,6 +9338,7 @@ describe('the capture ask (Stop)', () => {
         hook_event_name: 'SubagentStop',
         agent_id: 'a1',
         agent_type: 'general-purpose',
+        agent_transcript_path: childTranscript,
         stop_hook_active: false,
       }),
     );

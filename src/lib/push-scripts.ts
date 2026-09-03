@@ -192,8 +192,20 @@ export const PUSH_FINDING_MESSAGE_TAIL = 20000;
  *  harvest looks for. ONE CONSTANT, so the ask and the parser cannot drift. */
 export const PUSH_FINDING_TAG = 'tenjin-finding';
 /**
- * What a child is asked for at `SubagentStop`, once, when it stops on an open
- * loop (tenjin-agent#228). A template: `<agent-flag>` and `<mode>` are filled in
+ * The `agent_type` this harness gives a workflow subagent, which is stopped
+ * once its structured output is written and has no further turn to spend.
+ *
+ * PROBED, LIKE EVERY OTHER FIELD ON THIS PAYLOAD. Seven types appear across a
+ * week of `SubagentStart` rows on one machine (`general-purpose`, `Explore`,
+ * `Plan`, `claude-code-guide`, two loop worker types, and this one); the one ask
+ * that reached a real child and produced nothing went to a `workflow-subagent`
+ * after its StructuredOutput. Blocking one buys a turn that does not exist, so
+ * the arm counts it under `no-turn` and asks nobody.
+ */
+export const PUSH_WORKFLOW_AGENT_TYPE = 'workflow-subagent';
+/**
+ * What a child is asked for at `SubagentStop`, once, when it stops with its own
+ * edits behind it (tenjin-agent#228). A template: `<agent-flag>` and `<mode>` are filled in
  * at run time by {@link subagentCaptureReason}, mirrored in the generated script.
  *
  * PUBLISH IT YOURSELF, AND THE QUEUE IS THE FALLBACK. Operator decision
@@ -242,7 +254,7 @@ export const SUBAGENT_CAPTURE_REASON =
   '<search-flag>' +
   '` as its own bare shell/tool command, never chained behind writing the file; or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   PUSH_FINDING_TAG +
-  ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
+  ' and whose closing line is exactly ```. Make its FIRST line inside the fence `# ` and a short title for the finding, then a few sentences, self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
 /**
  * The search id a child may splice into its own publish, anchored. The
@@ -3553,6 +3565,7 @@ const MESSAGE_TAIL = __MESSAGE_TAIL__;
 const FINDING_OPEN = __FINDING_OPEN__;
 const FINDING_FENCE = __FINDING_FENCE__;
 const CAPTURE_ASK = __CAPTURE_ASK__;
+const WORKFLOW_AGENT_TYPE = __WORKFLOW_AGENT_TYPE__;
 
 /**
  * The child ask, with this agent's id, the loop it was earned by and this
@@ -3834,33 +3847,6 @@ function findingBlock(text) {
 }
 
 /**
- * Why this child is worth one more turn, or null.
- *
- * TWO SIGNALS, EITHER OF WHICH IS ENOUGH, and both scoped to this session and
- * the last hour: a dispatch lookup that found nothing (so nothing on any shelf
- * holds what this child just worked out), or a failure this session's own
- * arm opened or replayed a pairing for. Ungated, the ask would fire at the end
- * of every child a push-on session spawns, which is the noise budget
- * tenjin-agent#211 spent and the reason the ask is gated at all.
- *
- * THE FAILURE SIGNAL IS READ OFF THE \`sig:\` CLAIM, not off \`pairings\`. The
- * claim is written in the same breath as the pairing is opened or replayed, and
- * it is a primary-key range read; \`pairings\` has no session index, and adding
- * one is DDL this PR deliberately does not take (tenjin-agent#228 PR 4 owns the
- * migration machinery). A hook that may block must not be the one place that
- * scans a table that never shrinks.
- */
-function captureSignal(sessionId) {
-  const since = Date.now() - SIGNAL_WINDOW_MS;
-  const searchId = openDispatchMiss(sessionId, since);
-  if (searchId !== null) return { kind: 'dispatch-miss', searchId };
-  if (statePrefixSince(sessionId, STATE_SIGNATURES_PREFIX, since, 1).length > 0) {
-    return { kind: 'failure-pairing', searchId: null };
-  }
-  return null;
-}
-
-/**
  * The block, and NOTHING ELSE on stdout: this is a control decision, so the
  * update line \`emit\` appends is left out. Claude Code hands \`reason\` to the
  * CHILD, which continues one turn and then stops again with
@@ -3876,12 +3862,59 @@ function emitStopBlock(reason) {
 }
 
 /**
+ * Does this path exist?
+ *
+ * \`statSync\` AND NOT \`existsSync\`, because the prelude imports the one and not
+ * the other, and a throw is the whole answer: a permission error, a dead
+ * symlink and a missing file all mean the same thing here, which is that the
+ * harness named a transcript nothing wrote.
+ */
+function pathExists(path) {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A stop that belongs to no child.
+ *
+ * MEASURED, NOT MODELLED (tenjin-agent#228, plan
+ * \`2026-09-02-child-loop-close.md\`). In a week of two \`/loop\` sessions 2,297 of
+ * 2,588 \`SubagentStop\` fires carried an empty \`agent_type\` and a transcript path
+ * with no file behind it, none of their agent ids appear in either transcript,
+ * and none of them has a \`SubagentStart\` row; they arrive about every 30 seconds
+ * while a loop session is armed. They took 26 of the 29 asks the week spent,
+ * because whichever stop came first after a session-wide signal took the
+ * session's one ask. All three marks are checked, not one: they agreed on every
+ * row measured, and each is a harness detail that a Claude Code release may
+ * change on its own.
+ *
+ * AND THE EXIT IS SILENT, before the lifecycle row rather than after it. A
+ * phantom opened no lifecycle, so it has nothing to count: the row would be a
+ * fact about the harness filed under a child that never ran, and it is also the
+ * single largest writer to a table nothing prunes.
+ *
+ * AN AGENT ID IS NOT CHECKED FOR HERE. A fire with no id at all is not a
+ * phantom, it is a payload this build cannot key anything on, and it keeps the
+ * row and the \`no-agent-id\` reason it has always had.
+ */
+function isPhantomStop(sessionId, agentId, agentType, transcript) {
+  if (agentType === '') return true;
+  if (transcript === null || !pathExists(transcript)) return true;
+  return agentId !== null && !agentStarted(sessionId, agentId);
+}
+
+/**
  * SubagentStop: the lifecycle row always, the ask once, the harvest next.
  *
- * ONE ROW PER FIRE, WHATEVER HAPPENS, exactly as at SubagentStart: the
- * lifecycle row is what makes a child's end countable at all (there was no
- * child-end row of any kind before tenjin-agent#228), and it never depends on
- * the child complying with anything.
+ * ONE ROW PER FIRE OF A REAL CHILD, WHATEVER HAPPENS, exactly as at
+ * SubagentStart: the lifecycle row is what makes a child's end countable at all
+ * (there was no child-end row of any kind before tenjin-agent#228), and it never
+ * depends on the child complying with anything. A phantom stop is the one fire
+ * that leaves nothing, and \`isPhantomStop\` above says why.
  *
  * EVERY FIELD THIS READS IS UNDOCUMENTED. \`agent_id\`, \`stop_hook_active\`,
  * \`last_assistant_message\` and \`agent_transcript_path\` were probed, not
@@ -3890,12 +3923,17 @@ function emitStopBlock(reason) {
  * it to be present AND false: a harness that omits it gets the lifecycle row
  * and nothing else, which is the fail-open reading of a missing fuse.
  *
+ * THE ASK GOES TO THE CHILD THAT DID THE WORK. The gate is this agent's own
+ * \`edited:\` markers inside the window (\`agentHasActivity\`), not a session-wide
+ * signal any sibling could arm: one dispatch MISS used to arm the ask for every
+ * child that stopped in the hour behind it, and the first to stop took it.
+ *
  * THE ASK COSTS A CHILD TURN, SO IT IS BUDGETED TWICE OVER: once per session
- * (\`STATE_SUBAGENT_ASKED\`, because the signal that arms it is session-wide and
- * would otherwise arm it for every later child), and not at all unless
- * \`hooks.capture\` is on. The harvest is deliberately NOT gated on capture — a
- * child already asked has already spent the turn, and its answer is worth
- * filing whichever way the operator moved the key in between.
+ * (\`STATE_SUBAGENT_ASKED\`, left exactly as it was, because re-keying the shared
+ * budgets per agent is the cap rework and not this change), and not at all
+ * unless \`hooks.capture\` is on. The harvest is deliberately NOT gated on
+ * capture — a child already asked has already spent the turn, and its answer is
+ * worth filing whichever way the operator moved the key in between.
  *
  * WHAT THE ASK ASKS FOR IS A PUBLISH (operator decision 2026-08-27). The child
  * runs the same \`tenjin publish\` anyone runs, and the fenced block is the
@@ -3904,8 +3942,10 @@ function emitStopBlock(reason) {
  * WHEN to ask, and the CLI's own gates decide what happens next.
  */
 function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
-  const eventUid = uid();
   const transcript = agentTranscriptPath(input);
+  // BEFORE ANY WRITE, and before the uid that would name one.
+  if (isPhantomStop(sessionId, agentId, agentType, transcript)) return quiet();
+  const eventUid = uid();
   const beat = (reason, extra) =>
     recordEvent({
       uid: eventUid,
@@ -3933,6 +3973,17 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   const asked =
     agentId === null ? null : getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''));
   if (asked !== null) {
+    // ONCE PER ASK, AND THE CHECK COMES BEFORE THE PARSE. A long-lived agent
+    // stops many times after it answered, and every one of those fires used to
+    // re-read \`last_assistant_message\`, run the fence parse and the scrub over
+    // it, and land on the dedupe claim only at the end — work whose only
+    // possible outcome was \`duplicate-finding\`. The claim below stays where it
+    // is: it is the race guard between two fires of the same child, and this is
+    // the cheap read that keeps the ordinary repeat away from it.
+    if (agentHarvested(sessionId, agentId, Date.now() - SIGNAL_WINDOW_MS)) {
+      beat('harvested');
+      return quiet();
+    }
     const message = lastAssistantMessage(input);
     if (message === null) {
       beat('no-message');
@@ -4023,6 +4074,22 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     return quiet();
   }
 
+  // A WORKFLOW CHILD IS COUNTED, NOT BLOCKED. This harness runs a workflow
+  // subagent to produce structured output and stops it there, so the turn a
+  // block buys does not exist: the one measured ask to a real child that
+  // produced nothing went to one of these, after its StructuredOutput. Counted
+  // rather than dropped, because it IS a child (it starts, it edits, it stops)
+  // and the funnel has to show where the asks that were never made went.
+  //
+  // ABOVE THE CONFIG GATE, unlike the cheapest-gate order the rest of this arm
+  // takes: this is a fact about the child and the reasons below are facts about
+  // the operator's key, and a count that changes meaning with a config value
+  // answers neither question.
+  if (agentType === WORKFLOW_AGENT_TYPE) {
+    beat('no-turn');
+    return quiet();
+  }
+
   // \`hooks.capture\` (default off) IS THE OPERATOR'S SWITCH FOR BOUNDARY ASKS,
   // and a child's end is a boundary like the parent's turn end is. Off means
   // neither one asks: no child is spent a turn, and nothing publishes on the
@@ -4057,11 +4124,26 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     beat('no-agent-id');
     return quiet();
   }
-  const signal = captureSignal(sessionId);
-  if (signal === null) {
-    beat('no-signal');
+  // THE EVIDENCE GATE, AND IT IS THIS CHILD'S OWN (tenjin-agent#228 PR 1). What
+  // used to stand here was \`captureSignal(sessionId)\`: a dispatch MISS or a
+  // claimed failure signature ANYWHERE in the session, which armed the ask for
+  // every child that stopped in the hour behind it and left a first-come budget
+  // claim to pick which one. In a loop session that was a phantom 26 times out
+  // of 29. The question a child's own Stop can answer is whether THIS child did
+  // work, and its \`edited:\` markers are the store's only agent-keyed evidence of
+  // that: one bounded, index-backed read, no \`events\` scan, no new window.
+  const since = Date.now() - SIGNAL_WINDOW_MS;
+  if (!agentHasActivity(sessionId, agentId, since)) {
+    beat('no-evidence');
     return quiet();
   }
+  // THE LOOP THE ASK IS ATTRIBUTED TO, AND NOT A GATE ANY MORE. An open dispatch
+  // MISS still names the search the child's own publish should close, which is
+  // what gives the piece its \`questionsAnswered\` prefill and closes the loop
+  // through \`inheritedSearchIds\` on the fallback path. Null is ordinary now: a
+  // child with edits behind it is asked whether or not this session left a
+  // lookup open.
+  const searchId = openDispatchMiss(sessionId, since);
   // THE MODE THE CHILD'S OWN PUBLISH WOULD RUN UNDER, resolved exactly as the
   // parent's Stop resolves it (lib/config.ts precedence: an env pin outranks the
   // project file). The child runs in the parent's cwd, so this is the mode its
@@ -4071,11 +4153,12 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // it above them is what lets the lifecycle row sit directly under them.
   const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
   const publishMode = project === null ? config.publishMode : project;
-  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE. Both signals are
-  // session-wide, so one MISS or one claimed failure signature arms this arm for
-  // every child that stops in the hour behind it; the per-child claim only stops
-  // the SAME child being asked twice. One ask per session is the cost
-  // tenjin-agent#228 costed, and this is where it is held to it.
+  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE, AND LEFT EXACTLY AS IT
+  // WAS. Re-keying the shared gates per agent is the cap rework and not this
+  // change (tenjin-agent#228 PR 1 changes no budget), so this is still one ask
+  // per session per hour, whatever the fan-out; what changed above it is WHICH
+  // child gets to spend it. The per-child claim below only stops the SAME child
+  // being asked twice.
   //
   // FAIL-CLOSED, AND WINDOWED TO THE SIGNAL (round-3 gate 6). \`claimState\`
   // returns a win on a write the store swallowed, so a single SQLITE_BUSY on
@@ -4095,7 +4178,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // same fail-closed rule as the budget above it.
   if (
     !claimStateFresh(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''), SIGNAL_WINDOW_MS, {
-      searchId: signal.searchId,
+      searchId,
       agentType,
     })
   ) {
@@ -4120,8 +4203,8 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // entirely and is what the dispatch arm's asked-claim uses, but not here: a
   // session budget that expires after the fire's own ceiling is a budget of one
   // ask per 8 seconds, which is the runaway this claim exists to prevent.
-  beat('asked', { signal: signal.kind, searchId: signal.searchId, publishMode });
-  emitStopBlock(captureAskText(agentId, publishMode, signal.searchId));
+  beat('asked', { evidence: 'edited', searchId, publishMode });
+  emitStopBlock(captureAskText(agentId, publishMode, searchId));
 }
 
 async function main() {
@@ -4155,6 +4238,11 @@ async function main() {
   if ((await openStore()) === null) return quiet();
   if (event === 'SubagentStop')
     return subagentStop(input, sessionId, config, cwd, agentId, agentType);
+  // THE START ROW, FIRST AND UNCONDITIONALLY. It is what tells a child's stop
+  // from the phantom stops this harness also fires (\`isPhantomStop\`), so it has
+  // to be written on every start that reaches the store, whatever the handoff
+  // below then does. One upsert per child per session, on a primary key.
+  if (agentId !== null) markAgentStart(sessionId, agentId, agentType);
   // THE UID IS MINTED FIRST so the heartbeat can be written LAST. Every path
   // below ends in exactly one event row carrying the reason this fire ended the
   // way it did, and the decision rows have to point at that row, so the id
@@ -4299,7 +4387,8 @@ export function pushSubagentHookScript(dataDir: string): string {
     .replaceAll('__MESSAGE_TAIL__', String(PUSH_FINDING_MESSAGE_TAIL))
     .replaceAll('__FINDING_OPEN__', JSON.stringify('```' + PUSH_FINDING_TAG))
     .replaceAll('__FINDING_FENCE__', JSON.stringify('```'))
-    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON));
+    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON))
+    .replaceAll('__WORKFLOW_AGENT_TYPE__', JSON.stringify(PUSH_WORKFLOW_AGENT_TYPE));
   return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${js}`;
 }
 
