@@ -63,6 +63,7 @@ function makeCtx(): CommandContext {
 function fakeDaemonSource(version: string): string {
   return `
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const dataDir = process.env.TENJIN_DATA_DIR;
@@ -76,6 +77,11 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
+  let token_id;
+  try {
+    const tok = readFileSync(join(dataDir, 'daemon.token'), 'utf8').trim();
+    token_id = createHash('sha256').update('tenjin-daemon:' + tok).digest('hex').slice(0, 16);
+  } catch {}
   res.end(JSON.stringify({
     version: ${JSON.stringify(version)},
     pid: process.pid,
@@ -84,6 +90,7 @@ const server = createServer((req, res) => {
     idle_ms: 0,
     data_dir: dataDir,
     rss: process.memoryUsage().rss,
+    token_id,
   }));
 });
 server.listen(0, '127.0.0.1', () => {

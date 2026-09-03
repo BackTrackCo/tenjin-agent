@@ -120,19 +120,19 @@ export async function runFire(
           holdsClaim = true;
           const asked = await ask(ctx, plan);
           if (controller.signal.aborted) {
-            release(deps.db, actor, plan.question.fingerprint);
+            release(deps.db, actor, plan.question.fingerprint, fire.id);
             holdsClaim = false;
             return skip('deadline');
           }
           const definite = asked.legs.length > 0 && asked.legs.every((l) => l.status === 'ok');
           if (asked.answer === null && !definite) {
-            release(deps.db, actor, plan.question.fingerprint);
+            release(deps.db, actor, plan.question.fingerprint, fire.id);
             holdsClaim = false;
             return skip(
               asked.legs.some((l) => l.status === 'http_429') ? 'rate-server' : 'no-answer',
             );
           }
-          finish(deps.db, actor, plan.question.fingerprint, asked.answer, deps.clock());
+          finish(deps.db, actor, plan.question.fingerprint, asked.answer, deps.clock(), fire.id);
           holdsClaim = false;
           result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
         }
@@ -146,7 +146,7 @@ export async function runFire(
         }
         return result;
       } catch (err) {
-        if (holdsClaim && fingerprint !== undefined) release(deps.db, actor, fingerprint);
+        if (holdsClaim && fingerprint !== undefined) release(deps.db, actor, fingerprint, fire.id);
         return skip('error', reasonOf(err));
       }
     };

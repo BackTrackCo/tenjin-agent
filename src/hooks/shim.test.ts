@@ -14,7 +14,6 @@ import {
 } from '../lib/paths';
 import { SPAWN_BACKOFF_MS } from './constants';
 import {
-  clearStalePid,
   daemonEnv,
   ensureDaemon,
   forward,
@@ -24,6 +23,7 @@ import {
   readPid,
   readToken,
   resolveDataDir,
+  tokenId,
   type PidRecord,
 } from './shim';
 
@@ -79,6 +79,7 @@ async function freePort(): Promise<number> {
 }
 
 function healthBody(port: number, dataDir: string): string {
+  const token = readToken(dataDir);
   return JSON.stringify({
     version: 't',
     pid: process.pid,
@@ -87,6 +88,7 @@ function healthBody(port: number, dataDir: string): string {
     idle_ms: 0,
     data_dir: dataDir,
     rss: 0,
+    ...(token === null ? {} : { token_id: tokenId(token) }),
   });
 }
 
@@ -132,9 +134,14 @@ let port = 0;
 const srv = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
+    let token_id;
+    try {
+      const tok = readFileSync(join(dataDir, 'daemon.token'), 'utf8').trim();
+      token_id = createHash('sha256').update('tenjin-daemon:' + tok).digest('hex').slice(0, 16);
+    } catch {}
     res.end(JSON.stringify({
       version: 't', pid: process.pid, port, uptime_ms: 0, idle_ms: 0, data_dir: dataDir, rss: 0,
-      saw_session: process.env.CLAUDE_CODE_SESSION_ID ?? null,
+      token_id, saw_session: process.env.CLAUDE_CODE_SESSION_ID ?? null,
     }));
     return;
   }
@@ -415,25 +422,5 @@ describe('forward', () => {
     writeFileSync(daemonTokenPath(dir), 'tok-abc');
     await forward(dir, 'claude', '{}', Date.now());
     expect(readLog(dir)).toMatch(/ daemon-down no bundle; run `tenjin daemon start`\n$/);
-  });
-});
-
-describe('clearStalePid', () => {
-  it('removes the pid file when the recorded pid is dead', () => {
-    writePid(dir, { pid: DEAD_PID, port: 1, started_at: 1, data_dir: dir });
-    clearStalePid(dir);
-    expect(existsSync(daemonPidPath(dir))).toBe(false);
-  });
-
-  it('keeps the pid file when the recorded pid is alive', () => {
-    writePid(dir, { pid: process.pid, port: 1, started_at: 1, data_dir: dir });
-    clearStalePid(dir);
-    expect(existsSync(daemonPidPath(dir))).toBe(true);
-  });
-
-  it('is a no-op without a readable pid file', () => {
-    writeFileSync(daemonPidPath(dir), '{');
-    clearStalePid(dir);
-    expect(existsSync(daemonPidPath(dir))).toBe(true);
   });
 });

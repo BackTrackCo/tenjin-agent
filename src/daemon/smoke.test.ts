@@ -10,6 +10,7 @@ import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
 import { installDaemonFiles } from '../commands/daemon';
+import { SPAWN_MS } from '../hooks/constants';
 import { ensureDaemon, readToken } from '../hooks/shim';
 import {
   configPath,
@@ -32,84 +33,6 @@ vi.setConfig({ hookTimeout: 60_000, testTimeout: 20_000 });
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(HERE, '..', 'adapters', 'fixtures', 'claude');
 
-/**
- * The same 8 shapes as src/adapters/fixtures/claude/*.json (field names from
- * claude.ts `decode`). Used only if that directory is missing when this file
- * runs — it is written by another agent in parallel; the real files are the
- * source of truth whenever present.
- */
-const INLINE_FIXTURES: Record<string, unknown> = {
-  'SessionStart.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'SessionStart',
-    source: 'startup',
-  },
-  'UserPromptSubmit.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'UserPromptSubmit',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    prompt: 'Why does pnpm vitest hang on testcontainers when two worktrees run at once?',
-  },
-  'PreToolUse.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'PreToolUse',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    tool_name: 'WebFetch',
-    tool_input: { url: 'https://node.testcontainers.org/configuration/' },
-    tool_use_id: 'toolu_01HxTz8k3Qm2Vn9Yp4Rw6Sd7',
-  },
-  'PostToolUse.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'PostToolUse',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    tool_name: 'Bash',
-    tool_input: { command: 'pnpm vitest run src/lib/state-store.test.ts' },
-    tool_use_id: 'toolu_01Kp3Wq7Zx9Lm4Nv2Bt8Cy5R',
-    tool_response: { stdout: 'ok', stderr: '', interrupted: false, isImage: false },
-  },
-  'PostToolUseFailure.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'PostToolUseFailure',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    tool_name: 'Bash',
-    tool_input: { command: 'pnpm typecheck' },
-    tool_use_id: 'toolu_01Mv6Rt2Yk8Pq3Xw5Nz7Lb4H',
-    error: 'Exit code 2',
-    is_interrupt: false,
-  },
-  'SubagentStart.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'SubagentStart',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    agent_id: 'a7c31e9f',
-    agent_type: 'Explore',
-  },
-  'SubagentStop.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'SubagentStop',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    stop_hook_active: false,
-    agent_id: 'a7c31e9f',
-    agent_type: 'Explore',
-    last_assistant_message: 'done',
-  },
-  'Stop.json': {
-    session_id: '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04',
-    cwd: '/Users/dev/proj',
-    hook_event_name: 'Stop',
-    prompt_id: '01J9X4M2K7Q8R3T5V6W7Y8Z9A0',
-    stop_hook_active: false,
-    last_assistant_message: 'done',
-  },
-};
-
 interface Fixture {
   name: string;
   event: string;
@@ -122,21 +45,13 @@ function eventNameOf(body: string): string {
 }
 
 async function loadFixtures(): Promise<Fixture[]> {
-  if (existsSync(FIXTURES_DIR)) {
-    const files = (await readdir(FIXTURES_DIR)).filter((f) => f.endsWith('.json')).sort();
-    return Promise.all(
-      files.map(async (name) => {
-        const body = await readFile(join(FIXTURES_DIR, name), 'utf8');
-        return { name, event: eventNameOf(body), body };
-      }),
-    );
-  }
-  return Object.keys(INLINE_FIXTURES)
-    .sort()
-    .map((name) => {
-      const body = JSON.stringify(INLINE_FIXTURES[name]);
+  const files = (await readdir(FIXTURES_DIR)).filter((f) => f.endsWith('.json')).sort();
+  return Promise.all(
+    files.map(async (name) => {
+      const body = await readFile(join(FIXTURES_DIR, name), 'utf8');
       return { name, event: eventNameOf(body), body };
-    });
+    }),
+  );
 }
 
 let tmpOutDir: string;
@@ -463,10 +378,13 @@ describe('the daemon, cold-started from the real bundle', () => {
     expect(log).toMatch(/exit: SIGTERM/);
   }, 5000);
 
-  // Sanity bounds only; the actual numbers belong in the PR body against the
-  // cold-start figures in 03-decisions.md, not a threshold this file owns.
-  it('the built daemon bundle is a non-empty single file, spawned in finite time', () => {
+  // 85 to 95 ms on the laptop that wrote this (03-decisions.md measured 75 to
+  // 120 for a minimal daemon). The production shim polls for SPAWN_MS; a CI
+  // runner is slower and noisier, so the bound here is three times that: a
+  // regression that triples the cold start is what this should catch.
+  it('the built daemon bundle is a non-empty single file and cold-starts inside 3 x SPAWN_MS', () => {
     expect(bundleBytes).toBeGreaterThan(0);
     expect(coldStartMs).toBeGreaterThan(0);
+    expect(coldStartMs).toBeLessThan(3 * SPAWN_MS);
   });
 });

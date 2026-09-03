@@ -8,6 +8,7 @@ import { STOP_GRACE_MS } from '../hooks/constants';
 import {
   ensureDaemon,
   health,
+  isOurs,
   readPid,
   readToken,
   type Health,
@@ -87,6 +88,15 @@ export async function stopDaemon(
   const rec = readPid(dataDir);
   if (rec === null || !alive(rec.pid, kill)) {
     if (rec !== null) rmSync(daemonPidPath(dataDir), { force: true });
+    return { state: 'not-running' };
+  }
+  // A pid file a crash left behind can name a reused pid. If something answers
+  // on the recorded port and it is not that pid, the file is stale and the
+  // process a stranger; a port that does not answer is a hung daemon, which
+  // the signal is for.
+  const h = await health(rec.port);
+  if (h !== null && h.pid !== rec.pid) {
+    rmSync(daemonPidPath(dataDir), { force: true });
     return { state: 'not-running' };
   }
   kill(rec.pid, 'SIGTERM');
@@ -175,7 +185,7 @@ export async function runDaemonStop(
 export async function runDaemonStatus(ctx: CommandContext): Promise<CommandResult> {
   const rec = readPid(ctx.dataDir);
   const h = rec === null ? null : await health(rec.port);
-  if (h === null || h.data_dir !== ctx.dataDir) {
+  if (!isOurs(h, ctx.dataDir, readToken(ctx.dataDir))) {
     return {
       data: { state: 'not-running', pidFile: rec, tokenPresent: readToken(ctx.dataDir) !== null },
       humanLines: ['not running'],

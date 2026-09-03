@@ -95,17 +95,19 @@ export function openLoopDb(dataDir: string, opts: OpenLoopDbOptions = {}): LoopD
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const path = loopDbPath(dataDir);
   const db = new DatabaseSync(path);
+  try {
+    // Before the WAL switch, so `-wal` and `-shm` inherit 0600 too (SQLite
+    // copies the main file's mode). Defence in depth under a 0700 directory.
+    chmodSync(path, 0o600);
+  } catch {
+    // Not the guard.
+  }
   db.exec(`PRAGMA busy_timeout = ${opts.busyTimeoutMs ?? DAEMON_BUSY_TIMEOUT_MS}`);
   db.exec('PRAGMA auto_vacuum = INCREMENTAL');
   db.exec('PRAGMA journal_mode = wal');
   db.exec('PRAGMA synchronous = normal');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(LOOP_DDL);
-  try {
-    chmodSync(path, 0o600);
-  } catch {
-    // Defence in depth under a 0700 directory, not the guard.
-  }
   return db;
 }
 

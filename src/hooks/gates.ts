@@ -20,6 +20,27 @@ interface QuestionMark {
   status: 'asking' | 'done';
   at: number;
   answer?: Answer | null;
+  /** The fire that wrote it; `finish` and `release` from another fire are no-ops. */
+  by?: string;
+}
+
+function readQuestion(db: LoopDb, actor: Actor, key: string): QuestionMark | null {
+  const raw = getMark(db, actor, key);
+  if (raw === null) return null;
+  try {
+    return JSON.parse(raw) as QuestionMark;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * May `by` change this question's mark? A fire that lost the deadline race
+ * keeps running in the background; once a newer fire has retaken the claim,
+ * the old fire's late `release` or `finish` must not touch it.
+ */
+function owns(mark: QuestionMark | null, by: string | undefined): boolean {
+  return by === undefined || mark === null || mark.by === undefined || mark.by === by;
 }
 
 export function getMark(db: LoopDb, actor: Actor, key: string): string | null {
@@ -88,26 +109,15 @@ export function claim(
   fingerprint: string,
   now: number,
   waitMs: number,
+  by?: string,
 ): Claim {
   const key = Q_PREFIX + fingerprint;
-  const raw = getMark(db, actor, key);
-  if (raw !== null) {
-    let mark: QuestionMark | null;
-    try {
-      mark = JSON.parse(raw) as QuestionMark;
-    } catch {
-      mark = null;
-    }
-    if (mark?.status === 'done') return { kind: 'cached', answer: mark.answer ?? null };
-    if (mark?.status === 'asking' && now - mark.at < waitMs) return { kind: 'asked' };
-  }
-  setMark(
-    db,
-    actor,
-    key,
-    JSON.stringify({ status: 'asking', at: now } satisfies QuestionMark),
-    now,
-  );
+  const mark = readQuestion(db, actor, key);
+  if (mark?.status === 'done') return { kind: 'cached', answer: mark.answer ?? null };
+  if (mark?.status === 'asking' && now - mark.at < waitMs) return { kind: 'asked' };
+  const next: QuestionMark =
+    by === undefined ? { status: 'asking', at: now } : { status: 'asking', at: now, by };
+  setMark(db, actor, key, JSON.stringify(next), now);
   return { kind: 'fresh' };
 }
 
@@ -118,19 +128,22 @@ export function finish(
   fingerprint: string,
   answer: Answer | null,
   now: number,
+  by?: string,
 ): void {
-  setMark(
-    db,
-    actor,
-    Q_PREFIX + fingerprint,
-    JSON.stringify({ status: 'done', at: now, answer } satisfies QuestionMark),
-    now,
-  );
+  const key = Q_PREFIX + fingerprint;
+  if (!owns(readQuestion(db, actor, key), by)) return;
+  const next: QuestionMark =
+    by === undefined
+      ? { status: 'done', at: now, answer }
+      : { status: 'done', at: now, answer, by };
+  setMark(db, actor, key, JSON.stringify(next), now);
 }
 
 /** The fire ended without a verdict (deadline, error, rate): free the question. */
-export function release(db: LoopDb, actor: Actor, fingerprint: string): void {
-  deleteMark(db, actor, Q_PREFIX + fingerprint);
+export function release(db: LoopDb, actor: Actor, fingerprint: string, by?: string): void {
+  const key = Q_PREFIX + fingerprint;
+  if (!owns(readQuestion(db, actor, key), by)) return;
+  deleteMark(db, actor, key);
 }
 
 /** Once-per-piece, per actor. Returns false when this actor already saw it. */
@@ -150,13 +163,13 @@ export function firstSight(db: LoopDb, actor: Actor, resourceId: string, now: nu
 export function gates(ctx: FireContext, plan: Plan): Outcome | null {
   const { db, clock, config } = ctx.deps;
   const now = clock();
-  const c = claim(db, ctx.actor, plan.question.fingerprint, now, ctx.fire.deadlineMs);
+  const c = claim(db, ctx.actor, plan.question.fingerprint, now, ctx.fire.deadlineMs, ctx.fire.id);
   if (c.kind === 'asked') return { reason: 'asked' };
   if (c.kind === 'cached')
     return c.answer ? { reason: 'cached', answer: c.answer } : { reason: 'cached' };
   const { rate_per_min, burst } = config().loop;
   if (!charge(db, ctx.actor, ctx.arm.id, now, rate_per_min, burst)) {
-    release(db, ctx.actor, plan.question.fingerprint);
+    release(db, ctx.actor, plan.question.fingerprint, ctx.fire.id);
     return { reason: 'rate' };
   }
   return null;
