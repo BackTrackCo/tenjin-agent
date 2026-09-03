@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeChildFinding, readChildFinding, recentFindingIds } from './child-findings';
+import {
+  describeChildFinding,
+  findingDocument,
+  readChildFinding,
+  recentFindingIds,
+} from './child-findings';
 import { openStore, STORE_FINDING_HOOK, STORE_SQL } from './state-store';
 
 /**
@@ -121,5 +126,54 @@ describe('recentFindingIds', () => {
 
   it('is empty, not an error, on a machine with no store', async () => {
     expect(await recentFindingIds(join(dir, 'never-created'))).toEqual([]);
+  });
+});
+
+/**
+ * The title derivation (tenjin-agent#228 PR 1).
+ *
+ * The harvest stores a child's fenced block as ONE LINE, so the `# ` heading the
+ * ask asks for arrives with the finding run into it. What these pin is that
+ * every character of a derived title is the child's own, and that a body with
+ * nothing to derive from comes back untouched rather than published under a
+ * title nobody wrote.
+ */
+describe('findingDocument', () => {
+  it('takes the heading text as the title and leaves the rest as the body', () => {
+    expect(
+      findingDocument('# Pinning the resolver. It throws on an optional chain until you do.'),
+    ).toBe('# Pinning the resolver\n\nIt throws on an optional chain until you do.');
+  });
+
+  it('keeps a body that already reads as a document', () => {
+    const doc = '# ox 0.14 keeps Bytes.from\n\nVerified against the published tag.';
+    expect(findingDocument(doc)).toBe(doc);
+  });
+
+  it('uses the first sentence when the child wrote no heading, and keeps it', () => {
+    expect(findingDocument('Pinning the resolver to 4.1 stops the throw. Verified on 4.0.')).toBe(
+      '# Pinning the resolver to 4.1 stops the throw\n\nPinning the resolver to 4.1 stops the throw. Verified on 4.0.',
+    );
+  });
+
+  it('cuts a runaway first sentence at a word boundary', () => {
+    const long = `# ${'word '.repeat(60)}end.`;
+    const title = findingDocument(long).split('\n')[0] ?? '';
+    expect(title.length).toBeLessThanOrEqual(122);
+    expect(title.endsWith(' ')).toBe(false);
+    // Nothing invented and nothing reordered: the title is a prefix of what the
+    // child wrote.
+    expect(long.startsWith(title)).toBe(true);
+  });
+
+  it('keeps a question mark, drops a full stop', () => {
+    expect(findingDocument('# Does pinning help? Yes, on 4.1.')).toBe(
+      '# Does pinning help?\n\nYes, on 4.1.',
+    );
+  });
+
+  it('hands back a body it can derive nothing from, untouched', () => {
+    expect(findingDocument('   ')).toBe('   ');
+    expect(findingDocument('#')).toBe('#');
   });
 });

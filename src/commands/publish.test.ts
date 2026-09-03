@@ -2918,6 +2918,55 @@ describe('runPublish — publish --finding', () => {
     expect(body()?.searchId).toBe(SEEDED_SEARCH);
   });
 
+  /**
+   * THE TITLE IS DERIVED FROM THE FENCE (tenjin-agent#228 PR 1).
+   *
+   * The harvest stores a child's block as ONE LINE, so the `# ` heading the ask
+   * asks for arrives here as the head of a single line and the whole finding
+   * reads as one heading. Publishing that used to fail with `USAGE: A published
+   * post needs a title`, and the one finding a week of dogfood captured lost its
+   * attribution to it: the parent republished from a file and discarded the id.
+   */
+  it('takes the title off the fence heading, and leaves the finding under it', async () => {
+    const id = await seedFinding({
+      uid: 'FND-TITLED',
+      body: '# ox 0.14 keeps Bytes.from The export is still on the published tag. The 0.13 shim is dead weight.',
+    });
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    // The heading and the sentence the flattening ran into it: the line break
+    // the child wrote is gone by the time this reads it, so the cut is the first
+    // sentence end. Every character is the child's own, in its own order.
+    expect(body()?.title).toBe('ox 0.14 keeps Bytes.from The export is still on the published tag');
+    // And what the title took is not repeated under it.
+    expect(body()?.bodyMd).toBe(
+      '# ox 0.14 keeps Bytes.from The export is still on the published tag\n\nThe 0.13 shim is dead weight.',
+    );
+  });
+
+  /** No heading at all: the first sentence becomes the title and STAYS in the
+   *  body, because there it is prose the child wrote and not a label it chose. */
+  it('falls back to the first sentence when the child wrote no heading', async () => {
+    const id = await seedFinding({
+      uid: 'FND-UNTITLED',
+      body: 'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.',
+    });
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.title).toBe('Pinning the resolver to 4.1 stops the parse throw');
+    expect(String(body()?.bodyMd)).toContain(
+      'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.',
+    );
+  });
+
   it('an explicit --search-id still wins over the finding own loop', async () => {
     const id = await seedFinding({ uid: 'FND-EXPLICIT' });
     const mine = '0197bbbb-2222-4333-8444-555555555555';

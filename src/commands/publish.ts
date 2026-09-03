@@ -49,7 +49,12 @@ import {
 import { dequeueFinding, publishedUrlFor, recordPublished } from '../lib/publish-dedup';
 import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
-import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
+import {
+  describeChildFinding,
+  findingDocument,
+  readChildFinding,
+  type ChildFinding,
+} from '../lib/child-findings';
 import { AGENT_ID_RE } from '../lib/grade';
 import { projectIdOf } from '../lib/state-store';
 import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
@@ -955,7 +960,14 @@ async function resolveSource(
         fix: 'Nothing was stored for that child, so there is nothing to publish. Write the finding to a file and publish that.',
       });
     }
-    return { raw: finding.body, finding };
+    // THE TITLE COMES OFF THE FINDING'S OWN FIRST LINE (tenjin-agent#228). The
+    // harvest stores a child's block as one line, so a publish of it used to
+    // reach the shelf with no title at all and fail there; `findingDocument`
+    // derives one from the `# ` heading the ask asks for, or from the first
+    // sentence when the child wrote none. Nothing else about `--finding`
+    // changes: the body is still the child's words, and every gate below is the
+    // one a file publish takes.
+    return { raw: findingDocument(finding.body), finding };
   }
   if (args.file === undefined) {
     // Bare publish is the convenient pipe form, but only on the CLI and only

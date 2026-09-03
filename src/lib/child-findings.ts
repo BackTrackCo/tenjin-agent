@@ -165,3 +165,84 @@ export function describeChildFinding(finding: ChildFinding): string {
   const loop = finding.searchId === null ? '' : `, search ${finding.searchId}`;
   return `${who}${agent}${loop}`;
 }
+
+/**
+ * How long a derived title may run. Well under the server's own 200, because a
+ * title cut at the limit reads as a truncation and a short one reads as a title.
+ */
+const FINDING_TITLE_MAX = 120;
+
+/**
+ * A stored finding as a Markdown document: `# <title>`, then the finding.
+ *
+ * WHY THE HOOK CANNOT HAND ONE OVER READY-MADE. The harvest stores what the
+ * child wrote as ONE LINE (`clean` turns every control character into a space,
+ * which is what makes the body safe to splice into the parent's capture ask), so
+ * even a child that did exactly as it was asked and opened its block with
+ * `# Pinning the resolver` arrives here as `# Pinning the resolver Verified
+ * against 4.0 and 4.1.` — a single heading line whose text is the whole
+ * finding. Publishing that verbatim sent a 2,000-character title at the shelf;
+ * publishing it before this existed sent none at all and the publish failed with
+ * `USAGE: A published post needs a title`, which is what cost the one finding
+ * the week captured its attribution: the parent republished from a file and
+ * discarded the held id (tenjin-agent#228).
+ *
+ * TWO RULES, IN ORDER. A leading `#` heading is the child answering the ask, so
+ * its text becomes the title and leaves the body; with no heading the FIRST
+ * SENTENCE becomes the title and STAYS in the body, because there it is prose
+ * the child wrote rather than a label it chose. Either way the cut is a sentence
+ * end, or the last word inside {@link FINDING_TITLE_MAX}.
+ *
+ * DERIVED, NEVER INVENTED, and never rewritten: every character of the title
+ * comes from the child's own words, in their own order. A body with nothing to
+ * derive from comes back untouched, so the publish path refuses it exactly as it
+ * did before rather than publishing under a title nobody wrote.
+ */
+export function findingDocument(body: string): string {
+  const flat = body.trim();
+  if (flat === '') return body;
+  const breakAt = flat.indexOf('\n');
+  const first = (breakAt === -1 ? flat : flat.slice(0, breakAt)).trim();
+  const after = breakAt === -1 ? '' : flat.slice(breakAt + 1).trim();
+  const heading = /^#{1,6}\s+(\S.*)$/.exec(first);
+  if (heading === null) {
+    const { title } = cutTitle(flat);
+    return isTitle(title) ? joinDocument(title, flat) : body;
+  }
+  const { title, rest } = cutTitle((heading[1] ?? '').trim());
+  if (!isTitle(title)) return body;
+  return joinDocument(title, [rest, after].filter((part) => part !== '').join('\n\n'));
+}
+
+/** A candidate title with a word in it. Punctuation alone is not a title, and
+ *  a body that yields only punctuation is one to leave exactly as it is. */
+function isTitle(candidate: string): boolean {
+  return /[\p{L}\p{N}]/u.test(candidate);
+}
+
+/** `# <title>` and the body under it, or the title alone when the heading was
+ *  the whole finding. */
+function joinDocument(title: string, rest: string): string {
+  return rest === '' ? `# ${title}` : `# ${title}\n\n${rest}`;
+}
+
+/**
+ * The title out of one line, and whatever it left behind.
+ *
+ * THE FIRST SENTENCE, and a word boundary as the backstop: a child that wrote no
+ * sentence end, or one 400 characters in, still gets a title that reads like
+ * one. The trailing full stop goes because this is a title now; a `?` or a `!`
+ * stays, because a question is the shape half these findings answer.
+ */
+function cutTitle(text: string): { title: string; rest: string } {
+  const sentence = /[.!?](?=\s|$)/.exec(text);
+  let cut = sentence === null ? text.length : sentence.index + 1;
+  if (cut > FINDING_TITLE_MAX) {
+    const space = text.lastIndexOf(' ', FINDING_TITLE_MAX);
+    cut = space > 0 ? space : FINDING_TITLE_MAX;
+  }
+  return {
+    title: text.slice(0, cut).trim().replace(/\.$/, '').trim(),
+    rest: text.slice(cut).trim(),
+  };
+}
