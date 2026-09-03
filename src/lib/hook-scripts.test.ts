@@ -2268,9 +2268,9 @@ describe('SessionStart hook: the primer', () => {
   it('names the entry gate and both directions of the decision', async () => {
     const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
     const text = injected(run) ?? '';
-    expect(text).toContain('public, durable, and costly to reproduce');
+    expect(text).toContain('a durable question others also hit');
     expect(text).toContain('tenjin search');
-    expect(text).toContain('Skip it for private-repo questions');
+    expect(text).toContain('Skip private-repo questions');
   });
 
   it('says nothing when hooks.sessionPrimer is off', async () => {
@@ -2315,12 +2315,12 @@ describe('SessionStart hook: the primer', () => {
   });
 
   /**
-   * THE WORDING IS CHOSEN AT RUN TIME, from the config the script reads, and the
-   * team paragraph inverts the public one's bar: the public text tells the agent
-   * to skip private-repo questions and warns that a hit costs cents, which on a
-   * machine with a team shelf points away from exactly what the shelf holds. One
-   * generated script has to reach both answers, because a machine joins a team
-   * shelf by editing config.json and nothing rewrites its installed hooks.
+   * THE WORDING IS CHOSEN AT RUN TIME, from the config the script reads, so one
+   * generated script has to reach both answers (why: the `PRIMER_TEXT`
+   * docstring). The team paragraph inverts the public one's bar: the public text
+   * tells the agent to skip private-repo questions and warns that a hit costs
+   * cents, which on a machine with a team shelf points away from exactly what
+   * the shelf holds.
    */
   describe('team mode', () => {
     const teamConfig = {
@@ -2343,13 +2343,32 @@ describe('SessionStart hook: the primer', () => {
       expect(PRIMER_TEXT_TEAM).not.toContain('costs cents');
     });
 
-    // A team miss re-asks the same sentence of the public marketplace, so the
-    // one warning the public wording has no reason to carry is the one this
-    // paragraph must.
-    it('warns that the question travels', () => {
-      expect(PRIMER_TEXT_TEAM).toContain(
-        'Never put a secret, credential, customer, or account name',
-      );
+    // SessionStart never fires for a subagent and the dispatch hook's hint lands
+    // in the parent's context only, so this sentence is the only thing that
+    // carries Tenjin into a research subagent's prompt. It belongs in the team
+    // paragraph most of all: that is the shelf where a miss is cheapest.
+    it('carries the nudge into subagent and research prompts', () => {
+      expect(PRIMER_TEXT).toContain('research and subagent prompts');
+      expect(PRIMER_TEXT_TEAM).toContain('research and subagent prompts');
+    });
+
+    // NO "THE QUESTION TRAVELS" WARNING (owner decision 2026-09-03, and the
+    // reason is in the PRIMER_TEXT_TEAM docstring): an agent warned about its own
+    // question sentence hedges it, and a hedged sentence is a worse query against
+    // both shelves. This assertion exists so the sentence is not restored by
+    // accident on the next reading of the fallthrough.
+    it('does not warn that the question travels', () => {
+      expect(PRIMER_TEXT_TEAM).not.toContain('secret');
+      expect(PRIMER_TEXT_TEAM).not.toContain('credential');
+      expect(PRIMER_TEXT_TEAM).not.toContain('account name');
+    });
+
+    // The paragraph is read before the session's first real thought, so length is
+    // a contract, not a preference. Both wordings came down when the warning went
+    // (555 -> 375 public, 441 -> 379 team); these ceilings are the ratchet.
+    it('keeps both paragraphs short', () => {
+      expect(PRIMER_TEXT.length).toBeLessThanOrEqual(400);
+      expect(PRIMER_TEXT_TEAM.length).toBeLessThanOrEqual(400);
     });
 
     // Team mode is a secret AND a shelf of the team's own; a secret with baseUrl

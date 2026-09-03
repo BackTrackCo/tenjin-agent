@@ -268,6 +268,8 @@ export const REMIND_LINE =
  * What the SessionStart hook puts in front of the model, once, at the top of a
  * session. NOTHING MAY JOIN IT: an update line or a line of ledger state would
  * each be true, and would each cost the primer the attention it needs to work.
+ * EVERY WORD IS RENT: this paragraph is read before the session's first real
+ * thought, so a sentence that does not change what the agent does comes out.
  *
  * TWO WORDINGS, ONE PARAGRAPH, chosen at RUN TIME by the generated script from
  * the config it reads (`teamShelfOrigin`), exactly as the capture ask below is.
@@ -275,10 +277,11 @@ export const REMIND_LINE =
  * writing a secret and a baseUrl into config.json, and `tenjin update` does not
  * rewrite installed hook scripts (tenjin-agent#171), so a primer baked at
  * install would keep telling a team machine to skip the questions its shelf
- * exists to answer.
+ * exists to answer. THIS DOCSTRING IS THE ONE HOME for that rationale; the
+ * generated script and the tests point here rather than restating it.
  */
 export const PRIMER_TEXT =
-  'Tenjin knowledge marketplace is installed. Before spending real effort on a research question that is public, durable, and costly to reproduce (version-specific gotchas, integration probes, dated operational checks, maintained comparisons), state it as one line and run `tenjin search "<question>"` first: a hit costs cents and settles it, a miss takes seconds. When enumerating research sources in a subagent or research prompt, include Tenjin. Skip it for private-repo questions, live data, and anything the docs answer in a line.';
+  'Tenjin is installed: a marketplace of tested, paid answers. Before real effort on a durable question others also hit (version gotchas, integration probes, comparisons), run `tenjin search "<one sentence>"` first — a hit costs cents, a miss takes seconds. Include it in research and subagent prompts. Skip private-repo questions, live data, and what the docs answer in a line.';
 
 /**
  * The team-mode primer. The bar is INVERTED against the public one, and that is
@@ -288,13 +291,20 @@ export const PRIMER_TEXT =
  * and its past decisions are exactly what the shelf holds, and reading a
  * teammate's note off it costs nothing.
  *
- * What survives from the public wording is the one line that is not about price:
- * a question travels — a team miss re-asks the same sentence of the public
- * marketplace — so no secret, credential, customer or account name belongs in
- * one.
+ * NO "THE QUESTION TRAVELS" WARNING, by owner decision (2026-09-03): a team miss
+ * does re-ask the public marketplace, but telling the agent so buys nothing and
+ * costs the query. An agent warned about its own question sentence hedges it —
+ * drops the file name, the component, the version — and a hedged sentence is a
+ * worse query against BOTH shelves, so the warning would cost hits on the shelf
+ * it was written to protect. Searches are not published, the team is two people,
+ * and the search availability rule holds: paths and hosts stay in queries, and
+ * secret-shaped strings are stripped by the dispatch scrub, which is code and
+ * needs no sentence here. When `team.publicFallback: off` lands (loop redesign
+ * decision Q2), a team question stops leaving the machine at all and the
+ * question of a warning is moot.
  */
 export const PRIMER_TEXT_TEAM =
-  'Tenjin is installed in team mode: a team shelf of findings about this project, then the public marketplace behind it. Before real effort on any question that is durable and costly to settle, including this codebase, its services, or a past decision, run `tenjin search "<one sentence>" --json` first; a miss takes a second. Never put a secret, credential, customer, or account name in the question. Skip live data and anything the docs answer in a line.';
+  'Tenjin team mode: a shelf of findings about this project, with the public marketplace behind it. Before real effort on any durable question — this codebase, its services, or a past decision — run `tenjin search "<one sentence>" --json`; a team read is free and a miss takes a second. Use it in research and subagent prompts too. Skip live data and what the docs answer in a line.';
 
 /**
  * The capture ask, raised at Stop once per session that did any research.
@@ -2325,12 +2335,10 @@ const STATS_TIMEOUT_MS = ${PRIMER_STATS_TIMEOUT_MS};
 const PRIMER_TEXT = ${JSON.stringify(PRIMER_TEXT)};
 const PRIMER_TEXT_TEAM = ${JSON.stringify(PRIMER_TEXT_TEAM)};
 
-/** The paragraph for this machine's mode, decided HERE and not at install time:
- *  a machine joins a team shelf by editing config.json, and nothing rewrites an
- *  installed hook script when it does (tenjin-agent#171). The team wording only
- *  applies when there is a private shelf to hold the answers — a secret with
- *  baseUrl still on the marketplace is public mode, exactly as it is for the
- *  capture ask. */
+/** The paragraph for this machine's mode, decided HERE and not at install time
+ *  (why: see the \`PRIMER_TEXT\` docstring). The team wording only applies when
+ *  there is a private shelf to hold the answers — a secret with baseUrl still on
+ *  the marketplace is public mode, exactly as it is for the capture ask. */
 function primerText(config) {
   return teamShelfOrigin(config) === null ? PRIMER_TEXT : PRIMER_TEXT_TEAM;
 }
