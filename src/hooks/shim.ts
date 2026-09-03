@@ -109,7 +109,10 @@ export async function health(port: number, timeoutMs: number = HEALTH_MS): Promi
 /**
  * The env a daemon starts with. Scrubbed: the spawning hook's env carries
  * `CLAUDE_CODE_SESSION_ID`, which would otherwise stamp every session's rows
- * with the first session's id (`session.ts`).
+ * with the first session's id (`session.ts`). `NODE_OPTIONS` is deliberately
+ * NOT kept: a `--require` from one shell would run inside a daemon that serves
+ * every session on the machine. `TMP` rides with `TEMP` because `os.tmpdir()`
+ * reads both on Windows.
  */
 export function daemonEnv(
   dataDir: string,
@@ -128,7 +131,6 @@ export function daemonEnv(
     'http_proxy',
     'https_proxy',
     'no_proxy',
-    'NODE_OPTIONS',
   ];
   const out: NodeJS.ProcessEnv = {};
   for (const k of keep) if (env[k] !== undefined) out[k] = env[k];

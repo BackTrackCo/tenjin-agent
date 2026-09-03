@@ -57,7 +57,7 @@ Checks the local environment, API reachability, API contracts, skill wiring, ses
 
 ### `tenjin daemon start|stop|status`
 
-The loop daemon: one local `node` process per data dir that serves every hook fire on this machine and exits after `loop.idle_exit_min` minutes (default 30) without one. It binds `127.0.0.1` on `loop.port`, or, when that is `null`, a port derived from the data dir path (30000 to 31999), and answers `POST /hook/claude` only with the bearer token in `~/.tenjin/daemon.token`. `GET /health` is open to any local process and reports version, pid, port, uptime, idle time and data dir.
+The loop daemon: one local `node` process per data dir that serves every hook fire on this machine and exits after `loop.idle_exit_min` minutes (default 30) without one. It binds `127.0.0.1` on `loop.port`, or, when that is `null`, a port derived from the data dir path (30000 to 31999), and answers `POST /hook/claude` only with the bearer token in `~/.tenjin/daemon.token` and a `Content-Type: application/json` header (anything else is 401). `GET /health` is open to any local process and reports version, pid, port, uptime, idle time and data dir.
 
 | Subcommand | Effect                                                                                                                                                                               |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

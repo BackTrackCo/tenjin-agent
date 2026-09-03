@@ -252,13 +252,13 @@ describe('health', () => {
 });
 
 describe('daemonEnv', () => {
-  it('keeps PATH/HOME/proxy vars, drops the session id and strangers, sets the data dir', () => {
+  it('keeps PATH/HOME/proxy vars, drops the session id, NODE_OPTIONS and strangers, sets the data dir', () => {
     const out = daemonEnv(dir, {
       PATH: '/usr/bin',
       HOME: '/home/u',
       HTTPS_PROXY: 'http://p:1',
       no_proxy: 'localhost',
-      NODE_OPTIONS: '--max-old-space-size=64',
+      NODE_OPTIONS: '--require=/tmp/instrument.js',
       CLAUDE_CODE_SESSION_ID: 'sess-1',
       TENJIN_DATA_DIR: '/somewhere/else',
       AWS_SECRET_ACCESS_KEY: 'nope',
@@ -269,7 +269,6 @@ describe('daemonEnv', () => {
       HOME: '/home/u',
       HTTPS_PROXY: 'http://p:1',
       no_proxy: 'localhost',
-      NODE_OPTIONS: '--max-old-space-size=64',
       TENJIN_DATA_DIR: dir,
     });
   });

@@ -101,6 +101,10 @@ export async function runFire(
         resolve(skip('deadline'));
       }, deadlineMs);
     });
+    // The question claim is released only while THIS fire holds it as
+    // `asking`: never a `done` verdict `finish` just cached, and never a claim
+    // an earlier fire made (the `cached` path claims nothing).
+    let holdsClaim = false;
     const main = async (): Promise<Outcome> => {
       try {
         arm.before?.(ctx);
@@ -113,19 +117,23 @@ export async function runFire(
         if (gated !== null) {
           result = gated;
         } else {
+          holdsClaim = true;
           const asked = await ask(ctx, plan);
           if (controller.signal.aborted) {
             release(deps.db, actor, plan.question.fingerprint);
+            holdsClaim = false;
             return skip('deadline');
           }
           const definite = asked.legs.length > 0 && asked.legs.every((l) => l.status === 'ok');
           if (asked.answer === null && !definite) {
             release(deps.db, actor, plan.question.fingerprint);
+            holdsClaim = false;
             return skip(
               asked.legs.some((l) => l.status === 'http_429') ? 'rate-server' : 'no-answer',
             );
           }
           finish(deps.db, actor, plan.question.fingerprint, asked.answer, deps.clock());
+          holdsClaim = false;
           result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
         }
         if (result.answer) {
@@ -138,7 +146,7 @@ export async function runFire(
         }
         return result;
       } catch (err) {
-        if (fingerprint !== undefined) release(deps.db, actor, fingerprint);
+        if (holdsClaim && fingerprint !== undefined) release(deps.db, actor, fingerprint);
         return skip('error', reasonOf(err));
       }
     };

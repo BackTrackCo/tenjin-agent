@@ -228,8 +228,12 @@ export const registrar: Registrar = {
   },
   events: {
     'session.start': { native: 'SessionStart', matcher: SESSION_START_MATCHER, canBlock: false },
-    prompt: { native: 'UserPromptSubmit', canBlock: true },
-    'tool.before': { native: 'PreToolUse', canBlock: true },
+    // `canBlock` is where `stop_hook_active` exists: Claude sends the fuse on
+    // Stop and SubagentStop only, and `encode` gates `block` on it, so a block
+    // on a prompt or tool event could never be emitted (today's loop blocks
+    // only at those two events too).
+    prompt: { native: 'UserPromptSubmit', canBlock: false },
+    'tool.before': { native: 'PreToolUse', canBlock: false },
     'tool.after': { native: 'PostToolUse', canBlock: false },
     'agent.start': { native: 'SubagentStart', canBlock: false },
     'agent.stop': { native: 'SubagentStop', canBlock: true },

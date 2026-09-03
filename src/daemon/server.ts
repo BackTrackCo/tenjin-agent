@@ -124,6 +124,10 @@ export function createHookServer(d: ServerDeps): HookServer {
       return;
     }
     inFlight += 1;
+    // The ledger write is deferred past the response, so the request stays
+    // in flight until it has run: `drain()` must not let shutdown close the
+    // db under the last fire's row.
+    let commit: (() => void) | null = null;
     void (async () => {
       try {
         const body = await readBody(req, MAX_BODY_BYTES);
@@ -162,14 +166,23 @@ export function createHookServer(d: ServerDeps): HookServer {
           else send(res, 200, JSON.stringify(encoded));
         }
         // After the response has flushed, never on the harness's clock.
-        setImmediate(() => fire.commit());
+        commit = fire.commit;
       } catch (err) {
         d.deps.log(
           `hook ${m[1]}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
         );
         if (!res.headersSent) send(res, 500);
       } finally {
-        done();
+        const pending = commit;
+        if (pending === null) done();
+        else
+          setImmediate(() => {
+            try {
+              pending();
+            } finally {
+              done();
+            }
+          });
       }
     })();
   });

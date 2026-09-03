@@ -169,6 +169,21 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/**
+ * The ledger row is written AFTER the response flushes (server.ts defers
+ * `commit` past the send), so a reader that opens loop.db the instant a POST
+ * returns can be one row early on a slow runner. Wait for it, briefly.
+ */
+async function waitForFires(n: number, ms = 2000): Promise<number> {
+  const until = Date.now() + ms;
+  let count = countFires();
+  while (count < n && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 20));
+    count = countFires();
+  }
+  return count;
+}
+
 function countFires(): number {
   const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
   try {
@@ -279,7 +294,9 @@ describe('the daemon, cold-started from the real bundle', () => {
     }
   });
 
-  it('writes one fires row per valid event (reason no-question, arm none) except a phantom SubagentStop', () => {
+  it('writes one fires row per valid event (reason no-question, arm none) except a phantom SubagentStop', async () => {
+    const stops = fixtures.filter((f) => f.event === 'SubagentStop').length;
+    await waitForFires(fixtures.length - stops);
     const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
     try {
       const rows = db
@@ -291,7 +308,6 @@ describe('the daemon, cold-started from the real bundle', () => {
         arm: string;
         reason: string;
       }>;
-      const stops = fixtures.filter((f) => f.event === 'SubagentStop').length;
       expect(rows).toHaveLength(fixtures.length - stops);
       for (const r of rows) {
         expect(r.reason).toBe('no-question');
@@ -399,7 +415,7 @@ describe('the daemon, cold-started from the real bundle', () => {
     );
     expect(result.code).toBe(0);
     expect(result.stdout).toBe('');
-    expect(countFires()).toBe(before + 1);
+    expect(await waitForFires(before + 1)).toBe(before + 1);
   });
 
   it('the bind race: a second daemon on the same port exits 0 within 2 s, the first keeps serving', async () => {

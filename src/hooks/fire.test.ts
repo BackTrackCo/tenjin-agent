@@ -219,6 +219,48 @@ describe('runFire: a hit', () => {
     expect(legRows(db, rows[0]!.id)).toEqual([{ shelf: 'team', status: 'ok', outcome: 'hit' }]);
     expect(JSON.parse(getMark(db, LEAD, 'q:fp-hit') ?? 'null')).toMatchObject({ status: 'done' });
   });
+
+  it('a deliver() that throws after the verdict keeps the cached verdict', async () => {
+    // The catch releases only a claim this fire still holds as `asking`;
+    // once `finish` cached the verdict, an error in delivery must not turn
+    // the next identical question back into a paid lookup.
+    const db = await freshDb();
+    let legCalls = 0;
+    const leg = strongLeg('res-x');
+    const counted: Leg = {
+      ...leg,
+      request: (q, b, sig) => {
+        legCalls += 1;
+        return leg.request(q, b, sig);
+      },
+    };
+    let deliverCalls = 0;
+    const arm: Arm = {
+      id: 'throwing-deliver',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text: 'q', fingerprint: 'fp-throw' },
+        stages: [[counted]],
+      }),
+      deliver: () => {
+        deliverCalls += 1;
+        if (deliverCalls === 1) throw new Error('deliver exploded');
+        return { mode: 'inject', text: 'ok', resourceId: 'res-x' };
+      },
+    };
+    const first = await runFire(input(), deps(db, [arm]));
+    first.commit();
+    expect(fireRows(db)[0]).toMatchObject({ reason: 'error' });
+    expect(JSON.parse(getMark(db, LEAD, 'q:fp-throw') ?? 'null')).toMatchObject({ status: 'done' });
+
+    const second = await runFire(input(), deps(db, [arm]));
+    second.commit();
+    // No second lookup: the verdict came from the cache, and the piece was
+    // already marked seen by the first fire before its delivery threw.
+    expect(legCalls).toBe(1);
+    expect(fireRows(db)[1]).toMatchObject({ reason: 'seen' });
+  });
 });
 
 describe('runFire: seen', () => {
