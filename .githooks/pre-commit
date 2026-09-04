@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Local mirror of the CI Prettier gate. Auto-wired by the package.json
 # "prepare" script (sets git config core.hooksPath .githooks on install).
+echo "tenjin-agent pre-commit: generated workspace guidance"
+node scripts/check-workspace-adapters.mjs
+
 echo "tenjin-agent pre-commit: prettier format check"
 if ! pnpm format:check; then
   echo
