@@ -206,6 +206,24 @@ describe('stopDaemon', () => {
     expect(existsSync(daemonPidPath(dataDir))).toBe(true);
   });
 
+  it('removes the file when the recorded pid answers for another data dir', async () => {
+    const port = await healthStub({
+      version: pkg.version,
+      pid: 4242,
+      port: 0,
+      uptime_ms: 0,
+      idle_ms: 0,
+      data_dir: join(dataDir, 'other'),
+      rss: 0,
+    });
+    await writePidFile(4242, port);
+    const signals: (NodeJS.Signals | 0)[] = [];
+    const r = await stopDaemon(dataDir, { kill: (_pid, sig) => void signals.push(sig) });
+    expect(r).toEqual({ state: 'not-running' });
+    expect(signals).toEqual([0]);
+    expect(existsSync(daemonPidPath(dataDir))).toBe(false);
+  });
+
   it('removes the file when a different pid answers on the recorded port', async () => {
     const port = await healthStub({
       version: pkg.version,
