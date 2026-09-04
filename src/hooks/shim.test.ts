@@ -23,7 +23,6 @@ import {
   readPid,
   readToken,
   resolveDataDir,
-  tokenId,
   type PidRecord,
 } from './shim';
 
@@ -79,7 +78,6 @@ async function freePort(): Promise<number> {
 }
 
 function healthBody(port: number, dataDir: string): string {
-  const token = readToken(dataDir);
   return JSON.stringify({
     version: 't',
     pid: process.pid,
@@ -88,7 +86,6 @@ function healthBody(port: number, dataDir: string): string {
     idle_ms: 0,
     data_dir: dataDir,
     rss: 0,
-    ...(token === null ? {} : { token_id: tokenId(token) }),
   });
 }
 
@@ -134,14 +131,9 @@ let port = 0;
 const srv = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'content-type': 'application/json' });
-    let token_id;
-    try {
-      const tok = readFileSync(join(dataDir, 'daemon.token'), 'utf8').trim();
-      token_id = createHash('sha256').update('tenjin-daemon:' + tok).digest('hex').slice(0, 16);
-    } catch {}
     res.end(JSON.stringify({
       version: 't', pid: process.pid, port, uptime_ms: 0, idle_ms: 0, data_dir: dataDir, rss: 0,
-      token_id, saw_session: process.env.CLAUDE_CODE_SESSION_ID ?? null,
+      saw_session: process.env.CLAUDE_CODE_SESSION_ID ?? null,
     }));
     return;
   }

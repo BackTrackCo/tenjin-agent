@@ -32,7 +32,7 @@ import {
   SLEEP_GRACE_MS,
   SLEEP_REARM_MS,
 } from '../hooks/constants';
-import { tokenId, type Health } from '../hooks/shim';
+import type { Health } from '../hooks/shim';
 import { openLoopDb } from '../hooks/store';
 import { daemonLogPath, daemonPidPath } from '../lib/paths';
 
@@ -177,10 +177,8 @@ describe('writePid / removePidIfMine', () => {
 
 describe('bind', () => {
   const VERSION = '0.1.0-test';
-  const TOKEN = 'tok-for-bind';
   const healthOf = (over: Partial<Health>): Health => ({
     version: VERSION,
-    token_id: tokenId(TOKEN),
     pid: 999,
     port: 0,
     uptime_ms: 1,
@@ -194,7 +192,7 @@ describe('bind', () => {
     const dir = await tempDir();
     const server = trackedServer();
     const probe = vi.fn(async () => null);
-    const r = await bind(server, 0, dir, VERSION, TOKEN, probe);
+    const r = await bind(server, 0, dir, VERSION, probe);
     expect(r.kind).toBe('bound');
     expect(r.port).toBeGreaterThan(0);
     const addr = server.address();
@@ -207,24 +205,16 @@ describe('bind', () => {
     const dir = await tempDir();
     const port = await listening(trackedServer());
     const probe = vi.fn(async () => healthOf({ data_dir: dir, port }));
-    const r = await bind(trackedServer(), port, dir, VERSION, TOKEN, probe);
+    const r = await bind(trackedServer(), port, dir, VERSION, probe);
     expect(r).toEqual({ kind: 'peer', port, version: VERSION });
     expect(probe).toHaveBeenCalledWith(port);
-  });
-
-  it('reports foreign when the holder imitates /health without the token id', async () => {
-    const dir = await tempDir();
-    const port = await listening(trackedServer());
-    const probe = async () => healthOf({ data_dir: dir, port, token_id: 'not-ours' });
-    const r = await bind(trackedServer(), port, dir, VERSION, TOKEN, probe);
-    expect(r.kind).toBe('foreign');
   });
 
   it('reports foreign when the holder is a different version', async () => {
     const dir = await tempDir();
     const port = await listening(trackedServer());
     const probe = async () => healthOf({ data_dir: dir, version: '9.9.9', pid: 777 });
-    const r = await bind(trackedServer(), port, dir, VERSION, TOKEN, probe);
+    const r = await bind(trackedServer(), port, dir, VERSION, probe);
     expect(r).toEqual({ kind: 'foreign', port, detail: 'daemon 9.9.9 (pid 777) holds the port' });
   });
 
@@ -232,7 +222,7 @@ describe('bind', () => {
     const dir = await tempDir();
     const port = await listening(trackedServer());
     const probe = async () => healthOf({ data_dir: '/some/other/profile' });
-    const r = await bind(trackedServer(), port, dir, VERSION, TOKEN, probe);
+    const r = await bind(trackedServer(), port, dir, VERSION, probe);
     expect(r).toEqual({
       kind: 'foreign',
       port,
@@ -243,7 +233,7 @@ describe('bind', () => {
   it('reports foreign with detail when the probe returns null', async () => {
     const dir = await tempDir();
     const port = await listening(trackedServer());
-    const r = await bind(trackedServer(), port, dir, VERSION, TOKEN, async () => null);
+    const r = await bind(trackedServer(), port, dir, VERSION, async () => null);
     expect(r).toEqual({ kind: 'foreign', port, detail: 'port held by a foreign listener' });
   });
 
@@ -263,7 +253,7 @@ describe('bind', () => {
       }
     }
     const probe = vi.fn(async () => null);
-    const r = await bind(new Refusing() as unknown as Server, 30_500, dir, VERSION, TOKEN, probe);
+    const r = await bind(new Refusing() as unknown as Server, 30_500, dir, VERSION, probe);
     expect(r).toEqual({ kind: 'foreign', port: 30_500, detail: 'EACCES: permission denied' });
     expect(probe).not.toHaveBeenCalled();
   });

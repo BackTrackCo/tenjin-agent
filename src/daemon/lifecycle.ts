@@ -12,7 +12,7 @@ import {
 import type { Server } from 'node:http';
 import type { LoopDb } from '../hooks/store';
 import { runRetention } from './retention';
-import { health, tokenId, type PidRecord } from '../hooks/shim';
+import { health, type PidRecord } from '../hooks/shim';
 import {
   LOG_TRUNCATE_BYTES,
   PORT_BASE,
@@ -96,7 +96,6 @@ export function bind(
   port: number,
   dataDir: string,
   version: string,
-  token: string,
   probe: typeof health = health,
 ): Promise<BindResult> {
   return new Promise((resolve) => {
@@ -107,9 +106,7 @@ export function bind(
         return;
       }
       void probe(port).then((h) => {
-        // `data_dir` and `version` are guessable; the token id is not. A
-        // listener that cannot produce it is foreign, however it answers.
-        if (h !== null && h.data_dir === dataDir && h.token_id === tokenId(token)) {
+        if (h !== null && h.data_dir === dataDir) {
           if (h.version === version) resolve({ kind: 'peer', port, version: h.version });
           else
             resolve({

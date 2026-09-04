@@ -8,7 +8,6 @@ import {
   MAX_BODY_BYTES,
   REQUEST_TIMEOUT_MS,
 } from '../hooks/constants';
-import { tokenId } from '../hooks/shim';
 import { authorized } from './auth';
 
 /**
@@ -70,12 +69,6 @@ function readBody(req: IncomingMessage, max: number): Promise<string | null> {
   });
 }
 
-function loopbackHost(host: string | undefined): boolean {
-  if (host === undefined) return false;
-  const name = host.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-  return name === '127.0.0.1' || name === 'localhost' || name === '::1';
-}
-
 function send(res: ServerResponse, status: number, body?: string): void {
   if (body === undefined) {
     res.writeHead(status).end();
@@ -99,12 +92,6 @@ export function createHookServer(d: ServerDeps): HookServer {
   const server = createServer((req, res) => {
     d.onRequest();
     const url = req.url ?? '/';
-    // A DNS-rebinding page is same-origin to us and reads `/health` with no
-    // preflight; a Host that is not the loopback address is not a local caller.
-    if (!loopbackHost(req.headers.host)) {
-      send(res, 404);
-      return;
-    }
     if (req.method === 'GET' && url === '/health') {
       const now = d.deps.clock();
       send(
@@ -118,7 +105,6 @@ export function createHookServer(d: ServerDeps): HookServer {
           idle_ms: now - d.lastRequestAt(),
           data_dir: d.dataDir,
           rss: process.memoryUsage().rss,
-          token_id: tokenId(d.token),
         }),
       );
       return;

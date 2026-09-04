@@ -63,7 +63,6 @@ function makeCtx(): CommandContext {
 function fakeDaemonSource(version: string): string {
   return `
 import { createServer } from 'node:http';
-import { createHash } from 'node:crypto';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const dataDir = process.env.TENJIN_DATA_DIR;
@@ -77,11 +76,6 @@ const server = createServer((req, res) => {
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
-  let token_id;
-  try {
-    const tok = readFileSync(join(dataDir, 'daemon.token'), 'utf8').trim();
-    token_id = createHash('sha256').update('tenjin-daemon:' + tok).digest('hex').slice(0, 16);
-  } catch {}
   res.end(JSON.stringify({
     version: ${JSON.stringify(version)},
     pid: process.pid,
@@ -90,7 +84,6 @@ const server = createServer((req, res) => {
     idle_ms: 0,
     data_dir: dataDir,
     rss: process.memoryUsage().rss,
-    token_id,
   }));
 });
 server.listen(0, '127.0.0.1', () => {
@@ -201,8 +194,28 @@ describe('stopDaemon', () => {
     expect(existsSync(daemonPidPath(dataDir))).toBe(false);
   });
 
-  it('reports stopped when the process exits after SIGTERM', async () => {
+  it('leaves a live pid alone when nothing answers on the recorded port', async () => {
+    // A crash-left pid file naming a reused pid: the process is alive but is
+    // not our daemon. No signal on hearsay; the file goes, the pid is reported.
     await writePidFile(4242, 1);
+    const signals: (NodeJS.Signals | 0)[] = [];
+    const r = await stopDaemon(dataDir, { kill: (_pid, sig) => void signals.push(sig) });
+    expect(r).toEqual({ state: 'not-running', stalePid: 4242 });
+    expect(signals).toEqual([0]);
+    expect(existsSync(daemonPidPath(dataDir))).toBe(false);
+  });
+
+  it('reports stopped when the process exits after SIGTERM', async () => {
+    const port = await healthStub({
+      version: pkg.version,
+      pid: 4242,
+      port: 0,
+      uptime_ms: 0,
+      idle_ms: 0,
+      data_dir: dataDir,
+      rss: 0,
+    });
+    await writePidFile(4242, port);
     const signals: (NodeJS.Signals | 0)[] = [];
     let polls = 0;
     const r = await stopDaemon(dataDir, {
@@ -222,7 +235,16 @@ describe('stopDaemon', () => {
   });
 
   it('sends SIGKILL after STOP_GRACE_MS when the process never exits', async () => {
-    await writePidFile(4242, 1);
+    const port = await healthStub({
+      version: pkg.version,
+      pid: 4242,
+      port: 0,
+      uptime_ms: 0,
+      idle_ms: 0,
+      data_dir: dataDir,
+      rss: 0,
+    });
+    await writePidFile(4242, port);
     const signals: (NodeJS.Signals | 0)[] = [];
     let clock = 1_000_000;
     let killedAt = 0;
@@ -251,6 +273,20 @@ describe('runDaemonStop', () => {
     expect((await runDaemonStop(ctx)).humanLines).toEqual(['not running']);
 
     await writePidFile(4242, 1);
+    const stale = await runDaemonStop(ctx, { kill: () => {} });
+    expect(stale.data).toEqual({ state: 'not-running', stalePid: 4242 });
+    expect(stale.humanLines?.[0]).toMatch(/^not running: nothing answered .* pid 4242 left alone/);
+
+    const port = await healthStub({
+      version: pkg.version,
+      pid: 4242,
+      port: 0,
+      uptime_ms: 0,
+      idle_ms: 0,
+      data_dir: dataDir,
+      rss: 0,
+    });
+    await writePidFile(4242, port);
     let clock = 0;
     const killed = await runDaemonStop(ctx, {
       kill: () => {},

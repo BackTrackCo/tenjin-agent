@@ -8,7 +8,6 @@ import { STOP_GRACE_MS } from '../hooks/constants';
 import {
   ensureDaemon,
   health,
-  isOurs,
   readPid,
   readToken,
   type Health,
@@ -81,7 +80,7 @@ function alive(pid: number, kill: NonNullable<DaemonDeps['kill']>): boolean {
 export async function stopDaemon(
   dataDir: string,
   deps: DaemonDeps = {},
-): Promise<{ state: 'stopped' | 'killed' | 'not-running'; pid?: number }> {
+): Promise<{ state: 'stopped' | 'killed' | 'not-running'; pid?: number; stalePid?: number }> {
   const kill = deps.kill ?? ((pid, sig) => process.kill(pid, sig));
   const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => Date.now());
@@ -90,14 +89,14 @@ export async function stopDaemon(
     if (rec !== null) rmSync(daemonPidPath(dataDir), { force: true });
     return { state: 'not-running' };
   }
-  // A pid file a crash left behind can name a reused pid. If something answers
-  // on the recorded port and it is not that pid, the file is stale and the
-  // process a stranger; a port that does not answer is a hung daemon, which
-  // the signal is for.
+  // Signal only a process `/health` confirms is our daemon. A pid file a
+  // crash left behind can name a reused pid, and a signal on hearsay could
+  // kill a stranger; the file is removed and the pid reported instead, so a
+  // genuinely hung daemon is one `kill` away by hand.
   const h = await health(rec.port);
-  if (h !== null && h.pid !== rec.pid) {
+  if (h === null || h.pid !== rec.pid) {
     rmSync(daemonPidPath(dataDir), { force: true });
-    return { state: 'not-running' };
+    return { state: 'not-running', stalePid: rec.pid };
   }
   kill(rec.pid, 'SIGTERM');
   const until = now() + STOP_GRACE_MS;
@@ -175,7 +174,9 @@ export async function runDaemonStop(
   const r = await stopDaemon(ctx.dataDir, deps);
   const line =
     r.state === 'not-running'
-      ? 'not running'
+      ? r.stalePid === undefined
+        ? 'not running'
+        : `not running: nothing answered on the recorded port; removed the stale pid file (pid ${r.stalePid} left alone; kill it by hand if it is a hung daemon)`
       : r.state === 'stopped'
         ? `stopped pid ${r.pid}`
         : `killed pid ${r.pid} (did not exit within ${STOP_GRACE_MS} ms)`;
@@ -185,7 +186,7 @@ export async function runDaemonStop(
 export async function runDaemonStatus(ctx: CommandContext): Promise<CommandResult> {
   const rec = readPid(ctx.dataDir);
   const h = rec === null ? null : await health(rec.port);
-  if (!isOurs(h, ctx.dataDir, readToken(ctx.dataDir))) {
+  if (h === null || h.data_dir !== ctx.dataDir) {
     return {
       data: { state: 'not-running', pidFile: rec, tokenPresent: readToken(ctx.dataDir) !== null },
       humanLines: ['not running'],

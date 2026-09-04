@@ -160,7 +160,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => void exit(0, false, 'SIGTERM'));
   process.on('SIGINT', () => void exit(0, false, 'SIGINT'));
 
-  const bound = await bind(hook.server, port, dataDir, version, token);
+  const bound = await bind(hook.server, port, dataDir, version);
   if (bound.kind === 'peer') {
     // Lost a benign race to a daemon just like us; it serves, we go.
     db.close();

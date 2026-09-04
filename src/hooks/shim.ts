@@ -1,5 +1,4 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import {
   appendFileSync,
   closeSync,
@@ -12,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   daemonBundlePath,
   daemonLogPath,
@@ -48,29 +47,12 @@ export interface Health {
   idle_ms: number;
   data_dir: string;
   rss: number;
-  /** {@link tokenId} of the daemon's token: proof it holds OUR token, since
-   *  `data_dir` and `version` are guessable by any local account. */
-  token_id?: string;
 }
 
-/**
- * What `/health` publishes instead of the token: a truncated hash a holder can
- * verify and nobody can invert. A listener on our derived port that cannot
- * produce it is a foreign process, however well it imitates `/health`.
- */
-export function tokenId(token: string): string {
-  return createHash('sha256').update(`tenjin-daemon:${token}`).digest('hex').slice(0, 16);
-}
-
-/** Is this health record OUR daemon: same data dir, and the token's id when we hold a token? */
-export function isOurs(h: Health | null, dataDir: string, token: string | null): h is Health {
-  if (h === null || h.data_dir !== dataDir) return false;
-  return token === null || h.token_id === tokenId(token);
-}
-
+/** Absolute, so a relative `TENJIN_DATA_DIR` survives the daemon's `cwd` being the data dir. */
 export function resolveDataDir(env: NodeJS.ProcessEnv = process.env): string {
   const o = env.TENJIN_DATA_DIR;
-  return o !== undefined && o.length > 0 ? o : join(homedir(), '.tenjin');
+  return o !== undefined && o.length > 0 ? resolve(o) : join(homedir(), '.tenjin');
 }
 
 export function readPid(dataDir: string): PidRecord | null {
@@ -206,11 +188,10 @@ export async function ensureDaemon(
   opts: { env?: NodeJS.ProcessEnv; spawnMs?: number; now?: () => number } = {},
 ): Promise<EnsureResult> {
   const now = opts.now ?? (() => Date.now());
-  const token = readToken(dataDir);
   const pid = readPid(dataDir);
   if (pid !== null) {
     const h = await health(pid.port);
-    if (isOurs(h, dataDir, token)) return { ok: true, health: h, spawned: false };
+    if (h !== null && h.data_dir === dataDir) return { ok: true, health: h, spawned: false };
   }
   if (!existsSync(daemonBundlePath(dataDir)))
     return { ok: false, reason: 'no bundle; run `tenjin daemon start`' };
@@ -229,7 +210,7 @@ export async function ensureDaemon(
     const fresh = readPid(dataDir);
     if (fresh === null || (pid !== null && fresh.started_at === pid.started_at)) continue;
     const h = await health(fresh.port);
-    if (isOurs(h, dataDir, token)) {
+    if (h !== null && h.data_dir === dataDir) {
       try {
         unlinkSync(daemonSpawnPath(dataDir));
       } catch {
