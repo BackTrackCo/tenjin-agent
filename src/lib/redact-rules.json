@@ -62,11 +62,11 @@
       "id": "secret-assignment",
       "tier": "warn",
       "scopes": ["query", "publish", "team"],
-      "description": "Secret-named assignment (API_KEY=, password:, token=, and the JSON form \"password\": \"...\") with a literal value. The optional quote after the name is how gitleaks' generic rule reads JSON and YAML alike; the separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
+      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value. NOT the JSON-quoted form (\"password\": \"...\"): reading a quote after the name turned ordinary config keys into findings ({\"credentials\": \"include\"}, {\"max_tokens\": 128000}, {\"tokenizer\": \"cl100k_base\"}), and a JSON key is an identifier the shelf ranks on (owner decision, review round 6). The separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
       "source": "tenjin",
       "match": {
         "kind": "regex",
-        "pattern": "\\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|SUBSCRIPTION[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)[\"']?[ \\t]*[:=][ \\t]*(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "pattern": "\\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|SUBSCRIPTION[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)[ \\t]*[:=][ \\t]*(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
         "flags": "gi"
       },
       "excerpt": {
@@ -196,11 +196,11 @@
       "id": "openai-key",
       "tier": "block",
       "scopes": ["query", "publish", "team"],
-      "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block. Project, service-account and admin keys carry `_` and `-` throughout the body, so the prefixed forms take the wider class; the bare form keeps the digit requirement that tells a key from a word.",
+      "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block. Project, service-account and admin keys carry `_` and `-` throughout the body, so the prefixed branch takes the wider class and its own trailing guard; the bare branch keeps the digit requirement and its own guard. The guards live INSIDE each branch: a shared guard outside the alternation made a classic key followed by `-old` fail outright (review round 6).",
       "source": "gitleaks:openai-api-key",
       "match": {
         "kind": "regex",
-        "pattern": "\\bsk-(?!ant-)(?:(?:proj|svcacct|admin)-[0-9A-Za-z_-]{20,}|(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,})(?![0-9A-Za-z_-])",
+        "pattern": "\\bsk-(?!ant-)(?:(?:proj|svcacct|admin)-[0-9A-Za-z_-]{20,}(?![0-9A-Za-z_-])|(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z]))",
         "flags": "g"
       },
       "excerpt": {

@@ -68,7 +68,8 @@
     ["AKIAIO", "SFODNN", "7EXAMPLE"],
     ["3f9a1c77b2", "e04d5a8c6b", "1e2f9d0a4b7c"],
     ["sk-proj-SevzWEV_NmNn9", "abcdefghijklmnopqrstu", "vwxyz0123456789ABCDEFGH"],
-    ["ghp_abcdefghi", "jklmnopqrstuv", "wxyz0123456789"]
+    ["ghp_abcdefghi", "jklmnopqrstuv", "wxyz0123456789"],
+    ["sk-QzXvWuTsRqPoNm", "LkJiHgFeDcBa01234", "56789ZyXwVuTsRqPo"]
   ],
   "cases": [
     {
@@ -1061,18 +1062,17 @@
       "secret": "%%t33%%"
     },
     {
-      "id": "secret-assignment/pos-json-quoted",
-      "scope": "publish",
-      "label": "positive",
-      "input": "{\"aws_secret_access_key\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\", \"region\": \"us-east-1\"}",
-      "expect_ids": ["secret-assignment"],
-      "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-    },
-    {
       "id": "secret-assignment/neg-json-schema-types",
       "scope": "publish",
       "label": "negative",
       "input": "{\"password\": {\"type\": \"string\"}, \"token\": null}",
+      "expect_ids": []
+    },
+    {
+      "id": "secret-assignment/neg-json-config-keys",
+      "scope": "publish",
+      "label": "negative",
+      "input": "fetch(url, {\"credentials\": \"include\"}) with {\"max_tokens\": 128000, \"tokenizer\": \"cl100k_base\", \"secret_scanning\": \"enabled\", \"refresh_token_ttl\": 604800}",
       "expect_ids": []
     },
     {
@@ -1206,13 +1206,6 @@
       "expect_text": "token=[redacted 40 chars] fails"
     },
     {
-      "id": "mask/json-quoted-key",
-      "scope": "query",
-      "label": "positive",
-      "input": "{\"password\": \"hunter2secret\", \"user\": \"app\"}",
-      "expect_text": "{\"password=[redacted 13 chars], \"user\": \"app\"}"
-    },
-    {
       "id": "mask/openai-project-key",
       "scope": "query",
       "label": "positive",
@@ -1246,6 +1239,20 @@
       "label": "negative",
       "input": "interface X { password: string; token?: number }",
       "expect_text": "interface X { password: string; token?: number }"
+    },
+    {
+      "id": "mask/openai-classic-key-then-separator",
+      "scope": "query",
+      "label": "positive",
+      "input": "rotate %%t48%%-old and %%t48%%_bak today",
+      "expect_text": "rotate sk-…[redacted 48 chars]-old and sk-…[redacted 48 chars]_bak today"
+    },
+    {
+      "id": "mask/keeps-json-config-keys",
+      "scope": "query",
+      "label": "negative",
+      "input": "{\"credentials\": \"include\", \"max_tokens\": 128000, \"tokenizer\": \"cl100k_base\", \"temperature\": 0}",
+      "expect_text": "{\"credentials\": \"include\", \"max_tokens\": 128000, \"tokenizer\": \"cl100k_base\", \"temperature\": 0}"
     }
   ]
 }

@@ -8,8 +8,7 @@ scope)` is the publish scan with the audience as a parameter (`publish` reports 
 filter nothing), and `mask(text)` is the new query-side verb the hook templates render inline
 from the same table. `redact-rules.json` carries `scopes: ('query' | 'publish' | 'team')[]` per
 rule instead of a `teamSurvives` flag; `secret-assignment` gains a second entry for the
-space-separated `--api-key <v>` flag form, and reads a JSON-quoted name (`"password": "…"`)
-the way gitleaks does, so a flag-passed or JSON-dumped key is caught on a team shelf
+space-separated `--api-key <v>` flag form, so a flag-passed key is caught on a team shelf
 (tenjin-agent#281).
 One fixture set, `redact.fixtures.json`, replaces `scan-corpus.json`.
 
