@@ -272,7 +272,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
   addGlobalFlags(daemon.command('stop'))
-    .description('Stop the daemon: SIGTERM by pid, then SIGKILL after 3 s')
+    .description(
+      'Stop the daemon: SIGTERM once /health confirms the pid in daemon.pid, then SIGKILL after 3 s; a pid that does not answer is left alone and printed',
+    )
     .action(async function (this: Command) {
       await runCommand('daemon stop', this, async (ctx) => {
         const { runDaemonStop } = await import('./commands/daemon');

@@ -96,7 +96,7 @@ export async function stopDaemon(
   // a busy daemon that missed one 200 ms probe must not be orphaned without
   // a record (the next start would lose the bind to it and exit quietly).
   const h = await health(rec.port);
-  if (h !== null && h.pid !== rec.pid) {
+  if (h !== null && (h.pid !== rec.pid || h.data_dir !== dataDir)) {
     rmSync(daemonPidPath(dataDir), { force: true });
     return { state: 'not-running' };
   }
@@ -135,9 +135,11 @@ export async function runDaemonStart(
   const rec = readPid(dataDir);
   const running = rec === null ? null : await health(rec.port);
   let replaced: PidRecord | null = null;
+  let unconfirmed: number | null = null;
   if (running !== null && running.data_dir === dataDir && running.version !== pkg.version) {
-    await stopDaemon(dataDir, deps);
-    replaced = rec;
+    const stopped = await stopDaemon(dataDir, deps);
+    if (stopped.state === 'stopped' || stopped.state === 'killed') replaced = rec;
+    else if (stopped.state === 'unconfirmed') unconfirmed = stopped.pid ?? null;
   }
   const ensured = await ensureDaemon(dataDir, {
     ...(deps.env ? { env: deps.env } : {}),
@@ -165,6 +167,11 @@ export async function runDaemonStart(
         ? `started daemon: pid ${h.pid}, port ${h.port}, v${h.version}`
         : `already running: pid ${h.pid}, port ${h.port}, v${h.version}`,
       ...(replaced ? [`stopped previous daemon pid ${replaced.pid}`] : []),
+      ...(unconfirmed !== null
+        ? [
+            `previous daemon pid ${unconfirmed} did not answer /health and was left alone; run \`tenjin daemon start\` again`,
+          ]
+        : []),
       ...(written.length > 0 ? [`wrote ${written.length} file(s) under ${hooksDir(dataDir)}`] : []),
     ],
   };
