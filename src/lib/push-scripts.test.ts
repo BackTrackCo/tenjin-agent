@@ -7858,6 +7858,75 @@ describe('the subagent arm (SubagentStop)', () => {
   });
 
   /**
+   * THE TITLE IS SPLIT OFF HERE, ABOVE THE FLATTENING (round-2 review, major 1).
+   *
+   * The ask asks the child for a `# ` first line, and the newline that ends it
+   * is the only title boundary anything will ever have: `scrub` collapses every
+   * whitespace run and `clean` maps the rest to spaces, so a publish-time
+   * derivation had to guess a cut and rewrite the body around it. What these pin
+   * is that the child's line becomes a field of its own and the body under it
+   * keeps every character, on one line.
+   */
+  it('stores the fence heading as a title and the finding under it whole', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await workingChild();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({
+        stop_hook_active: true,
+        last_assistant_message: answer('# ox 0.14 keeps Bytes.from\n' + FINDING),
+      }),
+    );
+    expect((await stopRows()).find((r) => r.kind === 'finding')).toMatchObject({
+      title: 'ox 0.14 keeps Bytes.from',
+      body: FINDING,
+    });
+  });
+
+  /** NOTHING IS DROPPED when the heading is too long to be a title: the whole
+   *  block stays the body, marker included, and the empty title leaves the
+   *  publish path to derive one without taking anything out. */
+  it('keeps the whole block when the heading is too long to be a title', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await workingChild();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+    const runaway = '# ' + 'word '.repeat(40).trim();
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ stop_hook_active: true, last_assistant_message: answer(runaway + '\n' + FINDING) }),
+    );
+    expect((await stopRows()).find((r) => r.kind === 'finding')).toMatchObject({
+      title: '',
+      body: runaway + ' ' + FINDING,
+    });
+  });
+
+  /** And when the child wrote a heading and nothing under it, the heading is the
+   *  finding: it stays in the body rather than becoming a title with an empty
+   *  body behind it. */
+  it('keeps a heading with nothing under it as the body', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await workingChild();
+    await runScript(pushSubagentHookScript(dataDir), stop());
+    await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({
+        stop_hook_active: true,
+        last_assistant_message: answer('# ox 0.14 keeps Bytes.from'),
+      }),
+    );
+    expect((await stopRows()).find((r) => r.kind === 'finding')).toMatchObject({
+      title: '',
+      body: '# ox 0.14 keeps Bytes.from',
+    });
+  });
+
+  /**
    * secretsOnly (owner policy, tenjin-agent#197 rework): a finding is
    * published knowledge, and a path or a git SHA in it is a search key for the
    * team/public shelf, not an address to hide. Only a credential-shaped token
@@ -8172,8 +8241,9 @@ describe('the subagent arm (SubagentStop)', () => {
    * belonged to no child: an empty `agent_type`, a transcript path with no file
    * behind it, no `SubagentStart` row, and an agent id in neither transcript.
    * They took 26 of the 29 asks that week, because the arming signal was
-   * session-wide and the budget claim was first-come. Each of the three marks
-   * refuses on its own, because each is a harness detail a release may change.
+   * session-wide and the budget claim was first-come. All four marks agreed on
+   * every row measured, so a phantom is judged on the payload it arrived with
+   * and a start row clears it outright (the test below).
    */
   it('writes nothing at all for a phantom stop', async () => {
     await captureOn();
@@ -8181,24 +8251,19 @@ describe('the subagent arm (SubagentStop)', () => {
     // The session has evidence to spare: only the phantom marks refuse here.
     await edited('p1');
     await edited('p2');
-    await edited('p3');
 
-    // 1. No SubagentStart row for this agent id.
-    const noStart = await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: 'p1' }));
-    // 2. An empty agent_type.
-    await started('p2');
+    // 1. An empty agent_type, with no start row behind it.
     const noType = await runScript(
       pushSubagentHookScript(dataDir),
-      stop({ agent_id: 'p2', agent_type: '' }),
+      stop({ agent_id: 'p1', agent_type: '' }),
     );
-    // 3. A transcript path with no file behind it.
-    await started('p3');
+    // 2. A transcript path with no file behind it, likewise.
     const noFile = await runScript(
       pushSubagentHookScript(dataDir),
-      stop({ agent_id: 'p3', agent_transcript_path: join(scriptDir, 'never-written.jsonl') }),
+      stop({ agent_id: 'p2', agent_transcript_path: join(scriptDir, 'never-written.jsonl') }),
     );
 
-    for (const run of [noStart, noType, noFile]) {
+    for (const run of [noType, noFile]) {
       expect(run.code).toBe(0);
       expect(run.stdout).toBe('');
       expect(run.stderr).toBe('');
@@ -8209,6 +8274,65 @@ describe('the subagent arm (SubagentStop)', () => {
     // And nothing was claimed, so the session's one ask is still there for a
     // real child. This is the 26-of-29 defect, as a property.
     expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
+  });
+
+  /**
+   * A START ROW IS EXCULPATORY (round-2 review, major 2).
+   *
+   * The marks are a conjunction in every measurement, so ORing them classifies
+   * the same rows while failing the wrong way: one undocumented payload field
+   * renamed in a Claude Code release, or an `EACCES` on the transcript directory
+   * that `pathExists` cannot tell from a missing file, would drop every real
+   * child in the fleet and read as "no subagents ran". The start row is the one
+   * mark this codebase writes itself, so a child this session saw start keeps
+   * its row whatever the stop payload says.
+   */
+  it('keeps a started child even when its stop payload loses a mark', async () => {
+    await captureOn();
+    await started('a1');
+
+    const noType = await runScript(pushSubagentHookScript(dataDir), stop({ agent_type: '' }));
+    const noFile = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ agent_transcript_path: join(scriptDir, 'never-written.jsonl') }),
+    );
+
+    expect(noType.stdout).toBe('');
+    expect(noFile.stdout).toBe('');
+    // Counted, with the ordinary reason: this child did no work, so it is not
+    // asked, but its end is still a fact the funnel has a denominator for.
+    expect(await stopRows()).toMatchObject([
+      { kind: 'lifecycle', reason: 'no-evidence', agentId: 'a1' },
+      { kind: 'lifecycle', reason: 'no-evidence', agentId: 'a1' },
+    ]);
+  });
+
+  /**
+   * AND THE HARVEST SURVIVES IT, which is the sharper half. A child that was
+   * blocked, spent its turn writing the fenced finding and stopped again would
+   * lose that finding along with its row if one payload field failed on the
+   * re-stop.
+   */
+  it('still harvests from an asked child whose re-stop payload loses a mark', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await workingChild();
+
+    expect(blocked(await runScript(pushSubagentHookScript(dataDir), stop()))).not.toBeNull();
+    const back = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({
+        agent_type: '',
+        stop_hook_active: true,
+        last_assistant_message: answer('# Pin the resolver\n' + FINDING),
+      }),
+    );
+    expect(back.stdout).toBe('');
+    expect(await stopRows()).toMatchObject([
+      { kind: 'lifecycle', reason: 'asked' },
+      { kind: 'finding', title: 'Pin the resolver', body: FINDING },
+      { kind: 'lifecycle', reason: 'captured' },
+    ]);
   });
 
   /**

@@ -1331,6 +1331,14 @@ const STATE_AGENT_FINDING_PREFIX = 'finding:agent:';
  * \`(session, at)\`; a hook that may block must not be the one place that scans
  * a table that never shrinks, so the start arm leaves a primary-key row and
  * the stop arm reads it by key.
+ *
+ * AND NOTHING PRUNES IT (round-2 review, minor 5). This prefix appears in no
+ * \`pruneStatePrefix\` call, so it grows one row per child per session for as
+ * long as \`session_state\` lives: about 291 real children a week on the measured
+ * machine, which is a rounding error beside the 2,297 \`events\` rows the phantom
+ * exit stops writing over the same week, and the redesign's PR E deletes this
+ * store outright. Accepted on those two numbers, stated here rather than left
+ * for the next reader to rediscover.
  */
 const STATE_AGENT_START_PREFIX = 'start:agent:';
 /**
@@ -2638,13 +2646,21 @@ function agentStarted(sessionId, agentId) {
  * behind it. Pass evidence therefore waits for a marker of its own; edits cover
  * the 45 measured children that held a finding and were never asked.
  *
- * INDEX-BACKED AND BOUNDED AT ONE ROW. This is a primary-key range read under
- * \`(session, key)\` and it stops at the first row inside the window, which is
- * what makes it safe in a hook that can block. It applies no \`isTrackedPath\`
- * filter: that rule belongs to the failure arm's close ("the thing that failed
- * here is the thing that was fixed here"), while the question here is only
- * whether this child touched anything, and filtering would cost the read its
- * one-row bound.
+ * INDEX-BACKED, AND BOUNDED BY THIS CHILD'S OWN EDITS — not by one row
+ * (round-2 review, minor 3). \`statePrefixSince\` ends in \`ORDER BY at DESC LIMIT
+ * ?\`, and the index is the primary key \`(session, key)\`, so SQLite takes an
+ * index range over this agent's \`edited:\` keys and sorts them in a temp B-tree
+ * before handing back the one row \`LIMIT 1\` asks for. The range is the number of
+ * distinct paths this child edited, which is what makes it safe in a hook that
+ * can block; the \`LIMIT\` bounds what crosses back, not what is read.
+ *
+ * NO \`isTrackedPath\` FILTER, and not for the cost: the filter is a decision
+ * about what counts as work, and the store has no cwd on an \`edited:\` marker to
+ * apply it with. As it stands a child that wrote one scratch file reads as
+ * having done work and can spend the session's single ask. Naming that here
+ * because it is the open half: "the thing that failed here is the thing that was
+ * fixed here" belongs to the failure arm's close, and the owner decides whether
+ * the capture gate wants the same rule.
  */
 function agentHasActivity(sessionId, agentId, sinceMs) {
   return (

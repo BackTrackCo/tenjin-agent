@@ -51,6 +51,15 @@ export interface ChildFinding {
   agentId: string | null;
   /** The search whose open loop signalled the ask this finding answers. */
   searchId: string | null;
+  /**
+   * The child's own `# ` title line, split off the block at capture BEFORE the
+   * body was flattened to one line (`splitFinding` in lib/push-scripts.ts).
+   *
+   * Null for a row a build older than tenjin-agent#228 PR 1 wrote, and for a
+   * block whose first line was no title: {@link findingDocument} derives one
+   * there without taking anything out of the body.
+   */
+  title: string | null;
   body: string;
 }
 
@@ -95,6 +104,7 @@ function rowToFinding(row: Record<string, unknown>): ChildFinding | null {
     // this parse has always reported.
     agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
     searchId: typeof fields.searchId === 'string' ? fields.searchId : null,
+    title: typeof fields.title === 'string' && fields.title !== '' ? fields.title : null,
     body: typeof fields.body === 'string' ? fields.body : '',
   };
 }
@@ -167,51 +177,48 @@ export function describeChildFinding(finding: ChildFinding): string {
 }
 
 /**
- * How long a derived title may run. Well under the server's own 200, because a
- * title cut at the limit reads as a truncation and a short one reads as a title.
+ * How long a title may run, at capture and in the fallback below. Well under the
+ * server's own 200, because a title cut at the limit reads as a truncation and a
+ * short one reads as a title. Read by lib/push-scripts.ts, which substitutes it
+ * into the generated subagent script, so the split and the fallback agree.
  */
-const FINDING_TITLE_MAX = 120;
+export const FINDING_TITLE_MAX = 120;
 
 /**
  * A stored finding as a Markdown document: `# <title>`, then the finding.
  *
- * WHY THE HOOK CANNOT HAND ONE OVER READY-MADE. The harvest stores what the
- * child wrote as ONE LINE (`clean` turns every control character into a space,
- * which is what makes the body safe to splice into the parent's capture ask), so
- * even a child that did exactly as it was asked and opened its block with
- * `# Pinning the resolver` arrives here as `# Pinning the resolver Verified
- * against 4.0 and 4.1.` — a single heading line whose text is the whole
- * finding. Publishing that verbatim sent a 2,000-character title at the shelf;
- * publishing it before this existed sent none at all and the publish failed with
- * `USAGE: A published post needs a title`, which is what cost the one finding
- * the week captured its attribution: the parent republished from a file and
+ * THE TITLE IS THE CHILD'S, VERBATIM. The harvest splits the block's `# ` first
+ * line off before it flattens the rest (`splitFinding` in lib/push-scripts.ts)
+ * and stores it beside the body, so the ordinary path here is a join. Publishing
+ * the stored body verbatim used to send the shelf no title at all and fail with
+ * `USAGE: A published post needs a title`, which is what cost the one finding the
+ * measured week its attribution: the parent republished from a file and
  * discarded the held id (tenjin-agent#228).
  *
- * TWO RULES, IN ORDER. A leading `#` heading is the child answering the ask, so
- * its text becomes the title and leaves the body; with no heading the FIRST
- * SENTENCE becomes the title and STAYS in the body, because there it is prose
- * the child wrote rather than a label it chose. Either way the cut is a sentence
- * end, or the last word inside {@link FINDING_TITLE_MAX}.
+ * THE FALLBACK NEVER REWRITES THE BODY (round-2 review, major 1). A row written
+ * before the split existed, or one whose first line was no title, has the whole
+ * finding on one line; a title is derived from its opening words and the BODY IS
+ * PASSED THROUGH WHOLE. It has to be: the publish path's scan detectors are
+ * line-scoped, so cutting the derived words out and splicing a blank line in
+ * split one stored line into two and stopped a credential that spanned the cut
+ * from being found. The derived title repeats the body's first words instead,
+ * which costs a duplicated sentence and loses nothing.
  *
- * DERIVED, NEVER INVENTED, and never rewritten: every character of the title
- * comes from the child's own words, in their own order. A body with nothing to
- * derive from comes back untouched, so the publish path refuses it exactly as it
- * did before rather than publishing under a title nobody wrote.
+ * DERIVED, NEVER INVENTED: every character comes from the child's own words, in
+ * their own order. A finding with nothing to derive from comes back untouched,
+ * so the publish path refuses it exactly as it did before rather than publishing
+ * under a title nobody wrote.
  */
-export function findingDocument(body: string): string {
-  const flat = body.trim();
-  if (flat === '') return body;
-  const breakAt = flat.indexOf('\n');
-  const first = (breakAt === -1 ? flat : flat.slice(0, breakAt)).trim();
-  const after = breakAt === -1 ? '' : flat.slice(breakAt + 1).trim();
-  const heading = /^#{1,6}\s+(\S.*)$/.exec(first);
-  if (heading === null) {
-    const { title } = cutTitle(flat);
-    return isTitle(title) ? joinDocument(title, flat) : body;
-  }
-  const { title, rest } = cutTitle((heading[1] ?? '').trim());
-  if (!isTitle(title)) return body;
-  return joinDocument(title, [rest, after].filter((part) => part !== '').join('\n\n'));
+export function findingDocument(finding: ChildFinding): string {
+  const stored = (finding.title ?? '').trim();
+  const body = finding.body.trim();
+  if (stored !== '') return joinDocument(stored, body);
+  // ALREADY A DOCUMENT, so nothing to do: a heading on its own line with a body
+  // under it is what this function produces, and running it twice must not add a
+  // second heading.
+  if (/^#{1,6}[ \t]+\S[^\n]*\n[\s\S]*\S/.test(body)) return finding.body;
+  const title = cutTitle(body);
+  return isTitle(title) ? joinDocument(title, body) : finding.body;
 }
 
 /** A candidate title with a word in it. Punctuation alone is not a title, and
@@ -220,29 +227,42 @@ function isTitle(candidate: string): boolean {
   return /[\p{L}\p{N}]/u.test(candidate);
 }
 
-/** `# <title>` and the body under it, or the title alone when the heading was
- *  the whole finding. */
+/** `# <title>` and the body under it, or the title alone when there was no body
+ *  to put under it. */
 function joinDocument(title: string, rest: string): string {
   return rest === '' ? `# ${title}` : `# ${title}\n\n${rest}`;
 }
 
 /**
- * The title out of one line, and whatever it left behind.
+ * A title out of a one-line finding, taking nothing away from it.
  *
- * THE FIRST SENTENCE, and a word boundary as the backstop: a child that wrote no
- * sentence end, or one 400 characters in, still gets a title that reads like
- * one. The trailing full stop goes because this is a title now; a `?` or a `!`
- * stays, because a question is the shape half these findings answer.
+ * THE FIRST SENTENCE, with a word boundary as the backstop: a child that wrote
+ * no sentence end, or one 400 characters in, still gets a title that reads like
+ * one. A leading `#` marker is dropped because it is markup rather than a word.
+ * The trailing full stop goes because this is a title now; a `?` or a `!` stays,
+ * because a question is the shape half these findings answer.
+ *
+ * A SENTENCE END WITH NO LETTER BEFORE IT IS NOT ONE. `# 1. Pin the resolver`
+ * flattened gives its first `.` after the list number, and cutting there
+ * published the finding under the title `1`. The scan walks on to the next end
+ * instead of trusting the first.
  */
-function cutTitle(text: string): { title: string; rest: string } {
-  const sentence = /[.!?](?=\s|$)/.exec(text);
-  let cut = sentence === null ? text.length : sentence.index + 1;
-  if (cut > FINDING_TITLE_MAX) {
-    const space = text.lastIndexOf(' ', FINDING_TITLE_MAX);
-    cut = space > 0 ? space : FINDING_TITLE_MAX;
+function cutTitle(text: string): string {
+  const line = text.slice(0, text.indexOf('\n') === -1 ? text.length : text.indexOf('\n'));
+  const flat = line.replace(/^#{1,6}[ \t]+/, '').trim();
+  const ends = /[.!?](?=\s|$)/g;
+  for (let end = ends.exec(flat); end !== null; end = ends.exec(flat)) {
+    const cut = end.index + 1;
+    if (cut > FINDING_TITLE_MAX) break;
+    const candidate = flat.slice(0, cut);
+    if (/\p{L}/u.test(candidate)) return trimTitle(candidate);
   }
-  return {
-    title: text.slice(0, cut).trim().replace(/\.$/, '').trim(),
-    rest: text.slice(cut).trim(),
-  };
+  if (flat.length <= FINDING_TITLE_MAX) return trimTitle(flat);
+  const space = flat.lastIndexOf(' ', FINDING_TITLE_MAX);
+  return trimTitle(flat.slice(0, space > 0 ? space : FINDING_TITLE_MAX));
+}
+
+/** A title is not a sentence, so the full stop goes; nothing else does. */
+function trimTitle(text: string): string {
+  return text.trim().replace(/\.$/, '').trim();
 }

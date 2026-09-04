@@ -18,6 +18,7 @@
  * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
+import { FINDING_TITLE_MAX } from './child-findings';
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
 import { condenseSource } from './query-condense';
@@ -246,7 +247,7 @@ export const PUSH_WORKFLOW_AGENT_TYPE = 'workflow-subagent';
  * that would poison the queue.
  */
 export const SUBAGENT_CAPTURE_REASON =
-  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
+  'Before you finish: you changed files in this session, so you may be holding what it took to know what to change. If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
   '<agent-flag>' +
   '<search-flag>' +
   '` with the title as the first `# ` heading (one finding per publish). If it is already in a file, run `tenjin publish <file>' +
@@ -3561,6 +3562,7 @@ const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
 const SIGNAL_WINDOW_MS = __SIGNAL_WINDOW__;
 const FINDING_MAX_CHARS = __FINDING_MAX__;
+const FINDING_TITLE_MAX = __FINDING_TITLE_MAX__;
 const MESSAGE_TAIL = __MESSAGE_TAIL__;
 const FINDING_OPEN = __FINDING_OPEN__;
 const FINDING_FENCE = __FINDING_FENCE__;
@@ -3835,6 +3837,18 @@ function findingClose(body) {
  * ONE LINE OUT, whatever went in: \`clean\` turns control characters into
  * spaces, which is what makes the stored body safe to splice into the parent's
  * capture ask without a child's newlines reshaping it.
+ *
+ * AND THE TITLE COMES OFF BEFORE THAT FLATTENING, which is why it is split here
+ * rather than derived at publish time (round-2 review, major 1). The ask asks
+ * the child for a \`# \` first line, and the \`\n\` that ends it is the only
+ * boundary anything will ever have: once \`clean\` has run there is no line
+ * structure left to recover, so a publish-time derivation had to CUT the body at
+ * a guessed sentence end and splice a blank line in. That rewrite moved text out
+ * of the body and split one stored line into two, and every scan detector the
+ * publish path runs on a body — the seed-phrase run, \`scanHex64\`, the rest — is
+ * line-scoped, so a credential that spanned the guessed cut stopped being found.
+ * Splitting here costs a regex, keeps the body byte-for-byte what the child
+ * wrote, and gives \`publish --finding\` the child's own title verbatim.
  */
 function findingBlock(text) {
   const start = findingOpen(text);
@@ -3842,8 +3856,39 @@ function findingBlock(text) {
   const rest = text.slice(start + 1);
   const end = findingClose(rest);
   const raw = (end === -1 ? rest : rest.slice(0, end)).slice(0, FINDING_MAX_CHARS);
-  const body = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
-  return body.length === 0 ? null : body;
+  return splitFinding(raw);
+}
+
+/**
+ * A bounded block as \`{ title, body }\`, scrubbed, or null when there is nothing
+ * in it.
+ *
+ * THE SPLIT IS ABOVE THE SCRUB, not below it: \`scrub\`'s last rule in
+ * \`secretsOnly\` collapses every whitespace run to one space, so by the time it
+ * returns, the child's own line break — the only title boundary that will ever
+ * exist — is gone. Splitting first costs nothing: a newline is a token boundary
+ * to every rule the scrub runs, so no rule can match across the cut, and the two
+ * halves together are still the one bounded input the watchdog note above
+ * requires.
+ *
+ * NOTHING IS EVER DROPPED. A title is taken only when the block opens with a
+ * heading, that heading fits a title (\`FINDING_TITLE_MAX\`), and there is a
+ * finding under it; in every other case the title is empty and the WHOLE block
+ * is the body, heading marker included. So an over-long heading, a heading with
+ * no body under it and a block with no heading all keep every character the
+ * child wrote, and the publish path decides what to do with them.
+ */
+function splitFinding(raw) {
+  const heading = /^\s*#{1,6}[ \t]+(\S[^\n]*)\n([\s\S]+)$/.exec(raw);
+  // The RAW heading is length-checked, so the common path scrubs each half once
+  // and never the whole block twice.
+  if (heading !== null && heading[1].length <= FINDING_TITLE_MAX) {
+    const title = clean(scrub(heading[1], 'secretsOnly'), FINDING_TITLE_MAX);
+    const body = clean(scrub(heading[2], 'secretsOnly'), FINDING_MAX_CHARS);
+    if (title !== '' && body !== '') return { title, body };
+  }
+  const whole = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
+  return whole === '' ? null : { title: '', body: whole };
 }
 
 /**
@@ -3888,9 +3933,21 @@ function pathExists(path) {
  * and none of them has a \`SubagentStart\` row; they arrive about every 30 seconds
  * while a loop session is armed. They took 26 of the 29 asks the week spent,
  * because whichever stop came first after a session-wide signal took the
- * session's one ask. All three marks are checked, not one: they agreed on every
- * row measured, and each is a harness detail that a Claude Code release may
- * change on its own.
+ * session's one ask.
+ *
+ * A START ROW IS EXCULPATORY, AND IT IS READ FIRST (round-2 review, major 2).
+ * The three marks agreed on every one of the 3,166 rows measured, so the
+ * evidence is a CONJUNCTION and an OR of the three classifies the identical set
+ * while failing in a direction this arm cannot survive: one undocumented payload
+ * field renamed in a Claude Code release, or an \`EACCES\` on the transcript
+ * directory that \`pathExists\` reports the same way as a missing file, would drop
+ * every real child in the fleet and read as "no subagents ran". A child THIS
+ * SESSION saw start is proof against all of that: it is the one mark written by
+ * our own code, from a fire that already passed the payload marks. It also keeps
+ * the harvest whole, which is the sharper case: a child that was blocked, spent
+ * its turn writing the fenced finding and stopped again holds an \`asked\` row,
+ * and dropping it here for a payload field would discard the finding with it.
+ * The volume win is unchanged, because a phantom has no start row.
  *
  * AND THE EXIT IS SILENT, before the lifecycle row rather than after it. A
  * phantom opened no lifecycle, so it has nothing to count: the row would be a
@@ -3899,12 +3956,13 @@ function pathExists(path) {
  *
  * AN AGENT ID IS NOT CHECKED FOR HERE. A fire with no id at all is not a
  * phantom, it is a payload this build cannot key anything on, and it keeps the
- * row and the \`no-agent-id\` reason it has always had.
+ * row and the \`no-agent-id\` reason it has always had — but with no id there is
+ * no start row to clear it, so the payload marks decide it alone.
  */
 function isPhantomStop(sessionId, agentId, agentType, transcript) {
+  if (agentId !== null && agentStarted(sessionId, agentId)) return false;
   if (agentType === '') return true;
-  if (transcript === null || !pathExists(transcript)) return true;
-  return agentId !== null && !agentStarted(sessionId, agentId);
+  return transcript === null || !pathExists(transcript);
 }
 
 /**
@@ -3989,11 +4047,16 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
       beat('no-message');
       return quiet();
     }
-    const body = findingBlock(message);
-    if (body === null) {
+    const finding = findingBlock(message);
+    if (finding === null) {
       beat('no-finding');
       return quiet();
     }
+    // THE CHILD'S OWN TITLE, split off the block's first line before the body
+    // was flattened (\`splitFinding\`). Empty when the child wrote no heading, or
+    // one no title could be made of; the publish path derives one there without
+    // touching the body.
+    const { title, body } = finding;
     // Once per agent, claimed rather than checked: the same child stopping
     // twice, or a second fire racing this one, must not queue the block twice.
     // Windowed rather than permanent for the same reason the arming signal is:
@@ -4038,6 +4101,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
         kind: 'finding',
         agentType,
         searchId,
+        title,
         body,
         agentTranscriptPath: transcript,
       },
@@ -4061,6 +4125,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
       agentId,
       agentType,
       searchId,
+      title,
       body,
     });
     // \`store-busy\` is the SAME harvest with the dedupe claim unheld: the row is
@@ -4384,6 +4449,7 @@ export function pushSubagentHookScript(dataDir: string): string {
   const js = SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))
     .replaceAll('__SIGNAL_WINDOW__', String(PUSH_CAPTURE_SIGNAL_WINDOW_MS))
     .replaceAll('__FINDING_MAX__', String(PUSH_FINDING_MAX_CHARS))
+    .replaceAll('__FINDING_TITLE_MAX__', String(FINDING_TITLE_MAX))
     .replaceAll('__MESSAGE_TAIL__', String(PUSH_FINDING_MESSAGE_TAIL))
     .replaceAll('__FINDING_OPEN__', JSON.stringify('```' + PUSH_FINDING_TAG))
     .replaceAll('__FINDING_FENCE__', JSON.stringify('```'))

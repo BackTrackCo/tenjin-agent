@@ -960,14 +960,14 @@ async function resolveSource(
         fix: 'Nothing was stored for that child, so there is nothing to publish. Write the finding to a file and publish that.',
       });
     }
-    // THE TITLE COMES OFF THE FINDING'S OWN FIRST LINE (tenjin-agent#228). The
-    // harvest stores a child's block as one line, so a publish of it used to
-    // reach the shelf with no title at all and fail there; `findingDocument`
-    // derives one from the `# ` heading the ask asks for, or from the first
-    // sentence when the child wrote none. Nothing else about `--finding`
-    // changes: the body is still the child's words, and every gate below is the
-    // one a file publish takes.
-    return { raw: findingDocument(finding.body), finding };
+    // THE TITLE IS THE CHILD'S OWN (tenjin-agent#228). The harvest splits the
+    // block's `# ` first line off before it flattens the rest, so this is a
+    // join; a row captured before that split derives a title from its opening
+    // words instead, and either way the body is passed through whole. A publish
+    // of a stored finding used to reach the shelf with no title at all and fail
+    // there. Nothing else about `--finding` changes: the body is still the
+    // child's words, and every gate below is the one a file publish takes.
+    return { raw: findingDocument(finding), finding };
   }
   if (args.file === undefined) {
     // Bare publish is the convenient pipe form, but only on the CLI and only
