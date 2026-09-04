@@ -62,7 +62,7 @@ The loop daemon: one local `node` process per data dir that serves every hook fi
 | Subcommand | Effect                                                                                                                                                                               |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `start`    | Copies `tenjin-daemon.mjs` and `tenjin-shim.mjs` into `~/.tenjin/hooks`, mints the token if absent, stops a daemon from an older build, and starts one (or reports the one running). |
-| `stop`     | SIGTERM by the pid in `~/.tenjin/daemon.pid`, then SIGKILL after 3 s.                                                                                                                |
+| `stop`     | SIGTERM by the pid in `~/.tenjin/daemon.pid` once `/health` confirms that pid, then SIGKILL after 3 s; a pid that does not answer is left alone and printed.                         |
 | `status`   | The `/health` record, or `not running`.                                                                                                                                              |
 
 **Nothing is wired yet.** This release ships the daemon, the kernel and the Claude Code adapter; the hook entries that route Claude Code's events to it, and the arms that answer them, land in the next release. Until then the generated hook scripts under `~/.tenjin/hooks` keep running exactly as before, and the daemon only records a `no-question` row per fire it receives.

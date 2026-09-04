@@ -10,9 +10,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
 import {
+  dataDir,
   daemonBundlePath,
   daemonLogPath,
   daemonPidPath,
@@ -49,10 +48,9 @@ export interface Health {
   rss: number;
 }
 
-/** Absolute, so a relative `TENJIN_DATA_DIR` survives the daemon's `cwd` being the data dir. */
+/** The CLI's `dataDir` under its shim name: one resolution, so the CLI, the shim and the daemon agree on the string. */
 export function resolveDataDir(env: NodeJS.ProcessEnv = process.env): string {
-  const o = env.TENJIN_DATA_DIR;
-  return o !== undefined && o.length > 0 ? resolve(o) : join(homedir(), '.tenjin');
+  return dataDir(env);
 }
 
 export function readPid(dataDir: string): PidRecord | null {

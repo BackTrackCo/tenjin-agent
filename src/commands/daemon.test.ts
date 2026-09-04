@@ -194,13 +194,32 @@ describe('stopDaemon', () => {
     expect(existsSync(daemonPidPath(dataDir))).toBe(false);
   });
 
-  it('leaves a live pid alone when nothing answers on the recorded port', async () => {
-    // A crash-left pid file naming a reused pid: the process is alive but is
-    // not our daemon. No signal on hearsay; the file goes, the pid is reported.
+  it('leaves a live pid and its file alone when nothing answers on the recorded port', async () => {
+    // Either a crash-left file naming a reused pid, or a busy daemon that
+    // missed one probe: no signal on hearsay, and the record stays so a real
+    // daemon is not orphaned without one.
     await writePidFile(4242, 1);
     const signals: (NodeJS.Signals | 0)[] = [];
     const r = await stopDaemon(dataDir, { kill: (_pid, sig) => void signals.push(sig) });
-    expect(r).toEqual({ state: 'not-running', stalePid: 4242 });
+    expect(r).toEqual({ state: 'unconfirmed', pid: 4242 });
+    expect(signals).toEqual([0]);
+    expect(existsSync(daemonPidPath(dataDir))).toBe(true);
+  });
+
+  it('removes the file when a different pid answers on the recorded port', async () => {
+    const port = await healthStub({
+      version: pkg.version,
+      pid: 9999,
+      port: 0,
+      uptime_ms: 0,
+      idle_ms: 0,
+      data_dir: dataDir,
+      rss: 0,
+    });
+    await writePidFile(4242, port);
+    const signals: (NodeJS.Signals | 0)[] = [];
+    const r = await stopDaemon(dataDir, { kill: (_pid, sig) => void signals.push(sig) });
+    expect(r).toEqual({ state: 'not-running' });
     expect(signals).toEqual([0]);
     expect(existsSync(daemonPidPath(dataDir))).toBe(false);
   });
@@ -273,9 +292,9 @@ describe('runDaemonStop', () => {
     expect((await runDaemonStop(ctx)).humanLines).toEqual(['not running']);
 
     await writePidFile(4242, 1);
-    const stale = await runDaemonStop(ctx, { kill: () => {} });
-    expect(stale.data).toEqual({ state: 'not-running', stalePid: 4242 });
-    expect(stale.humanLines?.[0]).toMatch(/^not running: nothing answered .*pid 4242 left alone/);
+    const unconfirmed = await runDaemonStop(ctx, { kill: () => {} });
+    expect(unconfirmed.data).toEqual({ state: 'unconfirmed', pid: 4242 });
+    expect(unconfirmed.humanLines?.[0]).toMatch(/^pid 4242 is alive but did not answer/);
 
     const port = await healthStub({
       version: pkg.version,

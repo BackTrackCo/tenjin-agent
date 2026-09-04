@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 /**
  * Where the CLI keeps its config and wallet. Defaults to ~/.tenjin, overridable
@@ -8,7 +8,10 @@ import { join } from 'node:path';
  */
 export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.TENJIN_DATA_DIR;
-  if (override !== undefined && override.length > 0) return override;
+  // Absolute, always: the daemon compares this string against its own
+  // `data_dir` and is spawned with it as `cwd`, so a relative override must
+  // mean the same directory from every process.
+  if (override !== undefined && override.length > 0) return resolve(override);
   return defaultDataDir();
 }
 

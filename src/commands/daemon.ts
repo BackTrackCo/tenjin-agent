@@ -80,7 +80,7 @@ function alive(pid: number, kill: NonNullable<DaemonDeps['kill']>): boolean {
 export async function stopDaemon(
   dataDir: string,
   deps: DaemonDeps = {},
-): Promise<{ state: 'stopped' | 'killed' | 'not-running'; pid?: number; stalePid?: number }> {
+): Promise<{ state: 'stopped' | 'killed' | 'not-running' | 'unconfirmed'; pid?: number }> {
   const kill = deps.kill ?? ((pid, sig) => process.kill(pid, sig));
   const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => Date.now());
@@ -89,15 +89,18 @@ export async function stopDaemon(
     if (rec !== null) rmSync(daemonPidPath(dataDir), { force: true });
     return { state: 'not-running' };
   }
-  // Signal only a process `/health` confirms is our daemon. A pid file a
-  // crash left behind can name a reused pid, and a signal on hearsay could
-  // kill a stranger; the file is removed and the pid reported instead, so a
-  // genuinely hung daemon is one `kill` away by hand.
+  // Signal only a process `/health` confirms is our daemon: a crash-left pid
+  // file can name a reused pid, and a signal on hearsay could kill a stranger.
+  // A different pid answering on the port proves the file stale, so it goes.
+  // A live pid that did not answer in time is left alone AND keeps its file:
+  // a busy daemon that missed one 200 ms probe must not be orphaned without
+  // a record (the next start would lose the bind to it and exit quietly).
   const h = await health(rec.port);
-  if (h === null || h.pid !== rec.pid) {
+  if (h !== null && h.pid !== rec.pid) {
     rmSync(daemonPidPath(dataDir), { force: true });
-    return { state: 'not-running', stalePid: rec.pid };
+    return { state: 'not-running' };
   }
+  if (h === null) return { state: 'unconfirmed', pid: rec.pid };
   kill(rec.pid, 'SIGTERM');
   const until = now() + STOP_GRACE_MS;
   while (now() < until) {
@@ -174,12 +177,12 @@ export async function runDaemonStop(
   const r = await stopDaemon(ctx.dataDir, deps);
   const line =
     r.state === 'not-running'
-      ? r.stalePid === undefined
-        ? 'not running'
-        : `not running: nothing answered on the recorded port; removed the stale pid file (pid ${r.stalePid} left alone; kill it by hand if it is a hung daemon)`
-      : r.state === 'stopped'
-        ? `stopped pid ${r.pid}`
-        : `killed pid ${r.pid} (did not exit within ${STOP_GRACE_MS} ms)`;
+      ? 'not running'
+      : r.state === 'unconfirmed'
+        ? `pid ${r.pid} is alive but did not answer /health; left alone. Retry, or kill it by hand if it is hung.`
+        : r.state === 'stopped'
+          ? `stopped pid ${r.pid}`
+          : `killed pid ${r.pid} (did not exit within ${STOP_GRACE_MS} ms)`;
   return { data: r, humanLines: [line] };
 }
 
