@@ -268,9 +268,50 @@ export const REMIND_LINE =
  * What the SessionStart hook puts in front of the model, once, at the top of a
  * session. NOTHING MAY JOIN IT: an update line or a line of ledger state would
  * each be true, and would each cost the primer the attention it needs to work.
+ * EVERY WORD IS RENT: this paragraph is read before the session's first real
+ * thought, so a sentence that does not change what the agent does comes out.
+ *
+ * TWO WORDINGS, ONE PARAGRAPH, chosen at RUN TIME by the generated script from
+ * the config it reads (`teamShelfOrigin`), exactly as the capture ask below is.
+ * Install time is the wrong place to decide it: a machine joins a team shelf by
+ * writing a secret and a baseUrl into config.json, and `tenjin update` does not
+ * rewrite installed hook scripts (tenjin-agent#171), so a primer baked at
+ * install would keep telling a team machine to skip the questions its shelf
+ * exists to answer. THIS DOCSTRING IS THE ONE HOME for that rationale; the
+ * generated script and the tests point here rather than restating it.
  */
 export const PRIMER_TEXT =
-  'Tenjin knowledge marketplace is installed. Before spending real effort on a research question that is public, durable, and costly to reproduce (version-specific gotchas, integration probes, dated operational checks, maintained comparisons), state it as one line and run `tenjin search "<question>"` first: a hit costs cents and settles it, a miss takes seconds. When enumerating research sources in a subagent or research prompt, include Tenjin. Skip it for private-repo questions, live data, and anything the docs answer in a line.';
+  'Tenjin is installed: a marketplace of tested, paid answers. Before real effort on a durable question others also hit (version gotchas, integration probes, comparisons), run `tenjin search "<one sentence>"` first — a hit costs cents, a miss takes seconds. Include it in research and subagent prompts. Skip private-repo questions, live data, and what the docs answer in a line.';
+
+/**
+ * The team-mode primer. The bar is INVERTED against the public one, and that is
+ * the whole reason it exists: the public paragraph tells the agent to skip
+ * private-repo questions and warns that a hit costs cents, and on a machine with
+ * a team shelf both are backwards. Questions about this codebase, its services
+ * and its past decisions are exactly what the shelf holds, and reading a
+ * teammate's note off it costs nothing.
+ *
+ * NO "THE QUESTION TRAVELS" WARNING, by owner decision (2026-09-03): a team miss
+ * does re-ask the public marketplace, but telling the agent so buys nothing and
+ * costs the query. An agent warned about its own question sentence hedges it —
+ * drops the file name, the component, the version — and a hedged sentence is a
+ * worse query against BOTH shelves, so the warning would cost hits on the shelf
+ * it was written to protect. Searches are not published, the team is two people,
+ * and the search availability rule holds: paths and hosts stay in queries.
+ * NOT BECAUSE A SCRUB CATCHES THE REST — `scrub()` runs only inside the
+ * generated hook scripts, and the hand-run `tenjin search` this paragraph
+ * prescribes sends `buildSearchRequest(input)` as typed to both shelves
+ * (`src/commands/search.ts`). The control is the tenjin-search skill, which
+ * states the rule where the agent reads it at use time: a team shelf relaxes the
+ * topic and never the wording, so name the component, the version, the symptom,
+ * the internal service, and never a secret, a credential, a customer or an
+ * account name (`skills/tenjin-search/SKILL.md`). That sentence stays; this
+ * paragraph is not the place to repeat it. When `team.publicFallback: off` lands
+ * (loop redesign decision Q2), a team question stops leaving the machine at all
+ * and the question of a warning is moot.
+ */
+export const PRIMER_TEXT_TEAM =
+  'Tenjin team mode: a shelf of findings about this project, with the public marketplace behind it. Before real effort on any durable question — this codebase, its services, or a past decision — run `tenjin search "<one sentence>" --json`; a team read is free and a miss takes a second. Use it in research and subagent prompts too. Skip live data and what the docs answer in a line.';
 
 /**
  * The capture ask, raised at Stop once per session that did any research.
@@ -302,7 +343,7 @@ export const CAPTURE_REASON =
  * publish.mode at run time, exactly as in the public wording above.
  */
 export const CAPTURE_REASON_TEAM =
-  'Before ending: if this session settled anything a teammate on this project would reuse, publish one conclusion-first finding or durable code map to the team shelf now (publish.mode is <mode>). Name the repository and commit/version where known, but scope code references to repo-relative paths and components only, never absolute paths. State the evidence and explicit exclusions. Put the natural-language questions a teammate would ask in the answer card, and repeat exact repository, component, file, identifier, and error-symbol terms in the visible title/body as well as the card so future search finds them. Treat repo findings as snapshots: set `temporalMode=snapshot`, `asOf`, and a `validUntil` 14 days later by default, never more than 30 days later. Remove credentials, wallet identifiers, requester identifiers, personal data, customer data, and any private or restricted third-party data/material. Never paste raw shell/tool output, logs, transcripts, or diffs; summarize the evidence. Do not present unmerged or unverified work as shipped behaviour: omit it or label it clearly. Write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding). If nothing durable was learned, just stop again.';
+  'Before ending: if this session settled anything a teammate on this project would reuse, publish one conclusion-first finding, a decision and why, or a durable code map to the team shelf now (publish.mode is <mode>). Name the repository and commit/version where known, but scope code references to repo-relative paths and components only, never absolute paths. State the evidence and explicit exclusions. Put the natural-language questions a teammate would ask in the answer card, and repeat exact repository, component, file, identifier, and error-symbol terms in the visible title/body as well as the card so future search finds them. Treat repo findings as snapshots: set `temporalMode=snapshot`, `asOf`, and a `validUntil` 14 days later by default, never more than 30 days later. Remove credentials, wallet identifiers, requester identifiers, personal data, customer data, and any private or restricted third-party data/material. Never paste raw shell/tool output, logs, transcripts, or diffs; summarize the evidence. Do not present unmerged or unverified work as shipped behaviour: omit it or label it clearly. Write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding). If nothing durable was learned, just stop again.';
 
 const FILE_CAPTURE_PUBLISH_RE =
   /write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file \((one per finding(?:; publish\.mode is <mode>)?)\)/i;
@@ -2283,7 +2324,9 @@ main().catch(quiet);
 }
 
 /**
- * The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}.
+ * The SessionStart primer: one paragraph, then exit. See {@link PRIMER_TEXT}
+ * and {@link PRIMER_TEXT_TEAM}, between which the generated script chooses at
+ * run time from the config it reads.
  *
  * Advisory, and local but for one request: with push on it also fetches the
  * shelf's per-trigger use rates for the adaptive cooldown (`fetchTriggerRates`
@@ -2296,6 +2339,16 @@ export function sessionPrimerHookScript(dataDir: string): string {
   return `${prelude(dataDir, PRIMER_WATCHDOG_MS)}${storeSource()}${userAgentSource()}
 const STATS_DAYS = ${LOOKUP_STATS_DAYS};
 const STATS_TIMEOUT_MS = ${PRIMER_STATS_TIMEOUT_MS};
+const PRIMER_TEXT = ${JSON.stringify(PRIMER_TEXT)};
+const PRIMER_TEXT_TEAM = ${JSON.stringify(PRIMER_TEXT_TEAM)};
+
+/** The paragraph for this machine's mode, decided HERE and not at install time
+ *  (why: see the \`PRIMER_TEXT\` docstring). The team wording only applies when
+ *  there is a private shelf to hold the answers — a secret with baseUrl still on
+ *  the marketplace is public mode, exactly as it is for the capture ask. */
+function primerText(config) {
+  return teamShelfOrigin(config) === null ? PRIMER_TEXT : PRIMER_TEXT_TEAM;
+}
 
 /**
  * The adaptive cooldown's one input (tenjin-agent#212; PUSH_COOLDOWN_* in
@@ -2376,7 +2429,7 @@ async function main() {
         JSON.stringify({
           hookSpecificOutput: {
             hookEventName: 'SessionStart',
-            additionalContext: ${JSON.stringify(PRIMER_TEXT)},
+            additionalContext: primerText(config),
           },
         }),
       );
