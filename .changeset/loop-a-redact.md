@@ -7,8 +7,10 @@ scope)` is the publish scan with the audience as a parameter (`publish` reports 
 `team` reports only the rows scoped to it, so `publish`, `edit` and `sync` pass a scope and
 filter nothing), and `mask(text)` is the new query-side verb the hook templates render inline
 from the same table. `redact-rules.json` carries `scopes: ('query' | 'publish' | 'team')[]` per
-rule instead of a `teamSurvives` flag; `secret-assignment` also fires on `--api-key <v>` flags
-and `X-Api-Key:` headers now, so a flag-passed key is caught on a team shelf (tenjin-agent#281).
+rule instead of a `teamSurvives` flag; `secret-assignment` gains a second entry for the
+space-separated `--api-key <v>` flag form, and reads a JSON-quoted name (`"password": "…"`)
+the way gitleaks does, so a flag-passed or JSON-dumped key is caught on a team shelf
+(tenjin-agent#281).
 One fixture set, `redact.fixtures.json`, replaces `scan-corpus.json`.
 
 **`mask()` is precise, and it masks rather than deletes.** For a query, only the rows scoped
@@ -30,7 +32,7 @@ the local hard-block branch and its "never clearable" wording are gone. The mark
 ingest scan is the one place a write can still be refused outright (`PUBLISH_BLOCKED`, vendor
 tokens, private keys, seed phrases, DB passwords, bearer headers), unchanged, and no `--yes` or
 mode clears that. `sync` stops scanning locally: it sends every Fix note now, and the server's
-existing refusal path (`held`) covers what a local scan used to hold back.
+existing refusal is counted under `skipped`, as before, and covers what a local scan used to hold back.
 
 **Which rows a shelf flags is data.** `team` scope (both the local flag list and the shelf's own
 "is this safe to make public" triage) is now the block-tier rows plus `secret-assignment` (and

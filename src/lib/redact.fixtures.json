@@ -66,7 +66,9 @@
       "3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
     ],
     ["AKIAIO", "SFODNN", "7EXAMPLE"],
-    ["3f9a1c77b2", "e04d5a8c6b", "1e2f9d0a4b7c"]
+    ["3f9a1c77b2", "e04d5a8c6b", "1e2f9d0a4b7c"],
+    ["sk-proj-SevzWEV_NmNn9", "abcdefghijklmnopqrstu", "vwxyz0123456789ABCDEFGH"],
+    ["ghp_abcdefghi", "jklmnopqrstuv", "wxyz0123456789"]
   ],
   "cases": [
     {
@@ -1059,6 +1061,21 @@
       "secret": "%%t33%%"
     },
     {
+      "id": "secret-assignment/pos-json-quoted",
+      "scope": "publish",
+      "label": "positive",
+      "input": "{\"aws_secret_access_key\": \"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\", \"region\": \"us-east-1\"}",
+      "expect_ids": ["secret-assignment"],
+      "secret": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    },
+    {
+      "id": "secret-assignment/neg-json-schema-types",
+      "scope": "publish",
+      "label": "negative",
+      "input": "{\"password\": {\"type\": \"string\"}, \"token\": null}",
+      "expect_ids": []
+    },
+    {
       "id": "secret-assignment/pos-header-entry1",
       "scope": "publish",
       "label": "positive",
@@ -1173,6 +1190,62 @@
       "label": "negative",
       "input": "deployment dpl_9XkQmT7bV2pL4aReZx3WnY8uC1vB5tK0 and session_01WanwuWyR7tS8TdJqF9RPfT are fine",
       "expect_text": "deployment dpl_9XkQmT7bV2pL4aReZx3WnY8uC1vB5tK0 and session_01WanwuWyR7tS8TdJqF9RPfT are fine"
+    },
+    {
+      "id": "mask/assignment-takes-a-vendor-token-whole",
+      "scope": "query",
+      "label": "positive",
+      "input": "export OPENAI_API_KEY=%%t46%% then run",
+      "expect_text": "export OPENAI_API_KEY=[redacted 65 chars] then run"
+    },
+    {
+      "id": "mask/assignment-takes-a-github-token-whole",
+      "scope": "query",
+      "label": "positive",
+      "input": "token=%%t47%% fails",
+      "expect_text": "token=[redacted 40 chars] fails"
+    },
+    {
+      "id": "mask/json-quoted-key",
+      "scope": "query",
+      "label": "positive",
+      "input": "{\"password\": \"hunter2secret\", \"user\": \"app\"}",
+      "expect_text": "{\"password=[redacted 13 chars], \"user\": \"app\"}"
+    },
+    {
+      "id": "mask/openai-project-key",
+      "scope": "query",
+      "label": "positive",
+      "input": "%%t46%% alone",
+      "expect_text": "sk-…[redacted 62 chars] alone"
+    },
+    {
+      "id": "mask/redis-empty-user",
+      "scope": "query",
+      "label": "positive",
+      "input": "redis://:hunter2secret@cache.internal:6379 refused",
+      "expect_text": "redis://:[redacted]@cache.internal:6379 refused"
+    },
+    {
+      "id": "mask/control-byte-inside-a-name",
+      "scope": "query",
+      "label": "positive",
+      "input": "api_key\u0001=hunter2seventeen and plain",
+      "expect_text": "api_key=[redacted 16 chars] and plain"
+    },
+    {
+      "id": "mask/keeps-heading-before-newline",
+      "scope": "query",
+      "label": "negative",
+      "input": "## Token:\nRotate it monthly",
+      "expect_text": "## Token:\nRotate it monthly"
+    },
+    {
+      "id": "mask/keeps-type-declarations",
+      "scope": "query",
+      "label": "negative",
+      "input": "interface X { password: string; token?: number }",
+      "expect_text": "interface X { password: string; token?: number }"
     }
   ]
 }

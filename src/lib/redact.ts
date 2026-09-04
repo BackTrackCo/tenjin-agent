@@ -104,7 +104,14 @@ export function findings(text: string, scope: ReportScope): Finding[] {
  * value is left as written.
  */
 export function mask(text: string): string {
-  let out = text;
+  // C0 bytes are deleted first (whitespace kept): a control byte inside a name
+  // is a splitter, `api_key<0x01>=hunter2` reads as two tokens to every row
+  // below, and the hooks' clean() only removes it after the mask has decided.
+  // eslint-disable-next-line no-control-regex
+  let out = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  // Table order is mask order: the assignment row is first so a value that is
+  // itself a vendor token is taken whole, name kept, and no later row sees a
+  // stub to re-match.
   for (const detector of MASK_DETECTORS) {
     out = out.replace(detector.re, (...args) => {
       const m = args as unknown as RegExpExecArray;

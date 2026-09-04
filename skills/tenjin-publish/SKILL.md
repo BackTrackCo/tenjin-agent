@@ -62,7 +62,7 @@ me first". `tenjin install` settles it at **auto**; no mode skips the scan.
 | Mode        | What it means for you                                              |
 | ----------- | ------------------------------------------------------------------ |
 <!-- tenjin:when teamMode -->
-| `auto`      | A clean scan publishes free, no prompt. Report the URL. Only the two checks that survive below can flag one, and a flagged scan exits 3. |
+| `auto`      | A clean scan publishes free, no prompt. Report the URL. Only the block-tier shapes and `secret-assignment` can flag one, and a flagged scan exits 3. |
 <!-- tenjin:else -->
 | `auto`      | A clean scan publishes at the default price, no prompt. Report the URL. A flagged scan exits 3. |
 <!-- /tenjin:when -->

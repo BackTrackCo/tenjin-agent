@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries by `mask()`; regex rows only). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries by `mask()`; regex rows only). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Table order is mask() order (the assignment row runs first, see its description). Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
   "publicHexConstants": [
     {
       "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -58,6 +58,44 @@
     "custom": "Consumer-implemented builder named by `handler`."
   },
   "rules": [
+    {
+      "id": "secret-assignment",
+      "tier": "warn",
+      "scopes": ["query", "publish", "team"],
+      "description": "Secret-named assignment (API_KEY=, password:, token=, and the JSON form \"password\": \"...\") with a literal value. The optional quote after the name is how gitleaks' generic rule reads JSON and YAML alike; the separator class is [ \\t] rather than \\s so a heading line (`## Token:`) never swallows the next line when mask() runs over whole text. FIRST IN THE TABLE ON PURPOSE: mask() applies rows in table order, and a value that is itself a vendor token (`OPENAI_API_KEY=sk-...`) must be taken whole by this row, name kept, before a vendor row could leave a stub for this row to re-match.",
+      "source": "tenjin",
+      "match": {
+        "kind": "regex",
+        "pattern": "\\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|SUBSCRIPTION[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)[\"']?[ \\t]*[:=][ \\t]*(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
+    {
+      "id": "secret-assignment",
+      "tier": "warn",
+      "scopes": ["query", "publish", "team"],
+      "description": "Secret-named command-line flag with a SPACE-separated literal value (--api-key <v>, --token <v>): the one credential position the assignment form above cannot see, since it needs `=` or `:` after the name. `X-Api-Key: <v>` and `--api-key=<v>` already match above (Api-Key, api-key) and are deliberately not repeated here, so one value yields one finding. For the shapes a recorded command line takes (tenjin-agent#281): a hex-only key has no vendor prefix, and bare hex is deliberately never reported so a commit SHA still syncs, so the credential POSITION is the signal.",
+      "source": "tenjin (closes tenjin-agent#281)",
+      "match": {
+        "kind": "regex",
+        "pattern": "(--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|private[_-]?key|subscription[_-]?key|credentials?|secret|token|password|passwd))[ \\t]+(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "flags": "gi"
+      },
+      "excerpt": {
+        "kind": "custom",
+        "handler": "labeledValue"
+      },
+      "skip": {
+        "handler": "nonLiteralValue"
+      }
+    },
     {
       "id": "aws-access-key",
       "tier": "block",
@@ -158,11 +196,11 @@
       "id": "openai-key",
       "tier": "block",
       "scopes": ["query", "publish", "team"],
-      "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block.",
+      "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block. Project, service-account and admin keys carry `_` and `-` throughout the body, so the prefixed forms take the wider class; the bare form keeps the digit requirement that tells a key from a word.",
       "source": "gitleaks:openai-api-key",
       "match": {
         "kind": "regex",
-        "pattern": "\\bsk-(?!ant-)(?:proj-|svcacct-|admin-)?(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,}(?![0-9A-Za-z])",
+        "pattern": "\\bsk-(?!ant-)(?:(?:proj|svcacct|admin)-[0-9A-Za-z_-]{20,}|(?=[0-9A-Za-z]*[0-9])[0-9A-Za-z]{20,})(?![0-9A-Za-z_-])",
         "flags": "g"
       },
       "excerpt": {
@@ -446,11 +484,11 @@
       "id": "db-connection-uri",
       "tier": "block",
       "scopes": ["query", "publish", "team"],
-      "description": "Basic-auth style URI with an embedded password (scheme://user:pass@host), including database connection strings. The scheme run is length-bounded: unbounded, it backtracks quadratically across a transcript-length dotted-token line that never reaches ://.",
+      "description": "Basic-auth style URI with an embedded password (scheme://user:pass@host), including database connection strings. The scheme run is length-bounded: unbounded, it backtracks quadratically across a transcript-length dotted-token line that never reaches ://. The user may be empty: `redis://:password@host` is the standard Redis form.",
       "source": "tenjin",
       "match": {
         "kind": "regex",
-        "pattern": "\\b([a-z][a-z0-9+.-]{0,31}):\\/\\/([^\\s:@/]+):([^\\s@/]+)@([^\\s/:]+)",
+        "pattern": "\\b([a-z][a-z0-9+.-]{0,31}):\\/\\/([^\\s:@/]*):([^\\s@/]+)@([^\\s/:]+)",
         "flags": "gi"
       },
       "excerpt": {
@@ -478,44 +516,6 @@
       },
       "skip": {
         "handler": "placeholderGroup1"
-      }
-    },
-    {
-      "id": "secret-assignment",
-      "tier": "warn",
-      "scopes": ["query", "publish", "team"],
-      "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value.",
-      "source": "tenjin",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\b([A-Za-z0-9_]*(?:API[_-]?KEY|SECRET|ACCESS[_-]?KEY|SUBSCRIPTION[_-]?KEY|PRIVATE[_-]?KEY|PASSW(?:OR)?D|TOKEN|CREDENTIALS?|AUTH[_-]?TOKEN)[A-Za-z0-9_]*)\\s*[:=]\\s*(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "labeledValue"
-      },
-      "skip": {
-        "handler": "nonLiteralValue"
-      }
-    },
-    {
-      "id": "secret-assignment",
-      "tier": "warn",
-      "scopes": ["query", "publish", "team"],
-      "description": "Secret-named command-line flag with a SPACE-separated literal value (--api-key <v>, --token <v>): the one credential position the assignment form above cannot see, since it needs `=` or `:` after the name. `X-Api-Key: <v>` and `--api-key=<v>` already match above (Api-Key, api-key) and are deliberately not repeated here, so one value yields one finding. For the shapes a recorded command line takes (tenjin-agent#281): a hex-only key has no vendor prefix, and bare hex is deliberately never reported so a commit SHA still syncs, so the credential POSITION is the signal.",
-      "source": "tenjin (closes tenjin-agent#281)",
-      "match": {
-        "kind": "regex",
-        "pattern": "(--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|private[_-]?key|subscription[_-]?key|credentials?|secret|token|password|passwd))\\s+(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
-        "flags": "gi"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "labeledValue"
-      },
-      "skip": {
-        "handler": "nonLiteralValue"
       }
     },
     {
