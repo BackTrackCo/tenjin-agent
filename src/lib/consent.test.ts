@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   acksServerWarnings,
   dedupeFindings,
-  describeFindings,
   needsConfirmation,
   publicFinding,
   resolveWriteAuth,
@@ -12,16 +11,16 @@ import type { ServerAckInput } from './consent';
 import type { AckServerWarnings, PublishMode } from './config';
 import { testSigner } from './read-test-utils';
 import type { ResolvedPublishSettings } from './settings';
-import type { ScanFinding } from './scan';
+import type { Finding } from './redact';
 
-function finding(over: Partial<ScanFinding> = {}): ScanFinding {
+function finding(over: Partial<Finding> = {}): Finding {
   return {
     check: 'aws-access-key',
     severity: 'block',
     line: 4,
     excerpt: 'AKIA…MASKED',
     ...over,
-  } as ScanFinding;
+  } as Finding;
 }
 
 function settings(over: Partial<ResolvedPublishSettings> = {}): ResolvedPublishSettings {
@@ -192,15 +191,6 @@ describe('finding shaping', () => {
     const second = finding({ line: 40 });
     const other = finding({ check: 'private-key', excerpt: '0x…MASKED' });
     expect(dedupeFindings([first, second, other])).toEqual([first, other]);
-  });
-
-  it('describeFindings counts the findings and lists each check once', () => {
-    expect(describeFindings([finding(), finding({ line: 9 })])).toBe(
-      '2 secret finding(s) (aws-access-key)',
-    );
-    expect(describeFindings([finding(), finding({ check: 'private-key' })])).toBe(
-      '2 secret finding(s) (aws-access-key, private-key)',
-    );
   });
 });
 
