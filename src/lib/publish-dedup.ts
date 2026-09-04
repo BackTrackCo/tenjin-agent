@@ -24,11 +24,12 @@ import {
  * not to sweep it early — a swept marker is a duplicate post, the exact thing it
  * exists to prevent. The row has no mtime and no pruner.
  *
- * WHAT THIS IS NOT: a guarantee. It is a local optimisation, so it cannot cover
- * two machines publishing the same finding — that needs an idempotency key the
- * server honours, scoped to (shelf origin, publisher handle), which is filed
- * separately and deliberately not faked here with a client-side key the server
- * ignores.
+ * WHAT THIS IS FOR, NOW. It is bookkeeping, not a gate: the gate moved to the
+ * server as `Idempotency-Key` (tenjin#763), computed from exactly the same
+ * normalized body hash, so the two agree by construction. These rows still
+ * answer "what did this machine publish, and what did each agent publish",
+ * which `tenjin push status` reports and `edit.ts` extends when a draft is
+ * promoted.
  */
 
 /** The `session_state` key prefix. ⚠ MIRRORED with `STATE_PUBLISHED_PREFIX` in
@@ -67,28 +68,14 @@ function publishedKey(bodyMd: string): string {
   return PUBLISHED_KEY_PREFIX + publishBodyHash(bodyMd);
 }
 
-/**
- * The url this body was already published at, or null.
- *
- * Best-effort in both directions: an unreadable or empty row reads as "not
- * published", because the failure mode of a false hit is a publish that silently
- * never happens, and the failure mode of a miss is the duplicate this exists to
- * reduce. The cheaper mistake wins.
- */
-export async function publishedUrlFor(dataDir: string, bodyMd: string): Promise<string | null> {
-  const store = await openStore(dataDir);
-  if (store === null) return null;
-  try {
-    const row = store.get(STORE_SQL.getState, [MACHINE_SESSION, publishedKey(bodyMd)]);
-    if (row === null || typeof row.value !== 'string') return null;
-    const url = JSON.parse(row.value);
-    return typeof url === 'string' && url.length > 0 ? url : null;
-  } catch {
-    return null;
-  } finally {
-    store.close();
-  }
-}
+/* The read side of this ledger — `publishedUrlFor`, a pre-flight that
+ * short-circuited a publish whose body this machine had seen before — is gone
+ * (tenjin#763). It could only ever cover ONE machine, while the duplicate the
+ * mechanism exists to stop is two machines publishing the same finding; and it
+ * answered a stale url for a post that had since been deleted. The same hash is
+ * now sent as `Idempotency-Key` on `POST /api/posts`, where the server holds
+ * the uniqueness and says on the way back whether it replayed. What is left
+ * here is the WRITE side, which `tenjin push status` and `edit.ts` read. */
 
 /**
  * Who this publish belongs to, beyond the body it published.

@@ -2795,7 +2795,7 @@ describe('runDoctor — push hook wiring', () => {
 });
 
 /**
- * The `sig_v1_test` lane (tenjin-agent#267, redesigned round 3) reads a
+ * The test lane reads a
  * report `tenjin-vitest-reporter.mjs` wrote when one exists; this is the hint
  * that tells an operator whose project has no such reporter that they are
  * losing precision. Silent unless there is something to report, so most of
@@ -2826,10 +2826,14 @@ describe('runDoctor — test reporter hint', () => {
     const check = await reporterCheck();
     expect(check?.status).toBe('warn');
     expect(check?.required).toBe(false);
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
+    expect(check?.detail).toMatch(/vitest detected without a machine-readable report/);
     expect(check?.fix).toContain("reporters: ['default', ['");
     expect(check?.fix).toContain('tenjin-vitest-reporter.mjs');
     expect(check?.fix).toContain("{ outputFile: '.vitest-report.json' }]]");
+    // AND THE PORTABLE PATH, named beside it: the identity leg reads JUnit XML
+    // from any runner, so a repo that would rather wire `junit` than our own
+    // reporter is told how.
+    expect(check?.fix).toContain('.tenjin/junit.xml');
   });
 
   it('detects vitest as a bare devDependency with no config file', async () => {
@@ -2839,7 +2843,7 @@ describe('runDoctor — test reporter hint', () => {
     );
     const check = await reporterCheck();
     expect(check?.status).toBe('warn');
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
+    expect(check?.detail).toMatch(/vitest detected without a machine-readable report/);
   });
 
   it('a vite.config.* with no test block is not read as an unconfigured vitest', async () => {
@@ -2867,7 +2871,114 @@ describe('runDoctor — test reporter hint', () => {
     );
     const check = await reporterCheck();
     expect(check?.status).toBe('warn');
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
+    expect(check?.detail).toMatch(/vitest detected without a machine-readable report/);
+  });
+
+  /** The JUnit reporter IS a machine-readable report the identity leg reads, so
+   *  a repo already wiring it is not nagged about ours. */
+  it('stays quiet when the config wires the junit reporter instead', async () => {
+    await writeFile(
+      join(dir, 'vitest.config.ts'),
+      "export default { test: { reporters: ['default', ['junit', { outputFile: '.tenjin/junit.xml' }]] } };",
+    );
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  /**
+   * NON-JS RUNNERS GET A ROW EACH, because the lane is runner-agnostic now: the
+   * structured identity leg reads JUnit XML, which pytest, go and cargo-nextest
+   * can all write. For go and cargo the report is a command-line FLAG rather
+   * than a config key, so nothing in the repo says "wired" — an existing report
+   * at one of the paths the failure arm actually reads is what silences the row.
+   */
+  it('names the one-line JUnit setup for pytest, go and cargo', async () => {
+    await writeFile(join(dir, 'pytest.ini'), '[pytest]\naddopts = -q\n');
+    const pytest = await reporterCheck();
+    expect(pytest?.status).toBe('warn');
+    expect(pytest?.fix).toContain('--junitxml=.tenjin/junit.xml');
+    await rm(join(dir, 'pytest.ini'));
+
+    await writeFile(join(dir, 'go.mod'), 'module example.com/x\n');
+    expect((await reporterCheck())?.fix).toContain('gotestsum --junitfile .tenjin/junit.xml');
+    await rm(join(dir, 'go.mod'));
+
+    // ⚠ cargo-nextest has NO `--junit` flag: JUnit is a PROFILE setting, and
+    // the report lands under `target/nextest/<profile>/`. The old hint told an
+    // operator to pass an option that does not exist, and named a path the
+    // failure arm would then never look at.
+    await writeFile(join(dir, 'Cargo.toml'), '[package]\nname = "x"\n');
+    const cargo = await reporterCheck();
+    expect(cargo?.fix).toContain('[profile.default.junit]');
+    expect(cargo?.fix).toContain('.config/nextest.toml');
+    expect(cargo?.fix).toContain('target/nextest/default/junit.xml');
+    expect(cargo?.fix).not.toContain('--junit');
+  });
+
+  /** The path nextest actually writes to is one the failure arm reads, so a
+   *  repo already producing one is not nagged. */
+  it('stays quiet once nextest has written its own report path', async () => {
+    await writeFile(join(dir, 'Cargo.toml'), '[package]\nname = "x"\n');
+    expect(await reporterCheck()).toBeDefined();
+    await mkdir(join(dir, 'target', 'nextest', 'default'), { recursive: true });
+    await writeFile(join(dir, 'target', 'nextest', 'default', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), 'target/\n');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  /**
+   * A JUNIT REPORT HOLDS EVERY FAILURE'S FULL MESSAGE AND STACK, absolute paths
+   * included. A report that is not gitignored is one commit away from being
+   * pushed — and one already COMMITTED is worse than none, since it silences
+   * this row forever while the failure arm's mtime check rejects it on every
+   * run, so the operator hears nothing and gets nothing.
+   */
+  it('warns when an existing report is not gitignored', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/not gitignored/);
+    expect(check?.fix).toContain('.gitignore');
+  });
+
+  it('goes quiet once that report is gitignored', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), '# reports\n.tenjin/junit.xml\n');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  it('accepts a directory pattern, not just the exact path', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), '.tenjin/\n');
+    expect(await reporterCheck()).toBeUndefined();
+  });
+
+  it('warns louder when the report is already committed', async () => {
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    await writeFile(join(dir, '.gitignore'), '.tenjin/junit.xml\n');
+    // A git index naming the path: read as bytes, never by spawning git.
+    await mkdir(join(dir, '.git'), { recursive: true });
+    await writeFile(
+      join(dir, '.git', 'index'),
+      Buffer.from(`DIRC\u0000\u0000\u0000.tenjin/junit.xml\u0000\u0000`, 'utf8'),
+    );
+    const check = await reporterCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toMatch(/committed to git/);
+    expect(check?.fix).toContain('git rm --cached');
+  });
+
+  it('stays quiet once a JUnit report already exists at a path the arm reads', async () => {
+    await writeFile(join(dir, 'go.mod'), 'module example.com/x\n');
+    expect(await reporterCheck()).toBeDefined();
+    await mkdir(join(dir, '.tenjin'), { recursive: true });
+    await writeFile(join(dir, '.tenjin', 'junit.xml'), '<testsuites/>');
+    // Gitignored, since an existing report that is NOT is its own warn.
+    await writeFile(join(dir, '.gitignore'), '.tenjin/junit.xml\n');
+    expect(await reporterCheck()).toBeUndefined();
   });
 });
 

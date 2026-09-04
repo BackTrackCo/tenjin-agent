@@ -473,7 +473,7 @@ function ok200(body: Record<string, unknown>, status = 200): Response {
  * signature.
  */
 describe('keys on the write body', () => {
-  const KEY = 'sig_v1:0f3a9c1d2b4e5f60';
+  const KEY = 'sig_v2:0f3a9c1d2b4e5f60';
 
   it('emits each key with verified spelled out, last occurrence deciding', () => {
     const body = buildPostCreateBody({

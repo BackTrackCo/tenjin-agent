@@ -765,15 +765,6 @@ describe('the delete verb is registered', () => {
  */
 describe('sync --cwd, end to end through the dispatcher', () => {
   const SHELF = 'https://team.example';
-  const POST = {
-    id: '11111111-1111-4111-8111-111111111111',
-    slug: 'fix-pnpm-test',
-    title: 'Fix: pnpm — ENOENT',
-    status: 'published',
-    price: '0',
-    url: `${SHELF}/a/team/fix-pnpm-test`,
-    tags: [],
-  };
 
   let dataDir: string;
   let repo: string;
@@ -803,7 +794,8 @@ describe('sync --cwd, end to end through the dispatcher', () => {
   });
 
   it('salts the published coarse key with the --cwd checkout’s own origin', async () => {
-    const { openStore, projectId, teamCoarseKey, STORE_SQL } = await import('./lib/state-store');
+    const { openStore, projectId, shortHash, teamCoarseKey, STORE_SQL } =
+      await import('./lib/state-store');
 
     // A wallet the dispatcher can actually sign with, created through the CLI.
     expect(await main(['wallet', 'create'], captureIo().io)).toBe(0);
@@ -827,7 +819,7 @@ describe('sync --cwd, end to end through the dispatcher', () => {
       'sess-e2e',
       projectId(repo),
       'machine-e2e',
-      'sig_v1',
+      'sig_v2',
       'fine-hash-abc',
       'coarse-hash-def',
       'pnpm',
@@ -840,7 +832,7 @@ describe('sync --cwd, end to end through the dispatcher', () => {
     store.run(
       `UPDATE pairings SET status = 'unverified', closes = 1, closed_at = ?, fix_cmd = ?, fix_files = ?
          WHERE uid = 'pair-e2e-249'`,
-      [at + 1000, 'pnpm test', JSON.stringify(['widget.ts'])],
+      [at + 1000, 'pnpm db:migrate', JSON.stringify(['src/widget.ts'])],
     );
     store.close();
 
@@ -851,32 +843,31 @@ describe('sync --cwd, end to end through the dispatcher', () => {
         url: String(url),
         body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
       });
-      return new Response(JSON.stringify(POST), {
-        status: init?.method === 'PUT' ? 200 : 201,
-        headers: { 'content-type': 'application/json' },
-      });
+      return new Response(
+        JSON.stringify({ fix: { id: '11111111-1111-4111-8111-111111111111' }, created: true }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      );
     });
 
     const cap = captureIo();
     expect(await main(['sync', '--cwd', repo], cap.io)).toBe(0);
 
-    const post = sent.find((r) => r.method === 'POST' && r.url === `${SHELF}/api/posts`);
+    const post = sent.find((r) => r.method === 'POST' && r.url === `${SHELF}/api/fixes`);
     expect(post).toBeDefined();
-    const keys = post!.body!.keys as Array<{ kind: string; key: string }>;
+    const keys = post!.body!.keys as Array<{ kind: string; key: string; tier: string }>;
     // THE SALT CAME FROM `--cwd`. `github.com/acme/api` is the reduction of the
     // origin in THAT directory's `.git/config`; the process's own working
     // directory is this repo's checkout and would salt differently.
     expect(keys).toContainEqual({
-      kind: 'fingerprint',
-      key: 'sig_v1c:' + teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
-      verified: false,
+      kind: 'error',
+      key: teamCoarseKey('coarse-hash-def', 'github.com/acme/api'),
+      tier: 'coarse',
     });
     // And the fine key rode along unsalted, as it always does.
-    expect(keys).toContainEqual({
-      kind: 'fingerprint',
-      key: 'sig_v1:fine-hash-abc',
-      verified: false,
-    });
+    expect(keys).toContainEqual({ kind: 'error', key: 'fine-hash-abc', tier: 'fine' });
+    // The scope FIELD is the slug hashed; the coarse-key SALT above is the
+    // cleartext slug, which is what the generated hook salts with too.
+    expect(post!.body!.repo).toBe(shortHash('github.com/acme/api'));
     expect(JSON.parse(cap.stdout()).data).toMatchObject({ synced: 1 });
   });
 });

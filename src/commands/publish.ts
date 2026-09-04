@@ -46,7 +46,12 @@ import {
   throughScanGate,
   writeModeNotices,
 } from '../lib/consent';
-import { dequeueFinding, publishedUrlFor, recordPublished } from '../lib/publish-dedup';
+import {
+  dequeueFinding,
+  normalizePublishBody,
+  publishBodyHash,
+  recordPublished,
+} from '../lib/publish-dedup';
 import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
@@ -130,7 +135,7 @@ export interface PublishArgs {
   methodology?: string;
   /**
    * Exact-match keys this piece answers resolve-by-key lookups on, each spelled
-   * `<kind>=<value>` (`fingerprint=sig_v1:…`, `package_version=zod@4.1.0`,
+   * `<kind>=<value>` (`fingerprint=sig_v2:…`, `package_version=zod@4.1.0`,
    * `command_head=pnpm`, `repo=owner/name`). Repeatable, up to 32. Always sent
    * unverified: `verified` is the close rule's claim (two independent fixes),
    * not a flag a hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
@@ -338,46 +343,22 @@ export async function runPublish(
 
   const status = resolveStatus(args, frontmatter);
 
-  // ALREADY PUBLISHED FROM THIS MACHINE? Keyed on the body's content hash, not on
-  // a session id: the duplicates this catches come from two agents watching
-  // related sessions, or one agent whose turn ended twice, and the only thing the
-  // two publishes share is the text. Checked HERE — before the scan, before the
-  // consent gate, before the wallet — so a capture ask that fires twice cannot
-  // turn a clean turn end into a confirm prompt or a keystore unlock, and so no
-  // request is made at all.
+  // ALREADY PUBLISHED FROM THIS MACHINE? THE SERVER ANSWERS THAT NOW
+  // (tenjin#763). The local pre-flight that used to sit here — a `published:`
+  // row keyed on the body hash, read before the scan and the wallet — could
+  // only ever cover ONE machine, and the duplicate this whole mechanism exists
+  // to stop is two machines publishing the same finding. It also short-circuited
+  // on a row this machine wrote for a post that had since been deleted, and
+  // answered a url nothing was at.
   //
-  // AND BELOW THE CROSS-PROJECT GATE, which is the half that was missing. This
-  // branch DEQUEUES and answers with a url, so reached from another checkout it
-  // dropped the owning project's row and named where its work is, both without a
-  // confirm. It stays above the scan and the cascade; it is only the authority
-  // question that now precedes it.
+  // The key travels as `Idempotency-Key` on the create instead: the server
+  // holds the (creator, key) uniqueness, replays the original post on a repeat
+  // with the same body, and refuses a repeat with DIFFERENT bytes rather than
+  // guessing. The local rows are still written (`recordPublished` below) —
+  // `push status` and `edit.ts` read them — they are simply no longer the gate.
   //
-  // DRAFTS ARE OUT, both ways: a draft parks privately, so parking the same text
-  // twice is legitimate and a draft writes no marker to match. The marker is
-  // written wherever the body actually goes public — below on a non-draft
-  // publish, and in edit.ts when `--status published` promotes a draft.
-  if (status !== 'draft') {
-    const already = await publishedUrlFor(ctx.dataDir, body);
-    if (already !== null) {
-      // The body is on the shelf and this machine knows where, so the queue row
-      // is stale: leaving it would have every capture ask inside the window
-      // offer a finding that is already published.
-      //
-      // NOT UNDER --dry-run, which promises to write nothing. This dequeue sat
-      // above the dry-run return, so inspecting an already-published finding
-      // silently took it off the queue; the test that covers the promise seeds a
-      // body this machine has never published, so it could not see it.
-      if (finding !== undefined && args.dryRun !== true) {
-        await dequeueFinding(ctx.dataDir, finding.id);
-      }
-      // Success, deliberately. The caller is a turn end that already did its
-      // work; failing it would report a broken publish for a piece that is up.
-      return {
-        data: { alreadyPublished: true, url: already },
-        humanLines: [`Already published: ${sanitizeForTerminal(already)}`],
-      };
-    }
-  }
+  // DRAFTS ARE OUT: a draft parks privately, so parking the same text twice is
+  // legitimate, and the create must not reserve a key for it.
   if (status !== 'draft') warnUnrecorded(ctx, searchIds, stored);
   // THE OTHER SHELF'S SEARCHES ARE NOT THIS SHELF'S TO CLAIM. A publish lands on
   // one shelf; a searchId minted by the other names a row in a database this one
@@ -591,9 +572,28 @@ export async function runPublish(
     env,
   });
 
+  /**
+   * THE BYTES THAT ARE PUBLISHED ARE THE BYTES THE KEY IS OVER.
+   *
+   * `Idempotency-Key` is `sha256(normalizePublishBody(body))` and the server's
+   * replay check fingerprints the create body it receives, so sending the raw
+   * body made a RE-RENDER of one finding — the same prose with CRLF, a trailing
+   * blank line, or a space left at the end of a wrapped line — arrive as "same
+   * key, different fingerprint" and take the 422. That is the exact duplicate
+   * the mechanism exists to collapse, turned into a hard failure with no
+   * remedy the caller could act on.
+   *
+   * WHAT NORMALIZING ACTUALLY CHANGES: CRLF becomes LF, trailing whitespace
+   * comes off each line, and the document is trimmed at both ends. The only
+   * visible casualty is a markdown hard break spelled as two trailing spaces,
+   * which is worth less than a working dedup — and interior whitespace is
+   * untouched, so a reflowed paragraph is still a different finding.
+   */
+  const publishedBody = normalizePublishBody(body);
+
   const input: PublishInput = {
     ...(title !== undefined ? { title } : {}),
-    bodyMd: body,
+    bodyMd: publishedBody,
     ...(excerpt !== undefined ? { excerpt } : {}),
     ...(tags !== undefined ? { tags } : {}),
     priceAtomic,
@@ -617,6 +617,16 @@ export async function runPublish(
     timeoutMs: ctx.flags.timeout,
     ...(runtime.bypass !== undefined ? { bypass: runtime.bypass } : {}),
     ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
+    // THE SAME HASH THE LOCAL ROWS ARE KEYED ON — `normalizePublishBody`, so a
+    // re-render of one finding (CRLF, a trailing blank line, a stray space at
+    // the end of a wrapped line) is the same key and the second publish is a
+    // replay rather than a second post. A reflowed paragraph IS a different
+    // finding and hashes differently, which is the line that mechanism has
+    // always drawn. Not sent for a draft: a draft may legitimately be parked
+    // twice.
+    ...(status !== 'draft'
+      ? { headers: { 'Idempotency-Key': publishBodyHash(publishedBody) } }
+      : {}),
   };
   // The server ingest gate runs the same rule corpus in the marketplace's write
   // path, so its warn tier joins this command's exit-3 flow rather than arriving
@@ -633,6 +643,54 @@ export async function runPublish(
     noun: 'Publish',
     heldSuffix: `, price $${price.usd}`,
   });
+
+  // THE SERVER REPLAYED AN EARLIER PUBLISH of these exact bytes: the post was
+  // already up, nothing was created, and this run's work is done. Reported as a
+  // SUCCESS, deliberately — the caller is often a turn end that already did its
+  // work, and failing it would report a broken publish for a piece that is up.
+  if (result.replayed === true) {
+    // The body is on the shelf, so the queue row is stale: leaving it would have
+    // every capture ask inside the window offer a finding that is published.
+    if (finding !== undefined) await dequeueFinding(ctx.dataDir, finding.id);
+    // And the local row, which the pre-flight used to write: `push status` and
+    // `edit.ts` read these, and a replayed publish is still a publish this
+    // machine made.
+    await recordPublished(ctx.dataDir, body, result.url, {
+      agentId,
+      ...(finding === undefined ? {} : { findingId: finding.id }),
+    });
+    // AND THE LOOP THIS ANSWERED IS STILL CLOSED. A replay means the piece IS
+    // on the shelf, so a search that named it has been answered — by this body,
+    // at this url. Returning early without closing left the loop open forever
+    // for the commonest replay there is: a capture ask that fired twice, where
+    // the second run carries the same inherited `--search-id` as the first and
+    // is the one whose receipt the caller reads. The close is local
+    // bookkeeping, so it is safe to run again on an already-closed row.
+    const replaySearches: SearchReceipt[] = [];
+    for (const id of searchIds) {
+      if (foreignIds.includes(id)) {
+        replaySearches.push({ id, closed: false, otherShelf: true, prefill: 'none' });
+        continue;
+      }
+      replaySearches.push(
+        await closeNamedSearch(
+          ctx,
+          id,
+          stored.get(id) ?? null,
+          null,
+          id === prefillFrom ? prefill : 'none',
+        ),
+      );
+    }
+    return {
+      data: {
+        alreadyPublished: true,
+        url: result.url,
+        ...(replaySearches.length > 0 ? { searches: replaySearches } : {}),
+      },
+      humanLines: [`Already published: ${sanitizeForTerminal(result.url)}`],
+    };
+  }
 
   // A DRAFT answered nobody. It parks the piece privately, so it clears no parked
   // loop: the draft is still the pending answer, and the promotion (`edit
@@ -687,7 +745,7 @@ export async function runPublish(
  */
 /**
  * `--key <kind>=<value>`, split on the FIRST `=` only: a fingerprint key is
- * `sig_v1:<hash>` and a repo key may carry `=` in a query string, so only the
+ * `sig_v2:<hash>` and a repo key may carry `=` in a query string, so only the
  * kind is ever read off the left. Kind and bounds are checked by
  * {@link normalizePostKeys}, the same function the request builder runs.
  */

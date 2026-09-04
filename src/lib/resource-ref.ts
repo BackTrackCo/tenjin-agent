@@ -1,5 +1,5 @@
 import { CliError } from './errors';
-import { findPairingCandidate, findStoredCandidate } from './state-store';
+import { findStoredCandidate } from './state-store';
 import { canonicalReadUrl } from './library';
 import { UUID_RE } from './ids';
 import { isSameDeployment } from './production-origin';
@@ -139,14 +139,12 @@ export async function resolveResourceRef(
     return { url, shelfBaseUrl: shelfFor(url) };
   }
   if (UUID_RE.test(trimmed)) {
-    // A search candidate first (the ordinary case), then a pairing this
-    // machine's own `tenjin sync` published (tenjin-agent#252): `sync` never
-    // records what it publishes as a search result, so an id straight out of
-    // its own output would otherwise refuse to resolve here even though the
-    // CLI is the one that minted it.
-    const candidate =
-      (await findStoredCandidate(dataDir, trimmed)) ??
-      (await findPairingCandidate(dataDir, trimmed));
+    // A search candidate. The pairing-link leg that used to sit beside it is
+    // gone with the posts `tenjin sync` used to publish: a synced pairing is
+    // now a FIX RECORD, which has no slug, no read route and no url to
+    // resolve, so there is nothing for an id lookup to find. A publish-returned
+    // post id still resolves through the public by-id route below.
+    const candidate = await findStoredCandidate(dataDir, trimmed);
     if (candidate === null) {
       // Both local sources miss. The one id-only route left is the public
       // by-id lookup (tenjin#803, `getPostMetadata`): it is what lets an id
