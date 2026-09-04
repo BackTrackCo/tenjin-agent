@@ -3985,9 +3985,10 @@ function isPhantomStop(startedType, agentType, transcript) {
  * and nothing else, which is the fail-open reading of a missing fuse.
  *
  * THE ASK GOES TO THE CHILD THAT DID THE WORK. The gate is this agent's own
- * \`edited:\` markers inside the window (\`agentHasActivity\`), not a session-wide
- * signal any sibling could arm: one dispatch MISS used to arm the ask for every
- * child that stopped in the hour behind it, and the first to stop took it.
+ * \`edited:\` markers (\`agentHasActivity\`) or its own \`research\`/\`read\` rows
+ * (\`agentHasResearch\`) inside the window, not a session-wide signal any sibling
+ * could arm: one dispatch MISS used to arm the ask for every child that stopped
+ * in the hour behind it, and the first to stop took it.
  *
  * THE ASK COSTS A CHILD TURN, SO IT IS BUDGETED TWICE OVER: once per session
  * (\`STATE_SUBAGENT_ASKED\`, left exactly as it was, because re-keying the shared
@@ -4211,10 +4212,24 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   // every child that stopped in the hour behind it and left a first-come budget
   // claim to pick which one. In a loop session that was a phantom 26 times out
   // of 29. The question a child's own Stop can answer is whether THIS child did
-  // work, and its \`edited:\` markers are the store's only agent-keyed evidence of
-  // that: one bounded, index-backed read, no \`events\` scan, no new window.
+  // work, and both halves of that answer are agent-keyed: one bounded,
+  // index-backed read each, no \`events\` scan, no new window.
+  //
+  // TWO EVIDENCE KINDS, OR'D (round-3 review). Edits alone missed the case this
+  // arm exists for: a child that spent its run on WebSearch, WebFetch and Read
+  // edited nothing and stopped with \`no-evidence\`, and a research panel or a
+  // package comparison is exactly the finding worth a turn. \`agentHasResearch\`
+  // reads this child's own \`research\` and \`read\` rows in \`injections\`, which
+  // the sidecar's own arms already wrote against its \`agent_id\`. The label goes
+  // onto the \`asked\` row below, so the week's tuning question can still ask
+  // which kind earned each ask.
   const since = Date.now() - SIGNAL_WINDOW_MS;
-  if (!agentHasActivity(sessionId, agentId, since)) {
+  const evidence = agentHasActivity(sessionId, agentId, since)
+    ? 'edited'
+    : agentHasResearch(sessionId, agentId, since)
+      ? 'research'
+      : null;
+  if (evidence === null) {
     beat('no-evidence');
     return quiet();
   }
@@ -4284,7 +4299,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   // entirely and is what the dispatch arm's asked-claim uses, but not here: a
   // session budget that expires after the fire's own ceiling is a budget of one
   // ask per 8 seconds, which is the runaway this claim exists to prevent.
-  beat('asked', { evidence: 'edited', searchId, publishMode });
+  beat('asked', { evidence, searchId, publishMode });
   emitStopBlock(captureAskText(agentId, publishMode, searchId));
 }
 

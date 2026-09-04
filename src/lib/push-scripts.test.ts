@@ -7775,6 +7775,50 @@ describe('the subagent arm (SubagentStop)', () => {
   });
 
   /**
+   * THE OTHER HALF OF THE EVIDENCE (round-3 review). Edits alone silenced the
+   * case this arm exists for: a child that spent its run on WebSearch, WebFetch
+   * and Read edits nothing, and a research panel or a package comparison is
+   * exactly the finding worth a turn. Its own research rows are agent-keyed
+   * already, so nothing new is written to read them.
+   *
+   * THE REAL RESEARCH ARM WRITES THE ROW, not the test: the point of the gate
+   * is that the evidence the sidecar ALREADY produces is enough, so a fixture
+   * insert would prove nothing about the writers. A MISS is used deliberately,
+   * because a child whose research found nothing on the shelf is the one whose
+   * finding is worth the most.
+   */
+  it('asks a child that only researched, with no edit behind it', async () => {
+    const { baseUrl } = await serve(miss);
+    await pushOn(baseUrl, { capture: 'block' });
+    await started();
+    const research = await runScript(
+      websearchHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PreToolUse',
+        tool_name: 'WebSearch',
+        agent_id: 'a1',
+        tool_input: { query: 'does the resolver throw on a 4.1 schema' },
+      }),
+    );
+    expect(research.stdout).toBe('');
+    // One agent-keyed `research` row, and it is the child's own.
+    expect(await ledger()).toMatchObject([
+      { trigger: 'research', agentId: 'a1', action: 'skipped' },
+    ]);
+    // And no edit marker anywhere in the session: the edit gate alone refuses
+    // this child, which is what made the case invisible.
+    expect(sessionStateRows(SESSION, 'edited:')).toEqual([]);
+
+    const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop()));
+    expect(reason).toContain('--agent a1');
+    // The label says WHICH kind earned the ask, so the two are countable apart.
+    expect(await stopRows()).toMatchObject([
+      { reason: 'asked', agentId: 'a1', evidence: 'research' },
+    ]);
+  });
+
+  /**
    * The claim, as two consumers over one store rather than as a timer
    * (tenjin-agent#216). A nested child stopping beside its sibling fires this
    * hook twice for one agent id; exactly one may block, or the child is asked

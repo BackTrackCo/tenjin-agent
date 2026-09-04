@@ -610,6 +610,23 @@ export const STORE_SQL = {
   /** The trailing run of unanswered lookups for one session, newest first. */
   recentReasons: `SELECT reason, at FROM injections
      WHERE session = ? ORDER BY at DESC LIMIT ?`,
+  /**
+   * Did ONE agent's own research arms fire inside the window?
+   *
+   * The second half of the capture gate's evidence (tenjin-agent#228 PR 1,
+   * round-3 review). `research` is the WebSearch arm's row and `read` is the
+   * context arm's package lookup, both written by `recordDecision` with the
+   * trigger in `hook` and the child's own id in `agent_id`, so a child that
+   * only searched and read still leaves an agent-keyed row here.
+   *
+   * `session` LEADS, like `bucketCount`, so this seeks `injections_session_at`
+   * and `LIMIT 1` stops at the first row of the range: the two `hook` values
+   * and the `at` bound are filters over an already-seeked range, which is what
+   * makes it affordable in a hook that can block.
+   */
+  agentResearch: `SELECT 1 FROM injections
+     WHERE session = ? AND agent_id = ? AND hook IN ('research', 'read') AND at >= ?
+     LIMIT 1`,
 
   getState: 'SELECT value FROM session_state WHERE session = ? AND key = ?',
   /** Per key, so two arms touching different keys of one session never clobber
@@ -2675,6 +2692,43 @@ function agentStartType(sessionId, agentId) {
 function agentHasActivity(sessionId, agentId, sinceMs) {
   return (
     statePrefixSince(sessionId, STATE_EDITED_PREFIX + agentKey(agentId, ''), sinceMs, 1).length > 0
+  );
+}
+
+/**
+ * Did THIS agent research anything in this session inside the window?
+ *
+ * THE OTHER HALF OF THE EVIDENCE (tenjin-agent#228 PR 1, round-3 review). A
+ * child that spent its whole run on WebSearch, WebFetch and Read edits nothing,
+ * so \`agentHasActivity\` above reads it as having done nothing and its finding
+ * is never asked for. Those are the findings worth the most, and the evidence
+ * already exists: the sidecar's own research arms write an \`injections\` row
+ * carrying the CHILD's \`agent_id\`, so this asks about one agent exactly as the
+ * edit predicate does, over the same window, with no new column and no new key.
+ *
+ * TWO HOOK VALUES, AND THEY ARE THE WRITERS' OWN. \`recordDecision\` puts the
+ * arm's trigger in \`injections.hook\`, so the WebSearch arm's rows read
+ * \`research\` and the context arm's package lookups read \`read\` (the same two
+ * the Stop hook's research signal already names when it excludes log-only
+ * telemetry). Nothing else is admitted: an \`edit\` or \`failure\` row is the
+ * push arms talking about the agent rather than the agent doing research.
+ *
+ * A NULL AGENT MATCHES NOTHING, which is the property that keeps this per
+ * child. \`storeAgent\` maps an absent id to NULL and \`agent_id = NULL\` is never
+ * true in SQL, so the lead's own rows can never arm a child's gate, and a
+ * caller with no id gets \`false\` rather than a session-wide read.
+ *
+ * UNREADABLE IS NO EVIDENCE. \`storeGet\` answers null for a store it could not
+ * read, which reads here as "not asked": the same direction \`agentHasActivity\`
+ * fails in, and the safe one for a gate that ends a child's turn.
+ */
+function agentHasResearch(sessionId, agentId, sinceMs) {
+  return (
+    storeGet(STORE_SQL.agentResearch, [
+      storeSession(sessionId),
+      storeAgent(agentId),
+      sinceMs,
+    ]) !== null
   );
 }
 
