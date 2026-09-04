@@ -2624,9 +2624,19 @@ function agentHarvested(sessionId, agentId, sinceMs) {
   );
 }
 
-/** Did this session see the harness start this agent? A key read, never a scan. */
-function agentStarted(sessionId, agentId) {
-  return getState(sessionId, STATE_AGENT_START_PREFIX + agentKey(agentId, '')) !== null;
+/**
+ * Did this session see the harness start this agent, and as what? A key read,
+ * never a scan. \`null\` means no start row; a started child with no type in its
+ * start payload reads as \`''\`, which is still proof it started.
+ *
+ * THE TYPE IS RETURNED, NOT JUST THE FACT, because the \`SubagentStop\` arm needs
+ * both off one read: the row clears a phantom, and the type it recorded is what
+ * the type gates use when the stop payload arrives without one.
+ */
+function agentStartType(sessionId, agentId) {
+  const row = getState(sessionId, STATE_AGENT_START_PREFIX + agentKey(agentId, ''));
+  if (row === null) return null;
+  return isRecord(row) && typeof row.agentType === 'string' ? row.agentType : '';
 }
 
 /**

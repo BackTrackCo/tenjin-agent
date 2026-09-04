@@ -3957,10 +3957,13 @@ function pathExists(path) {
  * AN AGENT ID IS NOT CHECKED FOR HERE. A fire with no id at all is not a
  * phantom, it is a payload this build cannot key anything on, and it keeps the
  * row and the \`no-agent-id\` reason it has always had — but with no id there is
- * no start row to clear it, so the payload marks decide it alone.
+ * no start row to clear it, so the payload marks decide it alone. That is why
+ * the start row arrives as a value rather than being read here: \`null\` covers
+ * both "no id to key on" and "no row under that id", and the one read the
+ * caller already took serves the type gates below as well.
  */
-function isPhantomStop(sessionId, agentId, agentType, transcript) {
-  if (agentId !== null && agentStarted(sessionId, agentId)) return false;
+function isPhantomStop(startedType, agentType, transcript) {
+  if (startedType !== null) return false;
   if (agentType === '') return true;
   return transcript === null || !pathExists(transcript);
 }
@@ -3999,10 +4002,23 @@ function isPhantomStop(sessionId, agentId, agentType, transcript) {
  * Nothing here detects capability or branches on the mode: this arm decides
  * WHEN to ask, and the CLI's own gates decide what happens next.
  */
-function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
+function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   const transcript = agentTranscriptPath(input);
+  // ONE READ OF THE START ROW, for the phantom mark AND for the type. It is a
+  // primary-key read either way, and taking it once is what keeps the two from
+  // disagreeing about the same child.
+  const startedType = agentId === null ? null : agentStartType(sessionId, agentId);
   // BEFORE ANY WRITE, and before the uid that would name one.
-  if (isPhantomStop(sessionId, agentId, agentType, transcript)) return quiet();
+  if (isPhantomStop(startedType, payloadType, transcript)) return quiet();
+  // THE TYPE THE HARNESS RECORDED AT START WINS AN EMPTY PAYLOAD (round-4
+  // review). The same undocumented field the phantom mark cannot trust decides
+  // \`no-turn\` below, and the start row exists precisely because a stop can
+  // arrive without it: a \`workflow-subagent\` whose stop payload lost its
+  // \`agent_type\` used to read as an ordinary child, clear the edit-evidence
+  // gate and spend the session's one blocking ask on a child that has no turn
+  // to answer in. A non-empty payload type still wins, because that is the
+  // child's own claim at the fire being handled.
+  const agentType = payloadType !== '' ? payloadType : (startedType ?? '');
   const eventUid = uid();
   const beat = (reason, extra) =>
     recordEvent({

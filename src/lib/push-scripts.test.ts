@@ -8359,6 +8359,30 @@ describe('the subagent arm (SubagentStop)', () => {
     expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
   });
 
+  /**
+   * AND IT IS COUNTED OFF THE TYPE THE START ROW RECORDED (round-4 review).
+   * `agent_type` is undocumented, which is the whole reason a start row is
+   * exculpatory above, so a workflow child whose stop payload arrives without
+   * one must not read as an ordinary child: it would clear the edit-evidence
+   * gate and spend the session's one blocking ask on a child that has no turn
+   * to answer in, leaving a later eligible child unasked.
+   */
+  it('counts a workflow child under no-turn when its stop payload loses the type', async () => {
+    await captureOn();
+    await seedDispatchMiss();
+    await workingChild('w1', PUSH_WORKFLOW_AGENT_TYPE);
+
+    const run = await runScript(
+      pushSubagentHookScript(dataDir),
+      stop({ agent_id: 'w1', agent_type: '' }),
+    );
+    expect(run.stdout).toBe('');
+    expect(await stopRows()).toMatchObject([
+      { kind: 'lifecycle', reason: 'no-turn', agentId: 'w1' },
+    ]);
+    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
+  });
+
   it('says nothing and records nothing with push off', async () => {
     await writeConfig({ baseUrl: 'https://tenjin.test' });
     await seedDispatchMiss();
