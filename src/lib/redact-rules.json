@@ -507,7 +507,7 @@
       "source": "tenjin (closes tenjin-agent#281)",
       "match": {
         "kind": "regex",
-        "pattern": "(--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|secret|token|password|passwd))\\s+(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
+        "pattern": "(--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|private[_-]?key|subscription[_-]?key|credentials?|secret|token|password|passwd))\\s+(\"[^\"]{6,}\"|'[^']{6,}'|[^\\s\"']{6,})",
         "flags": "gi"
       },
       "excerpt": {
@@ -918,7 +918,7 @@
       "source": "tenjin (push-scripts scrub, tenjin-agent#273)",
       "match": {
         "kind": "regex",
-        "pattern": "(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\\w.-]{0,64}\\s*[=:]\\s*(\"[^\"]*\"|'[^']*'|\\S+)|bearer\\s+\\S{8,}|--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|secret|token|password|passwd)\\s+(\"[^\"]*\"|'[^']*'|\\S+))",
+        "pattern": "(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\\w.-]{0,64}\\s*[=:]\\s*(\"[^\"]*\"|'[^']*'|\\S+)|bearer\\s+\\S{8,}|--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|private[_-]?key|subscription[_-]?key|credentials?|secret|token|password|passwd)\\s+(\"[^\"]*\"|'[^']*'|\\S+))",
         "flags": "gi"
       }
     },
