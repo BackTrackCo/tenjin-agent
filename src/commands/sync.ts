@@ -17,7 +17,6 @@ import {
   type Store,
 } from '../lib/state-store';
 import { publishPost, updatePost, type PostKeyInput } from '../lib/posts-api';
-import { scan, survivesTeamDrop, type ScanFinding } from '../lib/scan';
 import { resolveWriteAuth } from '../lib/consent';
 import {
   describeWallet,
@@ -243,19 +242,6 @@ export async function runSync(ctx: CommandContext, deps: SyncDeps = {}): Promise
         // as verified on the wire whatever the local status says.
         const verifiedOnWire = row.status === 'verified' || (link !== null && !own);
 
-        // THE SAME SCAN EVERY PUBLISH RUNS, minus the warn tier a team shelf
-        // drops (survivesTeamDrop, as commands/publish.ts filters it). The
-        // fields are scrubbed on the way into the row, so this is the second
-        // look: a credential that survived the scrub in a command line or a
-        // filename stays on this machine. Nobody can --yes an automatic run,
-        // and the body is the same next run, so a finding marks the row synced
-        // (never retried) rather than blocking every row behind it.
-        if (scanFindings(row).length > 0) {
-          store.run(STORE_SQL.markPairingSynced, [now(), row.id]);
-          skipped += 1;
-          continue;
-        }
-
         try {
           if (own && link !== null) {
             await updatePost(
@@ -471,14 +457,6 @@ function keysFor(row: PairingRow, repo: string, verified: boolean): PostKeyInput
     keys.push({ kind: 'command_head', key: row.cmdHead });
   }
   return keys;
-}
-
-/** The publish scan over what would go on the wire — title and body — with
- *  the warn tier filtered exactly as `tenjin publish` filters it on a team
- *  shelf (this command only runs in team mode). No project markers: the row
- *  holds basenames and a command line, and the shelf is the team's own. */
-function scanFindings(row: PairingRow): ScanFinding[] {
-  return scan(titleFor(row) + '\n' + bodyFor(row)).filter(survivesTeamDrop);
 }
 
 /** `Fix: <cmd_head> — <errno|frame>`. The signature's errno and frame are not

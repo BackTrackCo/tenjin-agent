@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -314,7 +314,7 @@ describe('runPublish — Markdown from stdin', () => {
 });
 
 describe('runPublish — consent matrix (mode × content × --yes)', () => {
-  type Outcome = 'success' | 'NEEDS_CONFIRMATION' | 'PUBLISH_BLOCKED';
+  type Outcome = 'success' | 'NEEDS_CONFIRMATION';
   const cases: Array<{ mode: string; content: string; yes: boolean; want: Outcome }> = [
     { mode: 'auto', content: CLEAN, yes: false, want: 'success' },
     { mode: 'auto', content: CLEAN, yes: true, want: 'success' },
@@ -326,9 +326,13 @@ describe('runPublish — consent matrix (mode × content × --yes)', () => {
     { mode: 'review', content: WARN, yes: true, want: 'success' },
     { mode: 'full-auto', content: WARN, yes: false, want: 'success' },
     { mode: 'full-auto', content: CLEAN, yes: false, want: 'success' },
-    { mode: 'auto', content: BLOCK, yes: true, want: 'PUBLISH_BLOCKED' },
-    { mode: 'full-auto', content: BLOCK, yes: true, want: 'PUBLISH_BLOCKED' },
-    { mode: 'review', content: BLOCK, yes: false, want: 'PUBLISH_BLOCKED' },
+    // A block-tier finding is a flag like any other now: the LOCAL scan never
+    // refuses. auto/review still gate it through the ordinary cascade (yes or
+    // full-auto clears it); the server's ingest gate is the only thing that
+    // can still refuse a live secret, and this shelf's stub always accepts.
+    { mode: 'auto', content: BLOCK, yes: true, want: 'success' },
+    { mode: 'full-auto', content: BLOCK, yes: true, want: 'success' },
+    { mode: 'review', content: BLOCK, yes: false, want: 'NEEDS_CONFIRMATION' },
   ];
 
   for (const c of cases) {
@@ -360,13 +364,15 @@ function label(content: string): string {
 }
 
 describe('runPublish — exit-code conformance', () => {
-  it('PUBLISH_BLOCKED and NEEDS_CONFIRMATION are exit 3, unreadable file is exit 2', async () => {
+  it('NEEDS_CONFIRMATION is exit 3 (a block-tier finding included), unreadable file is exit 2', async () => {
     const { provider } = spyProvider();
     const { fetch } = stubServer();
     const deps = hermetic({ fetchImpl: fetch, provider });
+    // review is the default, so a block-tier finding with no --yes stops at the
+    // same exit-3 confirm a warn does; the local scan never refuses outright.
     await expect(
-      runPublish(baseArgs(await writeDoc(BLOCK)), makeCtx(), deps),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
+      runPublish(baseArgs(await writeDoc(BLOCK), { mode: 'review' }), makeCtx(), deps),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
     await expect(
       runPublish(baseArgs(await writeDoc(CLEAN), { mode: 'review' }), makeCtx(), deps),
     ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
@@ -607,138 +613,92 @@ describe('runPublish — card-flag values pass the scan', () => {
   // A block-tier secret (AWS key); secret-assignment is only warn-tier since B3.1.
   const SECRET = 'AKIAIOSFODNN7EXAMPLE';
 
-  it('a secret in --provenance hard-blocks in every mode, like an in-file secret', async () => {
+  // The local scan never refuses any more: every finding, block tier included,
+  // is a flag through the ordinary consent cascade. --yes clears it in every
+  // mode, so a flag-carried secret now publishes exactly like a clean draft —
+  // the point being that it reached the scan at all, the same as an in-file one.
+  it('a secret in --provenance is scanned and clears with --yes, in every mode', async () => {
     for (const mode of ['auto', 'full-auto', 'review']) {
       const { fetch, calls } = stubServer();
-      const { provider, signCount } = spyProvider();
-      await expect(
-        runPublish(
-          baseArgs(await writeDoc(CLEAN), { mode, yes: true, provenance: SECRET }),
-          makeCtx(),
-          hermetic({ fetchImpl: fetch, provider }),
-        ),
-      ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-      expect(calls).toHaveLength(0);
-      expect(signCount()).toBe(0);
+      const { provider } = spyProvider();
+      // A distinct body per mode: publish dedups on content hash, and the
+      // same-body short circuit (tested elsewhere) would otherwise answer
+      // `alreadyPublished` on the second iteration instead of publishing.
+      const res = await runPublish(
+        baseArgs(await writeDoc(`${CLEAN}\n<!-- ${mode} -->\n`), {
+          mode,
+          yes: true,
+          provenance: SECRET,
+        }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      );
+      expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+      expect(calls).toHaveLength(1);
     }
   });
 
   // `--excerpt` is the one shipped field that never passes through the file: a
   // frontmatter excerpt is inside `raw` already, so this one was reaching the
-  // public page unscanned, and "a block-tier secret never leaves the machine"
-  // was not true of it.
-  it('a secret in --excerpt hard-blocks before any wallet touch, in every mode', async () => {
+  // public page unscanned, and a flag secret must face the same scan a body
+  // secret does — even though neither refuses locally any more.
+  it('a secret in --excerpt is scanned and clears with --yes, in every mode', async () => {
     for (const mode of ['auto', 'full-auto', 'review']) {
       const { fetch, calls } = stubServer();
-      const { provider, signCount } = spyProvider();
-      await expect(
-        runPublish(
-          baseArgs(await writeDoc(CLEAN), { mode, yes: true, excerpt: `Ships ${SECRET} today.` }),
-          makeCtx(),
-          hermetic({ fetchImpl: fetch, provider }),
-        ),
-      ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-      expect(calls).toHaveLength(0);
-      expect(signCount()).toBe(0);
+      const { provider } = spyProvider();
+      // A distinct body per mode: see the --provenance test above.
+      const res = await runPublish(
+        baseArgs(await writeDoc(`${CLEAN}\n<!-- ${mode} -->\n`), {
+          mode,
+          yes: true,
+          excerpt: `Ships ${SECRET} today.`,
+        }),
+        makeCtx(),
+        hermetic({ fetchImpl: fetch, provider }),
+      );
+      expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+      expect(calls).toHaveLength(1);
     }
   });
 
-  it('the same secret in-file and via-flag behave identically (both block)', async () => {
+  it('the same secret in-file and via-flag behave identically (both need --yes in auto)', async () => {
+    const viaFlagNoYes = runPublish(
+      baseArgs(await writeDoc(CLEAN), { mode: 'auto', scope: SECRET }),
+      makeCtx(),
+      hermetic({ ...stubDeps(), provider: spyProvider().provider }),
+    );
+    await expect(viaFlagNoYes).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+
+    const inFileNoYes = runPublish(
+      baseArgs(await writeDoc(`# T\n\n${SECRET}\n`), { mode: 'auto' }),
+      makeCtx(),
+      hermetic({ ...stubDeps(), provider: spyProvider().provider }),
+    );
+    await expect(inFileNoYes).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+
     const viaFlag = runPublish(
       baseArgs(await writeDoc(CLEAN), { mode: 'full-auto', yes: true, scope: SECRET }),
       makeCtx(),
       hermetic({ ...stubDeps(), provider: spyProvider().provider }),
     );
-    await expect(viaFlag).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    await expect(viaFlag.then((r) => (r.data as { resourceId: string }).resourceId)).resolves.toBe(
+      CREATED.id,
+    );
 
     const inFile = runPublish(
       baseArgs(await writeDoc(`# T\n\n${SECRET}\n`), { mode: 'full-auto', yes: true }),
       makeCtx(),
       hermetic({ ...stubDeps(), provider: spyProvider().provider }),
     );
-    await expect(inFile).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    await expect(inFile.then((r) => (r.data as { resourceId: string }).resourceId)).resolves.toBe(
+      CREATED.id,
+    );
   });
 });
 
 function stubDeps(): { fetchImpl: typeof fetch } {
   return { fetchImpl: stubServer().fetch };
 }
-
-describe('runPublish — source-project scan context (#36)', () => {
-  async function gitConfigAt(root: string, slug = 'AcmeCorp/secret-svc'): Promise<void> {
-    await mkdir(join(root, '.git'), { recursive: true });
-    await writeFile(
-      join(root, '.git', 'config'),
-      `[remote "origin"]\n\turl = git@github.com:${slug}.git\n`,
-      'utf8',
-    );
-  }
-
-  it('a draft mentioning its own repo slug needs confirmation in auto mode', async () => {
-    await gitConfigAt(dir);
-    const file = await writeDoc('# T\n\nas shipped in AcmeCorp/secret-svc last week\n');
-    const { fetch, calls } = stubServer();
-    const { provider } = spyProvider();
-    const err = (await runPublish(
-      baseArgs(file, { mode: 'auto' }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider }),
-    ).catch((e: unknown) => e)) as { code: string; details: { findings: { check: string }[] } };
-    expect(err.code).toBe('NEEDS_CONFIRMATION');
-    expect(err.details.findings.map((f) => f.check)).toContain('private-repo-reference');
-    expect(calls).toHaveLength(0);
-  });
-
-  it('a clean draft in the same checkout still auto-publishes', async () => {
-    await gitConfigAt(dir);
-    const { fetch, calls } = stubServer();
-    const { provider } = spyProvider();
-    const res = await runPublish(
-      baseArgs(await writeDoc(CLEAN), { mode: 'auto' }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider }),
-    );
-    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
-    expect(calls).toHaveLength(1);
-  });
-
-  // Markers derive from the DRAFT's project, not the shell's cwd (review r5 fix,
-  // pinned in r6: every earlier fixture had cwd === draft dir === sourceProject,
-  // so a revert of markerRoot to plain cwd passed the suite unchanged). Here the
-  // shell cwd is a DIFFERENT checkout with its own remote: the draft-repo slug
-  // must warn, and the cwd-repo slug must not.
-  it('file publish scans with the draft directory markers, not the cwd markers (review r6)', async () => {
-    const shellDir = join(dir, 'shell');
-    const projectDir = join(dir, 'project');
-    await mkdir(shellDir, { recursive: true });
-    await mkdir(projectDir, { recursive: true });
-    await gitConfigAt(shellDir, 'OtherOrg/shell-tools');
-    await gitConfigAt(projectDir, 'AcmeCorp/secret-svc');
-
-    // Draft mentions ITS OWN repo: warns even though cwd is another checkout.
-    const file = join(projectDir, 'post.md');
-    await writeFile(file, '# T\n\nas shipped in AcmeCorp/secret-svc last week\n', 'utf8');
-    const err = (await runPublish(
-      baseArgs(file, { mode: 'auto' }),
-      makeCtx(),
-      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider, cwd: shellDir }),
-    ).catch((e: unknown) => e)) as { code: string; details: { findings: { check: string }[] } };
-    expect(err.code).toBe('NEEDS_CONFIRMATION');
-    expect(err.details.findings.map((f) => f.check)).toContain('private-repo-reference');
-
-    // Draft mentions the SHELL's repo: the cwd markers are not consulted.
-    const file2 = join(projectDir, 'post2.md');
-    await writeFile(file2, '# T\n\nas shipped in OtherOrg/shell-tools last week\n', 'utf8');
-    const { fetch, calls } = stubServer();
-    const res = await runPublish(
-      baseArgs(file2, { mode: 'auto' }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider: spyProvider().provider, cwd: shellDir }),
-    );
-    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
-    expect(calls).toHaveLength(1);
-  });
-});
 
 describe('runPublish — draft end to end', () => {
   it('maps --draft to a draft POST and echoes the draft receipt', async () => {
@@ -1738,25 +1698,24 @@ describe('runPublish on a team shelf', () => {
     );
   }
 
-  it('BLOCKS a live secret on the team shelf too, in the most permissive mode', async () => {
+  it('a live secret is still a flag on the team shelf, cleared by full-auto + --yes', async () => {
     await writeShelfConfig();
-    // The tier that does NOT change with the shelf. A team shelf is a hosted
-    // database with logs and a shared door key, so a leaked credential there is
-    // leaked, and eight surfaces promise this block can never be turned off.
+    // The tier that does NOT change with the shelf, but the LOCAL scan never
+    // refuses any more on either shelf: it is a flag through the ordinary
+    // cascade, exactly like public mode's consent matrix. The server ingest
+    // gate is the one place a live secret can still be refused.
     const file = await writeDoc(BLOCK);
     const { fetch, sent } = shelfServer();
-    const { provider, signCount } = spyProvider();
+    const { provider } = spyProvider();
 
-    await expect(
-      runPublish(
-        baseArgs(file, { mode: 'full-auto', yes: true }),
-        teamCtx(),
-        hermetic({ fetchImpl: fetch, provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
-    // Nothing written and no wallet touched, exactly as in public mode.
-    expect(sent).toHaveLength(0);
-    expect(signCount()).toBe(0);
+    const res = await runPublish(
+      baseArgs(file, { mode: 'full-auto', yes: true }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
+    expect(new URL(sent[0]!.url).origin).toBe(TEAM);
   });
 
   it('skips the WARN tier, so auto publishes a note the public scan would stop', async () => {
@@ -1812,7 +1771,7 @@ describe('runPublish on a team shelf', () => {
     // non-bypassable and a receipt or basescan tx hash must not be unpublishable
     // forever — warn is the surfaced-for-review tier there, not the safe one. So
     // the credential question is still open on a team shelf, and `auto` asks it.
-    // Before survivesTeamDrop this body published promptless under `auto`.
+    // Before the team scope kept it, this body published promptless under `auto`.
     const file = await writeDoc(HEX32);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
@@ -1827,75 +1786,65 @@ describe('runPublish on a team shelf', () => {
     expect(sent).toHaveLength(0);
   });
 
-  it('keeps high-entropy-string: auto confirms on an unrecognized key shape', async () => {
+  it('drops high-entropy-string: auto publishes promptless on a team shelf', async () => {
     await writeShelfConfig();
-    // The catch-all BEHIND the named shapes: it fires only where no named detector
-    // did, which is exactly the case a live credential nothing else knows produces.
-    // Dropping it cost different things per mode: `review` still stopped once per
-    // note and lost only the finding from the prompt body, but `auto` went
-    // promptless and `full-auto` published unattended, and the Stop hook's capture
-    // runs unattended.
+    // Review decisions 2026-09-04: team scope now flags only the block-tier rows
+    // plus secret-assignment and hex32-value. The generic entropy catch-all is
+    // NOT one of them any more — precision over a blanket rule — so `auto`
+    // publishes it with no ask, the same as a warn the team scope has always
+    // dropped.
     const file = await writeDoc(ENTROPY_TOKEN);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
 
-    await expect(
-      runPublish(
-        baseArgs(file, { mode: 'auto' }),
-        teamCtx(),
-        hermetic({ fetchImpl: fetch, provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
-    expect(sent).toHaveLength(0);
+    const res = await runPublish(
+      baseArgs(file, { mode: 'auto' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
   });
 
-  it('keeps env-dump-block: auto confirms on a pasted .env, on a team shelf too', async () => {
+  it('drops env-dump-block: auto publishes a pasted .env promptless on a team shelf', async () => {
     await writeShelfConfig();
-    // A team note quoting a config dump is the input the Stop hook's
-    // transcript-and-tool-output capture produces, and a `.env` paste is a live
-    // credential in the one place the shelf reliably receives one.
+    // Same review decision: env-dump-block is no longer in team scope.
     const file = await writeDoc(ENV_DUMP);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
 
-    await expect(
-      runPublish(
-        baseArgs(file, { mode: 'auto' }),
-        teamCtx(),
-        hermetic({ fetchImpl: fetch, provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
-    expect(sent).toHaveLength(0);
+    const res = await runPublish(
+      baseArgs(file, { mode: 'auto' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
   });
 
-  it('keeps embedded-instruction: auto confirms on an injection body, on a team shelf too', async () => {
+  it('drops embedded-instruction: auto publishes an injection body promptless on a team shelf', async () => {
     await writeShelfConfig();
-    // The third survivor, and the one that is not about credentials at all
-    // (review r6). The other two warn tiers get quieter on a shelf only the team
-    // reads because rights and third-party-data concerns are about the AUDIENCE.
-    // Injection is not: the body is fed to a model either way, and a team shelf's
-    // bodies are the ones the push sidecar re-injects into teammates' agents
-    // unasked — which is the laundering path an already-poisoned agent would take
-    // by capturing at turn end and publishing here promptless. So `auto` asks.
+    // Same review decision: embedded-instruction is no longer in team scope,
+    // even though it is not a credential question at all — precision is the
+    // rule for every row now, not just the credential ones.
     const file = await writeDoc(INJECT);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
 
-    await expect(
-      runPublish(
-        baseArgs(file, { mode: 'auto' }),
-        teamCtx(),
-        hermetic({ fetchImpl: fetch, provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
-    expect(sent).toHaveLength(0);
+    const res = await runPublish(
+      baseArgs(file, { mode: 'auto' }),
+      teamCtx(),
+      hermetic({ fetchImpl: fetch, provider }),
+    );
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
+    expect(sent).toHaveLength(1);
   });
 
   it('hedges secret-assignment under full-auto, the same price the marketplace pays', async () => {
     await writeShelfConfig();
     // Kept as a warn rather than promoted to block, so the consent cascade still
     // governs it: `full-auto` clears it unseen here exactly as it already does in
-    // public mode (scan.ts concedes that price at the detector). Promoting it
+    // public mode (redact.ts concedes that price at the detector). Promoting it
     // would have made a team shelf STRICTER than the marketplace on this check.
     const file = await writeDoc(SECRET_ASSIGN);
     const { fetch, sent } = shelfServer();
@@ -2012,21 +1961,24 @@ describe('runPublish on a team shelf', () => {
     expect(sent[0]!.body?.price).toBe('250000');
   });
 
-  it('puts the whole cascade back the moment the secret is cleared', async () => {
+  it('puts the whole cascade back the moment the shelf secret is cleared', async () => {
+    // An empty shelfBypassSecret yields no bypass pair and so no team mode
+    // (settings.ts): the checkout falls back to the full public scope, where a
+    // WARN body — promptless under team scope's narrower drop — asks again.
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ baseUrl: TEAM, publicShelfUrl: PUBLIC, shelfBypassSecret: '' }),
     );
-    const file = await writeDoc(BLOCK);
+    const file = await writeDoc(WARN);
     const { fetch, sent } = shelfServer();
     const { provider } = spyProvider();
     await expect(
       runPublish(
-        baseArgs(file, { mode: 'full-auto', yes: true }),
+        baseArgs(file, { mode: 'auto' }),
         teamCtx(),
         hermetic({ fetchImpl: fetch, provider }),
       ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
     expect(sent).toHaveLength(0);
   });
 });
@@ -2966,21 +2918,23 @@ describe('runPublish — publish --finding', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('the block tier fires on a stored body, in every mode', async () => {
+  it('the block tier is a flag on a stored body too: review/auto stop, full-auto publishes it', async () => {
     const id = await seedFinding({
       uid: 'FND-BLOCK',
-      body: 'The leaked key is 0x' + 'a'.repeat(64),
+      body: '# The Answer\n\nThe leaked key is 0x' + 'a'.repeat(64) + '\n',
     });
-    const { fetch, calls } = stubServer();
-    const err = (await runPublish(
-      { finding: id, mode: 'full-auto', yes: true },
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
-    ).catch((e: unknown) => e)) as { code: string; exitCode: number; message: string };
-    expect(err.code).toBe('PUBLISH_BLOCKED');
-    expect(err.exitCode).toBe(3);
-    expect(err.message).toContain('FND-BLOCK');
-    expect(calls).toHaveLength(0);
+    const deps = hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider });
+    for (const mode of ['review', 'auto']) {
+      await expect(runPublish({ finding: id, mode }, makeCtx(), deps)).rejects.toMatchObject({
+        code: 'NEEDS_CONFIRMATION',
+        exitCode: 3,
+      });
+    }
+    // full-auto never confirms and the local scan never refuses any more: the
+    // server's ingest gate is the one place left that can still refuse a live
+    // secret, and this stub always accepts.
+    const res = await runPublish({ finding: id, mode: 'full-auto' }, makeCtx(), deps);
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
   });
 
   it('--dry-run prints the whole body and writes and spends nothing', async () => {
@@ -3068,32 +3022,17 @@ describe('runPublish — publish --finding', () => {
    * error, which `emitFailure` prints, the JSON envelope carries and MCP
    * `structuredContent` relays. Reachable: a BIP-39 mnemonic is a block-tier
    * detector and passes all eleven scrub rules whole (no digit, no assignment
-   * shape, no hex run, no hostname). `scan.ts` promises a block excerpt is never
+   * shape, no hex run, no hostname). `redact.ts` promises a block excerpt is never
    * the matched secret; the file path honours that and this one now does too.
    */
-  it('withholds the body on PUBLISH_BLOCKED while still naming the finding', async () => {
-    const mnemonic = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
-    const id = await seedFinding({
-      uid: 'FND-MNEMONIC',
-      body: `The wallet came back: ${mnemonic}`,
-    });
-    const err = (await runPublish(
-      { finding: id, mode: 'full-auto', yes: true },
-      makeCtx(),
-      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
-    ).catch((e: unknown) => e)) as {
-      code: string;
-      fix?: string;
-      details?: { finding?: Record<string, unknown> };
-    };
-    expect(err.code).toBe('PUBLISH_BLOCKED');
-    // Everything a caller needs to name it, ask for it, or tell two apart...
-    expect(err.details?.finding).toMatchObject({ id, agentId: 'child-1', agentType: 'fork' });
-    // ...and not the secret the block exists because of.
-    expect(err.details?.finding).not.toHaveProperty('body');
-    expect(JSON.stringify(err.details)).not.toContain('sausage');
-    expect(err.fix).toContain('--dry-run');
-  });
+  /**
+   * DELETED: "withholds the body on PUBLISH_BLOCKED while still naming the
+   * finding". A local block no longer withholds anything — full-auto (or any
+   * mode with --yes) now sends a block-tier stored body straight through, and
+   * review/auto's NEEDS_CONFIRMATION carries the WHOLE body by design (the read
+   * gate the tests right below this one pin). There is no remaining path where
+   * a block-tier finding's body is hidden from the caller.
+   */
 
   /** And the confirm KEEPS it: there it is the read gate, not a leak. An
    *  operator asked to approve a body they have not seen is not a gate. */
@@ -3200,10 +3139,11 @@ describe('runPublish — publish --finding', () => {
   /**
    * The same ordering rule at the scan: a caller with no standing to publish this
    * row from here is told that rather than handed a verdict about another
-   * project's secret. Nothing is lost by the order, since a block is
-   * non-bypassable and still refuses after the `--yes`.
+   * project's secret. The cross-project gate still fires first; the block-tier
+   * finding underneath it is no longer a separate local refusal, so the `--yes`
+   * that clears the gate clears the whole publish too.
    */
-  it('refuses a cross-project finding before the block tier speaks', async () => {
+  it('refuses a cross-project finding before the scan is even reached', async () => {
     const id = await seedFinding({
       uid: 'FND-XP-BLOCKED',
       project: 'deadbeefdeadbeef',
@@ -3214,9 +3154,10 @@ describe('runPublish — publish --finding', () => {
       runPublish({ finding: id, mode: 'full-auto' }, makeCtx(), deps),
     ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
     // Said once, and only to somebody who claimed the authority to publish it.
-    await expect(
-      runPublish({ finding: id, mode: 'full-auto', yes: true }, makeCtx(), deps),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
+    // full-auto never confirms on its own, so with the authority gate cleared
+    // the block-tier finding underneath it flows through same as any other.
+    const res = await runPublish({ finding: id, mode: 'full-auto', yes: true }, makeCtx(), deps);
+    expect((res.data as { resourceId: string }).resourceId).toBe(CREATED.id);
   });
 
   /**

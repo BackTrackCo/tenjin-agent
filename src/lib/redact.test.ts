@@ -1,10 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { scan, type ScanFinding } from './scan';
+import { findings, type Finding } from './redact';
+
+/** Every case here is the marketplace audience; the team scope is pinned in redact.fixtures.test.ts. */
+const scan = (text: string): Finding[] => findings(text, 'publish');
 
 function checks(text: string): string[] {
   return scan(text).map((f) => f.check);
 }
-function find(text: string, check: string): ScanFinding | undefined {
+function find(text: string, check: string): Finding | undefined {
   return scan(text).find((f) => f.check === check);
 }
 
@@ -765,48 +768,6 @@ describe('scan — placeholder suppression', () => {
   });
 });
 
-describe('scan — private project references (context-driven)', () => {
-  const context = { projectMarkers: ['BackTrackCo/tenjin-agent', 'acme-corp/billing-svc'] };
-
-  it('warns when the draft mentions a source-project marker, case-insensitively', () => {
-    const found = scan('as we did in backtrackco/tenjin-agent, retry the call', context);
-    const f = found.find((x) => x.check === 'private-repo-reference');
-    expect(f?.severity).toBe('warn');
-    expect(f?.excerpt).toBe('BackTrackCo/tenjin-agent');
-  });
-
-  it('flags a marker inside a remote URL mention', () => {
-    expect(
-      scan('clone https://github.com/acme-corp/billing-svc.git first', context).map((f) => f.check),
-    ).toContain('private-repo-reference');
-  });
-
-  it('is silent without context, and on unrelated text with context', () => {
-    expect(checks('as we did in BackTrackCo/tenjin-agent')).not.toContain('private-repo-reference');
-    expect(
-      scan('a draft about unrelated/other-repo work', context).map((f) => f.check),
-    ).not.toContain('private-repo-reference');
-  });
-
-  it('drops degenerate short markers instead of over-matching', () => {
-    expect(scan('nothing to see', { projectMarkers: ['a', ' '] })).toEqual([]);
-  });
-
-  it('does not fire inside a sibling slug, but still fires on a .git URL mention (review r5)', () => {
-    // Trailing name characters continue the slug: Org/repo-docs is a DIFFERENT repo.
-    expect(
-      scan('see BackTrackCo/tenjin-agent-docs for details', context).map((f) => f.check),
-    ).not.toContain('private-repo-reference');
-    expect(scan('the xBackTrackCo/tenjin-agent fork', context).map((f) => f.check)).not.toContain(
-      'private-repo-reference',
-    );
-    // A trailing `.` stays allowed so the …/repo.git remote-URL mention fires.
-    expect(
-      scan('git@github.com:BackTrackCo/tenjin-agent.git', context).map((f) => f.check),
-    ).toContain('private-repo-reference');
-  });
-});
-
 describe('scan — determinism', () => {
   it('is a pure function of its input', () => {
     const text = ['send to 0x' + HEX40, 'API_KEY=abcdef123456', 'CONFIDENTIAL notes'].join('\n');
@@ -821,5 +782,42 @@ describe('scan — determinism', () => {
     // Line 1 has two findings, ordered by start column.
     const line1 = found.filter((f) => f.line === 1);
     expect(line1[0]!.span[0]).toBeLessThan(line1[1]!.span[0]);
+  });
+});
+
+describe('secret-assignment in credential position (#281)', () => {
+  const only = (text: string): Finding[] =>
+    scan(text).filter((f) => f.check === 'secret-assignment');
+
+  it('reports a space-separated flag value once', () => {
+    const found = only(
+      'Failed: curl --api-key 3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c https://api.acme.io',
+    );
+    expect(found).toHaveLength(1);
+    expect(found[0]?.excerpt).toBe('--api-key=[redacted 32 chars]');
+  });
+
+  it('reports a header or an = flag exactly once, from the assignment entry', () => {
+    expect(
+      only("curl -H 'X-Api-Key: 9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c' https://api.acme.io"),
+    ).toHaveLength(1);
+    expect(
+      only('curl --api-key=9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c https://api.acme.io'),
+    ).toHaveLength(1);
+  });
+
+  it('never reports bare hex, so a commit SHA still syncs', () => {
+    expect(only('Fixed in 9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c on main')).toEqual([]);
+  });
+});
+
+describe('findings(team) is the publish run filtered by the emitting rule', () => {
+  it('stays silent on a checksummed address a publish-only warn claims', () => {
+    // The entropy catch-all must see the wallet-address span even though that
+    // rule is not reported on a team shelf; otherwise the same token resurfaces
+    // as high-entropy-string, which is.
+    const text = 'Refund went to 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913 (USDC on Base).';
+    expect(scan(text).map((f) => f.check)).toEqual(['wallet-address']);
+    expect(findings(text, 'team')).toEqual([]);
   });
 });
