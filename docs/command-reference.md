@@ -55,6 +55,20 @@ The push arms count as hook scripts here: `uninstall` removes `tenjin-push-promp
 
 Checks the local environment, API reachability, API contracts, skill wiring, session state, wallet state, and balance. With `hooks.push` on it also checks both halves of the push sidecar's wiring — the four scripts on disk and the seven settings entries registered — as a warn-only check that can never fail the run. Human output includes `fix:` lines where useful; `--json` includes the permission recommendation under `permissions`.
 
+### `tenjin daemon start|stop|status`
+
+The loop daemon: one local `node` process per data dir that serves every hook fire on this machine and exits after `loop.idle_exit_min` minutes (default 30) without one. It binds `127.0.0.1` on `loop.port`, or, when that is `null`, a port derived from the data dir path (30000 to 31999), and answers `POST /hook/claude` only with the bearer token in `~/.tenjin/daemon.token` and a `Content-Type: application/json` header (anything else is 401). `GET /health` is open to any local process and reports version, pid, port, uptime, idle time and data dir.
+
+| Subcommand | Effect                                                                                                                                                                               |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `start`    | Copies `tenjin-daemon.mjs` and `tenjin-shim.mjs` into `~/.tenjin/hooks`, mints the token if absent, stops a daemon from an older build, and starts one (or reports the one running). |
+| `stop`     | SIGTERM by the pid in `~/.tenjin/daemon.pid` once `/health` confirms that pid, then SIGKILL after 3 s; a pid that does not answer is left alone and printed.                         |
+| `status`   | The `/health` record, or `not running`.                                                                                                                                              |
+
+**Nothing is wired yet.** This release ships the daemon, the kernel and the Claude Code adapter; the hook entries that route Claude Code's events to it, and the arms that answer them, land in the next release. Until then the generated hook scripts under `~/.tenjin/hooks` keep running exactly as before, and the daemon only records a `no-question` row per fire it receives.
+
+Files under the data dir: `loop.db` (the ledger: `fires`, `legs`, per-actor `marks`, rate `actors`; retention at idle exit deletes rows older than 30 days or beyond 50,000), `daemon.token`, `daemon.pid`, `daemon.log` (truncated at start past 5 MB), and `daemon.spawn` (an empty file whose mtime backs off respawns for 60 s after a failed one). Config: `loop.human_wait_ms` (2500), `loop.tool_wait_ms` (4000), `loop.rate_per_min` (3), `loop.burst` (6), `loop.idle_exit_min` (30), `loop.port` (null), `team.publicFallback` (`on`); the daemon re-reads `config.json` on the next fire after it changes, except `loop.idle_exit_min` and `loop.port`, which take effect at the next `tenjin daemon start`.
+
 ### `tenjin update`
 
 Installs the newest version npm offers this build, pinned to the exact version the registry names.

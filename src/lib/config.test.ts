@@ -10,6 +10,11 @@ import {
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
   DEFAULT_BAZAAR_REGISTRIES,
+  LOOP_CONFIG_KEYS,
+  TEAM_CONFIG_KEYS,
+  parseLoopValue,
+  parsePublicFallbackFlag,
+  resolveLoopConfig,
 } from './config';
 import { CliError } from './errors';
 
@@ -273,5 +278,169 @@ describe('install block', () => {
   it('is not a `config set` key: it is never rendered as a scalar', () => {
     expect(CONFIG_KEYS as readonly string[]).not.toContain('install');
     expect(CONFIG_KEYS as readonly string[]).not.toContain('publish');
+  });
+});
+
+describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => {
+  const LOOP_DEFAULTS = {
+    human_wait_ms: 2500,
+    tool_wait_ms: 4000,
+    rate_per_min: 3,
+    burst: 6,
+    idle_exit_min: 30,
+    port: null,
+  } as const;
+
+  it('defaults to the four budget numbers, two daemon knobs, and public fallback on', async () => {
+    expect(CONFIG_DEFAULTS.loop).toEqual(LOOP_DEFAULTS);
+    expect(CONFIG_DEFAULTS.team).toEqual({ publicFallback: 'on' });
+    const cfg = await loadConfig(dir);
+    expect(cfg.loop).toEqual(LOOP_DEFAULTS);
+    expect(cfg.team).toEqual({ publicFallback: 'on' });
+  });
+
+  it('merges a partial loop/team block per subkey (keeps the defaults it omits)', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ loop: { port: 31000 }, team: { publicFallback: 'off' } }),
+    );
+    const cfg = await loadConfig(dir);
+    expect(cfg.loop).toEqual({ ...LOOP_DEFAULTS, port: 31000 });
+    expect(cfg.team).toEqual({ publicFallback: 'off' });
+  });
+
+  it('resolveLoopConfig keeps an explicit port over the null default', () => {
+    expect(resolveLoopConfig({ loop: { port: 0 } }).port).toBe(0);
+    expect(resolveLoopConfig({}).port).toBeNull();
+  });
+
+  it.each([
+    ['loop.burst 0', { loop: { burst: 0 } }],
+    ['loop.port 70000', { loop: { port: 70000 } }],
+    ['team.publicFallback "maybe"', { team: { publicFallback: 'maybe' } }],
+  ])('rejects %s with CONFIG_INVALID', async (_label, raw) => {
+    await writeFile(configFile(), JSON.stringify(raw));
+    let caught: unknown;
+    try {
+      await loadConfig(dir);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(CliError);
+    expect((caught as CliError).code).toBe('CONFIG_INVALID');
+  });
+
+  // A newer CLI's loop key must survive an older binary's load + persist, the
+  // same reason the outer object passes unknown keys through.
+  it('passes an unknown loop subkey through loadRawConfig and drops it from the effective config', async () => {
+    await writeFile(configFile(), JSON.stringify({ loop: { burst: 9, future_knob: 'x' } }));
+    const raw = await loadRawConfig(dir);
+    expect(raw.loop).toEqual({ burst: 9, future_knob: 'x' });
+    expect(await loadConfig(dir)).toMatchObject({ loop: { ...LOOP_DEFAULTS, burst: 9 } });
+    expect((await loadConfig(dir)).loop).not.toHaveProperty('future_knob');
+  });
+
+  it('resolveSettings reports file vs default per loop subkey', async () => {
+    await writeFile(configFile(), JSON.stringify({ loop: { port: 31000, burst: 2 } }));
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.loop.port).toEqual({ value: 31000, source: 'file' });
+    expect(s.loop.burst).toEqual({ value: 2, source: 'file' });
+    expect(s.loop.human_wait_ms).toEqual({ value: 2500, source: 'default' });
+    expect(s.loop.tool_wait_ms).toEqual({ value: 4000, source: 'default' });
+    expect(s.loop.rate_per_min).toEqual({ value: 3, source: 'default' });
+    expect(s.loop.idle_exit_min).toEqual({ value: 30, source: 'default' });
+  });
+
+  it('resolveSettings reports a file-set null port as file, not default', async () => {
+    await writeFile(configFile(), JSON.stringify({ loop: { port: null } }));
+    const config = await loadRawConfig(dir);
+    const s = resolveSettings({ config, flags: {}, env: {} });
+    expect(s.loop.port).toEqual({ value: null, source: 'file' });
+  });
+
+  it('resolveSettings reports teamPublicFallback file vs default', async () => {
+    const fresh = resolveSettings({ config: await loadRawConfig(dir), flags: {}, env: {} });
+    expect(fresh.teamPublicFallback).toEqual({ value: 'on', source: 'default' });
+
+    await writeFile(configFile(), JSON.stringify({ team: { publicFallback: 'off' } }));
+    const set = resolveSettings({ config: await loadRawConfig(dir), flags: {}, env: {} });
+    expect(set.teamPublicFallback).toEqual({ value: 'off', source: 'file' });
+  });
+
+  it('exposes the dotted keys and keeps the blocks out of the scalar list', () => {
+    expect(LOOP_CONFIG_KEYS).toEqual([
+      'loop.human_wait_ms',
+      'loop.tool_wait_ms',
+      'loop.rate_per_min',
+      'loop.burst',
+      'loop.idle_exit_min',
+      'loop.port',
+    ]);
+    expect(TEAM_CONFIG_KEYS).toEqual(['team.publicFallback']);
+    expect(CONFIG_KEYS as readonly string[]).not.toContain('loop');
+    expect(CONFIG_KEYS as readonly string[]).not.toContain('team');
+  });
+
+  describe('parseLoopValue', () => {
+    const usage = (fn: () => unknown): CliError => {
+      let caught: unknown;
+      try {
+        fn();
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(CliError);
+      expect((caught as CliError).code).toBe('USAGE');
+      return caught as CliError;
+    };
+
+    it('accepts a positive integer string for every key', () => {
+      for (const key of LOOP_CONFIG_KEYS) expect(parseLoopValue(key, '12')).toBe(12);
+    });
+
+    it('accepts "null" and "auto" for loop.port only', () => {
+      expect(parseLoopValue('loop.port', 'null')).toBeNull();
+      expect(parseLoopValue('loop.port', 'auto')).toBeNull();
+      expect(parseLoopValue('loop.port', '0')).toBe(0);
+      expect(parseLoopValue('loop.port', '65535')).toBe(65535);
+      for (const key of LOOP_CONFIG_KEYS) {
+        if (key === 'loop.port') continue;
+        usage(() => parseLoopValue(key, 'null'));
+        usage(() => parseLoopValue(key, 'auto'));
+      }
+    });
+
+    it.each(['-1', 'abc', '1.5', '', '0'])('rejects %j for a budget key with USAGE', (value) => {
+      const err = usage(() => parseLoopValue('loop.burst', value));
+      expect(err.fix).toBe('Use a positive integer.');
+    });
+
+    it('rejects a port outside 0..65535 and names the derive spelling', () => {
+      const err = usage(() => parseLoopValue('loop.port', '70000'));
+      expect(err.fix).toContain('"null"');
+      usage(() => parseLoopValue('loop.port', '-1'));
+      usage(() => parseLoopValue('loop.port', '1.5'));
+    });
+  });
+
+  describe('parsePublicFallbackFlag', () => {
+    it('accepts on and off', () => {
+      expect(parsePublicFallbackFlag('on', 'team.publicFallback')).toBe('on');
+      expect(parsePublicFallbackFlag('off', 'team.publicFallback')).toBe('off');
+    });
+
+    it('rejects anything else with USAGE naming the key', () => {
+      let caught: unknown;
+      try {
+        parsePublicFallbackFlag('maybe', 'team.publicFallback');
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeInstanceOf(CliError);
+      expect((caught as CliError).code).toBe('USAGE');
+      expect((caught as CliError).message).toContain('team.publicFallback');
+      expect((caught as CliError).fix).toBe('Use "on" or "off".');
+    });
   });
 });

@@ -11,7 +11,7 @@ import {
   persistPublishMode,
   persistFreeVerbsDeclined,
 } from './config';
-import { RawConfigSchema } from '../lib/config';
+import { LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
@@ -109,8 +109,8 @@ describe('runConfigList', () => {
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
     // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 6 hooks.*
     // (webSearch, agentDispatch, stopNag, sessionPrimer, push, capture)
-    // + 1 update.mode.
-    expect(humanLines).toHaveLength(22);
+    // + 1 update.mode + 6 loop.* + 1 team.publicFallback.
+    expect(humanLines).toHaveLength(29);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -1365,5 +1365,100 @@ describe('the shelf keys', () => {
     const ctx = makeCtx();
     const based = await runConfigSet({ key: 'baseUrl', value: 'https://tenjin.blog' }, ctx);
     expect(based.data).not.toHaveProperty('warning');
+  });
+});
+
+describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md)', () => {
+  const LOOP_DEFAULT_LINES: Record<string, string> = {
+    'loop.human_wait_ms': '2500',
+    'loop.tool_wait_ms': '4000',
+    'loop.rate_per_min': '3',
+    'loop.burst': '6',
+    'loop.idle_exit_min': '30',
+    'loop.port': 'null',
+  };
+
+  it('lists every loop key and team.publicFallback with default provenance on a fresh dir', async () => {
+    const { data, humanLines } = await runConfigList(makeCtx());
+    const d = data as Record<string, { value: unknown; source: string }>;
+    for (const key of LOOP_CONFIG_KEYS) {
+      expect(d[key]).toEqual({ value: LOOP_DEFAULT_LINES[key], source: 'default' });
+      const line = (humanLines ?? []).find((l) => l.includes(key));
+      expect(line).toBeDefined();
+      expect(line).toContain('(default)');
+    }
+    expect(d['team.publicFallback']).toEqual({ value: 'on', source: 'default' });
+    const teamLine = (humanLines ?? []).find((l) => l.includes('team.publicFallback'));
+    expect(teamLine).toContain('(default)');
+  });
+
+  it('set loop.port 31000 then get reports "31000" from file, and only that subkey is written', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'loop.port', value: '31000' }, ctx);
+    expect(set.data).toEqual({ key: 'loop.port', value: '31000', source: 'file' });
+    const got = await runConfigGet({ key: 'loop.port' }, ctx);
+    expect(got.data).toEqual({ key: 'loop.port', value: '31000', source: 'file' });
+    expect(got.humanLines).toHaveLength(1);
+    expect(got.humanLines?.[0]).toContain('31000');
+    // Provenance stays truthful: the untouched subkeys are not materialized.
+    expect(await readRawFile()).toEqual({ loop: { port: 31000 } });
+    const burst = await runConfigGet({ key: 'loop.burst' }, ctx);
+    expect(burst.data).toMatchObject({ value: '6', source: 'default' });
+  });
+
+  it('set loop.port null reads back as "null" from file', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'loop.port', value: '31000' }, ctx);
+    const set = await runConfigSet({ key: 'loop.port', value: 'null' }, ctx);
+    expect(set.data).toEqual({ key: 'loop.port', value: 'null', source: 'file' });
+    expect(await readRawFile()).toEqual({ loop: { port: null } });
+    const got = await runConfigGet({ key: 'loop.port' }, ctx);
+    expect(got.data).toEqual({ key: 'loop.port', value: 'null', source: 'file' });
+  });
+
+  it('set of a second loop key keeps the first', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'loop.burst', value: '2' }, ctx);
+    await runConfigSet({ key: 'loop.rate_per_min', value: '1' }, ctx);
+    expect(await readRawFile()).toEqual({ loop: { burst: 2, rate_per_min: 1 } });
+    const { data } = await runConfigList(ctx);
+    const d = data as Record<string, { value: unknown; source: string }>;
+    expect(d['loop.burst']).toEqual({ value: '2', source: 'file' });
+    expect(d['loop.rate_per_min']).toEqual({ value: '1', source: 'file' });
+    expect(d['loop.human_wait_ms']).toEqual({ value: '2500', source: 'default' });
+  });
+
+  it('set team.publicFallback off then get reports off from file', async () => {
+    const ctx = makeCtx();
+    const set = await runConfigSet({ key: 'team.publicFallback', value: 'off' }, ctx);
+    expect(set.data).toEqual({ key: 'team.publicFallback', value: 'off', source: 'file' });
+    expect(await readRawFile()).toEqual({ team: { publicFallback: 'off' } });
+    const got = await runConfigGet({ key: 'team.publicFallback' }, ctx);
+    expect(got.data).toEqual({ key: 'team.publicFallback', value: 'off', source: 'file' });
+    expect(got.humanLines).toHaveLength(1);
+  });
+
+  it.each([
+    ['loop.burst', '0'],
+    ['loop.burst', 'abc'],
+    ['loop.burst', 'null'],
+    ['loop.port', '70000'],
+    ['loop.port', '-1'],
+    ['team.publicFallback', 'maybe'],
+  ])('set %s %s throws USAGE and writes nothing', async (key, value) => {
+    const ctx = makeCtx();
+    const err = await caught(() => runConfigSet({ key, value }, ctx));
+    expect(err).toBeInstanceOf(CliError);
+    expect(err.code).toBe('USAGE');
+    expect(err.message).toContain(key);
+    expect(existsSync(configFile())).toBe(false);
+  });
+
+  it('a bad set leaves an existing file untouched', async () => {
+    const ctx = makeCtx();
+    await runConfigSet({ key: 'loop.port', value: '31000' }, ctx);
+    const before = await readFile(configFile(), 'utf8');
+    await caught(() => runConfigSet({ key: 'loop.port', value: '70000' }, ctx));
+    expect(await readFile(configFile(), 'utf8')).toBe(before);
   });
 });
