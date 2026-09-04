@@ -23,7 +23,11 @@ import {
   RawConfigSchema,
   SEND_MAX_UNSET,
   UPDATE_CONFIG_KEYS,
+  LOOP_CONFIG_KEYS,
+  TEAM_CONFIG_KEYS,
   loadRawConfig,
+  parseLoopValue,
+  parsePublicFallbackFlag,
   parseAckServerWarnings,
   parseAgentDispatchHookModeFlag,
   parseCaptureModeFlag,
@@ -49,6 +53,8 @@ import type {
   SessionPrimerMode,
   StopNagMode,
   UpdateConfigKey,
+  LoopConfigKey,
+  TeamConfigKey,
   WebSearchMode,
 } from '../lib/config';
 import {
@@ -108,9 +114,14 @@ export interface ConfigSetDeps {
 
 const CONFIRM_ABOVE = 'above:';
 const KEY_WIDTH = Math.max(
-  ...[...CONFIG_KEYS, ...PUBLISH_CONFIG_KEYS, ...HOOKS_CONFIG_KEYS, ...UPDATE_CONFIG_KEYS].map(
-    (key) => key.length,
-  ),
+  ...[
+    ...CONFIG_KEYS,
+    ...PUBLISH_CONFIG_KEYS,
+    ...HOOKS_CONFIG_KEYS,
+    ...UPDATE_CONFIG_KEYS,
+    ...LOOP_CONFIG_KEYS,
+    ...TEAM_CONFIG_KEYS,
+  ].map((key) => key.length),
 );
 
 /**
@@ -151,7 +162,32 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'publish prompt for durable findings: block=your Stop blocks once per session AND a subagent is asked once at its own end, nudge=the same text at your turn end with no block and no subagent asked (nothing is ever blocked), off=silent',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
+  'loop.human_wait_ms':
+    'ms a hook fire may take when a human is waiting on it (prompt, Stop, SessionStart)',
+  'loop.tool_wait_ms': 'ms a hook fire may take when a tool call is waiting on it',
+  'loop.rate_per_min': 'lookups per minute per (session, agent, arm), charged once per question',
+  'loop.burst':
+    'how many lookups one (session, agent, arm) may make at once before the rate applies',
+  'loop.idle_exit_min': 'minutes without a hook fire before the loop daemon exits',
+  'loop.port':
+    "the loop daemon's loopback port; null derives one from the data dir (set only when doctor reports a foreign listener)",
+  'team.publicFallback':
+    'on=a team-shelf miss falls through to the public marketplace, off=team-only (public-only lookup stages are dropped)',
 };
+
+function isLoopKey(key: string): key is LoopConfigKey {
+  return (LOOP_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function isTeamKey(key: string): key is TeamConfigKey {
+  return (TEAM_CONFIG_KEYS as readonly string[]).includes(key);
+}
+
+function renderLoopSetting(key: LoopConfigKey, settings: EffectiveSettings): RenderedSetting {
+  const field = key.slice('loop.'.length) as keyof EffectiveSettings['loop'];
+  const { value, source } = settings.loop[field];
+  return { value: value === null ? 'null' : String(value), source };
+}
 
 function isPublishKey(key: string): key is PublishConfigKey {
   return (PUBLISH_CONFIG_KEYS as readonly string[]).includes(key);
@@ -209,6 +245,19 @@ export async function runConfigList(ctx: CommandContext): Promise<CommandResult>
     data[key] = entry;
     humanLines.push(describedLine(key, entry));
   }
+  for (const key of LOOP_CONFIG_KEYS) {
+    const entry = renderLoopSetting(key, settings);
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
+  for (const key of TEAM_CONFIG_KEYS) {
+    const entry: RenderedSetting = {
+      value: settings.teamPublicFallback.value,
+      source: settings.teamPublicFallback.source,
+    };
+    data[key] = entry;
+    humanLines.push(describedLine(key, entry));
+  }
   return { data, humanLines };
 }
 
@@ -234,6 +283,18 @@ export async function runConfigGet(
   if (isUpdateKey(key)) {
     const { updateMode } = await resolveFromContext(ctx);
     const entry: RenderedSetting = { value: updateMode.value, source: updateMode.source };
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
+  if (isLoopKey(key)) {
+    const entry = renderLoopSetting(key, await resolveFromContext(ctx));
+    return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+  }
+  if (isTeamKey(key)) {
+    const { teamPublicFallback } = await resolveFromContext(ctx);
+    const entry: RenderedSetting = {
+      value: teamPublicFallback.value,
+      source: teamPublicFallback.source,
+    };
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   const configKey = assertKey(key);
@@ -263,6 +324,8 @@ export async function runConfigSet(
     return setHooksKey(normalized, value, ctx, deps);
   }
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
+  if (isLoopKey(key)) return setLoopKey(key, value, ctx);
+  if (isTeamKey(key)) return setTeamKey(key, value, ctx);
   const configKey = assertKey(key);
   const stored = parseValue(configKey, value);
   await persist(ctx.dataDir, (existing) => ({ ...existing, [configKey]: stored }));
@@ -645,6 +708,43 @@ async function setUpdateKey(
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     update: { ...existing.update, mode: parsed },
+  }));
+  const entry: RenderedSetting = { value: parsed, source: 'file' };
+  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+}
+
+/**
+ * `config set loop.*` and `config set team.publicFallback`. The daemon stats
+ * `config.json` per fire and reloads on an mtime change, so a set takes effect
+ * on the next hook fire with no restart (02-redesign.md §4a).
+ */
+async function setLoopKey(
+  key: LoopConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const parsed = parseLoopValue(key, value);
+  const field = key.slice('loop.'.length);
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    loop: { ...existing.loop, [field]: parsed },
+  }));
+  const entry: RenderedSetting = {
+    value: parsed === null ? 'null' : String(parsed),
+    source: 'file',
+  };
+  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
+}
+
+async function setTeamKey(
+  key: TeamConfigKey,
+  value: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const parsed = parsePublicFallbackFlag(value, key);
+  await persist(ctx.dataDir, (existing) => ({
+    ...existing,
+    team: { ...existing.team, publicFallback: parsed },
   }));
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };

@@ -245,6 +245,62 @@ const LegacyHooksFields = z.object({
  * missing, so reporting is what this key controls.
  */
 export const UpdateModeSchema = z.enum(['nudge', 'off']);
+
+/**
+ * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). FOUR
+ * budget numbers and two daemon knobs; every other bound is a formula over
+ * these or a constant with a stated reason in `src/hooks/constants.ts`.
+ *
+ * `human_wait_ms`: a fire the human is waiting on (prompt, Stop, SessionStart).
+ * `tool_wait_ms`: a fire a tool call is waiting on. `rate_per_min` and `burst`:
+ * GCRA per (session, agent, arm), charged once per question. `idle_exit_min`:
+ * the daemon exits after this long with no request. `port`: null derives one
+ * from the data dir path; set it only when doctor reports a foreign listener.
+ */
+const positiveInt = z.number().int().positive();
+export const LoopConfigSchema = z.object({
+  human_wait_ms: positiveInt,
+  tool_wait_ms: positiveInt,
+  rate_per_min: positiveInt,
+  burst: positiveInt,
+  idle_exit_min: positiveInt,
+  port: z.number().int().min(0).max(65535).nullable(),
+});
+export type LoopConfig = z.infer<typeof LoopConfigSchema>;
+
+/**
+ * `team.publicFallback` (tenjin-agent#229): `off` drops every public-only stage
+ * from every lookup plan, so a team-mode miss never reaches tenjin.blog. Plain
+ * config read by the daemon per fire; install against a team shelf writes `off`.
+ */
+export const PublicFallbackSchema = z.enum(['on', 'off']);
+export type PublicFallback = z.infer<typeof PublicFallbackSchema>;
+export const TeamConfigSchema = z.object({ publicFallback: PublicFallbackSchema });
+export type TeamConfig = z.infer<typeof TeamConfigSchema>;
+
+export function parsePublicFallbackFlag(value: string, keyName: string): PublicFallback {
+  const parsed = PublicFallbackSchema.safeParse(value);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${keyName}: ${JSON.stringify(value)}`, {
+    fix: 'Use "on" or "off".',
+  });
+}
+
+/** A `loop.*` value from `config set`: a positive integer, or for `loop.port`
+ *  also `0`..`65535` or `null` (derive). */
+export function parseLoopValue(key: LoopConfigKey, value: string): number | null {
+  const field = key.slice('loop.'.length) as keyof LoopConfig;
+  if (field === 'port' && (value === 'null' || value === 'auto')) return null;
+  const n = /^\d+$/.test(value.trim()) ? Number(value.trim()) : NaN;
+  const parsed = LoopConfigSchema.shape[field].safeParse(n);
+  if (parsed.success) return parsed.data;
+  throw new CliError('USAGE', `Invalid ${key}: ${JSON.stringify(value)}`, {
+    fix:
+      field === 'port'
+        ? 'Use an integer from 0 to 65535, or "null" to derive one from the data dir.'
+        : 'Use a positive integer.',
+  });
+}
 export type UpdateMode = z.infer<typeof UpdateModeSchema>;
 
 const UpdateConfigSchema = z.object({
@@ -358,6 +414,8 @@ export const ConfigSchema = z.object({
   install: InstallConfigSchema,
   hooks: HooksConfigSchema,
   update: UpdateConfigSchema,
+  loop: LoopConfigSchema,
+  team: TeamConfigSchema,
 });
 export type Config = z.infer<typeof ConfigSchema>;
 
@@ -391,6 +449,8 @@ export const RawConfigSchema = ConfigSchema.partial()
     install: RawInstallConfigSchema.optional(),
     hooks: HooksConfigSchema.partial().merge(LegacyHooksFields).passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
+    loop: LoopConfigSchema.partial().passthrough().optional(),
+    team: TeamConfigSchema.partial().passthrough().optional(),
   })
   .passthrough();
 export type PartialConfig = z.infer<typeof RawConfigSchema>;
@@ -471,6 +531,15 @@ export const CONFIG_DEFAULTS: Config = {
     capture: 'off',
   },
   update: { mode: 'nudge' },
+  loop: {
+    human_wait_ms: 2500,
+    tool_wait_ms: 4000,
+    rate_per_min: 3,
+    burst: 6,
+    idle_exit_min: 30,
+    port: null,
+  },
+  team: { publicFallback: 'on' },
 };
 
 /**
@@ -480,8 +549,18 @@ export const CONFIG_DEFAULTS: Config = {
  * writes about itself rather than a setting to hand-edit, so none is ever a bare
  * scalar.
  */
-export type ScalarConfigKey = Exclude<keyof Config, 'publish' | 'install' | 'hooks' | 'update'>;
-const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set(['publish', 'install', 'hooks', 'update']);
+export type ScalarConfigKey = Exclude<
+  keyof Config,
+  'publish' | 'install' | 'hooks' | 'update' | 'loop' | 'team'
+>;
+const NESTED_CONFIG_KEYS: ReadonlySet<string> = new Set([
+  'publish',
+  'install',
+  'hooks',
+  'update',
+  'loop',
+  'team',
+]);
 export const CONFIG_KEYS = (Object.keys(CONFIG_DEFAULTS) as Array<keyof Config>).filter(
   (key): key is ScalarConfigKey => !NESTED_CONFIG_KEYS.has(key),
 );
@@ -512,6 +591,21 @@ export type LegacyHooksConfigKey = (typeof LEGACY_HOOKS_CONFIG_KEYS)[number];
 /** The dotted key `config get/set` accepts for the nested update block. */
 export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
 export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
+
+/** The dotted keys `config get/set` accept for the loop daemon's block. */
+export const LOOP_CONFIG_KEYS = [
+  'loop.human_wait_ms',
+  'loop.tool_wait_ms',
+  'loop.rate_per_min',
+  'loop.burst',
+  'loop.idle_exit_min',
+  'loop.port',
+] as const;
+export type LoopConfigKey = (typeof LOOP_CONFIG_KEYS)[number];
+
+/** The dotted key `config get/set` accepts for the team block. */
+export const TEAM_CONFIG_KEYS = ['team.publicFallback'] as const;
+export type TeamConfigKey = (typeof TEAM_CONFIG_KEYS)[number];
 
 /**
  * Read and validate config.json WITHOUT applying defaults, so provenance can
@@ -617,6 +711,22 @@ export async function loadConfig(dir: string): Promise<Config> {
       capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
     },
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
+    loop: resolveLoopConfig(raw),
+    team: { publicFallback: raw.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
+  };
+}
+
+/** Per-subkey merge over the defaults; an unknown key a newer CLI wrote is
+ *  dropped from the EFFECTIVE object (it still rides through persist). */
+export function resolveLoopConfig(raw: PartialConfig): LoopConfig {
+  const file = raw.loop ?? {};
+  return {
+    human_wait_ms: file.human_wait_ms ?? CONFIG_DEFAULTS.loop.human_wait_ms,
+    tool_wait_ms: file.tool_wait_ms ?? CONFIG_DEFAULTS.loop.tool_wait_ms,
+    rate_per_min: file.rate_per_min ?? CONFIG_DEFAULTS.loop.rate_per_min,
+    burst: file.burst ?? CONFIG_DEFAULTS.loop.burst,
+    idle_exit_min: file.idle_exit_min ?? CONFIG_DEFAULTS.loop.idle_exit_min,
+    port: file.port === undefined ? CONFIG_DEFAULTS.loop.port : file.port,
   };
 }
 
@@ -671,6 +781,8 @@ export interface EffectiveSettings {
   hooksPush: ResolvedSetting<PushMode>;
   hooksCapture: ResolvedSetting<CaptureMode>;
   updateMode: ResolvedSetting<UpdateMode>;
+  loop: { [K in keyof LoopConfig]: ResolvedSetting<LoopConfig[K]> };
+  teamPublicFallback: ResolvedSetting<PublicFallback>;
   /** @deprecated use hooksWebSearch — kept for backward compat */
   hooksSearchMode: ResolvedSetting<WebSearchMode>;
   /** @deprecated use hooksAgentDispatch — kept for backward compat (never `inherit`) */
@@ -726,7 +838,33 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     hooksPush: resolveHooksPush(config),
     hooksCapture: resolveHooksCapture(config),
     updateMode: resolveUpdateMode(config),
+    loop: resolveLoopSettings(config),
+    teamPublicFallback: resolveTeamPublicFallback(config),
   };
+}
+
+function resolveLoopSettings(config: PartialConfig): EffectiveSettings['loop'] {
+  const file = config.loop ?? {};
+  const one = <K extends keyof LoopConfig>(key: K): ResolvedSetting<LoopConfig[K]> => {
+    const fromFile = file[key];
+    if (fromFile !== undefined) return { value: fromFile as LoopConfig[K], source: 'file' };
+    return { value: CONFIG_DEFAULTS.loop[key], source: 'default' };
+  };
+  return {
+    human_wait_ms: one('human_wait_ms'),
+    tool_wait_ms: one('tool_wait_ms'),
+    rate_per_min: one('rate_per_min'),
+    burst: one('burst'),
+    idle_exit_min: one('idle_exit_min'),
+    port: one('port'),
+  };
+}
+
+/** team.publicFallback: file or default, no env or flag. */
+export function resolveTeamPublicFallback(config: PartialConfig): ResolvedSetting<PublicFallback> {
+  const fromFile = config.team?.publicFallback;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
+  return { value: CONFIG_DEFAULTS.team.publicFallback, source: 'default' };
 }
 
 /**

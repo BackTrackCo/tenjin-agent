@@ -8364,7 +8364,9 @@ describe('the capture ask (Stop)', () => {
   }
 
   it('gives the team ask a retrievable, bounded and privacy-safe capture brief', () => {
-    expect(teamAsk).toContain('conclusion-first finding or durable code map');
+    expect(teamAsk).toContain(
+      'conclusion-first finding, a decision and why, or a durable code map',
+    );
     expect(teamAsk).toContain('repository and commit/version where known');
     expect(teamAsk).toContain('repo-relative paths and components only');
     expect(teamAsk).toContain('evidence and explicit exclusions');

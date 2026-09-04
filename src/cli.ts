@@ -256,6 +256,40 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
+  const daemon = program
+    .command('daemon')
+    .description(
+      'The loop daemon: one local process per data dir that serves every hook fire on this machine and exits after loop.idle_exit_min without one',
+    );
+  addGlobalFlags(daemon.command('start'))
+    .description(
+      'Write the daemon and shim bundles under ~/.tenjin/hooks, mint the bearer token if absent, and start the daemon (or report the one already running)',
+    )
+    .action(async function (this: Command) {
+      await runCommand('daemon start', this, async (ctx) => {
+        const { runDaemonStart } = await import('./commands/daemon');
+        return runDaemonStart(ctx);
+      });
+    });
+  addGlobalFlags(daemon.command('stop'))
+    .description(
+      'Stop the daemon: SIGTERM once /health confirms the pid in daemon.pid, then SIGKILL after 3 s; a pid that does not answer is left alone and printed',
+    )
+    .action(async function (this: Command) {
+      await runCommand('daemon stop', this, async (ctx) => {
+        const { runDaemonStop } = await import('./commands/daemon');
+        return runDaemonStop(ctx);
+      });
+    });
+  addGlobalFlags(daemon.command('status'))
+    .description('Report the running daemon (pid, port, version, uptime, idle) or "not running"')
+    .action(async function (this: Command) {
+      await runCommand('daemon status', this, async (ctx) => {
+        const { runDaemonStatus } = await import('./commands/daemon');
+        return runDaemonStatus(ctx);
+      });
+    });
+
   addGlobalFlags(program.command('update'))
     .description('Update tenjin-cli to the newest version npm publishes on the latest tag')
     .option('--check', 'report whether a newer version exists without installing it')
