@@ -610,6 +610,23 @@ export const STORE_SQL = {
   /** The trailing run of unanswered lookups for one session, newest first. */
   recentReasons: `SELECT reason, at FROM injections
      WHERE session = ? ORDER BY at DESC LIMIT ?`,
+  /**
+   * Did ONE agent's own research arms fire inside the window?
+   *
+   * The second half of the capture gate's evidence (tenjin-agent#228 PR 1,
+   * round-3 review). `research` is the WebSearch arm's row and `read` is the
+   * context arm's package lookup, both written by `recordDecision` with the
+   * trigger in `hook` and the child's own id in `agent_id`, so a child that
+   * only searched and read still leaves an agent-keyed row here.
+   *
+   * `session` LEADS, like `bucketCount`, so this seeks `injections_session_at`
+   * and `LIMIT 1` stops at the first row of the range: the two `hook` values
+   * and the `at` bound are filters over an already-seeked range, which is what
+   * makes it affordable in a hook that can block.
+   */
+  agentResearch: `SELECT 1 FROM injections
+     WHERE session = ? AND agent_id = ? AND hook IN ('research', 'read') AND at >= ?
+     LIMIT 1`,
 
   getState: 'SELECT value FROM session_state WHERE session = ? AND key = ?',
   /** Per key, so two arms touching different keys of one session never clobber
@@ -1317,6 +1334,30 @@ const STATE_AGENT_ASKED_PREFIX = 'capture:agent:';
 /** Which children's findings have already been filed, so a repeated
  *  \`SubagentStop\` cannot queue the same block twice. */
 const STATE_AGENT_FINDING_PREFIX = 'finding:agent:';
+/**
+ * That the harness told this session a child by this id STARTED.
+ *
+ * THE LIFECYCLE ROW THE STOP ARM CHECKS ITSELF AGAINST. \`SubagentStop\` fires
+ * for agent ids this machine never saw start: 2,297 of 2,588 stop rows in a
+ * week of two \`/loop\` sessions carried an empty \`agent_type\` and a transcript
+ * path with no file behind it, and none of their ids appear in either
+ * transcript (tenjin-agent#228, plan \`2026-09-02-child-loop-close.md\`). A stop
+ * with no start is not a child, so it gets no ask, no claim and no row.
+ *
+ * A ROW, NOT A SCAN. The same fact is in \`events\`, whose only index is
+ * \`(session, at)\`; a hook that may block must not be the one place that scans
+ * a table that never shrinks, so the start arm leaves a primary-key row and
+ * the stop arm reads it by key.
+ *
+ * AND NOTHING PRUNES IT (round-2 review, minor 5). This prefix appears in no
+ * \`pruneStatePrefix\` call, so it grows one row per child per session for as
+ * long as \`session_state\` lives: about 291 real children a week on the measured
+ * machine, which is a rounding error beside the 2,297 \`events\` rows the phantom
+ * exit stops writing over the same week, and the redesign's PR E deletes this
+ * store outright. Accepted on those two numbers, stated here rather than left
+ * for the next reader to rediscover.
+ */
+const STATE_AGENT_START_PREFIX = 'start:agent:';
 /**
  * That this SESSION has already spent its one child ask.
  *
@@ -2578,6 +2619,117 @@ function childPublishedSince(sessionId, windowStart, limit) {
   const asks = new Map();
   for (const row of asked) asks.set(agentOfKey(row.key), row.at);
   return agentPublishes(windowStart, limit, asks).size > 0;
+}
+
+/** The start row for one child, written by the \`SubagentStart\` arm and read
+ *  by the \`SubagentStop\` arm. The type rides along because it is what the stop
+ *  arm would otherwise have to trust the stop payload for. */
+function markAgentStart(sessionId, agentId, agentType) {
+  return setState(sessionId, STATE_AGENT_START_PREFIX + agentKey(agentId, ''), {
+    agentType: typeof agentType === 'string' ? agentType : '',
+  });
+}
+
+/** Has this agent's finding already been filed inside the window? The read the
+ *  \`SubagentStop\` harvest takes before it parses anything, so an agent that
+ *  stops again and again after it answered costs one key read and not a fence
+ *  parse and a scrub per fire. */
+function agentHarvested(sessionId, agentId, sinceMs) {
+  return (
+    statePrefixSince(sessionId, STATE_AGENT_FINDING_PREFIX + agentKey(agentId, ''), sinceMs, 1)
+      .length > 0
+  );
+}
+
+/**
+ * Did this session see the harness start this agent, and as what? A key read,
+ * never a scan. \`null\` means no start row; a started child with no type in its
+ * start payload reads as \`''\`, which is still proof it started.
+ *
+ * THE TYPE IS RETURNED, NOT JUST THE FACT, because the \`SubagentStop\` arm needs
+ * both off one read: the row clears a phantom, and the type it recorded is what
+ * the type gates use when the stop payload arrives without one.
+ */
+function agentStartType(sessionId, agentId) {
+  const row = getState(sessionId, STATE_AGENT_START_PREFIX + agentKey(agentId, ''));
+  if (row === null) return null;
+  return isRecord(row) && typeof row.agentType === 'string' ? row.agentType : '';
+}
+
+/**
+ * Did THIS agent do work in this session inside the window?
+ *
+ * ONE PREDICATE, DEFINED ONCE (tenjin-agent#228 PR 1). The capture gate at a
+ * child's own Stop asks about the child, not about the session it shares with
+ * every sibling: a session-wide arming signal plus a first-come budget claim
+ * sent 26 of 29 asks in a week to stops that had done nothing at all. The lead's
+ * Stop keeps its own #266 activity classes for now and adopts this later
+ * (tenjin-agent#293), which is why the predicate takes an agent and a window
+ * rather than reading either off a global.
+ *
+ * EVIDENCE IS THE \`edited:\` MARKERS, and they are the only agent-keyed evidence
+ * the store holds: the context arm writes one row per path per agent on every
+ * Edit/Write/MultiEdit, and a \`pass\` leaves an \`events\` row with no marker
+ * behind it. Pass evidence therefore waits for a marker of its own; edits cover
+ * the 45 measured children that held a finding and were never asked.
+ *
+ * INDEX-BACKED, AND BOUNDED BY THIS CHILD'S OWN EDITS — not by one row
+ * (round-2 review, minor 3). \`statePrefixSince\` ends in \`ORDER BY at DESC LIMIT
+ * ?\`, and the index is the primary key \`(session, key)\`, so SQLite takes an
+ * index range over this agent's \`edited:\` keys and sorts them in a temp B-tree
+ * before handing back the one row \`LIMIT 1\` asks for. The range is the number of
+ * distinct paths this child edited, which is what makes it safe in a hook that
+ * can block; the \`LIMIT\` bounds what crosses back, not what is read.
+ *
+ * NO \`isTrackedPath\` FILTER, and not for the cost: the filter is a decision
+ * about what counts as work, and the store has no cwd on an \`edited:\` marker to
+ * apply it with. As it stands a child that wrote one scratch file reads as
+ * having done work and can spend the session's single ask. Naming that here
+ * because it is the open half: "the thing that failed here is the thing that was
+ * fixed here" belongs to the failure arm's close, and the owner decides whether
+ * the capture gate wants the same rule.
+ */
+function agentHasActivity(sessionId, agentId, sinceMs) {
+  return (
+    statePrefixSince(sessionId, STATE_EDITED_PREFIX + agentKey(agentId, ''), sinceMs, 1).length > 0
+  );
+}
+
+/**
+ * Did THIS agent research anything in this session inside the window?
+ *
+ * THE OTHER HALF OF THE EVIDENCE (tenjin-agent#228 PR 1, round-3 review). A
+ * child that spent its whole run on WebSearch, WebFetch and Read edits nothing,
+ * so \`agentHasActivity\` above reads it as having done nothing and its finding
+ * is never asked for. Those are the findings worth the most, and the evidence
+ * already exists: the sidecar's own research arms write an \`injections\` row
+ * carrying the CHILD's \`agent_id\`, so this asks about one agent exactly as the
+ * edit predicate does, over the same window, with no new column and no new key.
+ *
+ * TWO HOOK VALUES, AND THEY ARE THE WRITERS' OWN. \`recordDecision\` puts the
+ * arm's trigger in \`injections.hook\`, so the WebSearch arm's rows read
+ * \`research\` and the context arm's package lookups read \`read\` (the same two
+ * the Stop hook's research signal already names when it excludes log-only
+ * telemetry). Nothing else is admitted: an \`edit\` or \`failure\` row is the
+ * push arms talking about the agent rather than the agent doing research.
+ *
+ * A NULL AGENT MATCHES NOTHING, which is the property that keeps this per
+ * child. \`storeAgent\` maps an absent id to NULL and \`agent_id = NULL\` is never
+ * true in SQL, so the lead's own rows can never arm a child's gate, and a
+ * caller with no id gets \`false\` rather than a session-wide read.
+ *
+ * UNREADABLE IS NO EVIDENCE. \`storeGet\` answers null for a store it could not
+ * read, which reads here as "not asked": the same direction \`agentHasActivity\`
+ * fails in, and the safe one for a gate that ends a child's turn.
+ */
+function agentHasResearch(sessionId, agentId, sinceMs) {
+  return (
+    storeGet(STORE_SQL.agentResearch, [
+      storeSession(sessionId),
+      storeAgent(agentId),
+      sinceMs,
+    ]) !== null
+  );
 }
 
 /** SessionStart: one INSERT OR IGNORE-shaped upsert. */

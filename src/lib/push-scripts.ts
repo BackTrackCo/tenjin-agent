@@ -18,6 +18,7 @@
  * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
+import { FINDING_TITLE_MAX } from './child-findings';
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
 import { condenseSource } from './query-condense';
@@ -192,8 +193,20 @@ export const PUSH_FINDING_MESSAGE_TAIL = 20000;
  *  harvest looks for. ONE CONSTANT, so the ask and the parser cannot drift. */
 export const PUSH_FINDING_TAG = 'tenjin-finding';
 /**
- * What a child is asked for at `SubagentStop`, once, when it stops on an open
- * loop (tenjin-agent#228). A template: `<agent-flag>` and `<mode>` are filled in
+ * The `agent_type` this harness gives a workflow subagent, which is stopped
+ * once its structured output is written and has no further turn to spend.
+ *
+ * PROBED, LIKE EVERY OTHER FIELD ON THIS PAYLOAD. Seven types appear across a
+ * week of `SubagentStart` rows on one machine (`general-purpose`, `Explore`,
+ * `Plan`, `claude-code-guide`, two loop worker types, and this one); the one ask
+ * that reached a real child and produced nothing went to a `workflow-subagent`
+ * after its StructuredOutput. Blocking one buys a turn that does not exist, so
+ * the arm counts it under `no-turn` and asks nobody.
+ */
+export const PUSH_WORKFLOW_AGENT_TYPE = 'workflow-subagent';
+/**
+ * What a child is asked for at `SubagentStop`, once, when it stops with its own
+ * edits behind it (tenjin-agent#228). A template: `<agent-flag>` and `<mode>` are filled in
  * at run time by {@link subagentCaptureReason}, mirrored in the generated script.
  *
  * PUBLISH IT YOURSELF, AND THE QUEUE IS THE FALLBACK. Operator decision
@@ -234,7 +247,7 @@ export const PUSH_FINDING_TAG = 'tenjin-finding';
  * that would poison the queue.
  */
 export const SUBAGENT_CAPTURE_REASON =
-  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
+  'Before you finish: you changed files in this session, so you may be holding what it took to know what to change. If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
   '<agent-flag>' +
   '<search-flag>' +
   '` with the title as the first `# ` heading (one finding per publish). If it is already in a file, run `tenjin publish <file>' +
@@ -242,7 +255,7 @@ export const SUBAGENT_CAPTURE_REASON =
   '<search-flag>' +
   '` as its own bare shell/tool command, never chained behind writing the file; or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   PUSH_FINDING_TAG +
-  ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
+  ' and whose closing line is exactly ```. Make its FIRST line inside the fence `# ` and a short title for the finding, then a few sentences, self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
 /**
  * The search id a child may splice into its own publish, anchored. The
@@ -3549,10 +3562,12 @@ const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
 const SIGNAL_WINDOW_MS = __SIGNAL_WINDOW__;
 const FINDING_MAX_CHARS = __FINDING_MAX__;
+const FINDING_TITLE_MAX = __FINDING_TITLE_MAX__;
 const MESSAGE_TAIL = __MESSAGE_TAIL__;
 const FINDING_OPEN = __FINDING_OPEN__;
 const FINDING_FENCE = __FINDING_FENCE__;
 const CAPTURE_ASK = __CAPTURE_ASK__;
+const WORKFLOW_AGENT_TYPE = __WORKFLOW_AGENT_TYPE__;
 
 /**
  * The child ask, with this agent's id, the loop it was earned by and this
@@ -3822,6 +3837,18 @@ function findingClose(body) {
  * ONE LINE OUT, whatever went in: \`clean\` turns control characters into
  * spaces, which is what makes the stored body safe to splice into the parent's
  * capture ask without a child's newlines reshaping it.
+ *
+ * AND THE TITLE COMES OFF BEFORE THAT FLATTENING, which is why it is split here
+ * rather than derived at publish time (round-2 review, major 1). The ask asks
+ * the child for a \`# \` first line, and the \`\n\` that ends it is the only
+ * boundary anything will ever have: once \`clean\` has run there is no line
+ * structure left to recover, so a publish-time derivation had to CUT the body at
+ * a guessed sentence end and splice a blank line in. That rewrite moved text out
+ * of the body and split one stored line into two, and every scan detector the
+ * publish path runs on a body — the seed-phrase run, \`scanHex64\`, the rest — is
+ * line-scoped, so a credential that spanned the guessed cut stopped being found.
+ * Splitting here costs a regex, keeps the body byte-for-byte what the child
+ * wrote, and gives \`publish --finding\` the child's own title verbatim.
  */
 function findingBlock(text) {
   const start = findingOpen(text);
@@ -3829,35 +3856,39 @@ function findingBlock(text) {
   const rest = text.slice(start + 1);
   const end = findingClose(rest);
   const raw = (end === -1 ? rest : rest.slice(0, end)).slice(0, FINDING_MAX_CHARS);
-  const body = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
-  return body.length === 0 ? null : body;
+  return splitFinding(raw);
 }
 
 /**
- * Why this child is worth one more turn, or null.
+ * A bounded block as \`{ title, body }\`, scrubbed, or null when there is nothing
+ * in it.
  *
- * TWO SIGNALS, EITHER OF WHICH IS ENOUGH, and both scoped to this session and
- * the last hour: a dispatch lookup that found nothing (so nothing on any shelf
- * holds what this child just worked out), or a failure this session's own
- * arm opened or replayed a pairing for. Ungated, the ask would fire at the end
- * of every child a push-on session spawns, which is the noise budget
- * tenjin-agent#211 spent and the reason the ask is gated at all.
+ * THE SPLIT IS ABOVE THE SCRUB, not below it: \`scrub\`'s last rule in
+ * \`secretsOnly\` collapses every whitespace run to one space, so by the time it
+ * returns, the child's own line break — the only title boundary that will ever
+ * exist — is gone. Splitting first costs nothing: a newline is a token boundary
+ * to every rule the scrub runs, so no rule can match across the cut, and the two
+ * halves together are still the one bounded input the watchdog note above
+ * requires.
  *
- * THE FAILURE SIGNAL IS READ OFF THE \`sig:\` CLAIM, not off \`pairings\`. The
- * claim is written in the same breath as the pairing is opened or replayed, and
- * it is a primary-key range read; \`pairings\` has no session index, and adding
- * one is DDL this PR deliberately does not take (tenjin-agent#228 PR 4 owns the
- * migration machinery). A hook that may block must not be the one place that
- * scans a table that never shrinks.
+ * NOTHING IS EVER DROPPED. A title is taken only when the block opens with a
+ * heading, that heading fits a title (\`FINDING_TITLE_MAX\`), and there is a
+ * finding under it; in every other case the title is empty and the WHOLE block
+ * is the body, heading marker included. So an over-long heading, a heading with
+ * no body under it and a block with no heading all keep every character the
+ * child wrote, and the publish path decides what to do with them.
  */
-function captureSignal(sessionId) {
-  const since = Date.now() - SIGNAL_WINDOW_MS;
-  const searchId = openDispatchMiss(sessionId, since);
-  if (searchId !== null) return { kind: 'dispatch-miss', searchId };
-  if (statePrefixSince(sessionId, STATE_SIGNATURES_PREFIX, since, 1).length > 0) {
-    return { kind: 'failure-pairing', searchId: null };
+function splitFinding(raw) {
+  const heading = /^\s*#{1,6}[ \t]+(\S[^\n]*)\n([\s\S]+)$/.exec(raw);
+  // The RAW heading is length-checked, so the common path scrubs each half once
+  // and never the whole block twice.
+  if (heading !== null && heading[1].length <= FINDING_TITLE_MAX) {
+    const title = clean(scrub(heading[1], 'secretsOnly'), FINDING_TITLE_MAX);
+    const body = clean(scrub(heading[2], 'secretsOnly'), FINDING_MAX_CHARS);
+    if (title !== '' && body !== '') return { title, body };
   }
-  return null;
+  const whole = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
+  return whole === '' ? null : { title: '', body: whole };
 }
 
 /**
@@ -3876,12 +3907,75 @@ function emitStopBlock(reason) {
 }
 
 /**
+ * Does this path exist?
+ *
+ * \`statSync\` AND NOT \`existsSync\`, because the prelude imports the one and not
+ * the other, and a throw is the whole answer: a permission error, a dead
+ * symlink and a missing file all mean the same thing here, which is that the
+ * harness named a transcript nothing wrote.
+ */
+function pathExists(path) {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A stop that belongs to no child.
+ *
+ * MEASURED, NOT MODELLED (tenjin-agent#228, plan
+ * \`2026-09-02-child-loop-close.md\`). In a week of two \`/loop\` sessions 2,297 of
+ * 2,588 \`SubagentStop\` fires carried an empty \`agent_type\` and a transcript path
+ * with no file behind it, none of their agent ids appear in either transcript,
+ * and none of them has a \`SubagentStart\` row; they arrive about every 30 seconds
+ * while a loop session is armed. They took 26 of the 29 asks the week spent,
+ * because whichever stop came first after a session-wide signal took the
+ * session's one ask.
+ *
+ * A START ROW IS EXCULPATORY, AND IT IS READ FIRST (round-2 review, major 2).
+ * The three marks agreed on every one of the 3,166 rows measured, so the
+ * evidence is a CONJUNCTION and an OR of the three classifies the identical set
+ * while failing in a direction this arm cannot survive: one undocumented payload
+ * field renamed in a Claude Code release, or an \`EACCES\` on the transcript
+ * directory that \`pathExists\` reports the same way as a missing file, would drop
+ * every real child in the fleet and read as "no subagents ran". A child THIS
+ * SESSION saw start is proof against all of that: it is the one mark written by
+ * our own code, from a fire that already passed the payload marks. It also keeps
+ * the harvest whole, which is the sharper case: a child that was blocked, spent
+ * its turn writing the fenced finding and stopped again holds an \`asked\` row,
+ * and dropping it here for a payload field would discard the finding with it.
+ * The volume win is unchanged, because a phantom has no start row.
+ *
+ * AND THE EXIT IS SILENT, before the lifecycle row rather than after it. A
+ * phantom opened no lifecycle, so it has nothing to count: the row would be a
+ * fact about the harness filed under a child that never ran, and it is also the
+ * single largest writer to a table nothing prunes.
+ *
+ * AN AGENT ID IS NOT CHECKED FOR HERE. A fire with no id at all is not a
+ * phantom, it is a payload this build cannot key anything on, and it keeps the
+ * row and the \`no-agent-id\` reason it has always had — but with no id there is
+ * no start row to clear it, so the payload marks decide it alone. That is why
+ * the start row arrives as a value rather than being read here: \`null\` covers
+ * both "no id to key on" and "no row under that id", and the one read the
+ * caller already took serves the type gates below as well.
+ */
+function isPhantomStop(startedType, agentType, transcript) {
+  if (startedType !== null) return false;
+  if (agentType === '') return true;
+  return transcript === null || !pathExists(transcript);
+}
+
+/**
  * SubagentStop: the lifecycle row always, the ask once, the harvest next.
  *
- * ONE ROW PER FIRE, WHATEVER HAPPENS, exactly as at SubagentStart: the
- * lifecycle row is what makes a child's end countable at all (there was no
- * child-end row of any kind before tenjin-agent#228), and it never depends on
- * the child complying with anything.
+ * ONE ROW PER FIRE OF A REAL CHILD, WHATEVER HAPPENS, exactly as at
+ * SubagentStart: the lifecycle row is what makes a child's end countable at all
+ * (there was no child-end row of any kind before tenjin-agent#228), and it never
+ * depends on the child complying with anything. A phantom stop is the one fire
+ * that leaves nothing, and \`isPhantomStop\` above says why.
  *
  * EVERY FIELD THIS READS IS UNDOCUMENTED. \`agent_id\`, \`stop_hook_active\`,
  * \`last_assistant_message\` and \`agent_transcript_path\` were probed, not
@@ -3890,12 +3984,18 @@ function emitStopBlock(reason) {
  * it to be present AND false: a harness that omits it gets the lifecycle row
  * and nothing else, which is the fail-open reading of a missing fuse.
  *
+ * THE ASK GOES TO THE CHILD THAT DID THE WORK. The gate is this agent's own
+ * \`edited:\` markers (\`agentHasActivity\`) or its own \`research\`/\`read\` rows
+ * (\`agentHasResearch\`) inside the window, not a session-wide signal any sibling
+ * could arm: one dispatch MISS used to arm the ask for every child that stopped
+ * in the hour behind it, and the first to stop took it.
+ *
  * THE ASK COSTS A CHILD TURN, SO IT IS BUDGETED TWICE OVER: once per session
- * (\`STATE_SUBAGENT_ASKED\`, because the signal that arms it is session-wide and
- * would otherwise arm it for every later child), and not at all unless
- * \`hooks.capture\` is on. The harvest is deliberately NOT gated on capture — a
- * child already asked has already spent the turn, and its answer is worth
- * filing whichever way the operator moved the key in between.
+ * (\`STATE_SUBAGENT_ASKED\`, left exactly as it was, because re-keying the shared
+ * budgets per agent is the cap rework and not this change), and not at all
+ * unless \`hooks.capture\` is on. The harvest is deliberately NOT gated on
+ * capture — a child already asked has already spent the turn, and its answer is
+ * worth filing whichever way the operator moved the key in between.
  *
  * WHAT THE ASK ASKS FOR IS A PUBLISH (operator decision 2026-08-27). The child
  * runs the same \`tenjin publish\` anyone runs, and the fenced block is the
@@ -3903,9 +4003,24 @@ function emitStopBlock(reason) {
  * Nothing here detects capability or branches on the mode: this arm decides
  * WHEN to ask, and the CLI's own gates decide what happens next.
  */
-function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
-  const eventUid = uid();
+function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   const transcript = agentTranscriptPath(input);
+  // ONE READ OF THE START ROW, for the phantom mark AND for the type. It is a
+  // primary-key read either way, and taking it once is what keeps the two from
+  // disagreeing about the same child.
+  const startedType = agentId === null ? null : agentStartType(sessionId, agentId);
+  // BEFORE ANY WRITE, and before the uid that would name one.
+  if (isPhantomStop(startedType, payloadType, transcript)) return quiet();
+  // THE TYPE THE HARNESS RECORDED AT START WINS AN EMPTY PAYLOAD (round-4
+  // review). The same undocumented field the phantom mark cannot trust decides
+  // \`no-turn\` below, and the start row exists precisely because a stop can
+  // arrive without it: a \`workflow-subagent\` whose stop payload lost its
+  // \`agent_type\` used to read as an ordinary child, clear the edit-evidence
+  // gate and spend the session's one blocking ask on a child that has no turn
+  // to answer in. A non-empty payload type still wins, because that is the
+  // child's own claim at the fire being handled.
+  const agentType = payloadType !== '' ? payloadType : (startedType ?? '');
+  const eventUid = uid();
   const beat = (reason, extra) =>
     recordEvent({
       uid: eventUid,
@@ -3933,16 +4048,32 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   const asked =
     agentId === null ? null : getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''));
   if (asked !== null) {
+    // ONCE PER ASK, AND THE CHECK COMES BEFORE THE PARSE. A long-lived agent
+    // stops many times after it answered, and every one of those fires used to
+    // re-read \`last_assistant_message\`, run the fence parse and the scrub over
+    // it, and land on the dedupe claim only at the end — work whose only
+    // possible outcome was \`duplicate-finding\`. The claim below stays where it
+    // is: it is the race guard between two fires of the same child, and this is
+    // the cheap read that keeps the ordinary repeat away from it.
+    if (agentHarvested(sessionId, agentId, Date.now() - SIGNAL_WINDOW_MS)) {
+      beat('harvested');
+      return quiet();
+    }
     const message = lastAssistantMessage(input);
     if (message === null) {
       beat('no-message');
       return quiet();
     }
-    const body = findingBlock(message);
-    if (body === null) {
+    const finding = findingBlock(message);
+    if (finding === null) {
       beat('no-finding');
       return quiet();
     }
+    // THE CHILD'S OWN TITLE, split off the block's first line before the body
+    // was flattened (\`splitFinding\`). Empty when the child wrote no heading, or
+    // one no title could be made of; the publish path derives one there without
+    // touching the body.
+    const { title, body } = finding;
     // Once per agent, claimed rather than checked: the same child stopping
     // twice, or a second fire racing this one, must not queue the block twice.
     // Windowed rather than permanent for the same reason the arming signal is:
@@ -3987,6 +4118,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
         kind: 'finding',
         agentType,
         searchId,
+        title,
         body,
         agentTranscriptPath: transcript,
       },
@@ -4010,6 +4142,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
       agentId,
       agentType,
       searchId,
+      title,
       body,
     });
     // \`store-busy\` is the SAME harvest with the dedupe claim unheld: the row is
@@ -4020,6 +4153,22 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
       chars: body.length,
       findingUid,
     });
+    return quiet();
+  }
+
+  // A WORKFLOW CHILD IS COUNTED, NOT BLOCKED. This harness runs a workflow
+  // subagent to produce structured output and stops it there, so the turn a
+  // block buys does not exist: the one measured ask to a real child that
+  // produced nothing went to one of these, after its StructuredOutput. Counted
+  // rather than dropped, because it IS a child (it starts, it edits, it stops)
+  // and the funnel has to show where the asks that were never made went.
+  //
+  // ABOVE THE CONFIG GATE, unlike the cheapest-gate order the rest of this arm
+  // takes: this is a fact about the child and the reasons below are facts about
+  // the operator's key, and a count that changes meaning with a config value
+  // answers neither question.
+  if (agentType === WORKFLOW_AGENT_TYPE) {
+    beat('no-turn');
     return quiet();
   }
 
@@ -4057,11 +4206,40 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
     beat('no-agent-id');
     return quiet();
   }
-  const signal = captureSignal(sessionId);
-  if (signal === null) {
-    beat('no-signal');
+  // THE EVIDENCE GATE, AND IT IS THIS CHILD'S OWN (tenjin-agent#228 PR 1). What
+  // used to stand here was \`captureSignal(sessionId)\`: a dispatch MISS or a
+  // claimed failure signature ANYWHERE in the session, which armed the ask for
+  // every child that stopped in the hour behind it and left a first-come budget
+  // claim to pick which one. In a loop session that was a phantom 26 times out
+  // of 29. The question a child's own Stop can answer is whether THIS child did
+  // work, and both halves of that answer are agent-keyed: one bounded,
+  // index-backed read each, no \`events\` scan, no new window.
+  //
+  // TWO EVIDENCE KINDS, OR'D (round-3 review). Edits alone missed the case this
+  // arm exists for: a child that spent its run on WebSearch, WebFetch and Read
+  // edited nothing and stopped with \`no-evidence\`, and a research panel or a
+  // package comparison is exactly the finding worth a turn. \`agentHasResearch\`
+  // reads this child's own \`research\` and \`read\` rows in \`injections\`, which
+  // the sidecar's own arms already wrote against its \`agent_id\`. The label goes
+  // onto the \`asked\` row below, so the week's tuning question can still ask
+  // which kind earned each ask.
+  const since = Date.now() - SIGNAL_WINDOW_MS;
+  const evidence = agentHasActivity(sessionId, agentId, since)
+    ? 'edited'
+    : agentHasResearch(sessionId, agentId, since)
+      ? 'research'
+      : null;
+  if (evidence === null) {
+    beat('no-evidence');
     return quiet();
   }
+  // THE LOOP THE ASK IS ATTRIBUTED TO, AND NOT A GATE ANY MORE. An open dispatch
+  // MISS still names the search the child's own publish should close, which is
+  // what gives the piece its \`questionsAnswered\` prefill and closes the loop
+  // through \`inheritedSearchIds\` on the fallback path. Null is ordinary now: a
+  // child with edits behind it is asked whether or not this session left a
+  // lookup open.
+  const searchId = openDispatchMiss(sessionId, since);
   // THE MODE THE CHILD'S OWN PUBLISH WOULD RUN UNDER, resolved exactly as the
   // parent's Stop resolves it (lib/config.ts precedence: an env pin outranks the
   // project file). The child runs in the parent's cwd, so this is the mode its
@@ -4071,11 +4249,12 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // it above them is what lets the lifecycle row sit directly under them.
   const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
   const publishMode = project === null ? config.publishMode : project;
-  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE. Both signals are
-  // session-wide, so one MISS or one claimed failure signature arms this arm for
-  // every child that stops in the hour behind it; the per-child claim only stops
-  // the SAME child being asked twice. One ask per session is the cost
-  // tenjin-agent#228 costed, and this is where it is held to it.
+  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE, AND LEFT EXACTLY AS IT
+  // WAS. Re-keying the shared gates per agent is the cap rework and not this
+  // change (tenjin-agent#228 PR 1 changes no budget), so this is still one ask
+  // per session per hour, whatever the fan-out; what changed above it is WHICH
+  // child gets to spend it. The per-child claim below only stops the SAME child
+  // being asked twice.
   //
   // FAIL-CLOSED, AND WINDOWED TO THE SIGNAL (round-3 gate 6). \`claimState\`
   // returns a win on a write the store swallowed, so a single SQLITE_BUSY on
@@ -4095,7 +4274,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // same fail-closed rule as the budget above it.
   if (
     !claimStateFresh(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''), SIGNAL_WINDOW_MS, {
-      searchId: signal.searchId,
+      searchId,
       agentType,
     })
   ) {
@@ -4120,8 +4299,8 @@ function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   // entirely and is what the dispatch arm's asked-claim uses, but not here: a
   // session budget that expires after the fire's own ceiling is a budget of one
   // ask per 8 seconds, which is the runaway this claim exists to prevent.
-  beat('asked', { signal: signal.kind, searchId: signal.searchId, publishMode });
-  emitStopBlock(captureAskText(agentId, publishMode, signal.searchId));
+  beat('asked', { evidence, searchId, publishMode });
+  emitStopBlock(captureAskText(agentId, publishMode, searchId));
 }
 
 async function main() {
@@ -4155,6 +4334,11 @@ async function main() {
   if ((await openStore()) === null) return quiet();
   if (event === 'SubagentStop')
     return subagentStop(input, sessionId, config, cwd, agentId, agentType);
+  // THE START ROW, FIRST AND UNCONDITIONALLY. It is what tells a child's stop
+  // from the phantom stops this harness also fires (\`isPhantomStop\`), so it has
+  // to be written on every start that reaches the store, whatever the handoff
+  // below then does. One upsert per child per session, on a primary key.
+  if (agentId !== null) markAgentStart(sessionId, agentId, agentType);
   // THE UID IS MINTED FIRST so the heartbeat can be written LAST. Every path
   // below ends in exactly one event row carrying the reason this fire ended the
   // way it did, and the decision rows have to point at that row, so the id
@@ -4296,10 +4480,12 @@ export function pushSubagentHookScript(dataDir: string): string {
   const js = SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))
     .replaceAll('__SIGNAL_WINDOW__', String(PUSH_CAPTURE_SIGNAL_WINDOW_MS))
     .replaceAll('__FINDING_MAX__', String(PUSH_FINDING_MAX_CHARS))
+    .replaceAll('__FINDING_TITLE_MAX__', String(FINDING_TITLE_MAX))
     .replaceAll('__MESSAGE_TAIL__', String(PUSH_FINDING_MESSAGE_TAIL))
     .replaceAll('__FINDING_OPEN__', JSON.stringify('```' + PUSH_FINDING_TAG))
     .replaceAll('__FINDING_FENCE__', JSON.stringify('```'))
-    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON));
+    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON))
+    .replaceAll('__WORKFLOW_AGENT_TYPE__', JSON.stringify(PUSH_WORKFLOW_AGENT_TYPE));
   return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${js}`;
 }
 

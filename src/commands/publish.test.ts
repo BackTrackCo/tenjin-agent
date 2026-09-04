@@ -2816,6 +2816,9 @@ describe('runPublish — publish --finding', () => {
   async function seedFinding(over: {
     uid: string;
     body?: string;
+    /** The child's own `# ` line, split off at capture. Absent for a row a build
+     *  older than tenjin-agent#228 PR 1 wrote. */
+    title?: string;
     agentId?: string;
     agentType?: string;
     searchId?: string | null;
@@ -2847,6 +2850,7 @@ describe('runPublish — publish --finding', () => {
           kind: 'finding',
           agentType: over.agentType ?? 'fork',
           searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
+          ...(over.title === undefined ? {} : { title: over.title }),
           body: over.body ?? FINDING_BODY,
         }),
       ]);
@@ -2862,6 +2866,7 @@ describe('runPublish — publish --finding', () => {
           agentId: over.agentId ?? 'child-1',
           agentType: over.agentType ?? 'fork',
           searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
+          ...(over.title === undefined ? {} : { title: over.title }),
           body: over.body ?? FINDING_BODY,
         }),
         Date.now(),
@@ -2916,6 +2921,100 @@ describe('runPublish — publish --finding', () => {
     // The loop the child stopped on is the loop the piece answers, so it rides
     // to the server without the caller having to re-type it.
     expect(body()?.searchId).toBe(SEEDED_SEARCH);
+  });
+
+  /**
+   * THE TITLE IS THE CHILD'S OWN LINE (tenjin-agent#228 PR 1).
+   *
+   * The harvest splits the fence's `# ` line off before it flattens the rest, so
+   * this publish is a join of two stored fields. Before it existed, publishing a
+   * stored finding failed with `USAGE: A published post needs a title`, and the
+   * one finding a week of dogfood captured lost its attribution to it: the
+   * parent republished from a file and discarded the id.
+   */
+  it('publishes under the title the child wrote, with its body unchanged', async () => {
+    const id = await seedFinding({
+      uid: 'FND-TITLED',
+      title: 'ox 0.14 keeps Bytes.from',
+      body: 'The export is still on the published tag. The 0.13 shim is dead weight.',
+    });
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.title).toBe('ox 0.14 keeps Bytes.from');
+    expect(body()?.bodyMd).toBe(
+      '# ox 0.14 keeps Bytes.from\n\nThe export is still on the published tag. The 0.13 shim is dead weight.',
+    );
+  });
+
+  /**
+   * THE FALLBACK NEVER REWRITES THE BODY (round-2 review, major 1).
+   *
+   * A row captured before the split existed has the whole finding on one line. A
+   * title comes off its opening words and the body goes out ENTIRE, because the
+   * scan tiers this publish runs are line-scoped: cutting the derived words out
+   * and splicing a blank line in split one stored line into two and stopped a
+   * detector from seeing a run that spanned the cut.
+   */
+  it('derives a title for a pre-split row and still publishes every word of it', async () => {
+    const stored =
+      '# ox 0.14 keeps Bytes.from The export is still on the published tag. The 0.13 shim is dead weight.';
+    const id = await seedFinding({ uid: 'FND-LEGACY', body: stored });
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.title).toBe('ox 0.14 keeps Bytes.from The export is still on the published tag');
+    expect(body()?.bodyMd).toBe(
+      `# ox 0.14 keeps Bytes.from The export is still on the published tag\n\n${stored}`,
+    );
+  });
+
+  /**
+   * THE BLOCK TIER STILL SEES THE BODY (round-2 review, major 1).
+   *
+   * `scanSeedPhrases` needs twelve wordlist tokens on ONE line, and so do
+   * `scanHex64` and the rest of the per-line detectors. Deriving a title by
+   * cutting the body at a guessed word boundary and splicing a blank line in
+   * split this stored line in two, dropped both halves under twelve words, and
+   * published a recovery phrase the scan had been the only gate on. The body
+   * goes out whole now, so the run is still on one line when the scan reads it.
+   */
+  it('blocks a mnemonic that spans where the old title cut would have landed', async () => {
+    const stored =
+      '# the export is still on the published tag so the shim is dead weight and the words below prove it out ' +
+      'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    const id = await seedFinding({ uid: 'FND-SEED', body: stored });
+    const err = (await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: bodyServer().fetch, provider: spyProvider().provider }),
+    ).catch((e: unknown) => e)) as { code: string };
+    expect(err.code).toBe('PUBLISH_BLOCKED');
+  });
+
+  /** No heading at all: the first sentence becomes the title and STAYS in the
+   *  body, because there it is prose the child wrote and not a label it chose. */
+  it('falls back to the first sentence when the child wrote no heading', async () => {
+    const id = await seedFinding({
+      uid: 'FND-UNTITLED',
+      body: 'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.',
+    });
+    const { fetch, body } = bodyServer();
+    await runPublish(
+      { finding: id, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(body()?.title).toBe('Pinning the resolver to 4.1 stops the parse throw');
+    expect(String(body()?.bodyMd)).toContain(
+      'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.',
+    );
   });
 
   it('an explicit --search-id still wins over the finding own loop', async () => {

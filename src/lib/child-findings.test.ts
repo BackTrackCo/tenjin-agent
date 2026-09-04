@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describeChildFinding, readChildFinding, recentFindingIds } from './child-findings';
+import {
+  describeChildFinding,
+  findingDocument,
+  readChildFinding,
+  recentFindingIds,
+  type ChildFinding,
+} from './child-findings';
 import { openStore, STORE_FINDING_HOOK, STORE_SQL } from './state-store';
 
 /**
@@ -121,5 +127,97 @@ describe('recentFindingIds', () => {
 
   it('is empty, not an error, on a machine with no store', async () => {
     expect(await recentFindingIds(join(dir, 'never-created'))).toEqual([]);
+  });
+});
+
+/**
+ * The publish-side title (tenjin-agent#228 PR 1).
+ *
+ * The harvest splits a child's `# ` line off its block BEFORE it flattens the
+ * rest, so the ordinary path here is a join of two stored fields. What the rest
+ * pin is the fallback for a row captured before that split: a title comes off
+ * the finding's own opening words and the BODY IS NEVER REWRITTEN, because the
+ * publish path's scan detectors are line-scoped and a body cut in two stops one
+ * of them from seeing a run that spanned the cut.
+ */
+function finding(body: string, title: string | null = null): ChildFinding {
+  return {
+    id: 'f1',
+    at: new Date(0).toISOString(),
+    session: 's1',
+    project: 'p1',
+    agentType: 'general-purpose',
+    agentId: 'a1',
+    searchId: null,
+    title,
+    body,
+  };
+}
+
+describe('findingDocument', () => {
+  it("joins the child's own stored title to its stored body", () => {
+    expect(
+      findingDocument(
+        finding('It throws on an optional chain until you do.', 'Pinning the resolver'),
+      ),
+    ).toBe('# Pinning the resolver\n\nIt throws on an optional chain until you do.');
+  });
+
+  it('takes a stored title verbatim, with no sentence cut and no full stop dropped', () => {
+    // The child chose these words as its title, so nothing here second-guesses
+    // them: this exact string used to publish under `1`.
+    expect(
+      findingDocument(finding('The lockfile pins it.', '1. Pin the resolver. 2. Rerun.')),
+    ).toBe('# 1. Pin the resolver. 2. Rerun.\n\nThe lockfile pins it.');
+  });
+
+  it('derives from the first sentence when no title was stored, and keeps the body whole', () => {
+    const body = 'Pinning the resolver to 4.1 stops the throw. Verified on 4.0.';
+    expect(findingDocument(finding(body))).toBe(
+      `# Pinning the resolver to 4.1 stops the throw\n\n${body}`,
+    );
+  });
+
+  it('keeps the whole body of a stored one-liner that opens with a heading marker', () => {
+    // A row an older build wrote: the marker is markup so it leaves the title,
+    // and every WORD stays in the body.
+    const body = '# Pinning the resolver. It throws on an optional chain until you do.';
+    expect(findingDocument(finding(body))).toBe(`# Pinning the resolver\n\n${body}`);
+  });
+
+  it('keeps a body that already reads as a document', () => {
+    const doc = '# ox 0.14 keeps Bytes.from\n\nVerified against the published tag.';
+    expect(findingDocument(finding(doc))).toBe(doc);
+  });
+
+  it('walks past a sentence end with no word before it', () => {
+    // `1.` is a list number, not a sentence, and cutting there published the
+    // whole finding under the title `1`.
+    expect(findingDocument(finding('# 1. Pin the resolver to 4.1. It throws until you do.'))).toBe(
+      '# 1. Pin the resolver to 4.1\n\n# 1. Pin the resolver to 4.1. It throws until you do.',
+    );
+  });
+
+  it('cuts a runaway first sentence at a word boundary, and still keeps the body', () => {
+    const body = `# ${'word '.repeat(60)}end.`;
+    const doc = findingDocument(finding(body));
+    const title = doc.split('\n')[0] ?? '';
+    expect(title.length).toBeLessThanOrEqual(122);
+    expect(title.endsWith(' ')).toBe(false);
+    // Nothing invented and nothing reordered: the title is a prefix of what the
+    // child wrote, and the body under it is that finding entire.
+    expect(body.startsWith(title)).toBe(true);
+    expect(doc.endsWith(`\n\n${body}`)).toBe(true);
+  });
+
+  it('keeps a question mark, drops a full stop', () => {
+    expect(findingDocument(finding('# Does pinning help? Yes, on 4.1.'))).toBe(
+      '# Does pinning help?\n\n# Does pinning help? Yes, on 4.1.',
+    );
+  });
+
+  it('hands back a body it can derive nothing from, untouched', () => {
+    expect(findingDocument(finding('   '))).toBe('   ');
+    expect(findingDocument(finding('#'))).toBe('#');
   });
 });
