@@ -1,59 +1,55 @@
 /**
  * The one redaction module: every surface that decides what text may leave
  * this machine reads the same rule table (`redact-rules.json`) through this
- * file. Two verbs, one table, one fixed order:
+ * file. Two verbs over one table, and the audience is a parameter:
  *
- * `findings(text, scope)` is the deterministic, offline publish scan (B3, Q14).
- * Pure: identical input yields an identical `Finding[]`, no network and no model
- * call. It runs in every publish mode — it gates the explicit-approval gate, it
- * does not replace it. `block` findings refuse a publish in every mode and are
- * never `--yes`-clearable; `warn` findings are surfaced for review. The scope
- * is the audience: `publish` is the marketplace and reports every row, `team`
- * is the team shelf and reports only the rows whose `scopes` include it (the
- * block tier whole, plus the warns that ask the credential or the injection
- * question rather than the public-safety one). WHICH rows is data on the rule,
- * never a list in a caller: publish.ts, edit.ts and sync.ts cannot disagree
- * because none of them filters.
+ * `findings(text, scope)` is the deterministic, offline publish scan. Pure:
+ * identical input yields an identical `Finding[]`, no network and no model
+ * call. It REPORTS, it never rewrites: every finding is a detector id, a tier,
+ * offsets and a masked excerpt that never carries the matched secret. Locally
+ * a finding is a flag the consent flow shows the agent, which fixes the text or
+ * overrides with `--yes`; the server's ingest gate is the one place that
+ * refuses (vendor tokens, private keys, seed phrases, DB passwords, bearer
+ * headers). `publish` is the marketplace and reports every row; `team` is the
+ * team shelf and reports only the rows whose `scopes` include it. WHICH rows
+ * is data on the rule, never a list in a caller.
  *
- * `redact(text)` is the destructive scrub for hook queries and ledger text: it
- * bounds the input, strips the `query`-scoped rows in table order and squashes
- * whitespace, so no caller re-implements bound-before-scrub or
- * scrub-before-squash again. Hosts, paths, IPv4 literals and git SHAs stay in a
- * query on purpose (owner policy, tenjin-agent#197 rework: search availability
- * over scrubbing); credentials, control bytes and emails always go.
+ * `mask(text)` is the query-side verb: for the rows scoped `query` it replaces
+ * each match with that row's excerpt (`ghp_…[redacted 36 chars]`,
+ * `postgres://app:[redacted]@host`, `PGPASSWORD=[redacted 7 chars]`) and
+ * touches nothing else. Precision first, the way gitleaks and GitHub push
+ * protection work: a vendor prefix fires on format alone, the generic
+ * assignment rule needs a secret-named word plus `=` or `:`, and entropy is
+ * never a trigger. Paths, hosts, IPs, commit SHAs, env names and prose are
+ * never touched (owner policy, tenjin-agent#197 and the 2026-09-04 decision in
+ * tenjin-notes/loop-redesign/06-pr-a-redact.md: search availability over
+ * scrubbing; measured, the old scrub altered 16% of real prompts to stop two
+ * vendor tokens).
  *
- * Three invariants, all pinned by redact.fixtures.test.ts and redact.test.ts:
+ * Two invariants, pinned by redact.fixtures.test.ts and redact.test.ts:
  *
  * REDACTION: a `block` excerpt is masked — a type-identifying prefix plus a
  * redaction count, never the matched secret. `pem-private-key` is the one
  * exception, its excerpt being the armor header. Secret-shaped warns
  * (secret-assignment, customer-identifier, high-entropy-string) are masked too.
- * A finding travels as detector id + tier + offsets + redacted excerpt.
- *
- * TIER ORDERING: suppression may downgrade a warn, never a block. Block-tier
- * suppression is per-detector and anchored to the captured secret value; no
- * substring rule may reach it (see DOCS_PLACEHOLDER).
  *
  * ReDoS: no pattern may contain a quantified group whose body can also match the
  * group's own separator while a further obligation follows it. Audited against a
- * single line of hundreds of kilobytes, the shape a JSONL transcript record takes,
- * and the strip rows against the query seeds that bit before (#273).
+ * single line of hundreds of kilobytes, the shape a JSONL transcript record takes.
  *
  * The rule corpus lives as DATA in `redact-rules.json` so the tenjin server-side
- * ingest gate can vendor it verbatim (it reads the `publish` rows and skips the
- * rest); this file compiles that data and implements the handlers and
- * algorithmic detectors it names. Per-rule attribution is in the data file's
- * `source` field and in NOTICE.md. No pattern set is a runtime dependency: this
- * is a wallet-holding CLI, kept offline with a tight dep tree by design.
+ * ingest gate can vendor it verbatim; this file compiles that data and
+ * implements the handlers and algorithmic detectors it names. Per-rule
+ * attribution is in the data file's `source` field and in NOTICE.md. No pattern
+ * set is a runtime dependency: this is a wallet-holding CLI, kept offline with a
+ * tight dep tree by design.
  */
 
 import corpusJson from './redact-rules.json';
 import wordlistJson from './bip39-wordlist.json';
 
-/**
- * Where a rule applies. `query` rows are strip rows for `redact()`; `publish`
- * and `team` rows are report rows for `findings()`. A row is never both.
- */
+/** Where a rule applies: masked in hook queries, reported on the public
+ *  marketplace, reported on a team shelf. A row may carry any combination. */
 export type Scope = 'query' | 'publish' | 'team';
 /** The audiences `findings()` reports for. */
 export type ReportScope = Exclude<Scope, 'query'>;
@@ -72,37 +68,17 @@ export interface Finding {
   excerpt: string;
 }
 
-/**
- * Optional caller-supplied context. The scan stays a pure function — of the text
- * AND the context — with zero model calls; the context only carries deterministic
- * facts the caller already holds (the source project's git remote slugs/paths at
- * publish time, per the open-questions publishing-safety check-set).
- */
-export interface FindingsContext {
-  /**
-   * Source-project identifiers treated as private-by-default: git remote
-   * `org/repo` slugs and project paths. Matched case-insensitively as literal
-   * substrings; a mention in the draft warns (the project may be public — the
-   * offline scan cannot know — so this is ambiguity-class, never block).
-   */
-  projectMarkers?: string[];
-}
-
 /** Contiguous quoted/fenced runs at or above this word count read as copied. */
 const LONG_QUOTE_WORDS = 80;
 
-export function findings(
-  text: string,
-  scope: ReportScope,
-  context: FindingsContext = {},
-): Finding[] {
+export function findings(text: string, scope: ReportScope): Finding[] {
   const lines = text.split('\n');
   // EVERY detector runs whatever the scope, and the scope filters the RESULT.
   // The entropy catch-all suppresses itself against the spans the named
   // detectors claimed, and that set has to be the full one: a checksummed
-  // wallet address or a Google Docs id is a publish-only warn, and on a team
-  // shelf it must stay silent rather than resurface as high-entropy-string
-  // because the detector that knows what it is was switched off.
+  // wallet address is a publish-only warn, and on a team shelf it must stay
+  // silent rather than resurface as high-entropy-string because the detector
+  // that knows what it is was switched off.
   const found: Finding[] = [
     ...scanHex64(lines),
     ...scanLineDetectors(lines),
@@ -110,7 +86,6 @@ export function findings(
     ...scanSeedPhrases(lines),
     ...scanEnvDumpBlocks(lines),
     ...scanLongVerbatim(lines),
-    ...scanProjectMarkers(lines, context.projectMarkers ?? []),
   ];
   const named = dedupeAndSort(suppressEmailsInDbUris(found));
   const all = dedupeAndSort([...named, ...scanHighEntropy(lines, named)]);
@@ -122,43 +97,34 @@ export function findings(
   return all.filter((f) => keep.has(f.check));
 }
 
-/** The strip rows fit in this many characters; a longer input is cut back to
- *  the last whitespace before it so no token is handed over truncated (a
- *  secret cut at the boundary is a fragment no whole-token rule matches, and
- *  the fragment ships). 4x any slice a caller takes afterwards. */
-export const REDACT_INPUT_MAX = 8192;
-
 /**
- * Destructively remove what must never leave the machine in a query: control
- * bytes, credentials and emails. The fixed order is the contract — bound, then
- * the pre-pass, then the strip rows in table order, then squash — and it lives
- * here once rather than in every caller.
- *
- * ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so stripping
- * the block first would leave `[31m` behind as text. C0 is DELETED rather than
- * spaced, and before every whole-token rule: a control byte inside a name is a
- * splitter (`api_key<0x01>=hunter2` reads as two tokens to every rule below).
- * Whitespace controls are real text here and the squash at the end handles
- * them. The same sequences `sanitizeForTerminal` (output.ts) removes, minus
- * the newline it drops for single-line display.
+ * Replace every match of a `query`-scoped row with that row's masked excerpt.
+ * Nothing else changes: no deletion, no squash, no bound. The `skip` handlers
+ * apply exactly as they do for `findings()`, so a placeholder or a `$VAR`
+ * value is left as written.
  */
-export function redact(text: string): string {
-  const window = String(text).slice(0, REDACT_INPUT_MAX);
-  const whole =
-    window.length < String(text).length ? window.slice(0, window.search(/\s\S*$/) + 1) : window;
-  let out = whole
-    // eslint-disable-next-line no-control-regex
-    .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g, ' ')
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, '');
-  for (const row of STRIP_ROWS) {
-    out = out.replace(row.re, (...args) => {
+export function mask(text: string): string {
+  let out = text;
+  for (const detector of MASK_DETECTORS) {
+    out = out.replace(detector.re, (...args) => {
       const m = args as unknown as RegExpExecArray;
-      if (row.skip?.(m) === true) return m[0];
-      return row.replace(m);
+      return detector.skip?.(m) === true ? m[0] : detector.excerpt(m);
     });
   }
-  return out.replace(/\s+/g, ' ').trim();
+  return out;
+}
+
+/** The `query` rows as the hook template renders them: pattern, flags and the
+ *  excerpt's kept prefix. The template cannot import this file, so it gets the
+ *  data and a ten-line replace loop instead of a second regex list. */
+export function maskRules(): Array<{ pattern: string; flags: string; keep: number }> {
+  return CORPUS.rules
+    .filter((r) => r.scopes.includes('query') && r.match.kind === 'regex')
+    .map((r) => ({
+      pattern: r.match.pattern ?? '',
+      flags: r.match.flags ?? 'g',
+      keep: r.excerpt.kind === 'mask' ? (r.excerpt.keep ?? 0) : 0,
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -176,26 +142,17 @@ interface RuleExcerpt {
 
 interface Rule {
   id: string;
-  /** Report rows only; a strip row (`scopes: ['query']`) carries none. */
-  tier?: string;
+  tier: string;
   scopes: string[];
   description: string;
   source: string;
   match: { kind: string; pattern?: string; flags?: string; algorithm?: string };
-  /** Report rows only. */
-  excerpt?: RuleExcerpt;
-  /** Report rows: drop the match without a finding. Strip rows: keep the match. */
+  excerpt: RuleExcerpt;
+  /** Drop the match without a finding (e.g. a placeholder value). */
   skip?: { handler: string };
-  /** Strip rows only: what stands in for the match (default one space). */
-  replace?: { handler: string };
 }
 
 const SCOPES: ReadonlySet<string> = new Set(['query', 'publish', 'team']);
-
-/** A query-scoped row is a strip row; every other row is a report row. */
-function isStripRow(rule: Rule): boolean {
-  return rule.scopes.includes('query');
-}
 
 const CORPUS = corpusJson as unknown as {
   schemaVersion: number;
@@ -204,15 +161,7 @@ const CORPUS = corpusJson as unknown as {
 };
 
 /** Algorithmic detectors this file implements; a corpus entry naming any other fails to compile. */
-const ALGORITHMS = new Set([
-  'hex64',
-  'pemBlock',
-  'bip39',
-  'envDump',
-  'entropy',
-  'longVerbatim',
-  'projectMarkers',
-]);
+const ALGORITHMS = new Set(['hex64', 'pemBlock', 'bip39', 'envDump', 'entropy', 'longVerbatim']);
 
 const EXCERPT_HANDLERS: Record<string, (m: RegExpExecArray) => string> = {
   googleKey: (m) => maskKeeping(m[0], m[0].startsWith('AIza') ? 4 : 7),
@@ -228,47 +177,12 @@ const SKIP_HANDLERS: Record<string, (m: RegExpExecArray) => boolean> = {
   nonLiteralValue: skipNonLiteralValue,
   placeholderUsername: (m) => PLACEHOLDER_USERNAME.test(m[1] ?? m[2] ?? ''),
   reservedExampleEmail: (m) => RESERVED_EXAMPLE_DOMAIN.test(m[0]),
-  notKeyMaterial: (m) =>
-    !/\d/.test(m[0]) || !/[A-Za-z]/.test(m[0]) || isPureLowercaseHex(m[0]) || isEnvVarName(m[0]),
 };
-
-/** Strip-row replacements; the default is one space. */
-const REPLACE_HANDLERS: Record<string, (m: RegExpExecArray) => string> = {
-  urlTrail: (m) => {
-    const tail = STRIP_URL_TRAIL_RE.exec(m[0]);
-    return tail === null ? ' ' : ` ${tail[0]}`;
-  },
-};
-
-/** The trailing punctuation a blanked userinfo url hands back to the sentence
- *  it was written inside. Closers, quotes and sentence punctuation only: no
- *  alphanumeric, and no `=` (base64 padding; a key may end on it). */
-const STRIP_URL_TRAIL_RE = /[)\]}>'"\u0060*.,;:!?]+$/;
-
-/** A pure lowercase-hex run: the shape of a git SHA, kept in a query so a
- *  commit is not collateral damage. Deliberately also the shape of a hex-only
- *  token (tenjin-agent#281); the publish rows catch that one in credential
- *  position. */
-function isPureLowercaseHex(token: string): boolean {
-  return /^[0-9a-f]+$/.test(token);
-}
-
-/** All caps and digits with at least one underscore, at most 64 characters and
- *  no piece of 16+ between the underscores: a name somebody typed, never a
- *  base64 secret, and the exact token a shelf lookup keys on.
- *  `GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890` is a name glued to its
- *  value and fails the piece bound. */
-function isEnvVarName(token: string): boolean {
-  return (
-    token.length <= 64 &&
-    /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(token) &&
-    !/[A-Z0-9]{16}/.test(token)
-  );
-}
 
 interface LineDetector {
   check: string;
   severity: FindingSeverity;
+  scopes: ReadonlySet<string>;
   /** Global regex; `lastIndex` is reset per line. */
   re: RegExp;
   /** Build the (possibly masked) excerpt from a single match. */
@@ -290,27 +204,20 @@ function validateScopes(rule: Rule): void {
     if (!SCOPES.has(scope))
       throw new Error(`redact-rules.json: rule ${rule.id} names unknown scope ${scope}`);
   }
-  if (isStripRow(rule)) {
-    if (rule.scopes.length !== 1 || rule.tier !== undefined || rule.excerpt !== undefined) {
-      throw new Error(
-        `redact-rules.json: rule ${rule.id} is a strip row (scopes: query) and must carry no other scope, tier or excerpt`,
-      );
-    }
-    return;
-  }
   if (rule.tier !== 'block' && rule.tier !== 'warn') {
     throw new Error(`redact-rules.json: rule ${rule.id} has unknown tier ${String(rule.tier)}`);
   }
   if (!rule.scopes.includes('publish')) {
     throw new Error(`redact-rules.json: rule ${rule.id} reports for team but not publish`);
   }
-  // The block tier survives on every shelf: that invariant is stated to
-  // operators (lib/permissions.ts) and to models (mcp/server.ts).
+  // The block tier is reported on every shelf; the server refuses on it.
   if (rule.tier === 'block' && !rule.scopes.includes('team')) {
     throw new Error(`redact-rules.json: block rule ${rule.id} must be scoped to team as well`);
   }
-  if (rule.replace !== undefined) {
-    throw new Error(`redact-rules.json: report rule ${rule.id} names a replace handler`);
+  if (rule.scopes.includes('query') && rule.match.kind !== 'regex') {
+    throw new Error(
+      `redact-rules.json: rule ${rule.id} is masked in queries but is not a regex row`,
+    );
   }
 }
 
@@ -332,41 +239,14 @@ function compileRegex(rule: Rule): RegExp {
 function compileLineDetectors(rules: Rule[]): LineDetector[] {
   const out: LineDetector[] = [];
   for (const rule of rules) {
-    if (isStripRow(rule) || rule.match.kind === 'algorithm') continue;
+    if (rule.match.kind === 'algorithm') continue;
     out.push({
       check: rule.id,
       severity: rule.tier as FindingSeverity,
+      scopes: new Set(rule.scopes),
       re: compileRegex(rule),
       excerpt: compileExcerpt(rule),
       skip: compileSkip(rule),
-    });
-  }
-  return out;
-}
-
-interface StripRow {
-  id: string;
-  re: RegExp;
-  /** Keep the match as it stands. */
-  skip?: (m: RegExpExecArray) => boolean;
-  replace: (m: RegExpExecArray) => string;
-}
-
-function compileStripRows(rules: Rule[]): StripRow[] {
-  const out: StripRow[] = [];
-  for (const rule of rules) {
-    if (!isStripRow(rule)) continue;
-    const replace = rule.replace === undefined ? undefined : REPLACE_HANDLERS[rule.replace.handler];
-    if (rule.replace !== undefined && replace === undefined) {
-      throw new Error(
-        `redact-rules.json: rule ${rule.id} names unknown replace ${rule.replace.handler}`,
-      );
-    }
-    out.push({
-      id: rule.id,
-      re: compileRegex(rule),
-      skip: compileSkip(rule),
-      replace: replace ?? (() => ' '),
     });
   }
   return out;
@@ -382,7 +262,7 @@ function validateCorpus(rules: Rule[]): void {
   for (const rule of rules) {
     validateScopes(rule);
     if (rule.match.kind === 'algorithm') {
-      if (isStripRow(rule) || !ALGORITHMS.has(rule.match.algorithm ?? '')) {
+      if (!ALGORITHMS.has(rule.match.algorithm ?? '')) {
         throw new Error(`redact-rules.json: rule ${rule.id} names unknown algorithm`);
       }
       continue;
@@ -406,8 +286,6 @@ function validateCorpus(rules: Rule[]): void {
 
 function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
   const policy = rule.excerpt;
-  if (policy === undefined)
-    throw new Error(`redact-rules.json: rule ${rule.id} has no excerpt policy`);
   switch (policy.kind) {
     case 'mask': {
       const keep = policy.keep ?? 0;
@@ -436,7 +314,7 @@ function compileExcerpt(rule: Rule): (m: RegExpExecArray) => string {
 
 validateCorpus(CORPUS.rules);
 const LINE_DETECTORS: LineDetector[] = compileLineDetectors(CORPUS.rules);
-const STRIP_ROWS: StripRow[] = compileStripRows(CORPUS.rules);
+const MASK_DETECTORS: LineDetector[] = LINE_DETECTORS.filter((d) => d.scopes.has('query'));
 
 function scanLineDetectors(lines: string[]): Finding[] {
   const out: Finding[] = [];
@@ -525,51 +403,6 @@ function maskKeeping(match: string, prefixLen: number): string {
 
 function truncate(value: string, max: number): string {
   return value.length > max ? `${value.slice(0, max - 3)}…` : value;
-}
-
-/**
- * Occurrences of the caller's private project markers (git remote slugs, paths)
- * in the text — warn 'private-repo-reference'. Literal case-insensitive match,
- * compiled once per marker (not per line) and executed against the ORIGINAL
- * line, so spans stay exact (a locale-sensitive toLowerCase can change string
- * length — U+0130 — and misalign them). Token-bounded: `Org/repo`
- * must not fire inside a sibling slug (`Org/repo-docs`, `xOrg/repo`), but a
- * trailing `.` stays allowed so a remote-URL mention (`…/Org/repo.git`) fires.
- * Markers shorter than 3 chars are dropped as degenerate. The excerpt names the
- * matched marker: it is the publisher's own project name, shown locally so they
- * can find and generalize the reference, not key material.
- */
-function scanProjectMarkers(lines: string[], markers: string[]): Finding[] {
-  const cleaned = [...new Set(markers.filter((m) => m.trim().length >= 3))];
-  if (cleaned.length === 0) return [];
-  const needles = cleaned.map((marker) => ({
-    marker,
-    re: new RegExp(`(?<![A-Za-z0-9._-])${escapeRegExp(marker)}(?![A-Za-z0-9_-])`, 'gi'),
-  }));
-  const out: Finding[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? '';
-    for (const { marker, re } of needles) {
-      re.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      // Markers are >=3 chars, so every match advances lastIndex — no zero-width guard.
-      while ((m = re.exec(line)) !== null) {
-        out.push({
-          check: 'private-repo-reference',
-          severity: 'warn',
-          line: i + 1,
-          span: [m.index, m.index + m[0].length],
-          excerpt: marker,
-        });
-      }
-    }
-  }
-  return out;
-}
-
-/** Escape a literal string for embedding in a RegExp source. */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function localPathExcerpt(m: RegExpExecArray): string {
@@ -960,9 +793,7 @@ export const EMITTED_CHECKS: Readonly<Record<string, string>> = {
 
 /** Every rule id `findings()` can report for a scope, emitted checks included. */
 export function checksFor(scope: ReportScope): ReadonlySet<string> {
-  const ids = new Set(
-    CORPUS.rules.filter((r) => !isStripRow(r) && r.scopes.includes(scope)).map((r) => r.id),
-  );
+  const ids = new Set(CORPUS.rules.filter((r) => r.scopes.includes(scope)).map((r) => r.id));
   for (const [check, rule] of Object.entries(EMITTED_CHECKS)) if (ids.has(rule)) ids.add(check);
   return ids;
 }

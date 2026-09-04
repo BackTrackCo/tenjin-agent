@@ -353,9 +353,3 @@ export function dedupeFindings(findings: Finding[]): Finding[] {
     return true;
   });
 }
-
-/** "N secret finding(s) (check, check)" — the shared half of both block messages. */
-export function describeFindings(blocking: Finding[]): string {
-  const checks = [...new Set(blocking.map((f) => f.check))].join(', ');
-  return `${blocking.length} secret finding(s) (${checks})`;
-}

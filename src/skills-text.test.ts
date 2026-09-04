@@ -1010,10 +1010,18 @@ describe('the public render did not move', () => {
   // answer-source effect. tenjin-search is untouched, so its digest still carries
   // the value the stdin rung pinned; tenjin-publish's is this merge's own bytes,
   // both chains applied.
+  //
+  // Re-pinned for the 2026-09-04 redact-module decision
+  // (tenjin-notes/loop-redesign/06-pr-a-redact.md): the local scan is warn-only
+  // now, so tenjin-publish's mode table, scan sections and exit-3 guidance were
+  // rewritten to say the local scan never refuses and only the marketplace's own
+  // ingest scan still blocks; the team-shelf warn survivor list dropped from six
+  // to two (`secret-assignment`, `hex32-value`) and `private-repo-reference` is
+  // gone. tenjin-search is untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': '584c3e507794957238f180a56278163a',
+      'tenjin-publish': '2ac5df33ce96f5e2c1516d4535545f06',
     });
   });
 

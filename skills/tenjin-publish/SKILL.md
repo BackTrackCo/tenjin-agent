@@ -62,11 +62,11 @@ me first". `tenjin install` settles it at **auto**; no mode skips the scan.
 | Mode        | What it means for you                                              |
 | ----------- | ------------------------------------------------------------------ |
 <!-- tenjin:when teamMode -->
-| `auto`      | A clean scan publishes free, no prompt. Report the URL. Only the four checks that survive below can flag one, and a flagged scan exits 3. |
+| `auto`      | A clean scan publishes free, no prompt. Report the URL. Only the two checks that survive below can flag one, and a flagged scan exits 3. |
 <!-- tenjin:else -->
 | `auto`      | A clean scan publishes at the default price, no prompt. Report the URL. A flagged scan exits 3. |
 <!-- /tenjin:when -->
-| `full-auto` | Warnings do not stop it either. Only a hard block does.            |
+| `full-auto` | Local findings do not stop it either — nothing local does. Only the marketplace's own ingest block does, and it is checked once you actually write. |
 | `review`    | Every publish exits 3 for confirmation, even on a clean scan.      |
 
 You are told rather than left to guess: the Stop hook leads with a
@@ -79,49 +79,47 @@ where it went. Not a conversation.
 <!-- tenjin:when teamMode -->
 The CLI runs a deterministic scan in every mode, and here it asks two questions
 only: is this a live CREDENTIAL, and would this text STEER the agent that reads
-it. A repo slug, an internal hostname, a private-repo reference, a local path —
-the things a public scan warns on — are the point of a team note rather than a
-leak, so every one of those warn checks is dropped and none of them will ever stop
-you.
+it. A repo slug, an internal hostname, a local path — the things a public scan
+warns on — are the point of a team note rather than a leak, so every one of those
+warn checks is dropped and none of them will ever stop you. The injection check
+(`embedded-instruction`) and the catch-alls (`high-entropy-string`,
+`env-dump-block`) are public-only too now: a team note is fed to your teammates'
+agents the same as a public one is fed to a buyer's, but the local scan no longer
+holds this shelf to a stricter bar than the marketplace for those three, and
+`private-repo-reference` is gone entirely — a public-only nicety about the
+author's own repo slug that never applied here.
 
-Exactly six survive:
+The local scan never refuses on its own, here any more than on the marketplace:
+every finding it makes, including a structured credential shape (a provider
+token, a private key in or out of PEM framing, a seed phrase, a connection URI
+with an embedded password, a TOTP provisioning URI), is a flag through the same
+`publish.mode` consent below. What still refuses is the marketplace's own ingest
+scan, checked once the write actually reaches it: no `--yes` and no mode clears
+it, and it runs on a team shelf too, because that shelf is a hosted database with
+logs and a door key the whole team holds, so a live credential published here is
+still a live credential loose.
 
-- The whole BLOCKING tier: structured credential shapes — provider tokens, private
-  keys in and out of PEM framing, seed phrases, connection URIs with an embedded
-  password, and TOTP provisioning URIs. This shelf is a hosted database with logs
-  and a door key the whole team holds, so a live credential published here is still
-  a live credential loose. Exits 3 in every mode, and no `--yes` and no mode clears
-  it.
+Exactly two warn checks survive the public-only drop:
+
 - `secret-assignment`: a secret-named assignment such as
   `DEPLOY_API_KEY="pk_live_…"`, whose shape no block detector matches.
 - `hex32-value`: a `0x` + 64-hex value in hash context — the same detector as the
   blocking raw private key, kept a warn only so a receipt or tx hash is not
   permanently unpublishable.
-- `high-entropy-string`: a long token whose character profile reads as key material
-  and that no named detector claimed. It is what is left for `SEGMENT_WRITE_KEY=…`
-  or `Authorization: Basic …`, whose key name `secret-assignment` does not
-  recognize and whose value shape nothing above matches.
-- `env-dump-block`: three or more consecutive `KEY=VALUE` lines carrying a
-  substantial value, which is what a pasted `.env` looks like. A note written up
-  from a transcript or a config paste is exactly where one turns up.
-- `embedded-instruction`: an "ignore all previous instructions" imperative or a
-  `BEGIN SYSTEM PROMPT` header. The one survivor that is not about credentials.
-  Injection risk does not shrink for being private the way a publicness concern
-  does: a note here is fed to your teammates' agents, and the push sidecar injects
-  it unasked. If the imperative is source material the note is ABOUT, say so and
-  clear it; if you cannot say where it came from, do not.
 
-The last five are warns, so the cascade governs them as it does anywhere:
-`review` and `auto` exit 3 on them, `full-auto` and `--yes` clear them unseen. The
-publicness triage is what is gone here, because publicness is not what this shelf
-is for.
+Both are warns, so the cascade governs them as it does anywhere: `review` and
+`auto` exit 3 on them, `full-auto` and `--yes` clear them unseen. The publicness
+triage is what is gone here, because publicness is not what this shelf is for.
 <!-- tenjin:else -->
-The CLI runs a deterministic scan in every mode. Its BLOCKING tier is structured
-credential shapes only — provider tokens, private keys in and out of PEM framing,
-seed phrases, connection URIs with an embedded password, and TOTP provisioning
-URIs — and no mode and no `--yes` clears it. Everything else warns: `review`
-surfaces warnings, `--yes` and `full-auto` clear them. A
-secret with no recognizable shape is a prompt to look, not a stop.
+The CLI runs a deterministic local scan in every mode, but it never refuses on
+its own: every finding it makes, including its BLOCKING-tier shapes (structured
+credentials only — provider tokens, private keys in and out of PEM framing, seed
+phrases, connection URIs with an embedded password, TOTP provisioning URIs), is a
+flag through the same `publish.mode` consent below — `review` surfaces it, `--yes`
+and `full-auto` clear it. The marketplace runs its own ingest scan on the write
+itself, and it is the one place that still refuses: no mode and no `--yes` clears
+a block there. A secret with no recognizable shape is a prompt to look, not a
+stop.
 
 It matches patterns, so warnings split in two and only the second is worth the
 user's attention:
@@ -134,7 +132,7 @@ user's attention:
   to look.
 - Usually a real stop, because the draft carries context from somewhere it should
   not have travelled: `customer-identifier`, `confidential-marker`,
-  `internal-hostname`, `private-repo-reference`, `secret-assignment`,
+  `internal-hostname`, `secret-assignment`,
   `paid-content-marker`, `phone`, `long-verbatim-quote`, `collaboration-url`,
   `cloud-resource-id`, `env-dump-block`.
 <!-- /tenjin:when -->
@@ -353,22 +351,26 @@ private draft, leaves the loop open, and sends no attribution.
 **On any exit 3, render THAT payload's findings as one yes/no, then re-run with
 `--yes` on an explicit yes.** Never ask a generic "shall I publish?" before
 running: the findings are the question, and a `--yes` re-run after a bare yes
-silently clears the five warn checks that survive here (`secret-assignment`,
-`hex32-value`, `high-entropy-string`, `env-dump-block`, `embedded-instruction`),
-each one either a live credential or text that would steer the next agent to read
-it. The shelf scans at ingest too, and its warn tier is advisory there, so today
-those five are what a payload carries. A hard block refuses in every mode and no
-`--yes` clears it.
+silently clears every local finding, the two warn checks that survive here
+(`secret-assignment`, `hex32-value`) and a structured credential shape alike —
+the local scan never refuses on its own, so `--yes` is the only gate it has. The
+shelf scans at ingest too, and it is the one place that still refuses: a `--yes`
+re-run can still hit a SECOND exit 3 carrying findings marked `[server]` that the
+first payload could not have shown; render those the same way. A hard block
+refuses in every mode and no `--yes` clears it: that block is the marketplace's.
 <!-- tenjin:else -->
 **On any exit 3, render THAT payload's findings and price as one yes/no, then
 re-run with `--yes` on an explicit yes.** Never ask a generic "shall I publish?"
 before running: the findings are the question, and a `--yes` re-run after a bare
 yes silently clears WARN-tier findings (PII, wallet addresses, internal
-hostnames) the user never saw. The marketplace scans at ingest too, so a `--yes`
-re-run can hit a SECOND exit 3 carrying findings marked `[server]` that the first
-payload could not have shown: render those the same way, and follow that
-payload's own `fix` rather than re-running with `--yes` again. A hard block
-refuses in every mode and no `--yes` clears it.
+hostnames) the user never saw — the local scan never refuses on its own, so this
+now covers a structured credential shape it flagged too, not only its ordinary
+warns. The marketplace scans at ingest too, so a `--yes` re-run can hit a SECOND
+exit 3 carrying findings marked `[server]` that the first payload could not have
+shown: render those the same way, and follow that payload's own `fix` rather than
+re-running with `--yes` again. A hard block refuses in every mode and no `--yes`
+clears it: that block is the marketplace's, checked once the write actually
+reaches it, not the local scan's.
 <!-- /tenjin:when -->
 
 Exit 4 is a publish that failed AFTER approval: the write, not the gate. Nothing

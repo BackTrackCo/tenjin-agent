@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { findings, type Finding, type FindingsContext } from './redact';
+import { findings, type Finding } from './redact';
 
 /** Every case here is the marketplace audience; the team scope is pinned in redact.fixtures.test.ts. */
-const scan = (text: string, context?: FindingsContext): Finding[] =>
-  findings(text, 'publish', context);
+const scan = (text: string): Finding[] => findings(text, 'publish');
 
 function checks(text: string): string[] {
   return scan(text).map((f) => f.check);
@@ -766,48 +765,6 @@ describe('scan — placeholder suppression', () => {
     // A repeated-letter body is still a live key shape.
     expect(checks(`t=ghp_${'Z'.repeat(36)}`)).toContain('github-token');
     expect(checks(`0x${HEX64}`)).toContain('raw-private-key');
-  });
-});
-
-describe('scan — private project references (context-driven)', () => {
-  const context = { projectMarkers: ['BackTrackCo/tenjin-agent', 'acme-corp/billing-svc'] };
-
-  it('warns when the draft mentions a source-project marker, case-insensitively', () => {
-    const found = scan('as we did in backtrackco/tenjin-agent, retry the call', context);
-    const f = found.find((x) => x.check === 'private-repo-reference');
-    expect(f?.severity).toBe('warn');
-    expect(f?.excerpt).toBe('BackTrackCo/tenjin-agent');
-  });
-
-  it('flags a marker inside a remote URL mention', () => {
-    expect(
-      scan('clone https://github.com/acme-corp/billing-svc.git first', context).map((f) => f.check),
-    ).toContain('private-repo-reference');
-  });
-
-  it('is silent without context, and on unrelated text with context', () => {
-    expect(checks('as we did in BackTrackCo/tenjin-agent')).not.toContain('private-repo-reference');
-    expect(
-      scan('a draft about unrelated/other-repo work', context).map((f) => f.check),
-    ).not.toContain('private-repo-reference');
-  });
-
-  it('drops degenerate short markers instead of over-matching', () => {
-    expect(scan('nothing to see', { projectMarkers: ['a', ' '] })).toEqual([]);
-  });
-
-  it('does not fire inside a sibling slug, but still fires on a .git URL mention (review r5)', () => {
-    // Trailing name characters continue the slug: Org/repo-docs is a DIFFERENT repo.
-    expect(
-      scan('see BackTrackCo/tenjin-agent-docs for details', context).map((f) => f.check),
-    ).not.toContain('private-repo-reference');
-    expect(scan('the xBackTrackCo/tenjin-agent fork', context).map((f) => f.check)).not.toContain(
-      'private-repo-reference',
-    );
-    // A trailing `.` stays allowed so the …/repo.git remote-URL mention fires.
-    expect(
-      scan('git@github.com:BackTrackCo/tenjin-agent.git', context).map((f) => f.check),
-    ).toContain('private-repo-reference');
   });
 });
 

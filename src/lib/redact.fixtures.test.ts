@@ -1,7 +1,7 @@
 /**
  * The labeled-fixture gate for both verbs of redact.ts. `redact.fixtures.json`
  * names, per case, EXACTLY what the module must do: the detector ids
- * `findings()` reports on a `publish` case, the text `redact()` returns on a
+ * `findings()` reports on a `publish` case, the text `mask()` returns on a
  * `query` case. The publish cases turn into per-detector precision and recall
  * and fail on anything below 1.0 in either direction, so a detector edit has to
  * show its false-positive cost here before it can merge: recall alone is cheap
@@ -14,13 +14,12 @@
  *
  * It also pins the properties the rest of the pipeline depends on — the
  * redaction invariant (no finding excerpt ever carries the matched secret), the
- * team survivor set, and a ReDoS budget against transcript-scale input for the
- * report rows and against the query seeds that bit before (#273) for the strip
- * rows.
+ * team survivor set, and a ReDoS budget against transcript-scale input for
+ * both verbs.
  */
 
 import { describe, it, expect } from 'vitest';
-import { findings, redact, checksFor, EMITTED_CHECKS, REDACT_INPUT_MAX } from './redact';
+import { findings, mask, checksFor, EMITTED_CHECKS } from './redact';
 import type { ReportScope } from './redact';
 import fixtures from './redact.fixtures.json';
 import rules from './redact-rules.json';
@@ -33,7 +32,6 @@ interface Case {
   expect_ids?: string[];
   expect_text?: string;
   secret?: string;
-  markers?: string[];
 }
 
 interface Rule {
@@ -42,16 +40,9 @@ interface Rule {
   scopes: string[];
 }
 
-const {
-  cases: RAW_CASES,
-  tokens: TOKENS,
-  redos: REDOS,
-} = fixtures as {
-  cases: Case[];
-  tokens: string[][];
-  redos: Array<{ seed: string; prefix?: string; note: string }>;
-};
+const { cases: RAW_CASES, tokens: TOKENS } = fixtures as { cases: Case[]; tokens: string[][] };
 const RULES = (rules as { rules: Rule[] }).rules;
+const MASKED_IDS = new Set(RULES.filter((r) => r.scopes.includes('query')).map((r) => r.id));
 
 /**
  * Credential literals live in `tokens` split into thirds and are referenced from
@@ -85,7 +76,7 @@ function scopedExpectation(c: Case, scope: ReportScope): string[] {
 }
 
 function detectorsFor(c: Case, scope: ReportScope): string[] {
-  const found = findings(c.input, scope, { projectMarkers: c.markers ?? [] });
+  const found = findings(c.input, scope);
   return [...new Set(found.map((f) => f.check))].sort();
 }
 
@@ -168,38 +159,34 @@ describe('fixture coverage', () => {
   });
 });
 
-describe('redact() — the query scope', () => {
+describe('mask() — the query scope', () => {
   for (const c of QUERY_CASES) {
     it(`${c.id}`, () => {
-      expect(redact(c.input)).toBe(c.expect_text);
+      expect(mask(c.input)).toBe(c.expect_text);
     });
   }
 
-  it('never lets a labeled secret through', () => {
-    // Every credential-shaped token in the publish corpus is a shape the strip
-    // rows must also remove from a query, whatever the surrounding text.
+  it('masks every labeled secret a query-scoped row reports', () => {
+    // Every publish case whose expected detector is masked in queries is also
+    // a mask case: the same regex, the same excerpt, so the secret cannot
+    // survive in a question that findings() would flag on a shelf.
     const leaks: string[] = [];
     for (const c of PUBLISH_CASES) {
-      if (c.secret === undefined) continue;
-      // Pure lowercase hex is kept in a query by policy (a git SHA); the publish
-      // rows catch a hex-only key in credential position instead.
-      if (/^[0-9a-f]+$/.test(c.secret)) continue;
-      // Seed phrases and PEM blocks have no strip row: an algorithmic detector
-      // on publish, and neither shape is a search query. A home path's
-      // username is a path, and paths stay in a query by the same policy.
-      if (/^(?:bip39-|pem-|openssh-|local-path\/)/.test(c.id)) continue;
-      if (redact(c.input).includes(c.secret)) leaks.push(`${c.id}: ${c.secret.slice(0, 6)}…`);
+      // A case that also expects an algorithmic detector (hex64, PEM, seed
+      // phrase) may label THAT secret; those rows are report-only.
+      const ids = c.expect_ids ?? [];
+      if (c.secret === undefined || ids.length === 0 || !ids.every((id) => MASKED_IDS.has(id)))
+        continue;
+      if (mask(c.input).includes(c.secret)) leaks.push(`${c.id}: ${c.secret.slice(0, 6)}…`);
     }
     expect(leaks).toEqual([]);
   });
 
-  it('bounds the input to whole tokens', () => {
-    const secret = 'sk-' + 'a1'.repeat(20);
-    const text = `${'word '.repeat(REDACT_INPUT_MAX / 5 - 2)}${secret} tail`;
-    const out = redact(text);
-    expect(out.length).toBeLessThanOrEqual(REDACT_INPUT_MAX);
-    expect(out).not.toContain(secret);
-    expect(out).not.toMatch(/sk-a1/);
+  it('leaves text with no query-scoped match byte-identical', () => {
+    for (const c of PUBLISH_CASES) {
+      if ((c.expect_ids ?? []).some((id) => MASKED_IDS.has(id))) continue;
+      expect(mask(c.input), c.id).toBe(c.input);
+    }
   });
 });
 
@@ -208,7 +195,7 @@ describe('findings — excerpts are redacted', () => {
     const leaks: string[] = [];
     for (const c of PUBLISH_CASES) {
       if (c.secret === undefined) continue;
-      for (const f of findings(c.input, 'publish', { projectMarkers: c.markers ?? [] })) {
+      for (const f of findings(c.input, 'publish')) {
         if (f.excerpt.includes(c.secret)) leaks.push(`${c.id}: ${f.check}`);
       }
     }
@@ -218,7 +205,7 @@ describe('findings — excerpts are redacted', () => {
   it('masks every block-tier excerpt (pem armor is the one header-only exception)', () => {
     const unmasked: string[] = [];
     for (const c of PUBLISH_CASES) {
-      for (const f of findings(c.input, 'publish', { projectMarkers: c.markers ?? [] })) {
+      for (const f of findings(c.input, 'publish')) {
         if (f.severity !== 'block' || f.check === 'pem-private-key') continue;
         if (!f.excerpt.includes('[redacted')) unmasked.push(`${c.id}: ${f.check}`);
       }
@@ -229,7 +216,7 @@ describe('findings — excerpts are redacted', () => {
   it('gives every finding a detector id, a tier, and in-range offsets', () => {
     for (const c of PUBLISH_CASES) {
       const lines = c.input.split('\n');
-      for (const f of findings(c.input, 'publish', { projectMarkers: c.markers ?? [] })) {
+      for (const f of findings(c.input, 'publish')) {
         expect(RULE_IDS.has(f.check)).toBe(true);
         expect(['block', 'warn']).toContain(f.severity);
         const line = lines[f.line - 1] ?? '';
@@ -290,18 +277,11 @@ describe('ReDoS budget', () => {
     expect(performance.now() - started).toBeLessThan(BUDGET_MS);
   });
 
-  // The strip rows only ever see REDACT_INPUT_MAX characters, so the seeds are
-  // built to that bound; the measured shapes from #273 ran 0.05-0.65 ms at 16k
-  // on the old scrub, so a synchronous regex that reaches this budget is
-  // super-linear, not slow.
-  const STRIP_BUDGET_MS = 100;
-  for (const { seed, prefix, note } of REDOS) {
-    it(`redact completes within budget on ${JSON.stringify(seed)} repeats (${note})`, () => {
-      const body = seed.repeat(Math.ceil(REDACT_INPUT_MAX / seed.length));
-      const text = `${prefix ?? ''}${body}`.slice(0, REDACT_INPUT_MAX);
+  for (const [name, text] of pathological) {
+    it(`mask completes within budget on ${name}`, () => {
       const started = performance.now();
-      redact(text);
-      expect(performance.now() - started).toBeLessThan(STRIP_BUDGET_MS);
+      mask(text);
+      expect(performance.now() - started).toBeLessThan(BUDGET_MS);
     });
   }
 });
@@ -314,16 +294,16 @@ describe('ReDoS budget', () => {
  * tier is not listed: the table validator refuses a block rule without `team`.
  */
 describe('team-shelf survivor set', () => {
-  it('keeps every warn that asks the credential or the injection question', () => {
+  it('keeps the credential-shaped warns and nothing else', () => {
     const survivors = checksFor('team');
-    for (const name of [
-      'secret-assignment',
-      'hex32-value',
-      'high-entropy-string',
-      'env-dump-block',
-      'embedded-instruction',
-    ]) {
+    // The 2026-09-04 decision: a team shelf flags the precise credential shapes
+    // (the block rows, which the server refuses, and `secret-assignment`) and
+    // nothing that asks the public-safety question.
+    for (const name of ['secret-assignment', 'hex32-value']) {
       expect(survivors.has(name), `${name} no longer survives on a team shelf`).toBe(true);
+    }
+    for (const name of ['high-entropy-string', 'env-dump-block', 'embedded-instruction', 'email']) {
+      expect(survivors.has(name), `${name} is flagged on a team shelf again`).toBe(false);
     }
   });
 

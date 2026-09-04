@@ -1,5 +1,5 @@
 {
-  "note": "Fixture set for src/lib/redact.ts, one file for both verbs. `cases` name, per input, EXACTLY what the module must do: a `publish`-scoped case lists the detector ids `findings()` reports (the `team` expectation is derived by the test from the rules' scopes, never twinned by hand), a `query`-scoped case gives the exact text `redact()` returns. `secret`, when present, is a literal that must never appear in any finding excerpt; `markers` supplies scan context; `label` says whether the case is a positive or a benign lookalike, and every rule needs one of each. Positives are sanitized: every credential-shaped value here is synthetic and matches only its own shape. Credential literals are stored SPLIT into thirds in `tokens` and referenced as %%tN%% markers, so the committed bytes carry no contiguous token shape for a secret scanner or a model to learn. `redos` holds the seeds the strip rows are timed against at the redact() input bound, on top of the transcript-scale list in the test itself.",
+  "note": "Fixture set for src/lib/redact.ts, one file for both verbs. A `publish`-scoped case lists the detector ids `findings()` reports (the `team` expectation is derived by the test from the rules' scopes, never twinned by hand); a `query`-scoped case gives the exact text `mask()` returns. `secret`, when present, is a literal that must never appear in any finding excerpt; `label` says whether the case is a positive or a benign lookalike, and every rule needs one of each. Positives are sanitized: every credential-shaped value here is synthetic and matches only its own shape. Credential literals are stored SPLIT into thirds in `tokens` and referenced as %%tN%% markers, so the committed bytes carry no contiguous token shape for a secret scanner or a model to learn.",
   "tokens": [
     ["AKIAQYL", "PMN5HGO", "EDCFT2"],
     [
@@ -58,7 +58,15 @@
     ["GITHUB_TOKEN_AB", "CDEF1234567890A", "BCDEF1234567890"],
     ["8f3a9b2c", "1d4e5f6a", "7b8c9d0e"],
     ["a1b2c3d4", "e5f6a7b8", "c9d0e1f2"],
-    ["4c0883a69102937d9234c", "4a5e7f8b1c2d3e4f5a6b7", "c8d9e0f1a2b3c4d5e6f7a8"]
+    ["4c0883a69102937d9234c", "4a5e7f8b1c2d3e4f5a6b7", "c8d9e0f1a2b3c4d5e6f7a8"],
+    ["ghp_abcdefghi", "jklmnopqrstuv", "wxyz0123456789"],
+    [
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiO",
+      "iIxMjM0NTY3ODkwIn0.dozjgNryP4J",
+      "3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+    ],
+    ["AKIAIO", "SFODNN", "7EXAMPLE"],
+    ["3f9a1c77b2", "e04d5a8c6b", "1e2f9d0a4b7c"]
   ],
   "cases": [
     {
@@ -1012,22 +1020,6 @@
       "expect_ids": []
     },
     {
-      "id": "private-repo-reference/pos",
-      "scope": "publish",
-      "label": "positive",
-      "input": "We shipped it in BackTrackCo/tenjin-agent last week.",
-      "expect_ids": ["private-repo-reference"],
-      "markers": ["BackTrackCo/tenjin-agent"]
-    },
-    {
-      "id": "private-repo-reference/neg-sibling",
-      "scope": "publish",
-      "label": "negative",
-      "input": "See BackTrackCo/tenjin-agent-docs for the write-up.",
-      "expect_ids": [],
-      "markers": ["BackTrackCo/tenjin-agent"]
-    },
-    {
       "id": "benign/marketplace-post",
       "scope": "publish",
       "label": "negative",
@@ -1113,254 +1105,74 @@
       "expect_ids": []
     },
     {
-      "id": "strip-userinfo-url/pos",
+      "id": "mask/vendor-token",
       "scope": "query",
       "label": "positive",
-      "input": "the retry loops on (postgres://app:hunter2secret@db.internal:5432/main); see the log",
-      "expect_text": "the retry loops on ( ); see the log"
+      "input": "deploy failed with %%t42%% in the env",
+      "expect_text": "deploy failed with ghp_…[redacted 36 chars] in the env"
     },
     {
-      "id": "strip-userinfo-url/pos-query-string",
+      "id": "mask/jwt",
       "scope": "query",
       "label": "positive",
-      "input": "fails at https://u:p@h/db?apikey[0]=hunter2secret&next=xyz789abc after deploy",
-      "expect_text": "fails at after deploy"
+      "input": "session %%t43%% rejected",
+      "expect_text": "session eyJ…[redacted 89 chars] rejected"
     },
     {
-      "id": "strip-userinfo-url/no-padding-handback",
+      "id": "mask/aws-key",
       "scope": "query",
       "label": "positive",
-      "input": "postgres://u:p@h/db?k=aGVsbG93b3JsZGhlbGxvd29ybGQx== failed",
-      "expect_text": "failed"
+      "input": "AWS rejects %%t44%% on upload",
+      "expect_text": "AWS rejects AKIA…[redacted 16 chars] on upload"
     },
     {
-      "id": "strip-userinfo-url/keeps-space-separated-param",
-      "scope": "query",
-      "label": "positive",
-      "input": "postgres://admin:hunter2@db.acme.com/prod ref=abc123 failed",
-      "expect_text": "ref=abc123 failed"
-    },
-    {
-      "id": "strip-userinfo-url/neg-no-credential",
-      "scope": "query",
-      "label": "negative",
-      "input": "see https://acme.com/docs?page=2 for the flag",
-      "expect_text": "see https://acme.com/docs?page=2 for the flag"
-    },
-    {
-      "id": "strip-secret-assignment/pos",
+      "id": "mask/assignment",
       "scope": "query",
       "label": "positive",
       "input": "PGPASSWORD=hunter2 psql -h db.internal fails with 28P01",
-      "expect_text": "PG psql -h db.internal fails with 28P01"
+      "expect_text": "PGPASSWORD=[redacted 7 chars] psql -h db.internal fails with 28P01"
     },
     {
-      "id": "strip-secret-assignment/pos-long-prefix",
+      "id": "mask/flag",
       "scope": "query",
       "label": "positive",
-      "input": "my_service_my_service_my_service_my_service_my_service_my_service_my_service_password=hunter2secret rejected",
-      "expect_text": "my_service_my_service_my_service_my_service_my_service_my_service_my_service_ rejected"
+      "input": "Failed: curl --api-key %%t45%% https://api.acme.io/v1/ping",
+      "expect_text": "Failed: curl --api-key=[redacted 32 chars] https://api.acme.io/v1/ping"
     },
     {
-      "id": "strip-secret-assignment/pos-bearer",
+      "id": "mask/db-uri",
       "scope": "query",
       "label": "positive",
-      "input": "curl -H \"Authorization: bearer abc123def456\" returns 401",
-      "expect_text": "curl -H \"Authorization: returns 401"
+      "input": "retry loops on (postgres://app:hunter2secret@db.internal:5432/main); see the log",
+      "expect_text": "retry loops on (postgres://app:[redacted]@db.internal:5432/main); see the log"
     },
     {
-      "id": "strip-secret-assignment/pos-sig",
-      "scope": "query",
-      "label": "positive",
-      "input": "presigned url ;sig=abc123 expired early",
-      "expect_text": "presigned url ; expired early"
-    },
-    {
-      "id": "strip-secret-assignment/pos-flag",
-      "scope": "query",
-      "label": "positive",
-      "input": "curl --api-key Zx9QmT7bV2pL4aRe https://api.acme.io fails 401",
-      "expect_text": "curl https://api.acme.io fails 401"
-    },
-    {
-      "id": "strip-secret-assignment/pos-flag-prefixed",
-      "scope": "query",
-      "label": "positive",
-      "input": "curl --db-password Zx9QmT7bV2pL4aRe https://api.acme.io fails 401",
-      "expect_text": "curl https://api.acme.io fails 401"
-    },
-    {
-      "id": "strip-secret-assignment/pos-flag-private-key",
-      "scope": "query",
-      "label": "positive",
-      "input": "cast send --private-key %%t41%% 0xabc reverts",
-      "expect_text": "cast send 0xabc reverts"
-    },
-    {
-      "id": "strip-secret-assignment/pos-quoted-spaces",
-      "scope": "query",
-      "label": "positive",
-      "input": "run --password \"correct horse battery\" done",
-      "expect_text": "run done"
-    },
-    {
-      "id": "strip-secret-assignment/priced-design-colon",
-      "scope": "query",
-      "label": "positive",
-      "input": "the new design: dark mode breaks the header",
-      "expect_text": "the new de mode breaks the header"
-    },
-    {
-      "id": "strip-secret-assignment/neg-prose",
+      "id": "mask/keeps-prose-with-keywords",
       "scope": "query",
       "label": "negative",
-      "input": "the bearer of bad news is the token bucket",
-      "expect_text": "the bearer of bad news is the token bucket"
+      "input": "the new design: dark mode and assignee: bob and the bearer of bad news",
+      "expect_text": "the new design: dark mode and assignee: bob and the bearer of bad news"
     },
     {
-      "id": "strip-vendor-token/pos",
-      "scope": "query",
-      "label": "positive",
-      "input": "deploy failed with %%t35%% in the env",
-      "expect_text": "deploy failed with in the env"
-    },
-    {
-      "id": "strip-vendor-token/pos-jwt",
-      "scope": "query",
-      "label": "positive",
-      "input": "session %%t36%% rejected",
-      "expect_text": "session rejected"
-    },
-    {
-      "id": "strip-vendor-token/neg-prose",
+      "id": "mask/keeps-paths-hosts-shas-env-emails",
       "scope": "query",
       "label": "negative",
-      "input": "the sk-learn import and the ghp docs page",
-      "expect_text": "the sk-learn import and the ghp docs page"
+      "input": "checkout.test.ts fails on prod.acme.com at 10.14.203.7 under /private/tmp/claude-501/abc/scratchpad since 3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77; NEXT_PUBLIC_API_V2_BASE_URL is unset; mail dana.reyes@acme-corp.com; the build failed.In the log",
+      "expect_text": "checkout.test.ts fails on prod.acme.com at 10.14.203.7 under /private/tmp/claude-501/abc/scratchpad since 3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77; NEXT_PUBLIC_API_V2_BASE_URL is unset; mail dana.reyes@acme-corp.com; the build failed.In the log"
     },
     {
-      "id": "strip-entropy/pos",
-      "scope": "query",
-      "label": "positive",
-      "input": "AWS rejects %%t37%% on upload",
-      "expect_text": "AWS rejects on upload"
-    },
-    {
-      "id": "strip-entropy/keeps-sha",
+      "id": "mask/keeps-placeholders-and-vars",
       "scope": "query",
       "label": "negative",
-      "input": "regression since 3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77 on main",
-      "expect_text": "regression since 3f9a1c77b2e04d5a8c6b1e2f9d0a4b7c3f9a1c77 on main"
+      "input": "run it as tenjin --token <your-token> or password=$PASSWORD",
+      "expect_text": "run it as tenjin --token <your-token> or password=$PASSWORD"
     },
     {
-      "id": "strip-entropy/keeps-env-name",
+      "id": "mask/keeps-long-random-ids",
       "scope": "query",
       "label": "negative",
-      "input": "NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 is unset in CI",
-      "expect_text": "NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 is unset in CI"
-    },
-    {
-      "id": "strip-entropy/drops-env-name-over-64",
-      "scope": "query",
-      "label": "positive",
-      "input": "A1_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_B2_C3 leaked",
-      "expect_text": "leaked"
-    },
-    {
-      "id": "strip-entropy/drops-env-name-glued-to-value",
-      "scope": "query",
-      "label": "positive",
-      "input": "%%t38%% leaked",
-      "expect_text": "leaked"
-    },
-    {
-      "id": "strip-email/pos",
-      "scope": "query",
-      "label": "positive",
-      "input": "mail from dana.reyes@acme-corp.com bounces",
-      "expect_text": "mail from bounces"
-    },
-    {
-      "id": "strip-email/neg-handle",
-      "scope": "query",
-      "label": "negative",
-      "input": "ping @dana on the thread, the decorator @app.route stays",
-      "expect_text": "ping @dana on the thread, the decorator @app.route stays"
-    },
-    {
-      "id": "query/keeps-hosts-paths-ipv4",
-      "scope": "query",
-      "label": "negative",
-      "input": "checkout.test.ts fails on prod.acme.com at 10.14.203.7 under /Users/dana/src/app/keys.ts",
-      "expect_text": "checkout.test.ts fails on prod.acme.com at 10.14.203.7 under /Users/dana/src/app/keys.ts"
-    },
-    {
-      "id": "query/keeps-sentence-after-dot",
-      "scope": "query",
-      "label": "negative",
-      "input": "the build failed.In the log there is a stack",
-      "expect_text": "the build failed.In the log there is a stack"
-    },
-    {
-      "id": "query/control-bytes",
-      "scope": "query",
-      "label": "positive",
-      "input": "\u001b[31mapi_key\u0001=hunter2 and\tplain\u0007 text",
-      "expect_text": "and plain text"
-    },
-    {
-      "id": "query/squashes-whitespace",
-      "scope": "query",
-      "label": "negative",
-      "input": "  many   spaces\n\nand   newlines  ",
-      "expect_text": "many spaces and newlines"
-    }
-  ],
-  "redos": [
-    {
-      "seed": ";a=",
-      "note": "assignment separators (the #273 userinfo enumerator)"
-    },
-    {
-      "seed": "a.",
-      "note": "dotted runs (userinfo scheme class and email local part)"
-    },
-    {
-      "seed": "x://",
-      "note": "scheme runs with no userinfo"
-    },
-    {
-      "seed": "token.",
-      "note": "keyword-dotted run (the #273 assign-rule backtrack, 14.6 s at 8 kB unbounded)"
-    },
-    {
-      "seed": "?a=1&b=2",
-      "note": "alternating query params"
-    },
-    {
-      "seed": "a:",
-      "note": "colon run after a scheme",
-      "prefix": "x://"
-    },
-    {
-      "seed": "a-",
-      "note": "hyphen runs (host-ish)"
-    },
-    {
-      "seed": "aA1.",
-      "note": "dotted alphanumerics"
-    },
-    {
-      "seed": "QmVhcmVy",
-      "note": "base64 blob under the entropy row"
-    },
-    {
-      "seed": "user@",
-      "note": "email at-sign runs"
-    },
-    {
-      "seed": "a-b.",
-      "note": "mixed separator run"
+      "input": "deployment dpl_9XkQmT7bV2pL4aReZx3WnY8uC1vB5tK0 and session_01WanwuWyR7tS8TdJqF9RPfT are fine",
+      "expect_text": "deployment dpl_9XkQmT7bV2pL4aReZx3WnY8uC1vB5tK0 and session_01WanwuWyR7tS8TdJqF9RPfT are fine"
     }
   ]
 }

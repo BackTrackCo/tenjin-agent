@@ -1,11 +1,9 @@
-import { dirname, resolve } from 'node:path';
 import { CliError } from '../lib/errors';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import { resolveContextSettings, resolvePublishSettings, shelfRouteFor } from '../lib/settings';
 import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
-import { findings as scanFindings, type FindingsContext, type Finding } from '../lib/redact';
-import { deriveProjectMarkers } from '../lib/scan-context';
+import { findings as scanFindings } from '../lib/redact';
 import { sanitizeForTerminal } from '../lib/output';
 import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/state-store';
 import { recordPublished } from '../lib/publish-dedup';
@@ -30,7 +28,6 @@ import {
 } from '../lib/posts-api';
 import {
   dedupeFindings,
-  describeFindings,
   needsConfirmation,
   publicFinding,
   resolveWriteAuth,
@@ -52,8 +49,9 @@ import type { CommandContext, CommandResult } from '../context';
  * convenience that reads first and sends the merged array).
  *
  * The gates are publish's, deliberately: the same deterministic scan over the new
- * body + card text (a live secret hard-blocks in every mode), the same team-mode
- * narrowing of that scan, and the same publish.mode consent cascade, because an
+ * body + card text (every finding is a flag for the consent flow; the
+ * marketplace's ingest gate is what refuses), the same team-mode
+ * scoping of that scan, and the same publish.mode consent cascade, because an
  * edit ships content to the same page a publish does — the public marketplace,
  * or on a team shelf the team page a publish just wrote.
  *
@@ -74,8 +72,8 @@ import type { CommandContext, CommandResult } from '../context';
  * intends to write asks for `read+write`. We accept the remaining cost, because
  * the alternative is asking a human to approve a diff we cannot show them.
  *
- * Exit codes: 0 success (and the read-only show), 2 usage, 3 needs_confirmation /
- * non-bypassable publish_blocked, 4 a write failure after approval.
+ * Exit codes: 0 success (and the read-only show), 2 usage, 3 needs_confirmation (or
+ * the marketplace's own publish_blocked on the write), 4 a write failure after approval.
  */
 
 export interface EditArgs {
@@ -242,23 +240,16 @@ export async function runEdit(
     'each edit asks you once. Set auto to apply clean edits automatically',
   );
 
-  // Gate parity with publish (#38): the source project's own git remote slugs are
-  // private-by-default, so text quoting them warns. Markers derive from the
-  // CONTENT's project — the body file's own directory when there is one, else the
-  // working directory — never from wherever the shell happens to be.
-  const markerRoot =
-    args.body !== undefined && args.body !== '-' ? dirname(resolve(cwd, args.body)) : cwd;
-  const scanContext: FindingsContext = { projectMarkers: await deriveProjectMarkers(markerRoot) };
   const scope = runtime.teamMode ? 'team' : 'publish';
   // The scan covers exactly what this edit SHIPS: the typed text behind the keys
   // that survived pruning, plus the body file only when the body itself survived.
   // Scanning the raw flags instead would block on a value that prunes away — a
   // secret already public in the stored scope, restated verbatim, would refuse an
-  // unrelated title change while the same flags alone exit 0. A secret in a
-  // surviving value still blocks in every mode, never cleared by --yes.
+  // unrelated title change while the same flags alone exit 0. Every finding is
+  // a flag for the consent flow; the server's ingest gate is what refuses.
   const scanned = dedupeFindings([
-    ...(input.bodyMd !== undefined ? scanFindings(bodyFile?.raw ?? '', scope, scanContext) : []),
-    ...scanFindings(shippedTypedText(args, input), scope, scanContext),
+    ...(input.bodyMd !== undefined ? scanFindings(bodyFile?.raw ?? '', scope) : []),
+    ...scanFindings(shippedTypedText(args, input), scope),
     // A promotion ships the STORED body to the public page, and "scanned when it
     // was written" holds only for drafts this CLI wrote: one made on the web desk
     // or by a raw API call was never scanned locally. So the body that is about
@@ -268,28 +259,12 @@ export async function runEdit(
     // for. Skipped when this same edit replaces the body, which the first line
     // already scanned in full.
     ...(promotes && input.bodyMd === undefined
-      ? scanFindings(stored.bodyMd ?? '', scope, scanContext).filter((f) => f.severity === 'block')
+      ? scanFindings(stored.bodyMd ?? '', scope).filter((f) => f.severity === 'block')
       : []),
   ]);
-  // THE SAME SCOPE PUBLISH PASSES, and for the same reason: the warn tier asks
-  // "is this safe to make PUBLIC", and a team shelf is not public, so a repo slug
-  // is the point of a team note rather than a leak. The credential checks survive
-  // with the block tier because they ask a question the audience does not change;
-  // which ones those are is `scopes` on the rule in redact-rules.json, applied
-  // inside `findings()` rather than by a filter here. Without this, an author
-  // publishes a team note carrying its own repo slug silently under `auto` and
-  // then gets NEEDS_CONFIRMATION on that same string when fixing a typo in it —
-  // the --yes round trip the drop exists to remove, moved to the second command.
-  // publish.ts is where the full reasoning lives.
-  const findings = scanned;
-  const blocking = findings.filter((f) => f.severity === 'block');
-  const warns = findings.filter((f) => f.severity === 'warn');
-  if (blocking.length > 0) {
-    throw new CliError('PUBLISH_BLOCKED', blockMessage(blocking), {
-      fix: 'Remove the secret from the new content (it is never masked away by --yes), then re-run.',
-      details: { mode: settings.mode, findings: blocking.map(publicFinding) },
-    });
-  }
+  // THE SAME SCOPE PUBLISH PASSES: which rows a shelf flags is `scopes` on the
+  // rule in redact-rules.json, applied inside `findings()`, never a filter here.
+  const warns = scanned;
 
   const notes = [
     ...editNotes(args, stored, bodyFile, clears),
@@ -1109,10 +1084,6 @@ function shippedTypedText(args: EditArgs, input: PostUpdateInput): string {
     for (const values of Object.values(parseAppliesToFlags(args.appliesTo))) parts.push(...values);
   }
   return parts.join('\n');
-}
-
-function blockMessage(blocking: Finding[]): string {
-  return `Edit blocked: the new content contains ${describeFindings(blocking)}.`;
 }
 
 function confirmMessage(warnCount: number, changeCount: number): string {

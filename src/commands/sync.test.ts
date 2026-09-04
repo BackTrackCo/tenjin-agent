@@ -952,35 +952,6 @@ describe('tenjin sync: a 404 on the update of our own post', () => {
   });
 });
 
-describe('tenjin sync: the publish scan', () => {
-  it('keeps a row whose body carries a credential on the machine, marked synced and skipped', async () => {
-    await writeTeamConfig();
-    // The credential rides in `fixFiles` (`Changed: ...` in the body), not
-    // `cmd` or `fixCmd`: tenjin-agent#252 (PR 277 review) swapped both the
-    // `Failed:` line to `cmdHead` and the `Passed on:` line to a head derived
-    // from `fixCmd`, so a secret sitting only in either full scrubbed command
-    // line no longer reaches the body this scan reads at all — this test is
-    // about the scan catching what IS synced, not about a specific field.
-    const leaky = await seedPairing({
-      cwd: dir,
-      key: 'fine-leaky',
-      fixFiles: ['AKIAIOSFODNN7EXAMPLE.ts'],
-      status: 'unverified',
-    });
-    const clean = await seedPairing({ cwd: dir, key: 'fine-clean', status: 'unverified' });
-    const { provider } = spyProvider();
-    const { fetch, sent } = shelfServer();
-
-    const result = await runSync(ctx(), { cwd: dir, provider, fetchImpl: fetch });
-
-    expect(result.data).toMatchObject({ synced: 1, skipped: 1, pending: 0 });
-    expect(sent).toHaveLength(1);
-    expect(JSON.stringify(sent[0]!.body)).not.toContain('AKIA');
-    expect((await pairingRow(leaky)).synced_at).not.toBeNull();
-    expect((await pairingRow(clean)).synced_at).not.toBeNull();
-  });
-});
-
 describe('tenjin sync: an abort that is not a signing failure', () => {
   it('rethrows, leaves synced_at NULL, and records the error (not a code) on the events row', async () => {
     await writeTeamConfig();

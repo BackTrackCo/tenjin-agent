@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. `scopes` says where a row applies: rows scoped `publish` and/or `team` are REPORT rows the publish scan compiles into findings (`id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the redaction policy, `skip` names a suppression predicate); a block row is in both, a warn row is in `team` only when it asks the credential or the injection question rather than the public-safety one. Rows scoped `query` are STRIP rows `redact()` applies destructively to hook queries and ledger text; they carry no `tier` or `excerpt`, an optional `skip` that keeps the match, and an optional `replace` handler that decides what stands in for it (default: one space). A consumer that reads only the publish scan skips every row whose scopes lack `publish`. Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
+  "note": "One rule table for every redaction surface in the CLI (src/lib/redact.ts), kept as data so the tenjin server-side ingest gate can vendor it verbatim. Every row is one detector: `id` is the stable finding `check`, `tier` is the finding severity, `match` is a JS regex or the name of an algorithmic detector a consumer must implement, `excerpt` is the masked-excerpt policy (never the secret), `skip` names a suppression predicate. `scopes` says where the row applies: `publish` (reported on the public marketplace), `team` (reported on a team shelf), `query` (its matches are replaced by the excerpt in hook queries by `mask()`; regex rows only). Precision first, as gitleaks and GitHub push protection do: a block row fires on a vendor prefix or an unambiguous shape, the generic `secret-assignment` row needs a secret-named word plus `=` or `:`, and entropy is never a trigger for a query. Several entries may share an `id`; they are one detector expressed as more than one pattern. Patterns adapted from gitleaks are MIT and attributed in NOTICE.md.",
   "publicHexConstants": [
     {
       "value": "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
@@ -61,7 +61,7 @@
     {
       "id": "aws-access-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "AWS access key id (AKIA/ASIA/ABIA/ACCA/A3T prefixes).",
       "source": "gitleaks:aws-access-token",
       "match": {
@@ -77,7 +77,7 @@
     {
       "id": "jwt",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "JSON Web Token: three base64url segments whose header starts eyJ.",
       "source": "gitleaks:jwt",
       "match": {
@@ -93,7 +93,7 @@
     {
       "id": "github-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "GitHub classic PAT/OAuth/app/refresh token or fine-grained PAT (github_pat_).",
       "source": "gitleaks:github-pat + github-fine-grained-pat",
       "match": {
@@ -109,7 +109,7 @@
     {
       "id": "slack-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Slack bot/user/app/refresh/legacy token.",
       "source": "gitleaks:slack-*-token",
       "match": {
@@ -125,7 +125,7 @@
     {
       "id": "stripe-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Stripe live or test secret/restricted key.",
       "source": "gitleaks:stripe-access-token",
       "match": {
@@ -141,7 +141,7 @@
     {
       "id": "anthropic-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Anthropic API key (sk-ant-).",
       "source": "gitleaks:anthropic-api-key",
       "match": {
@@ -157,7 +157,7 @@
     {
       "id": "openai-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "OpenAI key: classic sk- plus sk-proj-/sk-svcacct-/sk-admin-. The body must carry a digit so sk- kebab identifiers do not hard-block.",
       "source": "gitleaks:openai-api-key",
       "match": {
@@ -173,7 +173,7 @@
     {
       "id": "google-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Google API key (AIza) or OAuth client secret (GOCSPX-).",
       "source": "gitleaks:gcp-api-key + gcp-oauth-client-secret",
       "match": {
@@ -189,7 +189,7 @@
     {
       "id": "npm-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "npm access token.",
       "source": "gitleaks:npm-access-token",
       "match": {
@@ -205,7 +205,7 @@
     {
       "id": "supabase-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Supabase personal access token (sbp_) or secret/publishable API key (sb_*_).",
       "source": "gitleaks:supabase-access-token",
       "match": {
@@ -221,7 +221,7 @@
     {
       "id": "twilio-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Twilio API key SID (SK + 32 lowercase hex).",
       "source": "gitleaks:twilio-api-key",
       "match": {
@@ -237,7 +237,7 @@
     {
       "id": "sendgrid-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "SendGrid API key (SG.<id>.<secret>).",
       "source": "gitleaks:sendgrid-api-token",
       "match": {
@@ -253,7 +253,7 @@
     {
       "id": "huggingface-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Hugging Face user access token (hf_).",
       "source": "gitleaks:huggingface-access-token",
       "match": {
@@ -269,7 +269,7 @@
     {
       "id": "vercel-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Vercel Blob read/write store token.",
       "source": "tenjin (shape from the Vercel Blob docs)",
       "match": {
@@ -285,7 +285,7 @@
     {
       "id": "vercel-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Vercel platform token (vcp_/vci_/vca_/vcr_/vck_ prefixes).",
       "source": "secretlint:@secretlint/secretlint-rule-vercel",
       "match": {
@@ -301,7 +301,7 @@
     {
       "id": "notion-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Notion integration token (ntn_).",
       "source": "secretlint:@secretlint/secretlint-rule-notion",
       "match": {
@@ -317,7 +317,7 @@
     {
       "id": "linear-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Linear API key (lin_api_).",
       "source": "secretlint:@secretlint/secretlint-rule-linear",
       "match": {
@@ -333,7 +333,7 @@
     {
       "id": "figma-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Figma personal access token (figd_).",
       "source": "secretlint:@secretlint/secretlint-rule-figma",
       "match": {
@@ -349,7 +349,7 @@
     {
       "id": "gitlab-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "GitLab personal access token (glpat-).",
       "source": "secretlint:@secretlint/secretlint-rule-gitlab",
       "match": {
@@ -365,7 +365,7 @@
     {
       "id": "docker-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Docker Hub personal access token (dckr_pat_).",
       "source": "secretlint:@secretlint/secretlint-rule-docker",
       "match": {
@@ -381,7 +381,7 @@
     {
       "id": "cloudflare-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Cloudflare API key or account/user token (cfk_/cfut_/cfat_).",
       "source": "secretlint:@secretlint/secretlint-rule-cloudflare",
       "match": {
@@ -397,7 +397,7 @@
     {
       "id": "databricks-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Databricks personal access token (dapi).",
       "source": "secretlint:@secretlint/secretlint-rule-databricks",
       "match": {
@@ -413,7 +413,7 @@
     {
       "id": "openssh-private-key",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "OpenSSH private key body pasted without its PEM framing (base64 of the openssh-key-v1 magic).",
       "source": "gitleaks:private-key (framing-free variant)",
       "match": {
@@ -429,7 +429,7 @@
     {
       "id": "totp-uri",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "otpauth:// TOTP/HOTP provisioning URI; its secret= parameter is a live second factor.",
       "source": "tenjin (RFC-style otpauth key URI)",
       "match": {
@@ -445,7 +445,7 @@
     {
       "id": "db-connection-uri",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Basic-auth style URI with an embedded password (scheme://user:pass@host), including database connection strings. The scheme run is length-bounded: unbounded, it backtracks quadratically across a transcript-length dotted-token line that never reaches ://.",
       "source": "tenjin",
       "match": {
@@ -464,7 +464,7 @@
     {
       "id": "bearer-token",
       "tier": "block",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Authorization: Bearer header carrying a live token.",
       "source": "tenjin",
       "match": {
@@ -483,7 +483,7 @@
     {
       "id": "secret-assignment",
       "tier": "warn",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Secret-named assignment (API_KEY=, password:, token=) with a literal value.",
       "source": "tenjin",
       "match": {
@@ -502,7 +502,7 @@
     {
       "id": "secret-assignment",
       "tier": "warn",
-      "scopes": ["publish", "team"],
+      "scopes": ["query", "publish", "team"],
       "description": "Secret-named command-line flag with a SPACE-separated literal value (--api-key <v>, --token <v>): the one credential position the assignment form above cannot see, since it needs `=` or `:` after the name. `X-Api-Key: <v>` and `--api-key=<v>` already match above (Api-Key, api-key) and are deliberately not repeated here, so one value yields one finding. For the shapes a recorded command line takes (tenjin-agent#281): a hex-only key has no vendor prefix, and bare hex is deliberately never reported so a commit SHA still syncs, so the credential POSITION is the signal.",
       "source": "tenjin (closes tenjin-agent#281)",
       "match": {
@@ -732,7 +732,7 @@
     {
       "id": "embedded-instruction",
       "tier": "warn",
-      "scopes": ["publish", "team"],
+      "scopes": ["publish"],
       "description": "Injection-shaped imperative captured from a prompt or tool output.",
       "source": "tenjin",
       "match": {
@@ -747,7 +747,7 @@
     {
       "id": "embedded-instruction",
       "tier": "warn",
-      "scopes": ["publish", "team"],
+      "scopes": ["publish"],
       "description": "Hidden-prompt document header. Case-sensitive: the all-caps header form is the injection-typed one.",
       "source": "tenjin",
       "match": {
@@ -840,7 +840,7 @@
     {
       "id": "env-dump-block",
       "tier": "warn",
-      "scopes": ["publish", "team"],
+      "scopes": ["publish"],
       "description": "Three or more consecutive SHOUTY_KEY=value lines carrying at least one substantial literal: a pasted .env file.",
       "source": "tenjin",
       "match": {
@@ -855,7 +855,7 @@
     {
       "id": "high-entropy-string",
       "tier": "warn",
-      "scopes": ["publish", "team"],
+      "scopes": ["publish"],
       "description": "Catch-all for unknown credential formats: a long mixed-case alphanumeric token whose Shannon entropy and case-run profile match random key material rather than an identifier.",
       "source": "tenjin (entropy heuristic in the spirit of gitleaks entropy gating)",
       "match": {
@@ -880,82 +880,6 @@
       "excerpt": {
         "kind": "custom",
         "handler": "longVerbatim"
-      }
-    },
-    {
-      "id": "private-repo-reference",
-      "tier": "warn",
-      "scopes": ["publish"],
-      "description": "Mention of a caller-supplied private project marker (git remote slug or path).",
-      "source": "tenjin",
-      "match": {
-        "kind": "algorithm",
-        "algorithm": "projectMarkers"
-      },
-      "excerpt": {
-        "kind": "custom",
-        "handler": "projectMarkers"
-      }
-    },
-    {
-      "id": "strip-userinfo-url",
-      "scopes": ["query"],
-      "description": "scheme://user:pass@... : the userinfo half of a url and EVERYTHING glued to it up to the next whitespace, because three review rounds of parsing the query string after the credential each closed one shape and missed the next (?apikey[0]=..., ;;ref=..., ;%73ig=...). Only the trailing closers, quotes and sentence punctuation come back, so the sentence around the url still reads; `=` is base64 padding and stays out of that set. A url with no credential never engages this row. Linear: the lookbehind makes only a run's first character a start position (with `\\b`, every character of an `a-a-a` run was one and each attempt scanned to the end of the window: 19 ms per 8 kB, 154 ms for the whole verb on the CI runner), the class before `:` stops at the first `:` and the one before `@` at the first `/`.",
-      "source": "tenjin (push-scripts scrub, tenjin-agent#273)",
-      "match": {
-        "kind": "regex",
-        "pattern": "(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\\/\\/[^\\s:@/]+:[^\\s@/]+@\\S*",
-        "flags": "gi"
-      },
-      "replace": {
-        "handler": "urlTrail"
-      }
-    },
-    {
-      "id": "strip-secret-assignment",
-      "scopes": ["query"],
-      "description": "password=..., api_key: ..., bearer <8+>, sig=...: the NAME says the value is a secret, so the value goes whatever it looks like. No leading name class and a bounded trailing one, both load-bearing: unbounded, a keyword-dotted run backtracks super-linearly (14.6 s at 8 kB), and a bounded LEADING class hid the keyword behind a 64+ character prefix. `sig`, `signature`, `nonce` and `hmac` are on the list because a presigned url carries a credential under them; `sig` inside design: or assignee: is the priced cost (design: dark -> de mode), cheaper than the leak. The third alternative is the space-separated flag form (--api-key <v>, --token <v>), the credential position tenjin-agent#281 added to the publish rows: over-stripping `--token` and its next word from a query costs one topic word.",
-      "source": "tenjin (push-scripts scrub, tenjin-agent#273)",
-      "match": {
-        "kind": "regex",
-        "pattern": "(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\\w.-]{0,64}\\s*[=:]\\s*(\"[^\"]*\"|'[^']*'|\\S+)|bearer\\s+\\S{8,}|--(?:[a-z0-9]+-)*(?:api[_-]?key|api[_-]?token|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|private[_-]?key|subscription[_-]?key|credentials?|secret|token|password|passwd)\\s+(\"[^\"]*\"|'[^']*'|\\S+))",
-        "flags": "gi"
-      }
-    },
-    {
-      "id": "strip-vendor-token",
-      "scopes": ["query"],
-      "description": "Credential shapes by vendor prefix (sk-, pk_live, ghp_/gho_/ghu_/ghs_/ghr_, github_pat_, glpat-, AKIA/ASIA, xox?-, ya29., JWT). Looser than the publish rows on purpose: over-stripping a query costs one topic word, a false block on publish costs the publish, so the two lists differ by design.",
-      "source": "tenjin (push-scripts scrub)",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|xox[baprse]-[A-Za-z0-9-]{10,}|ya29\\.[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]+)",
-        "flags": "g"
-      }
-    },
-    {
-      "id": "strip-entropy",
-      "scopes": ["query"],
-      "description": "The catch-all: a run of 28+ standard-base64 characters mixing letters and digits is not a word anybody typed as a question. Standard base64 (`+/=`) so a canonical AWS secret with a `/` leaves whole rather than as three short runs. The letter-and-digit test is in the `skip` handler, not in lookaheads: a lookahead re-scans the tail of the run from every word boundary and goes quadratic on `a-a-a-…`. Three shapes are KEPT by that handler: a run with no digit or no letter (a word, a number), a pure lowercase-hex run, which is what a git SHA looks like and, deliberately, what a hex-only token looks like too (owner policy: search availability over scrubbing), and a bounded ALL_CAPS env-var name (<= 64 chars, no 16+ piece between the underscores).",
-      "source": "tenjin (push-scripts scrub)",
-      "match": {
-        "kind": "regex",
-        "pattern": "\\b[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])",
-        "flags": "g"
-      },
-      "skip": {
-        "handler": "notKeyMaterial"
-      }
-    },
-    {
-      "id": "strip-email",
-      "scopes": ["query"],
-      "description": "An email address is near-never a search key, so it goes from queries alongside the credentials rather than with the hosts and paths the query scope keeps. The lookbehind, not `\\b`, opens the match: with `\\b` every character of a dotted or hyphenated run was a start position and the row went quadratic on `a-a-a` (36 ms per 8 kB).",
-      "source": "tenjin (push-scripts scrub)",
-      "match": {
-        "kind": "regex",
-        "pattern": "(?<![\\w.-])[\\w.-]+@[\\w.-]+\\.[a-z]{2,}\\b",
-        "flags": "gi"
       }
     }
   ]
