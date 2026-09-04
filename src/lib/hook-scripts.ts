@@ -1473,7 +1473,7 @@ function paramWords(url) {
  * puts a credential-shaped value in the PATH rather than the query string, and
  * {@link paramWords}'s allow-list only ever guarded the query string, so that
  * shape rode this marketplace query whole. The url has still already left the
- * machine via the fetch itself, so \`scrub(combined, 'secretsOnly')\` is not
+ * machine via the fetch itself, so \`mask(combined)\` is not
  * about hiding the address: paths and hostnames still ship unchanged, and only
  * a credential, control byte or email is dropped — the same floor every other
  * search-query and published-knowledge arm now holds to.
@@ -1503,7 +1503,7 @@ function fetchQuestion(toolInput) {
   // Whitespace-collapsed and trimmed, the same cleanup scrub used to do as a
   // side effect, so a run of url-word spacing doesn't read as content.
   const combined = (words + ' ' + prompt).replace(/\\s+/g, ' ').trim();
-  return clean(scrub(combined, 'secretsOnly'), ${QUESTION_MAX});
+  return clean(mask(combined), ${QUESTION_MAX});
 }
 
 async function main() {
@@ -1657,7 +1657,7 @@ function dispatchQuestion(toolInput) {
   const whole =
     window.length < prompt.length ? window.slice(0, window.search(/\\s\\S*$/) + 1) : window;
   const head = clean(
-    scrub(whole, 'secretsOnly').slice(0, ${DISPATCH_PROMPT_SLICE}),
+    mask(whole).slice(0, ${DISPATCH_PROMPT_SLICE}),
     ${DISPATCH_PROMPT_SLICE},
   );
   // NO HEAD, NO DISPATCH — whatever the description says. A description is a
@@ -1685,7 +1685,7 @@ function dispatchQuestion(toolInput) {
       ? descWindow.slice(0, descWindow.search(/\\s\\S*$/) + 1)
       : descWindow;
   const description =
-    raw === '' ? '' : clean(scrub(descWhole, 'secretsOnly'), ${DISPATCH_DESCRIPTION_MAX});
+    raw === '' ? '' : clean(mask(descWhole), ${DISPATCH_DESCRIPTION_MAX});
   return description === '' ? head : description + ': ' + head;
 }
 

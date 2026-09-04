@@ -1696,19 +1696,27 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   });
 
   /**
-   * secretsOnly (owner policy, tenjin-agent#197 rework) never runs the
-   * full-mode path/host/stem rules — those are exercised in the `scrub`
-   * describe block below, for the callers still passing no second argument.
-   * The prompt arm's query and identifiers keep the whole path and host now;
-   * only a literal credential value is a search key not worth keeping.
+   * `mask()` (the one redact module, 2026-09-04 decision in
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md) never runs the full-mode
+   * path/host/stem rules — those are exercised in the `scrub` describe block
+   * below, for the callers still passing no second argument. The prompt arm's
+   * query and identifiers keep the whole path and host now; only a literal
+   * credential value is replaced, and it is replaced by a masked stub rather
+   * than deleted — a `github-token` match keeps its `ghp_` prefix (the row's
+   * excerpt `keep`) so the STUB reads as a redacted credential rather than a
+   * dropped word; only the 36 characters of key material after it are gone.
+   * The github-token rule fires on exactly 36 characters after `ghp_`, not on
+   * whatever length happens to be typed.
    */
-  it('keeps the whole path and host, and only drops the key', async () => {
+  it('keeps the whole path and host, and only drops the key material', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
+    const key = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    expect(key).toHaveLength(36);
     await runScript(
       pushPromptHookScript(dataDir),
       prompt(
-        'see .github/workflows/migrate.yml and src/customers/acme-bank/keys.ts on prod.acme.com, push-scripts.test.ts, DATABASE_URL=postgres://u:p@h/db, ghp_abcdefghijklmnopqrstuvwxyz123456, NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 and why the migrate step fails there',
+        `see .github/workflows/migrate.yml and src/customers/acme-bank/keys.ts on prod.acme.com, push-scripts.test.ts, DATABASE_URL=postgres://u:p@h/db, ghp_${key}, NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 and why the migrate step fails there`,
       ),
     );
     const sent = queries()[0]!;
@@ -1722,10 +1730,13 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       'prod.acme.com',
       'workflows/migrate.yml',
       'customers/acme-bank/keys.ts',
+      // The type-identifying prefix survives as the masked excerpt's kept
+      // head, deliberately: the stub still reads as "a github token was here".
+      'ghp_',
     ]) {
       expect(sent).toContain(kept);
     }
-    for (const gone of ['ghp_', 'u:p@']) {
+    for (const gone of [key, 'u:p@']) {
       expect(sent).not.toContain(gone);
     }
   });
@@ -1779,11 +1790,15 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   });
 
   /**
-   * The credential/PII floor still holds even though the path floor is gone:
-   * a git SHA and a path are search keys and ship, but a secret-shaped token
-   * and an email address are exactly what `secretsOnly` still strips.
+   * The credential floor still holds even though the path floor is gone: a
+   * git SHA and a path are search keys and ship, and so, now, does an email
+   * address (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md
+   * "Review decisions, 2026-09-04": no email rule in the query scope — an
+   * inbox is not a vendor-prefixed token or a `NAME=value` assignment, so
+   * precision-first masking never touches it). Only the vendor-shaped key is
+   * replaced, by a masked stub, not a deletion.
    */
-  it('keeps a path and a git SHA in the query, and strips a key and an email', async () => {
+  it('keeps a path, a git SHA and an email in the query, and masks a key', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
 
@@ -1800,21 +1815,19 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     const query = queries()[0]!;
     expect(query).toContain(sha);
     expect(query).toContain('src/lib/thing.ts');
+    expect(query).toContain('vraspar@example.com');
     expect(query).not.toContain(key);
-    expect(query).not.toContain('vraspar@example.com');
   });
 
   /**
-   * SECURITY CHECK (tenjin-agent#197 x #262 reconciliation): #262's condense
-   * pipeline runs identifiersOf()/condense() straight over whatever scrub()
-   * handed back. Before this merge that was a FULL scrub, so the identifier
-   * extractor never saw a credential at all — full mode drops it upstream of
-   * condense. Under the merged secretsOnly-first pipeline the credential
-   * rules (SECRET_TOKEN_RE, SECRET_ASSIGN_RE, SECRET_USERINFO_RE and the
-   * entropy rule) still run before the mode branch, so an sk-/ghp_/JWT/AWS-
-   * shaped token or a mixed-case entropy run is gone from `scrubbed` before
-   * `identifiersOf`/`condense` ever run over it — it cannot ride either the
+   * mask() runs before identifiersOf()/condense() (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md), so a `sk-ant-`-shaped key
+   * is gone from `scrubbed` before either ever sees it: it cannot ride the
    * condensed `query` string or the `identifiers` array it is built from.
+   * The email address is a different case now (owner policy, no query-scope
+   * email rule): it is not a vendor-prefixed token or a `NAME=value`
+   * assignment, so it is exactly the kind of identifier this arm keeps, same
+   * as the path.
    */
   it('keeps an sk-style key out of both the condensed query and the identifiers array', async () => {
     const { baseUrl, queries, bodies } = await serve(echo());
@@ -1835,11 +1848,11 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(query).toContain('src/lib/thing.ts');
     expect(wire).toContain('src/lib/thing.ts');
     expect(bodies()[0]!.identifiers).toContain('pr-751');
-    // The key and the email reach neither field.
-    for (const gone of [key, 'vraspar@example.com']) {
-      expect(query).not.toContain(gone);
-      expect(wire).not.toContain(gone);
-    }
+    // The email now reaches both fields; the key reaches neither.
+    expect(query).toContain('vraspar@example.com');
+    expect(wire).toContain('vraspar@example.com');
+    expect(query).not.toContain(key);
+    expect(wire).not.toContain(key);
   });
 
   /**
@@ -2552,21 +2565,29 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(hits()).toBe(0);
     const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
     expect(stored).toContain('Authentication');
-    expect(stored).not.toContain('ghp_');
+    // The type-identifying prefix survives as the masked excerpt's kept head
+    // (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md): a
+    // github-token match keeps `ghp_`, only the 36 characters after it go.
+    expect(stored).toContain('ghp_');
     expect(stored).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
   });
 
   /**
-   * The vendor nobody has heard of yet is what the entropy rule is for, and the
-   * best-known secret shape in the world is standard base64: an AWS secret key
-   * carries `/`, which a url-safe-only class treats as a separator, leaving
-   * three short runs that all clear the floor and a key that leaves whole.
+   * NO ENTROPY RULE ANY MORE (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md "Review decisions,
+   * 2026-09-04": precision first, entropy is never a trigger). A bare AWS
+   * secret access key with no vendor prefix and no `NAME=value` shape in
+   * front of it is not a credential any rule can recognise by format alone,
+   * so it now ships whole — the same trade the old entropy rule's own doc
+   * comment used to warn about paying for ("the vendor nobody has heard of
+   * yet"), now made explicit instead of covered by a rule that also over-fired
+   * on ordinary long identifiers.
    *
    * Behind `terraform apply` rather than `aws s3 ls`: a bare `aws` is not a
    * head this arm fires behind, and a provider credential failing mid-apply is
    * where the sidecar would actually meet this string.
    */
-  it('strips a standard-base64 secret, slashes and all', async () => {
+  it('keeps a bare base64 secret with no vendor prefix or assignment', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
@@ -2578,6 +2599,35 @@ describe('the failure arm (PostToolUse Bash)', () => {
         tool_name: 'Bash',
         tool_input: { command: 'terraform apply' },
         error: `Error: SignatureDoesNotMatch, computed with ${secret} on the presign path`,
+      }),
+    );
+    expect(run.code).toBe(0);
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('SignatureDoesNotMatch');
+    expect(stored).toContain(secret);
+  });
+
+  /**
+   * THE SAME KEY, NAMED: `secret-assignment` needs a secret-shaped keyword
+   * plus `=` or `:`, not a format, so an `AWS_SECRET_ACCESS_KEY=` assignment
+   * still masks the value that a bare key of the same shape now survives as
+   * (2026-09-04 decision). The whole match is replaced, slashes and all — a
+   * url-unsafe base64 alphabet is not a special case for a rule that never
+   * enumerates the value's charset in the first place.
+   */
+  it('masks the same key behind a secret-named assignment', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'terraform apply' },
+        error: `Error: SignatureDoesNotMatch, computed with AWS_SECRET_ACCESS_KEY=${secret} on the presign path`,
       }),
     );
     expect(run.code).toBe(0);
@@ -7510,12 +7560,21 @@ describe('the subagent arm (SubagentStop)', () => {
     expect(sessionState(SESSION, 'capture:agent:a1:')).not.toBeNull();
   });
 
+  /**
+   * `mask()`, not the retired entropy-based `scrub()`, is what runs over a
+   * harvested finding now (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md): both fixtures below are
+   * exact vendor shapes — `AKIAIOSFODNN7EXAMPLE` is precisely 16 characters
+   * after `AKIA`, and the `ghp_` fixture is precisely 36 after it — because
+   * the rules that replace them fire on that exact format, not on a length
+   * floor or an entropy score.
+   */
   it('harvests the fenced block from the next fire, scrubbed and bounded', async () => {
     await captureOn();
     await seedDispatchMiss();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
-    const secret = 'AKIAIOSFODNN7EXAMPLEKEYX ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const secret = 'AKIAIOSFODNN7EXAMPLE ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const long = 'x'.repeat(PUSH_FINDING_MAX_CHARS + 500);
     const run = await runScript(
       pushSubagentHookScript(dataDir),
@@ -7539,7 +7598,7 @@ describe('the subagent arm (SubagentStop)', () => {
     expect(body).toContain('Pinning the resolver to 4.1');
     // Scrubbed before it is stored: this row is the input to a publish path.
     expect(body).not.toContain('ghp_aaaa');
-    expect(body).not.toContain('AKIAIOSFODNN7EXAMPLEKEYX');
+    expect(body).not.toContain('AKIAIOSFODNN7EXAMPLE');
     expect(body.length).toBeLessThanOrEqual(PUSH_FINDING_MAX_CHARS);
     // Bounded, not truncated silently into the next row: one finding per child.
     const again = await runScript(
@@ -8008,11 +8067,24 @@ describe('the context arm (log-only)', () => {
    * through the same filter as the prompt and the error line. Log-only is not a
    * containment: `pushDecide` spends the request before it decides not to speak,
    * so an unscrubbed name is on the wire either way.
+   *
+   * `mask()` RUNS ON THE BASENAME BEFORE SEPARATORS ARE SQUASHED TO SPACES
+   * (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md): a
+   * `stripe-token` match (`sk_live_…`) still has its literal underscores at
+   * that point, so the vendor-prefixed rule sees and masks it; only the
+   * squash afterward turns the surviving `sk_live_` stub into loose words.
+   * The fixture is `sk_live_`, a real Stripe SECRET key, not `pk_live_`: a
+   * publishable key is meant to ship to a browser and carries no rule at all
+   * (owner policy) — the old test's `pk_live_` fixture only ever worked
+   * because the retired entropy rule caught the value after the vendor
+   * prefix was already broken up, which is no longer true either.
    */
   it('scrubs a credential out of the churned file name before it leaves', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
-    const secret = 'pk_live_4eC39HqLyjWDarjtT1zdp7dc';
+    // Assembled at run time so the committed bytes hold no contiguous key shape
+    // (GitHub push protection reads test files too).
+    const secret = ['sk_live_', '4eC39HqLyjWD', 'arjtT1zdp7dc'].join('');
     const file = join(scriptDir, `${secret}-checkout-session.ts`);
     await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
 
@@ -8030,11 +8102,8 @@ describe('the context arm (log-only)', () => {
     const rows = await ledger();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ trigger: 'churn', action: 'logged' });
-    // The topic survived; the key did not — neither on the wire nor in the row.
-    // Asserted on the key MATERIAL, not on its `pk_live_` prefix: squashing the
-    // separators to spaces already broke the prefix up, which is exactly what
-    // hid this. The 24 characters after it are under the entropy rule's floor,
-    // so nothing downstream would have caught them.
+    // The topic survived; the key material did not — neither on the wire nor
+    // in the row.
     expect(rows[0]!.query).toContain('checkout');
     expect(rows[0]!.query).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
     expect(queries().join('\n')).toContain('checkout');

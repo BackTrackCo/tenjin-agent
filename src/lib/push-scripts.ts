@@ -18,6 +18,7 @@
  * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
+import { maskRules } from './redact';
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
 import { condenseSource } from './query-condense';
@@ -179,7 +180,7 @@ export const PUSH_CAPTURE_SIGNAL_WINDOW_MS = 60 * 60 * 1000;
  * A CHILD'S WORDS ARE UNTRUSTED INPUT, and this one is written to the queue a
  * later `tenjin publish` reads, so the size bound is a safety bound, not a
  * display one: whatever a child puts between the fences, at most this much of
- * it is stored, after `scrub()`. Sized for a paragraph, well under the retired
+ * it is stored, after `mask()`. Sized for a paragraph, well under the retired
  * full-body cap, because a finding that needs 6k characters is a document and
  * the child should write one.
  */
@@ -1057,354 +1058,22 @@ function packagesInSource(text) {
 }
 
 /**
- * Credential shapes, by vendor prefix. Named prefixes first because they are
- * unambiguous: nothing that is not a secret looks like \`ghp_\` followed by
- * sixteen base62 characters. The list is not a promise of completeness — the
- * generic rule below it is what catches the vendor nobody has heard of yet.
+ * The one redaction rule table, rendered in: the rows scoped \`query\` from
+ * src/lib/redact-rules.json (vendor prefixes, a password inside a url, a
+ * secret-named assignment). A match is replaced by a masked stub, never
+ * deleted, and nothing else in the text is touched: paths, hosts, IPv4
+ * literals, commit SHAs, env names and prose all stay, because those are the
+ * identifiers the shelf ranks on (owner policy, tenjin-agent#197 and the
+ * 2026-09-04 decision in tenjin-notes/loop-redesign/06-pr-a-redact.md).
+ * \`clean()\` handles control bytes and the length bound, as it always did.
  */
-const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|xox[baprse]-[A-Za-z0-9-]{10,}|ya29\.[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)/g;
-/**
- * \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
- * secret, so the value goes whatever it happens to look like.
- *
- * THERE IS NO LEADING NAME CLASS, and the trailing one is BOUNDED. Both halves
- * are load-bearing rather than cosmetic. Unbounded (\`[\w.-]*\`) they backtrack
- * super-linearly on a keyword-dotted run: driving the rendered dispatch arm with
- * a \`token.token.token…\` description measured 123 ms at 1k characters, 436 ms
- * at 2k, 1.9 s at 4k and 14.6 s at 8k with nothing emitted. A synchronous regex
- * cannot be pre-empted by an event-loop watchdog, so on attacker-chosen text
- * that is a core spun until the harness kill, in front of a tool call the user
- * is waiting on. Every caller windows its own input as well (defence in depth),
- * but this is the bound that holds whatever any caller forgets.
- *
- * BOUNDING THE LEADING CLASS DID CHANGE MATCHES, which is why it is gone rather
- * than capped. \`\b\` offers no start position inside an unbroken \`\w\` run,
- * so with a leading \`[\w.-]{0,64}\` a name longer than 64 characters
- * (\`my_service_\` x7 + \`password=\`) had no start the engine could retry from
- * and the value leaked. Dropping the class instead is what restores that shape:
- * the prefix was never the secret, the value is, and the match now starts at the
- * keyword wherever it sits.
- *
- * THE SECOND ALTERNATIVE IS THE AUTHORIZATION HEADER, which the first cannot
- * see: \`bearer abc123def456\` is separated by a space rather than \`=\` or
- * \`:\`, and a 12-character value sits under the entropy rule's 28-character
- * floor, so both rules walked past it. Eight characters is the floor here
- * because a token shorter than that is not one; it costs the prose reading
- * ("the bearer of bad news" keeps its words, none of which reach eight).
- *
- * THE SIGNING WORDS ARE ON THE LIST TOO — \`sig\`, \`signature\`, \`nonce\`,
- * \`hmac\` — because a request signature is a credential the other words do
- * not name: \`;sig=abc123\` is what a presigned url or a webhook callback
- * carries, and the value under it is mixed letters and digits well short of
- * the entropy rule's floor, so it left whole and the identifier rule then
- * PROMOTED it (\`abc123\` is a handle by shape) onto the wire to both shelves.
- *
- * \`sig\` IS A SUBSTRING OF ORDINARY WORDS, and that cost is paid knowingly.
- * The alternation has no leading boundary — deliberately, see above, so a
- * long prefix cannot hide the keyword — so \`design=dark\` and
- * \`assignee=me\` match at their inner \`sig\` and go. The cures are worse:
- * a \`(?<![A-Za-z])\` guard on the whole alternation loses camelCase
- * (\`requestSig=abc\`, \`servicePassword=hunter2\`), which is the exact
- * shape being closed here, and no rule can tell a signing prefix from an
- * English one. Redacting a topic word is the cheaper mistake. The COLON
- * form is the everyday trigger, not the \`=\` form: \`the new design:
- * dark mode\` scrubs to \`the new de mode\` and \`assignee: bob\` to
- * \`as\` — a two-character residue, not a clean removal. Harmless on the
- * wire (lowercase fragments never become identifiers) but expected, so
- * the next reader is not surprised by it in prose.
- */
-const SECRET_ASSIGN_RE =
-  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
-/** \`postgres://user:hunter2@host/db\`: the userinfo half of a url, which the
- *  path rule cannot see because that one starts at a slash. The host and path
- *  after the \`@\` go with it: a one-label host (\`h\`) is under the host
- *  rule's reach, and \`h/db\` left behind reads as an identifier to the
- *  prompt arm.
- *
- *  THE EXTENT IS THE WHOLE NON-WHITESPACE RUN, AND THE ENUMERATION IS
- *  RETIRED. This rule used to parse the query string after the credential
- *  with a hand-rolled \`(separator)(name)=(value)\` repetition, and three
- *  consecutive review rounds patched that repetition: round 2 put the signing
- *  words on the assign rule, round 3 widened the separator class to every
- *  character the match stopped at, round 4 widened the parameter-name class
- *  twice, once for interior digits and once for a leading one. Every one of
- *  those fixes was correct and every one closed exactly the shape it had been
- *  shown, and the next round found the next shape:
- *  \`?apikey[0]=hunter2secret\` — a real credential value, in the form
- *  \`qs\`, Rails and PHP all emit — plus \`?filter[id]=abc123\`,
- *  \`;;ref=abc123\`, \`;;;;t=abc123\`, \`;ref=abc123&&next=xyz789abc\`,
- *  \`;a.b=abc123\` and \`;%73ig=abc123\`, all of them promoted into the
- *  identifiers array and sent to BOTH shelves. Two character classes cannot
- *  enumerate what a query string is, so a fourth patch would only have bought
- *  an eighth shape. The tail is therefore no longer parsed at all: after
- *  \`user:pass@\` the match runs to the next whitespace and NOTHING inside
- *  that run survives. Brackets, empty separator runs, dotted or
- *  percent-encoded names, a value with no \`=\` in front of it — whatever the
- *  vendor glues on, it was written as one word with a credential inside it,
- *  so it leaves as one word.
- *
- *  THE REPLACER HANDS BACK THE TRAILING PUNCTUATION, which is what keeps a
- *  url readable inside prose. The handback is the run matched by
- *  \`SECRET_URL_TRAIL_RE\` at the END of the match and nothing else: the
- *  closers \`)\`, \`]\`, \`}\`, \`>\`, the quotes \`"\`, \`'\` and backtick,
- *  the markdown \`*\`, and the sentence punctuation \`.\`, \`,\`, \`;\`,
- *  \`:\`, \`!\`, \`?\`. So \`(postgres://u:p@h/db); the retry loops\` keeps
- *  \`);\` and, across the space, its sentence, and a bare \`(url)\` keeps its
- *  parens. Every character in that class is non-alphanumeric, so nothing
- *  handed back can be a credential value or reach the identifiers array;
- *  \`=\` is deliberately NOT in it, because it is base64 padding and a key
- *  may end on it.
- *
- *  PROSE GLUED STRAIGHT ONTO THE URL GOES WITH IT, and that is the priced
- *  cost of the redesign rather than an oversight.
- *  \`postgres://u:p@h/db,migration fails\` used to keep \`,migration\` and
- *  now keeps only \`fails\`. Nothing can tell \`,migration\` from
- *  \`,hunter2secret\` except the enumeration that just failed three times in
- *  a row, so the file's standing trade applies: redacting a topic word is the
- *  cheaper mistake. One space is all it takes to keep the word, and the
- *  spaced form is how a url is written in a sentence anyway.
- *
- *  LINEAR, AND RE-MEASURED ON THE SHAPES THE OLD REPETITION WAS TUNED FOR.
- *  \`[^\s:@/]+\` stops at the first \`:\` and \`[^\s@/]+\` stops at the first
- *  \`/\`, so the only backtracking seam left is bounded by the distance to
- *  the next slash, and the tail is one greedy \`\S*\` with nothing after it
- *  to backtrack into. Timed over the whole \`scrub\` at 16k characters per
- *  input: \`;a=\` repeats 0.15 ms, alternating \`?a=1&b=2\` 0.08 ms, all-\`?\`
- *  0.24 ms, \`?a\` repeats 0.19 ms, \`&a=b\` repeats then a forced fail
- *  0.05 ms, 16k of trailing non-matching text 0.05 ms, \`a://\` repeats
- *  0.52 ms, and the one seam that can still backtrack — \`x://\` then a 16k
- *  \`a:\` run with no \`@\` — 0.65 ms. Doubling every one of them to 32k
- *  doubles the time (worst case 1.31 ms), which is the linearity claim.
- *
- *  A NON-CREDENTIAL URL IS UNTOUCHED BY THIS. The rule only ever engages
- *  after \`user:pass@\`, so \`https://acme.com/docs?page=2\` keeps
- *  \`?page=2\` — the host rule takes the host and the page number travels as
- *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
- *  blanks a signing parameter wherever it sits, url or not. */
-const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@\S*/gi;
-/** The trailing punctuation a blanked userinfo url hands back to the sentence
- *  it was written inside. Closers, quotes and sentence punctuation only: no
- *  alphanumeric, and no \`=\`. */
-const SECRET_URL_TRAIL_RE = /[)\]}>'"\u0060*.,;:!?]+$/;
-/** The catch-all: a long opaque run mixing letters and digits is not a word
- *  anybody typed as part of a question. Dropping a rare long identifier costs
- *  one topic word; keeping a key costs the key.
- *
- *  THE ALPHABET IS STANDARD BASE64, not just the url-safe one. A canonical AWS
- *  secret (\`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\`) contains \`/\`, so a
- *  class without it splits the key into three short runs and every one of them
- *  falls under the length floor — the key leaves whole. \`+\`, \`/\` and the
- *  \`=\` padding are in; the floor moves to 28 to pay for the wider alphabet,
- *  which is still under any real key's length. */
-const SECRET_ENTROPY_RE =
-  /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
-/** The env-var-name exception to the rule above: all caps and digits, at least
- *  one underscore, at most 64 characters. Bounded again in the replacer. */
-const SECRET_ENV_NAME_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
-/**
- * Hostnames, and the addresses that are not names.
- *
- * THE TLD LIST IS WIDENED, NOT REPLACED BY A GENERIC DOTTED RUN. A rule that
- * took any dotted run ending in letters would have to run a SECOND
- * \`(?:label\.)+\` scan, and that shape is the quadratic residue already
- * measured here (~1.4 s per 20k of \`a-a-a\`, x4 per doubling): a second one
- * doubles it, in front of a tool call. Widening the alternation adds no scan and
- * no backtracking, so \`.sh\`, \`.xyz\` and the ccTLDs an internal host actually
- * uses leave without making the arm slower. It is a list, so it is not a promise
- * of completeness; the path, userinfo and entropy rules are what catch the rest.
- *
- * THE LIST STAYS CASE-INSENSITIVE, over-redaction and all. Widening to ccTLDs
- * put English words in it, so a missing space eats the next sentence
- * (\`failed.In the log\` -> \`failed the log\`). Every case-based cure trades
- * that for a leak: lower-case-only lets \`EU.ACME.DE\` through, and a
- * Title-case guard lets \`Eu.Acme.De\` through, because no rule can tell a
- * Title-cased host from a Title-cased word. Redacting a topic word is the
- * cheaper mistake, so it stands.
- *
- * A HOST FOLLOWED BY AN EXTENSION IS STILL A HOST, AND THE EXTENSION GOES
- * WITH IT. \`api.acme.com.json\`, \`values.prod.acme.io.yaml\` and
- * \`internal.corp.md\` are per-host config files, exactly the shape an nginx
- * sites directory or a cert bundle takes, so the trailing dotted labels are
- * consumed into the match (\`api.acme.com.tsx-beta\` included: the class runs
- * to the next non-label character) and the whole run is blanked. A negative
- * lookahead on the extension was tried first and did the opposite: the engine
- * found no shorter label run to match, so the host survived WHOLE.
- *
- * THE ONE FILE NAME KEPT is \`<name>.test.<source ext>\`: \`test\` is on the
- * TLD list, so \`push-scripts.test.ts\` used to leave \`.ts\` behind, and it
- * is the file most questions about a failing suite name. A single label
- * before \`.test\` and a source extension after it is not a host anybody
- * runs; \`docker-compose.dev.yml\` and \`settings.local.json\` still go,
- * which is the cheaper mistake.
- */
-const SECRET_HOST_RE =
-  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b(?:\.[a-z0-9-]+)*/gi;
-/** The one host-shaped file name the host rule hands back: see above. */
-const SECRET_HOST_KEEP_RE = /^[a-z0-9-]+\.test\.(?:ts|tsx|js|mjs|cjs)$/i;
-/** A basename stem the path rule must not hand back whatever its extension:
- *  the words a credential file is named with, matched as whole \`-\`/\`_\`/\`.\`
- *  separated pieces so \`keys.ts\` (a source file) is not \`key\`. */
-const SECRET_STEM_RE =
-  /(?:^|[-_.])(?:secrets?|credentials?|service[-_]?account|tokens?|passwords?|passwd|private|certs?|certificate|keyfile|id_[a-z0-9]+)(?:[-_.]|$)/i;
-/** The stem whose reading depends on its extension. \`key\`/\`keys\` names
- *  key MATERIAL under a config extension (\`keys.json\`, \`keys.yml\`) and
- *  SOURCE CODE under a source one (\`keys.ts\`, the module that handles them),
- *  so it cannot go on the list above: putting it there blanks the source file
- *  that half the questions about key handling name. Gated on the extension, both
- *  readings get what they deserve. */
-const SECRET_CONFIG_STEM_RE = /(?:^|[-_.])keys?(?:[-_.]|$)/i;
-/** The extensions a config stem is read under: the formats key material is
- *  actually written in. */
-const SECRET_CONFIG_EXT_RE = /^(?:json|yml|yaml|toml|env)$/i;
-/** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
- *  so no TLD. Bounded repetition, so it adds no backtracking. */
-const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
-
-/**
- * Drop every credential, control byte and email in \`secretsOnly\` mode; full
- * mode additionally drops the scheme-less path, hostname, hex id and number
- * that would otherwise still carry the address of the problem, not just its
- * shape. A path leaves its basename behind when the extension is a source or
- * config one; an ALL_CAPS env-var name survives the entropy rule in both
- * modes.
- *
- * THE CREDENTIAL RULES RUN FIRST, and they run on every arm, because the arm
- * most likely to be handed a secret is the failure arm and the failure it fires
- * on most often is an auth failure. The hex rule further down (full mode only)
- * is not a credential rule and never was: a PAT is mixed case with an
- * underscore, so \`\b[a-f0-9]{16,}\b\` cannot match one.
- *
- * \`mode === 'secretsOnly'\` stops after the credential rules, the email rule
- * and the control-character cleanup: paths, hostnames, IPv4 literals and
- * generic hex ids (a 40-character git SHA included) are left alone. That is
- * OWNER POLICY (tenjin-agent#197 rework): search-query and published-knowledge
- * text keep paths, hostnames, file basenames and git SHAs, because those are
- * the identifiers the server's identifier-aware BM25 lane ranks on — only
- * credentials, control bytes and emails are PII/secret enough to always strip.
- * Full privacy-tier scrubbing (the return below) is retired from every
- * knowledge/search arm; the callers still passing no second argument are the
- * ones where full redaction is still load-bearing for something other than a
- * path or a host.
- *
- * EMAILS ARE THE ONE PII RULE THAT RUNS IN BOTH MODES. Unlike a path or a
- * hostname, an email address is near-never a search key — nobody searches a
- * shelf by somebody's inbox — so it is dropped even in \`secretsOnly\`, right
- * alongside the credential rules rather than down with the path/host rules
- * that mode skips.
- */
-function scrub(text, mode) {
-  const secretsOnly = mode === 'secretsOnly';
-  const out = String(text)
-    // ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so
-    // stripping the block first would leave \`[31m\` behind as text.
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
-    // C0 BEFORE EVERY WHOLE-TOKEN RULE, and deleted rather than spaced. A
-    // control byte inside a name is a SPLITTER: \`api_key<0x01>=hunter2\` reads
-    // as two tokens to every rule below, and \`clean\` only removes it after the
-    // scrub has already decided. Whitespace controls are left alone; they are
-    // real text here and the collapse at the bottom handles them.
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    // The extent is the whole non-whitespace run; only the trailing
-    // punctuation comes back, so the sentence around the url still reads.
-    .replace(SECRET_USERINFO_RE, (m) => {
-      const tail = m.match(SECRET_URL_TRAIL_RE);
-      return tail ? ' ' + tail[0] : ' ';
-    })
-    .replace(SECRET_ASSIGN_RE, ' ')
-    .replace(SECRET_TOKEN_RE, ' ')
-    // A PURE-HEX MATCH SURVIVES IN \`secretsOnly\` MODE ONLY: that shape
-    // (\`[0-9a-f]+\`, nothing else) is what a git SHA looks like and, not
-    // coincidentally, what a hex-only API token also looks like too — this is
-    // the one accepted trade, taken deliberately and only where the owner
-    // asked for it, so a commit SHA is not collateral damage in a search query
-    // or a published finding. Every OTHER shape this rule catches — mixed
-    // case, base64's \`+/=\`, an underscore or hyphen anywhere in the run — is
-    // still dropped in \`secretsOnly\` exactly as before, and full mode ignores
-    // the match entirely and always drops it, unchanged.
-    //
-    // AN ENV-VAR NAME IS NOT A KEY, IN EITHER MODE. All caps with at least one
-    // underscore (\`NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1\`) is a name
-    // somebody typed, never a base64 secret, and it is the exact token a shelf
-    // lookup keys on — an identifier exactly like the paths and hosts
-    // \`secretsOnly\` already keeps, so the exemption holds whether or not full
-    // redaction runs afterward. BOUNDED: at most 64 characters and no piece of
-    // 16+ between the underscores, because
-    // \`GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890\` is a name glued to its
-    // value, and a hex-style key is all caps and digits too. The longest
-    // piece of a real env-var name is a word.
-    .replace(SECRET_ENTROPY_RE, (m) =>
-      (secretsOnly && /^[0-9a-f]+$/.test(m)) ||
-      (m.length <= 64 && SECRET_ENV_NAME_RE.test(m) && !/[A-Z0-9]{16}/.test(m))
-        ? m
-        : ' ',
-    );
-  if (secretsOnly) {
-    return out
-      .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+const MASK_RULES = __MASK_RULES__.map((r) => ({ re: new RegExp(r.pattern, r.flags), keep: r.keep }));
+function mask(text) {
+  let out = String(text);
+  for (const { re, keep } of MASK_RULES) {
+    out = out.replace(re, (m) => m.slice(0, Math.min(keep, m.length)) + '\u2026[redacted ' + (m.length - Math.min(keep, m.length)) + ' chars]');
   }
-  return out
-    .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
-    // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
-    // which carries exactly as much of a customer's name as the absolute one
-    // does (\`src/customers/acme-bank/keys.ts\`). Two separators minimum, so
-    // \`and/or\` survives. Both alternatives are anchored on a mandatory \`/\`
-    // between two classes that cannot contain one, so neither adds a
-    // backtracking seam.
-    //
-    // THE LEADING CLASS IS NEGATED, NOT ENUMERATED. Enumerating what a path is
-    // quoted or punctuated by is a list that is always one character short:
-    // \`**src/customers/acme-bank/keys.ts**\` (markdown bold, ordinary in a Task
-    // description) and \`a.ts;src/customers/…\` both walked past a class holding
-    // \`\s'"(=:,<\`~@[{\`. Anything that is not a path character now opens one.
-    //
-    // THE FIRST SEGMENT TAKES AT MOST THREE DOTS, and that bound is what keeps
-    // the negated class affordable. \`.\` opens a start position, so on 20k of
-    // \`a.a.a\` an unbounded \`[\w.@-]+\` re-scans the tail from every dot: 5 ms
-    // at 5k, 22 ms at 10k, 89 ms at 20k, x4 per doubling. Bounded, each start
-    // dies within four groups — 0.17 ms at 20k, x2 per doubling — and a real
-    // path prefix has nowhere near three dots.
-    //
-    // THE BOUND'S RESIDUE, PRICED AND KEPT: past three dots the match restarts
-    // inside the segment, so the HEAD of a longer one survives
-    // (\`acmebank.a.b.c.d/keys/prod.ts\` -> \`acmebank\`). Narrow, and paid for
-    // deliberately: widening the bound is what brings the quadratic back.
-    //
-    // THE BASENAME STAYS WHEN ITS EXTENSION IS ON THE ALLOWLIST AND ITS STEM
-    // IS NOT CREDENTIAL-SHAPED. The basename is the one exact token a shelf can
-    // match a finding on (\`migrate.yml\`, \`keys.ts\`), and dropping the
-    // whole path left the failure and dispatch arms blind to the file the
-    // question was about. The extension list is source and config only, so
-    // \`.env.production\`, \`id_rsa.pem\`, \`.key\` and \`.p12\` go with their
-    // path; the stem list catches the credential files that sit behind an
-    // innocent extension (\`prod-service-account.json\`, \`secrets.yml\`,
-    // \`id_rsa.md\`), and one stem is read BY its extension: \`keys.json\`
-    // and \`keys.yml\` are key material and go with the path, \`keys.ts\` is
-    // the module that handles them and stays.
-    //
-    // WHAT THIS DOES NOT DO is read the stem for a customer's name: no rule can
-    // tell \`acme-bank.ts\` from \`push-scripts.ts\`, so a file NAMED for a
-    // customer travels the same way it would typed bare with no path in front
-    // of it, and only its directories are blanked. The docs say so.
-    .replace(
-      /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
-      (m) => {
-        const base =
-          /\/(([\w-]+(?:\.[\w-]+)*)\.(ts|tsx|js|mjs|cjs|json|yml|yaml|md|sql|py|toml))$/.exec(m);
-        if (base === null) return ' ';
-        const credential =
-          SECRET_STEM_RE.test(base[2]) ||
-          (SECRET_CONFIG_EXT_RE.test(base[3]) && SECRET_CONFIG_STEM_RE.test(base[2]));
-        return credential ? ' ' : ' ' + base[1] + ' ';
-      },
-    )
-    .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
-    .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
-    .replace(SECRET_HOST_RE, (m) => (SECRET_HOST_KEEP_RE.test(m) ? m : ' '))
-    .replace(SECRET_IPV4_RE, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return out;
 }
 `;
 
@@ -1413,7 +1082,8 @@ function scrub(text, mode) {
  *  token, so it waits half as long for a body as an arm running beside a tool
  *  call that has already been made. */
 export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string {
-  const js = PUSH_CORE_JS.replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
+  const js = PUSH_CORE_JS.replaceAll('__MASK_RULES__', JSON.stringify(maskRules()))
+    .replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
     .replaceAll('__LOOKUP_WINDOW_MS__', String(PUSH_LOOKUP_WINDOW_MS))
     .replaceAll('__LOOKUP_CAPS__', JSON.stringify(PUSH_LOOKUP_CAPS_PER_WINDOW))
     .replaceAll('__LOOKUP_CAP_DEFAULT__', String(PUSH_LOOKUP_CAP_DEFAULT))
@@ -1492,7 +1162,7 @@ async function main() {
   // identifier and no clause of four words, so condense() returns '' — and an
   // empty query still spends a request on both shelves and writes a row that
   // says nothing. The 400-character head is what this arm sent before #255.
-  const scrubbed = scrub(prompt, 'secretsOnly');
+  const scrubbed = mask(prompt);
   const identifiers = identifiersOf(scrubbed);
   const condensed = condense(scrubbed);
   const query = clean(
@@ -2004,12 +1674,12 @@ function failureText(input) {
  * A local dedup key only — \`STATE_SIGNATURES_PREFIX + signatureOf(line)\` is a
  * claim in this machine's own state store, never read back into a prompt and
  * never sent anywhere. secretsOnly here does not change what leaves the
- * machine; it keeps this arm's every \`scrub()\` call on the one shared policy
+ * machine; it keeps this arm's every \`mask()\` call on the one shared policy
  * rather than carving out an exception for the one caller that happens not to
  * need it.
  */
 function signatureOf(line) {
-  return scrub(line, 'secretsOnly').toLowerCase().replace(/\d+/g, '#').slice(0, 200);
+  return mask(line).toLowerCase().replace(/\d+/g, '#').slice(0, 200);
 }
 
 // ---- sig_v1: the mechanical lane's key (04, "Two knowledge lanes") ----
@@ -2632,7 +2302,7 @@ function pairingScope(errorLine, fixFiles) {
  * stepped over) and would otherwise land verbatim in the database — and then be
  * read back out into a LATER session's context by \`pairingText\`. The plan's
  * adversarial section is explicit that the db never holds more than the wire
- * did, so the same \`scrub()\` every query goes through runs here too.
+ * did, so the same \`mask()\` every query goes through runs here too.
  *
  * secretsOnly, not full: this string is not local-only. \`openPairing\` stores
  * it as \`pairings.cmd\` / \`pairings.fix_cmd\`, and \`tenjin sync\` (commands/
@@ -2644,7 +2314,7 @@ function pairingScope(errorLine, fixFiles) {
  * that still blocks or warns on an actual secret shape reaching the wire.
  */
 function safeCommand(command) {
-  return clean(scrub(command, 'secretsOnly'), 300);
+  return clean(mask(command), 300);
 }
 
 /** The bare package name of \`name@1.2.3\`, keeping a scope intact. */
@@ -3247,7 +2917,7 @@ async function main() {
   // and emails come out here. \`sigV1\`/\`normalizeForSig\` is the separate,
   // untouched fingerprint path: it hashes its own normalized copy of \`line\`
   // and never carries content onto the wire, so it is not scrubbed at all.
-  const scrubbed = scrub(line, 'secretsOnly');
+  const scrubbed = mask(line);
   const sig = sigV1(line, text);
   const errorFiles = filesInError(text);
   // The test-identity lane (tenjin-agent#267): tried whatever \`sig\` came back
@@ -3829,7 +3499,7 @@ function findingBlock(text) {
   const rest = text.slice(start + 1);
   const end = findingClose(rest);
   const raw = (end === -1 ? rest : rest.slice(0, end)).slice(0, FINDING_MAX_CHARS);
-  const body = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
+  const body = clean(mask(raw), FINDING_MAX_CHARS);
   return body.length === 0 ? null : body;
 }
 
@@ -4499,7 +4169,7 @@ async function main() {
     // does not run the host rule at all, so the segment survives scrub and
     // only the later \`.replace(/\.[^.]+$/, '')\` strips the real extension —
     // which is what makes \`checkout.test.ts\` ship as \`checkout test\` again.
-    const name = scrub(filePath.split('/').pop() || '', 'secretsOnly').replace(/\.[^.]+$/, '');
+    const name = mask(filePath.split('/').pop() || '').replace(/\.[^.]+$/, '');
     const packages = packagesInSource(fileHead(filePath)).slice(0, 3);
     const query = clean(name.replace(/[-_.]/g, ' '), 300);
     if (wordCount(query) < 1) return quiet();
