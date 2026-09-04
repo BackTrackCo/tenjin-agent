@@ -275,7 +275,7 @@ describe('runDaemonStop', () => {
     await writePidFile(4242, 1);
     const stale = await runDaemonStop(ctx, { kill: () => {} });
     expect(stale.data).toEqual({ state: 'not-running', stalePid: 4242 });
-    expect(stale.humanLines?.[0]).toMatch(/^not running: nothing answered .* pid 4242 left alone/);
+    expect(stale.humanLines?.[0]).toMatch(/^not running: nothing answered .*pid 4242 left alone/);
 
     const port = await healthStub({
       version: pkg.version,
