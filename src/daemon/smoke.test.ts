@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -61,6 +62,76 @@ let daemonPid: number;
 let coldStartMs: number;
 let bundleBytes: number;
 let fixtures: Fixture[];
+let shelf: Server;
+let shelfUrl: string;
+/** Every /api/search body the stub shelf was handed. */
+const shelfBodies: Array<Record<string, unknown>> = [];
+
+/** The one piece the stub shelf holds, free and with its body attached — which
+ *  is what PR F puts on every free row and what makes the delivery the whole
+ *  finding rather than a pointer. */
+const SHELF_TITLE = 'The pgvector collation flip';
+const SHELF_BODY = 'swap the image tag back to pgvector/pgvector:pg16 and re-seed';
+const SHELF_CALIBRATION = 'hybrid-v1';
+
+function shelfEnvelope(): unknown {
+  return {
+    schemaVersion: 3,
+    searchId: '33333333-3333-4333-8333-333333333333',
+    calibration: SHELF_CALIBRATION,
+    matched: 1,
+    items: [
+      {
+        resourceId: '44444444-4444-4444-8444-444444444444',
+        url: 'https://shelf.example/p/collation',
+        slug: 'collation',
+        title: SHELF_TITLE,
+        artifactType: 'finding',
+        price: '0',
+        asOf: null,
+        validUntil: null,
+        matchReasons: ['title'],
+        estimatedTokens: 400,
+        creator: { handle: 'ali' },
+        strong: true,
+        body: { text: SHELF_BODY, truncated: false },
+      },
+    ],
+  };
+}
+
+/** A shelf on loopback, answering POST /api/search and nothing else. Both legs
+ *  point at it, so one prompt is two requests and two `legs` rows. */
+function startShelf(): Promise<{ server: Server; url: string }> {
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (c: Buffer) => (raw += c.toString('utf8')));
+    req.on('end', () => {
+      if (req.method !== 'POST' || !(req.url ?? '').startsWith('/api/search')) {
+        res.writeHead(404).end();
+        return;
+      }
+      try {
+        shelfBodies.push(JSON.parse(raw) as Record<string, unknown>);
+      } catch {
+        // The assertion below reads what did parse.
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(shelfEnvelope()));
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.on('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        reject(new Error('stub shelf did not bind a port'));
+        return;
+      }
+      resolve({ server, url: `http://127.0.0.1:${address.port}` });
+    });
+  });
+}
 
 /** Every pid this file has spawned or is otherwise responsible for; SIGKILLed
  *  in afterAll even when a case fails before it can clean up itself. */
@@ -181,9 +252,14 @@ beforeAll(async () => {
 
   bundleBytes = (await stat(daemonBundlePath(dataDir))).size;
   fixtures = await loadFixtures();
+
+  const stub = await startShelf();
+  shelf = stub.server;
+  shelfUrl = stub.url;
 });
 
 afterAll(async () => {
+  if (shelf !== undefined) await new Promise<void>((r) => shelf.close(() => r()));
   for (const pid of alivePids) tryKill(pid, 'SIGKILL');
   if (dataDir !== undefined) await rm(dataDir, { recursive: true, force: true });
   if (tmpOutDir !== undefined) await rm(tmpOutDir, { recursive: true, force: true });
@@ -208,7 +284,7 @@ describe('the daemon, cold-started from the real bundle', () => {
     }
   });
 
-  it('writes one fires row per valid event (reason no-question, arm none) except a phantom SubagentStop', async () => {
+  it('writes one no-question fires row per valid event except a phantom SubagentStop', async () => {
     const stops = fixtures.filter((f) => f.event === 'SubagentStop').length;
     await waitForFires(fixtures.length - stops);
     const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
@@ -223,12 +299,16 @@ describe('the daemon, cold-started from the real bundle', () => {
         reason: string;
       }>;
       expect(rows).toHaveLength(fixtures.length - stops);
+      // The default config is `hooks.push: off`, so every lookup arm declines
+      // and nothing is asked of any shelf. `arm` still names the arm that
+      // declined — the WebFetch fixture reaches `fetch`, the Bash and Read
+      // ones reach `context` — and `none` is only for an event no arm claims.
       for (const r of rows) {
-        expect(r.reason).toBe('no-question');
-        expect(r.arm).toBe('none');
+        expect(r.reason, r.event).toBe('no-question');
+        expect(['none', 'prompt', 'research', 'fetch', 'context']).toContain(r.arm);
       }
-      // No arm is registered in PR B, so nothing ever writes the `started`
-      // mark SubagentStop requires (actor.ts). There is no "prior
+      // No arm registers on `agent.stop` yet, so nothing ever writes the
+      // `started` mark SubagentStop requires (actor.ts). There is no "prior
       // SubagentStart" case that behaves differently yet: every SubagentStop
       // looks like a phantom stop and leaves no row at all, including this
       // one even though its matching SubagentStart fixture ran first.
@@ -362,6 +442,96 @@ describe('the daemon, cold-started from the real bundle', () => {
     expect(specifiers.length).toBeGreaterThan(0);
     for (const s of specifiers) expect(s.startsWith('node:')).toBe(true);
   });
+
+  /**
+   * THE ONE END-TO-END PASS OF PR C: a real prompt through the real bundle,
+   * both arms' shared pieces, two real HTTP legs against a stub shelf, and the
+   * finding back out as `additionalContext`. Everything between the POST and
+   * the assertion is production code.
+   */
+  it('a prompt with a stubbed shelf: one hit row, one leg per shelf, the finding injected', async () => {
+    const original = await readFile(configPath(dataDir), 'utf8');
+    await writeFile(
+      configPath(dataDir),
+      JSON.stringify({
+        loop: { port: 0 },
+        baseUrl: shelfUrl,
+        publicShelfUrl: shelfUrl,
+        hooks: { push: 'on' },
+      }),
+    );
+    let response: Record<string, unknown>;
+    try {
+      const res = await fetch(hookUrl(), {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({
+          session_id: 's-loop-prompt',
+          cwd: '/tmp/proj',
+          hook_event_name: 'UserPromptSubmit',
+          prompt_id: 'p-loop-1',
+          prompt:
+            'the pgvector testcontainer flipped its collation after the image bump and every ivfflat index test now fails',
+        }),
+      });
+      expect(res.status).toBe(200);
+      response = (await res.json()) as Record<string, unknown>;
+    } finally {
+      await writeFile(configPath(dataDir), original);
+    }
+
+    const out = response.hookSpecificOutput as {
+      hookEventName?: string;
+      additionalContext?: string;
+    };
+    expect(out.hookEventName).toBe('UserPromptSubmit');
+    expect(out.additionalContext).toContain(SHELF_TITLE);
+    // The body rode on the candidate, so the agent gets the finding itself
+    // rather than a pointer to it.
+    expect(out.additionalContext).toContain(SHELF_BODY);
+
+    // Both legs asked, and neither sent the raw prompt: the shape list masks
+    // and condenses before anything leaves the machine.
+    expect(shelfBodies).toHaveLength(2);
+    for (const body of shelfBodies) expect(body.trigger).toBe('prompt');
+
+    await waitForFires(countFires());
+    const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+    try {
+      const fires = db
+        .prepare('SELECT id, arm, reason, delivered FROM fires WHERE session = ?')
+        .all('s-loop-prompt') as Array<{
+        id: string;
+        arm: string;
+        reason: string;
+        delivered: string | null;
+      }>;
+      expect(fires).toHaveLength(1);
+      const fire = fires[0];
+      expect(fire?.arm).toBe('prompt');
+      expect(fire?.reason).toBe('hit');
+      expect(fire?.delivered).toMatch(/^inject:/);
+      const legs = db
+        .prepare(
+          'SELECT shelf, status, outcome, calibration FROM legs WHERE fire_id = ? ORDER BY shelf',
+        )
+        .all(fire?.id ?? '') as Array<{
+        shelf: string;
+        status: string;
+        outcome: string;
+        calibration: string | null;
+      }>;
+      expect(legs.map((l) => l.shelf)).toEqual(['public', 'team']);
+      for (const leg of legs) {
+        expect(leg.status).toBe('ok');
+        expect(leg.calibration).toBe(SHELF_CALIBRATION);
+      }
+      // Team outranks public at equal strength, so the team leg is the hit.
+      expect(legs.find((l) => l.shelf === 'team')?.outcome).toBe('hit');
+    } finally {
+      db.close();
+    }
+  }, 15_000);
 
   // Last: tears down the daemon every prior case in this file depends on.
   it('SIGTERM: the daemon exits within 3 s, removes daemon.pid, and logs the exit', async () => {

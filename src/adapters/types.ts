@@ -41,8 +41,14 @@ export const EVENTS: readonly Event[] = [
   'turn.end',
 ];
 
-/** What a tool IS to the arms. Anything unmatched is `'other'`, never a key. */
-export type ToolKind = 'web' | 'dispatch' | 'shell' | 'edit' | 'read';
+/**
+ * What a tool IS to the arms. Anything unmatched is `'other'`, never a key.
+ *
+ * `web` and `fetch` are separate kinds because they are separate arms: a page
+ * fetch and a real web search ask different questions, and one agent's six page
+ * fetches must not spend the budget its search needed.
+ */
+export type ToolKind = 'web' | 'fetch' | 'dispatch' | 'shell' | 'edit' | 'read';
 
 export interface HookTool {
   name: string;

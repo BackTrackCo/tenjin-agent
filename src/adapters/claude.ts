@@ -32,7 +32,8 @@ const NATIVE_TO_EVENT: Record<string, Event> = {
 
 /** Native tool names per kind, spelled once (the matchers below derive from them). */
 const TOOLS: Record<ToolKind, RegExp> = {
-  web: /^(WebSearch|WebFetch)$/,
+  web: /^WebSearch$/,
+  fetch: /^WebFetch$/,
   dispatch: /^(Agent|Task)$/,
   shell: /^Bash$/,
   edit: /^(Edit|Write|MultiEdit)$/,
@@ -211,7 +212,14 @@ export const registrar: Registrar = {
     return [
       { event: 'SessionStart', matcher: SESSION_START_MATCHER, hooks: command },
       { event: 'UserPromptSubmit', hooks: command },
-      { event: 'PreToolUse', matcher: matcherOf(TOOLS.web), hooks: http },
+      // ONE entry for both web kinds. The arms are separate; the harness entry
+      // is not, because a settings file with two PreToolUse entries whose
+      // matchers overlap is two POSTs for one tool call.
+      {
+        event: 'PreToolUse',
+        matcher: `${matcherOf(TOOLS.web)}|${matcherOf(TOOLS.fetch)}`,
+        hooks: http,
+      },
       { event: 'PreToolUse', matcher: matcherOf(TOOLS.dispatch), hooks: http },
       {
         event: 'PreToolUse',

@@ -1,6 +1,9 @@
 import { readFileSync, statSync } from 'node:fs';
 import pkg from '../../package.json';
 import { claudeAdapter } from '../adapters/claude';
+import { contextArm } from '../hooks/arms/context';
+import { promptArm } from '../hooks/arms/prompt';
+import { fetchArm, researchArm } from '../hooks/arms/research';
 import { openLoopDb } from '../hooks/store';
 import { readToken, resolveDataDir } from '../hooks/shim';
 import type { Arm, Deps, KernelConfig } from '../hooks/types';
@@ -14,12 +17,15 @@ import { createHookServer } from './server';
  * serves every session and every subagent on the machine until it has been
  * idle for `loop.idle_exit_min`.
  *
- * ARMS: none in PR B. The table is what PR C fills; with it empty every fire
- * that passes `actorOf` records `no-question` and answers 204, which is what
- * the smoke test checks.
+ * ARMS: the lookup arms of PR C. ORDER IS THE MAP — `selectArm` takes the
+ * first arm whose `on` matches, so a later arm can be shadowed by an earlier
+ * one. These four cannot shadow each other: they key on four disjoint
+ * (event, kind) pairs, and `context` is last regardless because it is the only
+ * one with more than one. Every entry `install` writes for an arm PR D has yet
+ * to add finds nothing here, records `no-question` and answers 204.
  */
 
-const ARMS: Arm[] = [];
+const ARMS: Arm[] = [promptArm, researchArm, fetchArm, contextArm];
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon
