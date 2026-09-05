@@ -358,15 +358,9 @@ never authentication, and it decides no entitlement, payment, or spend.
 
 ## Developing
 
-```bash
-pnpm install
-pnpm run build
-pnpm run test
-pnpm run typecheck
-pnpm run lint
-```
-
-Release notes live in [RELEASING.md](./RELEASING.md).
+The contributor command list, and the rule to add a changeset in the same PR,
+live in [RELEASING.md](./RELEASING.md#contributing). Release and publish steps
+are in the same file.
 
 ## License
 
