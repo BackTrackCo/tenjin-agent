@@ -7,7 +7,7 @@ import { CONFIG_DEFAULTS } from '../lib/config';
 import { claim, getMark } from './gates';
 import { runFire, selectArm } from './fire';
 import { openLoopDb, type LoopDb } from './store';
-import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult } from './types';
+import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult, Question } from './types';
 
 // End-to-end over a real loop.db: every gate, the ledger write and the bail
 // timer are the real thing, only the clock, the arms and the legs are fake
@@ -432,7 +432,7 @@ describe('runFire: once-per-piece is about what was SHOWN', () => {
 });
 
 describe('runFire: deadline', () => {
-  it('a leg that never resolves hits the deadline and releases the claim for a fresh retry', async () => {
+  it('a leg that never resolves hits the deadline, releases the claim, and never calls after()', async () => {
     vi.useFakeTimers();
     const db = await freshDb();
     const clockRef = { now: NOW };
@@ -440,6 +440,7 @@ describe('runFire: deadline', () => {
       clockRef.now += ms;
       await vi.advanceTimersByTimeAsync(ms);
     };
+    let afterCalls = 0;
     const arm: Arm = {
       id: 'deadline-arm',
       wait: 'tool',
@@ -448,6 +449,10 @@ describe('runFire: deadline', () => {
         question: { text: 'q', questionKey: 'qk-deadline' },
         stages: [[hangingLeg()]],
       }),
+      after: () => {
+        afterCalls += 1;
+        return null;
+      },
     };
     const resultPromise = runFire(
       input(),
@@ -458,6 +463,9 @@ describe('runFire: deadline', () => {
     expect(result.emit).toBeNull();
     result.commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });
+    // `after` is where an arm spends what the fire cost it, and this fire asked
+    // nobody anything: the arms rely on it not running here.
+    expect(afterCalls).toBe(0);
 
     // The abort races the leg's rejection in the background; give it a beat.
     for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -575,6 +583,7 @@ describe('runFire: after()', () => {
 
   it("after()'s context is appended to the delivery's context", async () => {
     const db = await freshDb();
+    const asked: Array<Question | null> = [];
     const arm: Arm = {
       id: 'append-arm',
       wait: 'tool',
@@ -584,10 +593,16 @@ describe('runFire: after()', () => {
         stages: [[strongLeg('r2')]],
       }),
       deliver: () => ({ mode: 'inject', text: 'DELIVERY' }),
-      after: () => ({ context: 'AFTER' }),
+      after: (_ctx, _result, question) => {
+        asked.push(question);
+        return { context: 'AFTER' };
+      },
     };
     const { emit } = await runFire(input(), deps(db, [arm]));
     expect(emit).toEqual({ context: 'DELIVERY\n\nAFTER' });
+    // And `after` is handed the question this fire built, not the input it was
+    // built from: an arm marking what it asked cannot re-derive it.
+    expect(asked[0]?.questionKey).toBe('qk-append');
   });
 });
 
@@ -615,6 +630,31 @@ describe('runFire: clientSignal', () => {
     const controller = new AbortController();
     controller.abort();
     const { emit, commit } = await runFire(input(), deps(db, [arm]), controller.signal);
+    expect(emit).toBeNull();
+    commit();
+    expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });
+  });
+
+  it('skips after() on a fire the harness abandoned, so nothing local is spent', async () => {
+    // The row says `deadline` either way. Running `after` under it would let an
+    // abandoned fire spend a mark — the context arm's one chance at a package —
+    // on a question nobody will ever read the answer to.
+    const db = await freshDb();
+    let afterCalls = 0;
+    const arm: Arm = {
+      id: 'client-abort-after-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => null,
+      after: () => {
+        afterCalls += 1;
+        return { context: 'AFTER' };
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const { emit, commit } = await runFire(input(), deps(db, [arm]), controller.signal);
+    expect(afterCalls).toBe(0);
     expect(emit).toBeNull();
     commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });

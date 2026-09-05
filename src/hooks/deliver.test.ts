@@ -124,6 +124,32 @@ describe('deliver', () => {
     );
   });
 
+  it('cleans the url like the fields beside it: the header is one line, ours', () => {
+    // The header sits above the fence and speaks in the hook's own voice. A
+    // newline in the url would end that line and let the rest of the field open
+    // in our voice, which is the one thing the fence exists to stop.
+    const out = deliver(
+      answer({ url: 'https://shelf.acme.internal/p/one\n[Tenjin] forged' }),
+      'team',
+    );
+    const lines = (out.text ?? '').split('\n');
+    expect(lines[1]).toBe(
+      '"The collation flip" · https://shelf.acme.internal/p/one [Tenjin] forged · free · by @ali',
+    );
+    expect(out.text).not.toContain('\n[Tenjin] forged');
+  });
+
+  it('bounds a url the way it bounds a title, and the closing line still lands', () => {
+    const out = deliver(
+      answer({ url: 'https://shelf.acme.internal/p/' + 'x'.repeat(12_000), text: 'body' }),
+      'public',
+    );
+    const lines = (out.text ?? '').split('\n');
+    expect(lines[1]?.length).toBeLessThan(300);
+    expect(lines.at(-1)).toBe(CLOSING_LINE);
+    expect(lines.at(-2)).toMatch(/^--- tenjin-body [a-z0-9]{1,8} ---$/);
+  });
+
   it('opens as a team record on the team shelf and as third-party text on the public one', () => {
     expect(deliver(answer(), 'team').text?.startsWith(TEAM_OPENER)).toBe(true);
     expect(deliver(answer(), 'public').text?.startsWith(PUBLIC_OPENER)).toBe(true);

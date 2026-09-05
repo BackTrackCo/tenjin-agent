@@ -96,19 +96,21 @@ describe('the research arm', () => {
     const config = kernelConfig({ push: 'on', webSearch: 'off' });
     const { plan, ctx } = planOf(researchArm, searchInput('anything at all'), config);
     expect(plan).toBeNull();
-    expect(researchArm.after?.(ctx, { reason: 'no-question' })).toBeNull();
+    expect(researchArm.after?.(ctx, { reason: 'no-question' }, null)).toBeNull();
   });
 
   it('`remind` says the line and sends nothing anywhere: no plan, no leg', () => {
     const config = kernelConfig({ push: 'on', webSearch: 'remind' });
     const { plan, ctx } = planOf(researchArm, searchInput('pgvector collation'), config);
     expect(plan).toBeNull();
-    expect(researchArm.after?.(ctx, { reason: 'no-question' })).toEqual({ context: REMIND_LINE });
+    expect(researchArm.after?.(ctx, { reason: 'no-question' }, null)).toEqual({
+      context: REMIND_LINE,
+    });
   });
 
   it('`auto` says no line of its own', () => {
     const { ctx } = planOf(researchArm, searchInput('pgvector collation'));
-    expect(researchArm.after?.(ctx, { reason: 'no-hit' })).toBeNull();
+    expect(researchArm.after?.(ctx, { reason: 'no-hit' }, null)).toBeNull();
   });
 
   it('an empty or absent query is no-question', () => {

@@ -102,6 +102,12 @@ export interface HooksResult {
   url?: string;
   /** Retired generated scripts this run deleted from the hooks dir. */
   removed: string[];
+  /**
+   * Retired scripts this run could NOT delete, each with why. Absent when they
+   * all went. A leftover of ours that will not unlink is a warning and never a
+   * failure: the entries are written and no session points at it any more.
+   */
+  kept?: string[];
   skipped?: HooksSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
@@ -270,7 +276,7 @@ async function inspectSettings(
         refusal: {
           reason: 'unresolvable',
           path: declaredPath,
-          message: `${declaredPath} could not be resolved (${(err as Error).message}); it was left exactly as it is.`,
+          message: `${declaredPath} could not be resolved (${(err as Error).message}); its "hooks" key was left exactly as it is.`,
         },
       };
     }
@@ -298,7 +304,7 @@ async function inspectSettings(
         refusal: {
           reason: 'unparsable',
           path,
-          message: `${path} is not valid JSON (${(err as Error).message}); it was left exactly as it is.`,
+          message: `${path} is not valid JSON (${(err as Error).message}); its "hooks" key was left exactly as it is.`,
         },
       };
     }
@@ -307,7 +313,7 @@ async function inspectSettings(
         refusal: {
           reason: 'unexpected-shape',
           path,
-          message: `${path} is not a JSON object; it was left exactly as it is.`,
+          message: `${path} is not a JSON object; its "hooks" key was left exactly as it is.`,
         },
       };
     }
@@ -320,7 +326,7 @@ async function inspectSettings(
       refusal: {
         reason: 'unexpected-shape',
         path,
-        message: `${path} has a "hooks" key that is not an object; it was left exactly as it is.`,
+        message: `${path} has a "hooks" key that is not an object; its "hooks" key was left exactly as it is.`,
       },
     };
   }
@@ -335,7 +341,7 @@ async function inspectSettings(
         refusal: {
           reason: 'unexpected-shape',
           path,
-          message: `${path} has a "hooks.${event}" that is not an array of entries; it was left exactly as it is.`,
+          message: `${path} has a "hooks.${event}" that is not an array of entries; its "hooks" key was left exactly as it is.`,
         },
       };
     }
@@ -419,7 +425,7 @@ export interface WriteClaudeHooksOptions {
 /**
  * Write Claude Code's eleven hook entries, whole.
  *
- * The four steps are the order §4a fixes and nothing here may reorder:
+ * The five steps are the order §4a fixes and nothing here may reorder:
  *
  *  1. copy the two bundles into `<dataDir>/hooks`;
  *  2. mint `daemon.token` (0600) if absent — both inside {@link startDaemon};
@@ -540,7 +546,7 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   // long after the bytes settled.
   if (next === raw) {
     await tightenSettings(path);
-    result.removed = await removeRetiredScripts(dir);
+    reportSweep(result, await removeRetiredScripts(dir));
     return result;
   }
 
@@ -573,7 +579,7 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       fix: fixFor('unwritable'),
     });
   }
-  result.removed = await removeRetiredScripts(dir);
+  reportSweep(result, await removeRetiredScripts(dir));
   return result;
 }
 
@@ -584,22 +590,41 @@ async function tightenSettings(path: string): Promise<void> {
   await chmod(path, 0o600).catch(() => undefined);
 }
 
+interface Sweep {
+  removed: string[];
+  kept: string[];
+}
+
+/** The sweep, onto the receipt: what went, and what would not go. */
+function reportSweep(result: HooksResult, sweep: Sweep): void {
+  result.removed = sweep.removed;
+  if (sweep.kept.length > 0) result.kept = sweep.kept;
+}
+
 /**
  * Delete the generated scripts of the pre-daemon era, by name.
  *
  * By NAME and only ours: a file someone else parked in the hooks dir is left
  * alone, and so is the directory, which now holds the two bundles.
  */
-async function removeRetiredScripts(dir: string): Promise<string[]> {
-  const removed: string[] = [];
+async function removeRetiredScripts(dir: string): Promise<Sweep> {
+  const sweep: Sweep = { removed: [], kept: [] };
   for (const file of RETIRED_HOOK_FILES) {
     const path = join(dir, file);
     const entry = await lstat(path).catch(() => null);
     if (entry === null || !entry.isFile()) continue;
-    await rm(path, { force: true });
-    removed.push(path);
+    // `force` covers the file that is already gone; it does not cover an EPERM
+    // on a locked-down hooks dir or an EBUSY on Windows. By here settings.json
+    // is written, so throwing would render a finished install as an internal
+    // error over a leftover nobody reads.
+    try {
+      await rm(path, { force: true });
+      sweep.removed.push(path);
+    } catch (err) {
+      sweep.kept.push(`${path} (${err instanceof Error ? err.message : String(err)})`);
+    }
   }
-  return removed;
+  return sweep;
 }
 
 /**

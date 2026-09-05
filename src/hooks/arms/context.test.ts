@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +39,13 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
   cleanup();
 });
+
+/** The mark key the arm derives from a path, computed here rather than
+ *  imported: the rule under test is "sha256 of the whole path", not whatever
+ *  the arm happens to do. */
+function key(path: string): string {
+  return createHash('sha256').update(path).digest('hex').slice(0, 32);
+}
 
 function sourceFile(name: string, body: string): string {
   const path = join(dir, name);
@@ -81,7 +89,7 @@ function fire(
   const ctx = ctxFor(event, kind, input, actor, config);
   contextArm.before?.(ctx);
   const plan = (contextArm.plan?.(ctx) ?? null) as Plan | null;
-  if (reason !== 'deadline') contextArm.after?.(ctx, { reason });
+  if (reason !== 'deadline') contextArm.after?.(ctx, { reason }, plan?.question ?? null);
   return plan;
 }
 
@@ -116,19 +124,31 @@ describe('the marks PR D reads', () => {
   it('marks every edited path whatever its extension, and counts it', () => {
     const path = join(dir, 'drizzle.config.toml');
     edit(path);
-    expect(getMark(db, LEAD, `edited:${path.slice(-200)}`)).not.toBeNull();
-    expect(getMark(db, LEAD, `edits:${path}`)).toBe('1');
+    expect(getMark(db, LEAD, `edited:${key(path)}`)).not.toBeNull();
+    expect(getMark(db, LEAD, `edits:${key(path)}`)).toBe('1');
   });
 
-  it('keys `edits:` and `edited:` on the same tail, so one long path is one file', () => {
-    // A path longer than the tail: keyed whole, `edits:` and `edited:` would
-    // name the same file two different ways.
+  it('keys `edits:` and `edited:` on the same hash, so a 300-character path is one file', () => {
     const path = `/${'nested/'.repeat(50)}deep.ts`;
     expect(path.length).toBeGreaterThan(300);
     edit(path);
-    const tail = path.slice(-200);
-    expect(getMark(db, LEAD, `edited:${tail}`)).not.toBeNull();
-    expect(getMark(db, LEAD, `edits:${tail}`)).toBe('1');
+    expect(getMark(db, LEAD, `edited:${key(path)}`)).not.toBeNull();
+    expect(getMark(db, LEAD, `edits:${key(path)}`)).toBe('1');
+  });
+
+  it('keys on the whole path: two files sharing a tail are two files', () => {
+    // Keyed on a tail, these are one mark, and one file's fourth edit is
+    // another file's.
+    const tail = `/${'nested/'.repeat(50)}deep.ts`;
+    const one = `/one${tail}`;
+    const two = `/two${tail}`;
+    expect(one.slice(-200)).toBe(two.slice(-200));
+    edit(one);
+    edit(one);
+    edit(two);
+    expect(key(one)).not.toBe(key(two));
+    expect(getMark(db, LEAD, `edits:${key(one)}`)).toBe('2');
+    expect(getMark(db, LEAD, `edits:${key(two)}`)).toBe('1');
   });
 
   it('marks activity for the lead only, split inspection from mutation', () => {
@@ -145,8 +165,8 @@ describe('the marks PR D reads', () => {
     edit(path);
     edit(path);
     edit(path, CHILD);
-    expect(getMark(db, LEAD, `edits:${path}`)).toBe('2');
-    expect(getMark(db, CHILD, `edits:${path}`)).toBe('1');
+    expect(getMark(db, LEAD, `edits:${key(path)}`)).toBe('2');
+    expect(getMark(db, CHILD, `edits:${key(path)}`)).toBe('1');
   });
 
   it('writes nothing at all while push is off', () => {
@@ -154,7 +174,7 @@ describe('the marks PR D reads', () => {
     const path = sourceFile('d.ts', "import { z } from 'zod';\n");
     expect(fire('tool.before', 'edit', { file_path: path }, LEAD, off)).toBeNull();
     expect(fire('tool.before', 'shell', { command: 'ls' }, LEAD, off)).toBeNull();
-    expect(getMark(db, LEAD, `edits:${path}`)).toBeNull();
+    expect(getMark(db, LEAD, `edits:${key(path)}`)).toBeNull();
     expect(getMark(db, LEAD, 'bashstart')).toBeNull();
   });
 });
@@ -185,6 +205,32 @@ describe('the read question', () => {
     expect(read(path, LEAD, 'no-hit')?.question.text).toBe('zod gotcha bug workaround');
     expect(getMark(db, LEAD, 'package:zod')).not.toBeNull();
     expect(read(path)).toBeNull();
+  });
+
+  it('marks the package it asked about, never the one a second look would find', () => {
+    // Two Reads by one actor, overlapping: both plan before either ends, which
+    // is what a fan-out does. Both ask about zod, and the second is `cached`
+    // because the first holds the claim. Re-deriving the package in `after`
+    // would mark whatever the file says is unasked BY THEN — drizzle, which
+    // nobody asked about — and leave zod to be asked all over again.
+    const one = sourceFile('par-one.ts', "import { z } from 'zod';\nimport d from 'drizzle';\n");
+    const two = sourceFile(
+      'par-two.ts',
+      "import { z } from 'zod';\nimport { it } from 'vitest';\n",
+    );
+    const a = ctxFor('tool.after', 'read', { file_path: one });
+    const b = ctxFor('tool.after', 'read', { file_path: two });
+    const planA = (contextArm.plan?.(a) ?? null) as Plan | null;
+    const planB = (contextArm.plan?.(b) ?? null) as Plan | null;
+    expect(planA?.question.text).toBe('zod gotcha bug workaround');
+    expect(planB?.question.text).toBe('zod gotcha bug workaround');
+    contextArm.after?.(a, { reason: 'no-hit' }, planA?.question ?? null);
+    contextArm.after?.(b, { reason: 'cached' }, planB?.question ?? null);
+    expect(getMark(db, LEAD, 'package:zod')).not.toBeNull();
+    expect(getMark(db, LEAD, 'package:drizzle')).toBeNull();
+    expect(getMark(db, LEAD, 'package:vitest')).toBeNull();
+    // So the next Read picks up exactly where those two left off.
+    expect(read(one)?.question.text).toBe('drizzle gotcha bug workaround');
   });
 
   it('dedupes per actor, not per session: a child asks its own questions', () => {
@@ -218,7 +264,7 @@ describe('the churn question', () => {
   it('a non-source file never churns, however often it is edited', () => {
     const path = join(dir, 'Dockerfile');
     for (let i = 0; i < 5; i += 1) expect(edit(path)).toBeNull();
-    expect(getMark(db, LEAD, `edits:${path}`)).toBe('5');
+    expect(getMark(db, LEAD, `edits:${key(path)}`)).toBe('5');
   });
 });
 

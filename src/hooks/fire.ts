@@ -5,7 +5,7 @@ import { ask } from './ask';
 import { finish, firstSight, gates, release } from './gates';
 import { record } from './ledger';
 import type { FireRecord } from './ledger';
-import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome } from './types';
+import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome, Question } from './types';
 
 /**
  * The one lifecycle (02-redesign.md §5). A fire is one hook event with one
@@ -89,6 +89,9 @@ export async function runFire(
   let emit: Emit | null = null;
   let questionKey: string | undefined;
   let question: string | undefined;
+  /** The Question this fire built, for `after`: what was asked, never what a
+   *  second look at the same input would ask now. */
+  let asked: Question | null = null;
 
   if (arm === null) {
     outcome = skip('no-question');
@@ -118,6 +121,7 @@ export async function runFire(
           return skip(planned.reason);
         }
         const plan = planned;
+        asked = plan.question;
         questionKey = plan.question.questionKey;
         question = plan.question.text;
         const gated = gates(ctx, plan);
@@ -168,18 +172,20 @@ export async function runFire(
     };
     outcome = await Promise.race([main(), bail]);
     clearTimeout(timer);
+    if (clientSignal?.aborted) {
+      // The harness gave up on this fire: nothing we send will be read. BEFORE
+      // `after`, because `after` is where an arm spends a local mark on the
+      // question it asked — and a fire nobody is listening to must not spend
+      // one, least of all while its own row says `deadline`.
+      outcome = outcome.reason === 'deadline' ? outcome : { ...outcome, reason: 'deadline' };
+    }
     if (outcome.reason !== 'deadline') {
       try {
-        emit = mergeEmit(outcome.delivery, arm.after?.(ctx, outcome) ?? null);
+        emit = mergeEmit(outcome.delivery, arm.after?.(ctx, outcome, asked) ?? null);
       } catch (err) {
         outcome = skip('error', reasonOf(err));
         emit = null;
       }
-    }
-    if (clientSignal?.aborted) {
-      // The harness gave up on this fire: nothing we send will be read.
-      outcome = outcome.reason === 'deadline' ? outcome : { ...outcome, reason: 'deadline' };
-      emit = null;
     }
   }
 

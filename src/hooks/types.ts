@@ -184,7 +184,14 @@ export interface Arm {
   /** A `Skip` is "there was text and I refused it"; null is "there was nothing". */
   plan?(ctx: FireContext): Plan | Skip | null;
   deliver?(answer: Answer, ctx: FireContext): Delivery | null;
-  after?(ctx: FireContext, result: Outcome): Emit | null;
+  /**
+   * The last word, and the only place an arm writes what the fire cost it.
+   * `question` is the one this fire actually built — null when it never got
+   * that far — because an arm that spends a mark must spend it on what was
+   * ASKED: re-deriving the question here would race a second fire by the same
+   * actor and mark the wrong thing.
+   */
+  after?(ctx: FireContext, result: Outcome, question: Question | null): Emit | null;
 }
 
 /**

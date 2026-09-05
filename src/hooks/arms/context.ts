@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { mask } from '../../lib/redact';
 import { getMark, setMark } from '../gates';
@@ -41,10 +42,18 @@ const CHURN_EDITS = 4;
 const HEAD_BYTES = 20_000;
 const FILE_MAX_BYTES = 2 * 1024 * 1024;
 
-/** The path tail the `edited:` and `edits:` marks are keyed on. A path is
- *  operator text and a mark key is not a place to keep all of it — and the two
- *  marks are about the same file, so they are keyed the same way. */
-const PATH_TAIL = 200;
+/**
+ * The key the `edited:` and `edits:` marks share. A path is operator text and a
+ * mark key is not a place to keep it, so the key is a HASH OF THE WHOLE PATH —
+ * sha256, hex, first 16 bytes, the shape `question.ts` keys a question on.
+ *
+ * OF THE WHOLE PATH, because a tail is not a file: two deep paths under
+ * different roots share their last 200 characters often enough in a monorepo,
+ * and one file's fourth edit would then be another file's.
+ */
+function pathKey(path: string): string {
+  return createHash('sha256').update(path).digest('hex').slice(0, 32);
+}
 
 const BASH_START = 'bashstart';
 const EDITED_PREFIX = 'edited:';
@@ -85,6 +94,23 @@ function bump(ctx: FireContext, key: string): number {
   const n = Number(getMark(db, ctx.actor, key) ?? '0') + 1;
   setMark(db, ctx.actor, key, String(n), now);
   return n;
+}
+
+/**
+ * The read question's wording, in one place: `text` builds it from the package
+ * and `after` reads the package back out of the question that was asked. The
+ * package name IS the question, so the rest is the boilerplate that makes it
+ * one.
+ */
+const PACKAGE_TAIL = ' gotcha bug workaround';
+
+function packageQuestion(pkg: string): string {
+  return pkg + PACKAGE_TAIL;
+}
+
+/** The package a built question asked about, or null for anything else. */
+function packageAsked(text: string): string | null {
+  return text.endsWith(PACKAGE_TAIL) ? text.slice(0, -PACKAGE_TAIL.length) : null;
 }
 
 /**
@@ -143,9 +169,9 @@ export const contextArm: Arm = lookupArm({
     if (kind === 'edit' && path.length > 0) {
       // Upserted, so a re-edit moves the timestamp and nothing else: the close
       // rule reads these back by time.
-      const tail = path.slice(-PATH_TAIL);
-      setMark(db, ctx.actor, EDITED_PREFIX + tail, String(clock()), clock());
-      bump(ctx, EDITS_PREFIX + tail);
+      const key = pathKey(path);
+      setMark(db, ctx.actor, EDITED_PREFIX + key, String(clock()), clock());
+      bump(ctx, EDITS_PREFIX + key);
     }
     // Content-free, and the LEAD's only: one mark for inspection and one for
     // mutation, never the path, the tool input or a growing counter. Subagent
@@ -161,14 +187,13 @@ export const contextArm: Arm = lookupArm({
     if (path.length === 0 || !SOURCE_RE.test(path)) return null;
     if (input.event === 'tool.after') {
       const pkg = unaskedPackage(ctx, path);
-      // The package name IS the question: without it the query is three
-      // boilerplate words. No `appliesTo` filter rides with it — 93 of 106
-      // shelf posts have no card, so the filter matched nothing in 78 fires.
-      return pkg === null ? null : `${pkg} gotcha bug workaround`;
+      // No `appliesTo` filter rides with it — 93 of 106 shelf posts have no
+      // card, so the filter matched nothing in 78 fires.
+      return pkg === null ? null : packageQuestion(pkg);
     }
     if (input.tool?.kind !== 'edit') return null;
     // Read back, not bumped: `before` already counted this edit.
-    const n = Number(getMark(ctx.deps.db, ctx.actor, EDITS_PREFIX + path.slice(-PATH_TAIL)) ?? '0');
+    const n = Number(getMark(ctx.deps.db, ctx.actor, EDITS_PREFIX + pathKey(path)) ?? '0');
     if (n !== CHURN_EDITS) return null;
     const query = churnQuery(path);
     return query.length === 0 ? null : query;
@@ -180,18 +205,22 @@ export const contextArm: Arm = lookupArm({
    * The package mark, written only once the fire reached a definite end. It is
    * this actor's one chance at that import, and a fire that timed out, errored
    * or never asked has not spent it — `after` does not run at all on a
-   * deadline, and the three reasons below are the ones that mean the question
-   * was actually settled.
+   * deadline or on a fire the harness abandoned, and the three reasons below
+   * are the ones that mean the question was actually settled.
+   *
+   * THE MARK IS THE PACKAGE THIS FIRE ASKED ABOUT, read back off `question`
+   * and never re-derived from the file. Two Reads by one actor run in
+   * parallel: asking the file again here would hand the second fire the NEXT
+   * unasked import, marking one that was never asked and leaving the one that
+   * was to be asked all over again.
    */
-  after(ctx, result) {
-    if (ctx.input.event !== 'tool.after') return null;
+  after(ctx, result, question) {
+    if (ctx.input.event !== 'tool.after' || question === null) return null;
     if (result.reason !== 'hit' && result.reason !== 'no-hit' && result.reason !== 'cached') {
       return null;
     }
-    const path = filePathOf(ctx);
-    if (path.length === 0 || !SOURCE_RE.test(path)) return null;
-    const pkg = unaskedPackage(ctx, path);
-    if (pkg !== null) {
+    const pkg = packageAsked(question.text);
+    if (pkg !== null && pkg.length > 0) {
       const { db, clock } = ctx.deps;
       setMark(db, ctx.actor, PACKAGE_PREFIX + pkg, String(clock()), clock());
     }

@@ -9,6 +9,7 @@ import type {
   KernelConfig,
   Outcome,
   Plan,
+  Question,
   Skip,
   SkipReason,
   Trigger,
@@ -62,8 +63,14 @@ export interface LookupSpec {
   deliver: 'inject' | 'log';
   /** Local writes, before anything is asked (the context arm's marks). */
   before?(ctx: FireContext): void;
-  /** A local line with no lookup behind it (research's `remind`). */
-  after?(ctx: FireContext, result: Outcome): Emit | null;
+  /**
+   * A local line with no lookup behind it (research's `remind`), and the local
+   * writes a fire has to have EARNED — the context arm's package mark.
+   * `question` is the one this fire built and null when it built none, so a
+   * spec marks what was asked rather than re-deriving it: two parallel fires
+   * by one actor would otherwise each mark the other's question.
+   */
+  after?(ctx: FireContext, result: Outcome, question: Question | null): Emit | null;
 }
 
 /**

@@ -70,15 +70,21 @@ export function priceLabel(answer: Answer): string {
 }
 
 /** Title, url, price, author. The title is QUOTED and the whole block is
- *  labelled as marketplace text: this lands in a trusted context. */
+ *  labelled as marketplace text: this lands in a trusted context.
+ *
+ *  EVERY FIELD ON THIS LINE IS CLEANED, the url included. The line sits ABOVE
+ *  the fence and speaks in the hook's own voice, so a newline in any of them
+ *  would end our line early and let the rest of that field speak as ours — and
+ *  a url is display text the shelf authored, not a link this machine follows. */
 export function headerLine(answer: Answer): string {
   const title = clean(answer.title, 160).replace(/"/g, "'");
+  const url = clean(answer.url ?? '', 200);
   const handle = clean(answer.handle, 80);
   return (
     '"' +
     title +
     '" · ' +
-    (answer.url ?? '') +
+    url +
     ' · ' +
     priceLabel(answer) +
     (handle !== '' ? ' · by @' + handle : '')
