@@ -165,9 +165,6 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'loop.human_wait_ms':
     'ms a hook fire may take when a human is waiting on it (prompt, Stop, SessionStart)',
   'loop.tool_wait_ms': 'ms a hook fire may take when a tool call is waiting on it',
-  'loop.rate_per_min': 'lookups per minute per (session, agent, arm), charged once per question',
-  'loop.burst':
-    'how many lookups one (session, agent, arm) may make at once before the rate applies',
   'loop.idle_exit_min': 'minutes without a hook fire before the loop daemon exits',
   'loop.port':
     "the loop daemon's loopback port; null derives one from the data dir (set only when doctor reports a foreign listener)",

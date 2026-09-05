@@ -24,7 +24,7 @@ import type {
  * real leg's HTTP behavior.
  */
 
-const QUESTION: Question = { text: 'why is vitest slow', fingerprint: 'fp1' };
+const QUESTION: Question = { text: 'why is vitest slow', questionKey: 'qk1' };
 
 function input(): HookInput {
   return {

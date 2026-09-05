@@ -424,7 +424,7 @@ describe('shutdown', () => {
 
     gate.resolve();
     await done;
-    expect(lines).toEqual(['retention: fires=1 marks=1 actors=0']);
+    expect(lines).toEqual(['retention: fires=1 marks=1']);
     expect(db.isOpen).toBe(false);
     expect(existsSync(daemonPidPath(dir))).toBe(false);
   });

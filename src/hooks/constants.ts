@@ -1,8 +1,8 @@
 /**
- * Every bound the loop uses that is not one of the four config numbers
- * (`loop.human_wait_ms`, `loop.tool_wait_ms`, `loop.rate_per_min`, `loop.burst`),
- * each with the reason it is a constant and not a knob. One file, so a reviewer
- * can see every number at once (tenjin-notes loop-redesign/02-redesign.md §7).
+ * Every bound the loop uses that is not one of its two config numbers
+ * (`loop.human_wait_ms`, `loop.tool_wait_ms`), each with the reason it is a
+ * constant and not a knob. One file, so a reviewer can see every number at
+ * once (tenjin-notes loop-redesign/02-redesign.md §7).
  */
 
 /** Left on every fetch so the response can be encoded and flushed before the

@@ -26,7 +26,7 @@ export interface FireRecord {
   deadlineMs: number;
   elapsedMs: number;
   outcome: Outcome;
-  fingerprint?: string;
+  questionKey?: string;
   question?: string;
   emit: Emit | null;
   legs: LegRow[];
@@ -38,7 +38,7 @@ export function record(db: LoopDb, log: (line: string) => void, r: FireRecord): 
     try {
       db.prepare(
         `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
-           deadline_ms, elapsed_ms, reason, fingerprint, question, delivered, emit)
+           deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         r.id,
@@ -54,7 +54,7 @@ export function record(db: LoopDb, log: (line: string) => void, r: FireRecord): 
         r.deadlineMs,
         r.elapsedMs,
         r.outcome.reason,
-        r.fingerprint ?? null,
+        r.questionKey ?? null,
         r.question ?? r.outcome.detail ?? null,
         r.outcome.delivery
           ? `${r.outcome.delivery.mode}:${r.outcome.delivery.resourceId ?? ''}`
@@ -62,8 +62,9 @@ export function record(db: LoopDb, log: (line: string) => void, r: FireRecord): 
         r.emit === null ? null : JSON.stringify(r.emit),
       );
       const leg = db.prepare(
-        `INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms, search_id, title, url, form)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms, search_id, title, url,
+           form, calibration)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (fire_id, stage, shelf) DO NOTHING`,
       );
       for (const l of r.legs) {
@@ -78,6 +79,7 @@ export function record(db: LoopDb, log: (line: string) => void, r: FireRecord): 
           l.title ?? null,
           l.url ?? null,
           l.form ?? null,
+          l.calibration ?? null,
         );
       }
       db.exec('COMMIT');

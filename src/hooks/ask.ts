@@ -88,6 +88,7 @@ export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
         ...(result.title !== undefined ? { title: result.title } : {}),
         ...(result.url !== undefined ? { url: result.url } : {}),
         ...(result.form !== undefined ? { form: result.form } : {}),
+        ...(result.calibration !== undefined ? { calibration: result.calibration } : {}),
       };
       rows.push(row);
       if (answer && better(best, answer)) {

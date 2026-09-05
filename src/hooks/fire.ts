@@ -87,7 +87,7 @@ export async function runFire(
 
   let outcome: Outcome;
   let emit: Emit | null = null;
-  let fingerprint: string | undefined;
+  let questionKey: string | undefined;
   let question: string | undefined;
 
   if (arm === null) {
@@ -108,9 +108,17 @@ export async function runFire(
     const main = async (): Promise<Outcome> => {
       try {
         arm.before?.(ctx);
-        const plan = arm.plan?.(ctx) ?? null;
-        if (plan === null) return skip('no-question');
-        fingerprint = plan.question.fingerprint;
+        const planned = arm.plan?.(ctx) ?? null;
+        if (planned === null) return skip('no-question');
+        if ('reason' in planned) {
+          // The arm had text and refused it. The row keeps both, because the
+          // skipped prompts are what a "/clear", a "yes" and a one-line
+          // correction leave behind, and something has to read them.
+          question = planned.text;
+          return skip(planned.reason);
+        }
+        const plan = planned;
+        questionKey = plan.question.questionKey;
         question = plan.question.text;
         const gated = gates(ctx, plan);
         let result: Outcome;
@@ -120,19 +128,19 @@ export async function runFire(
           holdsClaim = true;
           const asked = await ask(ctx, plan);
           if (controller.signal.aborted) {
-            release(deps.db, actor, plan.question.fingerprint, fire.id);
+            release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;
             return skip('deadline');
           }
           const definite = asked.legs.length > 0 && asked.legs.every((l) => l.status === 'ok');
           if (asked.answer === null && !definite) {
-            release(deps.db, actor, plan.question.fingerprint, fire.id);
+            release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;
             return skip(
               asked.legs.some((l) => l.status === 'http_429') ? 'rate-server' : 'no-answer',
             );
           }
-          finish(deps.db, actor, plan.question.fingerprint, asked.answer, deps.clock(), fire.id);
+          finish(deps.db, actor, plan.question.questionKey, asked.answer, deps.clock(), fire.id);
           holdsClaim = false;
           result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
         }
@@ -146,7 +154,7 @@ export async function runFire(
         }
         return result;
       } catch (err) {
-        if (holdsClaim && fingerprint !== undefined) release(deps.db, actor, fingerprint, fire.id);
+        if (holdsClaim && questionKey !== undefined) release(deps.db, actor, questionKey, fire.id);
         return skip('error', reasonOf(err));
       }
     };
@@ -181,7 +189,7 @@ export async function runFire(
     deadlineMs,
     elapsedMs: deps.clock() - startedAt,
     outcome,
-    ...(fingerprint !== undefined ? { fingerprint } : {}),
+    ...(questionKey !== undefined ? { questionKey } : {}),
     ...(question !== undefined ? { question } : {}),
     emit,
     legs,

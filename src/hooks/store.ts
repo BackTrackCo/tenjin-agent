@@ -7,16 +7,18 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  * `loop.db`: the daemon's ledger and gate state (02-redesign.md §10).
  *
  * ONE WRITER ON THE HOOK PATH. The daemon is the only process that writes
- * `actors`, `fires`, `legs` and `marks`; the CLI opens the file directly (PR E)
+ * `fires`, `legs` and `marks`; the CLI opens the file directly (PR E)
  * to read them and to write its own tables, rarely and briefly. That is why
  * there is no bootstrap lock, no busy-wait tier and no WAL retry here (compare
  * `state-store.ts` `openStore`, written for eight processes racing one file):
  * `busy_timeout` alone covers the CLI's occasional write.
  *
- * NO `user_version` LADDER. Nothing before launch has readers to migrate;
- * `CREATE TABLE IF NOT EXISTS` per table, and a shape change means delete the
- * file. PR B creates only the tables it writes; `handoff`, `facts` and
- * `pairings` are created by the PRs that first write them.
+ * NO `user_version` LADDER AND NO MIGRATION. Nothing before launch has readers
+ * to migrate; `CREATE TABLE IF NOT EXISTS` per table, and a shape change means
+ * DELETE `loop.db`, which is what a column added or dropped here (PR C's
+ * `legs.calibration`, PR C's dropped `actors`) costs. Each PR creates only the
+ * tables it writes; `handoff`, `facts` and `pairings` come with the PRs that
+ * first write them.
  *
  * Gate state is written SYNCHRONOUSLY per fire (`DatabaseSync` under WAL with
  * `synchronous=normal` is tens of microseconds a statement). Only the ledger row
@@ -24,47 +26,41 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  */
 
 export const LOOP_DDL = `
-CREATE TABLE IF NOT EXISTS actors (
-  session TEXT NOT NULL,
-  agent   TEXT NOT NULL DEFAULT '',
-  arm     TEXT NOT NULL,
-  tat     INTEGER NOT NULL,
-  PRIMARY KEY (session, agent, arm)
-);
 CREATE TABLE IF NOT EXISTS fires (
-  id          TEXT PRIMARY KEY,
-  at          INTEGER NOT NULL,
-  session     TEXT NOT NULL,
-  agent       TEXT NOT NULL DEFAULT '',
-  arm         TEXT NOT NULL,
-  harness     TEXT NOT NULL,
-  event       TEXT NOT NULL,
-  prompt_id   TEXT,
-  cwd         TEXT NOT NULL DEFAULT '',
-  wait        TEXT NOT NULL,
-  deadline_ms INTEGER NOT NULL,
-  elapsed_ms  INTEGER NOT NULL,
-  reason      TEXT NOT NULL,
-  fingerprint TEXT,
-  question    TEXT,
-  delivered   TEXT,
-  emit        TEXT
+  id           TEXT PRIMARY KEY,
+  at           INTEGER NOT NULL,
+  session      TEXT NOT NULL,
+  agent        TEXT NOT NULL DEFAULT '',
+  arm          TEXT NOT NULL,
+  harness      TEXT NOT NULL,
+  event        TEXT NOT NULL,
+  prompt_id    TEXT,
+  cwd          TEXT NOT NULL DEFAULT '',
+  wait         TEXT NOT NULL,
+  deadline_ms  INTEGER NOT NULL,
+  elapsed_ms   INTEGER NOT NULL,
+  reason       TEXT NOT NULL,
+  question_key TEXT,
+  question     TEXT,
+  delivered    TEXT,
+  emit         TEXT
 );
 CREATE INDEX IF NOT EXISTS fires_at ON fires (at);
 CREATE INDEX IF NOT EXISTS fires_actor ON fires (session, agent, at);
 CREATE TABLE IF NOT EXISTS legs (
-  fire_id    TEXT NOT NULL REFERENCES fires(id) ON DELETE CASCADE,
-  stage      INTEGER NOT NULL,
-  shelf      TEXT NOT NULL,
-  status     TEXT NOT NULL,
-  outcome    TEXT,
-  elapsed_ms INTEGER NOT NULL,
-  search_id  TEXT,
-  title      TEXT,
-  url        TEXT,
-  form       TEXT,
-  graded     TEXT,
-  posted_at  INTEGER,
+  fire_id     TEXT NOT NULL REFERENCES fires(id) ON DELETE CASCADE,
+  stage       INTEGER NOT NULL,
+  shelf       TEXT NOT NULL,
+  status      TEXT NOT NULL,
+  outcome     TEXT,
+  elapsed_ms  INTEGER NOT NULL,
+  search_id   TEXT,
+  title       TEXT,
+  url         TEXT,
+  form        TEXT,
+  calibration TEXT,
+  graded      TEXT,
+  posted_at   INTEGER,
   PRIMARY KEY (fire_id, stage, shelf)
 );
 CREATE TABLE IF NOT EXISTS marks (

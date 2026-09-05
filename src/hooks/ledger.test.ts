@@ -45,6 +45,7 @@ const LEG: LegRow = {
   title: 'ryuk serializes testcontainers',
   url: 'https://tenjin.blog/p/1',
   form: 'digest',
+  calibration: 'hybrid-v1',
 };
 
 const EMIT: Emit = { context: 'found it' };
@@ -63,7 +64,7 @@ function fullRecord(overrides: Partial<FireRecord> = {}): FireRecord {
     deadlineMs: 2500,
     elapsedMs: 37,
     outcome: OUTCOME,
-    fingerprint: 'fp1',
+    questionKey: 'qk1',
     question: 'how does ryuk serialize testcontainers',
     emit: EMIT,
     legs: [LEG],
@@ -101,7 +102,7 @@ describe('record', () => {
       deadline_ms: 2500,
       elapsed_ms: 37,
       reason: 'hit',
-      fingerprint: 'fp1',
+      question_key: 'qk1',
       question: 'how does ryuk serialize testcontainers',
       delivered: 'inject:r1',
       emit: JSON.stringify(EMIT),
@@ -119,11 +120,28 @@ describe('record', () => {
         title: 'ryuk serializes testcontainers',
         url: 'https://tenjin.blog/p/1',
         form: 'digest',
+        calibration: 'hybrid-v1',
         graded: null,
         posted_at: null,
       },
     ]);
     expect(log).not.toHaveBeenCalled();
+  });
+
+  it('round-trips legs.calibration, and leaves it NULL when the leg had none', async () => {
+    // `lexical-v1` is the shelf saying the meaning step never ran; without the
+    // column a spent embedding budget looks exactly like an empty shelf.
+    const db = await freshDb();
+    const lexical: LegRow = { ...LEG, shelf: 'public', calibration: 'lexical-v1' };
+    const none: LegRow = { ...LEG, shelf: 'keys' };
+    delete none.calibration;
+    expect(record(db, vi.fn(), fullRecord({ legs: [LEG, lexical, none] }))).toBe(true);
+
+    expect(legRows(db).map((r) => [r.shelf, r.calibration])).toEqual([
+      ['keys', null],
+      ['public', 'lexical-v1'],
+      ['team', 'hybrid-v1'],
+    ]);
   });
 
   it('stamps "log:<id>" for a log-mode delivery', async () => {

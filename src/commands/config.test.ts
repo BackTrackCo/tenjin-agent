@@ -109,8 +109,8 @@ describe('runConfigList', () => {
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
     // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 6 hooks.*
     // (webSearch, agentDispatch, stopNag, sessionPrimer, push, capture)
-    // + 1 update.mode + 6 loop.* + 1 team.publicFallback.
-    expect(humanLines).toHaveLength(29);
+    // + 1 update.mode + 4 loop.* + 1 team.publicFallback.
+    expect(humanLines).toHaveLength(27);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -1372,8 +1372,6 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
   const LOOP_DEFAULT_LINES: Record<string, string> = {
     'loop.human_wait_ms': '2500',
     'loop.tool_wait_ms': '4000',
-    'loop.rate_per_min': '3',
-    'loop.burst': '6',
     'loop.idle_exit_min': '30',
     'loop.port': 'null',
   };
@@ -1402,8 +1400,8 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
     expect(got.humanLines?.[0]).toContain('31000');
     // Provenance stays truthful: the untouched subkeys are not materialized.
     expect(await readRawFile()).toEqual({ loop: { port: 31000 } });
-    const burst = await runConfigGet({ key: 'loop.burst' }, ctx);
-    expect(burst.data).toMatchObject({ value: '6', source: 'default' });
+    const wait = await runConfigGet({ key: 'loop.tool_wait_ms' }, ctx);
+    expect(wait.data).toMatchObject({ value: '4000', source: 'default' });
   });
 
   it('set loop.port null reads back as "null" from file', async () => {
@@ -1418,13 +1416,13 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
 
   it('set of a second loop key keeps the first', async () => {
     const ctx = makeCtx();
-    await runConfigSet({ key: 'loop.burst', value: '2' }, ctx);
-    await runConfigSet({ key: 'loop.rate_per_min', value: '1' }, ctx);
-    expect(await readRawFile()).toEqual({ loop: { burst: 2, rate_per_min: 1 } });
+    await runConfigSet({ key: 'loop.tool_wait_ms', value: '2' }, ctx);
+    await runConfigSet({ key: 'loop.idle_exit_min', value: '1' }, ctx);
+    expect(await readRawFile()).toEqual({ loop: { tool_wait_ms: 2, idle_exit_min: 1 } });
     const { data } = await runConfigList(ctx);
     const d = data as Record<string, { value: unknown; source: string }>;
-    expect(d['loop.burst']).toEqual({ value: '2', source: 'file' });
-    expect(d['loop.rate_per_min']).toEqual({ value: '1', source: 'file' });
+    expect(d['loop.tool_wait_ms']).toEqual({ value: '2', source: 'file' });
+    expect(d['loop.idle_exit_min']).toEqual({ value: '1', source: 'file' });
     expect(d['loop.human_wait_ms']).toEqual({ value: '2500', source: 'default' });
   });
 
@@ -1439,9 +1437,9 @@ describe('loop.* and team.publicFallback (loop-redesign/07-pr-b-daemon-kernel.md
   });
 
   it.each([
-    ['loop.burst', '0'],
-    ['loop.burst', 'abc'],
-    ['loop.burst', 'null'],
+    ['loop.tool_wait_ms', '0'],
+    ['loop.tool_wait_ms', 'abc'],
+    ['loop.tool_wait_ms', 'null'],
     ['loop.port', '70000'],
     ['loop.port', '-1'],
     ['team.publicFallback', 'maybe'],

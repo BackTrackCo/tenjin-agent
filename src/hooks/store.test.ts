@@ -75,13 +75,13 @@ function insertFire(db: LoopDb, id = FIRE.id): void {
 }
 
 describe('openLoopDb', () => {
-  it('creates loop.db with the four PR B tables and both fires indexes', async () => {
+  it('creates loop.db with its three tables and both fires indexes', async () => {
     // A nested, not-yet-existing dataDir: the daemon may be the first thing to
     // touch ~/.tenjin on a fresh machine.
     const dir = join(await freshDir(), 'nested', 'data');
     const db = track(openLoopDb(dir));
     expect(existsSync(loopDbPath(dir))).toBe(true);
-    expect(names(db, 'table')).toEqual(['actors', 'fires', 'legs', 'marks']);
+    expect(names(db, 'table')).toEqual(['fires', 'legs', 'marks']);
     expect(names(db, 'index')).toEqual(['fires_actor', 'fires_at']);
   });
 
@@ -108,18 +108,14 @@ describe('openLoopDb', () => {
   it('reopens an existing file without error and keeps its rows', async () => {
     const dir = await freshDir();
     const first = openLoopDb(dir);
-    first
-      .prepare(`INSERT INTO actors (session, agent, arm, tat) VALUES ('s', '', 'lead', 42)`)
-      .run();
     first.prepare(`INSERT INTO marks (session, key, value, at) VALUES ('s', 'k', 'v', 1)`).run();
     first.close();
 
     const again = track(openLoopDb(dir));
     // Every statement is IF NOT EXISTS, so the DDL is safe against a live file.
     expect(() => again.exec(LOOP_DDL)).not.toThrow();
-    expect(again.prepare('SELECT tat FROM actors').all()).toEqual([{ tat: 42 }]);
     expect(again.prepare('SELECT value FROM marks').all()).toEqual([{ value: 'v' }]);
-    expect(names(again, 'table')).toEqual(['actors', 'fires', 'legs', 'marks']);
+    expect(names(again, 'table')).toEqual(['fires', 'legs', 'marks']);
     expect(again.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' });
   });
 
