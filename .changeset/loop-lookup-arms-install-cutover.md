@@ -25,7 +25,11 @@ leg row records the shelf's `calibration`, so a lookup whose meaning step never 
 is not mistaken for an empty shelf. A finding arrives **whole** when the shelf
 sends a body — free rows carry one, paid rows do not — with no per-session cap on
 full bodies and no second request to fetch one; a shelf that sends none yet gives
-pointers, as before. The read and churn lookups send the package or the basename as
+pointers, as before. The shelf sends the whole free piece and the CLIENT owns the
+cut, at 6,000 characters on a word boundary, because what a long body costs is the
+reading agent's context and the shelf cannot see that budget; a cut body carries one
+line naming the resource id, which is how the agent learns it has a preview and that
+`tenjin read <id>` is the rest. Nothing published today is long enough to reach it. The read and churn lookups send the package or the basename as
 query text and no `appliesTo` filter, which matched nothing on a shelf where 93 of
 106 pieces carry no card. **The client-side rate limit is deleted**: it refused 246
 research fires for every 25 that reached an agent, and the runaway guard is the

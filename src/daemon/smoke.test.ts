@@ -94,7 +94,7 @@ function shelfEnvelope(): unknown {
         estimatedTokens: 400,
         creator: { handle: 'ali' },
         strong: true,
-        body: { text: SHELF_BODY, truncated: false },
+        body: { text: SHELF_BODY },
       },
     ],
   };

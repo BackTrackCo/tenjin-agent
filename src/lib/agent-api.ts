@@ -200,10 +200,13 @@ export const searchCandidateSchema = z
      *  definition serves every client; absent (an older deployment, or a
      *  `lexical-v1` calibration) reads as not strong, never as unknown. */
     strong: z.boolean().optional(),
-    /** The free row's inline body. Declared for TYPING only — the candidate is
+    /** The free row's inline body, WHOLE: the shelf sends the whole free piece
+     *  and does not cut it, because a long body costs the reading agent's
+     *  context and the shelf cannot see that budget. The cut is the client's,
+     *  in `hooks/deliver.ts`. Declared for TYPING only — the candidate is
      *  `.passthrough()`, so an undeclared `body` would ride through untyped —
      *  and read by the loop's delivery, never by `tenjin search`. */
-    body: z.object({ text: z.string(), truncated: z.boolean() }).optional(),
+    body: z.object({ text: z.string() }).optional(),
   })
   .passthrough();
 

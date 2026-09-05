@@ -248,7 +248,7 @@ describe('searchLeg verdict', () => {
     const withBody = await verdictOf([
       candidate({
         strong: true,
-        body: { text: 'the collation flips on an image swap', truncated: false },
+        body: { text: 'the collation flips on an image swap' },
       }),
     ]);
     expect(withBody?.text).toBe('the collation flips on an image swap');

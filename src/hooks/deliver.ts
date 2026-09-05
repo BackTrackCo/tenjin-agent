@@ -1,6 +1,6 @@
 import { ATOMIC_RE } from '../lib/ids';
 import { formatUsdDisplay } from '../lib/money';
-import { clean, stripControlKeepingLines } from './text';
+import { clean, cut, stripControlKeepingLines } from './text';
 import type { Answer, Delivery, Shelf } from './types';
 
 /**
@@ -10,9 +10,11 @@ import type { Answer, Delivery, Shelf } from './types';
  *
  * THE RULE: the whole finding when the shelf sent one, a pointer otherwise. The
  * server attaches a body to every FREE row and to no paid one, so free is the
- * gate on either shelf and there is no price branch here. There is no cap and no
- * second fetch: once-per-piece is the kernel's `firstSight`, and a body the
- * search already paid for is not worth a second clock.
+ * gate on either shelf and there is no price branch here. There is no second
+ * fetch: once-per-piece is the kernel's `firstSight`, and a body the search
+ * already paid for is not worth a second clock. The one bound is OURS —
+ * `BODY_MAX_CHARS` below — because the shelf sends the whole free piece and
+ * cannot see the context window the piece is about to be spent from.
  */
 
 const PUBLIC_OPENER =
@@ -36,6 +38,23 @@ const TEAM_OPENER =
  */
 const CLOSING_LINE =
   'If this settles it, proceed without re-verifying. If it does not apply, ignore it.';
+
+/**
+ * How much of a body an agent is handed, in characters.
+ *
+ * A CONSTANT AND NOT A CONFIG NUMBER, because what it bounds is not a
+ * preference: it is the reading agent's context window, the one budget the loop
+ * exists to spend carefully. An operator who turned this up would be spending
+ * that budget on every fire of every session, and neither they nor the shelf can
+ * see what it costs the turn it lands in. So it moves in a commit, with the
+ * reason beside it, and never in `config.json`.
+ *
+ * TODAY'S FIGURE IS READ OFF THE LEDGER and set so that nothing anyone has
+ * written gets cut: the longest free piece on the team shelf is 5,536
+ * characters. Re-read the ledger before changing it — the number is only ever an
+ * observation about what the shelves actually serve.
+ */
+const BODY_MAX_CHARS = 6000;
 
 function isFree(answer: Answer): boolean {
   return answer.price !== undefined && ATOMIC_RE.test(answer.price) && BigInt(answer.price) === 0n;
@@ -126,8 +145,9 @@ export function fenceSafeBody(body: string): string {
  *  whole, and a bare escape byte in it repaints the terminal it lands in or
  *  hides a line from the person reading over the agent's shoulder. Its breaks
  *  and tabs stay: they are the piece's own layout, and the fence below reads
- *  the same lines the agent will. No length cap, because the shelf bounds the
- *  body it serves. */
+ *  the same lines the agent will. The length cut has already happened by here:
+ *  `deliver` bounds the body first, so the fence indents the lines the agent
+ *  actually gets, cut point included. */
 export function fullForm(opener: string, header: string, body: string): string {
   const fence = '--- tenjin-body ' + Math.random().toString(36).slice(2, 10) + ' ---';
   return [
@@ -141,6 +161,24 @@ export function fullForm(opener: string, header: string, body: string): string {
 }
 
 /**
+ * The body under the bound, and a preview plus a way out over it. The cut is at
+ * a whole word (`cut`), because a piece that stops mid-word reads as a corrupted
+ * one rather than as a preview.
+ *
+ * THE LINE UNDER A CUT BODY IS THE ONLY THING THAT SAYS EITHER FACT. The full
+ * form's header carries the piece's url, not its resource id, and `tenjin read`
+ * takes the id — so without this line the agent does not know it was handed a
+ * preview, and could not fetch the rest if it guessed. It is today's line from
+ * the arm this ports (`push-scripts.ts:563`), unchanged.
+ */
+function boundedBody(text: string, resourceId: string): string {
+  if (text.length <= BODY_MAX_CHARS) return text;
+  return (
+    cut(text, BODY_MAX_CHARS) + '\n[truncated; the full piece: tenjin read ' + resourceId + ']'
+  );
+}
+
+/**
  * One answer, as the agent will read it. `shelf` picks the opener; everything
  * else is the answer's own. The `keys` shelf is a team surface too, so anything
  * that is not the public marketplace is framed as the team's record.
@@ -149,7 +187,7 @@ export function deliver(answer: Answer, shelf: Shelf): Delivery {
   const opener = shelf === 'public' ? PUBLIC_OPENER : TEAM_OPENER;
   const text =
     answer.text !== undefined && answer.text.length > 0
-      ? fullForm(opener, headerLine(answer), answer.text)
+      ? fullForm(opener, headerLine(answer), boundedBody(answer.text, answer.resourceId))
       : shortForm(answer, opener);
   return { mode: 'inject', text, resourceId: answer.resourceId };
 }

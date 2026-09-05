@@ -474,7 +474,12 @@ body to every free row and to none of the paid ones, so free is the whole gate o
 either shelf and there is no price branch on this side — a paid piece is offered as
 its title, price and resource id, which is what a shelf that sends no body yet gives
 every hit. There is no per-session cap on full bodies and no second request to fetch
-one: a body the search already paid for needs neither. The same finding is delivered
+one: a body the search already paid for needs neither. **The cut is the client's, at
+6,000 characters.** The shelf sends the whole free piece — it has no view of the
+context window the piece is about to be spent from — and this side cuts at a whole
+word and adds one line naming the resource id, so an agent handed a preview knows it
+has one and knows that `tenjin read <id>` is the rest. Nothing on either shelf is
+long enough to hit it today; the longest free piece measured is 5,536 characters. The same finding is delivered
 once per ACTOR, not once per session: the lead and each subagent are separate
 actors, so a piece one of them has already been shown may still be shown once to
 another. The context arm delivers nothing at all.

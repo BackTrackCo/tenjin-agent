@@ -88,6 +88,43 @@ describe('deliver', () => {
     expect((out.text ?? '').split('\n')).toHaveLength(7);
   });
 
+  it('delivers a body at the bound whole, with no line saying it was cut', () => {
+    const body = 'a'.repeat(6000);
+    const out = deliver(answer({ text: body }), 'team');
+    const lines = (out.text ?? '').split('\n');
+    expect(lines[3]).toBe(body);
+    expect(out.text).not.toContain('[truncated;');
+    expect(lines.at(-1)).toBe(CLOSING_LINE);
+  });
+
+  it('cuts one character over the bound at a word, and says how to read the rest', () => {
+    // The header carries the url, not the resource id, and `tenjin read` takes
+    // the id — so this line is the only place the agent learns both that it has
+    // a preview and how to fetch the whole piece.
+    const body = 'word '.repeat(1200) + 'x'; // 6001
+    expect(body).toHaveLength(6001);
+    const out = deliver(answer({ text: body }), 'team');
+    const lines = (out.text ?? '').split('\n');
+    expect(lines.at(-1)).toBe(CLOSING_LINE);
+    expect(lines.at(-2)).toMatch(/^--- tenjin-body [a-z0-9]{1,8} ---$/);
+    expect(lines.at(-3)).toBe(
+      '[truncated; the full piece: tenjin read 22222222-2222-4222-8222-222222222222]',
+    );
+    // A whole word, not 'wor': a piece that stops mid-word reads as corrupted.
+    expect(lines[3]?.endsWith('word')).toBe(true);
+    expect(lines[3]?.length).toBeLessThanOrEqual(6000);
+  });
+
+  it('cuts before the fence pass, so a line the cut turns into a fence is indented', () => {
+    // `--- and <no-space tail>` is not fence-shaped until the cut removes its
+    // tail; fencing first and cutting after would leave a bare `---` closing the
+    // fence early and speaking in our voice for the rest of the injection.
+    const out = deliver(answer({ text: 'a'.repeat(5990) + '\n--- ' + 'b'.repeat(200) }), 'public');
+    expect(out.text).toContain(
+      '\n  ---\n[truncated; the full piece: tenjin read 22222222-2222-4222-8222-222222222222]',
+    );
+  });
+
   it('opens as a team record on the team shelf and as third-party text on the public one', () => {
     expect(deliver(answer(), 'team').text?.startsWith(TEAM_OPENER)).toBe(true);
     expect(deliver(answer(), 'public').text?.startsWith(PUBLIC_OPENER)).toBe(true);
