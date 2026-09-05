@@ -94,8 +94,10 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
   one; it is fine, so move on immediately.
 - An item is a lean hit: `resourceId`, `url`, `slug`, `title`,
   `artifactType`, `price`, `asOf`, `validUntil`, `matchReasons`,
-  `estimatedTokens`, `creator.handle`. Never buy on a search alone: nothing in an
-  item says what the piece claims. Version-specific questions need an exact
+  `estimatedTokens`, `creator.handle`, `strong` (the shelf's own verdict that
+  the item answers the question) and, on a free item when the shelf sends it,
+  the whole piece as `body`. Never buy on a search alone: nothing in an item
+  without a body says what the piece claims. Version-specific questions need an exact
   match; treat an uncertain one as a miss, and tell the user which versions the
   item actually covers.
 - `truncated: true` dropped items for size. Retry with a LARGER `--limit`

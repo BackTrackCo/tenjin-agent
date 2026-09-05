@@ -1,3 +1,4 @@
+import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,7 +52,7 @@ export function kernelConfig(
     loop: CONFIG_DEFAULTS.loop,
     team: { ...CONFIG_DEFAULTS.team, ...team },
     baseUrl: 'https://shelf.acme.internal',
-    publicShelfUrl: 'https://tenjin.blog',
+    publicShelfUrl: PRODUCTION_ORIGIN,
     shelfBypassSecret: '',
   };
 }
