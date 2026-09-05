@@ -459,8 +459,14 @@ Sets `hooks.push` to `on` and returns. It wires nothing: `tenjin install` regist
 **A hit is `strong` when the shelf says so, and the client reads that one field.**
 The request asks for three candidates and the first of them carrying `strong: true`
 is the answer, so a strong piece at rank 2 or 3 under an un-strong rank 1 still
-lands. When none of the three is strong, rank 1 rides as `weak` and is recorded
-rather than spoken; no candidates at all is a miss. Nothing is scored on the machine
+lands. **When none of the three is strong, that is a miss**: the fire records
+`no-hit` and injects nothing. There is no weaker answer to fall back to, because
+the client has no quality rule of its own to grade one with — the shelf either
+vouched for a candidate or it did not, and rank 1 on nobody's word is not an
+answer. The leg row still keeps the title, url, form, `searchId` and `calibration`
+of what the shelf offered, with `outcome: miss`, so the ledger can measure how
+often a lookup came back with an offer and no vouch behind it. No candidates at
+all is the same miss with nothing to record. Nothing is scored on the machine
 — the shelf has the embeddings, the full body and the fused retrieval evidence,
 while an arm has a title and an excerpt — and `confidence` and `corroborated` are no
 longer read here at all. Every leg row also records the shelf's `calibration`

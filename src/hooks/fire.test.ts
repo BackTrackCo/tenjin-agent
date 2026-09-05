@@ -101,7 +101,24 @@ function strongLeg(resourceId: string): Leg {
   return {
     shelf: 'team',
     request: async (): Promise<LegResult> => ({ status: 'ok' }),
-    verdict: (): Answer => ({ shelf: 'team', strength: 'strong', resourceId }),
+    verdict: (): Answer => ({ shelf: 'team', resourceId }),
+  };
+}
+
+/** A leg the shelf answered, with candidates and nothing marked `strong`: the
+ *  row carries what was offered and the verdict is still a miss. */
+function unvouchedLeg(): Leg {
+  return {
+    shelf: 'team',
+    request: async (): Promise<LegResult> => ({
+      status: 'ok',
+      searchId: 'sid-weak',
+      title: 'Something adjacent',
+      url: 'https://shelf.acme.internal/p/adjacent',
+      form: 'finding',
+      calibration: 'lexical-v1',
+    }),
+    verdict: () => null,
   };
 }
 
@@ -466,6 +483,39 @@ describe('runFire: leg outcomes short of a hit', () => {
     commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'no-answer' });
     expect(getMark(db, LEAD, 'q:qk-reject')).toBeNull();
+  });
+
+  it('candidates the shelf vouched for none of are no-hit, and nothing is emitted', async () => {
+    // The client has no quality rule of its own, so a shelf that marked nothing
+    // `strong` has said nothing: the leg is a definite miss, not an outage, and
+    // the row keeps what the shelf offered.
+    const db = await freshDb();
+    let delivered = 0;
+    const arm: Arm = {
+      id: 'no-vouch-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text: 'q', questionKey: 'qk-no-vouch' },
+        stages: [[unvouchedLeg()]],
+      }),
+      deliver: () => {
+        delivered += 1;
+        return { mode: 'inject', text: 'never', resourceId: 'nope' };
+      },
+    };
+    const { emit, commit } = await runFire(input(), deps(db, [arm]));
+    expect(emit).toBeNull();
+    commit();
+    const rows = fireRows(db);
+    expect(rows[0]).toMatchObject({ reason: 'no-hit', delivered: null });
+    expect(delivered).toBe(0);
+    expect(legRows(db, rows[0]!.id)).toEqual([{ shelf: 'team', status: 'ok', outcome: 'miss' }]);
+    // A definite miss is a verdict worth caching: the same question does not
+    // pay for the same nothing twice.
+    expect(JSON.parse(getMark(db, LEAD, 'q:qk-no-vouch') ?? 'null')).toMatchObject({
+      status: 'done',
+    });
   });
 
   it('a http_429 leg is rate-server', async () => {

@@ -224,7 +224,6 @@ describe('searchLeg verdict', () => {
     ]);
     expect(answer).toMatchObject({
       shelf: 'team',
-      strength: 'strong',
       title: 'The real one',
       searchId: SEARCH_ID,
       form: 'finding',
@@ -234,14 +233,36 @@ describe('searchLeg verdict', () => {
     });
   });
 
-  it('absent strong is never strong: rank 1 rides as weak, and calibration says why', async () => {
-    const { fetchImpl } = stub(() => json(200, envelope([candidate(), candidate()], 'lexical-v1')));
+  it('three candidates and no strong is a miss, and the leg still names rank 1', async () => {
+    // The client has no quality rule of its own: nothing the shelf vouched for
+    // is nothing to say. The leg row keeps what the shelf DID offer, so the
+    // ledger can count how often an offer came back with no vouch behind it.
+    const { fetchImpl } = stub(() =>
+      json(
+        200,
+        envelope(
+          [
+            candidate({ title: 'Rank one' }),
+            candidate({ resourceId: '33333333-3333-4333-8333-333333333333' }),
+            candidate({ resourceId: '44444444-4444-4444-8444-444444444444' }),
+          ],
+          'lexical-v1',
+        ),
+      ),
+    );
     const leg = searchLeg('team', 'prompt', CONFIG, fetchImpl);
     const result = await leg.request(q('why'), 2000, new AbortController().signal);
+    expect(leg.verdict(result)).toBeNull();
     // `lexical-v1` is the shelf saying the meaning step never ran, which is why
     // a spent embedding budget is not the same fact as an empty shelf.
-    expect(result.calibration).toBe('lexical-v1');
-    expect(leg.verdict(result)?.strength).toBe('weak');
+    expect(result).toMatchObject({
+      status: 'ok',
+      searchId: SEARCH_ID,
+      calibration: 'lexical-v1',
+      title: 'Rank one',
+      url: `${TEAM}/p/one`,
+      form: 'finding',
+    });
   });
 
   it('reads the candidate body into answer.text, and a strong row without one carries none', async () => {
@@ -257,7 +278,7 @@ describe('searchLeg verdict', () => {
       candidate({ resourceId: '44444444-4444-4444-8444-444444444444' }),
       candidate({ strong: true }),
     ]);
-    expect(bare?.strength).toBe('strong');
+    expect(bare?.resourceId).toBe('22222222-2222-4222-8222-222222222222');
     expect(bare?.text).toBeUndefined();
   });
 });

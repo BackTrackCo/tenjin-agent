@@ -11,7 +11,6 @@ import type { Answer } from './types';
 function answer(over: Partial<Answer> = {}): Answer {
   return {
     shelf: 'team',
-    strength: 'strong',
     resourceId: '22222222-2222-4222-8222-222222222222',
     title: 'The collation flip',
     url: 'https://shelf.acme.internal/p/one',

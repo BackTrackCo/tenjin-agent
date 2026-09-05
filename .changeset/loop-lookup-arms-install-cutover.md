@@ -20,7 +20,10 @@ stripped, the WebSearch query included — it used to travel raw. A search query
 never condensed (condensing damaged 131 of 184 real ones; `pgvector testcontainer
 collation` came out empty), while a prompt still is. A hit is the first of three
 candidates the shelf marks `strong`, so a strong rank 2 lands over an un-strong
-rank 1, and `confidence` and `corroborated` are no longer read on this side; each
+rank 1; with none of the three marked strong nothing is injected — the fire is a
+miss, reason `no-hit`, because the client has no quality rule of its own and rank 1
+on nobody's word is not an answer, though the leg row still records what the shelf
+offered. `confidence` and `corroborated` are no longer read on this side; each
 leg row records the shelf's `calibration`, so a lookup whose meaning step never ran
 is not mistaken for an empty shelf. A finding arrives **whole** when the shelf
 sends a body — free rows carry one, paid rows do not — with no per-session cap on

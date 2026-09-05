@@ -226,7 +226,7 @@ describe('the context arm never speaks', () => {
   it('delivers `log` with the resource id and no text', () => {
     const ctx = ctxFor('tool.after', 'read', { file_path: '/p/a.ts' });
     const delivery = contextArm.deliver?.(
-      { shelf: 'team', strength: 'strong', resourceId: 'r-9', text: 'the whole finding' },
+      { shelf: 'team', resourceId: 'r-9', text: 'the whole finding' },
       ctx,
     );
     expect(delivery).toEqual({ mode: 'log', resourceId: 'r-9' });

@@ -105,17 +105,11 @@ function readString(candidate: SearchCandidate, key: string): string | undefined
   return typeof value === 'string' ? value : undefined;
 }
 
-function answerOf(
-  shelf: 'team' | 'public',
-  candidate: SearchCandidate,
-  strong: boolean,
-  searchId: string,
-): Answer {
+function answerOf(shelf: 'team' | 'public', candidate: SearchCandidate, searchId: string): Answer {
   const handle = candidate.creator.handle;
   const excerpt = readString(candidate, 'excerpt');
   return {
     shelf,
-    strength: strong ? 'strong' : 'weak',
     resourceId: candidate.resourceId,
     title: candidate.title,
     url: candidate.url,
@@ -186,17 +180,21 @@ export function searchLeg(
      * embeddings and the full body behind it; the hook has forty words of
      * public text and used to guess with them, wrongly, 12 times out of 12.
      *
-     * Absent is not false. A deployment that sends no `strong` has not called
-     * anything strong, so rank 1 rides as `weak` and `calibration` on the leg
-     * row says whether the meaning step ran at all. No candidates is a miss.
+     * THIS MACHINE HAS NO QUALITY RULE OF ITS OWN, so there is no fallback to
+     * fall back to: a response the shelf vouched for nothing in is a MISS, and
+     * the fire records `no-hit` rather than speaking rank 1 on nobody's word.
+     * Absent is not false, but it is not strong either. What rank 1 was still
+     * rides on the leg's `LegResult` — title, url, form, searchId and
+     * `calibration` — so the ledger keeps what the shelf offered, and how often
+     * a lookup came back with an offer and no vouch, on a row whose `outcome`
+     * is `miss`.
      */
     verdict(result: LegResult): Answer | null {
       const payload = result.payload as SearchResult | undefined;
-      if (payload === undefined || payload.items.length === 0) return null;
-      const strong = payload.items.findIndex((c) => c.strong === true);
-      const winner = payload.items[strong >= 0 ? strong : 0];
+      if (payload === undefined) return null;
+      const winner = payload.items.find((c) => c.strong === true);
       if (winner === undefined) return null;
-      return answerOf(shelf, winner, strong >= 0, payload.searchId);
+      return answerOf(shelf, winner, payload.searchId);
     },
   };
 }

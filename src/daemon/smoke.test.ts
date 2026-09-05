@@ -526,7 +526,7 @@ describe('the daemon, cold-started from the real bundle', () => {
         expect(leg.status).toBe('ok');
         expect(leg.calibration).toBe(SHELF_CALIBRATION);
       }
-      // Team outranks public at equal strength, so the team leg is the hit.
+      // Team outranks public, so the team leg is the hit and public is shadowed.
       expect(legs.find((l) => l.shelf === 'team')?.outcome).toBe('hit');
     } finally {
       db.close();

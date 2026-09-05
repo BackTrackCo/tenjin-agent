@@ -41,7 +41,6 @@ const CHILD: Actor = { session: 's1', agent: 'a7c31e9f' };
 
 const ANSWER: Answer = {
   shelf: 'team',
-  strength: 'strong',
   resourceId: 'r1',
   title: 'ryuk serializes testcontainers',
 };

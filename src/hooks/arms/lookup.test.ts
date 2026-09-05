@@ -14,7 +14,6 @@ afterEach(cleanup);
 
 const ANSWER: Answer = {
   shelf: 'team',
-  strength: 'strong',
   resourceId: 'r-1',
   title: 'The collation flip',
   url: 'https://shelf.acme.internal/p/one',

@@ -34,12 +34,16 @@ export type Trigger = 'prompt' | 'research' | 'read' | 'churn';
 export type LegStatus =
   'ok' | 'timeout' | 'aborted' | 'refused' | 'bad_json' | 'bad_shape' | 'error' | `http_${number}`;
 
-export type Strength = 'strong' | 'weak';
-
-/** One shelf's answer to the question, as the leg's `verdict` judged it. */
+/**
+ * One shelf's answer to the question, as the leg's `verdict` judged it.
+ *
+ * THERE IS ONLY ONE STRENGTH, so the type that used to carry it is gone. The
+ * shelf vouches per candidate (`strong`) and this machine has no quality rule
+ * of its own to grade with: a leg either has a candidate the server vouched
+ * for, which is this, or it has a miss.
+ */
 export interface Answer {
   shelf: Shelf;
-  strength: Strength;
   resourceId: string;
   title?: string;
   url?: string;
@@ -94,11 +98,12 @@ export interface Leg {
   shelf: Shelf;
   /** `budgetMs` is what the leg forwards as the server's `budget_ms`. */
   request(q: Question, budgetMs: number, signal: AbortSignal): Promise<LegResult>;
-  /** null = miss. Search legs judge strength; keys legs judge exact key match. */
+  /** null = miss. Search legs take the shelf's `strong`; keys legs take an
+   *  exact key match. Neither grades a candidate the shelf vouched nothing for. */
   verdict(r: LegResult): Answer | null;
 }
 
-/** A stage is parallel legs; the next stage runs only if no stage yielded strong. */
+/** A stage is parallel legs; the next stage runs only if no stage answered. */
 export interface Plan {
   question: Question;
   stages: Leg[][];
