@@ -166,8 +166,7 @@ piped commands whose first one posts `used`.
 Report honestly after acting on a search, rejections included. `--last` binds to
 the newest local search; after more than one, pass `--search-id` (repeatable, one
 status for all). `--all-open --status regenerated` closes this session's open
-web-search loops; searches you ran, and hook searches Tenjin answered, stay open
-for you to report.
+web-search loops; searches you ran yourself stay open for you to report.
 
 ## After a miss: publish what you build
 

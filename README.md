@@ -60,7 +60,7 @@ tenjin install
 tenjin doctor
 ```
 
-`tenjin install` wires the skills for the harnesses it detects, sets up the recommended free command permissions where supported, offers search hooks, and can create a local Base wallet. It is safe to run again.
+`tenjin install` wires the skills for the harnesses it detects, sets up the recommended free command permissions where supported, offers the hook entries and starts the local loop daemon they point at, and can create a local Base wallet. It is safe to run again: the entries are written as one whole set, so a second run leaves the same file and no uninstall is needed first.
 
 During install, the interactive decisions are:
 
@@ -317,13 +317,10 @@ else that identifies the client:
 User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
 ```
 
-The WebSearch hook leads with its own product instead, because a query it rode
-along with is not a question anyone chose to look up, and Tenjin's demand data
-keeps the two apart:
-
-```http
-User-Agent: tenjin-websearch-hook/<version> (+https://tenjin.blog)
-```
+The loop's hook arms travel in that same field. What keeps a query an agent rode
+along with apart from a question somebody chose to look up is the `trigger` on the
+request itself — `prompt`, `research`, `read`, `churn` for an arm, `cli` for a
+command you ran — which is what Tenjin's demand data is grouped by.
 
 If you are an agent that runs the CLI, you can travel in that field too. Export
 `TENJIN_CALLER_USER_AGENT` when you launch it, and your products follow the
