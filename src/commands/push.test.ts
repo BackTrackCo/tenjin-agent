@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,31 +15,10 @@ import {
 } from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
-import { hooksDir } from '../lib/paths';
+import { hooksDir, shimBundlePath } from '../lib/paths';
 import { openStore, recordSearch, STORE_SQL } from '../lib/state-store';
-import {
-  PUSH_CONTEXT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-} from '../lib/push-scripts';
 import type { TranscriptLookup } from '../lib/grade';
 import type { CommandContext } from '../context';
-
-/**
- * The events a `push on` plans an entry on, in plan order. Named here rather
- * than counted, so a status report that loses one says WHICH one: with nothing
- * registered at all, every planned event is missing.
- */
-const PLANNED_PUSH_EVENTS = [
-  'UserPromptSubmit',
-  'PostToolUse',
-  'PostToolUseFailure',
-  'SubagentStart',
-  'SubagentStop',
-  'PostToolUse',
-  'PreToolUse',
-];
 
 let dir: string;
 let home: string;
@@ -150,155 +130,45 @@ async function seedSession(dir: string, session: string, ended: boolean): Promis
   }
 }
 
-const PUSH_SCRIPT_FILES = [
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-  PUSH_CONTEXT_HOOK_FILE,
-];
-
-describe('runPushOn', () => {
-  it('persists hooks.push=on and wires the four push scripts', async () => {
-    const result = await runPushOn(makeCtx(), { homeDir: home });
-
+describe('runPushOn / runPushOff', () => {
+  /**
+   * A CONFIG WRITE AND NOTHING ELSE, which is the whole change. There is no
+   * wiring step: `tenjin install` registers the eleven entries once, and the
+   * daemon re-stats config.json per fire, so this key takes effect on the next
+   * prompt with nothing installed and no process restarted.
+   */
+  it('persists hooks.push and touches nothing else', async () => {
+    const on = await runPushOn(makeCtx());
     expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
-    expect(result.data).toMatchObject({ mode: 'on' });
-    for (const file of PUSH_SCRIPT_FILES) {
-      expect(await readFile(join(hooksDir(dir), file), 'utf8').catch(() => null)).not.toBeNull();
-    }
-    const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    const hooks = settings.hooks as Record<string, unknown>;
-    expect(hooks.UserPromptSubmit).toBeDefined();
-    expect(hooks.SubagentStart).toBeDefined();
-    expect(result.humanLines?.join('\n')).toContain('tenjin push off');
-  });
-
-  it('is idempotent: a second run wires nothing new', async () => {
-    await runPushOn(makeCtx(), { homeDir: home });
-    const first = await readFile(claudeSettingsPath(home), 'utf8');
-
-    const result = await runPushOn(makeCtx(), { homeDir: home });
-    expect((result.data as { hooks: { added: string[]; updated: string[] } }).hooks.added).toEqual(
-      [],
-    );
-    expect(await readFile(claudeSettingsPath(home), 'utf8')).toBe(first);
-  });
-
-  it('keeps the currently configured hooks.webSearch rather than forcing auto', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'remind' } }));
-    await runPushOn(makeCtx(), { homeDir: home });
-    const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as Record<
-      string,
-      unknown
-    >;
-    expect((settings.hooks as Record<string, unknown>).UserPromptSubmit).toBeDefined();
-    // webSearch itself is read at run time by the generated scripts, not baked
-    // into settings.json, so this asserts the CALL succeeded under a non-default
-    // mode rather than asserting anything is literally 'remind' in the file.
-    expect((await loadRawConfig(dir)).hooks?.webSearch).toBe('remind');
-  });
-
-  /**
-   * `install` refuses to write a single hook entry when `hooks.webSearch` is
-   * `off` — that is what the kill switch means. This command called
-   * `wireSearchHooks` directly and so wired six entries straight past it, which
-   * made `off` mean two different things depending on which verb you typed.
-   */
-  it('refuses when hooks.webSearch is off, and leaves the key as it was', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'off' } }));
-    await expect(runPushOn(makeCtx(), { homeDir: home })).rejects.toMatchObject({
-      code: 'USAGE',
-      exitCode: 2,
-      fix: 'tenjin config set hooks.webSearch auto, then tenjin push on',
-    });
-    // Nothing written: not the mode, not a script, not settings.json.
-    expect((await loadRawConfig(dir)).hooks?.push).toBeUndefined();
-    expect(
-      await readFile(join(hooksDir(dir), PUSH_PROMPT_HOOK_FILE), 'utf8').catch(() => null),
-    ).toBeNull();
+    expect(on.data).toEqual({ mode: 'on' });
+    expect(on.humanLines?.join('\n')).toContain('next prompt');
+    // No settings file, no hooks dir: this verb writes neither.
     expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
-  });
+    expect(existsSync(hooksDir(dir))).toBe(false);
 
-  /**
-   * A recorded `--harness` set without Claude Code is the operator saying their
-   * harness is not the one these arms hook. `install` skips there out loud, and
-   * so must this — silence would look like it worked.
-   */
-  it('skips with a reason when the recorded harness is not Claude Code', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: ['hermes'] } }));
-    const result = await runPushOn(makeCtx(), { homeDir: home });
-
-    expect(result.data).toMatchObject({ mode: 'on', skipped: 'harness-not-claude' });
-    const text = result.humanLines?.join('\n') ?? '';
-    expect(text).toContain('nothing was wired (harness-not-claude)');
-    expect(text).toContain('tenjin install --harness claude');
-    expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
-    // The preference is still durable, so a later install on a Claude machine
-    // wires the arms with no second command.
-    expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
-  });
-
-  /** An EMPTY record means no past install passed `--harness`. That is the
-   *  common case, and it must not read as "no Claude Code". */
-  it('wires as normal when no harness was ever recorded', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: [] } }));
-    const result = await runPushOn(makeCtx(), { homeDir: home });
-    expect(result.data).toMatchObject({ mode: 'on' });
-    expect((result.data as { skipped?: string }).skipped).toBeUndefined();
-  });
-
-  /**
-   * Six entries into the operator's home, written by a verb that is not
-   * `install`, owe the same disclosure `install` gives — including the sentence
-   * `install` only says with push on.
-   */
-  it("discloses what the arms do, in install's words, above the undo line", async () => {
-    const result = await runPushOn(makeCtx(), { homeDir: home });
-    const lines = result.humanLines ?? [];
-    const text = lines.join('\n');
-    expect(text).toContain(
-      'The push experiment is on, so 7 more hook entries are wired and the WebSearch entry above is widened to cover WebFetch and becomes one of the arms itself',
-    );
-    expect(text).toContain(
-      'Every arm only adds context beside the call; none can block or change it.',
-    );
-    expect(text).not.toContain('They can never block or change the tool call.');
-    const disclosure = lines.findIndex((l) => l.includes('The push experiment is on'));
-    const undo = lines.findIndex((l) => l.startsWith('Undo anytime:'));
-    expect(disclosure).toBeGreaterThanOrEqual(0);
-    expect(undo).toBeGreaterThan(disclosure);
-  });
-});
-
-describe('runPushOff', () => {
-  it('persists hooks.push=off and touches nothing else', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
-    const result = await runPushOff(makeCtx());
+    const off = await runPushOff(makeCtx());
     expect((await loadRawConfig(dir)).hooks?.push).toBe('off');
-    expect(result.data).toEqual({ mode: 'off' });
-    expect(result.humanLines?.join('\n')).toContain('exit instantly');
+    expect(off.data).toEqual({ mode: 'off' });
+    expect(off.humanLines?.join('\n')).toContain('no unwiring step');
+    expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
   });
 
-  it('leaves already-wired scripts on disk (nothing to unwire)', async () => {
-    await runPushOn(makeCtx(), { homeDir: home });
-    await runPushOff(makeCtx());
-    for (const file of PUSH_SCRIPT_FILES) {
-      expect(await readFile(join(hooksDir(dir), file), 'utf8').catch(() => null)).not.toBeNull();
-    }
+  it('does not care what hooks.webSearch says: that key is the arms\u2019 own', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'off' } }));
+    await runPushOn(makeCtx());
+    expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
+    expect((await loadRawConfig(dir)).hooks?.webSearch).toBe('off');
   });
 });
 
 describe('runPushStatus', () => {
-  it('reports off/off/not-wired/empty-ledger on a fresh dir', async () => {
+  it('reports off/off/nothing-wired/empty-ledger on a fresh dir', async () => {
     const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(result.data).toEqual({
       mode: 'off',
       captureMode: 'off',
-      scriptsWired: false,
-      hookEntries: { planned: 7, missing: PLANNED_PUSH_EVENTS, present: 0, path: null },
+      daemonInstalled: false,
+      hooksRegistered: false,
       ledger: {
         windowDays: 7,
         rows: 0,
@@ -318,81 +188,46 @@ describe('runPushStatus', () => {
     );
   });
 
-  it('reflects the persisted modes and whether the scripts are actually on disk', async () => {
+  /**
+   * BOTH HALVES, and either alone reports an armed sidecar that does nothing: a
+   * daemon bundle nobody registered entries for, or entries pointing at a hooks
+   * dir with no bundle in it. The fix names `tenjin install`, the one verb that
+   * writes both.
+   */
+  it('is only armed when the daemon is installed AND the entries are registered', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ hooks: { push: 'on', capture: 'block' } }),
     );
-    const before = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(before.data).toMatchObject({ mode: 'on', captureMode: 'block', scriptsWired: false });
-    // The verb that actually wires them. `tenjin install` only does so when
-    // hooks.push is already on, so it is not the one-command fix.
-    expect(before.humanLines?.join('\n')).toContain('not fully wired yet; run `tenjin push on`');
+    const bare = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
+    expect(bare.data).toMatchObject({
+      mode: 'on',
+      captureMode: 'block',
+      daemonInstalled: false,
+      hooksRegistered: false,
+    });
+    expect(bare.humanLines?.join('\n')).toContain('nothing is wired yet; run `tenjin install`');
 
+    // Bundle on disk, nothing registered: the half that would read healthy.
     await mkdir(hooksDir(dir), { recursive: true });
-    for (const file of PUSH_SCRIPT_FILES) {
-      await writeFile(join(hooksDir(dir), file), '// stub\n');
-    }
-    const after = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(after.data).toMatchObject({ scriptsWired: true });
-  });
-
-  it('scriptsWired is false when even one of the five files is missing', async () => {
-    await mkdir(hooksDir(dir), { recursive: true });
-    for (const file of PUSH_SCRIPT_FILES.slice(1)) {
-      await writeFile(join(hooksDir(dir), file), '// stub\n');
-    }
-    const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(result.data).toMatchObject({ scriptsWired: false });
-  });
-
-  /**
-   * "Wired" used to mean four files on disk and nothing else — its own comment
-   * said so, while `push status`'s help promised the arms were actually wired.
-   * Files with no settings entries pointing at them never run, so that reported
-   * a healthy sidecar for a machine where nothing fires. Both halves, counted
-   * by the same ownership predicate the writer uses.
-   */
-  it('counts the settings.json entries, not just the files on disk', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
-    await mkdir(hooksDir(dir), { recursive: true });
-    for (const file of PUSH_SCRIPT_FILES) {
-      await writeFile(join(hooksDir(dir), file), '// stub\n');
-    }
-
-    // Scripts present, settings.json absent: the half that used to read healthy.
+    await writeFile(shimBundlePath(dir), '// shim');
     const halfWired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(halfWired.data).toMatchObject({
-      scriptsWired: true,
-      hookEntries: { planned: 7, missing: PLANNED_PUSH_EVENTS, present: 0, path: null },
-    });
-    const lines = halfWired.humanLines?.join('\n') ?? '';
-    expect(lines).toContain('not fully wired yet; run `tenjin push on`');
-    expect(lines).toContain('hook entries: 0/7');
+    expect(halfWired.data).toMatchObject({ daemonInstalled: true, hooksRegistered: false });
+    expect(halfWired.humanLines?.join('\n')).toContain('nothing is wired yet');
 
-    // A real wiring run registers all seven.
-    await runPushOn(makeCtx(), { homeDir: home });
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(
+      claudeSettingsPath(home),
+      JSON.stringify({
+        hooks: { Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:31999/hook/claude' }] }] },
+      }),
+    );
     const wired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(wired.data).toMatchObject({
-      scriptsWired: true,
-      hookEntries: { planned: 7, present: 7, missing: [] },
-    });
-    expect(wired.humanLines?.join('\n')).toContain('hook entries: 7/7');
-    expect(wired.humanLines?.join('\n')).not.toContain('not fully wired yet');
-
-    // Entries removed behind its back — a half-finished uninstall.
-    const settingsPath = claudeSettingsPath(home);
-    const settings = JSON.parse(await readFile(settingsPath, 'utf8')) as {
-      hooks: Record<string, unknown>;
-    };
-    delete settings.hooks.UserPromptSubmit;
-    await writeFile(settingsPath, JSON.stringify(settings));
-    const gone = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(gone.data).toMatchObject({
-      scriptsWired: true,
-      hookEntries: { planned: 7, present: 6, missing: ['UserPromptSubmit'] },
-    });
-    expect(gone.humanLines?.join('\n')).toContain('not fully wired yet');
+    expect(wired.data).toMatchObject({ daemonInstalled: true, hooksRegistered: true });
+    const lines = wired.humanLines?.join('\n') ?? '';
+    expect(lines).toContain('daemon installed: yes');
+    expect(lines).toContain('hook entries registered: yes');
+    expect(lines).not.toContain('nothing is wired yet');
   });
 
   /** One pairing row, as the failure arm opens it, then closed as asked. */

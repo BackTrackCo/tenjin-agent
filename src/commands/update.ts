@@ -15,8 +15,6 @@ import {
   isNewer,
   resolveTarget,
 } from '../lib/update-check';
-import { detectHookOwners } from '../lib/harness-hooks';
-import type { HookOwner } from '../lib/harness-hooks';
 import { defaultDataDir } from '../lib/paths';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -104,10 +102,8 @@ export interface UpdateDeps {
   /** The owning manager's entry script, or null when it has none to find.
    *  Injectable so the argv shape is asserted without depending on the runner. */
   managerScript?: string | null;
-  /** Home whose harness settings the hook-owner detector reads. Defaults to os.homedir(). */
+  /** Home whose manual-fix command the report names. Defaults to os.homedir(). */
   homeDir?: string;
-  /** The hook-owner detector; injected so tests choose the profiles without a settings file. */
-  detectHookOwners?: (homeDir: string) => Promise<HookOwner[]>;
   /**
    * The CLI entry the refresh child runs. Defaults to `process.argv[1]`, which
    * after the swap resolves to the NEWLY installed script — that is the whole
@@ -276,15 +272,6 @@ export async function runUpdate(
  *  registry: a minute is already generous, and `update` must not hang a turn. */
 const REFRESH_TIMEOUT_MS = 60_000;
 
-/**
- * How many detected profiles one `update` will refresh. Each costs a spawn and
- * up to {@link REFRESH_TIMEOUT_MS}, and the list is read out of a settings file
- * anything on the machine can append to, so an uncapped loop turns N planted
- * entries into N minutes of an agent's turn. Well above any real machine: the
- * default profile plus a shelf is two.
- */
-const MAX_REFRESH_PROFILES = 8;
-
 /** One profile this update did not bring up to date, and why. */
 export interface RefreshFailure {
   /** The profile's data dir. */
@@ -309,8 +296,7 @@ export interface RefreshOutcome {
    * Profiles this update did not bring up to date, each with its reason and the
    * manual command to finish it. Both halves land here: a refresh that ran and
    * did not report success, and one that was never run at all (no entry to
-   * re-exec, a data dir that is not a directory, past the
-   * {@link MAX_REFRESH_PROFILES} cap).
+   * re-exec, a data dir that is not a directory).
    */
   failed: RefreshFailure[];
 }
@@ -354,30 +340,25 @@ export interface RefreshOutcome {
  */
 async function refreshProfiles(ctx: CommandContext, deps: UpdateDeps): Promise<RefreshOutcome> {
   const home = deps.homeDir ?? homedir();
-  const detect = deps.detectHookOwners ?? detectHookOwners;
-  const owners = await detect(home).catch(() => []);
-  const candidates = owners.length > 0 ? owners.map((o) => o.dataDir) : [ctx.dataDir];
+  // THE INVOKING PROFILE, AND ONLY IT. The pre-daemon installer baked its data
+  // dir into eight generated scripts, so an upgrade had to find every profile
+  // registered in settings.json and refresh each one's bodies. Nothing is baked
+  // any more: the two bundles are the same bytes for every profile, and a
+  // profile's daemon picks up the new build the next time its own `tenjin`
+  // command runs. So there is nothing left to hunt for, and a detector reading
+  // paths out of somebody's settings file is not worth keeping to say so.
+  const candidates = [ctx.dataDir];
   const fixFor = (dataDir: string): string => manualFix(dataDir, home, ctx.dataDir);
 
-  // A detected data dir is a path READ OUT of settings.json, not a directory
-  // this CLI put there, and the child would create it: `install --refresh`
+  // The child would CREATE a data dir that is not there: `install --refresh`
   // converges surfaces rather than materializing them, but the process around it
   // mkdirs the tree for the update cache on its way out. So a path that is not
-  // already a directory is reported unrefreshed instead of visited. The cap is
-  // the other half of the same argument (see MAX_REFRESH_PROFILES).
-  const present: string[] = [];
+  // already a directory is reported unrefreshed instead of visited.
+  const profiles: string[] = [];
   const unrun: RefreshFailure[] = [];
   for (const dataDir of candidates) {
-    if (isExistingDir(dataDir)) present.push(dataDir);
+    if (isExistingDir(dataDir)) profiles.push(dataDir);
     else unrun.push({ dataDir, reason: 'It is not a directory.', fix: fixFor(dataDir) });
-  }
-  const profiles = present.slice(0, MAX_REFRESH_PROFILES);
-  for (const dataDir of present.slice(profiles.length)) {
-    unrun.push({
-      dataDir,
-      reason: `Past this update's ${MAX_REFRESH_PROFILES}-profile refresh cap.`,
-      fix: fixFor(dataDir),
-    });
   }
 
   const entry = versionFreeEntry(deps.refreshCommand ?? process.argv[1]);

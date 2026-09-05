@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
-import { installDaemonFiles } from '../commands/daemon';
+import { installDaemonFiles } from './control';
 import { ensureDaemon, readToken } from '../hooks/shim';
 import {
   configPath,

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, symlink, writeFile, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -19,10 +19,6 @@ import { saveSessionFile } from '../lib/session-key';
 import { sessionPath } from '../lib/paths';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
-import { wireHermesIntegration } from '../lib/hermes';
-import { wireSearchHooks } from '../lib/harness-hooks';
-import { WEBSEARCH_HOOK_FILE } from '../lib/hook-scripts';
-import { hooksDir } from '../lib/paths';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
 vi.mock('../lib/usdc', () => ({ getUsdcBalance: vi.fn() }));
@@ -140,31 +136,6 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
-  it('reports a working native Hermes integration separately from portable skills', async () => {
-    await wireHermesIntegration({
-      // A path that EXISTS: doctor now stats the baked command, because an
-      // `npx`/`dlx` cache path can be pruned out from under a green check.
-      hermesHome: join(skillHome, '.hermes'),
-      dataDir: dir,
-      tenjinCommand: process.execPath,
-      nodeCommand: process.execPath,
-      dryRun: false,
-      explicit: true,
-      hooks: { enabled: true, mode: 'auto' },
-    });
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(find(checks, 'hermes')).toMatchObject({ status: 'ok', required: false });
-    expect(find(checks, 'hermes').detail).toContain('retrieval and publish-back');
-  });
-
   // The preflight in src/index.ts already refused anything below Node 24, so a
   // failing probe here is never "upgrade Node": the runtime is supported and the
   // import still failed, which is a damaged install or bundle (tsup once shipped
@@ -264,73 +235,6 @@ describe('runDoctor — passing outcomes', () => {
     const checks = (res.data as { checks: CheckResult[] }).checks;
     expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
     expect(existsSync(join(dir, 'state.db'))).toBe(false);
-  });
-
-  // Doctor is the command you reach for when something is already broken, so the
-  // STRICT resolver must never run here: a stray relative HERMES_HOME belonging to
-  // some other tool would return CONFIG_INVALID and run zero checks on a machine
-  // with no Hermes at all.
-  it('a relative HERMES_HOME warns and falls back instead of aborting every check', async () => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: { HERMES_HOME: 'relative/hermes' },
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(checks.length).toBeGreaterThan(1);
-    expect(find(checks, 'node').status).toBe('ok');
-  });
-
-  it('a baked MCP command that no longer exists warns instead of reading green', async () => {
-    const hermesHome = join(skillHome, '.hermes');
-    await wireHermesIntegration({
-      hermesHome,
-      dataDir: dir,
-      tenjinCommand: join(skillHome, 'pruned-npx-cache', 'tenjin'),
-      nodeCommand: process.execPath,
-      dryRun: false,
-      explicit: true,
-      hooks: { enabled: true, mode: 'auto' },
-    });
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
-    expect(hermes.status).toBe('warn');
-    expect(hermes.detail).toContain('MCP command missing');
-    // One subject per problem: prefixing the activation with `plugin` too reads as
-    // one subject named twice.
-    expect(hermes.detail).not.toContain('plugin plugin');
-  });
-
-  // `tenjin install --harness hermes` alone is a dead end with the mode stored off:
-  // it re-runs, withholds the hook code by design, and prints the same warning
-  // forever. The `native-harness` fix string in this same PR already names the
-  // config command; doctor has to as well.
-  it('names the config command when the stored webSearch is what blocks the plugin', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ install: { harness: ['hermes'] }, hooks: { webSearch: 'off' } }),
-    );
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      which: () => false,
-      fetchImpl: healthyFetch,
-    });
-    const hermes = find((res.data as { checks: CheckResult[] }).checks, 'hermes');
-    expect(hermes.status).toBe('warn');
-    expect(hermes.fix).toContain('tenjin config set hooks.webSearch auto');
   });
 
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
@@ -2724,77 +2628,6 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
 });
 
 /**
- * The push sidecar's wiring, and the ONE half-wired state an upgrade produces.
- *
- * `tenjin update` refreshes hook bodies and materializes no new surface
- * (tenjin-agent#224), so a machine wired before `SubagentStop` existed runs the
- * new subagent body under the old entries: every other arm fires and the
- * child-capture half never does. The generic "half wired" line would send the
- * operator to `tenjin push on`; the fix here is `tenjin install`, which is what
- * the release note says too.
- */
-describe('runDoctor — push hook wiring', () => {
-  async function wirePush(): Promise<void> {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { push: 'on' } }));
-    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-  }
-
-  async function pushCheck(): Promise<CheckResult> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    return find((res.data as { checks: CheckResult[] }).checks, 'push hooks');
-  }
-
-  it('is ok when both halves agree', async () => {
-    await wirePush();
-    const check = await pushCheck();
-    expect(check.status).toBe('ok');
-    expect(check.detail).toContain('7/7 hook entries registered');
-  });
-
-  it('names the missing SubagentStop entry, and sends the operator to install', async () => {
-    await wirePush();
-    // The upgraded machine: every entry the previous release wrote, and not the
-    // one this release added.
-    const path = claudeSettingsPath(skillHome);
-    const settings = JSON.parse(await readFile(path, 'utf8')) as {
-      hooks: Record<string, unknown>;
-    };
-    delete settings.hooks.SubagentStop;
-    await writeFile(path, JSON.stringify(settings, null, 2));
-
-    const check = await pushCheck();
-    expect(check.status).toBe('warn');
-    expect(check.required).toBe(false);
-    expect(check.detail).toContain('6/7 hook entries registered');
-    expect(check.detail).toContain('the SubagentStop entry is missing');
-    expect(check.detail).toContain('tenjin update refreshes hook bodies and adds no new entry');
-    expect(check.fix).toBe('tenjin install');
-  });
-
-  it('falls back to the generic half-wired line when more than that is missing', async () => {
-    await wirePush();
-    const path = claudeSettingsPath(skillHome);
-    const settings = JSON.parse(await readFile(path, 'utf8')) as {
-      hooks: Record<string, unknown>;
-    };
-    delete settings.hooks.SubagentStop;
-    delete settings.hooks.SubagentStart;
-    await writeFile(path, JSON.stringify(settings, null, 2));
-
-    const check = await pushCheck();
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('only half wired');
-    expect(check.fix).toBe('tenjin push on');
-  });
-});
-
-/**
  * The `sig_v1_test` lane (tenjin-agent#267, redesigned round 3) reads a
  * report `tenjin-vitest-reporter.mjs` wrote when one exists; this is the hint
  * that tells an operator whose project has no such reporter that they are
@@ -2872,16 +2705,13 @@ describe('runDoctor — test reporter hint', () => {
 });
 
 /**
- * tenjin-agent#252: `tenjin update` bumps the npm-installed binary and nothing
- * else, so the generated hook/push scripts under `<dataDir>/hooks` stay
- * whatever bytes `tenjin install` last wrote until an operator reinstalls —
- * the exact shape #242's merged allowlist fix hit (junk pairings kept
- * accumulating for hours on a machine that had not reinstalled). Modeled on
- * the "skills go stale after a CLI update" block above:
- * {@link compareWiredSkills}'s equivalent for the four generated scripts.
+ * The one hook failure that is silent in the wild: the URL in settings.json
+ * carries the port the daemon had bound when install ran, and a daemon that
+ * later came back on another one makes every tool fire a non-blocking
+ * `HTTP hook error` the operator never sees.
  */
-describe('runDoctor — hook scripts go stale after a CLI update', () => {
-  async function hookScriptsCheck(): Promise<CheckResult | undefined> {
+describe('runDoctor — loop hook wiring', () => {
+  async function loopCheck(): Promise<CheckResult | undefined> {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
@@ -2889,52 +2719,65 @@ describe('runDoctor — hook scripts go stale after a CLI update', () => {
       env: {},
       fetchImpl: healthyFetch,
     });
-    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'hook scripts');
+    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'loop hooks');
   }
 
-  it('reports nothing on a machine with no hook scripts on disk', async () => {
-    expect(await hookScriptsCheck()).toBeUndefined();
+  async function wireAt(port: number): Promise<void> {
+    await mkdir(join(skillHome, '.claude'), { recursive: true });
+    await writeFile(
+      join(skillHome, '.claude', 'settings.json'),
+      `${JSON.stringify(
+        {
+          hooks: {
+            Stop: [
+              {
+                hooks: [
+                  {
+                    type: 'http',
+                    url: `http://127.0.0.1:${port}/hook/claude`,
+                    headers: { Authorization: 'Bearer t' },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      )}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  it('says nothing on a machine with no hook entries of ours', async () => {
+    expect(await loopCheck()).toBeUndefined();
   });
 
-  it('is ok when every wired script matches this build', async () => {
-    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-    const check = await hookScriptsCheck();
-    expect(check?.status).toBe('ok');
-  });
-
-  it('warns and names the stale script when one was hand-edited (or left over from a merge)', async () => {
-    await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-    // The exact dogfooded shape: a merge changed the generated source, and
-    // nobody has run `tenjin install` since — simulated here by mutating the
-    // installed script directly rather than re-generating it.
-    const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
-    await writeFile(target, `${await readFile(target, 'utf8')}\n// hand-edited, or pre-merge\n`);
-
-    const check = await hookScriptsCheck();
+  it('warns with "daemon not running" when nothing answers the registered port', async () => {
+    await wireAt(31_999);
+    const check = await loopCheck();
     expect(check?.status).toBe('warn');
-    expect(check?.detail).toContain('1 of');
-    expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
+    expect(check?.detail).toContain('daemon not running');
+    expect(check?.fix).toBe('tenjin daemon start');
+  });
+
+  it('names the port the daemon actually bound when it has moved', async () => {
+    await wireAt(31_999);
+    await writeFile(
+      join(dir, 'daemon.pid'),
+      JSON.stringify({ pid: 1, port: 32_100, started_at: 1, data_dir: dir }),
+    );
+    const check = await loopCheck();
+    expect(check?.status).toBe('warn');
+    expect(check?.detail).toContain('the daemon is on port 32100 instead');
     expect(check?.fix).toBe('tenjin install');
   });
 
-  // chmod 0o000 only blocks the owner's own read on a non-root process; skip
-  // rather than false-fail where that does not hold (Windows, root).
-  const canDenyOwnRead = process.platform !== 'win32' && process.getuid?.() !== 0;
-  (canDenyOwnRead ? it : it.skip)(
-    'warns when an installed script cannot be read, rather than staying silent',
-    async () => {
-      await wireSearchHooks({ homeDir: skillHome, dataDir: dir, mode: 'auto', push: true });
-      const target = join(hooksDir(dir), WEBSEARCH_HOOK_FILE);
-      await chmod(target, 0o000);
-      try {
-        const check = await hookScriptsCheck();
-        expect(check?.status).toBe('warn');
-        expect(check?.detail).toContain('could not be read');
-        expect(check?.detail).toContain(WEBSEARCH_HOOK_FILE);
-        expect(check?.fix).toContain('permissions');
-      } finally {
-        await chmod(target, 0o755);
-      }
-    },
-  );
+  it('warns about a settings file wider than 0600, because it carries the token', async () => {
+    if (process.platform === 'win32') return;
+    await wireAt(31_999);
+    await chmod(join(skillHome, '.claude', 'settings.json'), 0o644);
+    const check = await loopCheck();
+    expect(check?.detail).toContain('wider than 0600');
+  });
 });

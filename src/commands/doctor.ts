@@ -3,7 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import {
   OPTIONAL_PAY_SKILL,
   OPTIONAL_SKILL_NAMES,
@@ -16,7 +16,6 @@ import {
   anyTenjinSkill,
   cliSkillsWired,
   detectHarnesses,
-  harnessDetectedBy,
   harnessFlagFor,
   harnessInPlay,
   harnessReads,
@@ -27,7 +26,6 @@ import {
   readSkillFile,
   shadowedCliSkills,
 } from '../lib/skill-wiring';
-import { readHermesIntegrationStatus, resolveHermesHomeLenient } from '../lib/hermes';
 import { skillMaterialize } from '../lib/skill-materialize';
 import type {
   DirState,
@@ -50,13 +48,13 @@ import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
-import { inspectFreeVerbRules, MODE_GATED_RULES } from '../lib/harness-permissions';
 import {
-  PUSH_SCRIPT_FILES,
-  compareHookScripts,
-  countPushHookEntries,
-  pushScriptsPresent,
-} from '../lib/harness-hooks';
+  claudeSettingsPath,
+  inspectFreeVerbRules,
+  MODE_GATED_RULES,
+} from '../lib/harness-permissions';
+import { hookBundlesPresent, registeredHookPort } from '../lib/harness-hooks';
+import { health, readPid } from '../hooks/shim';
 import { PUSH_VITEST_REPORTER_FILE } from '../lib/push-scripts';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
@@ -186,8 +184,6 @@ export interface DoctorDeps {
   now?: () => number;
   /** Packaged skills to compare the wired copies against; defaults to this build's. */
   skillsSourceDir?: string;
-  /** Hermes home override; defaults through HERMES_HOME using the same resolver as install. */
-  hermesHome?: string;
   /**
    * Passphrase seams for the wallet verification (#70), which reads the OS
    * credential store. Tests inject a platform with no store, or a stubbed exec,
@@ -250,15 +246,6 @@ export async function collectDoctorChecks(
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
-  // NEVER the strict resolver here. Doctor is the command you reach for when
-  // something is already broken, so a stray relative HERMES_HOME must not abort it
-  // before a single check runs: it warns on the Hermes check and falls back.
-  const hermesTarget =
-    deps.hermesHome === undefined
-      ? resolveHermesHomeLenient(home, env)
-      : { home: deps.hermesHome, warning: undefined };
-  const hermesHome = hermesTarget.home;
-
   const built: BuiltCheck[] = [checkNode(), await checkStateStore(deps.probeSqlite ?? probeSqlite)];
   // Beside the probe it belongs to, and only when there is something to say.
   const journal = await checkStoreJournal(ctx.dataDir, deps.readStoreJournal ?? readStoreJournal);
@@ -295,7 +282,6 @@ export async function collectDoctorChecks(
       requested,
       settings.bazaarPay.value,
       deps.skillsSourceDir,
-      hermesHome,
       // The raw config, not resolved settings: the staleness compare has to shape
       // the packaged copies the way the WRITERS shaped them, and they read the
       // machine's configured mode with no flag layer (lib/skill-materialize).
@@ -304,16 +290,10 @@ export async function collectDoctorChecks(
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   );
 
-  // Silent (no check pushed) on a machine with no hook scripts on disk at all;
-  // see checkHookScripts.
-  const hookScripts = await checkHookScripts(ctx.dataDir);
-  if (hookScripts !== null) built.push(hookScripts);
-
-  // Only when the experiment is on. Off, there is nothing to be half-wired and
-  // a permanently-present check about a feature nobody enabled is noise.
-  if (config.hooks?.push === 'on') {
-    built.push(await checkPushHooks(home, ctx.dataDir));
-  }
+  // Silent (no check pushed) on a machine with no hook entries of ours at all;
+  // see checkLoopHooks.
+  const loopHooks = await checkLoopHooks(home, ctx.dataDir);
+  if (loopHooks !== null) built.push(loopHooks);
 
   // Same rule: silent unless one of the two settings claims a team shelf, so a
   // default machine gets no check about a feature it never turned on.
@@ -324,18 +304,6 @@ export async function collectDoctorChecks(
   // the reporter the failure arm's test-identity lane (tenjin-agent#267) prefers.
   const testReporterHint = await checkTestReporterHints(cwd, ctx.dataDir);
   if (testReporterHint !== null) built.push(testReporterHint);
-
-  const hermes = await checkHermes({
-    home,
-    hermesHome,
-    which,
-    requested,
-    webSearch:
-      (config.hooks as { webSearch?: string; searchMode?: string })?.webSearch ??
-      (config.hooks as { searchMode?: string })?.searchMode,
-    homeWarning: hermesTarget.warning,
-  });
-  if (hermes !== null) built.push(hermes);
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
   // describe() and diagnostics(), so doctor never runs its own fs/env probe.
@@ -767,17 +735,15 @@ async function checkSkills(
   requested: readonly HarnessTarget[],
   bazaarPay: boolean,
   skillsSourceDir: string | undefined,
-  hermesHome: string,
   teamMode: boolean,
 ): Promise<BuiltCheck> {
-  const resolvedHermesHome = hermesHome;
-  const present = detectHarnesses(home, which, resolvedHermesHome);
-  const wiring = await readAllWiring(home, resolvedHermesHome);
+  const present = detectHarnesses(home, which);
+  const wiring = await readAllWiring(home);
   const data = {
     directories: wiring.map((w) => ({
       ...w,
-      harnessPresent: harnessReads(home, w.dir, present, resolvedHermesHome),
-      requested: harnessRequested(home, w.dir, requested, resolvedHermesHome),
+      harnessPresent: harnessReads(home, w.dir, present),
+      requested: harnessRequested(home, w.dir, requested),
     })),
   };
   const inPlay = wiring.filter((w) => anyTenjinSkill(w));
@@ -792,15 +758,15 @@ async function checkSkills(
     // nobody asked to see named.
     const targeted =
       requested.length > 0
-        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome))
+        ? wiring.filter((w) => harnessInPlay(home, w.dir, present, requested))
         : [];
     return {
       result: {
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills, .agents/skills, and Hermes skills)`,
-        fix: targeted.length > 0 ? fixFor(home, targeted, resolvedHermesHome) : 'tenjin install',
+        detail: `No Tenjin skills wired under ${home} (looked in .claude/skills and .agents/skills)`,
+        fix: targeted.length > 0 ? fixFor(home, targeted) : 'tenjin install',
         data,
       },
     };
@@ -810,7 +776,7 @@ async function checkSkills(
   // is the defect, whether it is shadowed, half-installed, hosted-only or absent; a
   // directory neither detected nor asked for is described but never warned about.
   const broken = wiring.filter(
-    (w) => harnessInPlay(home, w.dir, present, requested, resolvedHermesHome) && !cliSkillsWired(w),
+    (w) => harnessInPlay(home, w.dir, present, requested) && !cliSkillsWired(w),
   );
   if (broken.length > 0) {
     return {
@@ -819,7 +785,7 @@ async function checkSkills(
         status: 'warn',
         required: false,
         detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
-        fix: fixFor(home, broken, resolvedHermesHome),
+        fix: fixFor(home, broken),
         data,
       },
     };
@@ -833,7 +799,7 @@ async function checkSkills(
   // keeps the lane itself safe either way, which is why this is warn, not fail.
   const payDrift: string[] = [];
   for (const w of inPlay) {
-    if (!harnessInPlay(home, w.dir, present, requested, resolvedHermesHome)) continue;
+    if (!harnessInPlay(home, w.dir, present, requested)) continue;
     const onDisk = await readSkillFile(join(w.dir, OPTIONAL_PAY_SKILL, 'SKILL.md'));
     if ((onDisk.kind === 'ok') !== bazaarPay) payDrift.push(w.dir);
   }
@@ -895,7 +861,6 @@ async function checkSkills(
         fix: fixFor(
           home,
           wiring.filter((w) => stale.includes(w.dir)),
-          resolvedHermesHome,
         ),
         data,
       },
@@ -909,65 +874,6 @@ async function checkSkills(
       required: false,
       detail: `${CLI_SKILL_NAMES.join(' + ')} wired: ${describeWiring(inPlay)}`,
       data,
-    },
-  };
-}
-
-/** Native Hermes wiring is a separate warn-level check from portable skills. */
-async function checkHermes(args: {
-  home: string;
-  hermesHome: string;
-  which: (bin: string) => boolean;
-  requested: readonly HarnessTarget[];
-  webSearch?: string;
-  homeWarning?: string;
-}): Promise<BuiltCheck | null> {
-  const { home, hermesHome, which, requested, webSearch: searchMode, homeWarning } = args;
-  const inPlay =
-    requested.includes('hermes') || harnessDetectedBy(home, 'hermes', which, hermesHome).length > 0;
-  if (!inPlay) return null;
-  const status = {
-    ...(await readHermesIntegrationStatus(hermesHome)),
-    ...(homeWarning !== undefined ? { homeWarning } : {}),
-  };
-  const ok =
-    status.mcp === 'configured' && status.plugin === 'installed' && status.activation === 'enabled';
-  if (ok && homeWarning === undefined) {
-    return {
-      result: {
-        name: 'hermes',
-        status: 'ok',
-        required: false,
-        detail: `Native Tenjin retrieval and publish-back plugin enabled in ${hermesHome}`,
-        data: status,
-      },
-    };
-  }
-  const problems: string[] = [];
-  if (status.mcp === 'stale') {
-    problems.push(`MCP command missing (${status.mcpCommand ?? 'unknown'})`);
-  } else if (status.mcp !== 'configured') problems.push(`MCP ${status.mcp}`);
-  if (status.plugin !== 'installed') problems.push(`plugin ${status.plugin}`);
-  // Named `activation`, not a second `plugin`: "plugin missing, plugin not-enabled"
-  // read as one subject twice.
-  if (status.activation !== 'enabled') problems.push(`activation ${status.activation}`);
-  if (homeWarning !== undefined) problems.push('HERMES_HOME ignored');
-  return {
-    result: {
-      name: 'hermes',
-      status: 'warn',
-      required: false,
-      detail: `Hermes Tenjin integration incomplete in ${hermesHome}: ${problems.join(', ')}${
-        homeWarning === undefined ? '' : `. ${homeWarning}`
-      }`,
-      // `tenjin install --harness hermes` alone is a dead end when the stored mode
-      // is `off`: it re-runs, withholds the hook code by design, and prints the same
-      // warning forever. Name the blocker that actually has to move first.
-      fix:
-        searchMode === 'off'
-          ? 'tenjin config set hooks.webSearch auto && tenjin install --harness hermes'
-          : 'tenjin install --harness hermes',
-      data: status,
     },
   };
 }
@@ -1088,8 +994,8 @@ function hostedHere(w: HarnessWiring): boolean {
  * the directories detection picks, so a problem in ~/.agents/skills on a
  * Claude-only machine needs `--harness shared` spelled out.
  */
-function fixFor(home: string, dirs: HarnessWiring[], hermesHome: string): string {
-  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir, hermesHome)))];
+function fixFor(home: string, dirs: HarnessWiring[]): string {
+  const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
   return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
 }
 
@@ -1407,125 +1313,71 @@ async function checkTestReporterHints(cwd: string, dataDir: string): Promise<Bui
 }
 
 /**
- * Are the generated hook/push scripts ON DISK current for this build?
+ * Do the registered hook entries reach a daemon that is actually answering?
  *
- * `tenjin update` bumps the npm-installed binary and nothing else; the scripts
- * under `<dataDir>/hooks` are written once, at `tenjin install` time, and stay
- * exactly those bytes until an operator reinstalls (`lib/install-location.ts`
- * refuses the self-heal outright on a git checkout, which is how this team
- * runs `main` — there is no `update` path that could have refreshed them).
- * tenjin-agent#242's hook-allowlist fix merged and kept producing junk pairings
- * on a machine that had not reinstalled for hours, which is the dogfooded case
- * this check exists to catch earlier than that.
+ * ONE COMPARISON, and it is the one that fails silently in the wild: the URL in
+ * settings.json carries the port the daemon had bound WHEN INSTALL RAN, and a
+ * daemon that later lost that port (a pinned `loop.port` changed, a foreign
+ * listener took it, a second profile) comes back on another one. Claude Code
+ * then posts every tool fire into a closed port and reports a non-blocking
+ * `HTTP hook error` the operator never sees. `/health` on the registered port is
+ * what tells the two apart.
  *
- * The skills-staleness check above (`compareWiredSkills`) is the model: same
- * "matches what this build would write now" compare, same silent-until-there
- * shape. Silent (`null`) when nothing is installed at all — a fresh machine
- * that never ran `tenjin install` is the skills/push-hooks checks' business,
- * not this one's. A script that IS installed but could not be READ is neither
- * of those: `compareHookScripts` reports it separately rather than dropping
- * it, so a permissions problem under the hooks directory (or a device node
- * where a script should be) is a `warn` an operator sees, not a diagnostic
- * that silently found "nothing wrong" by never looking.
+ * Silent (`null`) on a machine with no entry of ours: a fresh machine that never
+ * ran `tenjin install` is the skills check's business, not this one's.
+ *
+ * The MODE is checked in the same breath because the same file now carries the
+ * daemon token as a literal, and a settings.json anything on the machine can
+ * read is a token anything on the machine can present.
  */
-async function checkHookScripts(dataDir: string): Promise<BuiltCheck | null> {
-  const { stale, present, unreadable } = await compareHookScripts(dataDir);
-  if (present.length === 0 && unreadable.length === 0) return null;
-  if (stale.length === 0 && unreadable.length === 0) {
+async function checkLoopHooks(homeDir: string, dataDir: string): Promise<BuiltCheck | null> {
+  const port = await registeredHookPort(homeDir, dataDir);
+  if (port === null) return null;
+  const bundles = await hookBundlesPresent(dataDir);
+  const live = await health(port);
+  const pid = readPid(dataDir);
+  const mode = await settingsMode(homeDir);
+  const wide = mode !== null && (mode & 0o077) !== 0;
+  const modeNote =
+    wide === true
+      ? ` ${claudeSettingsPath(homeDir)} is mode ${mode.toString(8).padStart(3, '0')}, wider than 0600, and it carries the daemon token: \`chmod 600\` it.`
+      : '';
+  if (live !== null && live.data_dir === dataDir) {
     return {
       result: {
-        name: 'hook scripts',
-        status: 'ok',
+        name: 'loop hooks',
+        status: wide ? 'warn' : 'ok',
         required: false,
-        detail: `${present.length} generated hook/push script(s) on disk match this build`,
+        detail: `hook entries point at 127.0.0.1:${port}, and the daemon there answers (pid ${live.pid}, v${live.version}).${modeNote}`,
+        ...(wide ? { fix: `chmod 600 ${claudeSettingsPath(homeDir)}` } : {}),
       },
     };
   }
-  const parts: string[] = [];
-  if (stale.length > 0) {
-    parts.push(
-      `${stale.length} of ${present.length} readable script(s) are stale (${stale.join(', ')})`,
-    );
-  }
-  if (unreadable.length > 0) {
-    parts.push(`${unreadable.length} could not be read (${unreadable.join(', ')})`);
-  }
+  const where =
+    pid === null
+      ? 'daemon not running'
+      : pid.port === port
+        ? 'daemon not running'
+        : `the daemon is on port ${pid.port} instead`;
   return {
     result: {
-      name: 'hook scripts',
+      name: 'loop hooks',
       status: 'warn',
       required: false,
-      detail: `${parts.join('; ')}; agents may be running an older build's hook code`,
-      fix:
-        unreadable.length > 0
-          ? 'Check permissions under the hooks directory, then `tenjin install`.'
-          : 'tenjin install',
+      detail: `hook entries point at 127.0.0.1:${port}, but ${where}${bundles ? '' : ', and no daemon bundle is installed'}; every hook fire is a silent HTTP error until it is back.${modeNote}`,
+      fix: pid !== null && pid.port !== port ? 'tenjin install' : 'tenjin daemon start',
     },
   };
 }
 
-/**
- * The push experiment's TWO halves, asked separately, because either one alone
- * reports a healthy sidecar that does nothing: the generated scripts on disk
- * with no settings.json entries pointing at them (a `push on` whose settings
- * write refused), or seven entries pointing at scripts that are gone (a
- * half-finished uninstall, a moved data dir). Seven entries across six events,
- * so "half-wired" is a state with several ways in. Both counts are read from
- * the writer's own plan rather than stated here.
- *
- * ONE OF THOSE WAYS IN IS AN UPGRADE, and it needs its own sentence. `tenjin
- * update` refreshes hook BODIES and materializes no new surface
- * (tenjin-agent#224), so a machine that was wired before `SubagentStop` existed
- * runs the new subagent body under the old entries: every other arm works, the
- * child-capture half is simply never fired, and the generic "half wired" line
- * would send the operator hunting. The fix is `tenjin install`, once, which is
- * also what the release note says.
- *
- * Never required and never a fail: an experiment that is off-by-default cannot
- * take down the verb an operator runs when something else is broken.
- */
-async function checkPushHooks(homeDir: string, dataDir: string): Promise<BuiltCheck> {
-  const scripts = await pushScriptsPresent(dataDir);
-  const entries = await countPushHookEntries(homeDir, dataDir);
-  const where = entries.path === null ? 'no settings.json found' : entries.path;
-  const registered = `${entries.present}/${entries.planned} hook entries registered (${where})`;
-  if (scripts && entries.present === entries.planned) {
-    return {
-      result: {
-        name: 'push hooks',
-        status: 'ok',
-        required: false,
-        detail: `hooks.push is on: all ${PUSH_SCRIPT_FILES.length} push scripts written, ${registered}`,
-      },
-    };
+/** The settings file's permission bits, or null when there is nothing to stat. */
+async function settingsMode(homeDir: string): Promise<number | null> {
+  if (process.platform === 'win32') return null;
+  try {
+    return (await stat(claudeSettingsPath(homeDir))).mode & 0o777;
+  } catch {
+    return null;
   }
-  // The upgrade shape: everything else is registered and only the newest event
-  // is not. Named before the generic warn, because the remedy is a different
-  // command.
-  if (scripts && entries.missing.length === 1 && entries.missing[0] === 'SubagentStop') {
-    return {
-      result: {
-        name: 'push hooks',
-        status: 'warn',
-        required: false,
-        detail: `hooks.push is on and ${registered}, but the SubagentStop entry is missing: this machine was wired before that arm existed, so a subagent's finding is never captured at the end of the child that settled it. tenjin update refreshes hook bodies and adds no new entry`,
-        fix: 'tenjin install',
-      },
-    };
-  }
-  return {
-    result: {
-      name: 'push hooks',
-      status: 'warn',
-      required: false,
-      detail: `hooks.push is on, but the sidecar is only half wired: ${
-        scripts
-          ? `all ${PUSH_SCRIPT_FILES.length} push scripts are written`
-          : 'one or more push scripts are missing'
-      }, ${registered}. Nothing runs unless both halves are there`,
-      fix: 'tenjin push on',
-    },
-  };
 }
 
 /**

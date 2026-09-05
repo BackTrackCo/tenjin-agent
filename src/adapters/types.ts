@@ -16,6 +16,11 @@
 /** Harnesses with an adapter in this build. */
 export type Harness = 'claude';
 
+/** The same union at run time: the installer's ownership predicate matches a
+ *  registered URL against `/hook/<harness>`, and a list it cannot iterate would
+ *  have to be spelled a second time. */
+export const HARNESSES: readonly Harness[] = ['claude'];
+
 /**
  * The canonical event vocabulary every adapter maps its native events onto.
  * `session.end` is deliberately absent: no arm registers on it and retention

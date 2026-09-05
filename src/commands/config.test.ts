@@ -1093,76 +1093,29 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(badCapture.fix).toContain('"nudge"');
   });
 
-  // hooks.push is read by the push arms, which ship in the same build as the key
-  // itself, so there is no version of them that ignores it.
-  it('never reports hookScriptStale for push', async () => {
-    const ctx = makeCtx();
-    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(push.data).not.toHaveProperty('hookScriptStale');
-  });
-
   /**
-   * `hooks.push` is the one hooks key whose value is not the whole switch: the
-   * seven settings entries are written by `tenjin push on`, and `config set` only
-   * persists the key — so it echoed as effective while no arm fired.
-   * command-reference.md already gave the guidance; the CLI accepted it silently.
+   * NO STALENESS OR WIRING LINE ON ANY HOOKS KEY, and that is the change: every
+   * one of them is read out of config.json by the daemon on each fire, so a set
+   * takes effect on the next prompt. The old notes here described generated
+   * scripts (a Stop hook too old to read `hooks.capture`) and a `push on` that
+   * had to write settings entries of its own. Neither exists.
    */
-  it('points hooks.push at `tenjin push on`, because config set wires nothing', async () => {
+  it('stores a hooks key and says one thing about it, whatever the key', async () => {
     const ctx = makeCtx();
-    const push = await runConfigSet({ key: 'hooks.push', value: 'on' }, ctx);
-    expect(push.data).toMatchObject({ hookEntriesNotWired: true });
-    expect((push.humanLines ?? []).join('\n')).toContain('tenjin push on');
-    // The value is still stored: this is an honest line, not a refusal.
-    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
-      data: { value: 'on', source: 'file' },
-    });
-  });
-
-  it('says nothing for `off`, which is what an unwired machine already does', async () => {
-    const ctx = makeCtx();
-    const push = await runConfigSet({ key: 'hooks.push', value: 'off' }, ctx);
-    expect(push.data).not.toHaveProperty('hookEntriesNotWired');
-    expect(push.humanLines).toHaveLength(1);
-  });
-
-  /**
-   * Worse than `deliberate-only`'s misread: a Stop hook written before
-   * `hooks.capture` existed does not read the key at all. Setting `block` on one
-   * of those asks for nothing, while `config get` reports `value=block
-   * source=file` — the operator watches sessions end silently and has no way to
-   * tell the setting from the script.
-   */
-  it('says so when the installed Stop hook predates hooks.capture', async () => {
-    const ctx = makeCtx();
-    for (const value of ['block', 'nudge']) {
-      const set = await runConfigSet({ key: 'hooks.capture', value }, ctx, {
-        stopHookIsCurrent: async () => false,
+    for (const [key, value] of [
+      ['hooks.push', 'on'],
+      ['hooks.capture', 'block'],
+      ['hooks.stopNag', 'deliberate-only'],
+    ] as const) {
+      const set = await runConfigSet({ key, value }, ctx);
+      expect(set.data, key).toMatchObject({ key, value, source: 'file' });
+      expect(set.data, key).not.toHaveProperty('hookScriptStale');
+      expect(set.data, key).not.toHaveProperty('hookEntriesNotWired');
+      expect(set.humanLines, key).toHaveLength(1);
+      expect(await runConfigGet({ key }, ctx), key).toMatchObject({
+        data: { value, source: 'file' },
       });
-      expect(set.data).toMatchObject({ value, hookScriptStale: true });
-      expect(set.humanLines?.join('\n')).toContain('tenjin install');
     }
-    // Stored regardless: the line reports the script, it does not refuse the set.
-    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
-      data: { value: 'nudge', source: 'file' },
-    });
-  });
-
-  it('stays quiet about capture on a current script, and about `off` on any', async () => {
-    const ctx = makeCtx();
-    const current = await runConfigSet({ key: 'hooks.capture', value: 'block' }, ctx, {
-      stopHookIsCurrent: async () => true,
-    });
-    expect(current.data).not.toHaveProperty('hookScriptStale');
-    expect(current.humanLines).toHaveLength(1);
-
-    // `off` is exactly what a script that never heard of the key already does.
-    const off = await runConfigSet({ key: 'hooks.capture', value: 'off' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(off.data).not.toHaveProperty('hookScriptStale');
-    expect(off.humanLines).toHaveLength(1);
   });
 
   // The arm-level toggle (#162): silencing the batched web-search reminders
@@ -1174,42 +1127,6 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
       data: { value: 'deliberate-only', source: 'file' },
     });
-  });
-
-  /**
-   * `deliberate-only` is a value only the current script understands: an older
-   * installed script maps every non-`off` value to `on`. Storing it and saying
-   * nothing leaves the operator watching the batch keep firing while `config get`
-   * reports the setting effective.
-   */
-  it('says so when the installed Stop hook predates deliberate-only', async () => {
-    const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(set.data).toMatchObject({ value: 'deliberate-only', hookScriptStale: true });
-    expect(set.humanLines?.join('\n')).toContain('tenjin install');
-    // Stored regardless: the line reports the script, it does not refuse the set.
-    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
-      data: { value: 'deliberate-only', source: 'file' },
-    });
-  });
-
-  it('stays quiet on a current script, and on the values an old script honors', async () => {
-    const ctx = makeCtx();
-    const current = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx, {
-      stopHookIsCurrent: async () => true,
-    });
-    expect(current.data).not.toHaveProperty('hookScriptStale');
-    expect(current.humanLines).toHaveLength(1);
-
-    // `off` and `on` mean the same thing to every script version ever shipped,
-    // so a stale script is not worth a line about them.
-    const off = await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx, {
-      stopHookIsCurrent: async () => false,
-    });
-    expect(off.data).not.toHaveProperty('hookScriptStale');
-    expect(off.humanLines).toHaveLength(1);
   });
 });
 

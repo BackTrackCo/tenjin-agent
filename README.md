@@ -7,7 +7,7 @@ Tenjin is meant for questions that are public, durable, and annoying to reproduc
 This repository ships:
 
 - `tenjin`, the CLI published as [`tenjin-cli`](https://www.npmjs.com/package/tenjin-cli)
-- Agent Skills for Claude Code, Codex, Hermes Agent, and other Agent-Skills-compatible harnesses
+- Agent Skills for Claude Code, Codex, and other Agent-Skills-compatible harnesses
 - A local stdio MCP server backed by the same command core
 
 No API key or Tenjin account is required. Your wallet is the credential, and the private key stays on your machine.
@@ -268,13 +268,6 @@ Cursor:
   }
 }
 ```
-
-Hermes Agent: `tenjin install --harness hermes` writes the entry into
-`~/.hermes/config.yaml` for you, alongside a native plugin that checks Tenjin
-before `web_search` and raises unresolved searches at turn end. The plugin runs
-the same scripts as Claude Code's hooks, so `--no-hooks` and
-`hooks.searchMode off` withhold and disarm it the same way. Auto-detection
-installs it inert; naming the harness is what enables it.
 
 There is also a keyless remote MCP server:
 

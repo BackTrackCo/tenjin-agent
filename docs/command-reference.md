@@ -434,7 +434,7 @@ Common keys:
 | `hooks.agentDispatch`       | `auto`                     | Subagent-dispatch hook (most sensitive payload): `auto`, `remind`, `off` (disjoint).                                                                    |
 | `hooks.stopNag`             | `on`                       | End-of-turn reminder: `on`, `deliberate-only` (no web-search batch), `off`.                                                                             |
 | `hooks.sessionPrimer`       | `on`                       | Session-start search-first primer: `on`, `off`.                                                                                                         |
-| `hooks.push`                | `off`                      | Push experiment master switch: `on`, `off`. Set through `tenjin push on/off`, not `config set`, so the wiring step runs alongside it.                   |
+| `hooks.push`                | `off`                      | Push arms master switch: `on`, `off`. `tenjin push on/off` and `config set` are the same write; the daemon re-reads it per fire.                        |
 | `hooks.capture`             | `off`                      | Publish prompt at a turn end: `block` (you and your subagents), `nudge` (you only, never blocking), `off`. See [Stop-hook capture](#stop-hook-capture). |
 
 ## Push (experimental)
@@ -443,7 +443,7 @@ The push experiment flips Tenjin from a tool the agent calls into a sidecar that
 
 ### `tenjin push on`
 
-Sets `hooks.push` to `on` and immediately wires the four push hook scripts (seven settings entries, across six events) into Claude Code's settings (the same idempotent writer `tenjin install` uses, so re-running it is always safe). Two runs do not get that far: with `hooks.webSearch off` the command refuses and leaves `hooks.push` as it was (that key is the wiring switch for every hook this CLI writes), and on a machine whose recorded install harness is set and does not include Claude Code it persists `hooks.push: on` but wires nothing, since these arms are Claude Code hooks — `tenjin install --harness claude` then `tenjin push on` wires them.
+Sets `hooks.push` to `on` and returns. It wires nothing: `tenjin install` registers the whole entry set once, and the loop daemon re-reads `config.json` on every fire, so this takes effect on your next prompt with nothing to install and no process to restart. On a machine that never ran `tenjin install` it stores the preference and fires nothing, which is what `tenjin doctor` and `tenjin push status` report.
 
 | Script                     | Event(s)                                   | Matcher                           | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | -------------------------- | ------------------------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -515,7 +515,7 @@ export default defineConfig({
 
 ### `tenjin push off`
 
-Sets `hooks.push` to `off` and returns immediately. Nothing is unwired: every push script reads this key at the top of its own run and exits in milliseconds when it is not `on`, so the change takes effect on the very next hook invocation with no re-install. One registration outlives it until the next `tenjin install`: `push on` widens the WebSearch hook's matcher to `WebSearch|WebFetch`, and while that stays, a `WebFetch` spawns a hook that reads the key and exits without a word. The next `tenjin install` narrows it back on its own.
+Sets `hooks.push` to `off` and returns immediately. Nothing is unwired: the arms read this key per fire and plan nothing when it is not `on`, so the change takes effect on your next prompt with no re-install. The hook entries stay registered either way — they are the same eleven whatever this key says.
 
 To take the scripts and their settings entries away entirely, run `tenjin uninstall`.
 
