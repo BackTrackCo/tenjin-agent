@@ -402,6 +402,12 @@ export interface HttpRequestOptions {
   jsonBody?: unknown;
   fetchImpl?: typeof fetch;
   /**
+   * A caller's own abort, combined with (never replacing) `timeoutMs`. The loop's
+   * legs pass the fire's signal here so a harness that closed its socket stops the
+   * request in flight; a caller with no such signal is unchanged.
+   */
+  signal?: AbortSignal;
+  /**
    * Refuse redirects even when the request carries no signed header. For a
    * caller whose response becomes a durable local artifact (`fetchRead`: the
    * 200 is written to the library as an entitlement record under the
@@ -494,6 +500,12 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
     timedOut = true;
     controller.abort();
   }, opts.timeoutMs);
+  // The caller's abort is combined with the timeout rather than chosen between:
+  // whichever fires first ends the request, and `timedOut` still says which.
+  const signal =
+    opts.signal === undefined
+      ? controller.signal
+      : AbortSignal.any([controller.signal, opts.signal]);
 
   try {
     const prepared = prepareRequest(url, opts);
@@ -506,7 +518,7 @@ export async function httpRequest(url: string, opts: HttpRequestOptions): Promis
         method: opts.method ?? 'GET',
         headers,
         body,
-        signal: controller.signal,
+        signal,
         ...(pinned ? { redirect: 'manual' as const } : {}),
       });
     } catch (err) {

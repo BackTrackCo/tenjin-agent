@@ -81,7 +81,7 @@ describe('decode', () => {
     expect(input.turn).toBe(PROMPT_ID);
     expect(input.tool).toEqual({
       name: 'WebFetch',
-      kind: 'web',
+      kind: 'fetch',
       input: PreToolUse.tool_input,
       callId: PreToolUse.tool_use_id,
     });
@@ -148,7 +148,7 @@ describe('decode', () => {
   describe('tool kind', () => {
     const KINDS: [string, ToolKind | 'other'][] = [
       ['WebSearch', 'web'],
-      ['WebFetch', 'web'],
+      ['WebFetch', 'fetch'],
       ['Agent', 'dispatch'],
       ['Task', 'dispatch'],
       ['Bash', 'shell'],
@@ -414,8 +414,11 @@ describe('registrar', () => {
   it('tools regexes anchor on the whole native name', () => {
     const { tools } = registrar;
     expect(tools.web?.test('WebSearch')).toBe(true);
-    expect(tools.web?.test('WebFetch')).toBe(true);
-    expect(tools.web?.test('WebFetchX')).toBe(false);
+    expect(tools.web?.test('WebSearchX')).toBe(false);
+    // WebFetch is its own kind, so its own arm and its own budget.
+    expect(tools.web?.test('WebFetch')).toBe(false);
+    expect(tools.fetch?.test('WebFetch')).toBe(true);
+    expect(tools.fetch?.test('WebFetchX')).toBe(false);
     expect(tools.dispatch?.test('Agent')).toBe(true);
     expect(tools.dispatch?.test('Task')).toBe(true);
     expect(tools.dispatch?.test('TaskOutput')).toBe(false);

@@ -71,13 +71,6 @@ function seedMark(session: string, at: number): void {
   );
 }
 
-function seedActor(session: string, tat: number): void {
-  db.prepare(`INSERT INTO actors (session, agent, arm, tat) VALUES (?, '', 'prompt', ?)`).run(
-    session,
-    tat,
-  );
-}
-
 describe('runRetention: fires by age', () => {
   it('deletes fires older than RETENTION_DAYS with their legs, keeps the rest', () => {
     seedFires([
@@ -90,7 +83,7 @@ describe('runRetention: fires by age', () => {
 
     const report = runRetention(db, NOW);
 
-    expect(report).toEqual({ fires: 2, marks: 0, actors: 0, truncated: false });
+    expect(report).toEqual({ fires: 2, marks: 0, truncated: false });
     expect(ids('fires')).toEqual(['edge-keep', 'fresh']);
     // Cascade: the legs of a deleted fire go with it, no orphan rows.
     expect(ids('legs')).toEqual(['edge-keep', 'fresh']);
@@ -114,7 +107,7 @@ describe('runRetention: fires by age', () => {
   });
 
   it('returns zeros on an empty ledger', () => {
-    expect(runRetention(db, NOW)).toEqual({ fires: 0, marks: 0, actors: 0, truncated: false });
+    expect(runRetention(db, NOW)).toEqual({ fires: 0, marks: 0, truncated: false });
   });
 });
 
@@ -132,7 +125,7 @@ describe('runRetention: fires row cap', () => {
 
     const report = runRetention(db, NOW);
 
-    expect(report).toEqual({ fires: excess, marks: 0, actors: 0, truncated: false });
+    expect(report).toEqual({ fires: excess, marks: 0, truncated: false });
     expect(count('fires')).toBe(FIRES_ROW_CAP);
     const min = db.prepare('SELECT MIN(at) AS v FROM fires').get() as { v: unknown };
     expect(Number(min.v)).toBe(NOW - (FIRES_ROW_CAP - 1));
@@ -141,14 +134,11 @@ describe('runRetention: fires row cap', () => {
   });
 });
 
-describe('runRetention: marks and actors', () => {
-  it('deletes marks and actors older than the cutoff, keeps newer ones', () => {
+describe('runRetention: marks', () => {
+  it('deletes marks older than the cutoff, keeps newer ones', () => {
     seedMark('m-old', OLD);
     seedMark('m-edge', CUTOFF);
     seedMark('m-fresh', FRESH);
-    seedActor('a-old', OLD);
-    seedActor('a-edge', CUTOFF);
-    seedActor('a-fresh', FRESH);
     seedFires([
       ['old', OLD],
       ['fresh', FRESH],
@@ -156,9 +146,8 @@ describe('runRetention: marks and actors', () => {
 
     const report = runRetention(db, NOW);
 
-    expect(report).toEqual({ fires: 1, marks: 1, actors: 1, truncated: false });
+    expect(report).toEqual({ fires: 1, marks: 1, truncated: false });
     expect(ids('marks')).toEqual(['m-edge', 'm-fresh']);
-    expect(ids('actors')).toEqual(['a-edge', 'a-fresh']);
   });
 });
 
@@ -171,7 +160,6 @@ describe('runRetention: time bound', () => {
     seedFires(rows);
     db.exec('COMMIT');
     seedMark('m-old', OLD);
-    seedActor('a-old', OLD);
 
     // Reads 0 at start and at the check before the first batch, then jumps
     // past the bound: the second check must refuse to run another batch.
@@ -183,23 +171,16 @@ describe('runRetention: time bound', () => {
     expect(report.truncated).toBe(true);
     expect(report.fires).toBe(RETENTION_BATCH);
     expect(count('fires')).toBe(oldCount - RETENTION_BATCH);
-    // Later phases never ran: their rows and their counts are untouched.
+    // The marks phase never ran: its rows and its count are untouched.
     expect(report.marks).toBe(0);
-    expect(report.actors).toBe(0);
     expect(count('marks')).toBe(1);
-    expect(count('actors')).toBe(1);
   });
 
   it('finishes with truncated:false when the clock stays under the bound', () => {
     seedFires([['old', OLD]]);
     let t = 0;
     const clock = () => (t += 100);
-    expect(runRetention(db, NOW, clock)).toEqual({
-      fires: 1,
-      marks: 0,
-      actors: 0,
-      truncated: false,
-    });
+    expect(runRetention(db, NOW, clock)).toEqual({ fires: 1, marks: 0, truncated: false });
   });
 });
 
@@ -217,7 +198,7 @@ describe('runRetention: housekeeping', () => {
     reader.exec('BEGIN');
     reader.prepare('SELECT COUNT(*) FROM fires').get();
     try {
-      expect(runRetention(db, NOW)).toEqual({ fires: 1, marks: 0, actors: 0, truncated: false });
+      expect(runRetention(db, NOW)).toEqual({ fires: 1, marks: 0, truncated: false });
       expect(count('fires')).toBe(1);
     } finally {
       reader.exec('COMMIT');

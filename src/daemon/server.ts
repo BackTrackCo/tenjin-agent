@@ -158,6 +158,10 @@ export function createHookServer(d: ServerDeps): HookServer {
           return;
         }
         const fire = await runFire(input, d.deps, clientLeft.signal);
+        // Captured HERE, not after the response: the fire may already have
+        // cached a verdict and burned a `seen:` mark, and a throw in `encode` or
+        // `send` would otherwise end it with no row at all.
+        commit = fire.commit;
         const sync = performance.now() - t0;
         if (sync > IDLE_SYNC_WARN_MS && fire.emit === null) {
           // A fire with no legs that still took this long was synchronous work.
@@ -168,8 +172,8 @@ export function createHookServer(d: ServerDeps): HookServer {
           if (encoded === null) send(res, 204);
           else send(res, 200, JSON.stringify(encoded));
         }
-        // After the response has flushed, never on the harness's clock.
-        commit = fire.commit;
+        // The row itself is written in `finally`, after the response has
+        // flushed, never on the harness's clock.
       } catch (err) {
         d.deps.log(
           `hook ${m[1]}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,

@@ -285,13 +285,11 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
   const LOOP_DEFAULTS = {
     human_wait_ms: 2500,
     tool_wait_ms: 4000,
-    rate_per_min: 3,
-    burst: 6,
     idle_exit_min: 30,
     port: null,
   } as const;
 
-  it('defaults to the four budget numbers, two daemon knobs, and public fallback on', async () => {
+  it('defaults to the two budget numbers, two daemon knobs, and public fallback on', async () => {
     expect(CONFIG_DEFAULTS.loop).toEqual(LOOP_DEFAULTS);
     expect(CONFIG_DEFAULTS.team).toEqual({ publicFallback: 'on' });
     const cfg = await loadConfig(dir);
@@ -315,7 +313,7 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
   });
 
   it.each([
-    ['loop.burst 0', { loop: { burst: 0 } }],
+    ['loop.tool_wait_ms 0', { loop: { tool_wait_ms: 0 } }],
     ['loop.port 70000', { loop: { port: 70000 } }],
     ['team.publicFallback "maybe"', { team: { publicFallback: 'maybe' } }],
   ])('rejects %s with CONFIG_INVALID', async (_label, raw) => {
@@ -333,22 +331,25 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
   // A newer CLI's loop key must survive an older binary's load + persist, the
   // same reason the outer object passes unknown keys through.
   it('passes an unknown loop subkey through loadRawConfig and drops it from the effective config', async () => {
-    await writeFile(configFile(), JSON.stringify({ loop: { burst: 9, future_knob: 'x' } }));
+    await writeFile(
+      configFile(),
+      JSON.stringify({ loop: { tool_wait_ms: 9000, future_knob: 'x' } }),
+    );
     const raw = await loadRawConfig(dir);
-    expect(raw.loop).toEqual({ burst: 9, future_knob: 'x' });
-    expect(await loadConfig(dir)).toMatchObject({ loop: { ...LOOP_DEFAULTS, burst: 9 } });
+    expect(raw.loop).toEqual({ tool_wait_ms: 9000, future_knob: 'x' });
+    expect(await loadConfig(dir)).toMatchObject({
+      loop: { ...LOOP_DEFAULTS, tool_wait_ms: 9000 },
+    });
     expect((await loadConfig(dir)).loop).not.toHaveProperty('future_knob');
   });
 
   it('resolveSettings reports file vs default per loop subkey', async () => {
-    await writeFile(configFile(), JSON.stringify({ loop: { port: 31000, burst: 2 } }));
+    await writeFile(configFile(), JSON.stringify({ loop: { port: 31000, human_wait_ms: 900 } }));
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
     expect(s.loop.port).toEqual({ value: 31000, source: 'file' });
-    expect(s.loop.burst).toEqual({ value: 2, source: 'file' });
-    expect(s.loop.human_wait_ms).toEqual({ value: 2500, source: 'default' });
+    expect(s.loop.human_wait_ms).toEqual({ value: 900, source: 'file' });
     expect(s.loop.tool_wait_ms).toEqual({ value: 4000, source: 'default' });
-    expect(s.loop.rate_per_min).toEqual({ value: 3, source: 'default' });
     expect(s.loop.idle_exit_min).toEqual({ value: 30, source: 'default' });
   });
 
@@ -372,8 +373,6 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
     expect(LOOP_CONFIG_KEYS).toEqual([
       'loop.human_wait_ms',
       'loop.tool_wait_ms',
-      'loop.rate_per_min',
-      'loop.burst',
       'loop.idle_exit_min',
       'loop.port',
     ]);
@@ -412,7 +411,7 @@ describe('loop and team blocks (loop-redesign/07-pr-b-daemon-kernel.md)', () => 
     });
 
     it.each(['-1', 'abc', '1.5', '', '0'])('rejects %j for a budget key with USAGE', (value) => {
-      const err = usage(() => parseLoopValue('loop.burst', value));
+      const err = usage(() => parseLoopValue('loop.tool_wait_ms', value));
       expect(err.fix).toBe('Use a positive integer.');
     });
 

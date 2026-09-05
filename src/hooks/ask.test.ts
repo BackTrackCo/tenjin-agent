@@ -14,7 +14,6 @@ import type {
   Plan,
   Question,
   Shelf,
-  Strength,
 } from './types';
 
 /**
@@ -24,7 +23,7 @@ import type {
  * real leg's HTTP behavior.
  */
 
-const QUESTION: Question = { text: 'why is vitest slow', fingerprint: 'fp1' };
+const QUESTION: Question = { text: 'why is vitest slow', questionKey: 'qk1' };
 
 function input(): HookInput {
   return {
@@ -42,6 +41,9 @@ function config(publicFallback: PublicFallback): KernelConfig {
     hooks: CONFIG_DEFAULTS.hooks,
     loop: CONFIG_DEFAULTS.loop,
     team: { publicFallback },
+    baseUrl: CONFIG_DEFAULTS.baseUrl,
+    publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
+    shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
   };
 }
 
@@ -49,8 +51,10 @@ function plan(stages: Leg[][]): Plan {
   return { question: QUESTION, stages };
 }
 
-function mkAnswer(shelf: Shelf, strength: Strength, over: Partial<Answer> = {}): Answer {
-  return { shelf, strength, resourceId: `${shelf}-${strength}`, ...over };
+/** Every answer a leg can hand back is one the shelf vouched for; there is no
+ *  weaker one to build. */
+function mkAnswer(shelf: Shelf, over: Partial<Answer> = {}): Answer {
+  return { shelf, resourceId: `${shelf}-1`, ...over };
 }
 
 /** Builds a FireContext by hand. `remaining` defaults to a fixed 10s budget;
@@ -141,68 +145,80 @@ function signalAwareLeg(shelf: Shelf): FakeLeg {
 }
 
 describe('ask: stage progression', () => {
-  it('a strong verdict in stage 1 stops the plan; stage 2 legs never run', async () => {
-    const strongAns = mkAnswer('team', 'strong');
-    const stage1 = okLeg('team', {}, strongAns);
-    const stage2 = okLeg('public', {}, mkAnswer('public', 'strong'));
+  it('an answer in stage 1 stops the plan; stage 2 legs never run', async () => {
+    const teamAns = mkAnswer('team');
+    const stage1 = okLeg('team', {}, teamAns);
+    const stage2 = okLeg('public', {}, mkAnswer('public'));
     const result = await ask(context(), plan([[stage1], [stage2]]));
-    expect(result.answer).toEqual(strongAns);
+    expect(result.answer).toEqual(teamAns);
     expect(stage2.requestSpy).not.toHaveBeenCalled();
   });
 
-  it('a strong verdict in a later stage beats an earlier weak one; the weak row is shadowed', async () => {
-    const weakAns = mkAnswer('keys', 'weak');
-    const strongAns = mkAnswer('team', 'strong');
-    const weak = okLeg('keys', {}, weakAns);
-    const strong = okLeg('team', {}, strongAns);
-    const result = await ask(context(), plan([[weak], [strong]]));
-    expect(result.answer).toEqual(strongAns);
-    expect(result.legs[0]).toMatchObject({ shelf: 'keys', outcome: 'shadowed' });
+  it('a later stage runs only when the one before it answered nothing', async () => {
+    // A miss is a leg the shelf vouched nothing on, so the plan keeps going;
+    // its row stays a `miss` and the stage that did answer is the hit.
+    const teamAns = mkAnswer('team');
+    const missed = okLeg('keys', {}, null);
+    const answered = okLeg('team', {}, teamAns);
+    const result = await ask(context(), plan([[missed], [answered]]));
+    expect(result.answer).toEqual(teamAns);
+    expect(result.legs[0]).toMatchObject({ shelf: 'keys', outcome: 'miss' });
     expect(result.legs[1]).toMatchObject({ shelf: 'team', outcome: 'hit' });
   });
 
-  it('team strong beats public strong within one stage, regardless of leg order', async () => {
-    const teamAns = mkAnswer('team', 'strong');
-    const publicAns = mkAnswer('public', 'strong');
+  it('team beats public within one stage, regardless of leg order; the public row is shadowed', async () => {
+    const teamAns = mkAnswer('team');
+    const publicAns = mkAnswer('public');
     const team = okLeg('team', {}, teamAns);
     const pub = okLeg('public', {}, publicAns);
     const result = await ask(context(), plan([[pub, team]]));
     expect(result.answer).toEqual(teamAns);
+    expect(result.legs).toMatchObject([
+      { shelf: 'public', outcome: 'shadowed' },
+      { shelf: 'team', outcome: 'hit' },
+    ]);
   });
 
-  it('among weak answers the best shelf rank wins, only after every stage has run', async () => {
-    const keysAns = mkAnswer('keys', 'weak');
-    const publicAns = mkAnswer('public', 'weak');
-    const teamAns = mkAnswer('team', 'weak');
-    const s1 = okLeg('keys', {}, keysAns);
-    const s2 = okLeg('public', {}, publicAns);
-    const s3 = okLeg('team', {}, teamAns);
+  it('every stage runs while every stage misses, and the answer stays null', async () => {
+    const s1 = okLeg('keys', {}, null);
+    const s2 = okLeg('public', {}, null);
+    const s3 = okLeg('team', {}, null);
     const result = await ask(context(), plan([[s1], [s2], [s3]]));
-    // No stage was strong, so nothing short-circuits: every stage ran.
+    // Nothing answered, so nothing short-circuits: every stage ran.
     expect(s1.requestSpy).toHaveBeenCalledTimes(1);
     expect(s2.requestSpy).toHaveBeenCalledTimes(1);
     expect(s3.requestSpy).toHaveBeenCalledTimes(1);
-    expect(result.answer).toEqual(teamAns);
+    expect(result.answer).toBeNull();
+    expect(result.legs.every((row) => row.outcome === 'miss')).toBe(true);
   });
 });
 
 describe('ask: team.publicFallback off', () => {
-  it('drops a stage whose legs are all public but keeps a mixed stage', async () => {
+  it('drops the public leg out of a MIXED stage, which is the only stage C plans', async () => {
+    // Every lookup arm plans `[[team, public]]`, so a stage-level filter would
+    // have sent the public leg on every fire `off` exists to stop.
+    const teamAns = mkAnswer('team');
+    const mixedPublic = makeLeg('public', async () => {
+      throw new Error('must not run: publicFallback is off');
+    });
+    const mixedTeam = okLeg('team', {}, teamAns);
+    const result = await ask(context({ publicFallback: 'off' }), plan([[mixedPublic, mixedTeam]]));
+    expect(mixedPublic.requestSpy).not.toHaveBeenCalled();
+    expect(mixedTeam.requestSpy).toHaveBeenCalledTimes(1);
+    expect(result.answer).toEqual(teamAns);
+    expect(result.legs.map((row) => row.shelf)).toEqual(['team']);
+  });
+
+  it('drops a stage that held nothing but public legs, and renumbers what is left', async () => {
     const dropped = makeLeg('public', async () => {
       throw new Error('must not run: stage was all-public');
     });
-    const teamAns = mkAnswer('team', 'weak');
-    const mixedPublic = okLeg('public', {}, null);
-    const mixedTeam = okLeg('team', {}, teamAns);
-    const result = await ask(
-      context({ publicFallback: 'off' }),
-      plan([[dropped], [mixedPublic, mixedTeam]]),
-    );
+    const teamAns = mkAnswer('team');
+    const team = okLeg('team', {}, teamAns);
+    const result = await ask(context({ publicFallback: 'off' }), plan([[dropped], [team]]));
     expect(dropped.requestSpy).not.toHaveBeenCalled();
-    expect(mixedPublic.requestSpy).toHaveBeenCalledTimes(1);
-    expect(mixedTeam.requestSpy).toHaveBeenCalledTimes(1);
-    expect(result.answer).toEqual(teamAns);
-    // The dropped stage is filtered out before numbering, so the surviving
+    expect(team.requestSpy).toHaveBeenCalledTimes(1);
+    // The emptied stage is filtered out before numbering, so the surviving
     // stage's rows are stage 0, not stage 1.
     expect(result.legs.every((row) => row.stage === 0)).toBe(true);
   });
@@ -244,7 +260,7 @@ describe('ask: leg failure modes', () => {
     const refused = makeLeg(
       'team',
       async () => ({ status: 'refused' }),
-      () => mkAnswer('team', 'strong'),
+      () => mkAnswer('team'),
     );
     const result = await ask(context(), plan([[refused]]));
     expect(refused.verdictSpy).not.toHaveBeenCalled();
@@ -289,7 +305,7 @@ describe('ask: rows', () => {
         url: 'https://x/1',
         form: 'search',
       },
-      mkAnswer('team', 'weak'),
+      mkAnswer('team'),
     );
     const result = await ask(ctx, plan([[withFields]]));
     expect(result.legs[0]).toEqual({

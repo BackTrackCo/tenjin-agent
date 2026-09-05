@@ -227,7 +227,7 @@ export async function shutdown(d: ShutdownDeps): Promise<void> {
     try {
       const r = runRetention(d.db, d.clock(), d.clock);
       d.log(
-        `retention: fires=${r.fires} marks=${r.marks} actors=${r.actors}${r.truncated ? ' (time bound hit)' : ''}`,
+        `retention: fires=${r.fires} marks=${r.marks}${r.truncated ? ' (time bound hit)' : ''}`,
       );
     } catch (err) {
       d.log(`retention failed: ${err instanceof Error ? err.message : String(err)}`);

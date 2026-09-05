@@ -10,13 +10,8 @@ import { STOP_GRACE_MS } from '../hooks/constants';
 import { ensureDaemon, readPid, readToken, type Health } from '../hooks/shim';
 import { CliError } from '../lib/errors';
 import { daemonBundlePath, daemonPidPath, daemonTokenPath, shimBundlePath } from '../lib/paths';
-import {
-  installDaemonFiles,
-  runDaemonStart,
-  runDaemonStatus,
-  runDaemonStop,
-  stopDaemon,
-} from './daemon';
+import { installDaemonFiles, stopDaemon } from '../daemon/control';
+import { runDaemonStart, runDaemonStatus, runDaemonStop } from './daemon';
 
 let dataDir: string;
 let bundleDir: string;

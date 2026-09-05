@@ -1018,10 +1018,18 @@ describe('the public render did not move', () => {
   // ingest scan still blocks; the team-shelf warn survivor list dropped from six
   // to two (`secret-assignment`, `hex32-value`) and `private-repo-reference` is
   // gone. tenjin-search is untouched.
+  //
+  // Re-pinned for the loop's lookup arms (PR C): the generated Stop hook that
+  // led with a `publish.mode=` line is unregistered, so tenjin-publish no longer
+  // promises it; hook searches are the daemon's now and close their own loops,
+  // so tenjin-search's open-loop sentence names only the searches you ran; and
+  // its item bullet gained `strong` and `body`, the two candidate fields the
+  // shelf sends since search learned to say which item answers and to carry a
+  // free piece whole. Both arms moved.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '142f599a1f9154a2683ff44abe9cdad2',
-      'tenjin-publish': '2ac5df33ce96f5e2c1516d4535545f06',
+      'tenjin-search': '6ff3a2a6816ee8e42a9293cf032f9f63',
+      'tenjin-publish': 'e7c516189259f5498c7f0067813a801e',
     });
   });
 

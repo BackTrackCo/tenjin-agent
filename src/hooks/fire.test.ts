@@ -7,7 +7,7 @@ import { CONFIG_DEFAULTS } from '../lib/config';
 import { claim, getMark } from './gates';
 import { runFire, selectArm } from './fire';
 import { openLoopDb, type LoopDb } from './store';
-import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult } from './types';
+import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult, Question } from './types';
 
 // End-to-end over a real loop.db: every gate, the ledger write and the bail
 // timer are the real thing, only the clock, the arms and the legs are fake
@@ -45,6 +45,9 @@ const CONFIG: KernelConfig = {
   hooks: CONFIG_DEFAULTS.hooks,
   loop: CONFIG_DEFAULTS.loop,
   team: CONFIG_DEFAULTS.team,
+  baseUrl: CONFIG_DEFAULTS.baseUrl,
+  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
+  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
 };
 
 function input(over: Partial<HookInput> = {}): HookInput {
@@ -75,6 +78,7 @@ interface FireRow {
   deadline_ms: number;
   delivered: string | null;
   question: string | null;
+  error: string | null;
 }
 
 interface LegDbRow {
@@ -97,7 +101,24 @@ function strongLeg(resourceId: string): Leg {
   return {
     shelf: 'team',
     request: async (): Promise<LegResult> => ({ status: 'ok' }),
-    verdict: (): Answer => ({ shelf: 'team', strength: 'strong', resourceId }),
+    verdict: (): Answer => ({ shelf: 'team', resourceId }),
+  };
+}
+
+/** A leg the shelf answered, with candidates and nothing marked `strong`: the
+ *  row carries what was offered and the verdict is still a miss. */
+function unvouchedLeg(): Leg {
+  return {
+    shelf: 'team',
+    request: async (): Promise<LegResult> => ({
+      status: 'ok',
+      searchId: 'sid-weak',
+      title: 'Something adjacent',
+      url: 'https://shelf.acme.internal/p/adjacent',
+      form: 'finding',
+      calibration: 'lexical-v1',
+    }),
+    verdict: () => null,
   };
 }
 
@@ -193,6 +214,73 @@ describe('runFire: no question', () => {
   });
 });
 
+describe('runFire: a skip', () => {
+  it("records the skip's reason and stamps the row with the text it refused", async () => {
+    const db = await freshDb();
+    const arm: Arm = {
+      id: 'prompt',
+      wait: 'human',
+      on: [{ event: 'prompt' }],
+      plan: () => ({ reason: 'short', text: 'yes' }),
+    };
+    const { emit, commit } = await runFire(input(), deps(db, [arm]));
+    expect(emit).toBeNull();
+    commit();
+
+    const rows = fireRows(db);
+    expect(rows).toHaveLength(1);
+    // The text is what the importance score reads off a "/clear" or a "yes";
+    // a null plan would have lost it (reason `no-question`, question null).
+    expect(rows[0]).toMatchObject({ arm: 'prompt', reason: 'short', question: 'yes' });
+    // A skip is not a lookup: no gate ran, no leg ran.
+    expect(legRows(db, rows[0]!.id)).toEqual([]);
+    expect(getMark(db, LEAD, 'q:yes')).toBeNull();
+  });
+
+  it.each(['short', 'long', 'slash', 'words'] as const)('%s lands as its own reason', async (r) => {
+    const db = await freshDb();
+    const arm: Arm = {
+      id: 'prompt',
+      wait: 'human',
+      on: [{ event: 'prompt' }],
+      plan: () => ({ reason: r, text: `text for ${r}` }),
+    };
+    const { commit } = await runFire(input(), deps(db, [arm]));
+    commit();
+    expect(fireRows(db)[0]).toMatchObject({ reason: r, question: `text for ${r}` });
+  });
+});
+
+describe('runFire: no client-side rate limit', () => {
+  it("runs its legs on the fires B's bucket (3/min, burst 6) would have refused", async () => {
+    // A research subagent fires 15 to 18 web lookups a minute at peak, so the
+    // tenth fire of a burst is exactly the one that must still reach a shelf
+    // (09-pr-c-lookup-arms.md, review round 2).
+    const db = await freshDb();
+    let calls = 0;
+    const arm: Arm = {
+      id: 'research',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => {
+        calls += 1;
+        return {
+          question: { text: `q${calls}`, questionKey: `qk-burst-${calls}` },
+          stages: [[strongLeg(`res-${calls}`)]],
+        };
+      },
+      deliver: (answer) => ({ mode: 'inject', text: 'x', resourceId: answer.resourceId }),
+    };
+    const d = deps(db, [arm]);
+    for (let i = 0; i < 12; i += 1) (await runFire(input(), d)).commit();
+
+    const rows = fireRows(db);
+    expect(rows).toHaveLength(12);
+    expect(rows.map((r) => r.reason)).toEqual(Array<string>(12).fill('hit'));
+    expect(rows.every((r) => legRows(db, r.id).length === 1)).toBe(true);
+  });
+});
+
 describe('runFire: a hit', () => {
   it('delivers, caches the verdict, and rows one leg as hit', async () => {
     const db = await freshDb();
@@ -201,7 +289,7 @@ describe('runFire: a hit', () => {
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => ({
-        question: { text: 'why is vitest slow', fingerprint: 'fp-hit' },
+        question: { text: 'why is vitest slow', questionKey: 'qk-hit' },
         stages: [[strongLeg('res-1')]],
       }),
       deliver: (answer) => ({
@@ -217,7 +305,7 @@ describe('runFire: a hit', () => {
     const rows = fireRows(db);
     expect(rows[0]).toMatchObject({ reason: 'hit', delivered: 'inject:res-1' });
     expect(legRows(db, rows[0]!.id)).toEqual([{ shelf: 'team', status: 'ok', outcome: 'hit' }]);
-    expect(JSON.parse(getMark(db, LEAD, 'q:fp-hit') ?? 'null')).toMatchObject({ status: 'done' });
+    expect(JSON.parse(getMark(db, LEAD, 'q:qk-hit') ?? 'null')).toMatchObject({ status: 'done' });
   });
 
   it('a deliver() that throws after the verdict keeps the cached verdict', async () => {
@@ -240,7 +328,7 @@ describe('runFire: a hit', () => {
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => ({
-        question: { text: 'q', fingerprint: 'fp-throw' },
+        question: { text: 'q', questionKey: 'qk-throw' },
         stages: [[counted]],
       }),
       deliver: () => {
@@ -252,19 +340,20 @@ describe('runFire: a hit', () => {
     const first = await runFire(input(), deps(db, [arm]));
     first.commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'error' });
-    expect(JSON.parse(getMark(db, LEAD, 'q:fp-throw') ?? 'null')).toMatchObject({ status: 'done' });
+    expect(JSON.parse(getMark(db, LEAD, 'q:qk-throw') ?? 'null')).toMatchObject({ status: 'done' });
 
     const second = await runFire(input(), deps(db, [arm]));
     second.commit();
-    // No second lookup: the verdict came from the cache, and the piece was
-    // already marked seen by the first fire before its delivery threw.
+    // No second lookup: the verdict came from the cache. And the piece is still
+    // deliverable, because a delivery that threw showed the agent nothing and so
+    // never burned the once-per-piece mark.
     expect(legCalls).toBe(1);
-    expect(fireRows(db)[1]).toMatchObject({ reason: 'seen' });
+    expect(fireRows(db)[1]).toMatchObject({ reason: 'cached', delivered: 'inject:res-x' });
   });
 });
 
 describe('runFire: seen', () => {
-  it('the same resource on a later fire with a different fingerprint is "seen" with no emit', async () => {
+  it('the same resource on a later fire with a different question key is "seen" with no emit', async () => {
     const db = await freshDb();
     let calls = 0;
     const arm: Arm = {
@@ -274,7 +363,7 @@ describe('runFire: seen', () => {
       plan: () => {
         calls += 1;
         return {
-          question: { text: 'q', fingerprint: `fp-seen-${calls}` },
+          question: { text: 'q', questionKey: `qk-seen-${calls}` },
           stages: [[strongLeg('shared-resource')]],
         };
       },
@@ -294,8 +383,56 @@ describe('runFire: seen', () => {
   });
 });
 
+describe('runFire: once-per-piece is about what was SHOWN', () => {
+  it('a log-only arm does not burn the mark, so an inject arm still delivers the piece', async () => {
+    // The context arm looks things up to earn a precision number and says
+    // nothing. Burning `seen:` there would let a silent lookup silence the
+    // injection a prompt asks for a second later (00-principles.md, 4).
+    const db = await freshDb();
+    const logged: Arm = {
+      id: 'context',
+      wait: 'tool',
+      on: [{ event: 'tool.before', kind: 'edit' }],
+      plan: () => ({
+        question: { text: 'q', questionKey: 'qk-log' },
+        stages: [[strongLeg('res-shared')]],
+      }),
+      deliver: (answer) => ({ mode: 'log', resourceId: answer.resourceId }),
+    };
+    const injects: Arm = {
+      id: 'prompt',
+      wait: 'human',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text: 'q2', questionKey: 'qk-inject' },
+        stages: [[strongLeg('res-shared')]],
+      }),
+      deliver: (answer) => ({ mode: 'inject', text: 'the finding', resourceId: answer.resourceId }),
+    };
+    const d = deps(db, [logged, injects]);
+    const first = await runFire(
+      input({ event: 'tool.before', tool: { name: 'Edit', kind: 'edit', input: {} } }),
+      d,
+    );
+    first.commit();
+    expect(fireRows(db)[0]).toMatchObject({
+      arm: 'context',
+      reason: 'hit',
+      delivered: 'log:res-shared',
+    });
+    expect(getMark(db, LEAD, 'seen:res-shared')).toBeNull();
+
+    const second = await runFire(input(), d);
+    expect(second.emit).toEqual({ context: 'the finding' });
+    second.commit();
+    expect(fireRows(db)[1]).toMatchObject({ arm: 'prompt', reason: 'hit' });
+    // And the injection DID burn it: a second prompt gets `seen`.
+    expect(getMark(db, LEAD, 'seen:res-shared')).not.toBeNull();
+  });
+});
+
 describe('runFire: deadline', () => {
-  it('a leg that never resolves hits the deadline and releases the claim for a fresh retry', async () => {
+  it('a leg that never resolves hits the deadline, releases the claim, and never calls after()', async () => {
     vi.useFakeTimers();
     const db = await freshDb();
     const clockRef = { now: NOW };
@@ -303,14 +440,19 @@ describe('runFire: deadline', () => {
       clockRef.now += ms;
       await vi.advanceTimersByTimeAsync(ms);
     };
+    let afterCalls = 0;
     const arm: Arm = {
       id: 'deadline-arm',
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => ({
-        question: { text: 'q', fingerprint: 'fp-deadline' },
+        question: { text: 'q', questionKey: 'qk-deadline' },
         stages: [[hangingLeg()]],
       }),
+      after: () => {
+        afterCalls += 1;
+        return null;
+      },
     };
     const resultPromise = runFire(
       input(),
@@ -321,11 +463,14 @@ describe('runFire: deadline', () => {
     expect(result.emit).toBeNull();
     result.commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });
+    // `after` is where an arm spends what the fire cost it, and this fire asked
+    // nobody anything: the arms rely on it not running here.
+    expect(afterCalls).toBe(0);
 
     // The abort races the leg's rejection in the background; give it a beat.
     for (let i = 0; i < 10; i++) await Promise.resolve();
-    expect(getMark(db, LEAD, 'q:fp-deadline')).toBeNull();
-    expect(claim(db, LEAD, 'fp-deadline', clockRef.now + 1, 2500)).toEqual({ kind: 'fresh' });
+    expect(getMark(db, LEAD, 'q:qk-deadline')).toBeNull();
+    expect(claim(db, LEAD, 'qk-deadline', clockRef.now + 1, 2500)).toEqual({ kind: 'fresh' });
   });
 });
 
@@ -337,7 +482,7 @@ describe('runFire: leg outcomes short of a hit', () => {
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => ({
-        question: { text: 'q', fingerprint: 'fp-reject' },
+        question: { text: 'q', questionKey: 'qk-reject' },
         stages: [[rejectingLeg()]],
       }),
     };
@@ -345,7 +490,40 @@ describe('runFire: leg outcomes short of a hit', () => {
     expect(emit).toBeNull();
     commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'no-answer' });
-    expect(getMark(db, LEAD, 'q:fp-reject')).toBeNull();
+    expect(getMark(db, LEAD, 'q:qk-reject')).toBeNull();
+  });
+
+  it('candidates the shelf vouched for none of are no-hit, and nothing is emitted', async () => {
+    // The client has no quality rule of its own, so a shelf that marked nothing
+    // `strong` has said nothing: the leg is a definite miss, not an outage, and
+    // the row keeps what the shelf offered.
+    const db = await freshDb();
+    let delivered = 0;
+    const arm: Arm = {
+      id: 'no-vouch-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text: 'q', questionKey: 'qk-no-vouch' },
+        stages: [[unvouchedLeg()]],
+      }),
+      deliver: () => {
+        delivered += 1;
+        return { mode: 'inject', text: 'never', resourceId: 'nope' };
+      },
+    };
+    const { emit, commit } = await runFire(input(), deps(db, [arm]));
+    expect(emit).toBeNull();
+    commit();
+    const rows = fireRows(db);
+    expect(rows[0]).toMatchObject({ reason: 'no-hit', delivered: null });
+    expect(delivered).toBe(0);
+    expect(legRows(db, rows[0]!.id)).toEqual([{ shelf: 'team', status: 'ok', outcome: 'miss' }]);
+    // A definite miss is a verdict worth caching: the same question does not
+    // pay for the same nothing twice.
+    expect(JSON.parse(getMark(db, LEAD, 'q:qk-no-vouch') ?? 'null')).toMatchObject({
+      status: 'done',
+    });
   });
 
   it('a http_429 leg is rate-server', async () => {
@@ -355,7 +533,7 @@ describe('runFire: leg outcomes short of a hit', () => {
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => ({
-        question: { text: 'q', fingerprint: 'fp-429' },
+        question: { text: 'q', questionKey: 'qk-429' },
         stages: [[rateLimitedLeg()]],
       }),
     };
@@ -375,15 +553,17 @@ describe('runFire: before() throws', () => {
       before: () => {
         throw new Error('boom');
       },
-      plan: () => ({ question: { text: 'q', fingerprint: 'fp-throw' }, stages: [] }),
+      plan: () => ({ question: { text: 'q', questionKey: 'qk-throw' }, stages: [] }),
     };
     const { emit, commit } = await runFire(input(), deps(db, [arm]));
     expect(emit).toBeNull();
     commit();
     const row = fireRows(db)[0]!;
     expect(row.reason).toBe('error');
-    // before() throws before `question` is set, so the ledger's fallback lands the detail here.
-    expect(row.question).toBe('Error: boom');
+    // The class and message land in `error`, whether or not the fire had got as
+    // far as a question.
+    expect(row.error).toBe('Error: boom');
+    expect(row.question).toBeNull();
   });
 });
 
@@ -403,19 +583,26 @@ describe('runFire: after()', () => {
 
   it("after()'s context is appended to the delivery's context", async () => {
     const db = await freshDb();
+    const asked: Array<Question | null> = [];
     const arm: Arm = {
       id: 'append-arm',
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => ({
-        question: { text: 'q', fingerprint: 'fp-append' },
+        question: { text: 'q', questionKey: 'qk-append' },
         stages: [[strongLeg('r2')]],
       }),
       deliver: () => ({ mode: 'inject', text: 'DELIVERY' }),
-      after: () => ({ context: 'AFTER' }),
+      after: (_ctx, _result, question) => {
+        asked.push(question);
+        return { context: 'AFTER' };
+      },
     };
     const { emit } = await runFire(input(), deps(db, [arm]));
     expect(emit).toEqual({ context: 'DELIVERY\n\nAFTER' });
+    // And `after` is handed the question this fire built, not the input it was
+    // built from: an arm marking what it asked cannot re-derive it.
+    expect(asked[0]?.questionKey).toBe('qk-append');
   });
 });
 
@@ -443,6 +630,31 @@ describe('runFire: clientSignal', () => {
     const controller = new AbortController();
     controller.abort();
     const { emit, commit } = await runFire(input(), deps(db, [arm]), controller.signal);
+    expect(emit).toBeNull();
+    commit();
+    expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });
+  });
+
+  it('skips after() on a fire the harness abandoned, so nothing local is spent', async () => {
+    // The row says `deadline` either way. Running `after` under it would let an
+    // abandoned fire spend a mark — the context arm's one chance at a package —
+    // on a question nobody will ever read the answer to.
+    const db = await freshDb();
+    let afterCalls = 0;
+    const arm: Arm = {
+      id: 'client-abort-after-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => null,
+      after: () => {
+        afterCalls += 1;
+        return { context: 'AFTER' };
+      },
+    };
+    const controller = new AbortController();
+    controller.abort();
+    const { emit, commit } = await runFire(input(), deps(db, [arm]), controller.signal);
+    expect(afterCalls).toBe(0);
     expect(emit).toBeNull();
     commit();
     expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });

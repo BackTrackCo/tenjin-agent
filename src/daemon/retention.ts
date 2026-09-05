@@ -9,8 +9,8 @@ import type { LoopDb } from '../hooks/store';
 /**
  * Retention (02-redesign.md §10, owner Q8): `fires` older than
  * `RETENTION_DAYS` or beyond `FIRES_ROW_CAP`, whichever bites first, and their
- * `legs` by cascade; `marks` and `actors` older than 30 days; then a WAL
- * checkpoint and `incremental_vacuum`.
+ * `legs` by cascade; `marks` older than 30 days; then a WAL checkpoint and
+ * `incremental_vacuum`.
  *
  * WHERE: the daemon's idle exit, after the listener has closed, and `tenjin
  * doctor --prune` (PR E). Never on a hook path and never at SessionEnd: a
@@ -25,7 +25,6 @@ import type { LoopDb } from '../hooks/store';
 export interface RetentionReport {
   fires: number;
   marks: number;
-  actors: number;
   /** True when the time bound stopped it before it was done. */
   truncated: boolean;
 }
@@ -56,7 +55,7 @@ export function runRetention(
   const started = clock();
   const deadline = () => clock() - started > RETENTION_MAX_MS;
   const cutoff = now - RETENTION_DAYS * DAY_MS;
-  const report: RetentionReport = { fires: 0, marks: 0, actors: 0, truncated: false };
+  const report: RetentionReport = { fires: 0, marks: 0, truncated: false };
 
   const byAge = loop(
     db,
@@ -98,16 +97,6 @@ export function runRetention(
     );
     report.marks = marks.n;
     report.truncated ||= marks.truncated;
-  }
-  if (!report.truncated) {
-    const actors = loop(
-      db,
-      `DELETE FROM actors WHERE rowid IN (SELECT rowid FROM actors WHERE tat < ? LIMIT ${RETENTION_BATCH})`,
-      [cutoff],
-      deadline,
-    );
-    report.actors = actors.n;
-    report.truncated ||= actors.truncated;
   }
 
   try {

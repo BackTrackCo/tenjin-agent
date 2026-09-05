@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Trigger } from '../hooks/types';
 import { CliError } from './errors';
 import { httpRequest, type HttpResult, type ShelfBypass } from './http';
 import { ATOMIC_RE, UUID_RE } from './ids';
@@ -44,6 +45,14 @@ export interface SearchInput {
   maxPrice?: string;
   appliesTo?: Record<string, string[]>;
   limit?: number;
+  /** Which arm asked; omitted is `cli`, a direct `tenjin search`. */
+  trigger?: SearchRequestBody['trigger'];
+  /** The identifiers lifted out of the question (`pr-751`), for the shelf's
+   *  identifier leg. Only the loop's prompt arm sends any. */
+  identifiers?: string[];
+  /** What is left of the fire's deadline, so the shelf can spend its embedding
+   *  budget knowing when the answer stops being wanted. */
+  budgetMs?: number;
 }
 
 /** The nested v3 filter object. Freshness, price and applicability are no longer
@@ -72,10 +81,17 @@ export interface SearchRequestBody {
   limit: number;
   /** Which client arm fired the search. A direct `tenjin search` (and the MCP
    *  tool over it) is `cli`, which is also what the server records when the
-   *  field is absent; the hook arms send their own names from lib/hook-scripts.ts
-   *  askTenjin. Telemetry for the per-trigger use rates (`GET
-   *  /api/lookups/stats`); it never changes the result. */
-  trigger: 'cli';
+   *  field is absent; the loop's lookup arms send their own names. Telemetry for
+   *  the per-trigger use rates (`GET /api/lookups/stats`); it never changes the
+   *  result. */
+  trigger: 'cli' | Trigger;
+  /** The question's identifiers in the wire spelling, for the shelf's identifier
+   *  leg (`lib/search/understand.ts`). Absent unless the caller lifted any. */
+  identifiers?: string[];
+  /** Milliseconds the caller will still read an answer for. A server that does
+   *  not know the field echoes it as an unknown-key warning and answers as
+   *  before, which is why it ships ahead of the server half. */
+  budget_ms?: number;
 }
 
 export function buildSearchRequest(input: SearchInput): SearchRequestBody {
@@ -151,7 +167,11 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     // invites a server to read meaning into it.
     ...(Object.keys(filters).length > 0 ? { filters } : {}),
     limit,
-    trigger: 'cli',
+    trigger: input.trigger ?? 'cli',
+    ...(input.identifiers !== undefined && input.identifiers.length > 0
+      ? { identifiers: input.identifiers }
+      : {}),
+    ...(input.budgetMs !== undefined ? { budget_ms: input.budgetMs } : {}),
   };
 }
 
@@ -175,6 +195,18 @@ export const searchCandidateSchema = z
     matchReasons: z.array(z.string()),
     estimatedTokens: z.number(),
     creator: z.object({ handle: z.string() }).passthrough(),
+    /** The shelf's own verdict on this row: the meaning leg was medium or better
+     *  AND the word leg corroborated it. The rule lives on the server so one
+     *  definition serves every client; absent (an older deployment, or a
+     *  `lexical-v1` calibration) reads as not strong, never as unknown. */
+    strong: z.boolean().optional(),
+    /** The free row's inline body, WHOLE: the shelf sends the whole free piece
+     *  and does not cut it, because a long body costs the reading agent's
+     *  context and the shelf cannot see that budget. The cut is the client's,
+     *  in `hooks/deliver.ts`. Declared for TYPING only — the candidate is
+     *  `.passthrough()`, so an undeclared `body` would ride through untyped —
+     *  and read by the loop's delivery, never by `tenjin search`. */
+    body: z.object({ text: z.string() }).optional(),
   })
   .passthrough();
 
@@ -224,6 +256,9 @@ export interface AgentApiOptions {
    *  header only when the request URL is on that origin, so passing it while
    *  searching the public shelf sends nothing. */
   bypass?: ShelfBypass;
+  /** The caller's abort, combined with `timeoutMs` by the transport. A loop leg
+   *  hands in the fire's signal so a harness that walked away ends the request. */
+  signal?: AbortSignal;
 }
 
 /** Turn a non-2xx / transport HttpResult into the CLI error contract. */
@@ -279,6 +314,7 @@ export async function postSearch(
     ...(opts.bypass !== undefined ? { bypass: opts.bypass } : {}),
     jsonBody: body,
     fetchImpl: opts.fetchImpl,
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
   });
   if (!res.ok) throw apiFailure(url, res);
   if (res.status === 429) throw rateLimitError(url, (n) => res.header(n));
