@@ -54,6 +54,8 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   fsHooks.settingsInterleave = '';
+  // A test that made ~/.claude read-only has to hand it back before the rm.
+  await chmod(dirname(settingsPath()), 0o700).catch(() => undefined);
   await rm(home, { recursive: true, force: true });
   await rm(data, { recursive: true, force: true });
 });
@@ -319,6 +321,46 @@ describe('writeClaudeHooks: refusals', () => {
     expect(result.skipped).toBe('unparsable');
     expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
   });
+
+  it('keeps the retired scripts when the settings write is refused', async () => {
+    // They are deleted LAST for this: a refusal leaves settings.json naming
+    // them, and a live session would then point at files that are gone.
+    await writeSettings('{ not json');
+    await mkdir(hooksDir(data), { recursive: true });
+    for (const file of RETIRED_HOOK_FILES) await writeFile(join(hooksDir(data), file), '// old');
+    const result = await write();
+    expect(result.skipped).toBe('unparsable');
+    expect(result.removed).toEqual([]);
+    for (const file of RETIRED_HOOK_FILES) {
+      expect(existsSync(join(hooksDir(data), file))).toBe(true);
+    }
+  });
+
+  it('refuses an event whose entries are not a list, and names it', async () => {
+    // Copied through, this event would silently swallow its share of the plan
+    // while the receipt still said eleven.
+    await writeSettings({ hooks: { PreToolUse: 'oops' } });
+    const result = await write();
+    expect(result.skipped).toBe('unexpected-shape');
+    expect(result.warning).toContain('hooks.PreToolUse');
+    expect(result.fix).toContain('tenjin install');
+    expect(await readFile(settingsPath(), 'utf8')).toBe(
+      JSON.stringify({ hooks: { PreToolUse: 'oops' } }, null, 2),
+    );
+  });
+
+  it('reports a settings file it cannot write as a skip, not as an internal error', async () => {
+    if (platform() === 'win32') return;
+    // Everything above the write landed: the daemon is up, the bundles and the
+    // skills are in place, and only this one file did not take.
+    await mkdir(dirname(settingsPath()), { recursive: true });
+    await chmod(dirname(settingsPath()), 0o500);
+    const result = await write();
+    expect(result.skipped).toBe('unwritable');
+    expect(result.warning).toContain(settingsPath());
+    expect(result.fix).toContain('already in place');
+    expect(existsSync(settingsPath())).toBe(false);
+  });
 });
 
 describe('ownership', () => {
@@ -355,6 +397,17 @@ describe('ownership', () => {
     // Nothing of ours in it: returned untouched, by identity.
     const foreign = { matcher: '*', hooks: [theirs] };
     expect(pruneOurHandlers(foreign, data)).toBe(foreign);
+  });
+
+  it('registeredHookPort reads past a foreign handler with an unparsable url', async () => {
+    // Someone hand-merged their own handler into our entry, and theirs carries
+    // a relative url. `new URL` on it would throw ERR_INVALID_URL out of doctor.
+    await write({ start: (d) => fakeStart(d, 41_234) });
+    const settings = (await readSettings()) as { hooks: Record<string, Entry[]> };
+    const entry = settings.hooks.PreToolUse?.[0];
+    entry?.hooks.unshift({ type: 'http', url: 'hooks/x' });
+    await writeSettings(settings);
+    expect(await registeredHookPort(home, data)).toBe(41_234);
   });
 
   it('hasClaudeHooks answers no for a missing, unreadable or foreign settings file', async () => {

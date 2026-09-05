@@ -475,7 +475,9 @@ either shelf and there is no price branch on this side — a paid piece is offer
 its title, price and resource id, which is what a shelf that sends no body yet gives
 every hit. There is no per-session cap on full bodies and no second request to fetch
 one: a body the search already paid for needs neither. The same finding is delivered
-once per session, and the context arm delivers nothing at all.
+once per ACTOR, not once per session: the lead and each subagent are separate
+actors, so a piece one of them has already been shown may still be shown once to
+another. The context arm delivers nothing at all.
 
 Every lookup carries the arm it came from as `trigger` — `prompt`, `research` (both web arms), `read`, `churn` — so the shelf's per-trigger stats can tell a prompt lookup from a churn one; a `tenjin search` and the MCP tool over it send `cli`. Each also carries `budget_ms`, what is left of the fire's own deadline, so the shelf can size its work to the time the answer is still wanted in. **The read and churn arms send the package or the basename as query text and no `appliesTo` filter.** The filter was hard — a piece whose card claims no packages could not come back to an arm that sent one — and 93 of 106 pieces on the measured shelf carry no card at all, so it matched nothing in 78 fires and the arm never produced a number. The prompt arm also sends `identifiers` beside `query` (at most 12 strings of at most 80 characters, a PR or issue reference spelled `pr-751`); a shelf that does not read them strips them and reports them under `warnings`, which the daemon ignores.
 

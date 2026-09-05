@@ -80,7 +80,8 @@ export type HooksSkipReason =
   | 'unreadable'
   | 'unparsable'
   | 'unexpected-shape'
-  | 'changed-since-read';
+  | 'changed-since-read'
+  | 'unwritable';
 
 export interface HooksResult {
   /** The harness this outcome is about; only `claude` has a settings file we write. */
@@ -171,6 +172,8 @@ function fixFor(reason: HooksSkipReason): string {
       return 'Run `tenjin daemon start`, then re-run `tenjin install`.';
     case 'changed-since-read':
       return 'Another process changed the file mid-run; re-run `tenjin install`.';
+    case 'unwritable':
+      return "The daemon, its bundles and the skills are already in place; only settings.json could not be written. Fix its permissions (or its directory's), then re-run `tenjin install`.";
     default:
       return 'Fix the reported file, then re-run `tenjin install`.';
   }
@@ -234,7 +237,9 @@ interface SettingsInspection {
   /** The exact bytes read, so the commit can prove nothing changed underneath it. */
   raw: string | null;
   settings: Record<string, unknown>;
-  hooks: Record<string, unknown>;
+  /** Every event's entries, already known to be a list: {@link inspectSettings}
+   *  refuses the file rather than hand the writer a shape it would skip. */
+  hooks: Record<string, unknown[]>;
 }
 
 /** Why the settings file cannot be written, in the terms {@link skip} renders. */
@@ -319,7 +324,24 @@ async function inspectSettings(
       },
     };
   }
-  return { path, raw, settings, hooks: hooksValue ?? {} };
+  // An event whose value is not a list is refused for the same reason a
+  // non-object `hooks` is: the writer would copy it through untouched and
+  // silently drop this event's share of the plan, while the receipt still said
+  // eleven. A file we do not understand is left alone and reported.
+  const hooks: Record<string, unknown[]> = {};
+  for (const [event, list] of Object.entries(hooksValue ?? {})) {
+    if (!Array.isArray(list)) {
+      return {
+        refusal: {
+          reason: 'unexpected-shape',
+          path,
+          message: `${path} has a "hooks.${event}" that is not an array of entries; it was left exactly as it is.`,
+        },
+      };
+    }
+    hooks[event] = list;
+  }
+  return { path, raw, settings, hooks };
 }
 
 /**
@@ -346,6 +368,16 @@ export async function hasClaudeHooks(homeDir: string, dataDir: string): Promise<
   return false;
 }
 
+/** A url's port, or null for anything this build cannot parse as one. */
+function urlPort(url: string): number | null {
+  try {
+    const port = Number(new URL(url).port);
+    return Number.isFinite(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
 /** The port a settings entry of ours currently names, or null when none does. */
 export async function registeredHookPort(homeDir: string, dataDir: string): Promise<number | null> {
   let hooks: unknown;
@@ -361,9 +393,13 @@ export async function registeredHookPort(homeDir: string, dataDir: string): Prom
     for (const entry of list) {
       if (!ownsHookEntry(entry, dataDir)) continue;
       for (const handler of (entry as { hooks: unknown[] }).hooks) {
+        // OURS ONLY, and parsed defensively even then: an entry someone
+        // hand-merged their own handler into sits beside ours, and a relative
+        // `url` in theirs would otherwise throw ERR_INVALID_URL out of doctor.
+        if (!ownsHandler(handler, dataDir)) continue;
         if (!isPlainObject(handler) || typeof handler.url !== 'string') continue;
-        const port = Number(new URL(handler.url).port);
-        if (Number.isFinite(port) && port > 0) return port;
+        const port = urlPort(handler.url);
+        if (port !== null) return port;
       }
     }
   }
@@ -385,11 +421,16 @@ export interface WriteClaudeHooksOptions {
  *
  * The four steps are the order §4a fixes and nothing here may reorder:
  *
- *  1. copy the two bundles into `<dataDir>/hooks` and delete the retired scripts;
+ *  1. copy the two bundles into `<dataDir>/hooks`;
  *  2. mint `daemon.token` (0600) if absent — both inside {@link startDaemon};
  *  3. stop a daemon from an older build, then ensure a healthy one;
  *  4. only then rewrite `~/.claude/settings.json`, mode 0600, with the port read
- *     back out of `daemon.pid` and the token as a literal.
+ *     back out of `daemon.pid` and the token as a literal;
+ *  5. and only once that file no longer names them, delete the retired scripts.
+ *
+ * Step 5 is last because a refused settings write leaves the old entries in
+ * place: deleting the scripts first would strand a live session pointing at
+ * files that are gone.
  *
  * Every entry of ours is dropped before the plan is appended, so a machine
  * carrying the pre-daemon `command` entries is converged rather than doubled and
@@ -417,7 +458,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       fix: fixFor('daemon-down'),
     });
   }
-  const removed = await removeRetiredScripts(dir);
   await writeVitestReporter(dir);
 
   // Step 4's inputs, read back rather than remembered: the pid file is what the
@@ -426,33 +466,27 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   const pid = readPid(dataDir);
   const token = readToken(dataDir);
   if (pid === null || token === null) {
-    return {
-      ...skip('daemon-down', {
-        harness: 'claude',
-        path: claudeSettingsPath(homeDir),
-        hooksDir: dir,
-        mode,
-        warning: `The daemon answered but left no ${pid === null ? 'daemon.pid' : 'daemon.token'} under ${dataDir}, so no hook entry could name it.`,
-        fix: fixFor('daemon-down'),
-      }),
-      removed,
-    };
+    return skip('daemon-down', {
+      harness: 'claude',
+      path: claudeSettingsPath(homeDir),
+      hooksDir: dir,
+      mode,
+      warning: `The daemon answered but left no ${pid === null ? 'daemon.pid' : 'daemon.token'} under ${dataDir}, so no hook entry could name it.`,
+      fix: fixFor('daemon-down'),
+    });
   }
   const url = `http://127.0.0.1:${pid.port}/hook/${claudeAdapter.id}`;
 
   const found = await inspectSettings(homeDir);
   if ('refusal' in found) {
-    return {
-      ...skip(found.refusal.reason, {
-        harness: 'claude',
-        path: found.refusal.path,
-        hooksDir: dir,
-        mode,
-        warning: found.refusal.message,
-        fix: fixFor(found.refusal.reason),
-      }),
-      removed,
-    };
+    return skip(found.refusal.reason, {
+      harness: 'claude',
+      path: found.refusal.path,
+      hooksDir: dir,
+      mode,
+      warning: found.refusal.message,
+      fix: fixFor(found.refusal.reason),
+    });
   }
   const { path, raw, settings, hooks } = found;
 
@@ -476,10 +510,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   // needs nine does not keep two empty arrays.
   const nextHooks: Record<string, unknown> = {};
   for (const [event, list] of Object.entries(hooks)) {
-    if (!Array.isArray(list)) {
-      nextHooks[event] = list;
-      continue;
-    }
     const kept = list
       .map((entry) => pruneOurHandlers(entry, dataDir))
       .filter((entry) => entry !== null);
@@ -501,7 +531,7 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
     wrote: next !== raw,
     daemon: { pid: started.health.pid, port: pid.port, version: started.health.version },
     url,
-    removed,
+    removed: [],
   };
   // Byte-identical means untouched: a re-install that would write the same file
   // does not write it at all, so nothing downstream sees an mtime move. The MODE
@@ -510,6 +540,7 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   // long after the bytes settled.
   if (next === raw) {
     await tightenSettings(path);
+    result.removed = await removeRetiredScripts(dir);
     return result;
   }
 
@@ -518,20 +549,31 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   // writes this file too, so a change that landed underneath is refused rather
   // than erased.
   if ((await readFile(path, 'utf8').catch(() => null)) !== raw) {
-    return {
-      ...skip('changed-since-read', {
-        harness: 'claude',
-        path,
-        hooksDir: dir,
-        mode,
-        warning: `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
-        fix: fixFor('changed-since-read'),
-      }),
-      removed,
-    };
+    return skip('changed-since-read', {
+      harness: 'claude',
+      path,
+      hooksDir: dir,
+      mode,
+      warning: `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
+      fix: fixFor('changed-since-read'),
+    });
   }
-  // 0600 because the file now carries the daemon token as a literal.
-  await writeFileAtomic(path, next, { mode: 0o600 });
+  // 0600 because the file now carries the daemon token as a literal. A write
+  // that cannot land is this module's outcome to report, not an exception for
+  // the CLI to render as an internal error: everything above it succeeded.
+  try {
+    await writeFileAtomic(path, next, { mode: 0o600 });
+  } catch (err) {
+    return skip('unwritable', {
+      harness: 'claude',
+      path,
+      hooksDir: dir,
+      mode,
+      warning: `${path} could not be written (${err instanceof Error ? err.message : String(err)}); no hook entry was registered.`,
+      fix: fixFor('unwritable'),
+    });
+  }
+  result.removed = await removeRetiredScripts(dir);
   return result;
 }
 

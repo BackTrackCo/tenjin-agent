@@ -1,6 +1,6 @@
 import { ATOMIC_RE } from '../lib/ids';
 import { formatUsdDisplay } from '../lib/money';
-import { clean } from './text';
+import { clean, stripControlKeepingLines } from './text';
 import type { Answer, Delivery, Shelf } from './types';
 
 /**
@@ -119,10 +119,25 @@ export function fenceSafeBody(body: string): string {
 
 /** The opener, the header, then the body between two copies of a fence the body
  *  cannot forge, and the closing line. Everything outside the fence is the
- *  hook's own voice. */
+ *  hook's own voice.
+ *
+ *  THE BODY IS STRIPPED OF CONTROL CHARACTERS FIRST, as the generated arm this
+ *  replaces did. It is the one attacker-authored string that reaches the agent
+ *  whole, and a bare escape byte in it repaints the terminal it lands in or
+ *  hides a line from the person reading over the agent's shoulder. Its breaks
+ *  and tabs stay: they are the piece's own layout, and the fence below reads
+ *  the same lines the agent will. No length cap, because the shelf bounds the
+ *  body it serves. */
 export function fullForm(opener: string, header: string, body: string): string {
   const fence = '--- tenjin-body ' + Math.random().toString(36).slice(2, 10) + ' ---';
-  return [opener, header, fence, fenceSafeBody(body), fence, CLOSING_LINE].join('\n');
+  return [
+    opener,
+    header,
+    fence,
+    fenceSafeBody(stripControlKeepingLines(body)),
+    fence,
+    CLOSING_LINE,
+  ].join('\n');
 }
 
 /**

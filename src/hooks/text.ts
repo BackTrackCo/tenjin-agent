@@ -20,6 +20,24 @@ export function stripControl(text: string): string {
   return text.replace(CONTROL_CHARS, ' ');
 }
 
+/**
+ * The C0 bytes that are never layout. `\t`, `\n` and `\r` are missing on
+ * purpose: they are the only ones the reader of a multi-line block needs.
+ */
+// eslint-disable-next-line no-control-regex
+const NON_LAYOUT_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
+/**
+ * The same strip for text that is read as LINES rather than as a query: a
+ * shelf body's own breaks and indentation are its layout, and the fence around
+ * it is checked line by line, so flattening it would both mangle the piece and
+ * hide what the fence is looking for. Everything else in C0 still goes — an
+ * escape byte in a stranger's body repaints the terminal it lands in.
+ */
+export function stripControlKeepingLines(text: string): string {
+  return text.replace(NON_LAYOUT_CONTROL_CHARS, ' ');
+}
+
 /** Drop a trailing high surrogate a cut left without its pair. */
 function whole(text: string): string {
   return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;

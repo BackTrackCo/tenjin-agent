@@ -69,9 +69,12 @@ function paramWords(url: URL): string {
  * params; and PARAM VALUES ARE NOT SENT WHOLESALE, independent of masking,
  * because a query string is where an api key, an account id and a presigned
  * signature live. The url has already left the machine via the fetch itself, so
- * this is not about hiding the address — the spec's `[mask]` handles the one
- * shape that matters, a credential in a path segment
- * (`acme.com/download/sk-abc.../file.pdf`), which the allow-list never guarded.
+ * this is not about hiding the address — the one shape that matters is a
+ * credential in a path segment (`acme.com/download/ghp_.../file.pdf`), which the
+ * allow-list never guarded, and which is masked HERE rather than left to the
+ * spec's `[mask]`: a vendor prefix stops looking like a token the moment its
+ * underscores are spaces, so the path is masked before its separators go and the
+ * extension is stripped after, the order `churnQuery` already uses.
  *
  * The port's own 512-character cut is gone: no arm has a length rule now, and
  * masking a string before it is cut is strictly safer than cutting a secret in
@@ -82,7 +85,7 @@ function urlWords(raw: string): string | null {
   try {
     const url = new URL(raw);
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    const path = decodeURIComponent(url.pathname)
+    const path = mask(decodeURIComponent(url.pathname))
       .replace(/\.(html?|php|aspx?|md|txt)$/i, '')
       .replace(/[/_]+/g, ' ');
     return `${path} ${paramWords(url)}`.replace(/[^A-Za-z0-9@._-]+/g, ' ');

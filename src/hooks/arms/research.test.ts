@@ -147,6 +147,37 @@ describe('the fetch arm', () => {
     await leg?.request(plan.question, 1000, new AbortController().signal);
     expect(JSON.stringify(await bodies[0])).toContain('"trigger":"research"');
   });
+
+  it('masks a vendor token sitting in a path segment, before its underscores go', async () => {
+    // The shape the allow-list never guarded: a credential IS the path segment.
+    // Split into words first, `ghp_` and its body are two harmless-looking
+    // tokens and no rule fires on either, so the mask has to run on the path.
+    const token = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz';
+    const { bodies } = captureFetch();
+    const plan = planOf(fetchArm, fetchInput({ url: `https://acme.com/download/${token}/report` }))
+      .plan as Plan;
+    const leg = plan.stages[0]?.[0];
+    await leg?.request(plan.question, 1000, new AbortController().signal);
+    const body = JSON.stringify(await bodies[0]);
+    expect(body).not.toContain(token);
+    expect(body).not.toContain('0123456789abcdefghijklmnopqrstuvwxyz');
+    // The stub keeps the type and the length, so the query still says what was
+    // dropped. Its brackets do not survive the word split this arm ends on.
+    expect(body).toContain('ghp redacted 36 chars');
+  });
+
+  it('masks the fine-grained form in a path segment too', async () => {
+    const token = `github_pat_${'1'.repeat(22)}_${'a'.repeat(59)}`;
+    const { bodies } = captureFetch();
+    const plan = planOf(fetchArm, fetchInput({ url: `https://acme.com/f/${token}/report.pdf` }))
+      .plan as Plan;
+    const leg = plan.stages[0]?.[0];
+    await leg?.request(plan.question, 1000, new AbortController().signal);
+    const body = JSON.stringify(await bodies[0]);
+    expect(body).not.toContain(token);
+    expect(body).not.toContain('a'.repeat(59));
+    expect(body).toContain('redacted 89 chars');
+  });
 });
 
 describe('fetchQuestion', () => {

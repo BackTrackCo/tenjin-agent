@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMark } from '../gates';
 import type { LoopDb } from '../store';
-import type { Actor, KernelConfig, Plan } from '../types';
+import type { Actor, KernelConfig, Plan, Reason } from '../types';
 import { contextArm } from './context';
 import {
   CHILD,
@@ -65,25 +65,32 @@ function ctxFor(
   });
 }
 
-/** One whole fire's worth of the arm: the marks, then the question. */
+/**
+ * One whole fire's worth of the arm: the marks, the question, and the end the
+ * kernel reached. `reason` is that end, because the package mark is written in
+ * `after` — and `fire.ts` does not call `after` at all on a deadline.
+ */
 function fire(
   event: 'tool.before' | 'tool.after',
   kind: 'edit' | 'shell' | 'read',
   input: Record<string, unknown>,
   actor: Actor = LEAD,
   config: KernelConfig = PUSH_ON,
+  reason: Reason = 'no-hit',
 ): Plan | null {
   const ctx = ctxFor(event, kind, input, actor, config);
   contextArm.before?.(ctx);
-  return (contextArm.plan?.(ctx) ?? null) as Plan | null;
+  const plan = (contextArm.plan?.(ctx) ?? null) as Plan | null;
+  if (reason !== 'deadline') contextArm.after?.(ctx, { reason });
+  return plan;
 }
 
 function edit(path: string, actor: Actor = LEAD): Plan | null {
   return fire('tool.before', 'edit', { file_path: path }, actor);
 }
 
-function read(path: string, actor: Actor = LEAD): Plan | null {
-  return fire('tool.after', 'read', { file_path: path }, actor);
+function read(path: string, actor: Actor = LEAD, reason: Reason = 'no-hit'): Plan | null {
+  return fire('tool.after', 'read', { file_path: path }, actor, PUSH_ON, reason);
 }
 
 describe('the context arm registration', () => {
@@ -111,6 +118,17 @@ describe('the marks PR D reads', () => {
     edit(path);
     expect(getMark(db, LEAD, `edited:${path.slice(-200)}`)).not.toBeNull();
     expect(getMark(db, LEAD, `edits:${path}`)).toBe('1');
+  });
+
+  it('keys `edits:` and `edited:` on the same tail, so one long path is one file', () => {
+    // A path longer than the tail: keyed whole, `edits:` and `edited:` would
+    // name the same file two different ways.
+    const path = `/${'nested/'.repeat(50)}deep.ts`;
+    expect(path.length).toBeGreaterThan(300);
+    edit(path);
+    const tail = path.slice(-200);
+    expect(getMark(db, LEAD, `edited:${tail}`)).not.toBeNull();
+    expect(getMark(db, LEAD, `edits:${tail}`)).toBe('1');
   });
 
   it('marks activity for the lead only, split inspection from mutation', () => {
@@ -154,6 +172,18 @@ describe('the read question', () => {
     expect(read(path)?.question.text).toBe('zod gotcha bug workaround');
     expect(read(path)?.question.text).toBe('pg gotcha bug workaround');
     // And then there is nothing left to ask about this file.
+    expect(read(path)).toBeNull();
+  });
+
+  it('spends the package only on a fire that ended somewhere', () => {
+    // The mark is this actor's one chance at that import. A fire that ran out
+    // of clock asked nobody anything, so the next Read asks again; a fire that
+    // came back empty asked, and that import is spent.
+    const path = sourceFile('deadline.ts', "import { z } from 'zod';\n");
+    expect(read(path, LEAD, 'deadline')?.question.text).toBe('zod gotcha bug workaround');
+    expect(getMark(db, LEAD, 'package:zod')).toBeNull();
+    expect(read(path, LEAD, 'no-hit')?.question.text).toBe('zod gotcha bug workaround');
+    expect(getMark(db, LEAD, 'package:zod')).not.toBeNull();
     expect(read(path)).toBeNull();
   });
 

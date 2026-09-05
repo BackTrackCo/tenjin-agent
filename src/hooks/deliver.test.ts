@@ -77,6 +77,17 @@ describe('deliver', () => {
     ]);
   });
 
+  it('strips the control bytes out of a body and keeps its layout', () => {
+    // The body is the one string a stranger wrote that reaches the agent whole:
+    // an escape sequence in it repaints the terminal it lands in. Its own lines
+    // and indentation are the piece, though, and the fence reads them.
+    const out = deliver(answer({ text: 'red \u001b[31mnow\u0000 then\n\tindented' }), 'public');
+    expect(out.text).not.toContain('\u001b');
+    expect(out.text).not.toContain('\u0000');
+    expect(out.text).toContain('\n\tindented');
+    expect((out.text ?? '').split('\n')).toHaveLength(7);
+  });
+
   it('opens as a team record on the team shelf and as third-party text on the public one', () => {
     expect(deliver(answer(), 'team').text?.startsWith(TEAM_OPENER)).toBe(true);
     expect(deliver(answer(), 'public').text?.startsWith(PUBLIC_OPENER)).toBe(true);

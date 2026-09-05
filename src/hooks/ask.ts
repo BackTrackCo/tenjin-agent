@@ -11,7 +11,9 @@ import type { Answer, FireContext, Leg, LegResult, LegRow, LegStatus, Plan, Shel
  * every lookup arm plans one mixed stage `[[team, public]]`, so a stage-level
  * drop would have sent the public leg anyway. `off` means the public leg is
  * never sent (tenjin-agent#229), whatever stage it was planned into; a stage
- * left with no legs is dropped whole so the survivors keep their numbering.
+ * left with no legs is dropped whole, which renumbers the stages after it. That
+ * costs nothing today — every arm plans one stage, and `stage` is a label on a
+ * `legs` row, not something the plan or the verdict reads back.
  */
 
 /** Higher wins among equal strength. */

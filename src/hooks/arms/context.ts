@@ -17,7 +17,8 @@ import type { Arm, FireContext } from '../types';
  * TWO QUESTIONS, ONE ARM, because they share every field but the trigger:
  *  - a Read of a source file asks about the first package this agent has not
  *    asked about yet — a dedupe, not a cap, so a file with three new imports is
- *    asked about one of them here and the others at the next Read;
+ *    asked about one of them here and the others at the next Read, and the
+ *    package is only counted as asked once the fire came back with something;
  *  - the FOURTH edit of one file by one agent asks about the file itself. Four
  *    is the trigger, not a ration: edits one to three are work, edit four is
  *    stuck (tenjin-agent#195).
@@ -40,8 +41,9 @@ const CHURN_EDITS = 4;
 const HEAD_BYTES = 20_000;
 const FILE_MAX_BYTES = 2 * 1024 * 1024;
 
-/** The path tail an `edited:` mark is keyed on. A path is operator text and a
- *  mark key is not a place to keep all of it. */
+/** The path tail the `edited:` and `edits:` marks are keyed on. A path is
+ *  operator text and a mark key is not a place to keep all of it — and the two
+ *  marks are about the same file, so they are keyed the same way. */
 const PATH_TAIL = 200;
 
 const BASH_START = 'bashstart';
@@ -86,16 +88,15 @@ function bump(ctx: FireContext, key: string): number {
 }
 
 /**
- * The first package in this file the actor has not asked about, claimed as it
- * is chosen so two concurrent Read fires cannot both spend a lookup on it.
+ * The first package in this file the actor has not asked about. READ-ONLY: the
+ * mark is set in `after`, once the fire has actually spent the lookup, so a
+ * deadline or an error does not burn this actor's one chance at the package.
+ * Two concurrent Read fires cannot both spend a lookup on it either way — the
+ * kernel's once-per-question claim is what stops that, not this mark.
  */
 function unaskedPackage(ctx: FireContext, path: string): string | null {
-  const { db, clock } = ctx.deps;
   for (const pkg of packagesInSource(fileHead(path))) {
-    const key = PACKAGE_PREFIX + pkg;
-    if (getMark(db, ctx.actor, key) !== null) continue;
-    setMark(db, ctx.actor, key, String(clock()), clock());
-    return pkg;
+    if (getMark(ctx.deps.db, ctx.actor, PACKAGE_PREFIX + pkg) === null) return pkg;
   }
   return null;
 }
@@ -142,8 +143,9 @@ export const contextArm: Arm = lookupArm({
     if (kind === 'edit' && path.length > 0) {
       // Upserted, so a re-edit moves the timestamp and nothing else: the close
       // rule reads these back by time.
-      setMark(db, ctx.actor, EDITED_PREFIX + path.slice(-PATH_TAIL), String(clock()), clock());
-      bump(ctx, EDITS_PREFIX + path);
+      const tail = path.slice(-PATH_TAIL);
+      setMark(db, ctx.actor, EDITED_PREFIX + tail, String(clock()), clock());
+      bump(ctx, EDITS_PREFIX + tail);
     }
     // Content-free, and the LEAD's only: one mark for inspection and one for
     // mutation, never the path, the tool input or a growing counter. Subagent
@@ -166,7 +168,7 @@ export const contextArm: Arm = lookupArm({
     }
     if (input.tool?.kind !== 'edit') return null;
     // Read back, not bumped: `before` already counted this edit.
-    const n = Number(getMark(ctx.deps.db, ctx.actor, EDITS_PREFIX + path) ?? '0');
+    const n = Number(getMark(ctx.deps.db, ctx.actor, EDITS_PREFIX + path.slice(-PATH_TAIL)) ?? '0');
     if (n !== CHURN_EDITS) return null;
     const query = churnQuery(path);
     return query.length === 0 ? null : query;
@@ -174,4 +176,25 @@ export const contextArm: Arm = lookupArm({
   shape: [mask],
   shelves: ['team', 'public'],
   deliver: 'log',
+  /**
+   * The package mark, written only once the fire reached a definite end. It is
+   * this actor's one chance at that import, and a fire that timed out, errored
+   * or never asked has not spent it — `after` does not run at all on a
+   * deadline, and the three reasons below are the ones that mean the question
+   * was actually settled.
+   */
+  after(ctx, result) {
+    if (ctx.input.event !== 'tool.after') return null;
+    if (result.reason !== 'hit' && result.reason !== 'no-hit' && result.reason !== 'cached') {
+      return null;
+    }
+    const path = filePathOf(ctx);
+    if (path.length === 0 || !SOURCE_RE.test(path)) return null;
+    const pkg = unaskedPackage(ctx, path);
+    if (pkg !== null) {
+      const { db, clock } = ctx.deps;
+      setMark(db, ctx.actor, PACKAGE_PREFIX + pkg, String(clock()), clock());
+    }
+    return null;
+  },
 });
