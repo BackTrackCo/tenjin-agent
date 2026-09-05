@@ -3,20 +3,27 @@ import type { Answer, FireContext, Leg, LegResult, LegRow, LegStatus, Plan, Shel
 
 /**
  * Run a plan's stages on the fire's clock. Legs inside a stage run together;
- * a stage that yields a strong verdict ends the plan; otherwise the next stage
- * runs with whatever time is left. Team strong beats public strong beats the
- * best short-of-strong, decided once, here (02-redesign.md §5).
+ * a stage that yields an answer ends the plan; otherwise the next stage runs
+ * with whatever time is left. Every answer is one the shelf vouched for — the
+ * legs have no weaker grade to hand back — so the only thing left to decide
+ * between two of them is which shelf they came from, decided once, here
+ * (02-redesign.md §5).
  *
- * `team.publicFallback: off` is one filter: a stage whose legs are all public
- * is dropped, so `[[team], [public]]` becomes `[[team]]` (tenjin-agent#229).
+ * `team.publicFallback: off` is one filter, and it filters LEGS, not stages:
+ * every lookup arm plans one mixed stage `[[team, public]]`, so a stage-level
+ * drop would have sent the public leg anyway. `off` means the public leg is
+ * never sent (tenjin-agent#229), whatever stage it was planned into; a stage
+ * left with no legs is dropped whole, which renumbers the stages after it. That
+ * costs nothing today — every arm plans one stage, and `stage` is a label on a
+ * `legs` row, not something the plan or the verdict reads back.
  */
 
-/** Higher wins among equal strength. */
+/** The whole ranking: team's own shelf beats a key match beats the marketplace.
+ *  Nothing else separates two answers now that a leg has one grade to give. */
 const SHELF_RANK: Record<Shelf, number> = { team: 3, keys: 2, public: 1 };
 
 function better(a: Answer | null, b: Answer): boolean {
   if (a === null) return true;
-  if (a.strength !== b.strength) return b.strength === 'strong';
   return SHELF_RANK[b.shelf] > SHELF_RANK[a.shelf];
 }
 
@@ -38,7 +45,9 @@ export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
   const { fire, deps } = ctx;
   const stages =
     deps.config().team.publicFallback === 'off'
-      ? plan.stages.filter((stage) => stage.some((leg) => leg.shelf !== 'public'))
+      ? plan.stages
+          .map((stage) => stage.filter((leg) => leg.shelf !== 'public'))
+          .filter((stage) => stage.length > 0)
       : plan.stages;
   const rows: LegRow[] = [];
   let best: Answer | null = null;
@@ -63,7 +72,7 @@ export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
     const settled = await Promise.allSettled(
       legs.map((leg) => runLeg(leg, plan, budget, signal, deps.clock)),
     );
-    let stageStrong = false;
+    let stageAnswered = false;
     settled.forEach((s, i) => {
       const leg = legs[i];
       if (leg === undefined) return;
@@ -88,15 +97,16 @@ export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
         ...(result.title !== undefined ? { title: result.title } : {}),
         ...(result.url !== undefined ? { url: result.url } : {}),
         ...(result.form !== undefined ? { form: result.form } : {}),
+        ...(result.calibration !== undefined ? { calibration: result.calibration } : {}),
       };
       rows.push(row);
       if (answer && better(best, answer)) {
         best = answer;
         bestRow = row;
       }
-      if (answer?.strength === 'strong') stageStrong = true;
+      if (answer !== null) stageAnswered = true;
     });
-    if (stageStrong) break;
+    if (stageAnswered) break;
   }
   if (bestRow !== null) (bestRow as LegRow).outcome = 'hit';
   fire.legs.push(...rows);

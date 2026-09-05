@@ -69,8 +69,8 @@ me first". `tenjin install` settles it at **auto**; no mode skips the scan.
 | `full-auto` | Local findings do not stop it either — nothing local does. Only the marketplace's own ingest block does, and it is checked once you actually write. |
 | `review`    | Every publish exits 3 for confirmation, even on a clean scan.      |
 
-You are told rather than left to guess: the Stop hook leads with a
-`publish.mode=<mode>` line, and `tenjin config get publish.mode` reads it any time.
+You are told rather than left to guess: `tenjin config get publish.mode` reads the
+mode any time.
 So the normal shape here is finish the work, run the safety pass, publish, say
 where it went. Not a conversation.
 

@@ -8,6 +8,7 @@ import {
   removeSkills,
   type UninstallReport,
 } from '../lib/uninstall';
+import { stopDaemon } from '../daemon/control';
 import { sanitizeForTerminal } from '../lib/output';
 import { loadRawConfig } from '../lib/config';
 import type { CommandContext, CommandResult } from '../context';
@@ -16,20 +17,18 @@ import type { CommandContext, CommandResult } from '../context';
  * `tenjin uninstall`: undo exactly what `tenjin install` wrote, and nothing else.
  *
  * The shape of this command is the promise it makes. It removes the skills, the
- * hook scripts, our hook entries and permission rules in the harness's
- * settings.json, and the legacy pointer line older versions wrote into
- * CLAUDE.md/AGENTS.md. "The hook scripts" INCLUDES the push experiment's four
- * arms (prompt, failure, subagent, context) and all seven of their settings.json
- * entries, whatever `hooks.push` currently says: `tenjin push off` leaves the
- * files on disk on purpose, so uninstall is the only thing that takes them away.
+ * loop daemon and its files, our hook entries and permission rules in the
+ * harness's settings.json, and the legacy pointer line older versions wrote into
+ * CLAUDE.md/AGENTS.md. "Its files" INCLUDES the generated scripts of the
+ * pre-daemon era, whatever `hooks.push` currently says, so a machine that
+ * upgraded without re-installing is cleaned out too.
  * It does NOT remove the wallet, the config (the team shelf's shared
  * `shelfBypassSecret` included, which the receipt names on its own line, with the
  * command that clears it, on the machines that actually hold one), the library,
  * the push ledger, the search ledger, or
  * parked candidates: `install` did not create those, a wallet holds funds, and
- * the ledger is the experiment's only record. The hook scripts are
- * the one thing under `~/.tenjin` it does remove, because `install` generated
- * them. The receipt names both halves on every run, so the operator learns the
+ * the ledger is the experiment's only record. `~/.tenjin/hooks` is
+ * the one thing under `~/.tenjin` it does remove, because `install` wrote it. The receipt names both halves on every run, so the operator learns the
  * boundary from the command rather than from the docs.
  *
  * IDEMPOTENT BY CONSTRUCTION. Every step is "remove it if it is ours and there",
@@ -42,8 +41,8 @@ import type { CommandContext, CommandResult } from '../context';
 export interface UninstallDeps {
   /** Home whose harness directories are cleaned; tests inject a temp dir. */
   home?: string;
-  /** Environment the Hermes home is resolved from; defaults to process.env. */
-  env?: NodeJS.ProcessEnv;
+  /** Seam for stopping the daemon; tests inject one that signals nothing. */
+  stop?: typeof stopDaemon;
 }
 
 export async function runUninstall(
@@ -53,16 +52,21 @@ export async function runUninstall(
   const home = deps.home ?? homedir();
 
   // Settings first: it is the only step with a concurrency guard, and the only
-  // one that can refuse. Doing it before the scripts are deleted means a refusal
-  // leaves a registered hook still pointing at a script that exists, rather than
-  // at one that does not.
-  const settings = await removeFromSettings(home);
+  // one that can refuse. Doing it before the daemon is stopped means a refusal
+  // leaves registered entries pointing at a daemon that is still answering them,
+  // rather than at a port with nothing behind it.
+  const settings = await removeFromSettings(home, ctx.dataDir);
+  // Then the daemon, before its bundle is deleted: a running daemon whose entries
+  // are gone still holds the port and still serves any session that has not
+  // re-read settings.json yet.
+  const daemon = await (deps.stop ?? stopDaemon)(ctx.dataDir);
   const scripts = await removeHookScripts(ctx.dataDir);
-  const skills = await removeSkills(home, deps.env);
+  const skills = await removeSkills(home);
   const markers = await removeMarkerLines(home);
 
   const report: UninstallReport = {
     settings,
+    daemon: daemon.state,
     skills,
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
@@ -92,7 +96,8 @@ function humanLines(report: UninstallReport): string[] {
   const { settings } = report;
   const removed: string[] = [];
   for (const dir of report.skills) removed.push(`skill ${sanitizeForTerminal(dir)}`);
-  for (const script of report.scripts) removed.push(`hook script ${sanitizeForTerminal(script)}`);
+  if (report.daemon === 'stopped' || report.daemon === 'killed') removed.push('the loop daemon');
+  for (const script of report.scripts) removed.push(`hook file ${sanitizeForTerminal(script)}`);
   if (report.hooksDir !== undefined) {
     removed.push(`empty hooks directory ${sanitizeForTerminal(report.hooksDir)}`);
   }

@@ -2,15 +2,16 @@ import type { LoopDb } from './store';
 import type { Actor, Answer, FireContext, Outcome, Plan } from './types';
 
 /**
- * The gates: rate (GCRA per (session, agent, arm)), once-per-question (a claim
- * on the fingerprint with a cached verdict), once-per-piece (`seen:` marks).
- * All of it is a few prepared statements against `loop.db`, written
- * synchronously per fire: the daemon is the only writer, and `DatabaseSync`
- * under WAL costs tens of microseconds a statement (owner review decision,
- * 07-pr-b-daemon-kernel.md).
+ * The gates: once-per-question (a claim on the question key with a cached
+ * verdict) and once-per-piece (`seen:` marks). All of it is a few prepared
+ * statements against `loop.db`, written synchronously per fire: the daemon is
+ * the only writer, and `DatabaseSync` under WAL costs tens of microseconds a
+ * statement (owner review decision, 07-pr-b-daemon-kernel.md).
  *
- * ORDER: claim before charge, so a busy question cannot spend a unit and then
- * deny the lookup, and a cached verdict never reaches the charge at all.
+ * THERE IS NO CLIENT-SIDE RATE LIMIT. One research subagent fires 15 to 18 web
+ * lookups a minute at peak, so a bucket that refused half of them would ration
+ * exactly the panel the loop exists to capture. The runaway stop is the
+ * server's own per-IP 429, which arrives as the reason `rate-server`.
  */
 
 const Q_PREFIX = 'q:';
@@ -65,36 +66,6 @@ export function deleteMark(db: LoopDb, actor: Actor, key: string): void {
   );
 }
 
-/**
- * GCRA. `tat` is the theoretical arrival time of the next conforming request.
- * With emission interval T = 60000 / rate and burst b, a request at `now` is
- * allowed when `max(tat, now) - now <= T * (b - 1)`, and then `tat` advances by
- * T from `max(tat, now)`. A fresh actor (no row) starts at tat = 0 and gets its
- * full burst; the upsert is what keeps a first request from being denied
- * forever (critique C1-M3).
- */
-export function charge(
-  db: LoopDb,
-  actor: Actor,
-  arm: string,
-  now: number,
-  ratePerMin: number,
-  burst: number,
-): boolean {
-  const interval = 60_000 / ratePerMin;
-  const row = db
-    .prepare('SELECT tat FROM actors WHERE session = ? AND agent = ? AND arm = ?')
-    .get(actor.session, actor.agent, arm) as { tat?: unknown } | undefined;
-  const tat = typeof row?.tat === 'number' ? row.tat : 0;
-  const base = Math.max(tat, now);
-  if (base - now > interval * (burst - 1)) return false;
-  db.prepare(
-    `INSERT INTO actors (session, agent, arm, tat) VALUES (?, ?, ?, ?)
-     ON CONFLICT (session, agent, arm) DO UPDATE SET tat = excluded.tat`,
-  ).run(actor.session, actor.agent, arm, base + interval);
-  return true;
-}
-
 export type Claim =
   { kind: 'fresh' } | { kind: 'asked' } | { kind: 'cached'; answer: Answer | null };
 
@@ -106,12 +77,12 @@ export type Claim =
 export function claim(
   db: LoopDb,
   actor: Actor,
-  fingerprint: string,
+  questionKey: string,
   now: number,
   waitMs: number,
   by?: string,
 ): Claim {
-  const key = Q_PREFIX + fingerprint;
+  const key = Q_PREFIX + questionKey;
   const mark = readQuestion(db, actor, key);
   if (mark?.status === 'done') return { kind: 'cached', answer: mark.answer ?? null };
   if (mark?.status === 'asking' && now - mark.at < waitMs) return { kind: 'asked' };
@@ -125,12 +96,12 @@ export function claim(
 export function finish(
   db: LoopDb,
   actor: Actor,
-  fingerprint: string,
+  questionKey: string,
   answer: Answer | null,
   now: number,
   by?: string,
 ): void {
-  const key = Q_PREFIX + fingerprint;
+  const key = Q_PREFIX + questionKey;
   if (!owns(readQuestion(db, actor, key), by)) return;
   const next: QuestionMark =
     by === undefined
@@ -139,9 +110,9 @@ export function finish(
   setMark(db, actor, key, JSON.stringify(next), now);
 }
 
-/** The fire ended without a verdict (deadline, error, rate): free the question. */
-export function release(db: LoopDb, actor: Actor, fingerprint: string, by?: string): void {
-  const key = Q_PREFIX + fingerprint;
+/** The fire ended without a verdict (deadline or error): free the question. */
+export function release(db: LoopDb, actor: Actor, questionKey: string, by?: string): void {
+  const key = Q_PREFIX + questionKey;
   if (!owns(readQuestion(db, actor, key), by)) return;
   deleteMark(db, actor, key);
 }
@@ -161,16 +132,11 @@ export function firstSight(db: LoopDb, actor: Actor, resourceId: string, now: nu
  * not).
  */
 export function gates(ctx: FireContext, plan: Plan): Outcome | null {
-  const { db, clock, config } = ctx.deps;
+  const { db, clock } = ctx.deps;
   const now = clock();
-  const c = claim(db, ctx.actor, plan.question.fingerprint, now, ctx.fire.deadlineMs, ctx.fire.id);
+  const c = claim(db, ctx.actor, plan.question.questionKey, now, ctx.fire.deadlineMs, ctx.fire.id);
   if (c.kind === 'asked') return { reason: 'asked' };
   if (c.kind === 'cached')
     return c.answer ? { reason: 'cached', answer: c.answer } : { reason: 'cached' };
-  const { rate_per_min, burst } = config().loop;
-  if (!charge(db, ctx.actor, ctx.arm.id, now, rate_per_min, burst)) {
-    release(db, ctx.actor, plan.question.fingerprint, ctx.fire.id);
-    return { reason: 'rate' };
-  }
   return null;
 }

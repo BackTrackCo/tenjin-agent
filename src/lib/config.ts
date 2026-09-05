@@ -247,22 +247,21 @@ const LegacyHooksFields = z.object({
 export const UpdateModeSchema = z.enum(['nudge', 'off']);
 
 /**
- * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). FOUR
+ * The loop daemon's numbers (tenjin-notes loop-redesign/02-redesign.md §7). TWO
  * budget numbers and two daemon knobs; every other bound is a formula over
  * these or a constant with a stated reason in `src/hooks/constants.ts`.
  *
  * `human_wait_ms`: a fire the human is waiting on (prompt, Stop, SessionStart).
- * `tool_wait_ms`: a fire a tool call is waiting on. `rate_per_min` and `burst`:
- * GCRA per (session, agent, arm), charged once per question. `idle_exit_min`:
- * the daemon exits after this long with no request. `port`: null derives one
- * from the data dir path; set it only when doctor reports a foreign listener.
+ * `tool_wait_ms`: a fire a tool call is waiting on. There is no third budget:
+ * a client-side rate limit rationed the research panel the loop exists to
+ * capture, so the runaway stop is the server's own 429. `idle_exit_min`: the
+ * daemon exits after this long with no request. `port`: null derives one from
+ * the data dir path; set it only when doctor reports a foreign listener.
  */
 const positiveInt = z.number().int().positive();
 export const LoopConfigSchema = z.object({
   human_wait_ms: positiveInt,
   tool_wait_ms: positiveInt,
-  rate_per_min: positiveInt,
-  burst: positiveInt,
   idle_exit_min: positiveInt,
   port: z.number().int().min(0).max(65535).nullable(),
 });
@@ -534,8 +533,6 @@ export const CONFIG_DEFAULTS: Config = {
   loop: {
     human_wait_ms: 2500,
     tool_wait_ms: 4000,
-    rate_per_min: 3,
-    burst: 6,
     idle_exit_min: 30,
     port: null,
   },
@@ -596,8 +593,6 @@ export type UpdateConfigKey = (typeof UPDATE_CONFIG_KEYS)[number];
 export const LOOP_CONFIG_KEYS = [
   'loop.human_wait_ms',
   'loop.tool_wait_ms',
-  'loop.rate_per_min',
-  'loop.burst',
   'loop.idle_exit_min',
   'loop.port',
 ] as const;
@@ -723,8 +718,6 @@ export function resolveLoopConfig(raw: PartialConfig): LoopConfig {
   return {
     human_wait_ms: file.human_wait_ms ?? CONFIG_DEFAULTS.loop.human_wait_ms,
     tool_wait_ms: file.tool_wait_ms ?? CONFIG_DEFAULTS.loop.tool_wait_ms,
-    rate_per_min: file.rate_per_min ?? CONFIG_DEFAULTS.loop.rate_per_min,
-    burst: file.burst ?? CONFIG_DEFAULTS.loop.burst,
     idle_exit_min: file.idle_exit_min ?? CONFIG_DEFAULTS.loop.idle_exit_min,
     port: file.port === undefined ? CONFIG_DEFAULTS.loop.port : file.port,
   };
@@ -853,8 +846,6 @@ function resolveLoopSettings(config: PartialConfig): EffectiveSettings['loop'] {
   return {
     human_wait_ms: one('human_wait_ms'),
     tool_wait_ms: one('tool_wait_ms'),
-    rate_per_min: one('rate_per_min'),
-    burst: one('burst'),
     idle_exit_min: one('idle_exit_min'),
     port: one('port'),
   };

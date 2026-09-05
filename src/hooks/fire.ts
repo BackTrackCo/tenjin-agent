@@ -5,7 +5,7 @@ import { ask } from './ask';
 import { finish, firstSight, gates, release } from './gates';
 import { record } from './ledger';
 import type { FireRecord } from './ledger';
-import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome } from './types';
+import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome, Question } from './types';
 
 /**
  * The one lifecycle (02-redesign.md §5). A fire is one hook event with one
@@ -87,8 +87,11 @@ export async function runFire(
 
   let outcome: Outcome;
   let emit: Emit | null = null;
-  let fingerprint: string | undefined;
+  let questionKey: string | undefined;
   let question: string | undefined;
+  /** The Question this fire built, for `after`: what was asked, never what a
+   *  second look at the same input would ask now. */
+  let asked: Question | null = null;
 
   if (arm === null) {
     outcome = skip('no-question');
@@ -108,9 +111,18 @@ export async function runFire(
     const main = async (): Promise<Outcome> => {
       try {
         arm.before?.(ctx);
-        const plan = arm.plan?.(ctx) ?? null;
-        if (plan === null) return skip('no-question');
-        fingerprint = plan.question.fingerprint;
+        const planned = arm.plan?.(ctx) ?? null;
+        if (planned === null) return skip('no-question');
+        if ('reason' in planned) {
+          // The arm had text and refused it. The row keeps both, because the
+          // skipped prompts are what a "/clear", a "yes" and a one-line
+          // correction leave behind, and something has to read them.
+          question = planned.text;
+          return skip(planned.reason);
+        }
+        const plan = planned;
+        asked = plan.question;
+        questionKey = plan.question.questionKey;
         question = plan.question.text;
         const gated = gates(ctx, plan);
         let result: Outcome;
@@ -120,50 +132,60 @@ export async function runFire(
           holdsClaim = true;
           const asked = await ask(ctx, plan);
           if (controller.signal.aborted) {
-            release(deps.db, actor, plan.question.fingerprint, fire.id);
+            release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;
             return skip('deadline');
           }
           const definite = asked.legs.length > 0 && asked.legs.every((l) => l.status === 'ok');
           if (asked.answer === null && !definite) {
-            release(deps.db, actor, plan.question.fingerprint, fire.id);
+            release(deps.db, actor, plan.question.questionKey, fire.id);
             holdsClaim = false;
             return skip(
               asked.legs.some((l) => l.status === 'http_429') ? 'rate-server' : 'no-answer',
             );
           }
-          finish(deps.db, actor, plan.question.fingerprint, asked.answer, deps.clock(), fire.id);
+          finish(deps.db, actor, plan.question.questionKey, asked.answer, deps.clock(), fire.id);
           holdsClaim = false;
           result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
         }
         if (result.answer) {
-          if (!firstSight(deps.db, actor, result.answer.resourceId, deps.clock())) {
-            return { reason: 'seen', answer: result.answer };
-          }
           const delivery = arm.deliver?.(result.answer, ctx) ?? null;
           if (delivery === null) return { reason: 'no-hit', answer: result.answer };
+          // ONCE-PER-PIECE IS ABOUT WHAT AN AGENT WAS SHOWN, so only an
+          // injection burns the mark. A log-only arm looks a piece up to earn a
+          // precision number and says nothing; burning the mark there would let
+          // a silent lookup silence the real injection a prompt asks for a
+          // second later (00-principles.md, principle 4).
+          if (
+            delivery.mode === 'inject' &&
+            !firstSight(deps.db, actor, result.answer.resourceId, deps.clock())
+          ) {
+            return { reason: 'seen', answer: result.answer };
+          }
           return { ...result, delivery };
         }
         return result;
       } catch (err) {
-        if (holdsClaim && fingerprint !== undefined) release(deps.db, actor, fingerprint, fire.id);
+        if (holdsClaim && questionKey !== undefined) release(deps.db, actor, questionKey, fire.id);
         return skip('error', reasonOf(err));
       }
     };
     outcome = await Promise.race([main(), bail]);
     clearTimeout(timer);
+    if (clientSignal?.aborted) {
+      // The harness gave up on this fire: nothing we send will be read. BEFORE
+      // `after`, because `after` is where an arm spends a local mark on the
+      // question it asked — and a fire nobody is listening to must not spend
+      // one, least of all while its own row says `deadline`.
+      outcome = outcome.reason === 'deadline' ? outcome : { ...outcome, reason: 'deadline' };
+    }
     if (outcome.reason !== 'deadline') {
       try {
-        emit = mergeEmit(outcome.delivery, arm.after?.(ctx, outcome) ?? null);
+        emit = mergeEmit(outcome.delivery, arm.after?.(ctx, outcome, asked) ?? null);
       } catch (err) {
         outcome = skip('error', reasonOf(err));
         emit = null;
       }
-    }
-    if (clientSignal?.aborted) {
-      // The harness gave up on this fire: nothing we send will be read.
-      outcome = outcome.reason === 'deadline' ? outcome : { ...outcome, reason: 'deadline' };
-      emit = null;
     }
   }
 
@@ -181,7 +203,7 @@ export async function runFire(
     deadlineMs,
     elapsedMs: deps.clock() - startedAt,
     outcome,
-    ...(fingerprint !== undefined ? { fingerprint } : {}),
+    ...(questionKey !== undefined ? { questionKey } : {}),
     ...(question !== undefined ? { question } : {}),
     emit,
     legs,

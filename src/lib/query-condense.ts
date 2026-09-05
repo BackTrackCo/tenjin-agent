@@ -29,13 +29,19 @@
 const QUERY_CONDENSE_JS = String.raw`
 // condense:begin
 /** Words that carry no topic: articles, auxiliaries, pronouns, question words,
- *  hedges and the pleasantries a prompt opens and closes with. */
+ *  hedges and the pleasantries a prompt opens and closes with.
+ *
+ *  NEGATIONS ARE NOT FILLER. \`not\`, \`no\` and \`nor\` were in this list until the
+ *  loop's prompt arm became its first real caller: \`vitest does not restore
+ *  spies\` condensed to \`vitest restore spies\`, which is the opposite question
+ *  and matched the opposite pieces. Half the prompts worth asking about are a
+ *  negation. */
 const CONDENSE_STOP = new Set(
   (
     'a an the and or but if then else of to in on at by for with from as is are was were be ' +
     'been being it its this that these those i you he she we they me him us them my your our ' +
     'their what which who whom how when where why do does did doing have has had having can ' +
-    'could should would will shall may might must not no nor so than too very just also only ' +
+    'could should would will shall may might must so than too very just also only ' +
     's t don now up out into over under again further here there all any both each few more ' +
     'most other some such own same about above below between through during before after off ' +
     'once ok okay hey hi please pls thanks thx like right yes need want get got make sure still ' +
@@ -101,7 +107,9 @@ function identifiersOf(text) {
 /** The condensed query: identifiers as typed, then the prompt's own words in
  *  order with stopwords, one-character tokens, sub-4-word clauses and the
  *  identifiers' own parts dropped, deduped, at most 24 whitespace tokens and
- *  400 characters. A token that would cross the character bound is left out
+ *  400 characters. A word is letters and digits in ANY script (\`\p{L}\p{N}\`, not
+ *  \`A-Za-z0-9\`): the ASCII class split \`Diátaxis\` into \`Di\` and \`taxis\` and sent
+ *  both. A token that would cross the character bound is left out
  *  whole, never cut, and a prose word over 80 characters is not a word. */
 function condense(text) {
   const idents = condenseIdentifiers(text);
@@ -123,7 +131,7 @@ function condense(text) {
   const clauses = String(text).split(/[?\n]+/);
   for (const clause of clauses) {
     if (count >= CONDENSE_MAX_TOKENS) break;
-    const words = clause.match(/[A-Za-z0-9_./:#-]+/g);
+    const words = clause.match(/[\p{L}\p{N}_./:#-]+/gu);
     if (words === null || words.length < 4) continue;
     for (const word of words) {
       if (count >= CONDENSE_MAX_TOKENS) break;

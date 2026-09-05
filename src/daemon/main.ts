@@ -1,6 +1,9 @@
 import { readFileSync, statSync } from 'node:fs';
 import pkg from '../../package.json';
 import { claudeAdapter } from '../adapters/claude';
+import { contextArm } from '../hooks/arms/context';
+import { promptArm } from '../hooks/arms/prompt';
+import { fetchArm, researchArm } from '../hooks/arms/research';
 import { openLoopDb } from '../hooks/store';
 import { readToken, resolveDataDir } from '../hooks/shim';
 import type { Arm, Deps, KernelConfig } from '../hooks/types';
@@ -14,38 +17,53 @@ import { createHookServer } from './server';
  * serves every session and every subagent on the machine until it has been
  * idle for `loop.idle_exit_min`.
  *
- * ARMS: none in PR B. The table is what PR C fills; with it empty every fire
- * that passes `actorOf` records `no-question` and answers 204, which is what
- * the smoke test checks.
+ * ARMS: the lookup arms of PR C. ORDER IS THE MAP — `selectArm` takes the
+ * first arm whose `on` matches, so a later arm can be shadowed by an earlier
+ * one. These four cannot shadow each other: they key on four disjoint
+ * (event, kind) pairs, and `context` is last regardless because it is the only
+ * one with more than one. Every entry `install` writes for an arm PR D has yet
+ * to add finds nothing here, records `no-question` and answers 204.
  */
 
-const ARMS: Arm[] = [];
+const ARMS: Arm[] = [promptArm, researchArm, fetchArm, contextArm];
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon
- * needs `loop`, `team` and `hooks` only, and must not throw on a file an
- * older CLI wrote. Invalid JSON or schema falls back to defaults with a log
- * line, never to a dead daemon.
+ * needs `loop`, `team`, `hooks` and the three shelf fields the search leg
+ * routes on, and must not throw on a file an older CLI wrote. Invalid JSON or
+ * schema falls back to defaults with a log line, never to a dead daemon.
+ *
+ * NO FLAG OR ENV LAYER. A daemon serves every session on the machine, so the
+ * only `baseUrl` it can honour is the one on disk; `--base-url` belongs to the
+ * CLI invocation that carried it.
  */
+const DEFAULTS: KernelConfig = {
+  loop: CONFIG_DEFAULTS.loop,
+  team: CONFIG_DEFAULTS.team,
+  hooks: CONFIG_DEFAULTS.hooks,
+  baseUrl: CONFIG_DEFAULTS.baseUrl,
+  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
+  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+};
+
 function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConfig {
   try {
     const raw = RawConfigSchema.safeParse(JSON.parse(readFileSync(configPath(dataDir), 'utf8')));
     if (!raw.success) {
       log(`config.json invalid; using defaults: ${raw.error.issues[0]?.message ?? ''}`);
-      return {
-        loop: CONFIG_DEFAULTS.loop,
-        team: CONFIG_DEFAULTS.team,
-        hooks: CONFIG_DEFAULTS.hooks,
-      };
+      return DEFAULTS;
     }
     const r = raw.data;
     return {
       loop: resolveLoopConfig(r),
       team: { publicFallback: r.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
       hooks: { ...CONFIG_DEFAULTS.hooks, ...(r.hooks ?? {}) } as KernelConfig['hooks'],
+      baseUrl: r.baseUrl ?? DEFAULTS.baseUrl,
+      publicShelfUrl: r.publicShelfUrl ?? DEFAULTS.publicShelfUrl,
+      shelfBypassSecret: r.shelfBypassSecret ?? DEFAULTS.shelfBypassSecret,
     };
   } catch {
-    return { loop: CONFIG_DEFAULTS.loop, team: CONFIG_DEFAULTS.team, hooks: CONFIG_DEFAULTS.hooks };
+    return DEFAULTS;
   }
 }
 

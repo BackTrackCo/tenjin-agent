@@ -2,18 +2,10 @@ import { homedir } from 'node:os';
 import { readFile } from 'node:fs/promises';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import { persistPushMode } from './config';
-import { hooksDisclosure } from './install';
-import {
-  hookFallthroughAsked,
-  hookFallthroughHost,
-  hookRecipientHost,
-  resolveContextSettings,
-  type ResolvedSettings,
-} from '../lib/settings';
+import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { CliError } from '../lib/errors';
+import { hasClaudeHooks, hookBundlesPresent } from '../lib/harness-hooks';
 import { sanitizeForTerminal } from '../lib/output';
-import { countPushHookEntries, pushScriptsPresent, wireSearchHooks } from '../lib/harness-hooks';
-import type { HooksResult, PushHookEntryCount } from '../lib/harness-hooks';
 import { buildOutcomeItem, getLookupStats, postOutcomes, type LookupStats } from '../lib/agent-api';
 import { UUID_RE } from '../lib/ids';
 import {
@@ -41,132 +33,55 @@ import type { CommandContext, CommandResult } from '../context';
  * a failing command, a stuck edit loop, or a subagent dispatch, without being
  * asked for it first.
  *
- * `on` and `off` write the SAME key `tenjin install` already reads
- * (`hooks.push`), through the same locked read-modify-write every `config set`
- * uses (see `persistPushMode` in commands/config.ts) — this command is a
- * convenience front end over that key plus the wiring step, not a second
- * mechanism. `on` additionally wires the four push hook scripts immediately
- * (idempotent, like every `wireSearchHooks` call: a second run registers nothing
- * new), so an operator does not have to separately remember to re-run `tenjin
- * install`. `off` writes the key and stops: every push arm reads `hooks.push` at
- * the top of its own run (see readConfig() in hook-scripts.ts), so an already
- * wired script goes inert on its NEXT invocation with no unwiring step at all.
+ * BOTH ARE A CONFIG WRITE AND NOTHING ELSE. They set the same `hooks.push` key
+ * `tenjin config set` does, through the same locked read-modify-write
+ * (`persistPushMode` in commands/config.ts). There is no wiring step any more:
+ * `tenjin install` registers the whole entry set once, and the daemon re-stats
+ * `config.json` per fire, so either value takes effect on the next prompt with
+ * nothing to install and no process to restart.
  */
 
 const LEDGER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const LEDGER_WINDOW_DAYS = 7;
 
-export interface PushOnDeps {
-  /** Home whose `.claude/settings.json` gets the push entries; defaults to os.homedir(). */
-  homeDir?: string;
-  /** Seam for the wiring call itself; defaults to the real `wireSearchHooks`. */
-  wire?: typeof wireSearchHooks;
-}
-
 /**
- * Turn the push experiment on: persist `hooks.push=on`, then wire the four push
- * hook scripts (prompt, failure, subagent, context) alongside whatever search
- * hooks are already configured. Typing `tenjin push on` IS the operator's
- * consent to wire Claude Code hooks, the only harness the push arms target
- * today, the same way `tenjin config set hooks.webSearch auto` is consent
- * enough for the search hooks it governs.
+ * Turn the push arms on: persist `hooks.push=on` and stop.
  *
- * IT IS NOT CONSENT TO OVERRIDE THE TWO GATES `install` APPLIES, and this
- * command used to call `wireSearchHooks` straight past both of them:
- *
- *  - `hooks.webSearch: off` is the kill switch for this whole bundle, and
- *    `install` on that setting writes NOTHING into settings.json. Wiring seven
- *    more entries there because a different verb was typed would make `off` mean
- *    something different depending on which command you reached for, so this
- *    refuses and names the command that lifts it. Refused BEFORE the config
- *    write: a command that declines to act must not leave the key flipped.
- *  - A recorded `--harness` set that does not include Claude Code says the
- *    operator's harness is not the one these arms hook. `install` skips there
- *    (`harness-not-claude`) and so does this, out loud. An EMPTY record is not
- *    that statement: it only means no past install passed `--harness`, which is
- *    the common case and wires as before.
- *
- * And a run that does wire seven entries into the operator's home has to disclose
- * what they do, in the same words `install` uses, including the one arm that can
- * hold a stopping subagent open for a turn.
+ * Typing this IS the operator's consent to the arms, but not to hook entries:
+ * those were written by `tenjin install`, disclosed there, and are the same
+ * eleven whatever this key says. An arm reads the key per fire, so a machine
+ * that has never run `tenjin install` stores the preference and fires nothing —
+ * which is what `tenjin doctor` reports.
  */
-export async function runPushOn(
-  ctx: CommandContext,
-  deps: PushOnDeps = {},
-): Promise<CommandResult> {
-  const raw = await loadRawConfig(ctx.dataDir);
-  const settings = resolveSettings({
-    config: raw,
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-  });
-  if (settings.hooksWebSearch.value === 'off') {
-    throw new CliError(
-      'USAGE',
-      // NOT "the kill switch for every hook this CLI writes", which this used to
-      // say and which is false about push arms that are already wired: those read
-      // `hooks.push` at run time and nothing else. What `webSearch off` is, is
-      // the decision not to REGISTER anything — which is why there is no wiring
-      // path for these arms to join.
-      'hooks.webSearch is off, which is the decision not to register any hook entries at all, so the push arms were not wired and hooks.push was left as it was. (Once wired, the push arms are switched by `tenjin push off`; this key does not reach them.)',
-      { fix: 'tenjin config set hooks.webSearch auto, then tenjin push on' },
-    );
-  }
-  // The set a past `--harness` install recorded; empty means nothing was ever
-  // recorded, NOT that Claude Code is absent.
-  const recorded = raw.install?.harness ?? [];
-  if (recorded.length > 0 && !recorded.includes('claude')) {
-    // The mode is still persisted: it is a durable preference, it costs nothing
-    // without scripts, and it is what makes a later `tenjin install` on a
-    // machine that does have Claude Code wire the arms with no second command.
-    await persistPushMode(ctx.dataDir, 'on');
-    return {
-      data: { mode: 'on', hooks: null, skipped: 'harness-not-claude' },
-      humanLines: [
-        `hooks.push is on, but nothing was wired (harness-not-claude): your recorded install harness is ${recorded.join(', ')}, and the push arms are Claude Code hooks.`,
-        'Wire them: tenjin install --harness claude, then tenjin push on',
-      ],
-    };
-  }
+export async function runPushOn(ctx: CommandContext): Promise<CommandResult> {
   await persistPushMode(ctx.dataDir, 'on');
-  const result = await (deps.wire ?? wireSearchHooks)({
-    homeDir: deps.homeDir ?? homedir(),
-    dataDir: ctx.dataDir,
-    mode: settings.hooksWebSearch.value,
-    push: true,
-  });
   return {
-    data: { mode: 'on', hooks: result },
-    humanLines: renderWireLines(
-      result,
-      hookRecipientHost(raw),
-      hookFallthroughHost(raw),
-      hookFallthroughAsked(raw),
-    ),
+    data: { mode: 'on' },
+    humanLines: [
+      'hooks.push is on. The daemon re-reads this on its next fire, so it takes effect on your next prompt.',
+      'Undo anytime: tenjin push off',
+    ],
   };
 }
 
 /**
- * Turn the push experiment off: persist `hooks.push=off` and stop. Nothing is
- * unwired — every push arm's first line reads this config key and exits in
- * milliseconds when it is not `on` — so this returns without touching
- * settings.json or the hook scripts at all.
+ * Turn the push arms off: persist `hooks.push=off` and stop. Nothing is
+ * unwired — the arms read this key per fire and plan nothing when it is not
+ * `on` — so this touches neither settings.json nor the daemon.
  */
 export async function runPushOff(ctx: CommandContext): Promise<CommandResult> {
   await persistPushMode(ctx.dataDir, 'off');
   return {
     data: { mode: 'off' },
     humanLines: [
-      'hooks.push is off. The wired scripts (if any) stay on disk but exit instantly on their next invocation — no re-install, no unwiring step.',
+      'hooks.push is off. The hook entries stay registered and the arms plan nothing from your next prompt on — no re-install, no unwiring step.',
     ],
   };
 }
 
 export interface PushStatusDeps {
-  /** Seam for "are the push scripts on disk"; defaults to a real stat of hooksDir. */
-  scriptsWired?: (dataDir: string) => Promise<boolean>;
-  /** Seam for "are the push arms registered in settings.json". */
-  hookEntries?: (homeDir: string, dataDir: string) => Promise<PushHookEntryCount>;
+  /** Seam for "is the loop daemon installed"; defaults to a real stat of hooksDir. */
+  bundlesPresent?: (dataDir: string) => Promise<boolean>;
   /** Home whose `.claude/settings.json` is read; defaults to os.homedir(). */
   homeDir?: string;
   /** Seam for the store read; defaults to the real query. */
@@ -788,15 +703,6 @@ export async function readSessionScores(
   }
 }
 
-/** All four push scripts on disk under `<dataDir>/hooks`. HALF the answer, and
- *  it says so: a script can be written without an entry (a `push on` whose
- *  settings write refused) or an entry can outlive its script (a half-finished
- *  uninstall), and in both cases nothing runs. {@link countPushHookEntries} is
- *  the other half, and `status` prints both. */
-export async function pushScriptsWired(dataDir: string): Promise<boolean> {
-  return await pushScriptsPresent(dataDir);
-}
-
 export async function runPushStatus(
   ctx: CommandContext,
   deps: PushStatusDeps = {},
@@ -807,11 +713,11 @@ export async function runPushStatus(
     flags: { baseUrl: ctx.flags.baseUrl },
     env: process.env,
   });
-  const wired = await (deps.scriptsWired ?? pushScriptsWired)(ctx.dataDir);
-  const entries = await (deps.hookEntries ?? countPushHookEntries)(
-    deps.homeDir ?? homedir(),
-    ctx.dataDir,
-  );
+  // TWO HALVES, and either alone reports an armed sidecar that does nothing: a
+  // daemon bundle nobody registered entries for, or entries pointing at a hooks
+  // dir with no bundle in it (a half-finished uninstall).
+  const bundles = await (deps.bundlesPresent ?? hookBundlesPresent)(ctx.dataDir);
+  const registered = await hasClaudeHooks(deps.homeDir ?? homedir(), ctx.dataDir);
   const ledger = await (deps.ledgerTallies ?? readLedgerTallies)(
     ctx.dataDir,
     (deps.now ?? Date.now)(),
@@ -823,8 +729,8 @@ export async function runPushStatus(
   const data = {
     mode: settings.hooksPush.value,
     captureMode: settings.hooksCapture.value,
-    scriptsWired: wired,
-    hookEntries: entries,
+    daemonInstalled: bundles,
+    hooksRegistered: registered,
     ledger,
     ...(sessions === undefined ? {} : { sessions }),
     server: await readShelfStats(ctx, deps),
@@ -917,27 +823,20 @@ function configuredShelves(settings: ResolvedSettings): Shelf[] {
 function renderStatusLines(data: {
   mode: string;
   captureMode: string;
-  scriptsWired: boolean;
-  hookEntries: PushHookEntryCount;
+  daemonInstalled: boolean;
+  hooksRegistered: boolean;
   ledger: PushLedgerTallies;
   server: Record<string, LookupStats | null>;
 }): string[] {
-  const { mode, captureMode, scriptsWired, hookEntries, ledger, server } = data;
-  // "Wired" is both halves and nothing less: files on disk that no settings
-  // entry points at never run, and entries pointing at files that are gone fail
-  // silently. Either alone reporting healthy is how an operator spends an hour
-  // wondering why a sidecar they can see installed says nothing.
-  const armed = scriptsWired && hookEntries.present === hookEntries.planned;
+  const { mode, captureMode, daemonInstalled, hooksRegistered, ledger, server } = data;
+  const armed = daemonInstalled && hooksRegistered;
   const lines = [
-    // `tenjin push on` is the verb that wires them AND the one that got the
-    // operator here; `tenjin install` only wires the arms when hooks.push is
-    // already `on`, so naming it turns a one-command fix into a guess.
-    `push: ${mode}${mode === 'on' && !armed ? ' (not fully wired yet; run `tenjin push on`)' : ''}`,
+    // `tenjin install` is the verb that registers the entries and materializes
+    // the daemon; `tenjin push on` only sets the key the arms read.
+    `push: ${mode}${mode === 'on' && !armed ? ' (nothing is wired yet; run `tenjin install`)' : ''}`,
     `capture: ${captureMode}`,
-    `scripts wired: ${scriptsWired ? 'yes' : 'no'}`,
-    `hook entries: ${hookEntries.present}/${hookEntries.planned}${
-      hookEntries.path === null ? ' (no settings.json found)' : ` in ${hookEntries.path}`
-    }`,
+    `daemon installed: ${daemonInstalled ? 'yes' : 'no'}`,
+    `hook entries registered: ${hooksRegistered ? 'yes' : 'no'}`,
     `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ~${ledger.injectedTokens} injected token(s)`,
   ];
   for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {
@@ -1032,36 +931,6 @@ function tallyGraded(rows: Record<string, unknown>[]): Record<string, Record<str
     if (typeof row.outcome_at === 'number') counts.posted += 1;
   }
   return out;
-}
-
-/** What `runPushOn` prints: what {@link wireSearchHooks} actually did, plus the
- *  undo. Not {@link hooksUndo} from lib/harness-hooks.ts — that line names
- *  `hooks.webSearch off`, the search hooks' own off switch, and would tell an
- *  operator to flip the wrong key. */
-function renderWireLines(
-  result: HooksResult,
-  shelfHost: string,
-  fallthroughHost: string,
-  fallthroughAsked: boolean,
-): string[] {
-  if (result.skipped !== undefined) {
-    return [
-      `hooks.push is on, but nothing was wired (${result.skipped}): ${result.warning ?? 'no harness to wire it into'}`,
-      ...(result.fix !== undefined ? [result.fix] : []),
-    ];
-  }
-  const registered = [...result.added, ...result.updated];
-  return [
-    `hooks.push is on. Wired ${registered.length > 0 ? registered.join(', ') : '(nothing new; already up to date)'} in ${
-      result.path ?? result.scriptsDir
-    }.`,
-    // THE SAME WORDS `install` USES, from the same function: this command writes
-    // the same entries into the same file, and an operator who reached it by a
-    // different verb is owed the same disclosure — above the undo, because the
-    // undo is only meaningful once you know what there is to undo.
-    hooksDisclosure(result, shelfHost, fallthroughHost, fallthroughAsked),
-    'Undo anytime: `tenjin push off` (the scripts stay, but go inert on their next run).',
-  ];
 }
 
 /**

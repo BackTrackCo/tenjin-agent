@@ -11,8 +11,6 @@ import {
   type PermissionsResult,
 } from '../lib/harness-permissions';
 import { modeGatedPointer } from '../lib/permissions';
-import { stopHookIsCurrent } from '../lib/harness-hooks';
-import { resolveHermesHomeLenient } from '../lib/hermes';
 import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
@@ -102,8 +100,6 @@ export interface ConfigSetDeps {
   harnessIsClaude?: boolean;
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
-  /** Whether the installed Stop hook matches this build; defaults to reading it. */
-  stopHookIsCurrent?: (dataDir: string) => Promise<boolean>;
   /** PATH probe for harness detection; defaults to probing `env.PATH`. */
   which?: (bin: string) => boolean;
   /** Environment for that probe; defaults to process.env. */
@@ -165,9 +161,6 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'loop.human_wait_ms':
     'ms a hook fire may take when a human is waiting on it (prompt, Stop, SessionStart)',
   'loop.tool_wait_ms': 'ms a hook fire may take when a tool call is waiting on it',
-  'loop.rate_per_min': 'lookups per minute per (session, agent, arm), charged once per question',
-  'loop.burst':
-    'how many lookups one (session, agent, arm) may make at once before the rate applies',
   'loop.idle_exit_min': 'minutes without a hook fire before the loop daemon exits',
   'loop.port':
     "the loop daemon's loopback port; null derives one from the data dir (set only when doctor reports a foreign listener)",
@@ -321,7 +314,7 @@ export async function runConfigSet(
   if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
   if (isHooksKey(key) || isLegacyHooksKey(key)) {
     const normalized = normalizeHooksKey(key)!;
-    return setHooksKey(normalized, value, ctx, deps);
+    return setHooksKey(normalized, value, ctx);
   }
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   if (isLoopKey(key)) return setLoopKey(key, value, ctx);
@@ -578,13 +571,11 @@ async function claudeInPlay(
   const requested = await loadRawConfig(ctx.dataDir)
     .then((c) => c.install?.harness ?? [])
     .catch(() => [] as HarnessTarget[]);
-  const hermesHome = resolveHermesHomeLenient(home, env).home;
   return harnessInPlay(
     home,
-    harnessTargetDir(home, 'claude', hermesHome),
-    detectHarnesses(home, which, hermesHome),
+    harnessTargetDir(home, 'claude'),
+    detectHarnesses(home, which),
     requested,
-    hermesHome,
   );
 }
 
@@ -604,17 +595,15 @@ function allowlistLines(sync: AllowlistSync): string[] {
 /**
  * `config set hooks.webSearch` / `hooks.agentDispatch`. Merged into the nested hooks
  * block through the same locked read-modify-write every other set uses, so a subkey a
- * newer CLI wrote survives. The installed script reads this file on every run, so a
- * value that script UNDERSTANDS takes effect immediately with no re-install — which
- * is every value it shipped knowing about, and not `deliberate-only` on a script
- * written before that existed. That one case is reported, once, below. Legacy
- * `hooks.searchMode`/`hooks.dispatchMode` still work as aliases (mapped via normalizeHooksKey).
+ * newer CLI wrote survives. The daemon re-stats this file per fire, so every value
+ * takes effect on the next prompt with no re-install and no process to restart.
+ * Legacy `hooks.searchMode`/`hooks.dispatchMode` still work as aliases (mapped via
+ * normalizeHooksKey).
  */
 async function setHooksKey(
   key: HooksConfigKey,
   value: string,
   ctx: CommandContext,
-  deps: ConfigSetDeps,
 ): Promise<CommandResult> {
   const subkey =
     key === 'hooks.webSearch'
@@ -646,52 +635,13 @@ async function setHooksKey(
     hooks: { ...existing.hooks, [subkey]: parsed },
   }));
   const entry: RenderedSetting = { value: parsed, source: 'file' };
-  // ONE honest line, not a nag loop: the value is stored either way, and the
-  // operator is told the running script predates it rather than left believing a
-  // setting took that did not. Two keys the installed Stop hook can be too old
-  // to honour: `hooks.stopNag`, whose `deliberate-only` an older script maps back
-  // to `on`, and `hooks.capture`, which scripts written before it existed do not
-  // read AT ALL — so `block` on one of those asks for nothing while `config get`
-  // reports it effective. The remaining keys' scripts read every value they could
-  // ever be set to.
-  const staleable = key === 'hooks.stopNag' || key === 'hooks.capture';
-  const current = staleable
-    ? await (deps.stopHookIsCurrent ?? stopHookIsCurrent)(ctx.dataDir)
-    : true;
-  const stale = current
-    ? undefined
-    : key === 'hooks.stopNag' && parsed === 'deliberate-only'
-      ? `The installed Stop hook predates ${JSON.stringify(parsed)} and will keep treating it as "on". Run \`tenjin install\` to update it.`
-      : // `off` is what an unaware script already does, so only a value that asks
-        // for something is worth a warning.
-        key === 'hooks.capture' && parsed !== 'off'
-        ? `The installed Stop hook predates \`hooks.capture\` and will not ask for a note. Run \`tenjin install\` to update it.`
-        : undefined;
-  // `hooks.push` IS NOT THE WHOLE SWITCH. Every other key here is read by a
-  // script that is already wired; this one also needs seven settings entries
-  // across four scripts, and only `tenjin push on` writes them. Setting the key
-  // alone persists and echoes as effective while no arm fires, which
-  // command-reference.md already warns about and the CLI used to accept in
-  // silence. Not a stale-script warning — the scripts are current, the wiring is
-  // absent — so it rides its own field. Only on a value that asks for something:
-  // `off` is what an unwired machine already does.
-  const unwired =
-    key === 'hooks.push' && parsed !== 'off'
-      ? 'Set this through `tenjin push on` / `tenjin push off`: `config set` stores the value but does not wire the hook entries the arms need, so on a machine that never ran `tenjin push on` nothing fires. `tenjin push on` reports what it wired; `tenjin doctor` and `tenjin push status` report a half-wired one.'
-      : undefined;
-  const notes = [
-    ...(stale !== undefined ? [stale] : []),
-    ...(unwired !== undefined ? [unwired] : []),
-  ];
-  return {
-    data: {
-      key,
-      ...entry,
-      ...(stale !== undefined ? { hookScriptStale: true } : {}),
-      ...(unwired !== undefined ? { hookEntriesNotWired: true } : {}),
-    },
-    humanLines: [formatLine(key, entry), ...notes],
-  };
+  // NO STALENESS WARNING, and there is nothing left to warn about: every hooks
+  // key is read out of `config.json` by the daemon on each fire, so a value set
+  // here takes effect on the next prompt with nothing to re-install. The old
+  // notes here (an installed Stop hook too old to honour `hooks.capture`, a
+  // `hooks.push` that needed seven settings entries before it did anything)
+  // described generated scripts that no longer exist.
+  return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
 /**

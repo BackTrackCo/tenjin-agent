@@ -6,20 +6,9 @@ import { join } from 'node:path';
 import { runUninstall } from './uninstall';
 import { STATE_DB_FILE, openStore } from '../lib/state-store';
 import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
-import {
-  DISPATCH_HOOK_FILE,
-  SESSIONSTART_HOOK_FILE,
-  STOP_HOOK_FILE,
-  WEBSEARCH_HOOK_FILE,
-} from '../lib/hook-scripts';
-import {
-  PUSH_CONTEXT_HOOK_FILE,
-  PUSH_FAILURE_HOOK_FILE,
-  PUSH_PROMPT_HOOK_FILE,
-  PUSH_SUBAGENT_HOOK_FILE,
-} from '../lib/push-scripts';
-import { wireSearchHooks } from '../lib/harness-hooks';
-import { hooksDir } from '../lib/paths';
+import { RETIRED_HOOK_FILES, writeClaudeHooks } from '../lib/harness-hooks';
+import type { DaemonStart } from '../daemon/control';
+import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
 import type { CommandContext } from '../context';
 
@@ -47,9 +36,44 @@ function makeCtx(): CommandContext {
 const MARKER = '<!-- tenjin-cli:skills -->';
 
 const run = async (): Promise<{ report: UninstallReport; text: string }> => {
-  const res = await runUninstall(makeCtx(), { home });
+  // Never the real one: uninstall must not signal a process this suite did not
+  // start, and there is no daemon behind these fixtures anyway.
+  const res = await runUninstall(makeCtx(), {
+    home,
+    stop: () => Promise.resolve({ state: 'not-running' as const }),
+  });
   return { report: res.data as UninstallReport, text: (res.humanLines ?? []).join('\n') };
 };
+
+/** Steps 1-3 of the real writer, without a process behind them. */
+async function fakeStart(dataDir: string): Promise<DaemonStart> {
+  await mkdir(hooksDir(dataDir), { recursive: true });
+  await writeFile(shimBundlePath(dataDir), '// shim');
+  await writeFile(join(hooksDir(dataDir), 'tenjin-daemon.mjs'), '// daemon');
+  await writeFile(daemonTokenPath(dataDir), 'a'.repeat(64), { mode: 0o600 });
+  await writeFile(
+    daemonPidPath(dataDir),
+    JSON.stringify({ pid: 4242, port: 34567, started_at: 1, data_dir: dataDir }),
+  );
+  return {
+    health: {
+      version: '9.9.9',
+      pid: 4242,
+      port: 34567,
+      uptime_ms: 1,
+      idle_ms: 0,
+      data_dir: dataDir,
+      rss: 1,
+    },
+    spawned: true,
+    replaced: null,
+    unconfirmed: null,
+    written: [],
+  };
+}
+
+const wire = (): Promise<unknown> =>
+  writeClaudeHooks({ homeDir: home, dataDir: data, mode: 'auto', start: fakeStart });
 
 /** A settings.json holding every hook entry we write and our rules, plus a
  *  stranger's on two of the same events. */
@@ -61,21 +85,21 @@ async function seedSettings(extra: Record<string, unknown> = {}): Promise<string
       PreToolUse: [
         {
           matcher: 'WebSearch',
-          hooks: [{ type: 'command', command: `node '${WEBSEARCH_HOOK_FILE}'` }],
+          hooks: [{ type: 'command', command: `node 'tenjin-websearch-hook.mjs'` }],
         },
         { matcher: 'Bash', hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] },
         {
           matcher: 'Agent|Task',
-          hooks: [{ type: 'command', command: `node '${DISPATCH_HOOK_FILE}'` }],
+          hooks: [{ type: 'command', command: `node 'tenjin-dispatch-hook.mjs'` }],
         },
       ],
       SessionStart: [
         {
           matcher: 'startup|clear|compact',
-          hooks: [{ type: 'command', command: `node '${SESSIONSTART_HOOK_FILE}'` }],
+          hooks: [{ type: 'command', command: `node 'tenjin-sessionstart-hook.mjs'` }],
         },
       ],
-      Stop: [{ hooks: [{ type: 'command', command: `node '${STOP_HOOK_FILE}'` }] }],
+      Stop: [{ hooks: [{ type: 'command', command: `node 'tenjin-stop-hook.mjs'` }] }],
     },
     permissions: { allow: [...FREE_VERB_RULES, 'Bash(ls:*)'] },
     ...extra,
@@ -94,16 +118,10 @@ async function seedSkill(dir: string, name: string, frontmatterName = name): Pro
   return skillDir;
 }
 
+/** What a machine that upgraded but never re-installed still carries. */
 async function seedHookScripts(): Promise<void> {
   await mkdir(hooksDir(data), { recursive: true });
-  for (const f of [
-    WEBSEARCH_HOOK_FILE,
-    DISPATCH_HOOK_FILE,
-    SESSIONSTART_HOOK_FILE,
-    STOP_HOOK_FILE,
-  ]) {
-    await writeFile(join(hooksDir(data), f), '// generated\n');
-  }
+  for (const f of RETIRED_HOOK_FILES) await writeFile(join(hooksDir(data), f), '// generated\n');
 }
 
 describe('runUninstall — a fully installed machine', () => {
@@ -117,10 +135,10 @@ describe('runUninstall — a fully installed machine', () => {
 
     expect(report.skills).toHaveLength(2);
     expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search'))).toBe(false);
-    expect(report.scripts).toHaveLength(4);
-    expect(existsSync(join(hooksDir(data), STOP_HOOK_FILE))).toBe(false);
-    expect(existsSync(join(hooksDir(data), DISPATCH_HOOK_FILE))).toBe(false);
-    expect(existsSync(join(hooksDir(data), SESSIONSTART_HOOK_FILE))).toBe(false);
+    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
+    for (const f of RETIRED_HOOK_FILES) {
+      expect(existsSync(join(hooksDir(data), f)), f).toBe(false);
+    }
     expect(report.settings.hooks.sort()).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
     expect(report.settings.rules.sort()).toEqual([...FREE_VERB_RULES].sort());
 
@@ -135,24 +153,6 @@ describe('runUninstall — a fully installed machine', () => {
       },
       permissions: { allow: ['Bash(ls:*)'] },
     });
-  });
-
-  // `skillsDirsFor` requires a Hermes home precisely so a new caller cannot quietly
-  // leave that directory behind. Both spellings are covered: the default and an
-  // absolute HERMES_HOME, which is the one a defaulted argument would have missed.
-  it('removes the Hermes skills, including under an absolute HERMES_HOME', async () => {
-    await seedSkill('.hermes/skills', 'tenjin-search');
-    const custom = join(home, 'custom-hermes');
-    await seedSkill(join('custom-hermes', 'skills'), 'tenjin-publish');
-
-    const bare = (await runUninstall(makeCtx(), { home, env: {} })).data as UninstallReport;
-    expect(bare.skills).toHaveLength(1);
-    expect(existsSync(join(home, '.hermes', 'skills', 'tenjin-search'))).toBe(false);
-
-    const scoped = (await runUninstall(makeCtx(), { home, env: { HERMES_HOME: custom } }))
-      .data as UninstallReport;
-    expect(scoped.skills).toHaveLength(1);
-    expect(existsSync(join(custom, 'skills', 'tenjin-publish'))).toBe(false);
   });
 
   // Ownership, not position: a rule or entry we did not write keeps its place even
@@ -394,7 +394,7 @@ describe('runUninstall — ownership gates', () => {
     await seedHookScripts();
     await writeFile(join(hooksDir(data), 'theirs.mjs'), '// not ours\n');
     const { report } = await run();
-    expect(report.scripts).toHaveLength(4);
+    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
     expect(report.hooksDir).toBeUndefined();
     expect(existsSync(join(hooksDir(data), 'theirs.mjs'))).toBe(true);
   });
@@ -509,7 +509,7 @@ describe('runUninstall — partial and repeat states', () => {
     await seedHookScripts();
     await seedSkill('.claude/skills', 'tenjin-publish');
     const { report } = await run();
-    expect(report.scripts).toHaveLength(4);
+    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
     expect(report.skills).toHaveLength(1);
     expect(report.settings.skipped).toBe('absent');
   });
@@ -521,42 +521,31 @@ describe('runUninstall — partial and repeat states', () => {
     await seedHookScripts();
     const { report, text } = await run();
     expect(report.settings.skipped).toBe('unparsable');
-    expect(report.scripts).toHaveLength(4);
+    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
     expect(text).toContain('not valid JSON');
   });
 });
 
 /**
- * The push experiment's arms, wired by the REAL wiring code rather than by a
- * hand-written fixture: uninstall's whole claim is that it is the exact reverse
- * of what install (and `tenjin push on`) wrote, and a fixture I typed here would
- * go stale the day a seventh entry or a fifth script is added, silently passing
- * while the real machine keeps a file forever.
+ * The daemon entries, wired by the REAL writer rather than by a hand-written
+ * fixture: uninstall's whole claim is that it is the exact reverse of what
+ * install wrote, and a fixture typed here would go stale the day a twelfth entry
+ * is added, silently passing while the real machine keeps one forever.
  */
-describe('runUninstall — the push experiment’s arms', () => {
-  it('removes every push script and every push settings.json entry', async () => {
+describe('runUninstall — the loop daemon', () => {
+  it('removes every entry the writer registered and every file it installed', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
-    const wired = await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
-    expect(wired.skipped).toBeUndefined();
-
-    // What the wiring actually put on disk, so this asserts against the writer
-    // instead of against a second copy of the plan.
-    const pushFiles = [
-      PUSH_PROMPT_HOOK_FILE,
-      PUSH_FAILURE_HOOK_FILE,
-      PUSH_SUBAGENT_HOOK_FILE,
-      PUSH_CONTEXT_HOOK_FILE,
-    ];
-    for (const f of pushFiles) expect(existsSync(join(hooksDir(data), f))).toBe(true);
+    await wire();
+    expect(existsSync(shimBundlePath(data))).toBe(true);
+    expect(existsSync(daemonTokenPath(data))).toBe(true);
 
     const { report } = await run();
 
-    for (const f of pushFiles) expect(existsSync(join(hooksDir(data), f))).toBe(false);
-    for (const f of pushFiles) {
-      expect(report.scripts.some((p) => p.endsWith(f))).toBe(true);
-    }
-    // Every event the push arms are registered under is reported as cleared.
+    expect(existsSync(shimBundlePath(data))).toBe(false);
+    expect(existsSync(daemonTokenPath(data))).toBe(false);
+    expect(existsSync(daemonPidPath(data))).toBe(false);
+    // Every event the entries were registered under is reported as cleared.
     expect(report.settings.hooks.sort()).toEqual(
       [
         'PostToolUse',
@@ -570,17 +559,13 @@ describe('runUninstall — the push experiment’s arms', () => {
       ].sort(),
     );
     // Nothing of ours is left anywhere in the file.
-    const after = await readFile(claudeSettingsPath(home), 'utf8');
-    for (const f of pushFiles) expect(after).not.toContain(f);
-    expect(JSON.parse(after)).toEqual({});
+    expect(JSON.parse(await readFile(claudeSettingsPath(home), 'utf8'))).toEqual({});
   });
 
-  it('removes them, and KEEPS the state store, even after `tenjin push off`', async () => {
+  it('KEEPS both state stores, whatever hooks.push says', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
-    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
-    // `push off` writes the config key and nothing else: the scripts and entries
-    // stay on disk on purpose, which is exactly the state uninstall must clear.
+    await wire();
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'off' } }));
     // A real store, with its WAL sidecars, as a machine that has run the hooks
     // would have.
@@ -592,27 +577,27 @@ describe('runUninstall — the push experiment’s arms', () => {
       Date.now(),
     ]);
     store?.close();
-    expect(existsSync(join(data, STATE_DB_FILE))).toBe(true);
+    await writeFile(join(data, 'loop.db'), 'not really sqlite, but it is the operator’s');
 
     const { report, text } = await run();
 
-    expect(report.scripts.some((p) => p.endsWith(PUSH_PROMPT_HOOK_FILE))).toBe(true);
     expect(report.settings.hooks).toContain('UserPromptSubmit');
-    // The store holds the operator's own record — the pairings this machine
-    // worked out, the outcome history, the open loops — so it is kept for the
-    // same reason the wallet and the config are, and a later install picks it
-    // up as it is.
+    // The stores hold the operator's own record — the pairings this machine
+    // worked out, the outcome history, the open loops — so they are kept for the
+    // same reason the wallet and the config are, and a later install picks them
+    // up as they are.
     expect(existsSync(join(data, STATE_DB_FILE))).toBe(true);
+    expect(existsSync(join(data, 'loop.db'))).toBe(true);
     expect(existsSync(join(data, 'config.json'))).toBe(true);
-    // And SAID so: the receipt names it under Kept, never under Removed.
-    expect(text).toContain('the hook state store ~/.tenjin/state.db');
+    // And SAID so: the receipt names them under Kept, never under Removed.
     const kept = text.slice(text.indexOf('Kept:'));
     expect(kept).toContain('~/.tenjin/state.db');
+    expect(kept).toContain('~/.tenjin/loop.db');
     const removed = text.slice(0, text.indexOf('Kept:'));
     expect(removed).not.toContain('state.db');
   });
 
-  it('leaves a stranger’s entry on a push-only event alone', async () => {
+  it('leaves a stranger’s entry on one of our events alone', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(
       claudeSettingsPath(home),
@@ -622,7 +607,7 @@ describe('runUninstall — the push experiment’s arms', () => {
         },
       })}\n`,
     );
-    await wireSearchHooks({ homeDir: home, dataDir: data, mode: 'auto', push: true });
+    await wire();
     await run();
     const after = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
       hooks: { UserPromptSubmit: unknown[] };
