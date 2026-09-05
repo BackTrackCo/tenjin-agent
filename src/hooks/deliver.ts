@@ -1,5 +1,6 @@
 import { ATOMIC_RE } from '../lib/ids';
 import { formatUsdDisplay } from '../lib/money';
+import { clean } from './text';
 import type { Answer, Delivery, Shelf } from './types';
 
 /**
@@ -35,14 +36,6 @@ const TEAM_OPENER =
  */
 const CLOSING_LINE =
   'If this settles it, proceed without re-verifying. If it does not apply, ignore it.';
-
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
-
-/** Strip control characters and cap: server text lands in a model's context. */
-function clean(value: string | undefined, max: number): string {
-  return (value ?? '').replace(CONTROL_CHARS, ' ').trim().slice(0, max);
-}
 
 function isFree(answer: Answer): boolean {
   return answer.price !== undefined && ATOMIC_RE.test(answer.price) && BigInt(answer.price) === 0n;

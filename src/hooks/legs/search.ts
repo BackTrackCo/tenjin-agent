@@ -7,6 +7,7 @@ import {
 import type { ShelfBypass } from '../../lib/http';
 import { isTeamShelfOrigin } from '../../lib/settings';
 import { tryOriginOf } from '../../lib/url';
+import { cut } from '../text';
 import type { Answer, KernelConfig, Leg, LegResult, LegStatus, Question, Trigger } from '../types';
 
 /**
@@ -62,14 +63,6 @@ function routeOf(
   };
 }
 
-/** The question at the shelf's bound, cut at a whole word. */
-export function cut(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const head = text.slice(0, max);
-  const space = head.lastIndexOf(' ');
-  return (space > 0 ? head.slice(0, space) : head).trimEnd();
-}
-
 /** What the transport saw, for the failure map below. Captured off the Response
  *  because `postSearch` reports the CLI's error contract, which collapses a 404,
  *  a gate page and a missing field into one code. */
@@ -81,16 +74,23 @@ interface Seen {
 /**
  * Why this leg produced no answer.
  *
- * The order is the order of certainty: our own timer beats the caller's signal
- * (both fire on the same deadline, and only the timer says the deadline is what
- * ended it), a response we never got beats one we misread, and a status beats a
- * body. 401 and 403 are `refused` rather than `http_401`: on a team shelf that
- * is Deployment Protection turning the bypass key away, which is a setup
- * problem and not a server outage.
+ * ONE CLOCK. The leg starts no timer of its own: `ask` already hands in
+ * `AbortSignal.any([fire.signal, AbortSignal.timeout(budget)])`, and the abort
+ * REASON says which of the two ended it — `AbortSignal.timeout` aborts with a
+ * `TimeoutError` and `AbortSignal.any` forwards the first reason, so a deadline
+ * and a harness that closed its socket stay distinguishable with nothing extra
+ * running (00-principles.md, "One clock").
+ *
+ * The order is the order of certainty: a request that never returned beats one
+ * we misread, and a status beats a body. 401 and 403 are `refused` rather than
+ * `http_401`: on a team shelf that is Deployment Protection turning the bypass
+ * key away, which is a setup problem and not a server outage.
  */
-function statusOf(seen: Seen | null, timedOut: boolean, signal: AbortSignal): LegStatus {
-  if (timedOut) return 'timeout';
-  if (signal.aborted) return 'aborted';
+function statusOf(seen: Seen | null, signal: AbortSignal): LegStatus {
+  if (signal.aborted) {
+    const name = (signal.reason as { name?: unknown } | undefined)?.name;
+    return name === 'TimeoutError' ? 'timeout' : 'aborted';
+  }
   if (seen === null) return 'error';
   if (seen.status === 401 || seen.status === 403) return 'refused';
   if (seen.status !== 200) return `http_${seen.status}`;
@@ -138,18 +138,6 @@ export function searchLeg(
   return {
     shelf,
     async request(q: Question, budgetMs: number, signal: AbortSignal): Promise<LegResult> {
-      // Our own copy of the deadline. `ask` already hands in a signal that
-      // aborts on it, so an abort alone cannot say WHICH deadline ended the
-      // leg; this flag can.
-      const controller = new AbortController();
-      let timedOut = false;
-      const timer = setTimeout(
-        () => {
-          timedOut = true;
-          controller.abort();
-        },
-        Math.max(1, budgetMs),
-      );
       let seen: Seen | null = null;
       const base: typeof fetch = fetchImpl ?? ((input, init) => fetch(input, init));
       const probe: typeof fetch = async (input, init) => {
@@ -169,9 +157,12 @@ export function searchLeg(
           budgetMs,
         });
         const result = await postSearch(body, {
+          // The transport's own timer is not a second deadline: `httpRequest`
+          // requires a number and the caller's signal is what actually ends the
+          // leg, so it gets the same budget and never fires first.
           baseUrl: route.baseUrl,
           timeoutMs: Math.max(1, budgetMs),
-          signal: AbortSignal.any([signal, controller.signal]),
+          signal,
           fetchImpl: probe,
           ...(route.bypass !== undefined ? { bypass: route.bypass } : {}),
         });
@@ -184,9 +175,7 @@ export function searchLeg(
           payload: result,
         };
       } catch {
-        return { status: statusOf(seen, timedOut, signal) };
-      } finally {
-        clearTimeout(timer);
+        return { status: statusOf(seen, signal) };
       }
     },
     /**

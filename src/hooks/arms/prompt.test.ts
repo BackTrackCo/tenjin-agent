@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ask } from '../ask';
 import type { Plan, Skip } from '../types';
 import { promptArm } from './prompt';
 import { cleanup, fireContext, freshDb, hookInput, kernelConfig } from './test-support';
@@ -64,9 +65,11 @@ describe('the prompt arm skips, each with its own reason', () => {
     expect(plan('yes')).toEqual({ reason: 'short', text: 'yes' });
   });
 
-  it('long: a pasted payload, 40 of 474', () => {
+  it('long: a pasted payload, 40 of 474, stored as a scrubbed 512-char head', () => {
     const pasted = 'x'.repeat(4001);
-    expect(plan(pasted)).toEqual({ reason: 'long', text: pasted });
+    // The row keeps the head, not the paste: `long` IS the pasted-payload case,
+    // and a paste is where a token and another session's transcript live.
+    expect(plan(pasted)).toEqual({ reason: 'long', text: 'x'.repeat(512) });
   });
 
   it('slash: a harness command', () => {
@@ -81,11 +84,56 @@ describe('the prompt arm skips, each with its own reason', () => {
 });
 
 describe('the prompt arm and secrets', () => {
+  it('masks the text it SKIPS too: a token in a refused prompt is never stored', () => {
+    const token = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz';
+    const slash = plan(`/compact ${PROMPT} with the ${token} in it`) as Skip;
+    expect(slash.reason).toBe('slash');
+    expect(slash.text).not.toContain(token);
+
+    // `long` is the one that matters most: it IS the pasted-payload case.
+    const pasted = plan(`${'x'.repeat(4001)} ${token}`) as Skip;
+    expect(pasted.reason).toBe('long');
+    expect(pasted.text).not.toContain(token);
+  });
+
   it('masks before it condenses, so a token is never promoted to an identifier', () => {
     const token = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz';
     const q = (plan(`${PROMPT} and the token ${token} keeps being refused`) as Plan).question;
     expect(q.text).not.toContain(token);
     expect(q.identifiers ?? []).not.toContain(token);
     expect(JSON.stringify(q)).not.toContain(token);
+  });
+});
+
+describe('the prompt arm under team.publicFallback off', () => {
+  it('sends the question to the team shelf only, out of its one mixed stage', async () => {
+    const asked: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      asked.push(String(input));
+      return new Response(JSON.stringify({ schemaVersion: 3, searchId: 'x', items: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    };
+    vi.stubGlobal('fetch', fetchImpl);
+    try {
+      const config = kernelConfig({ push: 'on' }, { publicFallback: 'off' });
+      const db = freshDb();
+      const ctx = fireContext({
+        db,
+        arm: promptArm,
+        input: hookInput({ prompt: PROMPT }),
+        config,
+      });
+      const planned = promptArm.plan?.(ctx) as Plan;
+      // The arm plans both shelves in ONE stage, so nothing but a leg-level
+      // filter can keep the public marketplace from being asked.
+      expect(planned.stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
+      await ask(ctx, planned);
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain('shelf.acme.internal');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -42,11 +42,14 @@ export function cleanup(): void {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 }
 
-export function kernelConfig(hooks: Partial<KernelConfig['hooks']> = {}): KernelConfig {
+export function kernelConfig(
+  hooks: Partial<KernelConfig['hooks']> = {},
+  team: Partial<KernelConfig['team']> = {},
+): KernelConfig {
   return {
     hooks: { ...CONFIG_DEFAULTS.hooks, ...hooks },
     loop: CONFIG_DEFAULTS.loop,
-    team: CONFIG_DEFAULTS.team,
+    team: { ...CONFIG_DEFAULTS.team, ...team },
     baseUrl: 'https://shelf.acme.internal',
     publicShelfUrl: 'https://tenjin.blog',
     shelfBypassSecret: '',

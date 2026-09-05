@@ -1028,9 +1028,6 @@ function hooksLine(io: Io, h: HooksResult): string {
   if (h.skipped === 'dry-run') {
     return `${paint(io, 'dim', '-')} ${label} unchanged (dry run).`;
   }
-  if (h.skipped === 'mode-off') {
-    return `${paint(io, 'dim', '-')} ${label} off (hooks.webSearch). Turn them on: tenjin config set hooks.webSearch auto, then tenjin install`;
-  }
   if (h.skipped === 'declined') {
     return `${paint(io, 'dim', '-')} ${label} not registered this run; nothing was configured. Register them: tenjin install`;
   }
@@ -1831,10 +1828,13 @@ async function resolveHooks(args: {
     await persistWebSearchHookMode(dataDir, mode);
     await persistAgentDispatchHookMode(dataDir, mode);
   }
-  // `off` is a decision not to register anything, so settings.json is not touched
-  // at all. It is NOT the same as an inert script: an operator who later sets the
-  // mode back to `auto` re-runs install, which is what the fix string says.
-  if (mode === 'off') return hooksSkipped('claude', home, dataDir, mode, 'mode-off');
+  // `off` is no longer a decision about the ENTRY SET. The eleven entries are
+  // permanent after the daemon cutover and every gate is in an arm, read out of
+  // config.json per fire: `hooks.webSearch off` silences the research arm on the
+  // next tool call, and the prompt, fetch and context arms — which answer to
+  // `hooks.push`, not to this key — keep firing. Registering nothing here left
+  // those three dead on a machine that had only ever said "no" to web search,
+  // and made turning it back on cost a re-install.
   return writeClaudeHooks({
     homeDir: home,
     dataDir,

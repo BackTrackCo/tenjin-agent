@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { condense, identifiersOf } from '../lib/query-condense';
 import { mask } from '../lib/redact';
+import { clean } from './text';
 import type { Question, SkipReason } from './types';
 
 /**
@@ -29,12 +30,17 @@ const PROMPT_MIN_CHARS = 80;
 /** And longer than this is a pasted payload: 40 of 474, every one a hook log. */
 const PROMPT_MAX_CHARS = 4000;
 
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+/** What a SKIPPED text is stored as. Not a query bound — nothing is asked — but
+ *  the row still lands in `loop.db`, and the skip most likely to carry a
+ *  credential or another session's transcript is `long`, which by definition is
+ *  a 4000-character paste. Today's arm stored the same 512 (`push-scripts.ts`
+ *  `recordEvent`), and it is the scrubbed head, never the raw text. */
+const SKIP_TEXT_CHARS = 512;
 
-/** Strip control characters and cap: this text lands in a model's context. */
-function clean(value: string, max: number): string {
-  return value.replace(CONTROL_CHARS, ' ').trim().slice(0, max);
+/** The text a {@link Skip} carries into `fires.question`: masked first, so a
+ *  token is a stub before the cut, then cut. */
+export function skipText(text: string): string {
+  return clean(mask(text), SKIP_TEXT_CHARS);
 }
 
 /** Whole words long enough to be a topic word. Not a scorer — the shelf decides

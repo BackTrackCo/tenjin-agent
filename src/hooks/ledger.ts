@@ -38,8 +38,8 @@ export function record(db: LoopDb, log: (line: string) => void, r: FireRecord): 
     try {
       db.prepare(
         `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
-           deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         r.id,
         r.at,
@@ -55,11 +55,16 @@ export function record(db: LoopDb, log: (line: string) => void, r: FireRecord): 
         r.elapsedMs,
         r.outcome.reason,
         r.questionKey ?? null,
-        r.question ?? r.outcome.detail ?? null,
+        r.question ?? null,
         r.outcome.delivery
           ? `${r.outcome.delivery.mode}:${r.outcome.delivery.resourceId ?? ''}`
           : null,
         r.emit === null ? null : JSON.stringify(r.emit),
+        // Its OWN column, because a fire that throws after its question is set
+        // used to lose the detail entirely: `question` held the question and
+        // there was nowhere else for the error class to go, so an `error` row
+        // said only "error". Every throw site past `plan` is one of those.
+        r.outcome.detail ?? null,
       );
       const leg = db.prepare(
         `INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms, search_id, title, url,

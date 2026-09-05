@@ -1,14 +1,18 @@
 import { mask } from '../../lib/redact';
+import { stripControl } from '../text';
 import { lookupArm } from './lookup';
 import type { Arm } from '../types';
 
 /**
  * The two web arms, over one spec shape (09-pr-c-lookup-arms.md).
  *
- * TWO ARMS, NOT ONE, because the kernel keys its once-per-question claim per
- * arm: an agent that fetches six pages while researching would otherwise share
- * a bucket with the search it is actually running. They differ in three fields
- * and are the same pipeline everywhere else.
+ * TWO ARMS, NOT ONE, because they answer to different switches and read
+ * different words: `research` is what `hooks.webSearch` speaks for and asks the
+ * query as typed, `fetch` rides the push experiment and asks a url. Two arms
+ * also means two `fires.arm` values, so the ledger can tell a page fetch from a
+ * real search. They are the same pipeline everywhere else. (The once-per-question
+ * claim is keyed on the QUESTION, per actor, not per arm: identical text asked
+ * by both is one lookup, which is the point — the loop does not double count.)
  *
  * NEITHER IS CONDENSED and neither has a length rule. A WebSearch query is
  * already a query — `condense` was measured to damage 131 of 184 real ones
@@ -33,9 +37,6 @@ export const REMIND_LINE =
  */
 const SAFE_PARAM_KEY_RE =
   /^(?:q|query|search|keywords?|topic|tags?|section|category|lang|locale|version|v)$/i;
-
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
 
 /** The prompt head a fetch carries. The url's own words come before it. */
 const PROMPT_HEAD = 400;
@@ -73,8 +74,9 @@ function paramWords(url: URL): string {
  * (`acme.com/download/sk-abc.../file.pdf`), which the allow-list never guarded.
  *
  * The port's own 512-character cut is gone: no arm has a length rule now, and
- * masking the whole string before the search leg cuts it is strictly safer than
- * cutting a secret in half first.
+ * masking a string before it is cut is strictly safer than cutting a secret in
+ * half first — which is why the one bound that survives here, the prompt head,
+ * masks first too, and why the leg's 512 cut runs after the spec's `[mask]`.
  */
 function urlWords(raw: string): string | null {
   try {
@@ -93,8 +95,13 @@ function urlWords(raw: string): string | null {
 export function fetchQuestion(toolInput: Record<string, unknown>): string {
   const words = urlWords(typeof toolInput.url === 'string' ? toolInput.url : '');
   if (words === null) return '';
-  const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt.slice(0, PROMPT_HEAD) : '';
-  return `${words} ${prompt}`.replace(CONTROL_CHARS, ' ').replace(/\s+/g, ' ').trim();
+  // MASKED BEFORE IT IS CUT, for the same reason the leg's 512 cut runs after
+  // the spec's `[mask]`: a token straddling character 400 would otherwise leave
+  // a fragment too short for any redaction rule to recognize. `mask` is
+  // idempotent, so the spec's own pass over the joined string is harmless.
+  const prompt =
+    typeof toolInput.prompt === 'string' ? mask(toolInput.prompt).slice(0, PROMPT_HEAD) : '';
+  return stripControl(`${words} ${prompt}`).replace(/\s+/g, ' ').trim();
 }
 
 /** WebSearch. The one arm `hooks.webSearch` speaks for. */
@@ -120,7 +127,7 @@ export const researchArm: Arm = lookupArm({
     ctx.deps.config().hooks.webSearch === 'remind' ? { context: REMIND_LINE } : null,
 });
 
-/** WebFetch. Its own arm, its own claim, its own once-per-piece marks. */
+/** WebFetch. Its own arm, its own switch, its own row in the ledger. */
 export const fetchArm: Arm = lookupArm({
   id: 'fetch',
   wait: 'tool',

@@ -78,6 +78,7 @@ interface FireRow {
   deadline_ms: number;
   delivered: string | null;
   question: string | null;
+  error: string | null;
 }
 
 interface LegDbRow {
@@ -326,10 +327,11 @@ describe('runFire: a hit', () => {
 
     const second = await runFire(input(), deps(db, [arm]));
     second.commit();
-    // No second lookup: the verdict came from the cache, and the piece was
-    // already marked seen by the first fire before its delivery threw.
+    // No second lookup: the verdict came from the cache. And the piece is still
+    // deliverable, because a delivery that threw showed the agent nothing and so
+    // never burned the once-per-piece mark.
     expect(legCalls).toBe(1);
-    expect(fireRows(db)[1]).toMatchObject({ reason: 'seen' });
+    expect(fireRows(db)[1]).toMatchObject({ reason: 'cached', delivered: 'inject:res-x' });
   });
 });
 
@@ -361,6 +363,54 @@ describe('runFire: seen', () => {
     const rows = fireRows(db);
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({ reason: 'seen', delivered: null });
+  });
+});
+
+describe('runFire: once-per-piece is about what was SHOWN', () => {
+  it('a log-only arm does not burn the mark, so an inject arm still delivers the piece', async () => {
+    // The context arm looks things up to earn a precision number and says
+    // nothing. Burning `seen:` there would let a silent lookup silence the
+    // injection a prompt asks for a second later (00-principles.md, 4).
+    const db = await freshDb();
+    const logged: Arm = {
+      id: 'context',
+      wait: 'tool',
+      on: [{ event: 'tool.before', kind: 'edit' }],
+      plan: () => ({
+        question: { text: 'q', questionKey: 'qk-log' },
+        stages: [[strongLeg('res-shared')]],
+      }),
+      deliver: (answer) => ({ mode: 'log', resourceId: answer.resourceId }),
+    };
+    const injects: Arm = {
+      id: 'prompt',
+      wait: 'human',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text: 'q2', questionKey: 'qk-inject' },
+        stages: [[strongLeg('res-shared')]],
+      }),
+      deliver: (answer) => ({ mode: 'inject', text: 'the finding', resourceId: answer.resourceId }),
+    };
+    const d = deps(db, [logged, injects]);
+    const first = await runFire(
+      input({ event: 'tool.before', tool: { name: 'Edit', kind: 'edit', input: {} } }),
+      d,
+    );
+    first.commit();
+    expect(fireRows(db)[0]).toMatchObject({
+      arm: 'context',
+      reason: 'hit',
+      delivered: 'log:res-shared',
+    });
+    expect(getMark(db, LEAD, 'seen:res-shared')).toBeNull();
+
+    const second = await runFire(input(), d);
+    expect(second.emit).toEqual({ context: 'the finding' });
+    second.commit();
+    expect(fireRows(db)[1]).toMatchObject({ arm: 'prompt', reason: 'hit' });
+    // And the injection DID burn it: a second prompt gets `seen`.
+    expect(getMark(db, LEAD, 'seen:res-shared')).not.toBeNull();
   });
 });
 
@@ -452,8 +502,10 @@ describe('runFire: before() throws', () => {
     commit();
     const row = fireRows(db)[0]!;
     expect(row.reason).toBe('error');
-    // before() throws before `question` is set, so the ledger's fallback lands the detail here.
-    expect(row.question).toBe('Error: boom');
+    // The class and message land in `error`, whether or not the fire had got as
+    // far as a question.
+    expect(row.error).toBe('Error: boom');
+    expect(row.question).toBeNull();
   });
 });
 

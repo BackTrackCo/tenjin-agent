@@ -21,7 +21,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     },
   };
 });
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -32,6 +32,7 @@ import {
   hasClaudeHooks,
   hookBundlesPresent,
   ownsHookEntry,
+  pruneOurHandlers,
   registeredHookPort,
   RETIRED_HOOK_FILES,
   writeClaudeHooks,
@@ -198,6 +199,40 @@ describe('writeClaudeHooks: the eleven entries, whole', () => {
     expect((await stat(settingsPath())).mtimeMs).toBe(before);
   });
 
+  it('converges the MODE even when the bytes already match', async () => {
+    if (platform() === 'win32') return;
+    await write();
+    // A dotfiles sync, a stray chmod, another tool's rewrite: the entries are
+    // still right, and the daemon token in them is now world-readable.
+    await chmod(settingsPath(), 0o644);
+    const second = await write();
+    expect(second.wrote).toBe(false);
+    expect((await stat(settingsPath())).mode & 0o777).toBe(0o600);
+  });
+
+  it('drops only OUR handler out of an entry someone hand-merged theirs into', async () => {
+    const theirs = { type: 'command', command: 'node /elsewhere/theirs.mjs' };
+    await writeSettings({
+      hooks: {
+        Stop: [
+          {
+            matcher: '*',
+            hooks: [
+              { type: 'command', command: `node ${join(hooksDir(data), 'tenjin-shim.mjs')}` },
+              theirs,
+            ],
+          },
+        ],
+      },
+    });
+    await write();
+    const after = JSON.parse(await readFile(settingsPath(), 'utf8')) as {
+      hooks: Record<string, Array<{ hooks: unknown[] }>>;
+    };
+    const survivors = (after.hooks.Stop ?? []).flatMap((e) => e.hooks);
+    expect(survivors).toContainEqual(theirs);
+  });
+
   it('leaves entries and keys that are not ours exactly where they were', async () => {
     const theirs = { hooks: [{ type: 'command', command: 'node /elsewhere/theirs.mjs' }] };
     await writeSettings({
@@ -306,6 +341,20 @@ describe('ownership', () => {
     expect(ownsHookEntry(cmd('node /elsewhere/theirs.mjs'), data)).toBe(false);
     expect(ownsHookEntry({ hooks: 'not-an-array' }, data)).toBe(false);
     expect(ownsHookEntry(null, data)).toBe(false);
+  });
+
+  it('pruneOurHandlers removes handlers, not entries', () => {
+    const ours = { type: 'http', url: 'http://127.0.0.1:1/hook/claude' };
+    const theirs = { type: 'command', command: 'node /elsewhere/theirs.mjs' };
+    // An entry that is only ours goes whole; one that is shared keeps theirs.
+    expect(pruneOurHandlers({ matcher: '*', hooks: [ours] }, data)).toBeNull();
+    expect(pruneOurHandlers({ matcher: '*', hooks: [ours, theirs] }, data)).toEqual({
+      matcher: '*',
+      hooks: [theirs],
+    });
+    // Nothing of ours in it: returned untouched, by identity.
+    const foreign = { matcher: '*', hooks: [theirs] };
+    expect(pruneOurHandlers(foreign, data)).toBe(foreign);
   });
 
   it('hasClaudeHooks answers no for a missing, unreadable or foreign settings file', async () => {

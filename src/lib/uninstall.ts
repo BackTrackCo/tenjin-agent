@@ -1,5 +1,5 @@
 import { lstat, readFile, readdir, rm, rmdir, realpath } from 'node:fs/promises';
-import { lstatSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import {
@@ -8,7 +8,7 @@ import {
   LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
 } from './harness-permissions';
-import { ownsHookEntry, RETIRED_HOOK_FILES } from './harness-hooks';
+import { pruneOurHandlers, RETIRED_HOOK_FILES } from './harness-hooks';
 import { PUSH_VITEST_REPORTER_FILE } from './push-scripts';
 
 /**
@@ -256,7 +256,9 @@ export async function removeFromSettings(
         nextHooks[event] = value;
         continue;
       }
-      const kept = value.filter((e) => !ownsHookEntry(e, dataDir));
+      // Handler by handler, not entry by entry: an entry someone hand-merged
+      // ours into keeps their handler and loses only ours.
+      const kept = value.map((e) => pruneOurHandlers(e, dataDir)).filter((e) => e !== null);
       if (kept.length !== value.length) removedHooks.push(event);
       // An event WE emptied loses its key entirely; one that still holds someone
       // else's entry keeps it, and an array that was already empty before we
@@ -308,7 +310,17 @@ export async function removeFromSettings(
       `${path} changed while it was being updated, so nothing was removed from it. Re-run \`tenjin uninstall\`.`,
     );
   }
-  await writeFileAtomic(path, `${JSON.stringify(next, null, 2)}\n`);
+  // KEEPING THE MODE IT HAS, the same rule lib/harness-permissions.ts holds:
+  // install now writes this file 0600 because it carries the daemon token, and
+  // handing it back world-readable on the way out is a downgrade nobody asked
+  // for. (The token itself goes in this same run, but an env block and an
+  // apiKeyHelper of the operator's own do not.)
+  const mode = statSync(path, { throwIfNoEntry: false })?.mode;
+  await writeFileAtomic(
+    path,
+    `${JSON.stringify(next, null, 2)}\n`,
+    mode === undefined ? {} : { mode: mode & 0o777 },
+  );
   return { path, hooks: removedHooks, rules: removedRules };
 }
 

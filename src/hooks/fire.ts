@@ -145,11 +145,19 @@ export async function runFire(
           result = asked.answer ? { reason: 'hit', answer: asked.answer } : skip('no-hit');
         }
         if (result.answer) {
-          if (!firstSight(deps.db, actor, result.answer.resourceId, deps.clock())) {
-            return { reason: 'seen', answer: result.answer };
-          }
           const delivery = arm.deliver?.(result.answer, ctx) ?? null;
           if (delivery === null) return { reason: 'no-hit', answer: result.answer };
+          // ONCE-PER-PIECE IS ABOUT WHAT AN AGENT WAS SHOWN, so only an
+          // injection burns the mark. A log-only arm looks a piece up to earn a
+          // precision number and says nothing; burning the mark there would let
+          // a silent lookup silence the real injection a prompt asks for a
+          // second later (00-principles.md, principle 4).
+          if (
+            delivery.mode === 'inject' &&
+            !firstSight(deps.db, actor, result.answer.resourceId, deps.clock())
+          ) {
+            return { reason: 'seen', answer: result.answer };
+          }
           return { ...result, delivery };
         }
         return result;

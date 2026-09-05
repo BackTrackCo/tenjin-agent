@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { chmod, lstat, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { claudeAdapter } from '../adapters/claude';
 import { HARNESSES } from '../adapters/types';
@@ -73,7 +73,6 @@ export const HOOK_TIMEOUT_SECONDS = HARNESS_MS / 1000;
 
 export type HooksSkipReason =
   | 'harness-not-claude'
-  | 'mode-off'
   | 'declined'
   | 'dry-run'
   | 'daemon-down'
@@ -165,8 +164,6 @@ function fixFor(reason: HooksSkipReason): string {
   switch (reason) {
     case 'harness-not-claude':
       return 'Hooks are wired for Claude Code only. Re-run `tenjin install --harness claude` on a machine with Claude Code.';
-    case 'mode-off':
-      return 'Enable them with `tenjin config set hooks.webSearch auto`, then re-run `tenjin install`.';
     case 'declined':
     case 'dry-run':
       return 'Wire them with `tenjin install --search-hooks auto`.';
@@ -204,12 +201,32 @@ function ownsHandler(handler: unknown, dataDir: string): boolean {
   return command.includes(hooksDir(resolve(dataDir)));
 }
 
-/** Ours when ANY of its handlers is: we only ever write one handler per entry. */
+/** Does this entry hold a handler of ours? The question `doctor` and
+ *  `hasClaudeHooks` ask; the writers ask {@link pruneOurHandlers} instead. */
 export function ownsHookEntry(entry: unknown, dataDir: string): boolean {
   if (!isPlainObject(entry)) return false;
   const handlers = entry.hooks;
   if (!Array.isArray(handlers)) return false;
   return handlers.some((h) => ownsHandler(h, dataDir));
+}
+
+/**
+ * The entry with every handler of OURS removed, or null when nothing is left of
+ * it.
+ *
+ * OWNERSHIP IS A PROPERTY OF THE HANDLER, so removal has to be too. We only ever
+ * write one handler per entry, but a person who hand-merged ours into an entry
+ * beside their own would otherwise have their handler deleted along with it by
+ * both the install writer and `uninstall` — silently, in a file they edited on
+ * purpose.
+ */
+export function pruneOurHandlers(entry: unknown, dataDir: string): unknown | null {
+  if (!isPlainObject(entry)) return entry;
+  const handlers = entry.hooks;
+  if (!Array.isArray(handlers)) return entry;
+  const kept = handlers.filter((h) => !ownsHandler(h, dataDir));
+  if (kept.length === handlers.length) return entry;
+  return kept.length === 0 ? null : { ...entry, hooks: kept };
 }
 
 interface SettingsInspection {
@@ -463,7 +480,9 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       nextHooks[event] = list;
       continue;
     }
-    const kept = list.filter((entry) => !ownsHookEntry(entry, dataDir));
+    const kept = list
+      .map((entry) => pruneOurHandlers(entry, dataDir))
+      .filter((entry) => entry !== null);
     const mine = planned.get(event) ?? [];
     if (kept.length === 0 && mine.length === 0) continue;
     nextHooks[event] = [...kept, ...mine];
@@ -485,8 +504,14 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
     removed,
   };
   // Byte-identical means untouched: a re-install that would write the same file
-  // does not write it at all, so nothing downstream sees an mtime move.
-  if (next === raw) return result;
+  // does not write it at all, so nothing downstream sees an mtime move. The MODE
+  // still converges, because it is the only thing guarding the daemon token this
+  // file carries as a literal and a dotfiles sync or a stray chmod can widen it
+  // long after the bytes settled.
+  if (next === raw) {
+    await tightenSettings(path);
+    return result;
+  }
 
   // The same optimistic-concurrency contract lib/harness-permissions.ts holds:
   // this is a whole-file replacement built from a snapshot, and Claude Code
@@ -508,6 +533,13 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   // 0600 because the file now carries the daemon token as a literal.
   await writeFileAtomic(path, next, { mode: 0o600 });
   return result;
+}
+
+/** Bring an already-correct settings.json back to 0600 if something widened it. */
+async function tightenSettings(path: string): Promise<void> {
+  const found = await stat(path).catch(() => null);
+  if (found === null || (found.mode & 0o077) === 0) return;
+  await chmod(path, 0o600).catch(() => undefined);
 }
 
 /**

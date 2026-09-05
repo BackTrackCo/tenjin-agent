@@ -1,7 +1,7 @@
 import type { Emit, HookInput } from '../../adapters/types';
 import { deliver } from '../deliver';
 import { searchLeg } from '../legs/search';
-import { question } from '../question';
+import { question, skipText } from '../question';
 import type {
   Arm,
   Delivery,
@@ -85,7 +85,10 @@ export function lookupArm(spec: LookupSpec): Arm {
       const raw = spec.text(ctx.input, ctx);
       if (raw === null || raw.length === 0) return null;
       const reason = spec.skip?.(raw) ?? null;
-      if (reason !== null) return { reason, text: raw };
+      // A skipped row still lands in `loop.db`, so it carries the SCRUBBED head,
+      // never the raw text: `long` is by definition a 4000-character paste, and
+      // a paste is where a token and another session's transcript live.
+      if (reason !== null) return { reason, text: skipText(raw) };
       const q = question(raw, spec.shape);
       if (q.text.length === 0) return null;
       const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
@@ -94,8 +97,8 @@ export function lookupArm(spec: LookupSpec): Arm {
     /**
      * `log` is a real delivery, not a missing one: the arm looked something up
      * to earn a precision number and says nothing. The kernel still writes the
-     * row and still burns the once-per-piece mark, which is what keeps a
-     * logged answer from being injected by another arm a second later.
+     * row, and it does NOT burn the once-per-piece mark — nothing was shown, so
+     * the prompt arm may still inject that piece a second later (`fire.ts`).
      */
     deliver(answer): Delivery {
       return spec.deliver === 'log'

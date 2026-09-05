@@ -155,6 +155,41 @@ describe('openLoopDb', () => {
     expect(daemon.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 1 });
   });
 
+  it("rebuilds a loop.db whose tables are a different build's shape", async () => {
+    // PR B's `legs` had no `calibration`, and `CREATE TABLE IF NOT EXISTS` is
+    // silent about a table that already exists in another shape: every leg
+    // insert would then throw and ROLLBACK its whole fire, leaving a ledger that
+    // looks alive while every real lookup vanishes. The no-migration rule says
+    // delete the file, so this is where it is deleted.
+    const dir = await freshDir();
+    const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
+    old.exec(`CREATE TABLE fires (id TEXT PRIMARY KEY, reason TEXT);
+              CREATE TABLE legs (fire_id TEXT, stage INTEGER, shelf TEXT);
+              CREATE TABLE marks (session TEXT, agent TEXT, key TEXT, value TEXT, at INTEGER);`);
+    old.prepare('INSERT INTO fires (id, reason) VALUES (?, ?)').run('stale', 'hit');
+    old.close();
+
+    const db = track(openLoopDb(dir));
+    expect(names(db, 'table')).toEqual(['fires', 'legs', 'marks']);
+    // The stale rows went with the file; a fire written now records in full.
+    expect(db.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 0 });
+    insertFire(db);
+    db.prepare(
+      `INSERT INTO legs (fire_id, stage, shelf, status, elapsed_ms, calibration)
+       VALUES (?, 0, 'team', 'ok', 12, 'hybrid-v1')`,
+    ).run(FIRE.id);
+    expect(db.prepare('SELECT count(*) AS n FROM legs').get()).toEqual({ n: 1 });
+  });
+
+  it('leaves a loop.db of the CURRENT shape alone, rows and all', async () => {
+    const dir = await freshDir();
+    const first = track(openLoopDb(dir));
+    insertFire(first);
+    first.close();
+    const second = track(openLoopDb(dir));
+    expect(second.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 1 });
+  });
+
   it.skipIf(process.platform === 'win32')('leaves the file 0600', async () => {
     const dir = await freshDir();
     track(openLoopDb(dir));

@@ -1141,10 +1141,12 @@ describe('runInstall: interactive walkthrough', () => {
   // off the TAIL: whatever disclosures a given run owed the operator sit above it,
   // and adding one must not be able to quietly drop a summary line.
   it('closes with a six-line summary: skills, publishing, permissions, hooks, wallet, next', async () => {
-    // Nothing disclosable: hooks off, permissions declined by the default seam,
-    // no nudge. What is left is the summary, which is what this pins.
+    // Nothing disclosable: hooks not wired this run, permissions declined by the
+    // default seam, no nudge. What is left is the summary, which is what this
+    // pins. `--no-hooks`, not `--search-hooks off`: `off` is a per-fire gate the
+    // arms read now, and it still registers the entries.
     const res = await runInstall(
-      { harness: ['claude'], searchHooks: 'off', claudeMd: false },
+      { harness: ['claude'], noHooks: true, claudeMd: false },
       makeCtx(),
       deps({ isInteractive: true }),
     );
@@ -1633,7 +1635,7 @@ describe('runInstall: interactive walkthrough', () => {
 
   it('a green doctor says nothing; a failure surfaces with its fix', async () => {
     const okRes = await runInstall(
-      { harness: ['claude'], searchHooks: 'off', claudeMd: false },
+      { harness: ['claude'], noHooks: true, claudeMd: false },
       makeCtx(),
       deps({ isInteractive: true }),
     );
@@ -3828,25 +3830,31 @@ describe('runInstall: search hooks', () => {
     expect(human(wired)).toContain('Restart Claude Code');
     expect(human(wired)).toContain('read once at session start');
 
-    const off = await runInstall(
-      { harness: ['claude'], searchHooks: 'off' },
+    // `--no-hooks`, not `--search-hooks off`: the entry set is permanent now and
+    // `off` is a per-fire gate the arms read, so the only run that wires nothing
+    // is the one that declined to wire.
+    const declined = await runInstall(
+      { harness: ['claude'], noHooks: true },
       makeCtx(),
       deps({ isInteractive: true }),
     );
-    expect(human(off)).not.toContain('Restart Claude Code');
+    expect(human(declined)).not.toContain('Restart Claude Code');
   });
 
-  it('--search-hooks off registers nothing and persists the choice', async () => {
+  it('--search-hooks off still registers the eleven entries and persists the choice', async () => {
     const res = await runInstall(
       { harness: ['claude'], searchHooks: 'off' },
       makeCtx({ json: true }),
       deps(),
     );
-    expect(hooksOf(res.data)).toMatchObject({ skipped: 'mode-off', mode: 'off', entries: 0 });
-    expect((await settings()).hooks).toBeUndefined();
+    // The entry set is permanent and every gate is in an arm: `off` silences the
+    // research arm per fire, and the prompt, fetch and context arms answer to
+    // `hooks.push`, so registering nothing here would have left them dead.
+    expect(hooksOf(res.data)).toMatchObject({ mode: 'off', entries: 11 });
+    expect(hooksOf(res.data).skipped).toBeUndefined();
+    expect(Object.keys((await settings()).hooks as object).length).toBeGreaterThan(0);
     expect(await persistedMode()).toBe('off');
     expect(await persistedAgentMode()).toBe('off');
-    expect(hooksOf(res.data).fix).toContain('tenjin config set hooks.webSearch auto');
   });
 
   it('--search-hooks remind wires the hooks in remind mode', async () => {

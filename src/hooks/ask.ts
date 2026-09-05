@@ -7,8 +7,11 @@ import type { Answer, FireContext, Leg, LegResult, LegRow, LegStatus, Plan, Shel
  * runs with whatever time is left. Team strong beats public strong beats the
  * best short-of-strong, decided once, here (02-redesign.md §5).
  *
- * `team.publicFallback: off` is one filter: a stage whose legs are all public
- * is dropped, so `[[team], [public]]` becomes `[[team]]` (tenjin-agent#229).
+ * `team.publicFallback: off` is one filter, and it filters LEGS, not stages:
+ * every lookup arm plans one mixed stage `[[team, public]]`, so a stage-level
+ * drop would have sent the public leg anyway. `off` means the public leg is
+ * never sent (tenjin-agent#229), whatever stage it was planned into; a stage
+ * left with no legs is dropped whole so the survivors keep their numbering.
  */
 
 /** Higher wins among equal strength. */
@@ -38,7 +41,9 @@ export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
   const { fire, deps } = ctx;
   const stages =
     deps.config().team.publicFallback === 'off'
-      ? plan.stages.filter((stage) => stage.some((leg) => leg.shelf !== 'public'))
+      ? plan.stages
+          .map((stage) => stage.filter((leg) => leg.shelf !== 'public'))
+          .filter((stage) => stage.length > 0)
       : plan.stages;
   const rows: LegRow[] = [];
   let best: Answer | null = null;

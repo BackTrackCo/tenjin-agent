@@ -189,7 +189,11 @@ describe('searchLeg statuses', () => {
         init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
       });
     const leg = searchLeg('team', 'prompt', CONFIG, fetchImpl);
-    expect((await leg.request(q('why'), 5, new AbortController().signal)).status).toBe('timeout');
+    // The signal `ask` hands every leg: the fire's abort OR the budget's own
+    // timeout. The leg starts no timer of its own and reads the abort REASON,
+    // so a `TimeoutError` is the deadline and anything else is the harness.
+    const signal = AbortSignal.any([new AbortController().signal, AbortSignal.timeout(5)]);
+    expect((await leg.request(q('why'), 5, signal)).status).toBe('timeout');
   });
 
   it('a transport that never answers is error', async () => {

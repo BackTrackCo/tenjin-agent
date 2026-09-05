@@ -2,6 +2,7 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { mask } from '../../lib/redact';
 import { getMark, setMark } from '../gates';
 import { packagesInSource } from '../packages';
+import { clean } from '../text';
 import { lookupArm } from './lookup';
 import type { Arm, FireContext } from '../types';
 
@@ -51,9 +52,6 @@ const ACTIVITY_PREFIX = 'activity:';
 
 /** A basename's own bound once it is words. */
 const CHURN_QUERY_CHARS = 300;
-
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
 
 function filePathOf(ctx: FireContext): string {
   const value = ctx.input.tool?.input.file_path;
@@ -111,12 +109,7 @@ function unaskedPackage(ctx: FireContext, path: string): string | null {
 function churnQuery(path: string): string {
   const base = path.split(/[/\\]/).pop() ?? '';
   const name = mask(base).replace(/\.[^.]+$/, '');
-  return name
-    .replace(/[-_.]/g, ' ')
-    .replace(CONTROL_CHARS, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, CHURN_QUERY_CHARS);
+  return clean(name.replace(/[-_.]/g, ' ').replace(/\s+/g, ' '), CHURN_QUERY_CHARS);
 }
 
 export const contextArm: Arm = lookupArm({

@@ -190,22 +190,31 @@ describe('ask: stage progression', () => {
 });
 
 describe('ask: team.publicFallback off', () => {
-  it('drops a stage whose legs are all public but keeps a mixed stage', async () => {
+  it('drops the public leg out of a MIXED stage, which is the only stage C plans', async () => {
+    // Every lookup arm plans `[[team, public]]`, so a stage-level filter would
+    // have sent the public leg on every fire `off` exists to stop.
+    const teamAns = mkAnswer('team', 'weak');
+    const mixedPublic = makeLeg('public', async () => {
+      throw new Error('must not run: publicFallback is off');
+    });
+    const mixedTeam = okLeg('team', {}, teamAns);
+    const result = await ask(context({ publicFallback: 'off' }), plan([[mixedPublic, mixedTeam]]));
+    expect(mixedPublic.requestSpy).not.toHaveBeenCalled();
+    expect(mixedTeam.requestSpy).toHaveBeenCalledTimes(1);
+    expect(result.answer).toEqual(teamAns);
+    expect(result.legs.map((row) => row.shelf)).toEqual(['team']);
+  });
+
+  it('drops a stage that held nothing but public legs, and renumbers what is left', async () => {
     const dropped = makeLeg('public', async () => {
       throw new Error('must not run: stage was all-public');
     });
     const teamAns = mkAnswer('team', 'weak');
-    const mixedPublic = okLeg('public', {}, null);
-    const mixedTeam = okLeg('team', {}, teamAns);
-    const result = await ask(
-      context({ publicFallback: 'off' }),
-      plan([[dropped], [mixedPublic, mixedTeam]]),
-    );
+    const team = okLeg('team', {}, teamAns);
+    const result = await ask(context({ publicFallback: 'off' }), plan([[dropped], [team]]));
     expect(dropped.requestSpy).not.toHaveBeenCalled();
-    expect(mixedPublic.requestSpy).toHaveBeenCalledTimes(1);
-    expect(mixedTeam.requestSpy).toHaveBeenCalledTimes(1);
-    expect(result.answer).toEqual(teamAns);
-    // The dropped stage is filtered out before numbering, so the surviving
+    expect(team.requestSpy).toHaveBeenCalledTimes(1);
+    // The emptied stage is filtered out before numbering, so the surviving
     // stage's rows are stage 0, not stage 1.
     expect(result.legs.every((row) => row.stage === 0)).toBe(true);
   });
