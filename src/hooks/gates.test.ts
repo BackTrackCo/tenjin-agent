@@ -62,6 +62,9 @@ const CONFIG: KernelConfig = {
   hooks: CONFIG_DEFAULTS.hooks,
   loop: CONFIG_DEFAULTS.loop,
   team: CONFIG_DEFAULTS.team,
+  baseUrl: CONFIG_DEFAULTS.baseUrl,
+  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
+  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
 };
 
 function context(db: LoopDb, actor: Actor, now: number): FireContext {

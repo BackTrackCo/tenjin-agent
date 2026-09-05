@@ -47,6 +47,13 @@ export interface Answer {
   /** The inline free body when the server sent one (PR F), else undefined. */
   text?: string;
   searchId?: string;
+  /** What `deliver.ts` renders and nothing else reads: the piece's atomic price
+   *  (the free/paid line), its author's handle, and the public excerpt the
+   *  pointer form carries when there is no body. Copied off the winning
+   *  candidate by the leg's `verdict`, because the kernel never sees one. */
+  price?: string;
+  handle?: string;
+  excerpt?: string;
 }
 
 export interface LegResult {
@@ -175,7 +182,15 @@ export interface Arm {
   after?(ctx: FireContext, result: Outcome): Emit | null;
 }
 
-export type KernelConfig = Pick<Config, 'loop' | 'team' | 'hooks'>;
+/**
+ * What a fire reads off `config.json`. The three shelf fields are here because
+ * the search leg resolves its own origin and bypass per shelf: `baseUrl` (with
+ * the secret) is the team shelf, `publicShelfUrl` is the public one.
+ */
+export type KernelConfig = Pick<
+  Config,
+  'loop' | 'team' | 'hooks' | 'baseUrl' | 'publicShelfUrl' | 'shelfBypassSecret'
+>;
 
 export interface Deps {
   db: LoopDb;

@@ -23,29 +23,41 @@ const ARMS: Arm[] = [];
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon
- * needs `loop`, `team` and `hooks` only, and must not throw on a file an
- * older CLI wrote. Invalid JSON or schema falls back to defaults with a log
- * line, never to a dead daemon.
+ * needs `loop`, `team`, `hooks` and the three shelf fields the search leg
+ * routes on, and must not throw on a file an older CLI wrote. Invalid JSON or
+ * schema falls back to defaults with a log line, never to a dead daemon.
+ *
+ * NO FLAG OR ENV LAYER. A daemon serves every session on the machine, so the
+ * only `baseUrl` it can honour is the one on disk; `--base-url` belongs to the
+ * CLI invocation that carried it.
  */
+const DEFAULTS: KernelConfig = {
+  loop: CONFIG_DEFAULTS.loop,
+  team: CONFIG_DEFAULTS.team,
+  hooks: CONFIG_DEFAULTS.hooks,
+  baseUrl: CONFIG_DEFAULTS.baseUrl,
+  publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
+  shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+};
+
 function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConfig {
   try {
     const raw = RawConfigSchema.safeParse(JSON.parse(readFileSync(configPath(dataDir), 'utf8')));
     if (!raw.success) {
       log(`config.json invalid; using defaults: ${raw.error.issues[0]?.message ?? ''}`);
-      return {
-        loop: CONFIG_DEFAULTS.loop,
-        team: CONFIG_DEFAULTS.team,
-        hooks: CONFIG_DEFAULTS.hooks,
-      };
+      return DEFAULTS;
     }
     const r = raw.data;
     return {
       loop: resolveLoopConfig(r),
       team: { publicFallback: r.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
       hooks: { ...CONFIG_DEFAULTS.hooks, ...(r.hooks ?? {}) } as KernelConfig['hooks'],
+      baseUrl: r.baseUrl ?? DEFAULTS.baseUrl,
+      publicShelfUrl: r.publicShelfUrl ?? DEFAULTS.publicShelfUrl,
+      shelfBypassSecret: r.shelfBypassSecret ?? DEFAULTS.shelfBypassSecret,
     };
   } catch {
-    return { loop: CONFIG_DEFAULTS.loop, team: CONFIG_DEFAULTS.team, hooks: CONFIG_DEFAULTS.hooks };
+    return DEFAULTS;
   }
 }
 

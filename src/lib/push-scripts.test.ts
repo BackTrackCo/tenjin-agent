@@ -1524,6 +1524,24 @@ describe('condense', () => {
     expect(condense('why does PR 751 fail on the migrate step')).toBe('PR 751 fail migrate step');
   });
 
+  it('keeps a negation, because a negation is usually the question', () => {
+    // `not`, `no` and `nor` were stopwords until the loop's prompt arm became
+    // the first real caller: this query condensed to `vitest restore spies`,
+    // which is the opposite question and matched the opposite pieces.
+    expect(condense('vitest does not restore spies between test files')).toBe(
+      'vitest not restore spies test files',
+    );
+    expect(condense('there is no migration ladder and no legacy path here')).toContain('no');
+  });
+
+  it('reads a word in any script, so an accented name survives whole', () => {
+    // The clause word regex was `[A-Za-z0-9_./:#-]+`, which split `Diátaxis`
+    // into `Di` and `taxis` and sent both.
+    expect(condense('the Diátaxis framework split the docs into four modes')).toBe(
+      'Diátaxis framework split docs four modes',
+    );
+  });
+
   it('does not read a time, a date, a hyphenated word or an abbreviation as an identifier', () => {
     // Each of these matches the identifier regex on shape (an inner
     // separator or a digit) and none is a handle; sent first and ANDed on by

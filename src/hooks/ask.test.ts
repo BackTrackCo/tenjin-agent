@@ -42,6 +42,9 @@ function config(publicFallback: PublicFallback): KernelConfig {
     hooks: CONFIG_DEFAULTS.hooks,
     loop: CONFIG_DEFAULTS.loop,
     team: { publicFallback },
+    baseUrl: CONFIG_DEFAULTS.baseUrl,
+    publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
+    shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
   };
 }
 
