@@ -23,7 +23,7 @@ export type Shelf = 'team' | 'public' | 'keys' | 'local';
 
 /**
  * The wire `trigger`: which arm asked, so the server can tell a prompt lookup
- * from a research one in its own telemetry (`agent-api.ts`). All five exist in
+ * from a research one in its own telemetry (`agent-api.ts`). All four exist in
  * the server's `lookupTriggerSchema`.
  */
 export type Trigger = 'prompt' | 'research' | 'dispatch' | 'failure';

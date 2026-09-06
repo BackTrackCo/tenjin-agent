@@ -25,7 +25,7 @@ import type {
  *   enabled? -> text -> skip? -> question -> gates -> legs -> deliver
  *
  * so the arm files are specs and this is the only place the pipeline is spelled
- * out. Adding a lookup arm in PR D (dispatch, the subagent-stop report lookup)
+ * out. Adding a lookup arm in PR D (dispatch)
  * is a spec, not code. An arm that asks nothing — context, and the failure,
  * stop and primer arms of PR D — implements `Arm` directly; this is the lookup
  * shape, not a framework.
@@ -58,9 +58,8 @@ export interface LookupSpec {
    * `ask.ts` drops the public leg under `team.publicFallback: off`.
    */
   shelves: Array<'team' | 'public'>;
-  /** No arm in this release is `log`: the read and churn lookups that were
-   *  log-only are deleted. It stays for PR D's subagent-stop arm, which looks a
-   *  child's ending up and says nothing because the child is over. */
+  /** `log` is the dispatch arm's: it parks what it found for the child and
+   *  says nothing to the parent. */
   deliver: 'inject' | 'log';
   /** Local writes, before anything is asked. */
   before?(ctx: FireContext): void;
