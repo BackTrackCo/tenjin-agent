@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CLOSING_LINE, PUBLIC_OPENER, TEAM_OPENER, deliver, fenceSafeBody } from './deliver';
+import { deliver, fenceSafeBody } from './deliver';
+import { CLOSING_LINE, LOCAL_OPENER, PUBLIC_OPENER, TEAM_OPENER } from './prose';
 import type { Answer } from './types';
 
 /**
@@ -47,6 +48,18 @@ describe('deliver', () => {
     expect(lines.at(-1)).toBe(CLOSING_LINE);
     // The excerpt is the pointer's job; the body replaces it.
     expect(out.text).not.toContain('the image tag changed');
+  });
+
+  it("a record of this machine's own has no url, no price and no pointer", () => {
+    const out = deliver(
+      { shelf: 'local', resourceId: 'pairing:12', title: 'Error: ENOENT', text: 'Touched: a.ts.' },
+      'local',
+    );
+    const lines = (out.text ?? '').split('\n');
+    expect(lines[0]).toBe(LOCAL_OPENER);
+    expect(lines[1]).toBe('"Error: ENOENT"');
+    expect(out.text).not.toContain('tenjin read');
+    expect(out.text).not.toContain('tenjin inspect');
   });
 
   it('prices a paid piece and points at inspect instead of read', () => {
@@ -153,5 +166,8 @@ describe('deliver', () => {
   it('opens as a team record on the team shelf and as third-party text on the public one', () => {
     expect(deliver(answer(), 'team').text?.startsWith(TEAM_OPENER)).toBe(true);
     expect(deliver(answer(), 'public').text?.startsWith(PUBLIC_OPENER)).toBe(true);
+    // The keys shelf is a team surface; `local` is this machine's own record.
+    expect(deliver(answer(), 'keys').text?.startsWith(TEAM_OPENER)).toBe(true);
+    expect(deliver(answer(), 'local').text?.startsWith(LOCAL_OPENER)).toBe(true);
   });
 });

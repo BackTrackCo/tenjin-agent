@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { KernelConfig, Plan } from '../types';
-import { fetchArm, fetchQuestion, REMIND_LINE, researchArm } from './research';
+import { REMIND_LINE } from '../prose';
+import { fetchArm, fetchQuestion, researchArm } from './research';
 import { cleanup, fireContext, freshDb, hookInput, kernelConfig, toolInput } from './test-support';
 
 /**

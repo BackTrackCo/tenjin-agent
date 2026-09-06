@@ -1,3 +1,4 @@
+import { REMIND_LINE } from '../prose';
 import { lookupArm } from './lookup';
 import type { Arm } from '../types';
 
@@ -16,16 +17,6 @@ import type { Arm } from '../types';
  * query, a url is already an address, and the search leg cuts at 512 on a word
  * boundary, which is the shelf's bound and no arm's.
  */
-
-/**
- * The one-liner `remind` mode says instead of sending the query anywhere,
- * verbatim from the generated arm this replaces (`hook-scripts.ts` REMIND_LINE).
- * Copied rather than imported: that module renders the whole legacy script set
- * and pulls `push-scripts.ts` and `state-store.ts` in with it, and the daemon
- * bundle starts in front of every tool call. It is deleted with them in PR E.
- */
-export const REMIND_LINE =
-  'Tenjin (a marketplace of tested, paid answers) may already have this: `tenjin search "<question>" --json` is free and anonymous.';
 
 /**
  * The url up to its first `?` or `#`, whichever comes first; the rest is cut.

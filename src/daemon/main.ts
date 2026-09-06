@@ -2,8 +2,14 @@ import { readFileSync, statSync } from 'node:fs';
 import pkg from '../../package.json';
 import { claudeAdapter } from '../adapters/claude';
 import { contextArm } from '../hooks/arms/context';
+import { dispatchArm } from '../hooks/arms/dispatch';
+import { failureArm } from '../hooks/arms/failure';
+import { primerArm } from '../hooks/arms/primer';
 import { promptArm } from '../hooks/arms/prompt';
 import { fetchArm, researchArm } from '../hooks/arms/research';
+import { stopArm } from '../hooks/arms/stop';
+import { subagentStartArm } from '../hooks/arms/subagent-start';
+import { subagentStopArm } from '../hooks/arms/subagent-stop';
 import { openLoopDb } from '../hooks/store';
 import { readToken, resolveDataDir } from '../hooks/shim';
 import type { Arm, Deps, KernelConfig } from '../hooks/types';
@@ -17,16 +23,29 @@ import { createHookServer } from './server';
  * serves every session and every subagent on the machine until it has been
  * idle for `loop.idle_exit_min`.
  *
- * ARMS: the three lookup arms of PR C, and `context`, which asks nothing and
- * only writes the marks PR D's arms read. ORDER IS THE MAP — `selectArm` takes
- * the first arm whose `on` matches, so a later arm can be shadowed by an
- * earlier one. These four cannot shadow each other: they key on disjoint
- * (event, kind) pairs, and `context` is last regardless because it is the only
- * one with more than one. Every entry `install` writes for an arm PR D has yet
- * to add finds nothing here, records `no-question` and answers 204.
+ * ARMS: the four lookup arms (prompt, research, fetch, dispatch), PR D's
+ * `failure`, the two subagent arms, `stop`, `primer`, and `context`, which
+ * asks nothing and only writes the marks the other arms read. ORDER IS THE MAP
+ * — `selectArm` takes the first arm whose `on` matches, so a later arm can be
+ * shadowed by an earlier one. These ten cannot shadow each other: they key on
+ * disjoint (event, kind) pairs (`failure` takes `tool.after/shell`, `context`
+ * takes `tool.before/shell` and `tool.after/read`), and `context` is last
+ * regardless because it is the only one with more than one. Every one of the
+ * eleven entries `install` writes now finds an arm.
  */
 
-const ARMS: Arm[] = [promptArm, researchArm, fetchArm, contextArm];
+const ARMS: Arm[] = [
+  promptArm,
+  researchArm,
+  fetchArm,
+  dispatchArm,
+  failureArm,
+  subagentStartArm,
+  subagentStopArm,
+  stopArm,
+  primerArm,
+  contextArm,
+];
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon
@@ -45,6 +64,7 @@ const DEFAULTS: KernelConfig = {
   baseUrl: CONFIG_DEFAULTS.baseUrl,
   publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
   shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  publish: CONFIG_DEFAULTS.publish,
 };
 
 function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConfig {
@@ -62,6 +82,7 @@ function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConf
       baseUrl: r.baseUrl ?? DEFAULTS.baseUrl,
       publicShelfUrl: r.publicShelfUrl ?? DEFAULTS.publicShelfUrl,
       shelfBypassSecret: r.shelfBypassSecret ?? DEFAULTS.shelfBypassSecret,
+      publish: { ...CONFIG_DEFAULTS.publish, ...(r.publish ?? {}) } as KernelConfig['publish'],
     };
   } catch {
     return DEFAULTS;
@@ -85,25 +106,21 @@ async function main(): Promise<void> {
     log('no daemon.token; run `tenjin daemon start`');
     process.exit(1);
   }
-  let db;
-  try {
-    db = openLoopDb(dataDir);
-  } catch (err) {
-    log(`loop.db open failed: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
-
   let config = readKernelConfig(dataDir, log);
   let mtime = configMtime(dataDir);
   const clock = () => Date.now();
-  const deps: Deps = {
-    db,
+  // `db` IS OPENED AFTER `bind()`, the daemon's only mutual exclusion:
+  // `openLoopDb` deletes and rebuilds a file of another build's shape, and two
+  // shims racing to spawn could otherwise have the loser unlink the file the
+  // winner had just opened. The continuation after `await bind()` runs before
+  // any connection callback, so no fire can see `deps.db` unset.
+  const deps = {
     config: () => config,
     clock,
     log,
     arms: ARMS,
     adapters: { claude: claudeAdapter },
-  };
+  } as Deps;
 
   const startedAt = clock();
   let lastRequestAt = startedAt;
@@ -139,7 +156,7 @@ async function main(): Promise<void> {
     try {
       await shutdown({
         server: hook.server,
-        db,
+        db: deps.db,
         dataDir,
         pid: process.pid,
         inFlight: hook.drain,
@@ -159,7 +176,7 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (err) => {
     log(`uncaughtException: ${err.stack ?? err.message}`);
     try {
-      db.close();
+      deps.db?.close();
     } catch {
       // Already closed.
     }
@@ -170,7 +187,7 @@ async function main(): Promise<void> {
       `unhandledRejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`,
     );
     try {
-      db.close();
+      deps.db?.close();
     } catch {
       // Already closed.
     }
@@ -182,12 +199,16 @@ async function main(): Promise<void> {
   const bound = await bind(hook.server, port, dataDir, version);
   if (bound.kind === 'peer') {
     // Lost a benign race to a daemon just like us; it serves, we go.
-    db.close();
     process.exit(0);
   }
   if (bound.kind === 'foreign') {
     log(`bind ${port}: ${bound.detail}; set \`loop.port\` if this persists`);
-    db.close();
+    process.exit(1);
+  }
+  try {
+    deps.db = openLoopDb(dataDir);
+  } catch (err) {
+    log(`loop.db open failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
   port = bound.port;

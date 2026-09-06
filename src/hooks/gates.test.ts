@@ -64,6 +64,7 @@ const CONFIG: KernelConfig = {
   baseUrl: CONFIG_DEFAULTS.baseUrl,
   publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
   shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  publish: CONFIG_DEFAULTS.publish,
 };
 
 function context(db: LoopDb, actor: Actor, now: number): FireContext {
@@ -115,23 +116,49 @@ describe('claim / finish / release', () => {
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toEqual({
       status: 'asking',
       at: NOW,
+      until: NOW + WAIT_MS,
     });
   });
 
-  it('a second claim inside waitMs is asked; past it the question is retaken', async () => {
+  it('a second claim inside the first fire’s deadline is asked; past it the question is retaken', async () => {
     const db = await freshDb();
     claim(db, LEAD, 'qk1', NOW, WAIT_MS);
     expect(claim(db, LEAD, 'qk1', NOW + WAIT_MS - 1, WAIT_MS)).toEqual({ kind: 'asked' });
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toEqual({
       status: 'asking',
       at: NOW,
+      until: NOW + WAIT_MS,
     });
     // A stale `asking` is a fire that hit its deadline or crashed: retake it.
     expect(claim(db, LEAD, 'qk1', NOW + WAIT_MS, WAIT_MS)).toEqual({ kind: 'fresh' });
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toEqual({
       status: 'asking',
       at: NOW + WAIT_MS,
+      until: NOW + 2 * WAIT_MS,
     });
+  });
+
+  it('a claim lives as long as the fire that TOOK it, not the one arriving', async () => {
+    // A research fire (tool_wait_ms 4000) holds the key; a prompt fire
+    // (human_wait_ms 2500) arriving at t+2600 must not retake it and drop the
+    // research verdict. At t+4100 the research fire is past its deadline.
+    const db = await freshDb();
+    const research = CONFIG_DEFAULTS.loop.tool_wait_ms;
+    const prompt = CONFIG_DEFAULTS.loop.human_wait_ms;
+    expect(prompt).toBeLessThan(research);
+    claim(db, LEAD, 'qk1', NOW, research, 'research-fire');
+    expect(claim(db, LEAD, 'qk1', NOW + 2600, prompt, 'prompt-fire')).toEqual({ kind: 'asked' });
+    expect(claim(db, LEAD, 'qk1', NOW + 4100, prompt, 'prompt-fire')).toEqual({ kind: 'fresh' });
+    expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toMatchObject({
+      by: 'prompt-fire',
+      until: NOW + 4100 + prompt,
+    });
+  });
+
+  it('an asking mark with no deadline on it is stale', async () => {
+    const db = await freshDb();
+    setMark(db, LEAD, 'q:qk1', JSON.stringify({ status: 'asking', at: NOW }), NOW);
+    expect(claim(db, LEAD, 'qk1', NOW + 1, WAIT_MS)).toEqual({ kind: 'fresh' });
   });
 
   it('finish caches the verdict, hit or miss', async () => {
@@ -165,6 +192,7 @@ describe('claim / finish / release', () => {
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toEqual({
       status: 'asking',
       at: NOW + 1,
+      until: NOW + 1 + WAIT_MS,
     });
   });
 

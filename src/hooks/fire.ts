@@ -5,7 +5,7 @@ import { ask } from './ask';
 import { finish, firstSight, gates, release } from './gates';
 import { record } from './ledger';
 import type { FireRecord } from './ledger';
-import { QUERY_MAX } from './legs/search';
+import { QUERY_MAX } from './legs/shelf';
 import { cut } from './text';
 import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome, Question } from './types';
 
@@ -110,10 +110,13 @@ export async function runFire(
     // `asking`: never a `done` verdict `finish` just cached, and never a claim
     // an earlier fire made (the `cached` path claims nothing).
     let holdsClaim = false;
-    const main = async (): Promise<Outcome> => {
+    const lookup = async (): Promise<Outcome> => {
       try {
-        arm.before?.(ctx);
-        const planned = arm.plan?.(ctx) ?? null;
+        await arm.before?.(ctx);
+        const planned = (await arm.plan?.(ctx)) ?? null;
+        // A plan that landed after the deadline (or after the harness left)
+        // claims nothing: the row already says `deadline`.
+        if (controller.signal.aborted) return skip('deadline');
         if (planned === null) return skip('no-question');
         if ('reason' in planned) {
           // The arm had text and refused it. The row keeps both, because the
@@ -175,22 +178,29 @@ export async function runFire(
         return skip('error', reasonOf(err));
       }
     };
+    // `after` runs INSIDE the race, because it may be async (K1): an `after`
+    // that stalls past the deadline is a `deadline` row like any other stage,
+    // never a hung fire. The abort check in front of it is what keeps an
+    // abandoned fire — the bail timer or the harness closing its socket, both
+    // abort this controller — from spending a mark on a question nobody will
+    // read the answer to; the row says `deadline` either way.
+    const main = async (): Promise<Outcome> => {
+      const result = await lookup();
+      if (controller.signal.aborted || result.reason === 'deadline') return result;
+      try {
+        emit = mergeEmit(result.delivery, (await arm.after?.(ctx, result, asked)) ?? null);
+        return result;
+      } catch (err) {
+        emit = null;
+        return skip('error', reasonOf(err));
+      }
+    };
     outcome = await Promise.race([main(), bail]);
     clearTimeout(timer);
     if (clientSignal?.aborted) {
-      // The harness gave up on this fire: nothing we send will be read. BEFORE
-      // `after`, because `after` is where an arm spends a local mark on the
-      // question it asked — and a fire nobody is listening to must not spend
-      // one, least of all while its own row says `deadline`.
+      // The harness gave up on this fire: nothing we send will be read.
       outcome = outcome.reason === 'deadline' ? outcome : { ...outcome, reason: 'deadline' };
-    }
-    if (outcome.reason !== 'deadline') {
-      try {
-        emit = mergeEmit(outcome.delivery, arm.after?.(ctx, outcome, asked) ?? null);
-      } catch (err) {
-        outcome = skip('error', reasonOf(err));
-        emit = null;
-      }
+      emit = null;
     }
   }
 

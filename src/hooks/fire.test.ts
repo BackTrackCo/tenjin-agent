@@ -48,6 +48,7 @@ const CONFIG: KernelConfig = {
   baseUrl: CONFIG_DEFAULTS.baseUrl,
   publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
   shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  publish: CONFIG_DEFAULTS.publish,
 };
 
 function input(over: Partial<HookInput> = {}): HookInput {
@@ -482,6 +483,9 @@ describe('runFire: deadline', () => {
       input(),
       deps(db, [arm], () => clockRef.now),
     );
+    // `before` and `plan` are awaited (K1), so the leg starts a microtask or
+    // two in; let it, before the clock jumps to the deadline.
+    await vi.advanceTimersByTimeAsync(0);
     await advance(CONFIG_DEFAULTS.loop.tool_wait_ms);
     const result = await resultPromise;
     expect(result.emit).toBeNull();
@@ -495,6 +499,113 @@ describe('runFire: deadline', () => {
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(getMark(db, LEAD, 'q:qk-deadline')).toBeNull();
     expect(claim(db, LEAD, 'qk-deadline', clockRef.now + 1, 2500)).toEqual({ kind: 'fresh' });
+  });
+});
+
+describe('runFire: async arm hooks under the race (K1)', () => {
+  function withClock() {
+    vi.useFakeTimers();
+    const clockRef = { now: NOW };
+    const advance = async (ms: number): Promise<void> => {
+      clockRef.now += ms;
+      await vi.advanceTimersByTimeAsync(ms);
+    };
+    return { clockRef, advance };
+  }
+
+  it('a plan that resolves past the deadline records deadline and spends no mark', async () => {
+    const { clockRef, advance } = withClock();
+    const db = await freshDb();
+    let afterCalls = 0;
+    const arm: Arm = {
+      id: 'slow-plan-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      // A stalled mount on the failure arm's test-report read: the plan
+      // itself is what never comes back.
+      plan: () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                question: { text: 'q', questionKey: 'qk-slow' },
+                stages: [[strongLeg('r-slow')]],
+              }),
+            CONFIG_DEFAULTS.loop.tool_wait_ms + 500,
+          ),
+        ),
+      after: () => {
+        afterCalls += 1;
+        return null;
+      },
+    };
+    const resultPromise = runFire(
+      input(),
+      deps(db, [arm], () => clockRef.now),
+    );
+    await advance(CONFIG_DEFAULTS.loop.tool_wait_ms);
+    const result = await resultPromise;
+    expect(result.emit).toBeNull();
+    result.commit();
+    expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline' });
+    // The plan lands after the row: nothing it would have claimed is claimed,
+    // and `after` never runs on a fire whose deadline passed.
+    await advance(1000);
+    expect(afterCalls).toBe(0);
+    expect(getMark(db, LEAD, 'q:qk-slow')).toBeNull();
+    expect(getMark(db, LEAD, 'seen:r-slow')).toBeNull();
+    expect(fireRows(db)).toHaveLength(1);
+  });
+
+  it('an after() that stalls past the deadline is a deadline row with no emit', async () => {
+    const { clockRef, advance } = withClock();
+    const db = await freshDb();
+    const arm: Arm = {
+      id: 'slow-after-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => null,
+      after: () =>
+        new Promise((resolve) =>
+          setTimeout(() => resolve({ context: 'LATE' }), CONFIG_DEFAULTS.loop.tool_wait_ms + 500),
+        ),
+    };
+    const resultPromise = runFire(
+      input(),
+      deps(db, [arm], () => clockRef.now),
+    );
+    await advance(CONFIG_DEFAULTS.loop.tool_wait_ms);
+    const result = await resultPromise;
+    expect(result.emit).toBeNull();
+    result.commit();
+    expect(fireRows(db)[0]).toMatchObject({ reason: 'deadline', emit: null });
+  });
+
+  it('async before, plan and after that resolve in time run in order and emit', async () => {
+    const db = await freshDb();
+    const order: string[] = [];
+    const arm: Arm = {
+      id: 'async-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      before: async () => {
+        order.push('before');
+      },
+      plan: async () => {
+        order.push('plan');
+        return { question: { text: 'q', questionKey: 'qk-async' }, stages: [[strongLeg('r-1')]] };
+      },
+      deliver: () => ({ mode: 'inject', text: 'PIECE', resourceId: 'r-1' }),
+      after: async (_ctx, result, question) => {
+        order.push('after');
+        return { context: `AFTER ${result.reason} ${question?.questionKey ?? ''}` };
+      },
+    };
+    const { emit, commit } = await runFire(input(), deps(db, [arm]));
+    commit();
+    expect(order).toEqual(['before', 'plan', 'after']);
+    expect(emit).toEqual({ context: 'PIECE\n\nAFTER hit qk-async' });
+    expect(fireRows(db)[0]).toMatchObject({ reason: 'hit' });
   });
 });
 

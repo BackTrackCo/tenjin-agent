@@ -37,7 +37,8 @@ function spec(over: Partial<LookupSpec> = {}): LookupSpec {
 function planOf(arm: Arm, prompt = 'how do we flip the collation back'): Plan | Skip | null {
   const db = freshDb();
   const ctx = fireContext({ db, arm, input: hookInput({ prompt }) });
-  return arm.plan?.(ctx) ?? null;
+  // A spec whose `text` is synchronous plans synchronously (lookup.ts).
+  return (arm.plan?.(ctx) ?? null) as Plan | Skip | null;
 }
 
 describe('lookupArm wiring', () => {

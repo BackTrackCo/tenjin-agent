@@ -43,6 +43,8 @@ function names(db: LoopDb, type: 'table' | 'index'): string[] {
     .sort();
 }
 
+const TABLES = ['facts', 'fires', 'handoff', 'legs', 'marks', 'pairing_closes', 'pairings'];
+
 const FIRE = {
   id: 'f1',
   at: 1,
@@ -75,14 +77,21 @@ function insertFire(db: LoopDb, id = FIRE.id): void {
 }
 
 describe('openLoopDb', () => {
-  it('creates loop.db with its three tables and both fires indexes', async () => {
+  it('creates loop.db with its seven tables and their indexes', async () => {
     // A nested, not-yet-existing dataDir: the daemon may be the first thing to
     // touch ~/.tenjin on a fresh machine.
     const dir = join(await freshDir(), 'nested', 'data');
     const db = track(openLoopDb(dir));
     expect(existsSync(loopDbPath(dir))).toBe(true);
-    expect(names(db, 'table')).toEqual(['fires', 'legs', 'marks']);
-    expect(names(db, 'index')).toEqual(['fires_actor', 'fires_at']);
+    expect(names(db, 'table')).toEqual(TABLES);
+    expect(names(db, 'index')).toEqual([
+      'fires_actor',
+      'fires_at',
+      'handoff_claim',
+      'pairings_coarse_status',
+      'pairings_key_status',
+      'pairings_open_head',
+    ]);
   });
 
   it('sets wal, foreign_keys and incremental auto_vacuum', async () => {
@@ -115,7 +124,7 @@ describe('openLoopDb', () => {
     // Every statement is IF NOT EXISTS, so the DDL is safe against a live file.
     expect(() => again.exec(LOOP_DDL)).not.toThrow();
     expect(again.prepare('SELECT value FROM marks').all()).toEqual([{ value: 'v' }]);
-    expect(names(again, 'table')).toEqual(['fires', 'legs', 'marks']);
+    expect(names(again, 'table')).toEqual(TABLES);
     expect(again.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' });
   });
 
@@ -170,7 +179,7 @@ describe('openLoopDb', () => {
     old.close();
 
     const db = track(openLoopDb(dir));
-    expect(names(db, 'table')).toEqual(['fires', 'legs', 'marks']);
+    expect(names(db, 'table')).toEqual(TABLES);
     // The stale rows went with the file; a fire written now records in full.
     expect(db.prepare('SELECT count(*) AS n FROM fires').get()).toEqual({ n: 0 });
     insertFire(db);
@@ -179,6 +188,20 @@ describe('openLoopDb', () => {
        VALUES (?, 0, 'team', 'ok', 12, 'hybrid-v1')`,
     ).run(FIRE.id);
     expect(db.prepare('SELECT count(*) AS n FROM legs').get()).toEqual({ n: 1 });
+  });
+
+  it("rebuilds when one of D's tables is in another shape", async () => {
+    // `handoff` without `question` is a file from another build; a park on it
+    // would fail on every dispatch. Same rule, same delete.
+    const dir = await freshDir();
+    const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
+    old.exec(LOOP_DDL.replace('  question  TEXT NOT NULL,\n', ''));
+    old.prepare(`INSERT INTO handoff (session, at) VALUES ('s', 1)`).run();
+    old.close();
+    const db = track(openLoopDb(dir));
+    expect(db.prepare('SELECT count(*) AS n FROM handoff').get()).toEqual({ n: 0 });
+    const columns = db.prepare('PRAGMA table_info(handoff)').all() as Array<{ name: string }>;
+    expect(columns.map((c) => c.name)).toContain('question');
   });
 
   it('leaves a loop.db of the CURRENT shape alone, rows and all', async () => {

@@ -8,7 +8,7 @@
  * about one arm's input — a prompt's junk rules, the head a skipped row stores,
  * the shelf's own query bound — and each is only readable next to the code and
  * the measurement that justifies it. They live in `hooks/question.ts`,
- * `hooks/text.ts`, `hooks/legs/search.ts` and the arm files, and every one
+ * `hooks/text.ts`, `hooks/legs/shelf.ts` and the arm files, and every one
  * carries its reason there the way these do here.
  */
 
@@ -46,10 +46,6 @@ export const HEALTH_MS = 200;
  * file; `tenjin doctor` reads it (PR E).
  */
 export const SPAWN_BACKOFF_MS = 60_000;
-
-/** A parked parent-to-child handoff and the parent-answer fallback live this
- *  long. A dispatch that never became a child must not seed a stranger later. */
-export const HANDOFF_TTL_MS = 120_000;
 
 /** Ledger rows older than this are deleted at the daemon's idle exit. Matches
  *  Claude Code's own transcript sweep default. */

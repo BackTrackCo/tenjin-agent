@@ -17,8 +17,9 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  * to migrate; `CREATE TABLE IF NOT EXISTS` per table, and a shape change means
  * DELETE `loop.db`, which is what a column added or dropped here (PR C's
  * `legs.calibration`, PR C's dropped `actors`) costs. Each PR creates only the
- * tables it writes; `handoff`, `facts` and `pairings` come with the PRs that
- * first write them.
+ * tables it writes: PR D's `handoff`, `facts`, `pairings` and `pairing_closes`
+ * (the last two in `state-store.ts`'s shape, verbatim, so E moves readers and
+ * not rows).
  *
  * AND THE DELETE HAPPENS HERE, because nothing else does it: `CREATE TABLE IF
  * NOT EXISTS` is silent about a table whose columns have changed, and the row
@@ -80,6 +81,57 @@ CREATE TABLE IF NOT EXISTS marks (
   at      INTEGER NOT NULL,
   PRIMARY KEY (session, agent, key)
 );
+CREATE TABLE IF NOT EXISTS handoff (
+  id        INTEGER PRIMARY KEY,
+  session   TEXT NOT NULL,
+  prompt_id TEXT,
+  at        INTEGER NOT NULL,
+  question  TEXT NOT NULL,
+  search_id TEXT,
+  answer    TEXT
+);
+CREATE INDEX IF NOT EXISTS handoff_claim ON handoff (session, prompt_id, at);
+CREATE TABLE IF NOT EXISTS facts (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairings (
+  id INTEGER PRIMARY KEY,
+  uid TEXT NOT NULL UNIQUE,
+  at INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  project TEXT,
+  machine TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  coarse_key TEXT,
+  cmd_head TEXT,
+  cmd TEXT,
+  error_line TEXT,
+  error_files TEXT,
+  fix_cmd TEXT,
+  fix_files TEXT,
+  pkg_versions TEXT,
+  scope TEXT NOT NULL,
+  status TEXT NOT NULL,
+  closes INTEGER NOT NULL DEFAULT 0,
+  closed_at INTEGER,
+  synced_at INTEGER
+);
+CREATE TABLE IF NOT EXISTS pairing_closes (
+  pairing_id INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  agent_id TEXT,
+  at INTEGER NOT NULL,
+  fix_cmd TEXT,
+  fix_files TEXT,
+  scope TEXT,
+  PRIMARY KEY (pairing_id, session)
+);
+CREATE INDEX IF NOT EXISTS pairings_key_status ON pairings(key, status);
+CREATE INDEX IF NOT EXISTS pairings_coarse_status ON pairings(coarse_key, status);
+CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';
 `;
 
 /**
@@ -124,6 +176,32 @@ const LOOP_SHAPE: Record<string, readonly string[]> = {
     'posted_at',
   ],
   marks: ['session', 'agent', 'key', 'value', 'at'],
+  handoff: ['id', 'session', 'prompt_id', 'at', 'question', 'search_id', 'answer'],
+  facts: ['key', 'value', 'at'],
+  pairings: [
+    'id',
+    'uid',
+    'at',
+    'session',
+    'project',
+    'machine',
+    'kind',
+    'key',
+    'coarse_key',
+    'cmd_head',
+    'cmd',
+    'error_line',
+    'error_files',
+    'fix_cmd',
+    'fix_files',
+    'pkg_versions',
+    'scope',
+    'status',
+    'closes',
+    'closed_at',
+    'synced_at',
+  ],
+  pairing_closes: ['pairing_id', 'session', 'agent_id', 'at', 'fix_cmd', 'fix_files', 'scope'],
 };
 
 /** Does every table this build knows about have exactly the columns it expects? */

@@ -17,13 +17,22 @@ export interface Actor {
 /** Who is blocked on this fire; picks `human_wait_ms` or `tool_wait_ms`. */
 export type Wait = 'human' | 'tool';
 
-export type Shelf = 'team' | 'public' | 'keys';
+/** `local` is this machine's own `loop.db`: a parked handoff or a closed
+ *  pairing, read by a leg exactly as a shelf is asked (13-pr-d-local-arms.md). */
+export type Shelf = 'team' | 'public' | 'keys' | 'local';
 
 /**
  * The wire `trigger`: which arm asked, so the server can tell a prompt lookup
- * from a research one in its own telemetry (`agent-api.ts`).
+ * from a research one in its own telemetry (`agent-api.ts`). All four exist in
+ * the server's `lookupTriggerSchema`.
  */
-export type Trigger = 'prompt' | 'research';
+export type Trigger = 'prompt' | 'research' | 'dispatch' | 'failure';
+
+/** An arm hook may be synchronous or not: the one async consumer is the
+ *  failure arm's test-report read, and `fire.ts` awaits all three under the
+ *  fire's deadline so a stalled mount costs a `deadline` row, never a hung
+ *  daemon. */
+export type Maybe<T> = T | Promise<T>;
 
 /**
  * `legs.status`: the split tenjin-agent#286 asks for, so a timeout, a 5xx, a
@@ -178,9 +187,9 @@ export interface Arm {
   wait: Wait;
   /** The only event-to-arm map. First matching arm wins. */
   on: Array<{ event: Event; kind?: ToolKind }>;
-  before?(ctx: FireContext): void;
+  before?(ctx: FireContext): Maybe<void>;
   /** A `Skip` is "there was text and I refused it"; null is "there was nothing". */
-  plan?(ctx: FireContext): Plan | Skip | null;
+  plan?(ctx: FireContext): Maybe<Plan | Skip | null>;
   deliver?(answer: Answer, ctx: FireContext): Delivery | null;
   /**
    * The last word, and the only place an arm writes what the fire cost it.
@@ -189,17 +198,19 @@ export interface Arm {
    * ASKED: re-deriving the question here would race a second fire by the same
    * actor and mark the wrong thing.
    */
-  after?(ctx: FireContext, result: Outcome, question: Question | null): Emit | null;
+  after?(ctx: FireContext, result: Outcome, question: Question | null): Maybe<Emit | null>;
 }
 
 /**
  * What a fire reads off `config.json`. The three shelf fields are here because
  * the search leg resolves its own origin and bypass per shelf: `baseUrl` (with
- * the secret) is the team shelf, `publicShelfUrl` is the public one.
+ * the secret) is the team shelf, `publicShelfUrl` is the public one. `publish`
+ * is the capture ask's `<mode>` when the checkout has no `.tenjin.json` of its
+ * own: the ask names the consent a publish will actually run under.
  */
 export type KernelConfig = Pick<
   Config,
-  'loop' | 'team' | 'hooks' | 'baseUrl' | 'publicShelfUrl' | 'shelfBypassSecret'
+  'loop' | 'team' | 'hooks' | 'baseUrl' | 'publicShelfUrl' | 'shelfBypassSecret' | 'publish'
 >;
 
 export interface Deps {

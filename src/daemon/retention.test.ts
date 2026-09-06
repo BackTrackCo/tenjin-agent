@@ -83,7 +83,7 @@ describe('runRetention: fires by age', () => {
 
     const report = runRetention(db, NOW);
 
-    expect(report).toEqual({ fires: 2, marks: 0, truncated: false });
+    expect(report).toEqual({ fires: 2, marks: 0, handoff: 0, truncated: false });
     expect(ids('fires')).toEqual(['edge-keep', 'fresh']);
     // Cascade: the legs of a deleted fire go with it, no orphan rows.
     expect(ids('legs')).toEqual(['edge-keep', 'fresh']);
@@ -107,7 +107,7 @@ describe('runRetention: fires by age', () => {
   });
 
   it('returns zeros on an empty ledger', () => {
-    expect(runRetention(db, NOW)).toEqual({ fires: 0, marks: 0, truncated: false });
+    expect(runRetention(db, NOW)).toEqual({ fires: 0, marks: 0, handoff: 0, truncated: false });
   });
 });
 
@@ -125,7 +125,7 @@ describe('runRetention: fires row cap', () => {
 
     const report = runRetention(db, NOW);
 
-    expect(report).toEqual({ fires: excess, marks: 0, truncated: false });
+    expect(report).toEqual({ fires: excess, marks: 0, handoff: 0, truncated: false });
     expect(count('fires')).toBe(FIRES_ROW_CAP);
     const min = db.prepare('SELECT MIN(at) AS v FROM fires').get() as { v: unknown };
     expect(Number(min.v)).toBe(NOW - (FIRES_ROW_CAP - 1));
@@ -146,8 +146,24 @@ describe('runRetention: marks', () => {
 
     const report = runRetention(db, NOW);
 
-    expect(report).toEqual({ fires: 1, marks: 1, truncated: false });
+    expect(report).toEqual({ fires: 1, marks: 1, handoff: 0, truncated: false });
     expect(ids('marks')).toEqual(['m-edge', 'm-fresh']);
+  });
+});
+
+describe('runRetention: handoff', () => {
+  it('sweeps unclaimed rows older than the cutoff and keeps newer ones', () => {
+    // A claim deletes its row, so what retention sees was never claimed: a
+    // child that never started, or a harness that never sent SubagentStart.
+    const stmt = db.prepare(
+      `INSERT INTO handoff (session, prompt_id, at, question) VALUES (?, 'p', ?, 'q')`,
+    );
+    stmt.run('h-old', OLD);
+    stmt.run('h-edge', CUTOFF);
+    stmt.run('h-fresh', FRESH);
+    const report = runRetention(db, NOW);
+    expect(report).toEqual({ fires: 0, marks: 0, handoff: 1, truncated: false });
+    expect(ids('handoff')).toEqual(['h-edge', 'h-fresh']);
   });
 });
 
@@ -180,7 +196,12 @@ describe('runRetention: time bound', () => {
     seedFires([['old', OLD]]);
     let t = 0;
     const clock = () => (t += 100);
-    expect(runRetention(db, NOW, clock)).toEqual({ fires: 1, marks: 0, truncated: false });
+    expect(runRetention(db, NOW, clock)).toEqual({
+      fires: 1,
+      marks: 0,
+      handoff: 0,
+      truncated: false,
+    });
   });
 });
 
@@ -198,7 +219,7 @@ describe('runRetention: housekeeping', () => {
     reader.exec('BEGIN');
     reader.prepare('SELECT COUNT(*) FROM fires').get();
     try {
-      expect(runRetention(db, NOW)).toEqual({ fires: 1, marks: 0, truncated: false });
+      expect(runRetention(db, NOW)).toEqual({ fires: 1, marks: 0, handoff: 0, truncated: false });
       expect(count('fires')).toBe(1);
     } finally {
       reader.exec('COMMIT');

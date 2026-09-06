@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import { AGENT_ID_RE } from '../lib/grade';
 import { CLAUDE_CONTEXT_MAX } from '../hooks/constants';
+import { hasErrorMarker } from './error-markers';
 import type {
   Emit,
   Event,
@@ -136,9 +137,12 @@ export function decode(raw: unknown): HookInput | null {
     if (callId !== undefined) tool.callId = callId;
     if (event === 'tool.after') {
       // Decided here, never by an arm reading the text: PostToolUseFailure is
-      // a distinct event literal in the 2.1.259 schema.
-      tool.ok = native === 'PostToolUseFailure' ? false : true;
+      // a distinct event literal in the 2.1.259 schema, and a Bash PostToolUse
+      // whose output carries an error marker is a failure too (decision 9):
+      // a non-zero exit inside a pipe, or a runner that prints its verdict and
+      // exits zero, arrives as a plain PostToolUse.
       if (native === 'PostToolUseFailure') {
+        tool.ok = false;
         if (typeof raw.error === 'string') tool.result = { error: raw.error };
         else {
           const result = toolResult(raw.error);
@@ -147,6 +151,10 @@ export function decode(raw: unknown): HookInput | null {
       } else {
         const result = toolResult(raw.tool_response);
         if (result !== undefined) tool.result = result;
+        tool.ok = !(
+          tool.kind === 'shell' &&
+          hasErrorMarker((result?.stdout ?? '') + '\n' + (result?.stderr ?? ''))
+        );
       }
       if (typeof raw.is_interrupt === 'boolean') tool.interrupted = raw.is_interrupt;
     }

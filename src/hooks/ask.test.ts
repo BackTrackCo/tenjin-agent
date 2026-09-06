@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../adapters/types';
 import { CONFIG_DEFAULTS, type PublicFallback } from '../lib/config';
 import { RESERVE_MS } from './constants';
-import { ask } from './ask';
+import { SHELF_RANK, ask } from './ask';
 import type { LoopDb } from './store';
 import type {
   Answer,
@@ -44,6 +44,7 @@ function config(publicFallback: PublicFallback): KernelConfig {
     baseUrl: CONFIG_DEFAULTS.baseUrl,
     publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
     shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+    publish: CONFIG_DEFAULTS.publish,
   };
 }
 
@@ -179,6 +180,17 @@ describe('ask: stage progression', () => {
     ]);
   });
 
+  it('ranks team over keys over local over public, so a shelf write-up beats this machine', async () => {
+    const local = okLeg('local', {}, mkAnswer('local'));
+    const keys = okLeg('keys', {}, mkAnswer('keys'));
+    const pub = okLeg('public', {}, mkAnswer('public'));
+    const team = okLeg('team', {}, mkAnswer('team'));
+    expect((await ask(context(), plan([[local, pub]]))).answer?.shelf).toBe('local');
+    expect((await ask(context(), plan([[local, keys]]))).answer?.shelf).toBe('keys');
+    expect((await ask(context(), plan([[keys, team, local, pub]]))).answer?.shelf).toBe('team');
+    expect(SHELF_RANK).toEqual({ team: 4, keys: 3, local: 2, public: 1 });
+  });
+
   it('every stage runs while every stage misses, and the answer stays null', async () => {
     const s1 = okLeg('keys', {}, null);
     const s2 = okLeg('public', {}, null);
@@ -209,7 +221,7 @@ describe('ask: team.publicFallback off', () => {
     expect(result.legs.map((row) => row.shelf)).toEqual(['team']);
   });
 
-  it('drops a stage that held nothing but public legs, and renumbers what is left', async () => {
+  it('skips a stage that held nothing but public legs, and the next stage keeps its index', async () => {
     const dropped = makeLeg('public', async () => {
       throw new Error('must not run: stage was all-public');
     });
@@ -218,9 +230,9 @@ describe('ask: team.publicFallback off', () => {
     const result = await ask(context({ publicFallback: 'off' }), plan([[dropped], [team]]));
     expect(dropped.requestSpy).not.toHaveBeenCalled();
     expect(team.requestSpy).toHaveBeenCalledTimes(1);
-    // The emptied stage is filtered out before numbering, so the surviving
-    // stage's rows are stage 0, not stage 1.
-    expect(result.legs.every((row) => row.stage === 0)).toBe(true);
+    // The ledger's `stage` is the PLAN's index: a two-stage failure plan whose
+    // stage 1 hit must say 1, whatever was filtered out of stage 0.
+    expect(result.legs.map((row) => row.stage)).toEqual([1]);
   });
 });
 

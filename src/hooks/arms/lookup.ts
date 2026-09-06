@@ -1,12 +1,13 @@
 import type { Emit, HookInput } from '../../adapters/types';
 import { deliver } from '../deliver';
-import { searchLeg } from '../legs/search';
+import { searchLeg } from '../legs/shelf';
 import { question, skipText } from '../question';
 import type {
   Arm,
   Delivery,
   FireContext,
   KernelConfig,
+  Maybe,
   Outcome,
   Plan,
   Question,
@@ -24,7 +25,7 @@ import type {
  *   enabled? -> text -> skip? -> question -> gates -> legs -> deliver
  *
  * so the arm files are specs and this is the only place the pipeline is spelled
- * out. Adding a lookup arm in PR D (dispatch, the subagent-stop report lookup)
+ * out. Adding a lookup arm in PR D (dispatch)
  * is a spec, not code. An arm that asks nothing — context, and the failure,
  * stop and primer arms of PR D — implements `Arm` directly; this is the lookup
  * shape, not a framework.
@@ -48,7 +49,7 @@ export interface LookupSpec {
    * and nothing else touches them. `ctx` is the second parameter for a spec
    * whose text depends on this actor's own marks, which only the fire knows.
    */
-  text(input: HookInput, ctx: FireContext): string | null;
+  text(input: HookInput, ctx: FireContext): Maybe<string | null>;
   /** The prompt arm's junk rules, and no one else's. */
   skip?(text: string): SkipReason | null;
   /**
@@ -57,9 +58,8 @@ export interface LookupSpec {
    * `ask.ts` drops the public leg under `team.publicFallback: off`.
    */
   shelves: Array<'team' | 'public'>;
-  /** No arm in this release is `log`: the read and churn lookups that were
-   *  log-only are deleted. It stays for PR D's subagent-stop arm, which looks a
-   *  child's ending up and says nothing because the child is over. */
+  /** `log` is the dispatch arm's: it parks what it found for the child and
+   *  says nothing to the parent. */
   deliver: 'inject' | 'log';
   /** Local writes, before anything is asked. */
   before?(ctx: FireContext): void;
@@ -76,8 +76,8 @@ export interface LookupSpec {
 /**
  * Turn a spec into the kernel's `Arm`.
  *
- * `enabled` gates `before` too: an arm that is off is off, and marks are as
- * much of its behaviour as questions are. Text of length zero is `null` and
+ * `enabled` gates `before` and `after` too: an arm that is off is off, and
+ * marks are as much of its behaviour as questions are. Text of length zero is `null` and
  * not a skip — a skip means the arm HAD words and refused them, which is the
  * distinction the ledger's three skip reasons exist to keep.
  */
@@ -86,20 +86,25 @@ export function lookupArm(spec: LookupSpec): Arm {
     id: spec.id,
     wait: spec.wait,
     on: spec.on,
-    plan(ctx: FireContext): Plan | Skip | null {
+    plan(ctx: FireContext): Maybe<Plan | Skip | null> {
       const cfg = ctx.deps.config();
       if (!spec.enabled(cfg)) return null;
+      const build = (raw: string | null): Plan | Skip | null => {
+        if (raw === null || raw.length === 0) return null;
+        const reason = spec.skip?.(raw) ?? null;
+        // A skipped row still lands in `loop.db`, so it carries the masked head
+        // and never the raw text: a refused prompt is where a pasted transcript
+        // and a credential live.
+        if (reason !== null) return { reason, text: skipText(raw) };
+        const q = question(raw);
+        if (q.text.length === 0) return null;
+        const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
+        return { question: q, stages: [spec.shelves.map((s) => searchLeg(s, trigger, cfg))] };
+      };
+      // A spec whose text is synchronous plans synchronously: the promise is
+      // only ever the spec's own, so a sync spec costs no microtask.
       const raw = spec.text(ctx.input, ctx);
-      if (raw === null || raw.length === 0) return null;
-      const reason = spec.skip?.(raw) ?? null;
-      // A skipped row still lands in `loop.db`, so it carries the masked head
-      // and never the raw text: a refused prompt is where a pasted transcript
-      // and a credential live.
-      if (reason !== null) return { reason, text: skipText(raw) };
-      const q = question(raw);
-      if (q.text.length === 0) return null;
-      const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
-      return { question: q, stages: [spec.shelves.map((s) => searchLeg(s, trigger, cfg))] };
+      return raw instanceof Promise ? raw.then(build) : build(raw);
     },
     /**
      * `log` is a real delivery, not a missing one: an arm with nobody left to
@@ -119,6 +124,10 @@ export function lookupArm(spec: LookupSpec): Arm {
       if (spec.enabled(ctx.deps.config())) before(ctx);
     };
   }
-  if (spec.after !== undefined) arm.after = spec.after;
+  if (spec.after !== undefined) {
+    const after = spec.after;
+    arm.after = (ctx, result, question) =>
+      spec.enabled(ctx.deps.config()) ? after(ctx, result, question) : null;
+  }
   return arm;
 }
