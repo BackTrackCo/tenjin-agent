@@ -5,6 +5,8 @@ import { ask } from './ask';
 import { finish, firstSight, gates, release } from './gates';
 import { record } from './ledger';
 import type { FireRecord } from './ledger';
+import { QUERY_MAX } from './legs/search';
+import { cut } from './text';
 import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome, Question } from './types';
 
 /**
@@ -123,7 +125,10 @@ export async function runFire(
         const plan = planned;
         asked = plan.question;
         questionKey = plan.question.questionKey;
-        question = plan.question.text;
+        // The SAME cut the search leg makes on the wire: a row that stored the
+        // whole prompt would read as the question this fire asked, and nobody
+        // reading the ledger could tell the tail was never sent.
+        question = cut(plan.question.text, QUERY_MAX);
         const gated = gates(ctx, plan);
         let result: Outcome;
         if (gated !== null) {

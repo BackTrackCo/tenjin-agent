@@ -308,6 +308,30 @@ describe('runFire: a hit', () => {
     expect(JSON.parse(getMark(db, LEAD, 'q:qk-hit') ?? 'null')).toMatchObject({ status: 'done' });
   });
 
+  it('stores what was SENT: the row carries the search leg’s 512-character cut', async () => {
+    const db = await freshDb();
+    const text = 'why is vitest slow '.repeat(106).trim();
+    expect(text.length).toBeGreaterThan(2000);
+    const arm: Arm = {
+      id: 'long-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text, questionKey: 'qk-long' },
+        stages: [[strongLeg('res-long')]],
+      }),
+      deliver: (answer) => ({ mode: 'inject', text: 'because', resourceId: answer.resourceId }),
+    };
+    const { commit } = await runFire(input(), deps(db, [arm]));
+    commit();
+
+    const stored = fireRows(db)[0]?.question ?? '';
+    expect(stored.length).toBeLessThanOrEqual(512);
+    // On a word boundary, and a prefix of the prompt: the tail the leg never
+    // sent is not in the ledger either.
+    expect(text.startsWith(`${stored} `)).toBe(true);
+  });
+
   it('a deliver() that throws after the verdict keeps the cached verdict', async () => {
     // The catch releases only a claim this fire still holds as `asking`;
     // once `finish` cached the verdict, an error in delivery must not turn

@@ -192,27 +192,33 @@ describe('fetchQuestion', () => {
     );
   });
 
-  it('drops the query string, which is where a signed url keeps its credential', () => {
+  it('cuts at the first `?`, which is where a signed url keeps its credential', () => {
     const q = fetchQuestion({
       url: 'https://example.com/search?q=collation+flip&api_key=sk-live-abcdef123456&sig=zz',
     });
     expect(q).toBe('https://example.com/search');
   });
 
-  it('keeps the fragment: on a docs page it is the topic word', () => {
+  it('cuts at the first `#` too: a hash router keeps its credential there', () => {
+    expect(
+      fetchQuestion({ url: 'https://app.acme.dev/#/invite?email=a@b.co&code=sk-live-abc' }),
+    ).toBe('https://app.acme.dev/');
+    // A doc anchor goes with it: it is worth nothing to a shelf that ranks on
+    // the page, and it is not worth a second rule.
     expect(fetchQuestion({ url: 'https://vitest.dev/config/#restoremocks' })).toBe(
-      'https://vitest.dev/config/#restoremocks',
+      'https://vitest.dev/config/',
     );
-    // The query goes and both sides of it stay.
+    // Whichever comes first, and the rest is one run.
     expect(fetchQuestion({ url: 'https://vitest.dev/config/?q=1#restoremocks' })).toBe(
-      'https://vitest.dev/config/#restoremocks',
+      'https://vitest.dev/config/',
     );
   });
 
   it('sends the address as typed, not the parser’s re-spelling of it', () => {
     // `new URL(...).origin + .pathname` would lower-case the host, drop the
-    // default port, fold `..`, percent-encode the space and take the `#` off.
-    const raw = 'https://Docs.Acme.dev:443/a/../guide/pg vector.html#collation';
+    // default port, fold `..` and percent-encode the space. A url with neither
+    // a `?` nor a `#` is untouched.
+    const raw = 'https://Docs.Acme.dev:443/a/../guide/pg vector.html';
     expect(fetchQuestion({ url: raw })).toBe(raw);
     expect(fetchQuestion({ url: 'https://例え.jp/パス' })).toBe('https://例え.jp/パス');
   });
