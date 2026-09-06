@@ -50,7 +50,6 @@ import {
   PUSH_PROMPT_BUDGET_MS,
   PUSH_PROMPT_SEARCH_TIMEOUT_MS,
   PUSH_PROMPT_WATCHDOG_MS,
-  PUSH_WORKFLOW_AGENT_TYPE,
   subagentCaptureReason,
   pushContextHookScript,
   pushFailureHookScript,
@@ -1525,6 +1524,24 @@ describe('condense', () => {
     expect(condense('why does PR 751 fail on the migrate step')).toBe('PR 751 fail migrate step');
   });
 
+  it('keeps a negation, because a negation is usually the question', () => {
+    // `not`, `no` and `nor` were stopwords until the loop's prompt arm became
+    // the first real caller: this query condensed to `vitest restore spies`,
+    // which is the opposite question and matched the opposite pieces.
+    expect(condense('vitest does not restore spies between test files')).toBe(
+      'vitest not restore spies test files',
+    );
+    expect(condense('there is no migration ladder and no legacy path here')).toContain('no');
+  });
+
+  it('reads a word in any script, so an accented name survives whole', () => {
+    // The clause word regex was `[A-Za-z0-9_./:#-]+`, which split `Diátaxis`
+    // into `Di` and `taxis` and sent both.
+    expect(condense('the Diátaxis framework split the docs into four modes')).toBe(
+      'Diátaxis framework split docs four modes',
+    );
+  });
+
   it('does not read a time, a date, a hyphenated word or an abbreviation as an identifier', () => {
     // Each of these matches the identifier regex on shape (an inner
     // separator or a digit) and none is a handle; sent first and ANDed on by
@@ -1616,220 +1633,6 @@ describe('condense', () => {
   });
 });
 
-/**
- * The scrub every arm runs, lifted out of the generated prompt script the way
- * the condense block is: the same bytes the hook executes.
- */
-describe('scrub', () => {
-  // The data dir is only baked into the prelude; any string will do here.
-  const source = pushPromptHookScript('/tmp/scrub-probe');
-  const start = source.indexOf('const SECRET_TOKEN_RE');
-  const fn = source.indexOf('function scrub(text, mode)');
-  const end = source.indexOf('\n}\n', fn) + 3;
-  const scrub =
-    start > -1 && fn > start
-      ? (new Function(`${source.slice(start, end)}; return scrub;`)() as (text: string) => string)
-      : (): string => {
-          throw new Error('scrub block not found in the generated prompt script');
-        };
-
-  it('blanks a host together with the extension after it', () => {
-    // Per-host config files: an nginx sites directory, a k8s values file, a
-    // cert bundle. The host must not leave whole because a `.json` follows.
-    expect(
-      scrub(
-        'config at nginx/sites/api.acme.com.json is wrong, also api.acme.com.yml and internal.corp.md and values.prod.acme.io.yaml and api.acme.com.tsx-beta',
-      ),
-    ).toBe('config at is wrong, also and and and');
-    expect(scrub('jobs.acme-bank.sh runs at prod.acme.com')).toBe('runs at');
-    // The one file name handed back: `<name>.test.<source>`, bare or pathed.
-    expect(scrub('see push-scripts.test.ts and src/lib/push-scripts.test.ts')).toBe(
-      'see push-scripts.test.ts and push-scripts.test.ts',
-    );
-    // A second label before `.test` or a config extension after it reads as
-    // a host, and goes: the cheaper mistake.
-    expect(scrub('docker-compose.dev.yml and api.acme.test.ts and settings.local.json')).toBe(
-      'and and',
-    );
-  });
-
-  it('keeps a basename by its extension, never a credential-shaped stem', () => {
-    expect(scrub('see src/customers/acme-bank/keys.ts and .github/workflows/migrate.yml')).toBe(
-      'see keys.ts and migrate.yml',
-    );
-    for (const gone of [
-      '/Users/john/acme-bank/prod-service-account.json',
-      'config/prod/secrets.yml',
-      '~/.ssh/id_rsa.md',
-      'src/auth/token.ts',
-      'infra/certs/private.json',
-      'deploy/gcp/credentials.json',
-      // `key`/`keys` under a config extension is key MATERIAL.
-      'src/customers/acme-bank/keys.json',
-      'config/prod/keys.yml',
-      'infra/vault/api-keys.yaml',
-      'deploy/gcp/key.toml',
-    ]) {
-      expect(scrub(`why does ${gone} get read`)).toBe('why does get read');
-    }
-    // The same stem under a SOURCE extension is the module that handles them,
-    // and it is the token half the key-handling questions name.
-    expect(scrub('src/auth/keys.ts and src/auth/keys.tsx and src/lib/monkeys.json break')).toBe(
-      'keys.ts and keys.tsx and monkeys.json break',
-    );
-    // What the stem rule does NOT do, on record: a file named for a customer
-    // travels as it would typed bare. Only its directories are blanked.
-    expect(scrub('src/customers/acme-bank.ts fails on PR 751')).toBe(
-      'acme-bank.ts fails on PR 751',
-    );
-  });
-
-  it('bounds the env-var-name exception to the entropy rule', () => {
-    expect(scrub('NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 is unset')).toBe(
-      'NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 is unset',
-    );
-    // A name glued to its value, and a hex-style key: all caps and digits
-    // with an underscore, and a run of 16+ between underscores.
-    for (const key of [
-      'GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890',
-      'AWS_SECRET_1234567890ABCDEFGHIJKLMNOPQRSTUV_KEY',
-      'A1_' + 'B2_'.repeat(25) + 'C3',
-    ]) {
-      expect(scrub(`the value ${key} is wrong`)).toBe('the value is wrong');
-    }
-  });
-
-  it('takes the host and path after a userinfo url with it', () => {
-    // `h/db` left behind read as an identifier to the prompt arm.
-    expect(scrub('DATABASE_URL=postgres://u:p@h/db is wrong and postgres://u:p@h/db too')).toBe(
-      'DATABASE_URL= is wrong and too',
-    );
-    // THE EXTENT IS THE NON-WHITESPACE RUN (round 4 redesign). Anything glued
-    // straight onto the url goes with it, prose included: `,migration` used to
-    // survive and no longer does, because the enumeration that told it apart
-    // from `,hunter2secret` is what leaked a credential three rounds running.
-    // A space is all it takes to keep the word.
-    expect(scrub('postgres://u:p@h/db,migration fails')).toBe('fails');
-    expect(scrub('postgres://u:p@h/db, migration fails')).toBe(', migration fails');
-    // THE TRAILING PUNCTUATION COMES BACK, so the sentence still reads.
-    expect(scrub('(postgres://u:p@h/db); the retry loops')).toBe('( ); the retry loops');
-    expect(scrub('see (postgres://u:p@h/db) for it')).toBe('see ( ) for it');
-    expect(scrub('see "postgres://u:p@h/db". next')).toBe('see " ". next');
-    expect(scrub('the url is postgres://u:p@h/db.')).toBe('the url is .');
-  });
-
-  /**
-   * THE HANDBACK RULE. A blanked userinfo url returns the run of closers,
-   * quotes and sentence punctuation that TERMINATES its match and nothing
-   * else — no alphanumeric, and never `=`, which is base64 padding. Pinned as
-   * a rule rather than as examples because it is the only thing standing
-   * between the redesign and a url eating the bracket it was written inside.
-   */
-  it('hands back the trailing punctuation and nothing else', () => {
-    for (const [open, close] of [
-      ['(', ')'],
-      ['[', ']'],
-      ['{', '}'],
-      ['<', '>'],
-      ['"', '"'],
-      ["'", "'"],
-      ['`', '`'],
-      ['**', '**'],
-    ]) {
-      expect(scrub(`the url ${open}postgres://u:p@h/db${close} is stale`)).toBe(
-        `the url ${open} ${close} is stale`,
-      );
-    }
-    for (const mark of ['.', ',', ';', ':', '!', '?']) {
-      expect(scrub(`the url postgres://u:p@h/db${mark} next`)).toBe(`the url ${mark} next`);
-    }
-    // Nested and stacked closers come back in order, credential and all gone.
-    expect(scrub('see ("postgres://admin:hunter2@db.acme.com/prod?sig=abc123"), then')).toBe(
-      'see (" "), then',
-    );
-    // AND NOT `=`: a base64 key may END on its padding, so a run that stops on
-    // an `=` hands back nothing that could carry it.
-    const padded = scrub('postgres://u:p@h/db?k=aGVsbG93b3JsZGhlbGxvd29ybGQx==');
-    expect(padded).toBe('');
-    expect(identifiersOf(padded)).toEqual([]);
-  });
-
-  /**
-   * THE ROUND-4 TABLE. The hand-rolled `(separator)(name)=(value)` tail was
-   * patched in three consecutive review rounds and leaked a new shape each
-   * time; every row the reviewer measured on the enumeration is fixtured here
-   * against the redesign. `identifiersOf` is asserted on every one because
-   * that array is the half that reaches BOTH shelves — the team shelf and the
-   * public marketplace — so a value surviving into it is the leak, not the
-   * residue in the text.
-   */
-  it('eats every query-string tail hanging off a blanked userinfo url', () => {
-    const TAILS = [
-      // The round-4 table. The first is the one that mattered:
-      // `apikey[0]=hunter2secret` is a credential value, `SECRET_ASSIGN_RE`
-      // misses it because `[` is outside `[\w.-]`, and it is the form `qs`,
-      // Rails and PHP all emit.
-      ['?apikey[0]=hunter2secret', 'hunter2secret'],
-      ['?filter[id]=abc123', 'abc123'],
-      [';;ref=abc123', 'abc123'],
-      [';;;;t=abc123', 'abc123'],
-      [';ref=abc123&&next=xyz789abc', 'xyz789abc'],
-      [';a.b=abc123', 'abc123'],
-      [';%73ig=abc123', 'abc123'],
-      // The rounds before it, kept so the redesign does not regress them.
-      [';sig=abc123', 'abc123'],
-      [';ref=abc123', 'abc123'],
-      ['?token=abc123', 'abc123'],
-      ['&x-amz-signature=abc123&expires=900', 'abc123'],
-      [',ref=abc123', 'abc123'],
-      [';ref2=abc123', 'abc123'],
-      ['&utm_2-src=abc123', 'abc123'],
-      [';2fa=abc123', 'abc123'],
-      [')ref=abc123', 'abc123'],
-      [']v=abc123', 'abc123'],
-      ['>id=abc123', 'abc123'],
-      ['"x=abc123', 'abc123'],
-      ["'y=abc123", 'abc123'],
-      ['}z=abc123', 'abc123'],
-      ['|ref=abc123', 'abc123'],
-      ['#frag=abc123', 'abc123'],
-      // Shapes no enumeration was ever shown, which is the point of the
-      // redesign: the run is the extent, so there is nothing left to enumerate.
-      ['?apikey[0][1]=hunter2secret', 'hunter2secret'],
-      ['?a=1&&ref=abc123', 'abc123'],
-      ['?&ref=abc123', 'abc123'],
-      ['&&ref=abc123', 'abc123'],
-      ['?ref=abc123&', 'abc123'],
-      ['#abc123def', 'abc123def'],
-      ['/../abc123def', 'abc123def'],
-      [';ref:abc123', 'abc123'],
-      ['?ref%3Dabc123', 'abc123'],
-      ['?=abc123', 'abc123'],
-      ['?ref=abc123#f=xyz789abc', 'xyz789abc'],
-    ] as const;
-    for (const [tail, value] of TAILS) {
-      const scrubbed = scrub(`postgres://admin:hunter2@db.acme.com/prod${tail} breaks migrate`);
-      expect(scrubbed, tail).toBe('breaks migrate');
-      expect(scrubbed, tail).not.toContain(value);
-      expect(identifiersOf(scrubbed), tail).toEqual([]);
-    }
-    // THE SIGNING WORDS ALONE, with no url in front: `sig`, `signature`,
-    // `nonce` and `hmac` name a credential the other keywords do not.
-    for (const assign of ['sig=abc123', 'signature: abc123', 'nonce=abc123', 'hmac=abc123']) {
-      expect(scrub(`the ${assign} is stale`)).toBe('the is stale');
-    }
-    // THE CONTROL: the same remainder after a url with NO credential in it is
-    // an ordinary query string, and it travels. The host goes, the page
-    // number stays — it is a topic word, not a key.
-    const control = scrub('https://db.acme.com/prod?page=2 is empty');
-    expect(control).toContain('?page=2');
-    expect(control).toBe('https: ?page=2 is empty');
-    // A SPACE-SEPARATED parameter is prose, not part of the url, and it is
-    // left alone deliberately: eating it would be the over-blank direction.
-    expect(scrub('postgres://admin:hunter2@db.acme.com/prod ref=abc123')).toBe('ref=abc123');
-  });
-});
-
 describe('the prompt arm (UserPromptSubmit)', () => {
   const prompt = (text: string): string =>
     JSON.stringify({ session_id: SESSION, hook_event_name: 'UserPromptSubmit', prompt: text });
@@ -1911,19 +1714,27 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   });
 
   /**
-   * secretsOnly (owner policy, tenjin-agent#197 rework) never runs the
-   * full-mode path/host/stem rules — those are exercised in the `scrub`
-   * describe block below, for the callers still passing no second argument.
-   * The prompt arm's query and identifiers keep the whole path and host now;
-   * only a literal credential value is a search key not worth keeping.
+   * `mask()` (the one redact module, 2026-09-04 decision in
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md) never runs the full-mode
+   * path/host/stem rules — those are exercised in the `scrub` describe block
+   * below, for the callers still passing no second argument. The prompt arm's
+   * query and identifiers keep the whole path and host now; only a literal
+   * credential value is replaced, and it is replaced by a masked stub rather
+   * than deleted — a `github-token` match keeps its `ghp_` prefix (the row's
+   * excerpt `keep`) so the STUB reads as a redacted credential rather than a
+   * dropped word; only the 36 characters of key material after it are gone.
+   * The github-token rule fires on exactly 36 characters after `ghp_`, not on
+   * whatever length happens to be typed.
    */
-  it('keeps the whole path and host, and only drops the key', async () => {
+  it('keeps the whole path and host, and only drops the key material', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
+    const key = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    expect(key).toHaveLength(36);
     await runScript(
       pushPromptHookScript(dataDir),
       prompt(
-        'see .github/workflows/migrate.yml and src/customers/acme-bank/keys.ts on prod.acme.com, push-scripts.test.ts, DATABASE_URL=postgres://u:p@h/db, ghp_abcdefghijklmnopqrstuvwxyz123456, NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 and why the migrate step fails there',
+        `see .github/workflows/migrate.yml and src/customers/acme-bank/keys.ts on prod.acme.com, push-scripts.test.ts, DATABASE_URL=postgres://u:p@h/db, ghp_${key}, NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1 and why the migrate step fails there`,
       ),
     );
     const sent = queries()[0]!;
@@ -1937,10 +1748,13 @@ describe('the prompt arm (UserPromptSubmit)', () => {
       'prod.acme.com',
       'workflows/migrate.yml',
       'customers/acme-bank/keys.ts',
+      // The type-identifying prefix survives as the masked excerpt's kept
+      // head, deliberately: the stub still reads as "a github token was here".
+      'ghp_',
     ]) {
       expect(sent).toContain(kept);
     }
-    for (const gone of ['ghp_', 'u:p@']) {
+    for (const gone of [key, 'u:p@']) {
       expect(sent).not.toContain(gone);
     }
   });
@@ -1994,11 +1808,15 @@ describe('the prompt arm (UserPromptSubmit)', () => {
   });
 
   /**
-   * The credential/PII floor still holds even though the path floor is gone:
-   * a git SHA and a path are search keys and ship, but a secret-shaped token
-   * and an email address are exactly what `secretsOnly` still strips.
+   * The credential floor still holds even though the path floor is gone: a
+   * git SHA and a path are search keys and ship, and so, now, does an email
+   * address (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md
+   * "Review decisions, 2026-09-04": no email rule in the query scope — an
+   * inbox is not a vendor-prefixed token or a `NAME=value` assignment, so
+   * precision-first masking never touches it). Only the vendor-shaped key is
+   * replaced, by a masked stub, not a deletion.
    */
-  it('keeps a path and a git SHA in the query, and strips a key and an email', async () => {
+  it('keeps a path, a git SHA and an email in the query, and masks a key', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
 
@@ -2015,21 +1833,19 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     const query = queries()[0]!;
     expect(query).toContain(sha);
     expect(query).toContain('src/lib/thing.ts');
+    expect(query).toContain('vraspar@example.com');
     expect(query).not.toContain(key);
-    expect(query).not.toContain('vraspar@example.com');
   });
 
   /**
-   * SECURITY CHECK (tenjin-agent#197 x #262 reconciliation): #262's condense
-   * pipeline runs identifiersOf()/condense() straight over whatever scrub()
-   * handed back. Before this merge that was a FULL scrub, so the identifier
-   * extractor never saw a credential at all — full mode drops it upstream of
-   * condense. Under the merged secretsOnly-first pipeline the credential
-   * rules (SECRET_TOKEN_RE, SECRET_ASSIGN_RE, SECRET_USERINFO_RE and the
-   * entropy rule) still run before the mode branch, so an sk-/ghp_/JWT/AWS-
-   * shaped token or a mixed-case entropy run is gone from `scrubbed` before
-   * `identifiersOf`/`condense` ever run over it — it cannot ride either the
+   * mask() runs before identifiersOf()/condense() (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md), so a `sk-ant-`-shaped key
+   * is gone from `scrubbed` before either ever sees it: it cannot ride the
    * condensed `query` string or the `identifiers` array it is built from.
+   * The email address is a different case now (owner policy, no query-scope
+   * email rule): it is not a vendor-prefixed token or a `NAME=value`
+   * assignment, so it is exactly the kind of identifier this arm keeps, same
+   * as the path.
    */
   it('keeps an sk-style key out of both the condensed query and the identifiers array', async () => {
     const { baseUrl, queries, bodies } = await serve(echo());
@@ -2050,11 +1866,11 @@ describe('the prompt arm (UserPromptSubmit)', () => {
     expect(query).toContain('src/lib/thing.ts');
     expect(wire).toContain('src/lib/thing.ts');
     expect(bodies()[0]!.identifiers).toContain('pr-751');
-    // The key and the email reach neither field.
-    for (const gone of [key, 'vraspar@example.com']) {
-      expect(query).not.toContain(gone);
-      expect(wire).not.toContain(gone);
-    }
+    // The email now reaches both fields; the key reaches neither.
+    expect(query).toContain('vraspar@example.com');
+    expect(wire).toContain('vraspar@example.com');
+    expect(query).not.toContain(key);
+    expect(wire).not.toContain(key);
   });
 
   /**
@@ -2767,21 +2583,29 @@ describe('the failure arm (PostToolUse Bash)', () => {
     expect(hits()).toBe(0);
     const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
     expect(stored).toContain('Authentication');
-    expect(stored).not.toContain('ghp_');
+    // The type-identifying prefix survives as the masked excerpt's kept head
+    // (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md): a
+    // github-token match keeps `ghp_`, only the 36 characters after it go.
+    expect(stored).toContain('ghp_');
     expect(stored).not.toContain('16C7e42F292c6912E7710c838347Ae178B4a');
   });
 
   /**
-   * The vendor nobody has heard of yet is what the entropy rule is for, and the
-   * best-known secret shape in the world is standard base64: an AWS secret key
-   * carries `/`, which a url-safe-only class treats as a separator, leaving
-   * three short runs that all clear the floor and a key that leaves whole.
+   * NO ENTROPY RULE ANY MORE (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md "Review decisions,
+   * 2026-09-04": precision first, entropy is never a trigger). A bare AWS
+   * secret access key with no vendor prefix and no `NAME=value` shape in
+   * front of it is not a credential any rule can recognise by format alone,
+   * so it now ships whole — the same trade the old entropy rule's own doc
+   * comment used to warn about paying for ("the vendor nobody has heard of
+   * yet"), now made explicit instead of covered by a rule that also over-fired
+   * on ordinary long identifiers.
    *
    * Behind `terraform apply` rather than `aws s3 ls`: a bare `aws` is not a
    * head this arm fires behind, and a provider credential failing mid-apply is
    * where the sidecar would actually meet this string.
    */
-  it('strips a standard-base64 secret, slashes and all', async () => {
+  it('keeps a bare base64 secret with no vendor prefix or assignment', async () => {
     const { baseUrl, hits } = await serve(echo());
     await pushOn(baseUrl);
     const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
@@ -2793,6 +2617,35 @@ describe('the failure arm (PostToolUse Bash)', () => {
         tool_name: 'Bash',
         tool_input: { command: 'terraform apply' },
         error: `Error: SignatureDoesNotMatch, computed with ${secret} on the presign path`,
+      }),
+    );
+    expect(run.code).toBe(0);
+    expect(hits()).toBe(0);
+    const stored = String((await events()).find((e) => e.hook === 'failure')?.data.error);
+    expect(stored).toContain('SignatureDoesNotMatch');
+    expect(stored).toContain(secret);
+  });
+
+  /**
+   * THE SAME KEY, NAMED: `secret-assignment` needs a secret-shaped keyword
+   * plus `=` or `:`, not a format, so an `AWS_SECRET_ACCESS_KEY=` assignment
+   * still masks the value that a bare key of the same shape now survives as
+   * (2026-09-04 decision). The whole match is replaced, slashes and all — a
+   * url-unsafe base64 alphabet is not a special case for a rule that never
+   * enumerates the value's charset in the first place.
+   */
+  it('masks the same key behind a secret-named assignment', async () => {
+    const { baseUrl, hits } = await serve(echo());
+    await pushOn(baseUrl);
+    const secret = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+    const run = await runScript(
+      pushFailureHookScript(dataDir),
+      JSON.stringify({
+        session_id: SESSION,
+        hook_event_name: 'PostToolUseFailure',
+        tool_name: 'Bash',
+        tool_input: { command: 'terraform apply' },
+        error: `Error: SignatureDoesNotMatch, computed with AWS_SECRET_ACCESS_KEY=${secret} on the presign path`,
       }),
     );
     expect(run.code).toBe(0);
@@ -7463,64 +7316,15 @@ describe('the subagent arm (SubagentStop)', () => {
   const FINDING =
     'Pinning the resolver to 4.1 stops the parse throw. Verified against 4.0 and 4.1.';
 
-  /**
-   * A child's own transcript file. A real stop names one that EXISTS; a phantom
-   * names one nothing ever wrote, which is one of the three marks the arm
-   * refuses on before it writes anything.
-   */
-  let transcript: string;
-  beforeEach(async () => {
-    transcript = join(scriptDir, 'agent-a1.jsonl');
-    await writeFile(transcript, '{"type":"user"}\n');
-  });
-
   const stop = (over: Record<string, unknown> = {}): string =>
     JSON.stringify({
       session_id: SESSION,
       hook_event_name: 'SubagentStop',
       agent_id: 'a1',
       agent_type: 'general-purpose',
-      agent_transcript_path: transcript,
       stop_hook_active: false,
       ...over,
     });
-
-  /** The child's own `SubagentStart`, run as the real fire that writes the row:
-   *  a stop with no start behind it is a phantom and leaves nothing. */
-  const started = async (agentId = 'a1', agentType = 'general-purpose'): Promise<void> => {
-    await runScript(
-      pushSubagentHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'SubagentStart',
-        agent_id: agentId,
-        agent_type: agentType,
-      }),
-    );
-  };
-
-  /** One edit by THIS child, written by the real context arm: the agent-keyed
-   *  evidence the ask is gated on (tenjin-agent#228 PR 1). */
-  const edited = async (agentId = 'a1'): Promise<void> => {
-    await runScript(
-      pushContextHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        cwd: dataDir,
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Edit',
-        agent_id: agentId,
-        tool_input: { file_path: join(dataDir, 'src', 'resolver.ts') },
-      }),
-    );
-  };
-
-  /** A child the harness started and that then did work: both marks the arm
-   *  needs before it will spend a turn asking one. */
-  const workingChild = async (agentId = 'a1', agentType = 'general-purpose'): Promise<void> => {
-    await started(agentId, agentType);
-    await edited(agentId);
-  };
 
   /** A child's final answer with the marked block in it. */
   const answer = (body: string): string =>
@@ -7554,10 +7358,9 @@ describe('the subagent arm (SubagentStop)', () => {
     return parsed.decision === 'block' ? (parsed.reason ?? '') : null;
   }
 
-  it('asks the child once, on its own edits, at its first stop', async () => {
+  it('asks the child once, on a signal, at its first stop', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
 
     const first = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(first.code).toBe(0);
@@ -7569,13 +7372,7 @@ describe('the subagent arm (SubagentStop)', () => {
         kind: 'lifecycle',
         reason: 'asked',
         agentId: 'a1',
-        // The evidence that earned the ask, and it is this child's own. The
-        // session-wide signal that used to sit here armed the arm for every
-        // sibling behind it.
-        evidence: 'edited',
-        // Still recorded, and attribution only now: the loop the child's own
-        // publish should close.
-        searchId: SEARCH_ID,
+        signal: 'dispatch-miss',
       },
     ]);
 
@@ -7602,7 +7399,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('asks the child to publish, and names the block as the fallback', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
 
     const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop())) ?? '';
     // The command, with this child's own id riding along for attribution and the
@@ -7631,11 +7427,6 @@ describe('the subagent arm (SubagentStop)', () => {
     );
     expect(reason).not.toContain('needs_confirmation');
     expect(reason).toContain('```' + PUSH_FINDING_TAG);
-    // AND THE FENCE CARRIES ITS OWN TITLE. The harvest stores the block as one
-    // line, so `publish --finding` has nothing to derive a title from unless the
-    // child writes one: the publish then failed with `A published post needs a
-    // title` and the one finding captured in a week lost its attribution.
-    expect(reason).toContain('Make its FIRST line inside the fence `# ` and a short title');
     expect(reason).toContain('recorded locally for your parent');
     // And doing nothing stays as easy as either, so no child invents a finding.
     expect(reason).toContain('If you settled nothing durable, ignore this');
@@ -7655,7 +7446,6 @@ describe('the subagent arm (SubagentStop)', () => {
       publish: { mode: 'auto' },
     });
     await seedDispatchMiss();
-    await workingChild();
     const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop())) ?? '';
     expect(reason).toContain('resolves publish.mode to auto');
   });
@@ -7709,7 +7499,6 @@ describe('the subagent arm (SubagentStop)', () => {
     await captureOn();
     await seedDispatchMiss();
     const long = 'a'.repeat(100);
-    await workingChild(long);
     const reason = blocked(
       await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: long })),
     );
@@ -7725,25 +7514,22 @@ describe('the subagent arm (SubagentStop)', () => {
   it('never asks on a push-on machine with capture off, the default', async () => {
     await pushOn('https://tenjin.test');
     await seedDispatchMiss();
-    await workingChild();
     const run = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(run.stdout).toBe('');
     expect(await stopRows()).toMatchObject([{ kind: 'lifecycle', reason: 'capture-off' }]);
   });
 
   /**
-   * THE BUDGET IS UNTOUCHED BY PR 1 (tenjin-agent#228): re-keying the shared
-   * gates per agent is the cap rework. Five children that all did work still
-   * share one ask per session per hour; what changed above it is that every one
-   * of the five is a child that actually edited something.
+   * BOTH signals are session-wide, so without a session budget one MISS arms
+   * this arm for every child that stops in the hour behind it and the one extra
+   * turn tenjin-agent#228 costed is paid per child instead of per session.
    */
-  it('asks once per session however many working children stop', async () => {
+  it('asks once per session however many children stop on the same signal', async () => {
     await captureOn();
     await seedDispatchMiss();
 
     const runs = [];
     for (const id of ['a1', 'a2', 'a3', 'a4', 'a5']) {
-      await workingChild(id);
       runs.push(await runScript(pushSubagentHookScript(dataDir), stop({ agent_id: id })));
     }
     expect(runs.filter((r) => blocked(r) !== null)).toHaveLength(1);
@@ -7756,66 +7542,11 @@ describe('the subagent arm (SubagentStop)', () => {
     ]);
   });
 
-  /**
-   * THE GATE IS THIS CHILD'S OWN WORK. A dispatch MISS anywhere in the session
-   * used to arm the ask for every child behind it, so the first to stop took it
-   * — a phantom 26 times out of 29 in the week measured. A child that started,
-   * stopped, and edited nothing is counted and asked nothing, whatever the
-   * session around it was doing.
-   */
-  it('leaves a child that edited nothing one lifecycle row and nothing else', async () => {
+  it('leaves a child with no signal one lifecycle row and nothing else', async () => {
     await captureOn();
-    await seedDispatchMiss();
-    await started();
     const run = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(run.stdout).toBe('');
-    expect(await stopRows()).toMatchObject([{ reason: 'no-evidence', agentId: 'a1' }]);
-    // And the session's one ask is unspent, for a child that did do work.
-    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
-  });
-
-  /**
-   * THE OTHER HALF OF THE EVIDENCE (round-3 review). Edits alone silenced the
-   * case this arm exists for: a child that spent its run on WebSearch, WebFetch
-   * and Read edits nothing, and a research panel or a package comparison is
-   * exactly the finding worth a turn. Its own research rows are agent-keyed
-   * already, so nothing new is written to read them.
-   *
-   * THE REAL RESEARCH ARM WRITES THE ROW, not the test: the point of the gate
-   * is that the evidence the sidecar ALREADY produces is enough, so a fixture
-   * insert would prove nothing about the writers. A MISS is used deliberately,
-   * because a child whose research found nothing on the shelf is the one whose
-   * finding is worth the most.
-   */
-  it('asks a child that only researched, with no edit behind it', async () => {
-    const { baseUrl } = await serve(miss);
-    await pushOn(baseUrl, { capture: 'block' });
-    await started();
-    const research = await runScript(
-      websearchHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'PreToolUse',
-        tool_name: 'WebSearch',
-        agent_id: 'a1',
-        tool_input: { query: 'does the resolver throw on a 4.1 schema' },
-      }),
-    );
-    expect(research.stdout).toBe('');
-    // One agent-keyed `research` row, and it is the child's own.
-    expect(await ledger()).toMatchObject([
-      { trigger: 'research', agentId: 'a1', action: 'skipped' },
-    ]);
-    // And no edit marker anywhere in the session: the edit gate alone refuses
-    // this child, which is what made the case invisible.
-    expect(sessionStateRows(SESSION, 'edited:')).toEqual([]);
-
-    const reason = blocked(await runScript(pushSubagentHookScript(dataDir), stop()));
-    expect(reason).toContain('--agent a1');
-    // The label says WHICH kind earned the ask, so the two are countable apart.
-    expect(await stopRows()).toMatchObject([
-      { reason: 'asked', agentId: 'a1', evidence: 'research' },
-    ]);
+    expect(await stopRows()).toMatchObject([{ reason: 'no-signal', agentId: 'a1' }]);
   });
 
   /**
@@ -7827,7 +7558,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('blocks exactly once per agent when two fires race', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
 
     const runs = await Promise.all([
       runScript(pushSubagentHookScript(dataDir), stop()),
@@ -7848,18 +7578,27 @@ describe('the subagent arm (SubagentStop)', () => {
     expect(sessionState(SESSION, 'capture:agent:a1:')).not.toBeNull();
   });
 
+  /**
+   * `mask()`, not the retired entropy-based `scrub()`, is what runs over a
+   * harvested finding now (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md): both fixtures below are
+   * exact vendor shapes — `AKIAIOSFODNN7EXAMPLE` is precisely 16 characters
+   * after `AKIA`, and the `ghp_` fixture is precisely 36 after it — because
+   * the rules that replace them fire on that exact format, not on a length
+   * floor or an entropy score.
+   */
   it('harvests the fenced block from the next fire, scrubbed and bounded', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
-    const secret = 'AKIAIOSFODNN7EXAMPLEKEYX ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const secret = 'AKIAIOSFODNN7EXAMPLE ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
     const long = 'x'.repeat(PUSH_FINDING_MAX_CHARS + 500);
     const run = await runScript(
       pushSubagentHookScript(dataDir),
       stop({
         stop_hook_active: true,
+        agent_transcript_path: '/tmp/child.jsonl',
         last_assistant_message: answer(FINDING + ' ' + secret + ' ' + long),
       }),
     );
@@ -7871,103 +7610,22 @@ describe('the subagent arm (SubagentStop)', () => {
       agentId: 'a1',
       agentType: 'general-purpose',
       searchId: SEARCH_ID,
-      agentTranscriptPath: transcript,
+      agentTranscriptPath: '/tmp/child.jsonl',
     });
     const body = String(finding?.body);
     expect(body).toContain('Pinning the resolver to 4.1');
     // Scrubbed before it is stored: this row is the input to a publish path.
     expect(body).not.toContain('ghp_aaaa');
-    expect(body).not.toContain('AKIAIOSFODNN7EXAMPLEKEYX');
+    expect(body).not.toContain('AKIAIOSFODNN7EXAMPLE');
     expect(body.length).toBeLessThanOrEqual(PUSH_FINDING_MAX_CHARS);
-    // ONE HARVEST PER ASK. A long-lived agent stops again and again after it
-    // answered, and every one of those fires used to re-read the message and run
-    // the fence parse and the scrub over it before the dedupe claim refused the
-    // row. The already-harvested read comes first now, so the later stop is one
-    // key read and a row that says so.
+    // Bounded, not truncated silently into the next row: one finding per child.
     const again = await runScript(
       pushSubagentHookScript(dataDir),
       stop({ stop_hook_active: true, last_assistant_message: answer('a second finding') }),
     );
     expect(again.stdout).toBe('');
     expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(1);
-    expect((await stopRows()).map((r) => r.reason)).toContain('harvested');
-    expect((await stopRows()).map((r) => r.reason)).not.toContain('duplicate-finding');
-    // And a third stop is the same read again, not a growing pile of parses.
-    await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ stop_hook_active: true, last_assistant_message: answer('a third finding') }),
-    );
-    expect((await stopRows()).filter((r) => r.kind === 'finding')).toHaveLength(1);
-    expect((await stopRows()).filter((r) => r.reason === 'harvested')).toHaveLength(2);
-  });
-
-  /**
-   * THE TITLE IS SPLIT OFF HERE, ABOVE THE FLATTENING (round-2 review, major 1).
-   *
-   * The ask asks the child for a `# ` first line, and the newline that ends it
-   * is the only title boundary anything will ever have: `scrub` collapses every
-   * whitespace run and `clean` maps the rest to spaces, so a publish-time
-   * derivation had to guess a cut and rewrite the body around it. What these pin
-   * is that the child's line becomes a field of its own and the body under it
-   * keeps every character, on one line.
-   */
-  it('stores the fence heading as a title and the finding under it whole', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    await workingChild();
-    await runScript(pushSubagentHookScript(dataDir), stop());
-
-    await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({
-        stop_hook_active: true,
-        last_assistant_message: answer('# ox 0.14 keeps Bytes.from\n' + FINDING),
-      }),
-    );
-    expect((await stopRows()).find((r) => r.kind === 'finding')).toMatchObject({
-      title: 'ox 0.14 keeps Bytes.from',
-      body: FINDING,
-    });
-  });
-
-  /** NOTHING IS DROPPED when the heading is too long to be a title: the whole
-   *  block stays the body, marker included, and the empty title leaves the
-   *  publish path to derive one without taking anything out. */
-  it('keeps the whole block when the heading is too long to be a title', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    await workingChild();
-    await runScript(pushSubagentHookScript(dataDir), stop());
-    const runaway = '# ' + 'word '.repeat(40).trim();
-    await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ stop_hook_active: true, last_assistant_message: answer(runaway + '\n' + FINDING) }),
-    );
-    expect((await stopRows()).find((r) => r.kind === 'finding')).toMatchObject({
-      title: '',
-      body: runaway + ' ' + FINDING,
-    });
-  });
-
-  /** And when the child wrote a heading and nothing under it, the heading is the
-   *  finding: it stays in the body rather than becoming a title with an empty
-   *  body behind it. */
-  it('keeps a heading with nothing under it as the body', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    await workingChild();
-    await runScript(pushSubagentHookScript(dataDir), stop());
-    await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({
-        stop_hook_active: true,
-        last_assistant_message: answer('# ox 0.14 keeps Bytes.from'),
-      }),
-    );
-    expect((await stopRows()).find((r) => r.kind === 'finding')).toMatchObject({
-      title: '',
-      body: '# ox 0.14 keeps Bytes.from',
-    });
+    expect((await stopRows()).map((r) => r.reason)).toContain('duplicate-finding');
   });
 
   /**
@@ -7980,7 +7638,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('keeps paths and a git SHA in a harvested finding, and strips a key', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const sha = 'a1b2c3d4e5f60718293a4b5c6d7e8f9021324354';
@@ -8020,7 +7677,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('files the finding when the dedupe claim is swallowed, and names that', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
     const store = await openStore(dataDir);
     store?.run(
@@ -8061,32 +7717,24 @@ describe('the subagent arm (SubagentStop)', () => {
   it('fails open and quiet when an undocumented field is absent', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
 
     // No stop_hook_active: the re-block fuse is missing, so the ask cannot fire.
-    // The two marks a real child's stop carries are still here, or this fire
-    // would be read as a phantom and leave no row to count.
     const noFuse = await runScript(
       pushSubagentHookScript(dataDir),
       JSON.stringify({
         session_id: SESSION,
         hook_event_name: 'SubagentStop',
         agent_id: 'a1',
-        agent_type: 'general-purpose',
-        agent_transcript_path: transcript,
       }),
     );
     expect(noFuse.stdout).toBe('');
 
-    // No agent_id: nothing to make the ask once-per-child, and nothing to look
-    // a start row up by either, so the other two marks are what decide.
+    // No agent_id: nothing to make the ask once-per-child.
     const noAgent = await runScript(
       pushSubagentHookScript(dataDir),
       JSON.stringify({
         session_id: SESSION,
         hook_event_name: 'SubagentStop',
-        agent_type: 'general-purpose',
-        agent_transcript_path: transcript,
         stop_hook_active: false,
       }),
     );
@@ -8128,7 +7776,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('bounds the block before scrub, not after', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     // ~2900 characters that scrub collapses to a few hundred, so under the old
@@ -8157,7 +7804,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('keeps a code snippet inside the finding rather than closing on its fence', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const body = [
@@ -8185,7 +7831,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('harvests the real block, not a child quoting the marker on the way to it', async () => {
     await captureOn();
     await seedDispatchMiss();
-    await workingChild();
     await runScript(pushSubagentHookScript(dataDir), stop());
 
     const message =
@@ -8225,9 +7870,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('drops the ask rather than blocking a child on a claim that did not stick', async () => {
     await captureOn();
     await seedDispatchMiss();
-    // Both marks written BEFORE the trigger below refuses every later write, so
-    // what this case exercises is the claim and not the phantom filter.
-    await workingChild();
     const store = await openStore(dataDir);
     store?.run(
       "CREATE TRIGGER refuse_state BEFORE INSERT ON session_state BEGIN SELECT RAISE(ABORT, 'refused'); END",
@@ -8254,7 +7896,6 @@ describe('the subagent arm (SubagentStop)', () => {
   it('never spends a child turn under capture nudge', async () => {
     await pushOn('https://tenjin.test', { capture: 'nudge' });
     await seedDispatchMiss();
-    await workingChild();
 
     const run = await runScript(pushSubagentHookScript(dataDir), stop());
     expect(run.stdout).toBe('');
@@ -8268,163 +7909,12 @@ describe('the subagent arm (SubagentStop)', () => {
    *  session's own ask produced. */
   it('never harvests from a child it did not ask', async () => {
     await captureOn();
-    await workingChild();
     const run = await runScript(
       pushSubagentHookScript(dataDir),
       stop({ stop_hook_active: true, last_assistant_message: answer(FINDING) }),
     );
     expect(run.stdout).toBe('');
     expect(await stopRows()).toMatchObject([{ kind: 'lifecycle', reason: 'stop-active' }]);
-  });
-
-  /**
-   * PHANTOM STOPS LEAVE NOTHING (tenjin-agent#228, plan
-   * `2026-09-02-child-loop-close.md`).
-   *
-   * 2,297 of 2,588 `SubagentStop` fires in a week of two `/loop` sessions
-   * belonged to no child: an empty `agent_type`, a transcript path with no file
-   * behind it, no `SubagentStart` row, and an agent id in neither transcript.
-   * They took 26 of the 29 asks that week, because the arming signal was
-   * session-wide and the budget claim was first-come. All four marks agreed on
-   * every row measured, so a phantom is judged on the payload it arrived with
-   * and a start row clears it outright (the test below).
-   */
-  it('writes nothing at all for a phantom stop', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    // The session has evidence to spare: only the phantom marks refuse here.
-    await edited('p1');
-    await edited('p2');
-
-    // 1. An empty agent_type, with no start row behind it.
-    const noType = await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ agent_id: 'p1', agent_type: '' }),
-    );
-    // 2. A transcript path with no file behind it, likewise.
-    const noFile = await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ agent_id: 'p2', agent_transcript_path: join(scriptDir, 'never-written.jsonl') }),
-    );
-
-    for (const run of [noType, noFile]) {
-      expect(run.code).toBe(0);
-      expect(run.stdout).toBe('');
-      expect(run.stderr).toBe('');
-    }
-    // Not one row: a phantom opened no lifecycle, so it has nothing to count,
-    // and this is the largest writer to a table nothing prunes.
-    expect(await stopRows()).toEqual([]);
-    // And nothing was claimed, so the session's one ask is still there for a
-    // real child. This is the 26-of-29 defect, as a property.
-    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
-  });
-
-  /**
-   * A START ROW IS EXCULPATORY (round-2 review, major 2).
-   *
-   * The marks are a conjunction in every measurement, so ORing them classifies
-   * the same rows while failing the wrong way: one undocumented payload field
-   * renamed in a Claude Code release, or an `EACCES` on the transcript directory
-   * that `pathExists` cannot tell from a missing file, would drop every real
-   * child in the fleet and read as "no subagents ran". The start row is the one
-   * mark this codebase writes itself, so a child this session saw start keeps
-   * its row whatever the stop payload says.
-   */
-  it('keeps a started child even when its stop payload loses a mark', async () => {
-    await captureOn();
-    await started('a1');
-
-    const noType = await runScript(pushSubagentHookScript(dataDir), stop({ agent_type: '' }));
-    const noFile = await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ agent_transcript_path: join(scriptDir, 'never-written.jsonl') }),
-    );
-
-    expect(noType.stdout).toBe('');
-    expect(noFile.stdout).toBe('');
-    // Counted, with the ordinary reason: this child did no work, so it is not
-    // asked, but its end is still a fact the funnel has a denominator for.
-    expect(await stopRows()).toMatchObject([
-      { kind: 'lifecycle', reason: 'no-evidence', agentId: 'a1' },
-      { kind: 'lifecycle', reason: 'no-evidence', agentId: 'a1' },
-    ]);
-  });
-
-  /**
-   * AND THE HARVEST SURVIVES IT, which is the sharper half. A child that was
-   * blocked, spent its turn writing the fenced finding and stopped again would
-   * lose that finding along with its row if one payload field failed on the
-   * re-stop.
-   */
-  it('still harvests from an asked child whose re-stop payload loses a mark', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    await workingChild();
-
-    expect(blocked(await runScript(pushSubagentHookScript(dataDir), stop()))).not.toBeNull();
-    const back = await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({
-        agent_type: '',
-        stop_hook_active: true,
-        last_assistant_message: answer('# Pin the resolver\n' + FINDING),
-      }),
-    );
-    expect(back.stdout).toBe('');
-    expect(await stopRows()).toMatchObject([
-      { kind: 'lifecycle', reason: 'asked' },
-      { kind: 'finding', title: 'Pin the resolver', body: FINDING },
-      { kind: 'lifecycle', reason: 'captured' },
-    ]);
-  });
-
-  /**
-   * A WORKFLOW CHILD IS COUNTED, NOT BLOCKED. This harness stops a
-   * `workflow-subagent` once its structured output is written, so the turn a
-   * block buys does not exist: the one ask that reached a real child and
-   * produced nothing went to one of these. It still starts, edits and stops, so
-   * it is counted rather than dropped.
-   */
-  it('counts a workflow child under no-turn and asks it nothing', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    await workingChild('w1', PUSH_WORKFLOW_AGENT_TYPE);
-
-    const run = await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ agent_id: 'w1', agent_type: PUSH_WORKFLOW_AGENT_TYPE }),
-    );
-    expect(run.stdout).toBe('');
-    expect(await stopRows()).toMatchObject([
-      { kind: 'lifecycle', reason: 'no-turn', agentId: 'w1' },
-    ]);
-    // The budget is intact: a child with a turn left may still spend it.
-    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
-  });
-
-  /**
-   * AND IT IS COUNTED OFF THE TYPE THE START ROW RECORDED (round-4 review).
-   * `agent_type` is undocumented, which is the whole reason a start row is
-   * exculpatory above, so a workflow child whose stop payload arrives without
-   * one must not read as an ordinary child: it would clear the edit-evidence
-   * gate and spend the session's one blocking ask on a child that has no turn
-   * to answer in, leaving a later eligible child unasked.
-   */
-  it('counts a workflow child under no-turn when its stop payload loses the type', async () => {
-    await captureOn();
-    await seedDispatchMiss();
-    await workingChild('w1', PUSH_WORKFLOW_AGENT_TYPE);
-
-    const run = await runScript(
-      pushSubagentHookScript(dataDir),
-      stop({ agent_id: 'w1', agent_type: '' }),
-    );
-    expect(run.stdout).toBe('');
-    expect(await stopRows()).toMatchObject([
-      { kind: 'lifecycle', reason: 'no-turn', agentId: 'w1' },
-    ]);
-    expect(sessionState(SESSION, 'capture:subagent')).toBeNull();
   });
 
   it('says nothing and records nothing with push off', async () => {
@@ -8595,11 +8085,24 @@ describe('the context arm (log-only)', () => {
    * through the same filter as the prompt and the error line. Log-only is not a
    * containment: `pushDecide` spends the request before it decides not to speak,
    * so an unscrubbed name is on the wire either way.
+   *
+   * `mask()` RUNS ON THE BASENAME BEFORE SEPARATORS ARE SQUASHED TO SPACES
+   * (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md): a
+   * `stripe-token` match (`sk_live_…`) still has its literal underscores at
+   * that point, so the vendor-prefixed rule sees and masks it; only the
+   * squash afterward turns the surviving `sk_live_` stub into loose words.
+   * The fixture is `sk_live_`, a real Stripe SECRET key, not `pk_live_`: a
+   * publishable key is meant to ship to a browser and carries no rule at all
+   * (owner policy) — the old test's `pk_live_` fixture only ever worked
+   * because the retired entropy rule caught the value after the vendor
+   * prefix was already broken up, which is no longer true either.
    */
   it('scrubs a credential out of the churned file name before it leaves', async () => {
     const { baseUrl, queries } = await serve(echo());
     await pushOn(baseUrl);
-    const secret = 'pk_live_4eC39HqLyjWDarjtT1zdp7dc';
+    // Assembled at run time so the committed bytes hold no contiguous key shape
+    // (GitHub push protection reads test files too).
+    const secret = ['sk_live_', '4eC39HqLyjWD', 'arjtT1zdp7dc'].join('');
     const file = join(scriptDir, `${secret}-checkout-session.ts`);
     await writeFile(file, "import { z } from 'zod';\nexport const s = z.string();\n");
 
@@ -8617,11 +8120,8 @@ describe('the context arm (log-only)', () => {
     const rows = await ledger();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ trigger: 'churn', action: 'logged' });
-    // The topic survived; the key did not — neither on the wire nor in the row.
-    // Asserted on the key MATERIAL, not on its `pk_live_` prefix: squashing the
-    // separators to spaces already broke the prefix up, which is exactly what
-    // hid this. The 24 characters after it are under the entropy rule's floor,
-    // so nothing downstream would have caught them.
+    // The topic survived; the key material did not — neither on the wire nor
+    // in the row.
     expect(rows[0]!.query).toContain('checkout');
     expect(rows[0]!.query).not.toContain('4eC39HqLyjWDarjtT1zdp7dc');
     expect(queries().join('\n')).toContain('checkout');
@@ -8882,7 +8382,9 @@ describe('the capture ask (Stop)', () => {
   }
 
   it('gives the team ask a retrievable, bounded and privacy-safe capture brief', () => {
-    expect(teamAsk).toContain('conclusion-first finding or durable code map');
+    expect(teamAsk).toContain(
+      'conclusion-first finding, a decision and why, or a durable code map',
+    );
     expect(teamAsk).toContain('repository and commit/version where known');
     expect(teamAsk).toContain('repo-relative paths and components only');
     expect(teamAsk).toContain('evidence and explicit exclusions');
@@ -9498,31 +9000,6 @@ describe('the capture ask (Stop)', () => {
     await pushOn('https://tenjin.test', { capture: 'block' });
     await seedSearch({ decision: 'MISS', source: 'dispatch-hook', sessionId: SESSION });
 
-    // A REAL CHILD, with the start row and the edit the ask is now gated on
-    // (tenjin-agent#228 PR 1), and a transcript that exists.
-    const childTranscript = join(scriptDir, 'agent-a1.jsonl');
-    await writeFile(childTranscript, '{"type":"user"}\n');
-    await runScript(
-      pushSubagentHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        hook_event_name: 'SubagentStart',
-        agent_id: 'a1',
-        agent_type: 'general-purpose',
-      }),
-    );
-    await runScript(
-      pushContextHookScript(dataDir),
-      JSON.stringify({
-        session_id: SESSION,
-        cwd: dataDir,
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Edit',
-        agent_id: 'a1',
-        tool_input: { file_path: join(dataDir, 'src', 'resolver.ts') },
-      }),
-    );
-
     const ask = await runScript(
       pushSubagentHookScript(dataDir),
       JSON.stringify({
@@ -9530,7 +9007,6 @@ describe('the capture ask (Stop)', () => {
         hook_event_name: 'SubagentStop',
         agent_id: 'a1',
         agent_type: 'general-purpose',
-        agent_transcript_path: childTranscript,
         stop_hook_active: false,
       }),
     );

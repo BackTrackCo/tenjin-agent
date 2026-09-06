@@ -38,7 +38,7 @@
   ],
   "packageManager": "pnpm@11.11.0",
   "scripts": {
-    "build": "tsup",
+    "build": "rm -rf dist && tsup",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

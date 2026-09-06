@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -539,16 +539,17 @@ describe('runEdit — append convenience', () => {
     });
     expect((res.data as { id: string }).id).toBe(POST_ID);
 
-    // Typing that same secret yourself still blocks: the gate moved scope, not away.
+    // Typing that same secret yourself still faces the scan: the gate moved
+    // scope, not away. It is a flag like any other now, so --yes still clears
+    // it and the append goes through.
     const typed = stubServer();
-    await expect(
-      runEdit(
-        args({ yes: true, addQuestion: ['How do I use AKIAIOSFODNN7EXAMPLE?'] }),
-        makeCtx(),
-        hermetic({ fetchImpl: typed.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-    expect(typed.puts()).toHaveLength(0);
+    const typedRes = await runEdit(
+      args({ yes: true, addQuestion: ['How do I use AKIAIOSFODNN7EXAMPLE?'] }),
+      makeCtx(),
+      hermetic({ fetchImpl: typed.fetch, provider: spyProvider().provider }),
+    );
+    expect(typed.puts()).toHaveLength(1);
+    expect((typedRes.data as { id: string }).id).toBe(POST_ID);
   });
 
   it('never leaks a server-owned key from the GET into the strictObject body', async () => {
@@ -707,33 +708,52 @@ describe('runEdit — the confirmation gate', () => {
     expect(stderr()).toContain('Ignoring invalid TENJIN_PUBLISH_MODE="reveiw"');
   });
 
-  it('a live secret in the new content hard-blocks in every mode, --yes included', async () => {
+  it('a live secret in the new content is a flag, cleared by --yes in every mode', async () => {
+    // The local scan never refuses any more: a block-tier finding is a flag
+    // through the ordinary cascade like a warn, so --yes clears it whatever the
+    // mode is. The server's ingest gate is the one place left that can refuse.
     for (const mode of ['auto', 'full-auto', 'review']) {
       const viaFlag = stubServer();
-      await expect(
-        runEdit(
-          args({ yes: true, provenance: 'AKIAIOSFODNN7EXAMPLE' }),
-          makeCtx(),
-          hermetic({
-            fetchImpl: viaFlag.fetch,
-            provider: spyProvider().provider,
-            env: { TENJIN_PUBLISH_MODE: mode },
-          }),
-        ),
-      ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
-      expect(viaFlag.puts()).toHaveLength(0);
+      const res = await runEdit(
+        args({ yes: true, provenance: 'AKIAIOSFODNN7EXAMPLE' }),
+        makeCtx(),
+        hermetic({
+          fetchImpl: viaFlag.fetch,
+          provider: spyProvider().provider,
+          env: { TENJIN_PUBLISH_MODE: mode },
+        }),
+      );
+      expect(viaFlag.puts()).toHaveLength(1);
+      expect((res.data as { id: string }).id).toBe(POST_ID);
     }
 
     const viaBody = stubServer();
     const file = await writeDoc(`# T\n\nThe leaked key is 0x${'a'.repeat(64)}\n`);
-    await expect(
-      runEdit(
-        args({ yes: true, body: file }),
-        makeCtx(),
-        hermetic({ fetchImpl: viaBody.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-    expect(viaBody.puts()).toHaveLength(0);
+    const res = await runEdit(
+      args({ yes: true, body: file }),
+      makeCtx(),
+      hermetic({ fetchImpl: viaBody.fetch, provider: spyProvider().provider }),
+    );
+    expect(viaBody.puts()).toHaveLength(1);
+    expect((res.data as { id: string }).id).toBe(POST_ID);
+  });
+
+  it('a live secret in the new content still needs --yes: review/auto stop for confirmation', async () => {
+    for (const mode of ['review', 'auto']) {
+      const stub = stubServer();
+      await expect(
+        runEdit(
+          args({ provenance: 'AKIAIOSFODNN7EXAMPLE' }),
+          makeCtx(),
+          hermetic({
+            fetchImpl: stub.fetch,
+            provider: spyProvider().provider,
+            env: { TENJIN_PUBLISH_MODE: mode },
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
+      expect(stub.puts()).toHaveLength(0);
+    }
   });
 });
 
@@ -1100,7 +1120,8 @@ describe('runEdit — the session is scoped to what the run does', () => {
 });
 
 describe('runEdit — every typed source faces the scan', () => {
-  // A live-shaped AWS key: block tier, never clearable by --yes or any mode.
+  // A live-shaped AWS key: block tier, a flag through the ordinary cascade like
+  // any other finding — --yes clears it, in every mode, on every typed source.
   const SECRET = 'AKIAIOSFODNN7EXAMPLE';
   const cases: Array<[string, Partial<EditArgs>]> = [
     ['title', { title: SECRET }],
@@ -1116,15 +1137,26 @@ describe('runEdit — every typed source faces the scan', () => {
     ['applies-to', { appliesTo: [`products=${SECRET}`] }],
   ];
 
-  it.each(cases)('a secret in --%s hard-blocks and writes nothing', async (_label, over) => {
+  it.each(cases)('a secret in --%s is scanned and clears with --yes', async (_label, over) => {
+    const stub = stubServer();
+    const res = await runEdit(
+      args({ yes: true, ...over }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect((res.data as { id: string }).id).toBe(POST_ID);
+  });
+
+  it.each(cases)('a secret in --%s needs confirmation without --yes', async (_label, over) => {
     const stub = stubServer();
     await expect(
       runEdit(
-        args({ yes: true, ...over }),
+        args(over),
         makeCtx(),
         hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
       ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED', exitCode: 3 });
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION', exitCode: 3 });
     expect(stub.puts()).toHaveLength(0);
   });
 
@@ -1311,16 +1343,15 @@ describe('runEdit — the scan follows what ships, not what was typed', () => {
     expect((res.data as { changes: string[] }).changes).toEqual([]);
   });
 
-  it('a secret in a SURVIVING value still blocks', async () => {
+  it('a secret in a SURVIVING value still faces the scan, cleared by --yes', async () => {
     const stub = stubServer({ get: POISONED });
-    await expect(
-      runEdit(
-        args({ yes: true, scope: `now also ${SECRET} plus more`, title: 'A Better Answer' }),
-        makeCtx(),
-        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-    expect(stub.puts()).toHaveLength(0);
+    const res = await runEdit(
+      args({ yes: true, scope: `now also ${SECRET} plus more`, title: 'A Better Answer' }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect((res.data as { id: string }).id).toBe(POST_ID);
   });
 
   it('a body file that prunes to a no-op does not block on its stored secret', async () => {
@@ -1337,17 +1368,16 @@ describe('runEdit — the scan follows what ships, not what was typed', () => {
     expect((res.data as { changes: string[] }).changes).toEqual([]);
   });
 
-  it('a body file that DOES change still blocks on a secret it introduces', async () => {
+  it('a body file that DOES change still faces the scan on a secret it introduces', async () => {
     const file = await writeDoc(`# The Answer\n\nA new body with ${SECRET} in it.\n`);
     const stub = stubServer();
-    await expect(
-      runEdit(
-        args({ yes: true, body: file }),
-        makeCtx(),
-        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-    expect(stub.puts()).toHaveLength(0);
+    const res = await runEdit(
+      args({ yes: true, body: file }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect((res.data as { id: string }).id).toBe(POST_ID);
   });
 });
 
@@ -1488,82 +1518,6 @@ describe('runEdit — a big appliesTo cannot flood one line', () => {
   });
 });
 
-describe('runEdit — the project-marker scan context (parity with publish)', () => {
-  /** A git checkout whose remote names an org/repo the scan treats as private. */
-  async function gitProject(): Promise<void> {
-    await mkdir(join(dir, '.git'), { recursive: true });
-    await writeFile(
-      join(dir, '.git', 'config'),
-      '[remote "origin"]\n\turl = git@github.com:AcmeInternal/secret-service.git\n',
-      'utf8',
-    );
-  }
-
-  it('warns when a card field quotes the source project, so auto mode stops to ask', async () => {
-    // Publish gained this context in #38; an edit ships to the same public card, so
-    // it must derive the same markers or the two gates have quietly diverged.
-    await gitProject();
-    const stub = stubServer();
-    await expect(
-      runEdit(
-        args({ scope: 'internals of AcmeInternal/secret-service' }),
-        makeCtx(),
-        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
-    expect(stub.puts()).toHaveLength(0);
-  });
-
-  it('is warn-tier, so --yes still applies it', async () => {
-    await gitProject();
-    const stub = stubServer();
-    await runEdit(
-      args({ yes: true, scope: 'internals of AcmeInternal/secret-service' }),
-      makeCtx(),
-      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-    );
-    expect(stub.puts()).toHaveLength(1);
-  });
-
-  it('says nothing when the text does not name the project', async () => {
-    await gitProject();
-    const stub = stubServer();
-    await runEdit(
-      args({ scope: 'a new scope naming nothing private' }),
-      makeCtx(),
-      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-    );
-    expect(stub.puts()).toHaveLength(1); // auto mode, clean scan: applied
-  });
-
-  it("a body file draws its markers from the FILE's project, not the cwd", async () => {
-    // The body may come from anywhere; the project that matters is the one the
-    // draft lives in, matching publish's resolution.
-    const other = await mkdtemp(join(tmpdir(), 'tenjin-edit-src-'));
-    try {
-      await mkdir(join(other, '.git'), { recursive: true });
-      await writeFile(
-        join(other, '.git', 'config'),
-        '[remote "origin"]\n\turl = https://github.com/OtherOrg/other-repo.git\n',
-        'utf8',
-      );
-      const file = join(other, 'body.md');
-      await writeFile(file, '# New\n\nNotes on OtherOrg/other-repo internals.\n', 'utf8');
-      const stub = stubServer();
-      await expect(
-        runEdit(
-          args({ body: file }),
-          makeCtx(),
-          hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-        ),
-      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
-      expect(stub.puts()).toHaveLength(0);
-    } finally {
-      await rm(other, { recursive: true, force: true });
-    }
-  });
-});
-
 /**
  * TEAM MODE, and the point is PARITY WITH PUBLISH. Without it an author
  * publishes a team note carrying its own repo slug silently under `auto` and
@@ -1638,18 +1592,19 @@ describe('runEdit — a team shelf narrows the scan exactly as publish does', ()
     expect(stub.puts()).toHaveLength(0);
   });
 
-  it('still hard-blocks a live secret on a team shelf, with --yes on', async () => {
+  it('a live secret is still a flag on a team shelf, cleared by --yes', async () => {
     await writeShelfConfig();
+    // The local scan never refuses on either shelf any more: the block tier is
+    // a flag through the ordinary cascade, so --yes clears it here too.
     const file = await writeDoc(BLOCK_BODY);
     const stub = stubServer();
-    await expect(
-      runEdit(
-        args({ body: file, yes: true }),
-        teamCtx(),
-        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-    expect(stub.puts()).toHaveLength(0);
+    const res = await runEdit(
+      args({ body: file, yes: true }),
+      teamCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect((res.data as { id: string }).id).toBe(POST_ID);
   });
 });
 
@@ -2072,16 +2027,25 @@ describe('runEdit — promoting a draft', () => {
     expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 
-  it('block-scans the stored body: a secret in it refuses the promotion, before the PUT', async () => {
-    const stub = stubServer({ get: { ...DRAFT, bodyMd: BLOCK_BODY } });
+  it('block-scans the stored body: a secret in it needs confirmation before promoting, cleared by --yes', async () => {
+    const withoutYes = stubServer({ get: { ...DRAFT, bodyMd: BLOCK_BODY } });
     await expect(
       runEdit(
-        args({ status: 'published', yes: true }),
+        args({ status: 'published' }),
         makeCtx(),
-        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+        hermetic({ fetchImpl: withoutYes.fetch, provider: spyProvider().provider }),
       ),
-    ).rejects.toMatchObject({ code: 'PUBLISH_BLOCKED' });
-    expect(stub.puts()).toHaveLength(0);
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(withoutYes.puts()).toHaveLength(0);
+
+    const stub = stubServer({ get: { ...DRAFT, bodyMd: BLOCK_BODY } });
+    const res = await runEdit(
+      args({ status: 'published', yes: true }),
+      makeCtx(),
+      hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect((res.data as { id: string }).id).toBe(POST_ID);
   });
 
   // Only the BLOCK tier rides the promotion: the warn tier confirms newly typed

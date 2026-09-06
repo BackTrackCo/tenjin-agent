@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { sanitizeForTerminal } from './output';
-import type { ScanFinding } from './scan';
+import type { Finding } from './redact';
 
 /**
  * The server-side ingest scan gate as the CLI sees it; the consent half is
@@ -35,7 +35,7 @@ export const SCAN_NEEDS_ACK = 'scan_needs_ack';
  * to see. Which tier a finding belongs to is never inferred from this value —
  * the ERROR CODE decides that, and the server owns it.
  */
-export const serverScanFindingSchema = z
+export const serverFindingSchema = z
   .object({
     check: z.string(),
     severity: z.string(),
@@ -46,7 +46,7 @@ export const serverScanFindingSchema = z
   })
   .loose();
 
-export type ServerScanFinding = z.infer<typeof serverScanFindingSchema>;
+export type ServerFinding = z.infer<typeof serverFindingSchema>;
 
 /**
  * The report body. Malformed entries are DROPPED rather than failing the parse:
@@ -63,7 +63,7 @@ export const serverScanReportSchema = z
   .loose();
 
 export interface ServerScanReport {
-  findings: ServerScanFinding[];
+  findings: ServerFinding[];
   /** `ran` | `skipped` today. Open: the unattended lane behind
    *  `PublishDeps.ackServerWarnings` (commands/publish.ts) reads it fail-closed. */
   semantic?: string;
@@ -82,9 +82,9 @@ export interface ScanGateRejection {
 function toReport(raw: unknown): ServerScanReport {
   const parsed = serverScanReportSchema.safeParse(raw);
   if (!parsed.success) return { findings: [] };
-  const findings: ServerScanFinding[] = [];
+  const findings: ServerFinding[] = [];
   for (const entry of parsed.data.findings ?? []) {
-    const finding = serverScanFindingSchema.safeParse(entry);
+    const finding = serverFindingSchema.safeParse(entry);
     if (finding.success) findings.push(finding.data);
   }
   const semantic = parsed.data.checks?.semantic;
@@ -183,7 +183,7 @@ function valueKey(check: string, excerpt: string): string {
  * and an excerpt is redacted, so it cannot tell one value reported at two sites
  * from two different values that redact to the same string.
  */
-function serverSiteKey(f: ServerScanFinding): string {
+function serverSiteKey(f: ServerFinding): string {
   return `${offsetKey(f.check, f.line, f.span)}\u0000${f.field ?? '-'}\u0000${f.excerpt}`;
 }
 
@@ -223,10 +223,7 @@ function serverSiteKey(f: ServerScanFinding): string {
  * cost is that one secret genuinely occurring in two fields renders twice, on
  * two different lines, which is what actually happened.
  */
-export function mergeScanFindings(
-  local: ScanFinding[],
-  server: ServerScanFinding[],
-): RenderedFinding[] {
+export function mergeFindings(local: Finding[], server: ServerFinding[]): RenderedFinding[] {
   const out: RenderedFinding[] = [];
   const byOffset = new Map<string, RenderedFinding>();
   const byValue = new Map<string, RenderedFinding>();
@@ -294,7 +291,7 @@ export function scanReceipt(report: ServerScanReport): {
   acked?: boolean;
 } {
   return {
-    findings: mergeScanFindings([], report.findings),
+    findings: mergeFindings([], report.findings),
     ...(report.semantic !== undefined ? { semantic: report.semantic } : {}),
     ...(report.acked !== undefined ? { acked: report.acked } : {}),
   };

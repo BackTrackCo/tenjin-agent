@@ -11,6 +11,7 @@ import {
   HOOK_SCRIPT_STAMP,
   HOOK_TIMEOUT_SECONDS,
   PRIMER_TEXT,
+  PRIMER_TEXT_TEAM,
   REMIND_LINE,
   dispatchHookScript,
   prelude,
@@ -2267,9 +2268,9 @@ describe('SessionStart hook: the primer', () => {
   it('names the entry gate and both directions of the decision', async () => {
     const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
     const text = injected(run) ?? '';
-    expect(text).toContain('public, durable, and costly to reproduce');
+    expect(text).toContain('a durable question others also hit');
     expect(text).toContain('tenjin search');
-    expect(text).toContain('Skip it for private-repo questions');
+    expect(text).toContain('Skip private-repo questions');
   });
 
   it('says nothing when hooks.sessionPrimer is off', async () => {
@@ -2311,6 +2312,90 @@ describe('SessionStart hook: the primer', () => {
     const run = await runScript(sessionPrimerHookScript(dataDir), 'not json');
     expect(run.code).toBe(0);
     expect(injected(run)).toBe(PRIMER_TEXT);
+  });
+
+  /**
+   * THE WORDING IS CHOSEN AT RUN TIME, from the config the script reads, so one
+   * generated script has to reach both answers (why: the `PRIMER_TEXT`
+   * docstring). The team paragraph inverts the public one's bar: the public text
+   * tells the agent to skip private-repo questions and warns that a hit costs
+   * cents, which on a machine with a team shelf points away from exactly what
+   * the shelf holds.
+   */
+  describe('team mode', () => {
+    const teamConfig = {
+      baseUrl: 'https://team.example',
+      publicShelfUrl: 'https://public.example',
+      shelfBypassSecret: 'shelf-secret-abc123',
+    };
+
+    it('prints the team paragraph when a team shelf is configured', async () => {
+      await writeConfig(teamConfig);
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(run.code).toBe(0);
+      expect(injected(run)).toBe(PRIMER_TEXT_TEAM);
+    });
+
+    it('asks for this project, and drops the public text that points away from it', () => {
+      expect(PRIMER_TEXT_TEAM).toContain('this codebase, its services, or a past decision');
+      expect(PRIMER_TEXT_TEAM).toContain('tenjin search');
+      expect(PRIMER_TEXT_TEAM).not.toContain('private-repo questions');
+      expect(PRIMER_TEXT_TEAM).not.toContain('costs cents');
+    });
+
+    // SessionStart never fires for a subagent and the dispatch hook's hint lands
+    // in the parent's context only, so this sentence is the only thing that
+    // carries Tenjin into a research subagent's prompt. It belongs in the team
+    // paragraph most of all: that is the shelf where a miss is cheapest.
+    it('carries the nudge into subagent and research prompts', () => {
+      expect(PRIMER_TEXT).toContain('research and subagent prompts');
+      expect(PRIMER_TEXT_TEAM).toContain('research and subagent prompts');
+    });
+
+    // NO "THE QUESTION TRAVELS" WARNING (owner decision 2026-09-03, and the
+    // reason is in the PRIMER_TEXT_TEAM docstring): an agent warned about its own
+    // question sentence hedges it, and a hedged sentence is a worse query against
+    // both shelves. This assertion exists so the sentence is not restored by
+    // accident on the next reading of the fallthrough.
+    it('does not warn that the question travels', () => {
+      expect(PRIMER_TEXT_TEAM).not.toContain('secret');
+      expect(PRIMER_TEXT_TEAM).not.toContain('credential');
+      expect(PRIMER_TEXT_TEAM).not.toContain('account name');
+    });
+
+    // The paragraph is read before the session's first real thought, so length is
+    // a contract, not a preference. Both wordings came down when the warning went
+    // (555 -> 375 public, 441 -> 379 team); these ceilings are the ratchet.
+    it('keeps both paragraphs short', () => {
+      expect(PRIMER_TEXT.length).toBeLessThanOrEqual(400);
+      expect(PRIMER_TEXT_TEAM.length).toBeLessThanOrEqual(400);
+    });
+
+    // Team mode is a secret AND a shelf of the team's own; a secret with baseUrl
+    // still on the marketplace is public mode, and gets the public paragraph.
+    it.each([
+      [PRODUCTION_ORIGIN, 'the production marketplace'],
+      ['https://public.example', 'whatever publicShelfUrl names'],
+    ])('keeps the public paragraph when baseUrl is %s (%s)', async (baseUrl) => {
+      await writeConfig({ ...teamConfig, baseUrl });
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+    });
+
+    it('keeps the public paragraph when there is no bypass secret', async () => {
+      await writeConfig({ ...teamConfig, shelfBypassSecret: '' });
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(injected(run)).toBe(PRIMER_TEXT);
+    });
+
+    // Same rule as public mode: the switch decides the wording, never whether
+    // the paragraph is printed at all.
+    it('says nothing when hooks.sessionPrimer is off', async () => {
+      await writeConfig({ ...teamConfig, hooks: { sessionPrimer: 'off' } });
+      const run = await runScript(sessionPrimerHookScript(dataDir), sessionStartInput);
+      expect(run.code).toBe(0);
+      expect(run.stdout).toBe('');
+    });
   });
 });
 
@@ -2502,39 +2587,37 @@ describe('dispatch hook: a subagent dispatch', () => {
   });
 
   /**
-   * SCRUB BEFORE SLICE, pinned at the boundary that makes the order matter.
-   *
-   * The fixture above is 219 chars against a 400-char slice, so
-   * `scrub(prompt).slice(0, 400)` and `scrub(prompt.slice(0, 400))` are the
-   * same expression on it and the regression greptile found is unpinned. Here
-   * the secret STRADDLES offset 400: slicing first leaves a 12-character
-   * fragment, which is under the hex rule's 16-character floor, so the head of
-   * a real secret ships. Scrubbing first removes the whole token.
-   *
-   * MIXED CASE AND HYPHENATED, DELIBERATELY, not a plain hex run: a pure
-   * lowercase `[0-9a-f]` match is exactly the shape `secretsOnly` now exempts
-   * from the entropy rule (a git SHA, tenjin-agent#197 rework) so it is no
-   * longer replaced at all and a straddling fragment of ONE would say nothing
-   * about whether a straddling SECRET still leaks — this fixture keeps the
-   * uppercase run the entropy rule needs to still treat it as one. The
-   * hyphens are load-bearing too, kept OUT of a plain 40-char run: a solid
-   * base64-charset string this shape and length reads as a real AWS secret
-   * access key to GitHub's push protection, which has no checksum to tell a
-   * test fixture from a live credential.
+   * MASK BEFORE SLICE, pinned at the boundary that makes the order matter.
+   * There is no entropy rule left to straddle (owner policy, the 2026-09-04
+   * decision in tenjin-notes/loop-redesign/06-pr-a-redact.md): a bare hex or
+   * mixed-case id is never masked, straddling or not, so that shape no longer
+   * proves anything about ordering. A vendor-prefixed token still is, and it
+   * is the one shape where slicing first would ship a raw, unmatched
+   * fragment: a github-token needs exactly 36 characters after `ghp_`, so a
+   * naive `prompt.slice(0, 400)` taken before `mask()` runs cuts the token
+   * down to 9 of those characters, well short of the pattern, and the
+   * fragment leaves as plain text. Masking the whole window first consumes
+   * the token before the final 400-character cut ever sees it, whatever that
+   * cut later does to the resulting stub.
    */
-  it('scrubs a secret that straddles the slice boundary', async () => {
+  it('masks a vendor token that straddles the slice boundary', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
-    const commit = 'ABCDEF0123456789-abcdef0123456789-ABCDE';
+    const token = 'ghp_0A2B4C6D8E0F2G4H6I8J0K2L4M6N8O0P2Q4R';
+    expect(token).toHaveLength(40);
     const lead = 'Work out why the migration replays, checking each release in turn. ';
-    // The id starts at offset 387, so a 400-char slice keeps 13 hex characters
-    // of it: a recognisable head, and one short of the rule's 16-char floor.
-    const prompt = `${lead.padEnd(377, 'x ').slice(0, 377)}at commit ${commit} and report what actually happens.`;
-    expect(prompt.indexOf(commit)).toBe(387);
+    // The token starts at offset 387, so a naive 400-char slice taken before
+    // masking would keep 13 characters of it: a recognisable head, and far
+    // short of the full 40-character shape the rule needs to match.
+    const prompt = `${lead.padEnd(377, 'x ').slice(0, 377)}at commit ${token} and report what actually happens.`;
+    expect(prompt.indexOf(token)).toBe(387);
 
     await runScript(dispatchHookScript(dataDir), dispatchInput({ prompt }));
 
-    expect(bodies[0]).not.toContain(commit.slice(0, 13));
+    expect(bodies[0]).not.toContain(token);
+    expect(bodies[0]).not.toContain(token.slice(0, 13));
+    expect(questionSent(bodies)).toContain('ghp_');
+    expect(questionSent(bodies)).toContain('redacte');
   });
 
   /**
@@ -2655,35 +2738,79 @@ describe('dispatch hook: a subagent dispatch', () => {
   });
 
   /**
-   * SECRET-SHAPED FIXTURES, one per credential rule this arm still runs
-   * (tenjin-agent#197 rework). A control byte still cannot split a secret name
-   * past the whole-token rules, and the bearer alternative still has no `=` or
-   * `:` for the assignment rule and a value under the entropy floor — both are
-   * unaffected by the policy change below, which is about paths and hosts, not
-   * credentials.
+   * THE ONE CREDENTIAL SHAPE THIS ARM STILL MASKS UNCONDITIONALLY on a bare
+   * word boundary (the 2026-09-04 decision in
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md): `bearer-token` fires only
+   * on an `Authorization: Bearer <8+>` header. Two fixtures this table used to
+   * cover are gone, not retargeted, because the rule they pinned no longer
+   * exists: a C0 byte splicing a secret name is no longer a query-arm
+   * guarantee (`clean()` sanitizes control bytes, but only after `mask()` has
+   * already run, so a name a control byte splits is not masked — see "keeps a
+   * secret behind a control byte" below), and a bare `bearer <token>` with no
+   * `Authorization:` header is deliberately no longer masked at all: it has
+   * no vendor prefix and no `NAME=value` shape, so precision-first rows never
+   * fire on it (see "keeps a bare bearer token" below).
    */
-  it.each([
-    // A C0 byte inside the name split the token past every whole-token rule,
-    // and `clean` only removed the splitter afterwards.
-    ['a control byte splicing a secret name', 'api_key\u0001=hunter2seventeen', 'hunter2seventeen'],
-    ['a space-separated bearer', 'bearer abc123def456', 'abc123def456'],
-    ['an Authorization header', 'Authorization: Bearer abc123def456', 'abc123def456'],
-  ])('still scrubs %s', async (label, fixture, leak) => {
+  it('still scrubs an Authorization header', async () => {
     const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
     await writeConfig({ baseUrl });
     await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({
-        // Its own session per case: the arm's per-session lookup cap is 10, and
-        // a table longer than that silences its own tail.
-        sessionId: `scrub-${label.replace(/\W+/g, '-')}`,
-        // Past the arm's 80-character floor for the SHORTEST fixture too: under
-        // it the hook goes quiet and every assertion below passes vacuously.
-        prompt: `Work out why the retry loop stalls at ${fixture} and say what actually breaks in production.`,
+        prompt:
+          'Work out why the retry loop stalls at Authorization: Bearer abc123def456 and say what actually breaks in production.',
       }),
     );
     expect(questionSent(bodies)).toContain('why the retry loop stalls');
-    expect(bodies[0]).not.toContain(leak);
+    expect(bodies[0]).not.toContain('abc123def456');
+  });
+
+  /**
+   * THE CONTROL-BYTE SPLICE IS NO LONGER THE QUERY ARM'S JOB TO CATCH. The
+   * former `scrub()` stripped C0 bytes before every whole-token rule ran, so a
+   * splicer inside a secret name never got the chance to defeat one; `mask()`
+   * runs on the raw text and `clean()` strips control bytes only afterward, on
+   * the OUTPUT, so a name a control byte splits (`api_key<0x01>=value`) fails
+   * `secret-assignment`'s `\s*[:=]\s*` gap and the value ships. Accepted
+   * (2026-09-04 decision): a stray control byte splicing a keyword is rarer
+   * than the super-linear backtracking a leading name class used to cost, and
+   * `clean()` still does its own job of stripping the byte itself before
+   * anything reaches a shelf or a store.
+   */
+  it('keeps a secret behind a control byte splicing its name', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        prompt:
+          'Work out why the retry loop stalls at api_key\u0001=hunter2seventeen and say what actually breaks in production.',
+      }),
+    );
+    expect(questionSent(bodies)).toContain('why the retry loop stalls');
+    expect(bodies[0]).toContain('hunter2seventeen');
+  });
+
+  /**
+   * THE OTHER HALF OF THE SAME POLICY: a bearer token with no `Authorization:`
+   * header in front of it is not vendor-prefixed and not a `NAME=value`
+   * assignment, so no precision-first row fires on it (2026-09-04 decision).
+   * This used to be `SECRET_ASSIGN_RE`'s bearer alternative, added for the
+   * exact shape below; that alternative is retired along with the rest of the
+   * generic assignment regex.
+   */
+  it('keeps a bare bearer token with no Authorization header', async () => {
+    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
+    await writeConfig({ baseUrl });
+    await runScript(
+      dispatchHookScript(dataDir),
+      dispatchInput({
+        prompt:
+          'Work out why the retry loop stalls at bearer abc123def456 and say what actually breaks in production.',
+      }),
+    );
+    expect(questionSent(bodies)).toContain('why the retry loop stalls');
+    expect(bodies[0]).toContain('abc123def456');
   });
 
   /**
@@ -2785,35 +2912,13 @@ describe('dispatch hook: a subagent dispatch', () => {
   });
 
   /**
-   * DIFFERENTIAL for round 6's bearer alternative. The Authorization header is
-   * the one credential shape both credential rules walked past: no `=` or `:`
-   * for the assignment rule, and a 12-character value under the entropy rule's
-   * 28-character floor.
+   * DELETED: "redacts a space-separated bearer token neither credential rule
+   * could see" pinned the old `SECRET_ASSIGN_RE` bearer alternative, which is
+   * retired (2026-09-04 decision, tenjin-notes/loop-redesign/06-pr-a-redact.md
+   * "Review decisions, 2026-09-04"). The opposite outcome — a bare bearer
+   * token with no `Authorization:` header now survives — is pinned above as
+   * "keeps a bare bearer token with no Authorization header".
    */
-  it('redacts a space-separated bearer token neither credential rule could see', async () => {
-    const fixture = 'bearer abc123def456';
-
-    // Vacuity guard, both halves: the assignment rule as it stood, and the
-    // entropy floor. Either one matching would make the case below vacuous.
-    const assignOnly =
-      /(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer)[\w.-]{0,64}\s*[=:]\s*\S+/gi;
-    const entropyOnly =
-      /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
-    expect(fixture.replace(assignOnly, ' ')).toContain('abc123def456');
-    expect(fixture.replace(entropyOnly, ' ')).toContain('abc123def456');
-
-    const { baseUrl, bodies } = await serveCapturing(() => ({ status: 200, json: DISPATCH_MISS }));
-    await writeConfig({ baseUrl });
-    await runScript(
-      dispatchHookScript(dataDir),
-      dispatchInput({
-        sessionId: 'scrub-bearer',
-        prompt: `Work out why the retry loop stalls when ${fixture} is sent, and say what breaks.`,
-      }),
-    );
-    expect(questionSent(bodies)).toContain('why the retry loop stalls');
-    expect(bodies[0]).not.toContain('abc123def456');
-  });
 
   /** And the shape the bound could already see still goes: a dotted prefix
    *  gives `\\b` a start position at every dot, so it never depended on the
@@ -4267,23 +4372,30 @@ describe('dispatch hook: paths ship as content, secrets do not (tenjin-agent#197
   });
 
   /**
-   * The `head === ''` guard this arm still has (no description-only query with
-   * a dangling colon): with paths and hostnames retained, the only way left to
-   * gate a prompt to nothing is for it to be ENTIRELY secret-shaped — long
-   * enough to clear `DISPATCH_PROMPT_MIN` as raw text, but scrubbing away to
-   * nothing once the secret rules run.
+   * `mask()` NEVER COMPOSES TO EMPTY (2026-09-04 decision,
+   * tenjin-notes/loop-redesign/06-pr-a-redact.md): every match becomes a
+   * stub, never a deletion, so the `head === ''` guard can no longer be
+   * reached by a prompt that is entirely secret-shaped the way it used to
+   * when `scrub()` blanked a match outright. A prompt of nothing but a
+   * `secret-assignment` match is long enough to clear `DISPATCH_PROMPT_MIN`
+   * and now still dispatches, carrying the masked stub rather than either the
+   * raw secret or an empty, colon-dangling query. The guard itself is still
+   * real; "still no-ops on an empty or whitespace-only prompt" below is what
+   * still reaches it.
    */
-  it('never composes a description-only query when the prompt is nothing but secrets', async () => {
+  it('dispatches a masked stub, not the raw secret, when the prompt is nothing but a secret assignment', async () => {
     const cap = await serveCapturing((_b, base) => ({ status: 200, json: hit(base) }));
     await writeConfig({ baseUrl: cap.baseUrl });
-    const prompt = 'token=' + 'a1B2c3D4'.repeat(12);
-    const run = await runScript(
+    const secret = 'a1B2c3D4'.repeat(12);
+    const prompt = 'token=' + secret;
+    await runScript(
       dispatchHookScript(dataDir),
       dispatchInput({ description: 'probe ox', prompt }),
     );
-    expect(run.stdout).toBe('');
-    expect(cap.hits()).toBe(0);
-    expect(cap.bodies).toHaveLength(0);
+    expect(cap.hits()).toBe(1);
+    expect(cap.bodies).toHaveLength(1);
+    expect(cap.bodies[0]).not.toContain(secret);
+    expect(questionSent(cap.bodies)).toContain('probe ox');
   });
 
   it('still no-ops on an empty or whitespace-only prompt', async () => {

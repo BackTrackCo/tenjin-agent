@@ -1,0 +1,13 @@
+{
+  "session_id": "6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04.jsonl",
+  "cwd": "/Users/dev/proj",
+  "permission_mode": "default",
+  "hook_event_name": "SubagentStop",
+  "prompt_id": "01J9X4M2K7Q8R3T5V6W7Y8Z9A0",
+  "stop_hook_active": false,
+  "agent_id": "a7c31e9f",
+  "agent_type": "Explore",
+  "agent_transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04/subagents/agent-a7c31e9f.jsonl",
+  "last_assistant_message": "Both worktrees share one Docker daemon; ryuk's per-session reaper serializes container startup, so the second vitest run waits on the first's testcontainers lock."
+}

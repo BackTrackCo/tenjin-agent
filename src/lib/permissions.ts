@@ -276,9 +276,11 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
       'PREFIX rule, so it pins the verb and not the flags: `--base-url` rides it (see the ' +
       'flag caveat), and `--yes` is an ordinary flag on the same verb that clears exactly ' +
       'the WARN findings auto stopped on, so a re-run collapses auto into full-auto with ' +
-      'nobody asked. What still gates a publish is the CLI: the deterministic secret scan ' +
-      'blocks in every mode and no --yes clears it. The skills hold the rest of that line. ' +
-      'Set publish.mode back to review and the rule is retracted.',
+      'nobody asked. The local scan is warn-only now and every finding routes through the ' +
+      'same consent flow this mode already governs; what still refuses a publish outright is ' +
+      'the SERVER’s ingest gate (vendor tokens, private keys, seed phrases, DB passwords, ' +
+      'bearer headers), which no mode and no flag clears. The skills hold the rest of that ' +
+      'line. Set publish.mode back to review and the rule is retracted.',
   },
   {
     rule: 'Bash(tenjin edit:*)',
@@ -358,9 +360,8 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason:
       'Can raise maxAutoSpend / sessionBudget / confirm, i.e. widen the agent’s own spend policy — ' +
       'and, through shelfBypassSecret + baseUrl, put the machine in team mode, where a publish ' +
-      'skips the scan’s warn tier (except the credential checks secret-assignment, ' +
-      'hex32-value, high-entropy-string and env-dump-block and the injection check ' +
-      'embedded-instruction) and prices at 0. It also writes ' +
+      'skips the scan’s warn tier (except secret-assignment, and hex32-value, the warn form a ' +
+      'block-tier check demotes to) and prices at 0. It also writes ' +
       'publish.ackServerWarnings on, the most direct consent-loosening write on this verb: ' +
       'it lets one --yes cover the marketplace’s own scan findings, which no payload had ' +
       'rendered when that yes was given.',

@@ -1,0 +1,20 @@
+{
+  "session_id": "6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04",
+  "transcript_path": "/Users/dev/.claude/projects/-Users-dev-proj/6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04.jsonl",
+  "cwd": "/Users/dev/proj",
+  "permission_mode": "acceptEdits",
+  "hook_event_name": "PostToolUse",
+  "prompt_id": "01J9X4M2K7Q8R3T5V6W7Y8Z9A0",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "pnpm vitest run src/lib/state-store.test.ts",
+    "description": "Run the store tests"
+  },
+  "tool_use_id": "toolu_01Kp3Wq7Zx9Lm4Nv2Bt8Cy5R",
+  "tool_response": {
+    "stdout": " ✓ src/lib/state-store.test.ts (42 tests) 812ms\n\n Test Files  1 passed (1)\n      Tests  42 passed (42)\n",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false
+  }
+}

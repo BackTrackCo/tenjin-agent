@@ -437,23 +437,51 @@ describe('tenjin_publish consent', () => {
     expect((res.structuredContent as ErrorEnvelope).error.code).toBe('USAGE');
   });
 
-  it('a block-severity scan finding hard-blocks even with yes:true', async () => {
+  it('a block-severity scan finding needs confirmation, and clears with yes:true', async () => {
     const file = join(dir, 'leaky.md');
-    // A live-shaped AWS access key is a block finding; block is never yes-clearable.
+    // A live-shaped AWS access key is a block finding. The local scan never
+    // refuses any more: it is a flag through the ordinary consent cascade, so
+    // review's default NEEDS_CONFIRMATION is what fires without yes:true, and
+    // yes:true clears it like it would a warn. The server's ingest gate is the
+    // one place left that can still refuse a live secret.
     await writeFile(file, '# Deploy\n\nSet AKIAIOSFODNN7EXAMPLE in the environment.\n');
-    const client = await connect({
+    const noYesClient = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
       deps: { publish: { cwd: dir, env: {} } },
+    });
+    const blocked = await noYesClient.callTool({
+      name: 'tenjin_publish',
+      arguments: { file },
+    });
+    expect(blocked.isError).toBe(true);
+    expect((blocked.structuredContent as ErrorEnvelope).error.code).toBe('NEEDS_CONFIRMATION');
+
+    const fetchImpl = (async () =>
+      new Response(
+        JSON.stringify({
+          id: '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+          slug: 's',
+          title: 'Deploy',
+          status: 'published',
+          price: '100000',
+          url: `${BASE}/a/iris/s`,
+          tags: [],
+        }),
+        { status: 201, headers: { 'content-type': 'application/json' } },
+      )) as unknown as typeof fetch;
+    const client = await connect({
+      dataDir: dir,
+      flags: { baseUrl: BASE },
+      deps: {
+        publish: { cwd: dir, env: {}, fetchImpl, provider: testWalletProvider() },
+      },
     });
     const res = await client.callTool({
       name: 'tenjin_publish',
       arguments: { file, yes: true },
     });
-
-    expect(res.isError).toBe(true);
-    const sc = res.structuredContent as ErrorEnvelope;
-    expect(sc.error.code).toBe('PUBLISH_BLOCKED');
+    expect(res.isError).toBeFalsy();
   });
 });
 
@@ -665,16 +693,29 @@ describe('tenjin_edit', () => {
     expect(server.puts()).toHaveLength(0);
   });
 
-  it('a live secret in the new content hard-blocks even with yes:true', async () => {
+  it('a live secret in the new content needs confirmation, and clears with yes:true', async () => {
+    // The local scan never refuses any more: a block-severity finding is a flag
+    // through the ordinary cascade, so without yes:true it stops the same way a
+    // warn would, and yes:true clears it. The server's ingest gate is the one
+    // place left that can still refuse a live secret.
+    const withoutYes = editServer();
+    const noYesClient = await editClient(withoutYes.fetch);
+    const blocked = await noYesClient.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, provenance: 'AKIAIOSFODNN7EXAMPLE', mode: 'auto' },
+    });
+    expect(blocked.isError).toBe(true);
+    expect((blocked.structuredContent as ErrorEnvelope).error.code).toBe('NEEDS_CONFIRMATION');
+    expect(withoutYes.puts()).toHaveLength(0);
+
     const server = editServer();
     const client = await editClient(server.fetch);
     const res = await client.callTool({
       name: 'tenjin_edit',
       arguments: { postId: POST_ID, provenance: 'AKIAIOSFODNN7EXAMPLE', yes: true, mode: 'auto' },
     });
-    expect(res.isError).toBe(true);
-    expect((res.structuredContent as ErrorEnvelope).error.code).toBe('PUBLISH_BLOCKED');
-    expect(server.puts()).toHaveLength(0);
+    expect(res.isError).toBeFalsy();
+    expect(server.puts()).toHaveLength(1);
   });
 });
 

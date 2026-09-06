@@ -87,7 +87,7 @@ Open couplings:
   sets no `SCAN_WARN_MODE`, so its warn tier reports on the success response and
   holds nothing, and this coupling does not ask you to flip it there. Under
   `enforce` a shelf would re-impose exactly the warn findings the team drop
-  (`survivesTeamDrop`, `src/lib/scan.ts`) exists to remove, so flipping it is a
+  (the `team` scope of `findings()`, `src/lib/redact.ts`) exists to remove, so flipping it is a
   deliberate change of what a team note is allowed to carry, not a rollout step.
 
 ## One-time owner setup

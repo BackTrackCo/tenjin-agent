@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  mergeScanFindings,
+  mergeFindings,
   parseScanRejection,
   parseScanSuccessReport,
   scanNoteLines,
@@ -8,8 +8,8 @@ import {
   SCAN_BLOCKED,
   SCAN_NEEDS_ACK,
 } from './scan-gate';
-import type { ServerScanFinding } from './scan-gate';
-import type { ScanFinding } from './scan';
+import type { ServerFinding } from './scan-gate';
+import type { Finding } from './redact';
 
 function envelope(code: string, scan: unknown): unknown {
   return { error: { code, message: 'held', details: { scan } } };
@@ -121,7 +121,7 @@ describe('parseScanSuccessReport', () => {
   });
 });
 
-const local = (over: Partial<ScanFinding> = {}): ScanFinding => ({
+const local = (over: Partial<Finding> = {}): Finding => ({
   check: 'email',
   severity: 'warn',
   line: 7,
@@ -130,9 +130,9 @@ const local = (over: Partial<ScanFinding> = {}): ScanFinding => ({
   ...over,
 });
 
-describe('mergeScanFindings', () => {
+describe('mergeFindings', () => {
   it('collapses one value both scans found and marks it as both', () => {
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [local()],
       [{ check: 'email', severity: 'warn', line: 7, span: [0, 6], excerpt: 'a@b.co' }],
     );
@@ -143,7 +143,7 @@ describe('mergeScanFindings', () => {
   it('collapses the same detector + excerpt even when the offsets differ', () => {
     // The local scan reads the whole file (frontmatter included); the gate scans
     // the extracted body, so the identical secret lands on different lines.
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [local({ line: 12 })],
       [{ check: 'email', severity: 'warn', line: 3, span: [4, 10], excerpt: 'a@b.co' }],
     );
@@ -156,7 +156,7 @@ describe('mergeScanFindings', () => {
   // (routine on a draft with no frontmatter, where body and raw lines agree), and
   // the operator then acked a set the render had dropped a member of.
   it('keeps a server finding that only shares coordinates with a local one', () => {
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [local()],
       [{ check: 'email', severity: 'warn', line: 7, span: [0, 6], excerpt: 'other@b.co' }],
     );
@@ -166,7 +166,7 @@ describe('mergeScanFindings', () => {
   });
 
   it('keeps a server-only finding, tagged server, with its field', () => {
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [local()],
       [{ check: 'semantic-pii', severity: 'warn', line: 1, excerpt: 'reads as…', field: 'body' }],
     );
@@ -175,7 +175,7 @@ describe('mergeScanFindings', () => {
   });
 
   it('renders local findings first and never duplicates within one side', () => {
-    const merged = mergeScanFindings([local(), local()], []);
+    const merged = mergeFindings([local(), local()], []);
     expect(merged).toHaveLength(1);
     expect(merged[0]?.source).toBe('local');
   });
@@ -184,7 +184,7 @@ describe('mergeScanFindings', () => {
   // matter of course. Collapsing them would leave the operator acking a secret
   // the server flagged and the render never showed.
   it('keeps two server findings that share an offset in different fields', () => {
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [],
       [
         {
@@ -214,7 +214,7 @@ describe('mergeScanFindings', () => {
   // The cost lands here: one secret genuinely in two fields renders twice, on two
   // different lines. The alternative dropped the second of two distinct secrets.
   it('keeps both server entries when one excerpt covers two match sites', () => {
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [],
       [
         {
@@ -246,7 +246,7 @@ describe('mergeScanFindings', () => {
   it('keeps two distinct findings whose redactions are identical', () => {
     // Same detector, same tier, same fixed excerpt, same field: two findings that
     // differ only in where the judge matched.
-    const redacted = (span: [number, number]): ServerScanFinding => ({
+    const redacted = (span: [number, number]): ServerFinding => ({
       check: 'semantic-pii',
       severity: 'warn',
       line: 1,
@@ -254,7 +254,7 @@ describe('mergeScanFindings', () => {
       excerpt: 'reads as private context',
       field: 'body',
     });
-    const merged = mergeScanFindings([], [redacted([0, 40]), redacted([90, 130])]);
+    const merged = mergeFindings([], [redacted([0, 40]), redacted([90, 130])]);
     expect(merged).toHaveLength(2);
     expect(merged.every((f) => f.source === 'server')).toBe(true);
   });
@@ -264,7 +264,7 @@ describe('mergeScanFindings', () => {
   it('collapses a server finding the server sent twice', () => {
     // Annotated, not inferred: a bare object literal widens `span` to number[],
     // which the tuple the schema declares does not accept.
-    const entry: ServerScanFinding = {
+    const entry: ServerFinding = {
       check: 'email',
       severity: 'warn',
       line: 3,
@@ -272,7 +272,7 @@ describe('mergeScanFindings', () => {
       excerpt: 'x@b.co',
       field: 'body',
     };
-    expect(mergeScanFindings([], [entry, { ...entry }])).toHaveLength(1);
+    expect(mergeFindings([], [entry, { ...entry }])).toHaveLength(1);
   });
 
   // A local entry absorbs ONE server finding, not a queue of them. The local
@@ -282,21 +282,21 @@ describe('mergeScanFindings', () => {
   // the first cleared `serverAddedUnseen`, and an eligible --yes then acked a
   // token covering a finding no render had shown.
   it('lets one local entry absorb one server finding, not several', () => {
-    const site = (over: Partial<ServerScanFinding>): ServerScanFinding => ({
+    const site = (over: Partial<ServerFinding>): ServerFinding => ({
       check: 'secret-assignment',
       severity: 'warn',
       line: 1,
       excerpt: 'DEPLOY_API_KEY=[redacted 16 chars]',
       ...over,
     });
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [
         {
           check: 'secret-assignment',
           severity: 'warn',
           line: 4,
           excerpt: 'DEPLOY_API_KEY=[redacted 16 chars]',
-        } as ScanFinding,
+        } as Finding,
       ],
       [site({ span: [0, 34], field: 'body' }), site({ span: [80, 114], field: 'body' })],
     );
@@ -309,7 +309,7 @@ describe('mergeScanFindings', () => {
 
   // The ordinary case is untouched: one occurrence, both scans, one line.
   it('still collapses the ordinary one-for-one agreement', () => {
-    const merged = mergeScanFindings(
+    const merged = mergeFindings(
       [local()],
       [
         {

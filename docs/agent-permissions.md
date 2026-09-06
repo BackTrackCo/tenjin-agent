@@ -205,18 +205,18 @@ which origin, at what scope, and when it expires.
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                   | Why it stays a human decision                                                        |
-| ---------------------- | ------------------------------------------------------------------------------------ |
-| `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
-| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
-| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.              |
-| `tenjin delete`        | Destroys a published piece. No mode clears it; see below.                            |
-| `tenjin wallet create` | Creates the payment credential.                                                      |
-| `tenjin config set`    | It can widen the agent's own spend policy.                                           |
-| `tenjin install`       | Writes into harness config and skills directories.                                   |
-| `tenjin push`          | Writes hook entries into harness settings; they add context and never block a call.  |
-| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                  |
-| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                        |
+| Verb                   | Why it stays a human decision                                                              |
+| ---------------------- | ------------------------------------------------------------------------------------------ |
+| `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below.       |
+| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.         |
+| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.                    |
+| `tenjin delete`        | Destroys a published piece. No mode clears it; see below.                                  |
+| `tenjin wallet create` | Creates the payment credential.                                                            |
+| `tenjin config set`    | It can widen the agent's own spend policy.                                                 |
+| `tenjin install`       | Writes into harness config and skills directories.                                         |
+| `tenjin push`          | Arms the sidecar arms already wired by `install`; they add context and never block a call. |
+| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                        |
+| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                              |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
@@ -319,11 +319,11 @@ one first.
 
 `tenjin update` replaces the globally installed `tenjin` with whatever npm serves
 next, which is the binary the agent goes on to run for the rest of the session and
-every session after it. A successful swap then rewrites the generated hook scripts
-and this CLI's own hook entries in `settings.json`, on each profile whose hooks
-this machine has registered, so the harness fires the new build rather than the
-one just replaced; it writes no permission rule and registers no hook that is not
-already there. Which build an agent executes is an operator decision, so
+every session after it. A successful swap then re-copies the loop daemon's
+bundles and rewrites this CLI's own hook entries in `settings.json`, for the
+profile the update ran under, so the harness fires the new build rather than the
+one just replaced; it writes no permission rule and registers no hook on a machine
+that had none. Which build an agent executes is an operator decision, so
 no recommended rule pre-clears it. `tenjin update --check` only reports, but a
 prefix rule pins the **verb**, not the flags, so clearing the check would clear
 the install with it. Nothing stops you adding the rule yourself; it stays off the

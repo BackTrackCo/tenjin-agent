@@ -18,7 +18,7 @@
  * as ordinary JavaScript with regexes and no `\` doubling by hand.
  */
 
-import { FINDING_TITLE_MAX } from './child-findings';
+import { maskRules } from './redact';
 import { AGENT_ID_RE } from './grade';
 import { marketplaceSource, prelude, userAgentSource } from './hook-scripts';
 import { condenseSource } from './query-condense';
@@ -180,7 +180,7 @@ export const PUSH_CAPTURE_SIGNAL_WINDOW_MS = 60 * 60 * 1000;
  * A CHILD'S WORDS ARE UNTRUSTED INPUT, and this one is written to the queue a
  * later `tenjin publish` reads, so the size bound is a safety bound, not a
  * display one: whatever a child puts between the fences, at most this much of
- * it is stored, after `scrub()`. Sized for a paragraph, well under the retired
+ * it is stored, after `mask()`. Sized for a paragraph, well under the retired
  * full-body cap, because a finding that needs 6k characters is a document and
  * the child should write one.
  */
@@ -193,20 +193,8 @@ export const PUSH_FINDING_MESSAGE_TAIL = 20000;
  *  harvest looks for. ONE CONSTANT, so the ask and the parser cannot drift. */
 export const PUSH_FINDING_TAG = 'tenjin-finding';
 /**
- * The `agent_type` this harness gives a workflow subagent, which is stopped
- * once its structured output is written and has no further turn to spend.
- *
- * PROBED, LIKE EVERY OTHER FIELD ON THIS PAYLOAD. Seven types appear across a
- * week of `SubagentStart` rows on one machine (`general-purpose`, `Explore`,
- * `Plan`, `claude-code-guide`, two loop worker types, and this one); the one ask
- * that reached a real child and produced nothing went to a `workflow-subagent`
- * after its StructuredOutput. Blocking one buys a turn that does not exist, so
- * the arm counts it under `no-turn` and asks nobody.
- */
-export const PUSH_WORKFLOW_AGENT_TYPE = 'workflow-subagent';
-/**
- * What a child is asked for at `SubagentStop`, once, when it stops with its own
- * edits behind it (tenjin-agent#228). A template: `<agent-flag>` and `<mode>` are filled in
+ * What a child is asked for at `SubagentStop`, once, when it stops on an open
+ * loop (tenjin-agent#228). A template: `<agent-flag>` and `<mode>` are filled in
  * at run time by {@link subagentCaptureReason}, mirrored in the generated script.
  *
  * PUBLISH IT YOURSELF, AND THE QUEUE IS THE FALLBACK. Operator decision
@@ -247,7 +235,7 @@ export const PUSH_WORKFLOW_AGENT_TYPE = 'workflow-subagent';
  * that would poison the queue.
  */
 export const SUBAGENT_CAPTURE_REASON =
-  'Before you finish: you changed files in this session, so you may be holding what it took to know what to change. If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
+  'Before you finish: this task ran against an open Tenjin loop (a lookup that found nothing, or a failure this session is still carrying). If you settled something durable a teammate would reuse (a probe result, a version-specific gotcha, a tested workaround, a decision and the reasoning behind it), publish it YOURSELF now, while you still hold the evidence behind it: pass the Markdown on stdin and run `tenjin publish -' +
   '<agent-flag>' +
   '<search-flag>' +
   '` with the title as the first `# ` heading (one finding per publish). If it is already in a file, run `tenjin publish <file>' +
@@ -255,7 +243,7 @@ export const SUBAGENT_CAPTURE_REASON =
   '<search-flag>' +
   '` as its own bare shell/tool command, never chained behind writing the file; or call the tenjin_publish MCP tool with that file if you have no shell. It is an ordinary publish: the same local scan and the same publish.mode consent as any other, and this machine resolves publish.mode to <mode>. If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   PUSH_FINDING_TAG +
-  ' and whose closing line is exactly ```. Make its FIRST line inside the fence `# ` and a short title for the finding, then a few sentences, self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
+  ' and whose closing line is exactly ```, a few sentences and self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
 
 /**
  * The search id a child may splice into its own publish, anchored. The
@@ -1070,354 +1058,22 @@ function packagesInSource(text) {
 }
 
 /**
- * Credential shapes, by vendor prefix. Named prefixes first because they are
- * unambiguous: nothing that is not a secret looks like \`ghp_\` followed by
- * sixteen base62 characters. The list is not a promise of completeness — the
- * generic rule below it is what catches the vendor nobody has heard of yet.
+ * The one redaction rule table, rendered in: the rows scoped \`query\` from
+ * src/lib/redact-rules.json (vendor prefixes, a password inside a url, a
+ * secret-named assignment). A match is replaced by a masked stub, never
+ * deleted, and nothing else in the text is touched: paths, hosts, IPv4
+ * literals, commit SHAs, env names and prose all stay, because those are the
+ * identifiers the shelf ranks on (owner policy, tenjin-agent#197 and the
+ * 2026-09-04 decision in tenjin-notes/loop-redesign/06-pr-a-redact.md).
+ * \`clean()\` handles control bytes and the length bound, as it always did.
  */
-const SECRET_TOKEN_RE = /\b(?:sk-[A-Za-z0-9_-]{16,}|pk_(?:live|test)_[A-Za-z0-9]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{16,}|A(?:KIA|SIA)[0-9A-Z]{16}|xox[baprse]-[A-Za-z0-9-]{10,}|ya29\.[A-Za-z0-9_-]{10,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+)/g;
-/**
- * \`PGPASSWORD=hunter2\`, \`api_key: abcd\`: the NAME says the value is a
- * secret, so the value goes whatever it happens to look like.
- *
- * THERE IS NO LEADING NAME CLASS, and the trailing one is BOUNDED. Both halves
- * are load-bearing rather than cosmetic. Unbounded (\`[\w.-]*\`) they backtrack
- * super-linearly on a keyword-dotted run: driving the rendered dispatch arm with
- * a \`token.token.token…\` description measured 123 ms at 1k characters, 436 ms
- * at 2k, 1.9 s at 4k and 14.6 s at 8k with nothing emitted. A synchronous regex
- * cannot be pre-empted by an event-loop watchdog, so on attacker-chosen text
- * that is a core spun until the harness kill, in front of a tool call the user
- * is waiting on. Every caller windows its own input as well (defence in depth),
- * but this is the bound that holds whatever any caller forgets.
- *
- * BOUNDING THE LEADING CLASS DID CHANGE MATCHES, which is why it is gone rather
- * than capped. \`\b\` offers no start position inside an unbroken \`\w\` run,
- * so with a leading \`[\w.-]{0,64}\` a name longer than 64 characters
- * (\`my_service_\` x7 + \`password=\`) had no start the engine could retry from
- * and the value leaked. Dropping the class instead is what restores that shape:
- * the prefix was never the secret, the value is, and the match now starts at the
- * keyword wherever it sits.
- *
- * THE SECOND ALTERNATIVE IS THE AUTHORIZATION HEADER, which the first cannot
- * see: \`bearer abc123def456\` is separated by a space rather than \`=\` or
- * \`:\`, and a 12-character value sits under the entropy rule's 28-character
- * floor, so both rules walked past it. Eight characters is the floor here
- * because a token shorter than that is not one; it costs the prose reading
- * ("the bearer of bad news" keeps its words, none of which reach eight).
- *
- * THE SIGNING WORDS ARE ON THE LIST TOO — \`sig\`, \`signature\`, \`nonce\`,
- * \`hmac\` — because a request signature is a credential the other words do
- * not name: \`;sig=abc123\` is what a presigned url or a webhook callback
- * carries, and the value under it is mixed letters and digits well short of
- * the entropy rule's floor, so it left whole and the identifier rule then
- * PROMOTED it (\`abc123\` is a handle by shape) onto the wire to both shelves.
- *
- * \`sig\` IS A SUBSTRING OF ORDINARY WORDS, and that cost is paid knowingly.
- * The alternation has no leading boundary — deliberately, see above, so a
- * long prefix cannot hide the keyword — so \`design=dark\` and
- * \`assignee=me\` match at their inner \`sig\` and go. The cures are worse:
- * a \`(?<![A-Za-z])\` guard on the whole alternation loses camelCase
- * (\`requestSig=abc\`, \`servicePassword=hunter2\`), which is the exact
- * shape being closed here, and no rule can tell a signing prefix from an
- * English one. Redacting a topic word is the cheaper mistake. The COLON
- * form is the everyday trigger, not the \`=\` form: \`the new design:
- * dark mode\` scrubs to \`the new de mode\` and \`assignee: bob\` to
- * \`as\` — a two-character residue, not a clean removal. Harmless on the
- * wire (lowercase fragments never become identifiers) but expected, so
- * the next reader is not surprised by it in prose.
- */
-const SECRET_ASSIGN_RE =
-  /(?:(?:passwd|password|secret|token|api[_-]?key|apikey|access[_-]?key|credential|bearer|signature|sig|nonce|hmac)[\w.-]{0,64}\s*[=:]\s*\S+|bearer\s+\S{8,})/gi;
-/** \`postgres://user:hunter2@host/db\`: the userinfo half of a url, which the
- *  path rule cannot see because that one starts at a slash. The host and path
- *  after the \`@\` go with it: a one-label host (\`h\`) is under the host
- *  rule's reach, and \`h/db\` left behind reads as an identifier to the
- *  prompt arm.
- *
- *  THE EXTENT IS THE WHOLE NON-WHITESPACE RUN, AND THE ENUMERATION IS
- *  RETIRED. This rule used to parse the query string after the credential
- *  with a hand-rolled \`(separator)(name)=(value)\` repetition, and three
- *  consecutive review rounds patched that repetition: round 2 put the signing
- *  words on the assign rule, round 3 widened the separator class to every
- *  character the match stopped at, round 4 widened the parameter-name class
- *  twice, once for interior digits and once for a leading one. Every one of
- *  those fixes was correct and every one closed exactly the shape it had been
- *  shown, and the next round found the next shape:
- *  \`?apikey[0]=hunter2secret\` — a real credential value, in the form
- *  \`qs\`, Rails and PHP all emit — plus \`?filter[id]=abc123\`,
- *  \`;;ref=abc123\`, \`;;;;t=abc123\`, \`;ref=abc123&&next=xyz789abc\`,
- *  \`;a.b=abc123\` and \`;%73ig=abc123\`, all of them promoted into the
- *  identifiers array and sent to BOTH shelves. Two character classes cannot
- *  enumerate what a query string is, so a fourth patch would only have bought
- *  an eighth shape. The tail is therefore no longer parsed at all: after
- *  \`user:pass@\` the match runs to the next whitespace and NOTHING inside
- *  that run survives. Brackets, empty separator runs, dotted or
- *  percent-encoded names, a value with no \`=\` in front of it — whatever the
- *  vendor glues on, it was written as one word with a credential inside it,
- *  so it leaves as one word.
- *
- *  THE REPLACER HANDS BACK THE TRAILING PUNCTUATION, which is what keeps a
- *  url readable inside prose. The handback is the run matched by
- *  \`SECRET_URL_TRAIL_RE\` at the END of the match and nothing else: the
- *  closers \`)\`, \`]\`, \`}\`, \`>\`, the quotes \`"\`, \`'\` and backtick,
- *  the markdown \`*\`, and the sentence punctuation \`.\`, \`,\`, \`;\`,
- *  \`:\`, \`!\`, \`?\`. So \`(postgres://u:p@h/db); the retry loops\` keeps
- *  \`);\` and, across the space, its sentence, and a bare \`(url)\` keeps its
- *  parens. Every character in that class is non-alphanumeric, so nothing
- *  handed back can be a credential value or reach the identifiers array;
- *  \`=\` is deliberately NOT in it, because it is base64 padding and a key
- *  may end on it.
- *
- *  PROSE GLUED STRAIGHT ONTO THE URL GOES WITH IT, and that is the priced
- *  cost of the redesign rather than an oversight.
- *  \`postgres://u:p@h/db,migration fails\` used to keep \`,migration\` and
- *  now keeps only \`fails\`. Nothing can tell \`,migration\` from
- *  \`,hunter2secret\` except the enumeration that just failed three times in
- *  a row, so the file's standing trade applies: redacting a topic word is the
- *  cheaper mistake. One space is all it takes to keep the word, and the
- *  spaced form is how a url is written in a sentence anyway.
- *
- *  LINEAR, AND RE-MEASURED ON THE SHAPES THE OLD REPETITION WAS TUNED FOR.
- *  \`[^\s:@/]+\` stops at the first \`:\` and \`[^\s@/]+\` stops at the first
- *  \`/\`, so the only backtracking seam left is bounded by the distance to
- *  the next slash, and the tail is one greedy \`\S*\` with nothing after it
- *  to backtrack into. Timed over the whole \`scrub\` at 16k characters per
- *  input: \`;a=\` repeats 0.15 ms, alternating \`?a=1&b=2\` 0.08 ms, all-\`?\`
- *  0.24 ms, \`?a\` repeats 0.19 ms, \`&a=b\` repeats then a forced fail
- *  0.05 ms, 16k of trailing non-matching text 0.05 ms, \`a://\` repeats
- *  0.52 ms, and the one seam that can still backtrack — \`x://\` then a 16k
- *  \`a:\` run with no \`@\` — 0.65 ms. Doubling every one of them to 32k
- *  doubles the time (worst case 1.31 ms), which is the linearity claim.
- *
- *  A NON-CREDENTIAL URL IS UNTOUCHED BY THIS. The rule only ever engages
- *  after \`user:pass@\`, so \`https://acme.com/docs?page=2\` keeps
- *  \`?page=2\` — the host rule takes the host and the page number travels as
- *  the topic word it is. \`SECRET_ASSIGN_RE\` is the belt to this brace: it
- *  blanks a signing parameter wherever it sits, url or not. */
-const SECRET_USERINFO_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:@/]+:[^\s@/]+@\S*/gi;
-/** The trailing punctuation a blanked userinfo url hands back to the sentence
- *  it was written inside. Closers, quotes and sentence punctuation only: no
- *  alphanumeric, and no \`=\`. */
-const SECRET_URL_TRAIL_RE = /[)\]}>'"\u0060*.,;:!?]+$/;
-/** The catch-all: a long opaque run mixing letters and digits is not a word
- *  anybody typed as part of a question. Dropping a rare long identifier costs
- *  one topic word; keeping a key costs the key.
- *
- *  THE ALPHABET IS STANDARD BASE64, not just the url-safe one. A canonical AWS
- *  secret (\`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\`) contains \`/\`, so a
- *  class without it splits the key into three short runs and every one of them
- *  falls under the length floor — the key leaves whole. \`+\`, \`/\` and the
- *  \`=\` padding are in; the floor moves to 28 to pay for the wider alphabet,
- *  which is still under any real key's length. */
-const SECRET_ENTROPY_RE =
-  /\b(?=[A-Za-z0-9+/=_-]*\d)(?=[A-Za-z0-9+/=_-]*[A-Za-z])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])/g;
-/** The env-var-name exception to the rule above: all caps and digits, at least
- *  one underscore, at most 64 characters. Bounded again in the replacer. */
-const SECRET_ENV_NAME_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/;
-/**
- * Hostnames, and the addresses that are not names.
- *
- * THE TLD LIST IS WIDENED, NOT REPLACED BY A GENERIC DOTTED RUN. A rule that
- * took any dotted run ending in letters would have to run a SECOND
- * \`(?:label\.)+\` scan, and that shape is the quadratic residue already
- * measured here (~1.4 s per 20k of \`a-a-a\`, x4 per doubling): a second one
- * doubles it, in front of a tool call. Widening the alternation adds no scan and
- * no backtracking, so \`.sh\`, \`.xyz\` and the ccTLDs an internal host actually
- * uses leave without making the arm slower. It is a list, so it is not a promise
- * of completeness; the path, userinfo and entropy rules are what catch the rest.
- *
- * THE LIST STAYS CASE-INSENSITIVE, over-redaction and all. Widening to ccTLDs
- * put English words in it, so a missing space eats the next sentence
- * (\`failed.In the log\` -> \`failed the log\`). Every case-based cure trades
- * that for a leak: lower-case-only lets \`EU.ACME.DE\` through, and a
- * Title-case guard lets \`Eu.Acme.De\` through, because no rule can tell a
- * Title-cased host from a Title-cased word. Redacting a topic word is the
- * cheaper mistake, so it stands.
- *
- * A HOST FOLLOWED BY AN EXTENSION IS STILL A HOST, AND THE EXTENSION GOES
- * WITH IT. \`api.acme.com.json\`, \`values.prod.acme.io.yaml\` and
- * \`internal.corp.md\` are per-host config files, exactly the shape an nginx
- * sites directory or a cert bundle takes, so the trailing dotted labels are
- * consumed into the match (\`api.acme.com.tsx-beta\` included: the class runs
- * to the next non-label character) and the whole run is blanked. A negative
- * lookahead on the extension was tried first and did the opposite: the engine
- * found no shorter label run to match, so the host survived WHOLE.
- *
- * THE ONE FILE NAME KEPT is \`<name>.test.<source ext>\`: \`test\` is on the
- * TLD list, so \`push-scripts.test.ts\` used to leave \`.ts\` behind, and it
- * is the file most questions about a failing suite name. A single label
- * before \`.test\` and a source extension after it is not a host anybody
- * runs; \`docker-compose.dev.yml\` and \`settings.local.json\` still go,
- * which is the cheaper mistake.
- */
-const SECRET_HOST_RE =
-  /\b(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|ai|co|sh|xyz|app|cloud|site|tech|team|works|systems|services|internal|local|lan|corp|intra|test|example|de|uk|fr|nl|se|no|fi|dk|es|it|pl|ch|at|be|ie|pt|cz|ru|ua|tr|il|in|jp|cn|kr|sg|hk|au|nz|ca|mx|br|ar|za)\b(?:\.[a-z0-9-]+)*/gi;
-/** The one host-shaped file name the host rule hands back: see above. */
-const SECRET_HOST_KEEP_RE = /^[a-z0-9-]+\.test\.(?:ts|tsx|js|mjs|cjs)$/i;
-/** A basename stem the path rule must not hand back whatever its extension:
- *  the words a credential file is named with, matched as whole \`-\`/\`_\`/\`.\`
- *  separated pieces so \`keys.ts\` (a source file) is not \`key\`. */
-const SECRET_STEM_RE =
-  /(?:^|[-_.])(?:secrets?|credentials?|service[-_]?account|tokens?|passwords?|passwd|private|certs?|certificate|keyfile|id_[a-z0-9]+)(?:[-_.]|$)/i;
-/** The stem whose reading depends on its extension. \`key\`/\`keys\` names
- *  key MATERIAL under a config extension (\`keys.json\`, \`keys.yml\`) and
- *  SOURCE CODE under a source one (\`keys.ts\`, the module that handles them),
- *  so it cannot go on the list above: putting it there blanks the source file
- *  that half the questions about key handling name. Gated on the extension, both
- *  readings get what they deserve. */
-const SECRET_CONFIG_STEM_RE = /(?:^|[-_.])keys?(?:[-_.]|$)/i;
-/** The extensions a config stem is read under: the formats key material is
- *  actually written in. */
-const SECRET_CONFIG_EXT_RE = /^(?:json|yml|yaml|toml|env)$/i;
-/** An IPv4 literal is a hostname the dotted-name rule cannot see: no letters,
- *  so no TLD. Bounded repetition, so it adds no backtracking. */
-const SECRET_IPV4_RE = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
-
-/**
- * Drop every credential, control byte and email in \`secretsOnly\` mode; full
- * mode additionally drops the scheme-less path, hostname, hex id and number
- * that would otherwise still carry the address of the problem, not just its
- * shape. A path leaves its basename behind when the extension is a source or
- * config one; an ALL_CAPS env-var name survives the entropy rule in both
- * modes.
- *
- * THE CREDENTIAL RULES RUN FIRST, and they run on every arm, because the arm
- * most likely to be handed a secret is the failure arm and the failure it fires
- * on most often is an auth failure. The hex rule further down (full mode only)
- * is not a credential rule and never was: a PAT is mixed case with an
- * underscore, so \`\b[a-f0-9]{16,}\b\` cannot match one.
- *
- * \`mode === 'secretsOnly'\` stops after the credential rules, the email rule
- * and the control-character cleanup: paths, hostnames, IPv4 literals and
- * generic hex ids (a 40-character git SHA included) are left alone. That is
- * OWNER POLICY (tenjin-agent#197 rework): search-query and published-knowledge
- * text keep paths, hostnames, file basenames and git SHAs, because those are
- * the identifiers the server's identifier-aware BM25 lane ranks on — only
- * credentials, control bytes and emails are PII/secret enough to always strip.
- * Full privacy-tier scrubbing (the return below) is retired from every
- * knowledge/search arm; the callers still passing no second argument are the
- * ones where full redaction is still load-bearing for something other than a
- * path or a host.
- *
- * EMAILS ARE THE ONE PII RULE THAT RUNS IN BOTH MODES. Unlike a path or a
- * hostname, an email address is near-never a search key — nobody searches a
- * shelf by somebody's inbox — so it is dropped even in \`secretsOnly\`, right
- * alongside the credential rules rather than down with the path/host rules
- * that mode skips.
- */
-function scrub(text, mode) {
-  const secretsOnly = mode === 'secretsOnly';
-  const out = String(text)
-    // ANSI FIRST, THEN THE REST OF C0. The escape byte is itself C0, so
-    // stripping the block first would leave \`[31m\` behind as text.
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, ' ')
-    // C0 BEFORE EVERY WHOLE-TOKEN RULE, and deleted rather than spaced. A
-    // control byte inside a name is a SPLITTER: \`api_key<0x01>=hunter2\` reads
-    // as two tokens to every rule below, and \`clean\` only removes it after the
-    // scrub has already decided. Whitespace controls are left alone; they are
-    // real text here and the collapse at the bottom handles them.
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    // The extent is the whole non-whitespace run; only the trailing
-    // punctuation comes back, so the sentence around the url still reads.
-    .replace(SECRET_USERINFO_RE, (m) => {
-      const tail = m.match(SECRET_URL_TRAIL_RE);
-      return tail ? ' ' + tail[0] : ' ';
-    })
-    .replace(SECRET_ASSIGN_RE, ' ')
-    .replace(SECRET_TOKEN_RE, ' ')
-    // A PURE-HEX MATCH SURVIVES IN \`secretsOnly\` MODE ONLY: that shape
-    // (\`[0-9a-f]+\`, nothing else) is what a git SHA looks like and, not
-    // coincidentally, what a hex-only API token also looks like too — this is
-    // the one accepted trade, taken deliberately and only where the owner
-    // asked for it, so a commit SHA is not collateral damage in a search query
-    // or a published finding. Every OTHER shape this rule catches — mixed
-    // case, base64's \`+/=\`, an underscore or hyphen anywhere in the run — is
-    // still dropped in \`secretsOnly\` exactly as before, and full mode ignores
-    // the match entirely and always drops it, unchanged.
-    //
-    // AN ENV-VAR NAME IS NOT A KEY, IN EITHER MODE. All caps with at least one
-    // underscore (\`NEXT_PUBLIC_API_V2_BASE_URL_FOR_PREVIEW_1\`) is a name
-    // somebody typed, never a base64 secret, and it is the exact token a shelf
-    // lookup keys on — an identifier exactly like the paths and hosts
-    // \`secretsOnly\` already keeps, so the exemption holds whether or not full
-    // redaction runs afterward. BOUNDED: at most 64 characters and no piece of
-    // 16+ between the underscores, because
-    // \`GITHUB_TOKEN_ABCDEF1234567890ABCDEF1234567890\` is a name glued to its
-    // value, and a hex-style key is all caps and digits too. The longest
-    // piece of a real env-var name is a word.
-    .replace(SECRET_ENTROPY_RE, (m) =>
-      (secretsOnly && /^[0-9a-f]+$/.test(m)) ||
-      (m.length <= 64 && SECRET_ENV_NAME_RE.test(m) && !/[A-Z0-9]{16}/.test(m))
-        ? m
-        : ' ',
-    );
-  if (secretsOnly) {
-    return out
-      .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+const MASK_RULES = __MASK_RULES__.map((r) => ({ re: new RegExp(r.pattern, r.flags), keep: r.keep }));
+function mask(text) {
+  let out = String(text);
+  for (const { re, keep } of MASK_RULES) {
+    out = out.replace(re, (m) => m.slice(0, Math.min(keep, m.length)) + '\u2026[redacted ' + (m.length - Math.min(keep, m.length)) + ' chars]');
   }
-  return out
-    .replace(/[A-Za-z]:\\[^\s'"]+/g, ' ')
-    // PATHS, ABSOLUTE OR NOT. The second alternative takes the relative form,
-    // which carries exactly as much of a customer's name as the absolute one
-    // does (\`src/customers/acme-bank/keys.ts\`). Two separators minimum, so
-    // \`and/or\` survives. Both alternatives are anchored on a mandatory \`/\`
-    // between two classes that cannot contain one, so neither adds a
-    // backtracking seam.
-    //
-    // THE LEADING CLASS IS NEGATED, NOT ENUMERATED. Enumerating what a path is
-    // quoted or punctuated by is a list that is always one character short:
-    // \`**src/customers/acme-bank/keys.ts**\` (markdown bold, ordinary in a Task
-    // description) and \`a.ts;src/customers/…\` both walked past a class holding
-    // \`\s'"(=:,<\`~@[{\`. Anything that is not a path character now opens one.
-    //
-    // THE FIRST SEGMENT TAKES AT MOST THREE DOTS, and that bound is what keeps
-    // the negated class affordable. \`.\` opens a start position, so on 20k of
-    // \`a.a.a\` an unbounded \`[\w.@-]+\` re-scans the tail from every dot: 5 ms
-    // at 5k, 22 ms at 10k, 89 ms at 20k, x4 per doubling. Bounded, each start
-    // dies within four groups — 0.17 ms at 20k, x2 per doubling — and a real
-    // path prefix has nowhere near three dots.
-    //
-    // THE BOUND'S RESIDUE, PRICED AND KEPT: past three dots the match restarts
-    // inside the segment, so the HEAD of a longer one survives
-    // (\`acmebank.a.b.c.d/keys/prod.ts\` -> \`acmebank\`). Narrow, and paid for
-    // deliberately: widening the bound is what brings the quadratic back.
-    //
-    // THE BASENAME STAYS WHEN ITS EXTENSION IS ON THE ALLOWLIST AND ITS STEM
-    // IS NOT CREDENTIAL-SHAPED. The basename is the one exact token a shelf can
-    // match a finding on (\`migrate.yml\`, \`keys.ts\`), and dropping the
-    // whole path left the failure and dispatch arms blind to the file the
-    // question was about. The extension list is source and config only, so
-    // \`.env.production\`, \`id_rsa.pem\`, \`.key\` and \`.p12\` go with their
-    // path; the stem list catches the credential files that sit behind an
-    // innocent extension (\`prod-service-account.json\`, \`secrets.yml\`,
-    // \`id_rsa.md\`), and one stem is read BY its extension: \`keys.json\`
-    // and \`keys.yml\` are key material and go with the path, \`keys.ts\` is
-    // the module that handles them and stays.
-    //
-    // WHAT THIS DOES NOT DO is read the stem for a customer's name: no rule can
-    // tell \`acme-bank.ts\` from \`push-scripts.ts\`, so a file NAMED for a
-    // customer travels the same way it would typed bare with no path in front
-    // of it, and only its directories are blanked. The docs say so.
-    .replace(
-      /(?:^|[^\w@-])~?(?:(?:\/[\w.@-]+){2,}|[\w@-]+(?:\.[\w@-]+){0,3}(?:\/[\w.@-]+){2,})/g,
-      (m) => {
-        const base =
-          /\/(([\w-]+(?:\.[\w-]+)*)\.(ts|tsx|js|mjs|cjs|json|yml|yaml|md|sql|py|toml))$/.exec(m);
-        if (base === null) return ' ';
-        const credential =
-          SECRET_STEM_RE.test(base[2]) ||
-          (SECRET_CONFIG_EXT_RE.test(base[3]) && SECRET_CONFIG_STEM_RE.test(base[2]));
-        return credential ? ' ' : ' ' + base[1] + ' ';
-      },
-    )
-    .replace(/\b[\w.-]+@[\w.-]+\.[a-z]{2,}\b/gi, ' ')
-    .replace(/\b[a-f0-9]{16,}\b/gi, ' ')
-    .replace(SECRET_HOST_RE, (m) => (SECRET_HOST_KEEP_RE.test(m) ? m : ' '))
-    .replace(SECRET_IPV4_RE, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return out;
 }
 `;
 
@@ -1426,7 +1082,8 @@ function scrub(text, mode) {
  *  token, so it waits half as long for a body as an arm running beside a tool
  *  call that has already been made. */
 export function pushSource(bodyTimeoutMs: number = PUSH_BODY_TIMEOUT_MS): string {
-  const js = PUSH_CORE_JS.replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
+  const js = PUSH_CORE_JS.replaceAll('__MASK_RULES__', JSON.stringify(maskRules()))
+    .replaceAll('__INJECT_MAX__', String(PUSH_INJECT_MAX_PER_SESSION))
     .replaceAll('__LOOKUP_WINDOW_MS__', String(PUSH_LOOKUP_WINDOW_MS))
     .replaceAll('__LOOKUP_CAPS__', JSON.stringify(PUSH_LOOKUP_CAPS_PER_WINDOW))
     .replaceAll('__LOOKUP_CAP_DEFAULT__', String(PUSH_LOOKUP_CAP_DEFAULT))
@@ -1505,7 +1162,7 @@ async function main() {
   // identifier and no clause of four words, so condense() returns '' — and an
   // empty query still spends a request on both shelves and writes a row that
   // says nothing. The 400-character head is what this arm sent before #255.
-  const scrubbed = scrub(prompt, 'secretsOnly');
+  const scrubbed = mask(prompt);
   const identifiers = identifiersOf(scrubbed);
   const condensed = condense(scrubbed);
   const query = clean(
@@ -2017,12 +1674,12 @@ function failureText(input) {
  * A local dedup key only — \`STATE_SIGNATURES_PREFIX + signatureOf(line)\` is a
  * claim in this machine's own state store, never read back into a prompt and
  * never sent anywhere. secretsOnly here does not change what leaves the
- * machine; it keeps this arm's every \`scrub()\` call on the one shared policy
+ * machine; it keeps this arm's every \`mask()\` call on the one shared policy
  * rather than carving out an exception for the one caller that happens not to
  * need it.
  */
 function signatureOf(line) {
-  return scrub(line, 'secretsOnly').toLowerCase().replace(/\d+/g, '#').slice(0, 200);
+  return mask(line).toLowerCase().replace(/\d+/g, '#').slice(0, 200);
 }
 
 // ---- sig_v1: the mechanical lane's key (04, "Two knowledge lanes") ----
@@ -2645,7 +2302,7 @@ function pairingScope(errorLine, fixFiles) {
  * stepped over) and would otherwise land verbatim in the database — and then be
  * read back out into a LATER session's context by \`pairingText\`. The plan's
  * adversarial section is explicit that the db never holds more than the wire
- * did, so the same \`scrub()\` every query goes through runs here too.
+ * did, so the same \`mask()\` every query goes through runs here too.
  *
  * secretsOnly, not full: this string is not local-only. \`openPairing\` stores
  * it as \`pairings.cmd\` / \`pairings.fix_cmd\`, and \`tenjin sync\` (commands/
@@ -2653,11 +2310,11 @@ function pairingScope(errorLine, fixFiles) {
  * "Failed: <cmd>" / "Passed on: <fix cmd>" on the team shelf. The owner wants
  * a Fix post to keep the command as written, path arguments included, so full
  * redaction here would erase exactly what makes the post findable. The
- * publish-time \`scan()\`/\`survivesTeamDrop\` gate in sync.ts is the backstop
+ * publish-time \`findings(text, 'team')\` gate in sync.ts is the backstop
  * that still blocks or warns on an actual secret shape reaching the wire.
  */
 function safeCommand(command) {
-  return clean(scrub(command, 'secretsOnly'), 300);
+  return clean(mask(command), 300);
 }
 
 /** The bare package name of \`name@1.2.3\`, keeping a scope intact. */
@@ -3260,7 +2917,7 @@ async function main() {
   // and emails come out here. \`sigV1\`/\`normalizeForSig\` is the separate,
   // untouched fingerprint path: it hashes its own normalized copy of \`line\`
   // and never carries content onto the wire, so it is not scrubbed at all.
-  const scrubbed = scrub(line, 'secretsOnly');
+  const scrubbed = mask(line);
   const sig = sigV1(line, text);
   const errorFiles = filesInError(text);
   // The test-identity lane (tenjin-agent#267): tried whatever \`sig\` came back
@@ -3562,12 +3219,10 @@ const SUBAGENT_JS = String.raw`
 const CACHE_TTL_MS = __CACHE_TTL__;
 const SIGNAL_WINDOW_MS = __SIGNAL_WINDOW__;
 const FINDING_MAX_CHARS = __FINDING_MAX__;
-const FINDING_TITLE_MAX = __FINDING_TITLE_MAX__;
 const MESSAGE_TAIL = __MESSAGE_TAIL__;
 const FINDING_OPEN = __FINDING_OPEN__;
 const FINDING_FENCE = __FINDING_FENCE__;
 const CAPTURE_ASK = __CAPTURE_ASK__;
-const WORKFLOW_AGENT_TYPE = __WORKFLOW_AGENT_TYPE__;
 
 /**
  * The child ask, with this agent's id, the loop it was earned by and this
@@ -3837,18 +3492,6 @@ function findingClose(body) {
  * ONE LINE OUT, whatever went in: \`clean\` turns control characters into
  * spaces, which is what makes the stored body safe to splice into the parent's
  * capture ask without a child's newlines reshaping it.
- *
- * AND THE TITLE COMES OFF BEFORE THAT FLATTENING, which is why it is split here
- * rather than derived at publish time (round-2 review, major 1). The ask asks
- * the child for a \`# \` first line, and the \`\n\` that ends it is the only
- * boundary anything will ever have: once \`clean\` has run there is no line
- * structure left to recover, so a publish-time derivation had to CUT the body at
- * a guessed sentence end and splice a blank line in. That rewrite moved text out
- * of the body and split one stored line into two, and every scan detector the
- * publish path runs on a body — the seed-phrase run, \`scanHex64\`, the rest — is
- * line-scoped, so a credential that spanned the guessed cut stopped being found.
- * Splitting here costs a regex, keeps the body byte-for-byte what the child
- * wrote, and gives \`publish --finding\` the child's own title verbatim.
  */
 function findingBlock(text) {
   const start = findingOpen(text);
@@ -3856,39 +3499,35 @@ function findingBlock(text) {
   const rest = text.slice(start + 1);
   const end = findingClose(rest);
   const raw = (end === -1 ? rest : rest.slice(0, end)).slice(0, FINDING_MAX_CHARS);
-  return splitFinding(raw);
+  const body = clean(mask(raw), FINDING_MAX_CHARS);
+  return body.length === 0 ? null : body;
 }
 
 /**
- * A bounded block as \`{ title, body }\`, scrubbed, or null when there is nothing
- * in it.
+ * Why this child is worth one more turn, or null.
  *
- * THE SPLIT IS ABOVE THE SCRUB, not below it: \`scrub\`'s last rule in
- * \`secretsOnly\` collapses every whitespace run to one space, so by the time it
- * returns, the child's own line break — the only title boundary that will ever
- * exist — is gone. Splitting first costs nothing: a newline is a token boundary
- * to every rule the scrub runs, so no rule can match across the cut, and the two
- * halves together are still the one bounded input the watchdog note above
- * requires.
+ * TWO SIGNALS, EITHER OF WHICH IS ENOUGH, and both scoped to this session and
+ * the last hour: a dispatch lookup that found nothing (so nothing on any shelf
+ * holds what this child just worked out), or a failure this session's own
+ * arm opened or replayed a pairing for. Ungated, the ask would fire at the end
+ * of every child a push-on session spawns, which is the noise budget
+ * tenjin-agent#211 spent and the reason the ask is gated at all.
  *
- * NOTHING IS EVER DROPPED. A title is taken only when the block opens with a
- * heading, that heading fits a title (\`FINDING_TITLE_MAX\`), and there is a
- * finding under it; in every other case the title is empty and the WHOLE block
- * is the body, heading marker included. So an over-long heading, a heading with
- * no body under it and a block with no heading all keep every character the
- * child wrote, and the publish path decides what to do with them.
+ * THE FAILURE SIGNAL IS READ OFF THE \`sig:\` CLAIM, not off \`pairings\`. The
+ * claim is written in the same breath as the pairing is opened or replayed, and
+ * it is a primary-key range read; \`pairings\` has no session index, and adding
+ * one is DDL this PR deliberately does not take (tenjin-agent#228 PR 4 owns the
+ * migration machinery). A hook that may block must not be the one place that
+ * scans a table that never shrinks.
  */
-function splitFinding(raw) {
-  const heading = /^\s*#{1,6}[ \t]+(\S[^\n]*)\n([\s\S]+)$/.exec(raw);
-  // The RAW heading is length-checked, so the common path scrubs each half once
-  // and never the whole block twice.
-  if (heading !== null && heading[1].length <= FINDING_TITLE_MAX) {
-    const title = clean(scrub(heading[1], 'secretsOnly'), FINDING_TITLE_MAX);
-    const body = clean(scrub(heading[2], 'secretsOnly'), FINDING_MAX_CHARS);
-    if (title !== '' && body !== '') return { title, body };
+function captureSignal(sessionId) {
+  const since = Date.now() - SIGNAL_WINDOW_MS;
+  const searchId = openDispatchMiss(sessionId, since);
+  if (searchId !== null) return { kind: 'dispatch-miss', searchId };
+  if (statePrefixSince(sessionId, STATE_SIGNATURES_PREFIX, since, 1).length > 0) {
+    return { kind: 'failure-pairing', searchId: null };
   }
-  const whole = clean(scrub(raw, 'secretsOnly'), FINDING_MAX_CHARS);
-  return whole === '' ? null : { title: '', body: whole };
+  return null;
 }
 
 /**
@@ -3907,75 +3546,12 @@ function emitStopBlock(reason) {
 }
 
 /**
- * Does this path exist?
- *
- * \`statSync\` AND NOT \`existsSync\`, because the prelude imports the one and not
- * the other, and a throw is the whole answer: a permission error, a dead
- * symlink and a missing file all mean the same thing here, which is that the
- * harness named a transcript nothing wrote.
- */
-function pathExists(path) {
-  try {
-    statSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * A stop that belongs to no child.
- *
- * MEASURED, NOT MODELLED (tenjin-agent#228, plan
- * \`2026-09-02-child-loop-close.md\`). In a week of two \`/loop\` sessions 2,297 of
- * 2,588 \`SubagentStop\` fires carried an empty \`agent_type\` and a transcript path
- * with no file behind it, none of their agent ids appear in either transcript,
- * and none of them has a \`SubagentStart\` row; they arrive about every 30 seconds
- * while a loop session is armed. They took 26 of the 29 asks the week spent,
- * because whichever stop came first after a session-wide signal took the
- * session's one ask.
- *
- * A START ROW IS EXCULPATORY, AND IT IS READ FIRST (round-2 review, major 2).
- * The three marks agreed on every one of the 3,166 rows measured, so the
- * evidence is a CONJUNCTION and an OR of the three classifies the identical set
- * while failing in a direction this arm cannot survive: one undocumented payload
- * field renamed in a Claude Code release, or an \`EACCES\` on the transcript
- * directory that \`pathExists\` reports the same way as a missing file, would drop
- * every real child in the fleet and read as "no subagents ran". A child THIS
- * SESSION saw start is proof against all of that: it is the one mark written by
- * our own code, from a fire that already passed the payload marks. It also keeps
- * the harvest whole, which is the sharper case: a child that was blocked, spent
- * its turn writing the fenced finding and stopped again holds an \`asked\` row,
- * and dropping it here for a payload field would discard the finding with it.
- * The volume win is unchanged, because a phantom has no start row.
- *
- * AND THE EXIT IS SILENT, before the lifecycle row rather than after it. A
- * phantom opened no lifecycle, so it has nothing to count: the row would be a
- * fact about the harness filed under a child that never ran, and it is also the
- * single largest writer to a table nothing prunes.
- *
- * AN AGENT ID IS NOT CHECKED FOR HERE. A fire with no id at all is not a
- * phantom, it is a payload this build cannot key anything on, and it keeps the
- * row and the \`no-agent-id\` reason it has always had — but with no id there is
- * no start row to clear it, so the payload marks decide it alone. That is why
- * the start row arrives as a value rather than being read here: \`null\` covers
- * both "no id to key on" and "no row under that id", and the one read the
- * caller already took serves the type gates below as well.
- */
-function isPhantomStop(startedType, agentType, transcript) {
-  if (startedType !== null) return false;
-  if (agentType === '') return true;
-  return transcript === null || !pathExists(transcript);
-}
-
-/**
  * SubagentStop: the lifecycle row always, the ask once, the harvest next.
  *
- * ONE ROW PER FIRE OF A REAL CHILD, WHATEVER HAPPENS, exactly as at
- * SubagentStart: the lifecycle row is what makes a child's end countable at all
- * (there was no child-end row of any kind before tenjin-agent#228), and it never
- * depends on the child complying with anything. A phantom stop is the one fire
- * that leaves nothing, and \`isPhantomStop\` above says why.
+ * ONE ROW PER FIRE, WHATEVER HAPPENS, exactly as at SubagentStart: the
+ * lifecycle row is what makes a child's end countable at all (there was no
+ * child-end row of any kind before tenjin-agent#228), and it never depends on
+ * the child complying with anything.
  *
  * EVERY FIELD THIS READS IS UNDOCUMENTED. \`agent_id\`, \`stop_hook_active\`,
  * \`last_assistant_message\` and \`agent_transcript_path\` were probed, not
@@ -3984,18 +3560,12 @@ function isPhantomStop(startedType, agentType, transcript) {
  * it to be present AND false: a harness that omits it gets the lifecycle row
  * and nothing else, which is the fail-open reading of a missing fuse.
  *
- * THE ASK GOES TO THE CHILD THAT DID THE WORK. The gate is this agent's own
- * \`edited:\` markers (\`agentHasActivity\`) or its own \`research\`/\`read\` rows
- * (\`agentHasResearch\`) inside the window, not a session-wide signal any sibling
- * could arm: one dispatch MISS used to arm the ask for every child that stopped
- * in the hour behind it, and the first to stop took it.
- *
  * THE ASK COSTS A CHILD TURN, SO IT IS BUDGETED TWICE OVER: once per session
- * (\`STATE_SUBAGENT_ASKED\`, left exactly as it was, because re-keying the shared
- * budgets per agent is the cap rework and not this change), and not at all
- * unless \`hooks.capture\` is on. The harvest is deliberately NOT gated on
- * capture — a child already asked has already spent the turn, and its answer is
- * worth filing whichever way the operator moved the key in between.
+ * (\`STATE_SUBAGENT_ASKED\`, because the signal that arms it is session-wide and
+ * would otherwise arm it for every later child), and not at all unless
+ * \`hooks.capture\` is on. The harvest is deliberately NOT gated on capture — a
+ * child already asked has already spent the turn, and its answer is worth
+ * filing whichever way the operator moved the key in between.
  *
  * WHAT THE ASK ASKS FOR IS A PUBLISH (operator decision 2026-08-27). The child
  * runs the same \`tenjin publish\` anyone runs, and the fenced block is the
@@ -4003,24 +3573,9 @@ function isPhantomStop(startedType, agentType, transcript) {
  * Nothing here detects capability or branches on the mode: this arm decides
  * WHEN to ask, and the CLI's own gates decide what happens next.
  */
-function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
-  const transcript = agentTranscriptPath(input);
-  // ONE READ OF THE START ROW, for the phantom mark AND for the type. It is a
-  // primary-key read either way, and taking it once is what keeps the two from
-  // disagreeing about the same child.
-  const startedType = agentId === null ? null : agentStartType(sessionId, agentId);
-  // BEFORE ANY WRITE, and before the uid that would name one.
-  if (isPhantomStop(startedType, payloadType, transcript)) return quiet();
-  // THE TYPE THE HARNESS RECORDED AT START WINS AN EMPTY PAYLOAD (round-4
-  // review). The same undocumented field the phantom mark cannot trust decides
-  // \`no-turn\` below, and the start row exists precisely because a stop can
-  // arrive without it: a \`workflow-subagent\` whose stop payload lost its
-  // \`agent_type\` used to read as an ordinary child, clear the edit-evidence
-  // gate and spend the session's one blocking ask on a child that has no turn
-  // to answer in. A non-empty payload type still wins, because that is the
-  // child's own claim at the fire being handled.
-  const agentType = payloadType !== '' ? payloadType : (startedType ?? '');
+function subagentStop(input, sessionId, config, cwd, agentId, agentType) {
   const eventUid = uid();
+  const transcript = agentTranscriptPath(input);
   const beat = (reason, extra) =>
     recordEvent({
       uid: eventUid,
@@ -4048,32 +3603,16 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   const asked =
     agentId === null ? null : getState(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''));
   if (asked !== null) {
-    // ONCE PER ASK, AND THE CHECK COMES BEFORE THE PARSE. A long-lived agent
-    // stops many times after it answered, and every one of those fires used to
-    // re-read \`last_assistant_message\`, run the fence parse and the scrub over
-    // it, and land on the dedupe claim only at the end — work whose only
-    // possible outcome was \`duplicate-finding\`. The claim below stays where it
-    // is: it is the race guard between two fires of the same child, and this is
-    // the cheap read that keeps the ordinary repeat away from it.
-    if (agentHarvested(sessionId, agentId, Date.now() - SIGNAL_WINDOW_MS)) {
-      beat('harvested');
-      return quiet();
-    }
     const message = lastAssistantMessage(input);
     if (message === null) {
       beat('no-message');
       return quiet();
     }
-    const finding = findingBlock(message);
-    if (finding === null) {
+    const body = findingBlock(message);
+    if (body === null) {
       beat('no-finding');
       return quiet();
     }
-    // THE CHILD'S OWN TITLE, split off the block's first line before the body
-    // was flattened (\`splitFinding\`). Empty when the child wrote no heading, or
-    // one no title could be made of; the publish path derives one there without
-    // touching the body.
-    const { title, body } = finding;
     // Once per agent, claimed rather than checked: the same child stopping
     // twice, or a second fire racing this one, must not queue the block twice.
     // Windowed rather than permanent for the same reason the arming signal is:
@@ -4118,7 +3657,6 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
         kind: 'finding',
         agentType,
         searchId,
-        title,
         body,
         agentTranscriptPath: transcript,
       },
@@ -4142,7 +3680,6 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
       agentId,
       agentType,
       searchId,
-      title,
       body,
     });
     // \`store-busy\` is the SAME harvest with the dedupe claim unheld: the row is
@@ -4153,22 +3690,6 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
       chars: body.length,
       findingUid,
     });
-    return quiet();
-  }
-
-  // A WORKFLOW CHILD IS COUNTED, NOT BLOCKED. This harness runs a workflow
-  // subagent to produce structured output and stops it there, so the turn a
-  // block buys does not exist: the one measured ask to a real child that
-  // produced nothing went to one of these, after its StructuredOutput. Counted
-  // rather than dropped, because it IS a child (it starts, it edits, it stops)
-  // and the funnel has to show where the asks that were never made went.
-  //
-  // ABOVE THE CONFIG GATE, unlike the cheapest-gate order the rest of this arm
-  // takes: this is a fact about the child and the reasons below are facts about
-  // the operator's key, and a count that changes meaning with a config value
-  // answers neither question.
-  if (agentType === WORKFLOW_AGENT_TYPE) {
-    beat('no-turn');
     return quiet();
   }
 
@@ -4206,40 +3727,11 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
     beat('no-agent-id');
     return quiet();
   }
-  // THE EVIDENCE GATE, AND IT IS THIS CHILD'S OWN (tenjin-agent#228 PR 1). What
-  // used to stand here was \`captureSignal(sessionId)\`: a dispatch MISS or a
-  // claimed failure signature ANYWHERE in the session, which armed the ask for
-  // every child that stopped in the hour behind it and left a first-come budget
-  // claim to pick which one. In a loop session that was a phantom 26 times out
-  // of 29. The question a child's own Stop can answer is whether THIS child did
-  // work, and both halves of that answer are agent-keyed: one bounded,
-  // index-backed read each, no \`events\` scan, no new window.
-  //
-  // TWO EVIDENCE KINDS, OR'D (round-3 review). Edits alone missed the case this
-  // arm exists for: a child that spent its run on WebSearch, WebFetch and Read
-  // edited nothing and stopped with \`no-evidence\`, and a research panel or a
-  // package comparison is exactly the finding worth a turn. \`agentHasResearch\`
-  // reads this child's own \`research\` and \`read\` rows in \`injections\`, which
-  // the sidecar's own arms already wrote against its \`agent_id\`. The label goes
-  // onto the \`asked\` row below, so the week's tuning question can still ask
-  // which kind earned each ask.
-  const since = Date.now() - SIGNAL_WINDOW_MS;
-  const evidence = agentHasActivity(sessionId, agentId, since)
-    ? 'edited'
-    : agentHasResearch(sessionId, agentId, since)
-      ? 'research'
-      : null;
-  if (evidence === null) {
-    beat('no-evidence');
+  const signal = captureSignal(sessionId);
+  if (signal === null) {
+    beat('no-signal');
     return quiet();
   }
-  // THE LOOP THE ASK IS ATTRIBUTED TO, AND NOT A GATE ANY MORE. An open dispatch
-  // MISS still names the search the child's own publish should close, which is
-  // what gives the piece its \`questionsAnswered\` prefill and closes the loop
-  // through \`inheritedSearchIds\` on the fallback path. Null is ordinary now: a
-  // child with edits behind it is asked whether or not this session left a
-  // lookup open.
-  const searchId = openDispatchMiss(sessionId, since);
   // THE MODE THE CHILD'S OWN PUBLISH WOULD RUN UNDER, resolved exactly as the
   // parent's Stop resolves it (lib/config.ts precedence: an env pin outranks the
   // project file). The child runs in the parent's cwd, so this is the mode its
@@ -4249,12 +3741,11 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   // it above them is what lets the lifecycle row sit directly under them.
   const project = cwd === null || config.envPinned ? null : projectPublishMode(cwd);
   const publishMode = project === null ? config.publishMode : project;
-  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE, AND LEFT EXACTLY AS IT
-  // WAS. Re-keying the shared gates per agent is the cap rework and not this
-  // change (tenjin-agent#228 PR 1 changes no budget), so this is still one ask
-  // per session per hour, whatever the fan-out; what changed above it is WHICH
-  // child gets to spend it. The per-child claim below only stops the SAME child
-  // being asked twice.
+  // THE SESSION BUDGET, CLAIMED BEFORE THE PER-CHILD ONE. Both signals are
+  // session-wide, so one MISS or one claimed failure signature arms this arm for
+  // every child that stops in the hour behind it; the per-child claim only stops
+  // the SAME child being asked twice. One ask per session is the cost
+  // tenjin-agent#228 costed, and this is where it is held to it.
   //
   // FAIL-CLOSED, AND WINDOWED TO THE SIGNAL (round-3 gate 6). \`claimState\`
   // returns a win on a write the store swallowed, so a single SQLITE_BUSY on
@@ -4274,7 +3765,7 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   // same fail-closed rule as the budget above it.
   if (
     !claimStateFresh(sessionId, STATE_AGENT_ASKED_PREFIX + agentKey(agentId, ''), SIGNAL_WINDOW_MS, {
-      searchId,
+      searchId: signal.searchId,
       agentType,
     })
   ) {
@@ -4299,8 +3790,8 @@ function subagentStop(input, sessionId, config, cwd, agentId, payloadType) {
   // entirely and is what the dispatch arm's asked-claim uses, but not here: a
   // session budget that expires after the fire's own ceiling is a budget of one
   // ask per 8 seconds, which is the runaway this claim exists to prevent.
-  beat('asked', { evidence, searchId, publishMode });
-  emitStopBlock(captureAskText(agentId, publishMode, searchId));
+  beat('asked', { signal: signal.kind, searchId: signal.searchId, publishMode });
+  emitStopBlock(captureAskText(agentId, publishMode, signal.searchId));
 }
 
 async function main() {
@@ -4334,11 +3825,6 @@ async function main() {
   if ((await openStore()) === null) return quiet();
   if (event === 'SubagentStop')
     return subagentStop(input, sessionId, config, cwd, agentId, agentType);
-  // THE START ROW, FIRST AND UNCONDITIONALLY. It is what tells a child's stop
-  // from the phantom stops this harness also fires (\`isPhantomStop\`), so it has
-  // to be written on every start that reaches the store, whatever the handoff
-  // below then does. One upsert per child per session, on a primary key.
-  if (agentId !== null) markAgentStart(sessionId, agentId, agentType);
   // THE UID IS MINTED FIRST so the heartbeat can be written LAST. Every path
   // below ends in exactly one event row carrying the reason this fire ended the
   // way it did, and the decision rows have to point at that row, so the id
@@ -4480,12 +3966,10 @@ export function pushSubagentHookScript(dataDir: string): string {
   const js = SUBAGENT_JS.replaceAll('__CACHE_TTL__', String(PUSH_CACHE_TTL_MS))
     .replaceAll('__SIGNAL_WINDOW__', String(PUSH_CAPTURE_SIGNAL_WINDOW_MS))
     .replaceAll('__FINDING_MAX__', String(PUSH_FINDING_MAX_CHARS))
-    .replaceAll('__FINDING_TITLE_MAX__', String(FINDING_TITLE_MAX))
     .replaceAll('__MESSAGE_TAIL__', String(PUSH_FINDING_MESSAGE_TAIL))
     .replaceAll('__FINDING_OPEN__', JSON.stringify('```' + PUSH_FINDING_TAG))
     .replaceAll('__FINDING_FENCE__', JSON.stringify('```'))
-    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON))
-    .replaceAll('__WORKFLOW_AGENT_TYPE__', JSON.stringify(PUSH_WORKFLOW_AGENT_TYPE));
+    .replaceAll('__CAPTURE_ASK__', JSON.stringify(SUBAGENT_CAPTURE_REASON));
   return `${prelude(dataDir, PUSH_WATCHDOG_MS)}${storeSource()}${userAgentSource()}${marketplaceSource()}${pushSource()}${js}`;
 }
 
@@ -4685,7 +4169,7 @@ async function main() {
     // does not run the host rule at all, so the segment survives scrub and
     // only the later \`.replace(/\.[^.]+$/, '')\` strips the real extension —
     // which is what makes \`checkout.test.ts\` ship as \`checkout test\` again.
-    const name = scrub(filePath.split('/').pop() || '', 'secretsOnly').replace(/\.[^.]+$/, '');
+    const name = mask(filePath.split('/').pop() || '').replace(/\.[^.]+$/, '');
     const packages = packagesInSource(fileHead(filePath)).slice(0, 3);
     const query = clean(name.replace(/[-_.]/g, ' '), 300);
     if (wordCount(query) < 1) return quiet();

@@ -4,10 +4,10 @@ import type { AckServerWarnings, PublishMode } from './config';
 import { PublishModeSchema } from './config';
 import { CliError } from './errors';
 import { ScanGateError } from './posts-api';
-import { describeRendered, mergeScanFindings } from './scan-gate';
+import { describeRendered, mergeFindings } from './scan-gate';
 import type { RenderedFinding, ScanGateRejection } from './scan-gate';
 import type { ResolvedPublishSettings } from './settings';
-import type { ScanFinding } from './scan';
+import type { Finding } from './redact';
 import type { TenjinSigner } from './wallet';
 
 /**
@@ -129,7 +129,7 @@ export interface ScanGateFlow<T> {
   /** Perform the write; called a second time with the ack token on an approved yes. */
   send: (scanAck?: string) => Promise<T>;
   /** This run's local scan warns, so the server's merge in rather than repeat. */
-  localWarns: ScanFinding[];
+  localWarns: Finding[];
   mode: PublishMode;
   yes: boolean;
   /** `publish.ackServerWarnings`; see {@link acksServerWarnings}. */
@@ -200,7 +200,7 @@ export async function throughScanGate<T>(flow: ScanGateFlow<T>): Promise<T> {
   // and left the local block path (which names only its blocking findings) and
   // this one saying different things about the same refusal.
   if (rejection.kind === 'blocked') {
-    const blocked = mergeScanFindings([], rejection.report.findings);
+    const blocked = mergeFindings([], rejection.report.findings);
     throw new CliError(
       'PUBLISH_BLOCKED',
       `${flow.noun} blocked by the marketplace scan: ${describeRendered(blocked)}.`,
@@ -211,7 +211,7 @@ export async function throughScanGate<T>(flow: ScanGateFlow<T>): Promise<T> {
     );
   }
 
-  const findings = mergeScanFindings(flow.localWarns, rejection.report.findings);
+  const findings = mergeFindings(flow.localWarns, rejection.report.findings);
   const serverAddedUnseen = findings.some((f) => f.source === 'server');
   const token = rejection.report.ackToken;
   const acks = acksServerWarnings({
@@ -239,7 +239,7 @@ export async function throughScanGate<T>(flow: ScanGateFlow<T>): Promise<T> {
     // The retry's own rejection, wrapped the same way the first one is. Raw, it
     // reached the renderer as ScanGateError's unmerged details: no `source`, so
     // the marketplace's findings printed as if the local scan had found them.
-    const retried = mergeScanFindings([], err.rejection.report.findings);
+    const retried = mergeFindings([], err.rejection.report.findings);
     const blocked = err.rejection.kind === 'blocked';
     throw new CliError(
       blocked ? 'PUBLISH_BLOCKED' : 'NEEDS_CONFIRMATION',
@@ -330,7 +330,7 @@ export function writeModeNotices(
 }
 
 /** A finding safe to echo: block excerpts are already masked by the scanner. */
-export function publicFinding(f: ScanFinding): {
+export function publicFinding(f: Finding): {
   check: string;
   severity: string;
   line: number;
@@ -344,7 +344,7 @@ export function publicFinding(f: ScanFinding): {
  * same value scanned twice (a frontmatter field present in both the raw file and
  * the derived card) is one finding, not two.
  */
-export function dedupeFindings(findings: ScanFinding[]): ScanFinding[] {
+export function dedupeFindings(findings: Finding[]): Finding[] {
   const seen = new Set<string>();
   return findings.filter((f) => {
     const key = `${f.check}:${f.excerpt}`;
@@ -352,10 +352,4 @@ export function dedupeFindings(findings: ScanFinding[]): ScanFinding[] {
     seen.add(key);
     return true;
   });
-}
-
-/** "N secret finding(s) (check, check)" — the shared half of both block messages. */
-export function describeFindings(blocking: ScanFinding[]): string {
-  const checks = [...new Set(blocking.map((f) => f.check))].join(', ');
-  return `${blocking.length} secret finding(s) (${checks})`;
 }
