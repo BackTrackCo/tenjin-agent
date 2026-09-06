@@ -98,20 +98,18 @@ describe('the marks PR D reads', () => {
     expect(getMark(db, LEAD, 'activity:mutation')).toBeNull();
   });
 
-  it('marks every edited path whatever its extension, with the basename as the value', () => {
+  it('marks every edited path whatever its extension, with the path as the value', () => {
     const path = '/p/drizzle.config.toml';
     edit(path);
-    // The close rule compares what changed with the files the error named,
-    // and reads the time off `marks.at`; the value is the name, not a clock.
-    expect(getMark(db, LEAD, `edited:${key(path)}`)).toBe('drizzle.config.toml');
+    // The close rule asks whether the path is under the checkout and compares
+    // its basename with the files the error named; the time is `marks.at`.
+    expect(getMark(db, LEAD, `edited:${key(path)}`)).toBe(path);
   });
 
-  it('bounds the basename it stores and strips control characters from it', () => {
+  it('strips control characters from the path it stores', () => {
     const path = `/p/${'n'.repeat(120)}\u001b[2K.ts`;
     edit(path);
-    const value = getMark(db, LEAD, `edited:${key(path)}`) ?? '';
-    expect(value.length).toBeLessThanOrEqual(80);
-    expect(value).not.toContain('\u001b');
+    expect(getMark(db, LEAD, `edited:${key(path)}`)).not.toContain('\u001b');
   });
 
   it('keys on the whole path, so a 300-character path is one file', () => {

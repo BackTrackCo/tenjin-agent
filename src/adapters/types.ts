@@ -1,7 +1,8 @@
 /**
  * The harness adapter contract (tenjin-notes loop-redesign/04-harness-adapters.md).
  *
- * This is the ONLY file the kernel (`src/hooks/*`) imports from `src/adapters/`.
+ * This and `error-markers.ts` (data both sides read) are the ONLY files the
+ * kernel (`src/hooks/*`) imports from `src/adapters/`.
  * A harness is one module exporting a {@link HarnessAdapter}: a pure `decode`
  * from its native payload to {@link HookInput}, a pure `encode` from the
  * kernel's {@link Emit} to its native response, and a {@link Registrar} the

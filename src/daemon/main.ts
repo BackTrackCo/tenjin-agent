@@ -2,6 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import pkg from '../../package.json';
 import { claudeAdapter } from '../adapters/claude';
 import { contextArm } from '../hooks/arms/context';
+import { failureArm } from '../hooks/arms/failure';
 import { promptArm } from '../hooks/arms/prompt';
 import { fetchArm, researchArm } from '../hooks/arms/research';
 import { openLoopDb } from '../hooks/store';
@@ -17,16 +18,16 @@ import { createHookServer } from './server';
  * serves every session and every subagent on the machine until it has been
  * idle for `loop.idle_exit_min`.
  *
- * ARMS: the three lookup arms of PR C, and `context`, which asks nothing and
- * only writes the marks PR D's arms read. ORDER IS THE MAP — `selectArm` takes
- * the first arm whose `on` matches, so a later arm can be shadowed by an
- * earlier one. These four cannot shadow each other: they key on disjoint
- * (event, kind) pairs, and `context` is last regardless because it is the only
- * one with more than one. Every entry `install` writes for an arm PR D has yet
- * to add finds nothing here, records `no-question` and answers 204.
+ * ARMS: the three lookup arms of PR C, PR D's `failure`, and `context`, which
+ * asks nothing and only writes the marks the other arms read. ORDER IS THE MAP
+ * — `selectArm` takes the first arm whose `on` matches, so a later arm can be
+ * shadowed by an earlier one. These five cannot shadow each other: they key on
+ * disjoint (event, kind) pairs, and `context` is last regardless because it is
+ * the only one with more than one. Every entry `install` writes for an arm PR
+ * D has yet to add finds nothing here, records `no-question` and answers 204.
  */
 
-const ARMS: Arm[] = [promptArm, researchArm, fetchArm, contextArm];
+const ARMS: Arm[] = [promptArm, researchArm, fetchArm, failureArm, contextArm];
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon

@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
-import { basename } from 'node:path';
 import { setMark } from '../gates';
-import { clean } from '../text';
+import { stripControl } from '../text';
 import type { Arm, FireContext } from '../types';
 
 /**
@@ -18,7 +17,7 @@ import type { Arm, FireContext } from '../types';
  * the old code faked with an `agentKey()` prefix, and a subagent's edit is the
  * subagent's:
  *  - `bashstart`, the failure arm's test-identity clock (PR D);
- *  - `edited:<pathKey>`, its close rule, with the basename as the value;
+ *  - `edited:<pathKey>`, its close rule, with the path as the value;
  *  - `activity:inspection` / `activity:mutation`, the capture ask's gate.
  *
  * It stays registered on the same three (event, kind) pairs because those marks
@@ -74,9 +73,11 @@ export const contextArm: Arm = {
     const path = filePathOf(ctx);
     if (kind === 'edit' && path.length > 0) {
       // Upserted, so a re-edit moves `marks.at` and nothing else. The VALUE is
-      // the basename: the failure arm's close rule compares what changed with
-      // the files the error named, and reads the time off `marks.at`.
-      setMark(db, ctx.actor, EDITED_PREFIX + pathKey(path), clean(basename(path), 80), clock());
+      // the path as given: the failure arm's close rule asks whether it is
+      // under the checkout (tenjin-agent#269), compares its basename with the
+      // files the error named, records it repo-relative, and reads the time
+      // off `marks.at`.
+      setMark(db, ctx.actor, EDITED_PREFIX + pathKey(path), stripControl(path), clock());
     }
     // Content-free, and the LEAD's only: one mark for inspection and one for
     // mutation, never the path, the tool input or a growing counter. Subagent

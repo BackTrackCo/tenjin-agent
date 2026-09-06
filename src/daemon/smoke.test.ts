@@ -301,11 +301,12 @@ describe('the daemon, cold-started from the real bundle', () => {
       expect(rows).toHaveLength(fixtures.length - stops);
       // The default config is `hooks.push: off`, so every lookup arm declines
       // and nothing is asked of any shelf. `arm` still names the arm that
-      // declined — the WebFetch fixture reaches `fetch`, the Bash and Read
-      // ones reach `context` — and `none` is only for an event no arm claims.
+      // declined — the WebFetch fixture reaches `fetch`, the Bash result
+      // reaches `failure`, the Bash call and the Read reach `context` — and
+      // `none` is only for an event no arm claims.
       for (const r of rows) {
         expect(r.reason, r.event).toBe('no-question');
-        expect(['none', 'prompt', 'research', 'fetch', 'context']).toContain(r.arm);
+        expect(['none', 'prompt', 'research', 'fetch', 'failure', 'context']).toContain(r.arm);
       }
       // No arm registers on `agent.stop` yet, so nothing ever writes the
       // `started` mark SubagentStop requires (actor.ts). There is no "prior
