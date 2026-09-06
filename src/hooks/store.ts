@@ -86,7 +86,6 @@ CREATE TABLE IF NOT EXISTS handoff (
   session   TEXT NOT NULL,
   prompt_id TEXT,
   at        INTEGER NOT NULL,
-  outcome   TEXT NOT NULL,
   question  TEXT NOT NULL,
   search_id TEXT,
   answer    TEXT
@@ -177,7 +176,7 @@ const LOOP_SHAPE: Record<string, readonly string[]> = {
     'posted_at',
   ],
   marks: ['session', 'agent', 'key', 'value', 'at'],
-  handoff: ['id', 'session', 'prompt_id', 'at', 'outcome', 'question', 'search_id', 'answer'],
+  handoff: ['id', 'session', 'prompt_id', 'at', 'question', 'search_id', 'answer'],
   facts: ['key', 'value', 'at'],
   pairings: [
     'id',

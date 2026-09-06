@@ -165,9 +165,7 @@ describe('the dispatch arm', () => {
     expect(row.delivered).toBe(`log:${POST_ID}`);
     expect(getMark(db, LEAD, `seen:${POST_ID}`)).toBeNull();
     const rows = handoffRows(db);
-    expect(rows).toMatchObject([
-      { session: 's1', prompt_id: 'p1', outcome: 'hit', search_id: SEARCH_ID },
-    ]);
+    expect(rows).toMatchObject([{ session: 's1', prompt_id: 'p1', search_id: SEARCH_ID }]);
     const answer = JSON.parse(String(rows[0]?.answer)) as { resourceId: string; text: string };
     expect(answer.resourceId).toBe(POST_ID);
     expect(answer.text).toBe('swap the image tag back');
@@ -181,7 +179,6 @@ describe('the dispatch arm', () => {
     expect(row.reason).toBe('no-hit');
     expect(handoffRows(db)).toMatchObject([
       {
-        outcome: 'miss',
         search_id: SEARCH_ID,
         answer: null,
         question: 'the pgvector collation flip',
@@ -205,6 +202,6 @@ describe('the dispatch arm', () => {
     const { turn, ...noTurn } = dispatch('the pgvector collation flip');
     void turn;
     await fire(db, noTurn);
-    expect(handoffRows(db)).toMatchObject([{ prompt_id: null, outcome: 'miss' }]);
+    expect(handoffRows(db)).toMatchObject([{ prompt_id: null, answer: null }]);
   });
 });

@@ -10,9 +10,10 @@ import type { Answer } from './types';
  *
  * Oldest first within a turn, so two dispatches in one turn hand their rows
  * to two children in dispatch order. The claim is positional and nothing
- * else: a `SubagentStart` carries nothing to match a row on, so a dispatch
- * whose child never starts (a denied permission prompt) hands its row to the
- * next child of the turn (decision 14). A harness with no turn id parks
+ * else: Claude Code's `SubagentStart` carries no field naming the tool call
+ * that spawned the child (hooks reference, checked 2026-09-06; `agent_type` is
+ * shared by every child of one type), so a dispatch whose child never starts
+ * hands its row to the next child of the turn (owner decision, 2026-09-06). A harness with no turn id parks
  * `promptId` undefined and claims with it undefined, which degrades to
  * arrival order across the session; a claim from a harness WITH turn ids never
  * crosses turns.
@@ -22,7 +23,6 @@ export interface Handoff {
   session: string;
   promptId?: string;
   at: number;
-  outcome: 'hit' | 'miss';
   /** The masked work order, for the child's question key. */
   question: string;
   /** The team leg's search id; the child's `--search-id` on a miss. */
@@ -32,13 +32,12 @@ export interface Handoff {
 
 export function park(db: LoopDb, row: Handoff): void {
   db.prepare(
-    `INSERT INTO handoff (session, prompt_id, at, outcome, question, search_id, answer)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO handoff (session, prompt_id, at, question, search_id, answer)
+     VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
     row.session,
     row.promptId ?? null,
     row.at,
-    row.outcome,
     row.question,
     row.searchId ?? null,
     row.answer === undefined ? null : JSON.stringify(row.answer),
@@ -67,7 +66,6 @@ export function claim(db: LoopDb, session: string, promptId: string | undefined)
     session: String(row.session),
     ...(typeof row.prompt_id === 'string' ? { promptId: row.prompt_id } : {}),
     at: Number(row.at),
-    outcome: row.outcome === 'hit' ? 'hit' : 'miss',
     question: String(row.question),
     ...(typeof row.search_id === 'string' ? { searchId: row.search_id } : {}),
     ...(answer !== undefined ? { answer } : {}),

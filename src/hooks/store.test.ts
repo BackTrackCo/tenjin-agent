@@ -196,7 +196,7 @@ describe('openLoopDb', () => {
     const dir = await freshDir();
     const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
     old.exec(LOOP_DDL.replace('  question  TEXT NOT NULL,\n', ''));
-    old.prepare(`INSERT INTO handoff (session, at, outcome) VALUES ('s', 1, 'miss')`).run();
+    old.prepare(`INSERT INTO handoff (session, at) VALUES ('s', 1)`).run();
     old.close();
     const db = track(openLoopDb(dir));
     expect(db.prepare('SELECT count(*) AS n FROM handoff').get()).toEqual({ n: 0 });

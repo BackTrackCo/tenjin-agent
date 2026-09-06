@@ -19,7 +19,6 @@ function row(over: Partial<Handoff> = {}): Handoff {
     session: 's1',
     promptId: 'p1',
     at: NOW,
-    outcome: 'miss',
     question: 'find the collation flip',
     searchId: 'sid-miss',
     ...over,
@@ -36,20 +35,19 @@ function noTurn(over: Partial<Handoff> = {}): Handoff {
 describe('park / claim', () => {
   it('two dispatches in one turn are claimed oldest first, and the rows are gone', () => {
     const db = freshDb();
-    park(db, row({ at: NOW + 10, question: 'second', outcome: 'hit', answer: ANSWER }));
+    park(db, row({ at: NOW + 10, question: 'second', answer: ANSWER }));
     park(db, row({ at: NOW, question: 'first' }));
 
     const first = claim(db, 's1', 'p1');
     expect(first).toMatchObject({
       session: 's1',
       promptId: 'p1',
-      outcome: 'miss',
       question: 'first',
       searchId: 'sid-miss',
     });
     expect(first?.answer).toBeUndefined();
     const second = claim(db, 's1', 'p1');
-    expect(second).toMatchObject({ question: 'second', outcome: 'hit', answer: ANSWER });
+    expect(second).toMatchObject({ question: 'second', answer: ANSWER });
     // A third child finds nothing: the rows went with their claims.
     expect(claim(db, 's1', 'p1')).toBeNull();
     expect(db.prepare('SELECT COUNT(*) AS n FROM handoff').get()).toEqual({ n: 0 });

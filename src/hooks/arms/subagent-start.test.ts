@@ -87,7 +87,6 @@ describe('the subagent-start arm', () => {
       session: 's1',
       promptId: 'p1',
       at: NOW - 10,
-      outcome: 'hit',
       question: 'the pgvector collation flip',
       searchId: SEARCH_ID,
       answer: hit(),
@@ -109,7 +108,6 @@ describe('the subagent-start arm', () => {
       session: 's1',
       promptId: 'p1',
       at: NOW,
-      outcome: 'hit',
       question: 'q',
       answer: hit({ shelf: 'public', price: '250000', text: undefined }),
     });
@@ -125,7 +123,6 @@ describe('the subagent-start arm', () => {
       session: 's1',
       promptId: 'p1',
       at: NOW,
-      outcome: 'miss',
       question: 'the pgvector collation flip',
       searchId: SEARCH_ID,
     });
@@ -142,7 +139,6 @@ describe('the subagent-start arm', () => {
       session: 's1',
       promptId: 'p2',
       at: NOW,
-      outcome: 'hit',
       question: 'q',
       answer: hit(),
     });

@@ -199,13 +199,13 @@ describe('the child ask', () => {
     expect(getMark(workflow, CHILD, 'capture:asked')).toBeNull();
   });
 
-  it('the report is looked up log-only on the first stop; the answer turn harvests and looks nothing up', async () => {
+  it('asks no shelf at either stop; the answer turn harvests', async () => {
     const db = freshDb();
     started(db);
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
     const stub = shelf();
     await fire(db, childStop({ lastMessage: 'Both worktrees share one Docker daemon.' }));
-    expect(stub.calls).toBe(2);
+    expect(stub.calls).toBe(0);
 
     const body = 'Pinning the resolver to 4.1 stops the parse throw.';
     const emit = await fire(
@@ -213,7 +213,7 @@ describe('the child ask', () => {
       childStop({ stopFuse: true, lastMessage: fence('# ox 0.14 keeps Bytes.from\n' + body) }),
     );
     expect(emit).toBeNull();
-    expect(stub.calls).toBe(2);
+    expect(stub.calls).toBe(0);
     expect(findings(db)).toMatchObject([
       {
         title: 'ox 0.14 keeps Bytes.from',

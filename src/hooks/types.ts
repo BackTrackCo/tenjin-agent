@@ -26,7 +26,7 @@ export type Shelf = 'team' | 'public' | 'keys' | 'local';
  * from a research one in its own telemetry (`agent-api.ts`). All five exist in
  * the server's `lookupTriggerSchema`.
  */
-export type Trigger = 'prompt' | 'research' | 'dispatch' | 'failure' | 'subagent';
+export type Trigger = 'prompt' | 'research' | 'dispatch' | 'failure';
 
 /** An arm hook may be synchronous or not: the one async consumer is the
  *  failure arm's test-report read, and `fire.ts` awaits all three under the

@@ -156,7 +156,7 @@ describe('runRetention: handoff', () => {
     // A claim deletes its row, so what retention sees was never claimed: a
     // child that never started, or a harness that never sent SubagentStart.
     const stmt = db.prepare(
-      `INSERT INTO handoff (session, prompt_id, at, outcome, question) VALUES (?, 'p', ?, 'miss', 'q')`,
+      `INSERT INTO handoff (session, prompt_id, at, question) VALUES (?, 'p', ?, 'q')`,
     );
     stmt.run('h-old', OLD);
     stmt.run('h-edge', CUTOFF);

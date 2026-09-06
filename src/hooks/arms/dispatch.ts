@@ -46,19 +46,14 @@ export const dispatchArm: Arm = lookupArm({
     // A hit parks the answer; a definite miss (no-hit, or a cached miss) parks
     // the search id alone. A deadline or an error never reaches here: the child
     // then finds nothing and the fire's row says why.
-    const outcome =
-      result.answer !== undefined
-        ? 'hit'
-        : result.reason === 'no-hit' || result.reason === 'cached'
-          ? 'miss'
-          : null;
-    if (outcome === null) return null;
+    const definite =
+      result.answer !== undefined || result.reason === 'no-hit' || result.reason === 'cached';
+    if (!definite) return null;
     const searchId = result.answer?.searchId ?? searchIdOf(ctx.fire.legs);
     park(ctx.deps.db, {
       session: ctx.actor.session,
       ...(ctx.input.turn !== undefined ? { promptId: ctx.input.turn } : {}),
       at: ctx.deps.clock(),
-      outcome,
       question: question.text,
       ...(searchId !== undefined ? { searchId } : {}),
       ...(result.answer !== undefined ? { answer: result.answer } : {}),

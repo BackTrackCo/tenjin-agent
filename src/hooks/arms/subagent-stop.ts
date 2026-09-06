@@ -1,23 +1,18 @@
 import { stop } from '../capture';
 import type { Arm } from '../types';
-import { lookupArm } from './lookup';
 
 /**
- * The subagent-stop arm (13-pr-d-local-arms.md, "subagent-stop"): the child's
- * report is looked up log-only — was the shelf already holding what this
- * child found? — and a child with evidence is asked once to publish. The
- * report goes as written (decision 10); the answer turn after a block
- * (`stopFuse`) is not a report and is harvested instead.
+ * The subagent-stop arm (13-pr-d-local-arms.md, "subagent-stop"): a child
+ * with evidence is asked once to publish, and the answer turn after a block
+ * (`stopFuse`) is harvested. It asks no shelf: the log-only report lookup
+ * that used to ride here was deleted in review (owner, 2026-09-06) because
+ * nothing read its rows and a slow shelf could cost the child its ask.
  */
 
-export const subagentStopArm: Arm = lookupArm({
+export const subagentStopArm: Arm = {
   id: 'subagent-stop',
   wait: 'tool',
   on: [{ event: 'agent.stop' }],
-  trigger: 'subagent',
-  enabled: (cfg) => cfg.hooks.push === 'on',
-  text: (input) => (input.stopFuse === true ? null : (input.lastMessage ?? null)),
-  shelves: ['team', 'public'],
-  deliver: 'log',
-  after: (ctx) => stop(ctx, 'child'),
-});
+  // Gated like every push arm: a push-off machine never blocks a child.
+  after: (ctx) => (ctx.deps.config().hooks.push === 'on' ? stop(ctx, 'child') : null),
+};
