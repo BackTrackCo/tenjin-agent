@@ -221,7 +221,7 @@ describe('runFire: a skip', () => {
       id: 'prompt',
       wait: 'human',
       on: [{ event: 'prompt' }],
-      plan: () => ({ reason: 'short', text: 'yes' }),
+      plan: () => ({ reason: 'slash', text: '/clear' }),
     };
     const { emit, commit } = await runFire(input(), deps(db, [arm]));
     expect(emit).toBeNull();
@@ -229,15 +229,15 @@ describe('runFire: a skip', () => {
 
     const rows = fireRows(db);
     expect(rows).toHaveLength(1);
-    // The text is what the importance score reads off a "/clear" or a "yes";
-    // a null plan would have lost it (reason `no-question`, question null).
-    expect(rows[0]).toMatchObject({ arm: 'prompt', reason: 'short', question: 'yes' });
+    // The text is what the importance score reads off a "/clear"; a null plan
+    // would have lost it (reason `no-question`, question null).
+    expect(rows[0]).toMatchObject({ arm: 'prompt', reason: 'slash', question: '/clear' });
     // A skip is not a lookup: no gate ran, no leg ran.
     expect(legRows(db, rows[0]!.id)).toEqual([]);
-    expect(getMark(db, LEAD, 'q:yes')).toBeNull();
+    expect(getMark(db, LEAD, 'q:/clear')).toBeNull();
   });
 
-  it.each(['short', 'long', 'slash', 'words'] as const)('%s lands as its own reason', async (r) => {
+  it.each(['slash', 'harness', 'words'] as const)('%s lands as its own reason', async (r) => {
     const db = await freshDb();
     const arm: Arm = {
       id: 'prompt',

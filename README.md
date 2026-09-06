@@ -319,8 +319,8 @@ User-Agent: tenjin-cli/<version> (+https://tenjin.blog)
 
 The loop's hook arms travel in that same field. What keeps a query an agent rode
 along with apart from a question somebody chose to look up is the `trigger` on the
-request itself — `prompt`, `research`, `read`, `churn` for an arm, `cli` for a
-command you ran — which is what Tenjin's demand data is grouped by.
+request itself — `prompt` or `research` for an arm, `cli` for a command you
+ran — which is what Tenjin's demand data is grouped by.
 
 If you are an agent that runs the CLI, you can travel in that field too. Export
 `TENJIN_CALLER_USER_AGENT` when you launch it, and your products follow the

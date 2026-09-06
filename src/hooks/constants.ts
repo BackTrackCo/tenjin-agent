@@ -4,12 +4,12 @@
  * `loop.tool_wait_ms`), each with the reason it is a constant
  * (tenjin-notes loop-redesign/02-redesign.md §7).
  *
- * An ARM's own bounds are not here and must not be moved here: they are evidence
- * about one arm's input — a prompt's junk thresholds, a file head's size, a
- * churn count — and each is only readable next to the code and the measurement
- * that justifies it. They live in `hooks/question.ts`, `hooks/text.ts`,
- * `hooks/legs/search.ts` and the arm files, and every one carries its reason
- * there the way these do here.
+ * AN ARM's own bounds are not here and must not be moved here: they are evidence
+ * about one arm's input — a prompt's junk rules, the head a skipped row stores,
+ * the shelf's own query bound — and each is only readable next to the code and
+ * the measurement that justifies it. They live in `hooks/question.ts`,
+ * `hooks/text.ts`, `hooks/legs/search.ts` and the arm files, and every one
+ * carries its reason there the way these do here.
  */
 
 /** Left on every fetch so the response can be encoded and flushed before the

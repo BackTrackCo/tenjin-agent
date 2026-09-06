@@ -1,13 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { condense, identifiersOf } from '../lib/query-condense';
-import { mask } from '../lib/redact';
-import { promptSkip, question, questionKeyOf } from './question';
+import { promptSkip, question, questionKeyOf, skipText } from './question';
+import { cut } from './text';
 
 /**
- * `question()` is pure: text in, `{ text, questionKey, identifiers? }` out. What
- * is under test is the SHAPE LIST — that the steps run in the order given, that
- * only a shape carrying `condense` produces identifiers, and that nothing an arm
- * masked can reappear downstream.
+ * `question()` is pure: text in, `{ text, questionKey }` out. What is under test
+ * is that MASKING IS THE WHOLE TRANSFORM — the words an arm was given are the
+ * words that leave, minus the secrets — and that nothing else shortens, drops or
+ * rewrites them on the way.
  */
 
 const PROMPT =
@@ -18,50 +17,40 @@ const PROMPT =
  *  prefix as a stub, so the assertion is on the secret, not on the prefix. */
 const SECRET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
+/** The shelf's own bound, which the search leg applies and no arm does. */
+const QUERY_MAX = 512;
+
 describe('question', () => {
-  it('runs the shape in order: mask before condense', () => {
-    const q = question(PROMPT, [mask, condense]);
-    // Identifiers are read off the MASKED text. On the raw prompt the token
-    // matches the identifier regex and would have been lifted whole.
-    expect(identifiersOf(PROMPT)).toContain(`ghp_${SECRET}`);
-    expect(q.identifiers).toEqual(['migrate.yml', 'pr-751']);
+  it('leaves the text alone: the question is what was typed', () => {
+    for (const text of [
+      'pgvector testcontainer collation',
+      'x402 payTo attribution',
+      'arXiv 2608.13568',
+      'the migrate.yml step of PR 751 keeps failing and I cannot see why',
+    ]) {
+      expect(question(text).text).toBe(text);
+    }
   });
 
-  it('a ghp_ token reaches neither the text, nor the key, nor the identifiers', () => {
-    const q = question(PROMPT, [mask, condense]);
+  it('a ghp_ token reaches neither the text nor the key', () => {
+    const q = question(PROMPT);
     expect(q.text).not.toContain(SECRET);
-    expect(q.identifiers?.join(' ')).not.toContain(SECRET);
+    // Everything around the token is untouched.
+    expect(q.text).toContain('the migrate.yml step of PR 751');
     // The key is a hash of what was SENT, not of what was typed.
     expect(q.questionKey).toBe(questionKeyOf(q.text));
     expect(q.questionKey).not.toBe(questionKeyOf(PROMPT));
   });
 
-  it('a mask-only shape leaves a search-shaped query byte-identical', () => {
-    // The three shapes the 14-day corpus is made of; condense damaged all of
-    // them, which is why no search arm has it in its shape.
-    for (const query of [
-      'pgvector testcontainer collation',
-      'x402 payTo attribution',
-      'arXiv 2608.13568',
-    ]) {
-      expect(question(query, [mask]).text).toBe(query);
-    }
-  });
-
-  it('fills identifiers only when condense is in the shape', () => {
-    expect(
-      question('the migrate.yml step of PR 751 keeps failing', [mask]).identifiers,
-    ).toBeUndefined();
-    expect(
-      question('the migrate.yml step of PR 751 keeps failing', [mask, condense]).identifiers,
-    ).toEqual(['migrate.yml', 'pr-751']);
-  });
-
-  it('falls back to the head when condensing leaves nothing', () => {
-    // Three-word questions: no identifier, no clause of four words.
-    const thin = 'does it build? does it lint? does it ship?';
-    expect(condense(thin)).toBe('');
-    expect(question(thin, [mask, condense]).text).toBe(thin);
+  it("has no length rule of its own: the search leg's cut is the only bound", () => {
+    const paste = `${'collation '.repeat(500)}pgvector`;
+    expect(paste.length).toBeGreaterThan(5000);
+    const q = question(paste);
+    expect(q.text).toBe(paste);
+    // What the shelf sees is the leg's 512 characters, cut at a whole word.
+    const sent = cut(q.text, QUERY_MAX);
+    expect(sent.length).toBeLessThanOrEqual(QUERY_MAX);
+    expect(sent.endsWith('collation')).toBe(true);
   });
 
   it('keys the same question the same way across case and whitespace', () => {
@@ -72,23 +61,47 @@ describe('question', () => {
   });
 });
 
+describe('skipText', () => {
+  it('masks a refused text and keeps 512 characters of it', () => {
+    const refused = `/compact ${PROMPT} ${'x'.repeat(2000)}`;
+    const stored = skipText(refused);
+    expect(stored).not.toContain(SECRET);
+    expect(stored.length).toBe(512);
+  });
+});
+
 describe('promptSkip', () => {
-  it('names each reason', () => {
-    expect(promptSkip('yes')).toBe('short');
-    expect(promptSkip('x '.repeat(2100))).toBe('long');
+  it('names each of the three reasons', () => {
     expect(
       promptSkip(
         '/compact please summarize the whole session before we continue with the migration',
       ),
     ).toBe('slash');
-    // Thirty two-character tokens: 89 characters, no word long enough to be one.
+    expect(promptSkip('<task-notification>agent a-1 finished</task-notification>')).toBe('harness');
+    expect(promptSkip('<agent-message from="a-1">done with the migration</agent-message>')).toBe(
+      'harness',
+    );
+    expect(promptSkip('[SYSTEM NOTIFICATION] the daemon restarted mid-turn')).toBe('harness');
+    // Thirty two-character tokens: no word long enough to be one.
     expect(promptSkip('ab '.repeat(30).trim())).toBe('words');
   });
 
   it('counts words on the masked text, so a stub is not a word', () => {
-    const q = `is ${'ghp_abcdefghijklmnopqrstuvwxyz0123456789'} ok or ok or ok or ok or ok or ok or ok`;
-    expect(q.length).toBeGreaterThanOrEqual(80);
-    expect(promptSkip(q)).toBe('words');
+    expect(promptSkip(`is ${'ghp_abcdefghijklmnopqrstuvwxyz0123456789'} ok`)).toBe('words');
+  });
+
+  it('asks a short question rather than refusing it for being short', () => {
+    // 78 characters, which the deleted length floor refused as a conversational
+    // reply. It is a question, so it is asked.
+    const short = 'the pgvector testcontainer collation flipped after the image bump, why was it?';
+    expect(short.length).toBe(78);
+    expect(promptSkip(short)).toBeNull();
+  });
+
+  it('asks a pasted payload rather than refusing it for being long', () => {
+    const paste = `${'collation '.repeat(500)}pgvector`;
+    expect(paste.length).toBeGreaterThan(5000);
+    expect(promptSkip(paste)).toBeNull();
   });
 
   it('passes a real question through', () => {

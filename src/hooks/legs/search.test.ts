@@ -25,8 +25,8 @@ const CONFIG: KernelConfig = {
 
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 
-function q(text: string, identifiers?: string[]): Question {
-  return { text, questionKey: 'qk1', ...(identifiers !== undefined ? { identifiers } : {}) };
+function q(text: string): Question {
+  return { text, questionKey: 'qk1' };
 }
 
 function candidate(over: Record<string, unknown> = {}): Record<string, unknown> {
@@ -97,20 +97,16 @@ describe('searchLeg request', () => {
     expect(long.startsWith(sent)).toBe(true);
   });
 
-  it('puts the trigger, the limit, the identifiers and budget_ms on the wire', async () => {
+  it('puts the trigger, the limit and budget_ms on the wire, and no identifiers', async () => {
     const { fetchImpl, calls } = stub(() => json(200, envelope([])));
     const leg = searchLeg('team', 'research', CONFIG, fetchImpl);
-    await leg.request(
-      q('why the collation flipped', ['pgvector', 'pr-751']),
-      3200,
-      new AbortController().signal,
-    );
-    expect(await body(calls)).toMatchObject({
-      trigger: 'research',
-      limit: 3,
-      identifiers: ['pgvector', 'pr-751'],
-      budget_ms: 3200,
-    });
+    await leg.request(q('why the collation flipped'), 3200, new AbortController().signal);
+    const sent = await body(calls);
+    expect(sent).toMatchObject({ trigger: 'research', limit: 3, budget_ms: 3200 });
+    // The shelf lifts identifiers out of the query itself
+    // (`lib/search/retrieve/tsquery.ts`); this side sends the question and
+    // nothing it inferred from it.
+    expect(sent.identifiers).toBeUndefined();
   });
 
   it('sends the bypass key to the team origin and never to the public one', async () => {

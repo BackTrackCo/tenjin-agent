@@ -147,7 +147,6 @@ export function searchLeg(
           question: cut(q.text, QUERY_MAX),
           limit: SEARCH_LIMIT,
           trigger,
-          ...(q.identifiers !== undefined ? { identifiers: q.identifiers } : {}),
           budgetMs,
         });
         const result = await postSearch(body, {

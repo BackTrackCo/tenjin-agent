@@ -6,15 +6,14 @@ import { cleanup, fireContext, freshDb, hookInput, kernelConfig } from './test-s
 
 /**
  * The prompt arm's spec: which prompts become a question, which become a skip
- * row, and what the shape list does to the words on the way.
+ * row, and that the question is the prompt itself with its secrets stubbed.
  */
 
 afterEach(cleanup);
 
 const ON = kernelConfig({ push: 'on' });
 
-/** A real question, over the `short` floor and under `long`, carrying one
- *  identifier-shaped token so the identifiers list has something to lift. */
+/** A real question, of the shape a person actually types. */
 const PROMPT =
   'the pgvector testcontainer flipped its collation after the image bump in #772 and every ivfflat index test now fails on sort order';
 
@@ -46,11 +45,8 @@ describe('the prompt arm plan', () => {
     expect(planned.stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
   });
 
-  it('condenses the prose and lifts its identifiers, which no other arm does', () => {
-    const q = (plan(PROMPT) as Plan).question;
-    expect(q.text.length).toBeLessThan(PROMPT.length);
-    expect(q.text).toContain('pgvector');
-    expect(q.identifiers).toContain('pr-772');
+  it('asks the prompt itself: nothing is rewritten, dropped or reordered', () => {
+    expect((plan(PROMPT) as Plan).question.text).toBe(PROMPT);
   });
 
   it('a prompt with no prompt field at all is no-question, not a skip', () => {
@@ -61,25 +57,25 @@ describe('the prompt arm plan', () => {
 });
 
 describe('the prompt arm skips, each with its own reason', () => {
-  it('short: a conversational reply, 48 of 474 real prompts', () => {
-    expect(plan('yes')).toEqual({ reason: 'short', text: 'yes' });
-  });
-
-  it('long: a pasted payload, 40 of 474, stored as a scrubbed 512-char head', () => {
-    const pasted = 'x'.repeat(4001);
-    // The row keeps the head, not the paste: `long` IS the pasted-payload case,
-    // and a paste is where a token and another session's transcript live.
-    expect(plan(pasted)).toEqual({ reason: 'long', text: 'x'.repeat(512) });
-  });
-
   it('slash: a harness command', () => {
     const slash = `/compact ${PROMPT}`;
     expect(plan(slash)).toEqual({ reason: 'slash', text: slash });
   });
 
-  it('words: long enough, but not three words of three characters', () => {
+  it('harness: the tooling talking to itself through the prompt channel', () => {
+    const notice = '<task-notification>agent a-1 finished its work order</task-notification>';
+    expect(plan(notice)).toEqual({ reason: 'harness', text: notice });
+  });
+
+  it('words: not three words of three characters', () => {
     const noWords = `${'a '.repeat(45)}`.trim();
     expect(plan(noWords)).toEqual({ reason: 'words', text: noWords });
+  });
+
+  it('asks a short prompt and a pasted one: there is no length rule', () => {
+    expect(plan('why did the collation flip?')).toMatchObject({ stages: expect.anything() });
+    const pasted = `${'collation '.repeat(500)}pgvector`;
+    expect((plan(pasted) as Plan).question.text).toBe(pasted);
   });
 });
 
@@ -89,19 +85,16 @@ describe('the prompt arm and secrets', () => {
     const slash = plan(`/compact ${PROMPT} with the ${token} in it`) as Skip;
     expect(slash.reason).toBe('slash');
     expect(slash.text).not.toContain(token);
-
-    // `long` is the one that matters most: it IS the pasted-payload case.
-    const pasted = plan(`${'x'.repeat(4001)} ${token}`) as Skip;
-    expect(pasted.reason).toBe('long');
-    expect(pasted.text).not.toContain(token);
   });
 
-  it('masks before it condenses, so a token is never promoted to an identifier', () => {
+  it('masks the question, and masking is the only thing it does to it', () => {
     const token = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz';
     const q = (plan(`${PROMPT} and the token ${token} keeps being refused`) as Plan).question;
     expect(q.text).not.toContain(token);
-    expect(q.identifiers ?? []).not.toContain(token);
     expect(JSON.stringify(q)).not.toContain(token);
+    // Everything either side of the stub is the prompt, word for word.
+    expect(q.text.startsWith(`${PROMPT} and the token `)).toBe(true);
+    expect(q.text.endsWith(' keeps being refused')).toBe(true);
   });
 });
 

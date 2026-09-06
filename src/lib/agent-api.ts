@@ -47,9 +47,6 @@ export interface SearchInput {
   limit?: number;
   /** Which arm asked; omitted is `cli`, a direct `tenjin search`. */
   trigger?: SearchRequestBody['trigger'];
-  /** The identifiers lifted out of the question (`pr-751`), for the shelf's
-   *  identifier leg. Only the loop's prompt arm sends any. */
-  identifiers?: string[];
   /** What is left of the fire's deadline, so the shelf can spend its embedding
    *  budget knowing when the answer stops being wanted. */
   budgetMs?: number;
@@ -85,9 +82,6 @@ export interface SearchRequestBody {
    *  the per-trigger use rates (`GET /api/lookups/stats`); it never changes the
    *  result. */
   trigger: 'cli' | Trigger;
-  /** The question's identifiers in the wire spelling, for the shelf's identifier
-   *  leg (`lib/search/understand.ts`). Absent unless the caller lifted any. */
-  identifiers?: string[];
   /** Milliseconds the caller will still read an answer for. A server that does
    *  not know the field echoes it as an unknown-key warning and answers as
    *  before, which is why it ships ahead of the server half. */
@@ -168,9 +162,6 @@ export function buildSearchRequest(input: SearchInput): SearchRequestBody {
     ...(Object.keys(filters).length > 0 ? { filters } : {}),
     limit,
     trigger: input.trigger ?? 'cli',
-    ...(input.identifiers !== undefined && input.identifiers.length > 0
-      ? { identifiers: input.identifiers }
-      : {}),
     ...(input.budgetMs !== undefined ? { budget_ms: input.budgetMs } : {}),
   };
 }
