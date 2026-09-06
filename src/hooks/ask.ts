@@ -13,14 +13,15 @@ import type { Answer, FireContext, Leg, LegResult, LegRow, LegStatus, Plan, Shel
  * every lookup arm plans one mixed stage `[[team, public]]`, so a stage-level
  * drop would have sent the public leg anyway. `off` means the public leg is
  * never sent (tenjin-agent#229), whatever stage it was planned into; a stage
- * left with no legs is dropped whole, which renumbers the stages after it. That
- * costs nothing today — every arm plans one stage, and `stage` is a label on a
- * `legs` row, not something the plan or the verdict reads back.
+ * left with no legs is skipped and KEEPS ITS INDEX, so the `stage` label on a
+ * `legs` row is the plan's own index whatever was filtered before it (the
+ * failure arm plans two stages, and its ledger has to say which one hit).
  */
 
-/** The whole ranking: team's own shelf beats a key match beats the marketplace.
- *  Nothing else separates two answers now that a leg has one grade to give. */
-const SHELF_RANK: Record<Shelf, number> = { team: 3, keys: 2, public: 1 };
+/** The whole ranking: a teammate's write-up beats a key match beats this
+ *  machine's own terse record beats the marketplace (decision 13). Nothing
+ *  else separates two answers now that a leg has one grade to give. */
+export const SHELF_RANK: Record<Shelf, number> = { team: 4, keys: 3, local: 2, public: 1 };
 
 function better(a: Answer | null, b: Answer): boolean {
   if (a === null) return true;
@@ -43,18 +44,15 @@ export interface AskResult {
 
 export async function ask(ctx: FireContext, plan: Plan): Promise<AskResult> {
   const { fire, deps } = ctx;
-  const stages =
-    deps.config().team.publicFallback === 'off'
-      ? plan.stages
-          .map((stage) => stage.filter((leg) => leg.shelf !== 'public'))
-          .filter((stage) => stage.length > 0)
-      : plan.stages;
+  const noPublic = deps.config().team.publicFallback === 'off';
   const rows: LegRow[] = [];
   let best: Answer | null = null;
   let bestRow: LegRow | null = null;
 
-  for (let stage = 0; stage < stages.length; stage += 1) {
-    const legs = stages[stage] ?? [];
+  for (let stage = 0; stage < plan.stages.length; stage += 1) {
+    const planned = plan.stages[stage] ?? [];
+    const legs = noPublic ? planned.filter((leg) => leg.shelf !== 'public') : planned;
+    if (legs.length === 0) continue;
     const budget = fire.remaining() - RESERVE_MS;
     if (budget <= 0) {
       for (const leg of legs) {

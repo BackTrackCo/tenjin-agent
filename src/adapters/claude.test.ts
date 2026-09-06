@@ -12,6 +12,8 @@ import PostToolUseFailure from './fixtures/claude/PostToolUseFailure.json';
 import SubagentStart from './fixtures/claude/SubagentStart.json';
 import SubagentStop from './fixtures/claude/SubagentStop.json';
 import Stop from './fixtures/claude/Stop.json';
+import childPreToolUse from './fixtures/claude/child-PreToolUse.json';
+import childPostToolUse from './fixtures/claude/child-PostToolUse.json';
 
 const FIXTURES = {
   SessionStart,
@@ -24,9 +26,10 @@ const FIXTURES = {
   Stop,
 } as const;
 
-const SESSION = '6d2f0c8a-9b41-4e7a-8c3d-1f5e2a7b9c04';
-const TRANSCRIPT = `/Users/dev/.claude/projects/-Users-dev-proj/${SESSION}.jsonl`;
 const PROMPT_ID = '01J9X4M2K7Q8R3T5V6W7Y8Z9A0';
+/** The child's id as Claude Code 2.1.261 really mints it (17 hex chars), from
+ *  the captured turn in `evidence/claude-2.1.261-subagent-turn.json`. */
+const CHILD_ID = 'a59db2769b6f0fcd1';
 
 /** Every fixture decodes; `null` here would hide a fixture typo behind a TypeError. */
 function decoded(name: keyof typeof FIXTURES): HookInput {
@@ -54,9 +57,9 @@ describe('decode', () => {
       expect(input.harness).toBe('claude');
       expect(input.event).toBe(EXPECTED[name]);
       expect(input.native).toEqual({ event: name });
-      expect(input.session).toBe(SESSION);
+      expect(input.session).toBe(FIXTURES[name].session_id);
       expect(input.cwd).toBe('/Users/dev/proj');
-      expect(input.transcript?.path).toBe(TRANSCRIPT);
+      expect(input.transcript?.path).toBe(FIXTURES[name].transcript_path);
       expect(input.raw).toBe(FIXTURES[name]);
     },
   );
@@ -113,12 +116,43 @@ describe('decode', () => {
     });
   });
 
-  it('SubagentStart names the child and its type', () => {
+  it('SubagentStart names the child and its type, and carries the parent turn', () => {
     const input = decoded('SubagentStart');
-    expect(input.agent).toBe('a7c31e9f');
+    expect(input.agent).toBe(CHILD_ID);
     expect(input.agentType).toBe('Explore');
-    expect(input.turn).toBe(PROMPT_ID);
+    // `prompt_id` is real on SubagentStart (probed 2026-09-05): the handoff
+    // claim keys on it, so a child's start finds its own turn's parked row.
+    expect(input.turn).toBe(SubagentStart.prompt_id);
     expect(input.stopFuse).toBeUndefined();
+  });
+
+  describe("a child's tool fires (captured 2.1.261 turn)", () => {
+    it('PreToolUse inside the child carries agent_id and the parent turn', () => {
+      const input = decode(childPreToolUse);
+      expect(input).toMatchObject({
+        event: 'tool.before',
+        session: childPreToolUse.session_id,
+        agent: CHILD_ID,
+        turn: childPreToolUse.prompt_id,
+        agentType: 'Explore',
+        tool: { name: 'Bash', kind: 'shell', callId: childPreToolUse.tool_use_id },
+      });
+      expect(input?.tool?.ok).toBeUndefined();
+    });
+
+    it('PostToolUse inside the child is ok: a clean `ls` carries no marker', () => {
+      const input = decode(childPostToolUse);
+      expect(input).toMatchObject({
+        event: 'tool.after',
+        agent: CHILD_ID,
+        turn: childPostToolUse.prompt_id,
+        tool: {
+          kind: 'shell',
+          ok: true,
+          result: { stdout: childPostToolUse.tool_response.stdout, stderr: '' },
+        },
+      });
+    });
   });
 
   it('SubagentStop carries the child transcript, last message and fuse', () => {
@@ -126,7 +160,7 @@ describe('decode', () => {
     expect(input.agent).toBe('a7c31e9f');
     expect(input.agentType).toBe('Explore');
     expect(input.transcript).toEqual({
-      path: TRANSCRIPT,
+      path: SubagentStop.transcript_path,
       agentPath: SubagentStop.agent_transcript_path,
     });
     expect(input.lastMessage).toBe(SubagentStop.last_assistant_message);
@@ -138,7 +172,7 @@ describe('decode', () => {
     expect(input.agent).toBeUndefined();
     expect(input.stopFuse).toBe(false);
     expect(input.lastMessage).toBe(Stop.last_assistant_message);
-    expect(input.transcript).toEqual({ path: TRANSCRIPT });
+    expect(input.transcript).toEqual({ path: Stop.transcript_path });
   });
 
   it('reads stop_hook_active true as a tripped fuse', () => {
@@ -209,11 +243,48 @@ describe('decode', () => {
       expect(decode({ ...PostToolUse, is_interrupt: true })?.tool?.interrupted).toBe(true);
     });
 
-    it('ok is decided by the event literal, never by the response text', () => {
-      const failing = { ...PostToolUse, tool_response: { stdout: '', stderr: 'FAIL: 3 tests' } };
-      expect(decode(failing)?.tool?.ok).toBe(true);
+    it('PostToolUseFailure is not ok whatever its error text says', () => {
       const clean = { ...PostToolUseFailure, error: '' };
       expect(decode(clean)?.tool?.ok).toBe(false);
+    });
+
+    describe('a Bash PostToolUse is not ok when its output carries an error marker', () => {
+      // Decision 9: a non-zero exit inside a pipe and a runner that prints its
+      // verdict and exits zero both arrive as a plain PostToolUse. The adapter
+      // decides here; the failure arm never reads text.
+      function bash(stdout: string, stderr = ''): boolean | undefined {
+        return decode({ ...PostToolUse, tool_response: { stdout, stderr } })?.tool?.ok;
+      }
+
+      it.each([
+        ['a vitest FAIL verdict on stderr', '', ' FAIL  src/x.test.ts > flips'],
+        ['a totals row', ' Tests  3 failed | 40 passed (43)'],
+        ['a tsc diagnostic', "src/a.ts(3,1): error TS2322: Type 'x' is not assignable"],
+        ['a class-named error at line start', 'TypeError: cannot read properties of undefined'],
+        ['a POSIX code', 'spawn pnpm ENOENT'],
+        ['a stated exit code', 'Command failed with exit code 1'],
+      ])('%s', (_label, stdout, stderr = '') => {
+        expect(bash(stdout, stderr)).toBe(false);
+      });
+
+      it('prose that mentions an error mid-line is not a failure', () => {
+        expect(bash('handled an error: retried and passed')).toBe(true);
+        expect(bash('0 failed, nothing to see')).toBe(true);
+      });
+
+      it('scans the whole output, not a bounded tail', () => {
+        expect(bash(' FAIL  src/x.test.ts\n' + 'ok\n'.repeat(5000))).toBe(false);
+        expect(bash('ok\n'.repeat(5000) + 'npm ERR! code ELIFECYCLE')).toBe(false);
+      });
+
+      it('a Read whose text says Error: is still ok — the scan is for shells only', () => {
+        const read = {
+          ...PostToolUse,
+          tool_name: 'Read',
+          tool_response: { text: 'Error: this is file content' },
+        };
+        expect(decode(read)?.tool?.ok).toBe(true);
+      });
     });
   });
 
@@ -440,7 +511,7 @@ describe('registrar', () => {
     expect(registrar.transcriptFor(decoded('SubagentStop'))).toEqual({
       path: SubagentStop.agent_transcript_path,
     });
-    expect(registrar.transcriptFor(decoded('Stop'))).toEqual({ path: TRANSCRIPT });
+    expect(registrar.transcriptFor(decoded('Stop'))).toEqual({ path: Stop.transcript_path });
     const stop = decoded('Stop');
     expect(registrar.transcriptFor({ ...stop, transcript: undefined })).toBeNull();
     expect(registrar.transcriptFor({ ...stop, transcript: {} })).toBeNull();

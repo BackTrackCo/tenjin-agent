@@ -20,7 +20,8 @@ const PROMPT =
 function plan(prompt: string, config = ON): Plan | Skip | null {
   const db = freshDb();
   const ctx = fireContext({ db, arm: promptArm, input: hookInput({ prompt }), config });
-  return promptArm.plan?.(ctx) ?? null;
+  // The prompt arm's `text` is synchronous, so its plan is (lookup.ts).
+  return (promptArm.plan?.(ctx) ?? null) as Plan | Skip | null;
 }
 
 describe('the prompt arm registration', () => {

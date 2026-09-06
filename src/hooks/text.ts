@@ -2,7 +2,7 @@
  * The two string bounds every arm and every shared piece uses, in one place.
  *
  * They were four copies of the same control-character regex and two copies of
- * `clean` across `question.ts`, `deliver.ts`, `legs/search.ts` and the arms; a
+ * `clean` across `question.ts`, `deliver.ts`, `legs/shelf.ts` and the arms; a
  * rule about what may leave this machine is worth exactly one implementation.
  *
  * BOTH CUTS ARE SURROGATE-SAFE. `slice` counts UTF-16 units, so a cut that lands

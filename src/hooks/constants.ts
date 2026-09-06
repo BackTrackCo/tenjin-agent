@@ -8,7 +8,7 @@
  * about one arm's input — a prompt's junk rules, the head a skipped row stores,
  * the shelf's own query bound — and each is only readable next to the code and
  * the measurement that justifies it. They live in `hooks/question.ts`,
- * `hooks/text.ts`, `hooks/legs/search.ts` and the arm files, and every one
+ * `hooks/text.ts`, `hooks/legs/shelf.ts` and the arm files, and every one
  * carries its reason there the way these do here.
  */
 

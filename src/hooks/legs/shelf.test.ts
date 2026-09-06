@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { CONFIG_DEFAULTS } from '../../lib/config';
 import { SHELF_BYPASS_HEADER } from '../../lib/http';
 import type { KernelConfig, Question } from '../types';
-import { searchLeg } from './search';
+import { keysLeg, searchLeg } from './shelf';
 
 /**
  * One leg against a stubbed `fetch`: no daemon, no store, no network. What is
@@ -276,5 +276,60 @@ describe('searchLeg verdict', () => {
     ]);
     expect(bare?.resourceId).toBe('22222222-2222-4222-8222-222222222222');
     expect(bare?.text).toBeUndefined();
+  });
+});
+
+describe('keysLeg', () => {
+  const KEYS = ['sig_v1:abc', 'sig_v1_test:def'];
+
+  it('posts the fingerprints to /api/keys/resolve on the team route with the bypass key', async () => {
+    const { fetchImpl, calls } = stub(() => json(200, envelope([])));
+    const leg = keysLeg(CONFIG, KEYS, fetchImpl);
+    const result = await leg.request(q('ignored'), 3000, new AbortController().signal);
+    expect(result.status).toBe('ok');
+    expect(leg.shelf).toBe('keys');
+    expect(calls[0]?.url).toBe(`${TEAM}/api/keys/resolve`);
+    expect(calls[0]?.headers.get(SHELF_BYPASS_HEADER)).toBe('door-key');
+    // Exactly `resolveRequestSchema`'s shape (a strict object): keys, trigger,
+    // limit. No question, no budget: a key is not a search.
+    expect(await body(calls)).toEqual({
+      keys: [
+        { kind: 'fingerprint', key: 'sig_v1:abc' },
+        { kind: 'fingerprint', key: 'sig_v1_test:def' },
+      ],
+      trigger: 'failure',
+      limit: 3,
+    });
+  });
+
+  it('a 404 (keys not enabled) is http_404 on the row, and nothing else remembers it', async () => {
+    const { fetchImpl } = stub(() => json(404, { error: { code: 'not_enabled' } }));
+    const leg = keysLeg(CONFIG, KEYS, fetchImpl);
+    const result = await leg.request(q(''), 3000, new AbortController().signal);
+    expect(result).toEqual({ status: 'http_404' });
+    expect(leg.verdict(result)).toBeNull();
+  });
+
+  it('a 200 with items is a hit on the first item, strong or not, calibration key-v1', async () => {
+    const { fetchImpl } = stub(() =>
+      json(200, envelope([candidate({ title: 'Fixed here' })], 'key-v1')),
+    );
+    const leg = keysLeg(CONFIG, KEYS, fetchImpl);
+    const result = await leg.request(q(''), 3000, new AbortController().signal);
+    expect(result).toMatchObject({ status: 'ok', calibration: 'key-v1', searchId: SEARCH_ID });
+    expect(leg.verdict(result)).toMatchObject({
+      shelf: 'keys',
+      title: 'Fixed here',
+      searchId: SEARCH_ID,
+      resourceId: '22222222-2222-4222-8222-222222222222',
+    });
+  });
+
+  it('a 200 with no items is a miss', async () => {
+    const { fetchImpl } = stub(() => json(200, envelope([], 'key-v1')));
+    const leg = keysLeg(CONFIG, KEYS, fetchImpl);
+    const result = await leg.request(q(''), 3000, new AbortController().signal);
+    expect(result.status).toBe('ok');
+    expect(leg.verdict(result)).toBeNull();
   });
 });

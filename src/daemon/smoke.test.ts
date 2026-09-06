@@ -313,10 +313,18 @@ describe('the daemon, cold-started from the real bundle', () => {
       // looks like a phantom stop and leaves no row at all, including this
       // one even though its matching SubagentStart fixture ran first.
       expect(rows.some((r) => r.event === 'agent.stop')).toBe(false);
+      // Every fire the child sent but its stop is filed under the child's own
+      // id (the start, and its two tool fires from the captured 2.1.261 turn).
       const start = fixtures.find((f) => f.event === 'SubagentStart');
       if (start !== undefined) {
         const agentId = (JSON.parse(start.body) as { agent_id: string }).agent_id;
-        expect(rows.filter((r) => r.agent === agentId)).toHaveLength(1);
+        const childFires = fixtures.filter(
+          (f) =>
+            (JSON.parse(f.body) as { agent_id?: string }).agent_id === agentId &&
+            f.event !== 'SubagentStop',
+        ).length;
+        expect(childFires).toBeGreaterThan(1);
+        expect(rows.filter((r) => r.agent === agentId)).toHaveLength(childFires);
       }
     } finally {
       db.close();

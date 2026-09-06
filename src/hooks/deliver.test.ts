@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { CLOSING_LINE, PUBLIC_OPENER, TEAM_OPENER, deliver, fenceSafeBody } from './deliver';
+import { deliver, fenceSafeBody } from './deliver';
+import { CLOSING_LINE, LOCAL_OPENER, PUBLIC_OPENER, TEAM_OPENER } from './prose';
 import type { Answer } from './types';
 
 /**
@@ -153,5 +154,8 @@ describe('deliver', () => {
   it('opens as a team record on the team shelf and as third-party text on the public one', () => {
     expect(deliver(answer(), 'team').text?.startsWith(TEAM_OPENER)).toBe(true);
     expect(deliver(answer(), 'public').text?.startsWith(PUBLIC_OPENER)).toBe(true);
+    // The keys shelf is a team surface; `local` is this machine's own record.
+    expect(deliver(answer(), 'keys').text?.startsWith(TEAM_OPENER)).toBe(true);
+    expect(deliver(answer(), 'local').text?.startsWith(LOCAL_OPENER)).toBe(true);
   });
 });

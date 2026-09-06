@@ -20,6 +20,8 @@ const SEEN_PREFIX = 'seen:';
 interface QuestionMark {
   status: 'asking' | 'done';
   at: number;
+  /** `asking` only: the claiming fire's own deadline, `at + deadlineMs`. */
+  until?: number;
   answer?: Answer | null;
   /** The fire that wrote it; `finish` and `release` from another fire are no-ops. */
   by?: string;
@@ -70,24 +72,31 @@ export type Claim =
   { kind: 'fresh' } | { kind: 'asked' } | { kind: 'cached'; answer: Answer | null };
 
 /**
- * Once-per-question. `asking` younger than `waitMs` is someone else's live
- * fire (`asked`); an older `asking` is stale (its fire hit its deadline or
- * crashed) and is retaken; `done` returns the stored verdict without a fetch.
+ * Once-per-question. An `asking` mark is live until the deadline of THE FIRE
+ * THAT TOOK IT (`until`), not the arriving fire's: a prompt fire (2,500 ms)
+ * must not retake a research claim (4,000 ms) at t+2,600 and drop its verdict.
+ * A claim lives exactly as long as its fire; past `until` the fire hit its
+ * deadline or crashed, and the question is retaken. `done` returns the stored
+ * verdict without a fetch.
  */
 export function claim(
   db: LoopDb,
   actor: Actor,
   questionKey: string,
   now: number,
-  waitMs: number,
+  deadlineMs: number,
   by?: string,
 ): Claim {
   const key = Q_PREFIX + questionKey;
   const mark = readQuestion(db, actor, key);
   if (mark?.status === 'done') return { kind: 'cached', answer: mark.answer ?? null };
-  if (mark?.status === 'asking' && now - mark.at < waitMs) return { kind: 'asked' };
+  if (mark?.status === 'asking' && mark.until !== undefined && now < mark.until)
+    return { kind: 'asked' };
+  const until = now + deadlineMs;
   const next: QuestionMark =
-    by === undefined ? { status: 'asking', at: now } : { status: 'asking', at: now, by };
+    by === undefined
+      ? { status: 'asking', at: now, until }
+      : { status: 'asking', at: now, until, by };
   setMark(db, actor, key, JSON.stringify(next), now);
   return { kind: 'fresh' };
 }

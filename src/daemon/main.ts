@@ -85,25 +85,21 @@ async function main(): Promise<void> {
     log('no daemon.token; run `tenjin daemon start`');
     process.exit(1);
   }
-  let db;
-  try {
-    db = openLoopDb(dataDir);
-  } catch (err) {
-    log(`loop.db open failed: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
-  }
-
   let config = readKernelConfig(dataDir, log);
   let mtime = configMtime(dataDir);
   const clock = () => Date.now();
-  const deps: Deps = {
-    db,
+  // `db` IS OPENED AFTER `bind()`, the daemon's only mutual exclusion:
+  // `openLoopDb` deletes and rebuilds a file of another build's shape, and two
+  // shims racing to spawn could otherwise have the loser unlink the file the
+  // winner had just opened. The continuation after `await bind()` runs before
+  // any connection callback, so no fire can see `deps.db` unset.
+  const deps = {
     config: () => config,
     clock,
     log,
     arms: ARMS,
     adapters: { claude: claudeAdapter },
-  };
+  } as Deps;
 
   const startedAt = clock();
   let lastRequestAt = startedAt;
@@ -139,7 +135,7 @@ async function main(): Promise<void> {
     try {
       await shutdown({
         server: hook.server,
-        db,
+        db: deps.db,
         dataDir,
         pid: process.pid,
         inFlight: hook.drain,
@@ -159,7 +155,7 @@ async function main(): Promise<void> {
   process.on('uncaughtException', (err) => {
     log(`uncaughtException: ${err.stack ?? err.message}`);
     try {
-      db.close();
+      deps.db?.close();
     } catch {
       // Already closed.
     }
@@ -170,7 +166,7 @@ async function main(): Promise<void> {
       `unhandledRejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`,
     );
     try {
-      db.close();
+      deps.db?.close();
     } catch {
       // Already closed.
     }
@@ -182,12 +178,16 @@ async function main(): Promise<void> {
   const bound = await bind(hook.server, port, dataDir, version);
   if (bound.kind === 'peer') {
     // Lost a benign race to a daemon just like us; it serves, we go.
-    db.close();
     process.exit(0);
   }
   if (bound.kind === 'foreign') {
     log(`bind ${port}: ${bound.detail}; set \`loop.port\` if this persists`);
-    db.close();
+    process.exit(1);
+  }
+  try {
+    deps.db = openLoopDb(dataDir);
+  } catch (err) {
+    log(`loop.db open failed: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   }
   port = bound.port;
