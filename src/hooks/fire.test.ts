@@ -221,7 +221,7 @@ describe('runFire: a skip', () => {
       id: 'prompt',
       wait: 'human',
       on: [{ event: 'prompt' }],
-      plan: () => ({ reason: 'short', text: 'yes' }),
+      plan: () => ({ reason: 'slash', text: '/clear' }),
     };
     const { emit, commit } = await runFire(input(), deps(db, [arm]));
     expect(emit).toBeNull();
@@ -229,15 +229,15 @@ describe('runFire: a skip', () => {
 
     const rows = fireRows(db);
     expect(rows).toHaveLength(1);
-    // The text is what the importance score reads off a "/clear" or a "yes";
-    // a null plan would have lost it (reason `no-question`, question null).
-    expect(rows[0]).toMatchObject({ arm: 'prompt', reason: 'short', question: 'yes' });
+    // The text is what the importance score reads off a "/clear"; a null plan
+    // would have lost it (reason `no-question`, question null).
+    expect(rows[0]).toMatchObject({ arm: 'prompt', reason: 'slash', question: '/clear' });
     // A skip is not a lookup: no gate ran, no leg ran.
     expect(legRows(db, rows[0]!.id)).toEqual([]);
-    expect(getMark(db, LEAD, 'q:yes')).toBeNull();
+    expect(getMark(db, LEAD, 'q:/clear')).toBeNull();
   });
 
-  it.each(['short', 'long', 'slash', 'words'] as const)('%s lands as its own reason', async (r) => {
+  it.each(['slash', 'harness', 'words'] as const)('%s lands as its own reason', async (r) => {
     const db = await freshDb();
     const arm: Arm = {
       id: 'prompt',
@@ -306,6 +306,30 @@ describe('runFire: a hit', () => {
     expect(rows[0]).toMatchObject({ reason: 'hit', delivered: 'inject:res-1' });
     expect(legRows(db, rows[0]!.id)).toEqual([{ shelf: 'team', status: 'ok', outcome: 'hit' }]);
     expect(JSON.parse(getMark(db, LEAD, 'q:qk-hit') ?? 'null')).toMatchObject({ status: 'done' });
+  });
+
+  it('stores what was SENT: the row carries the search leg’s 512-character cut', async () => {
+    const db = await freshDb();
+    const text = 'why is vitest slow '.repeat(106).trim();
+    expect(text.length).toBeGreaterThan(2000);
+    const arm: Arm = {
+      id: 'long-arm',
+      wait: 'tool',
+      on: [{ event: 'prompt' }],
+      plan: () => ({
+        question: { text, questionKey: 'qk-long' },
+        stages: [[strongLeg('res-long')]],
+      }),
+      deliver: (answer) => ({ mode: 'inject', text: 'because', resourceId: answer.resourceId }),
+    };
+    const { commit } = await runFire(input(), deps(db, [arm]));
+    commit();
+
+    const stored = fireRows(db)[0]?.question ?? '';
+    expect(stored.length).toBeLessThanOrEqual(512);
+    // On a word boundary, and a prefix of the prompt: the tail the leg never
+    // sent is not in the ledger either.
+    expect(text.startsWith(`${stored} `)).toBe(true);
   });
 
   it('a deliver() that throws after the verdict keeps the cached verdict', async () => {

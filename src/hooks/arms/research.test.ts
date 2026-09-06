@@ -5,8 +5,9 @@ import { cleanup, fireContext, freshDb, hookInput, kernelConfig, toolInput } fro
 
 /**
  * The two web arms. What matters here is that they are TWO — separate ids,
- * separate events, separate questions and so separate claims — and that
- * nothing an agent typed into a search box reaches a shelf unmasked.
+ * separate events, separate questions and so separate claims — that a query and
+ * a url travel as written, and that nothing an agent typed into either reaches
+ * a shelf unmasked.
  */
 
 afterEach(() => {
@@ -82,14 +83,11 @@ describe('research and fetch are two arms', () => {
 });
 
 describe('the research arm', () => {
-  it('asks both shelves with the raw query, masked and never condensed', () => {
+  it('asks both shelves the query the agent typed', () => {
     const planned = planOf(researchArm, searchInput('pgvector testcontainer collation')).plan;
     const plan = planned as Plan;
     expect(plan.stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
-    // Condensing this would have emptied it: three plain words, no clause of
-    // four. The shape list is `[mask]` for exactly that reason.
     expect(plan.question.text).toBe('pgvector testcontainer collation');
-    expect(plan.question.identifiers).toBeUndefined();
   });
 
   it('`off` is the kill switch: no question and no line', () => {
@@ -150,10 +148,10 @@ describe('the fetch arm', () => {
     expect(JSON.stringify(await bodies[0])).toContain('"trigger":"research"');
   });
 
-  it('masks a vendor token sitting in a path segment, before its underscores go', async () => {
-    // The shape the allow-list never guarded: a credential IS the path segment.
-    // Split into words first, `ghp_` and its body are two harmless-looking
-    // tokens and no rule fires on either, so the mask has to run on the path.
+  it('masks a vendor token sitting in a path segment', async () => {
+    // A credential IS the path segment here, and the url is sent whole, so the
+    // one thing standing between it and the shelf is the mask every question
+    // goes through.
     const token = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz';
     const { bodies } = captureFetch();
     const plan = planOf(fetchArm, fetchInput({ url: `https://acme.com/download/${token}/report` }))
@@ -164,8 +162,8 @@ describe('the fetch arm', () => {
     expect(body).not.toContain(token);
     expect(body).not.toContain('0123456789abcdefghijklmnopqrstuvwxyz');
     // The stub keeps the type and the length, so the query still says what was
-    // dropped. Its brackets do not survive the word split this arm ends on.
-    expect(body).toContain('ghp redacted 36 chars');
+    // dropped.
+    expect(body).toContain('ghp_\u2026[redacted 36 chars]');
   });
 
   it('masks the fine-grained form in a path segment too', async () => {
@@ -183,20 +181,46 @@ describe('the fetch arm', () => {
 });
 
 describe('fetchQuestion', () => {
-  it('is the path words plus the prompt head, and never the hostname', () => {
+  it('is the address and the prompt, both as written', () => {
     const q = fetchQuestion({
       url: 'https://docs.acme.dev/guides/pgvector_collation.html',
       prompt: 'did the image bump change the sort order',
     });
-    expect(q).toBe('guides pgvector collation did the image bump change the sort order');
-    expect(q).not.toContain('acme');
+    expect(q).toBe(
+      'https://docs.acme.dev/guides/pgvector_collation.html ' +
+        'did the image bump change the sort order',
+    );
   });
 
-  it('reads allow-listed param values only: a key or a signature is never a topic', () => {
+  it('cuts at the first `?`, which is where a signed url keeps its credential', () => {
     const q = fetchQuestion({
       url: 'https://example.com/search?q=collation+flip&api_key=sk-live-abcdef123456&sig=zz',
     });
-    expect(q).toBe('search collation flip');
+    expect(q).toBe('https://example.com/search');
+  });
+
+  it('cuts at the first `#` too: a hash router keeps its credential there', () => {
+    expect(
+      fetchQuestion({ url: 'https://app.acme.dev/#/invite?email=a@b.co&code=sk-live-abc' }),
+    ).toBe('https://app.acme.dev/');
+    // A doc anchor goes with it: it is worth nothing to a shelf that ranks on
+    // the page, and it is not worth a second rule.
+    expect(fetchQuestion({ url: 'https://vitest.dev/config/#restoremocks' })).toBe(
+      'https://vitest.dev/config/',
+    );
+    // Whichever comes first, and the rest is one run.
+    expect(fetchQuestion({ url: 'https://vitest.dev/config/?q=1#restoremocks' })).toBe(
+      'https://vitest.dev/config/',
+    );
+  });
+
+  it('sends the address as typed, not the parser’s re-spelling of it', () => {
+    // `new URL(...).origin + .pathname` would lower-case the host, drop the
+    // default port, fold `..` and percent-encode the space. A url with neither
+    // a `?` nor a `#` is untouched.
+    const raw = 'https://Docs.Acme.dev:443/a/../guide/pg vector.html';
+    expect(fetchQuestion({ url: raw })).toBe(raw);
+    expect(fetchQuestion({ url: 'https://例え.jp/パス' })).toBe('https://例え.jp/パス');
   });
 
   it('is empty for a non-http url and for a malformed one', () => {
@@ -205,8 +229,8 @@ describe('fetchQuestion', () => {
     expect(fetchQuestion({})).toBe('');
   });
 
-  it('cuts the prompt at its head and leaves the length rule to the search leg', () => {
+  it("has no length rule: the search leg's 512 is the only bound", () => {
     const q = fetchQuestion({ url: 'https://example.com/a', prompt: 'x'.repeat(900) });
-    expect(q).toBe(`a ${'x'.repeat(400)}`);
+    expect(q).toBe(`https://example.com/a ${'x'.repeat(900)}`);
   });
 });

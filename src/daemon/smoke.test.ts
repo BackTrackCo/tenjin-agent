@@ -490,8 +490,7 @@ describe('the daemon, cold-started from the real bundle', () => {
     // rather than a pointer to it.
     expect(out.additionalContext).toContain(SHELF_BODY);
 
-    // Both legs asked, and neither sent the raw prompt: the shape list masks
-    // and condenses before anything leaves the machine.
+    // Both legs asked, on the one question the prompt arm masked.
     expect(shelfBodies).toHaveLength(2);
     for (const body of shelfBodies) expect(body.trigger).toBe('prompt');
 

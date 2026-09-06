@@ -17,9 +17,10 @@ import { createHookServer } from './server';
  * serves every session and every subagent on the machine until it has been
  * idle for `loop.idle_exit_min`.
  *
- * ARMS: the lookup arms of PR C. ORDER IS THE MAP — `selectArm` takes the
- * first arm whose `on` matches, so a later arm can be shadowed by an earlier
- * one. These four cannot shadow each other: they key on four disjoint
+ * ARMS: the three lookup arms of PR C, and `context`, which asks nothing and
+ * only writes the marks PR D's arms read. ORDER IS THE MAP — `selectArm` takes
+ * the first arm whose `on` matches, so a later arm can be shadowed by an
+ * earlier one. These four cannot shadow each other: they key on disjoint
  * (event, kind) pairs, and `context` is last regardless because it is the only
  * one with more than one. Every entry `install` writes for an arm PR D has yet
  * to add finds nothing here, records `no-question` and answers 204.

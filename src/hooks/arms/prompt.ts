@@ -1,5 +1,3 @@
-import { condense } from '../../lib/query-condense';
-import { mask } from '../../lib/redact';
 import { promptSkip } from '../question';
 import { lookupArm } from './lookup';
 import type { Arm } from '../types';
@@ -13,9 +11,9 @@ import type { Arm } from '../types';
  * shelves answer it, so a sequential plan bought nothing but a public leg with
  * a second left on its clock (owner decision 2026-09-04).
  *
- * `shape` is the only `[mask, condense]` in the build. A typed prompt is prose
- * and condensing measurably helps it (#255); a search query is already a query
- * and condensing damages it, which is why every other arm masks and stops.
+ * THE QUESTION IS THE PROMPT. It is masked and it is not rewritten: the shelf
+ * ranks the sentence better than this machine's summary of it, and the three
+ * skips below are the only text rules the arm has.
  */
 export const promptArm: Arm = lookupArm({
   id: 'prompt',
@@ -27,7 +25,6 @@ export const promptArm: Arm = lookupArm({
   enabled: (cfg) => cfg.hooks.push === 'on',
   text: (input) => input.prompt ?? null,
   skip: promptSkip,
-  shape: [mask, condense],
   shelves: ['team', 'public'],
   deliver: 'inject',
 });

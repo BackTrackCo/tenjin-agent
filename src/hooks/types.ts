@@ -23,7 +23,7 @@ export type Shelf = 'team' | 'public' | 'keys';
  * The wire `trigger`: which arm asked, so the server can tell a prompt lookup
  * from a research one in its own telemetry (`agent-api.ts`).
  */
-export type Trigger = 'prompt' | 'research' | 'read' | 'churn';
+export type Trigger = 'prompt' | 'research';
 
 /**
  * `legs.status`: the split tenjin-agent#286 asks for, so a timeout, a 5xx, a
@@ -80,15 +80,13 @@ export interface Question {
   text: string;
   /** The once-per-question key the claim gate is keyed on; computed by the arm. */
   questionKey: string;
-  /** Identifiers lifted out of the text; the prompt arm fills them, no one else. */
-  identifiers?: string[];
 }
 
 /**
  * Why an arm looked at the text and asked nothing. It carries the text so the
  * ledger keeps what was skipped: the importance score reads those rows.
  */
-export type SkipReason = 'short' | 'long' | 'slash' | 'words';
+export type SkipReason = 'slash' | 'harness' | 'words';
 export interface Skip {
   reason: SkipReason;
   text: string;
@@ -117,7 +115,7 @@ export interface Delivery {
 
 /**
  * `fires.reason`, closed. `hit` is the one non-skip: something was delivered.
- * The four {@link SkipReason}s are an arm refusing text it did have (the row
+ * The three {@link SkipReason}s are an arm refusing text it did have (the row
  * still carries the text); `no-question` is having none at all. A phantom
  * SubagentStop and an invalid `agent_id` are the only silent exits, both by
  * `actorOf`, before any row.

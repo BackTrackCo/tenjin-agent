@@ -32,8 +32,9 @@ import type { Answer, KernelConfig, Leg, LegResult, LegStatus, Question, Trigger
  *  un-strong rank 1. Today's `PUSH_SEARCH_LIMIT`. */
 const SEARCH_LIMIT = 3;
 
-/** The server's query bound (`lookupRequestSchema`). */
-const QUERY_MAX = 512;
+/** The server's query bound (`lookupRequestSchema`). Exported because the
+ *  ledger stores what was sent, so `fire.ts` cuts the row to the same bound. */
+export const QUERY_MAX = 512;
 
 /**
  * Which origin this shelf is, and what opens it.
@@ -147,7 +148,6 @@ export function searchLeg(
           question: cut(q.text, QUERY_MAX),
           limit: SEARCH_LIMIT,
           trigger,
-          ...(q.identifiers !== undefined ? { identifiers: q.identifiers } : {}),
           budgetMs,
         });
         const result = await postSearch(body, {

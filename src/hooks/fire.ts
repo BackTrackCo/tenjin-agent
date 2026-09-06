@@ -5,6 +5,8 @@ import { ask } from './ask';
 import { finish, firstSight, gates, release } from './gates';
 import { record } from './ledger';
 import type { FireRecord } from './ledger';
+import { QUERY_MAX } from './legs/search';
+import { cut } from './text';
 import type { Actor, Arm, Deps, FireClock, FireContext, LegRow, Outcome, Question } from './types';
 
 /**
@@ -123,7 +125,10 @@ export async function runFire(
         const plan = planned;
         asked = plan.question;
         questionKey = plan.question.questionKey;
-        question = plan.question.text;
+        // The SAME cut the search leg makes on the wire: a row that stored the
+        // whole prompt would read as the question this fire asked, and nobody
+        // reading the ledger could tell the tail was never sent.
+        question = cut(plan.question.text, QUERY_MAX);
         const gated = gates(ctx, plan);
         let result: Outcome;
         if (gated !== null) {
@@ -152,10 +157,10 @@ export async function runFire(
           const delivery = arm.deliver?.(result.answer, ctx) ?? null;
           if (delivery === null) return { reason: 'no-hit', answer: result.answer };
           // ONCE-PER-PIECE IS ABOUT WHAT AN AGENT WAS SHOWN, so only an
-          // injection burns the mark. A log-only arm looks a piece up to earn a
-          // precision number and says nothing; burning the mark there would let
-          // a silent lookup silence the real injection a prompt asks for a
-          // second later (00-principles.md, principle 4).
+          // injection burns the mark. A log-only arm looks a piece up and says
+          // nothing; burning the mark there would let a silent lookup silence
+          // the real injection a prompt asks for a second later
+          // (00-principles.md, principle 4).
           if (
             delivery.mode === 'inject' &&
             !firstSight(deps.db, actor, result.answer.resourceId, deps.clock())

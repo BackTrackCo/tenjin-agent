@@ -1,5 +1,3 @@
-import { mask } from '../../lib/redact';
-import { stripControl } from '../text';
 import { lookupArm } from './lookup';
 import type { Arm } from '../types';
 
@@ -14,10 +12,9 @@ import type { Arm } from '../types';
  * claim is keyed on the QUESTION, per actor, not per arm: identical text asked
  * by both is one lookup, which is the point — the loop does not double count.)
  *
- * NEITHER IS CONDENSED and neither has a length rule. A WebSearch query is
- * already a query — `condense` was measured to damage 131 of 184 real ones
- * (`pgvector testcontainer collation` to nothing at all) — and the search leg
- * cuts at 512 on a word boundary, which is the shelf's bound and no arm's.
+ * NEITHER REWRITES ITS WORDS and neither has a length rule. A query is already a
+ * query, a url is already an address, and the search leg cuts at 512 on a word
+ * boundary, which is the shelf's bound and no arm's.
  */
 
 /**
@@ -31,80 +28,47 @@ export const REMIND_LINE =
   'Tenjin (a marketplace of tested, paid answers) may already have this: `tenjin search "<question>" --json` is free and anonymous.';
 
 /**
- * Query-string keys whose VALUE is a topic rather than a credential. An
- * allow-list, not a deny-list: `?api_key=`, `?access_token=`, `?sig=` and every
- * vendor spelling nobody has thought of are all handled by not being on it.
+ * The url up to its first `?` or `#`, whichever comes first; the rest is cut.
+ * ONE RULE, because both runs carry the same risk: a credential in a shape
+ * `mask` has no rule for — a presigned signature or an account id in the query,
+ * a hash router's own `#/invite?code=…`, the `#access_token=…` an OAuth
+ * redirect hands back. A fragment that is none of those is a doc anchor, and an
+ * anchor is worth nothing to a shelf that ranks on the page.
  */
-const SAFE_PARAM_KEY_RE =
-  /^(?:q|query|search|keywords?|topic|tags?|section|category|lang|locale|version|v)$/i;
-
-/** The prompt head a fetch carries. The url's own words come before it. */
-const PROMPT_HEAD = 400;
-
-/** The words of an allow-listed param value. A value is a phrase, so it is read
- *  word by word, and a word that reads as an opaque handle rather than as
- *  language is dropped even here. */
-function paramWords(url: URL): string {
-  const out: string[] = [];
-  let budget = 120;
-  for (const [key, value] of url.searchParams) {
-    if (!SAFE_PARAM_KEY_RE.test(key)) continue;
-    for (const word of String(value).split(/[^A-Za-z0-9@._-]+/)) {
-      if (word.length === 0 || word.length > 24) continue;
-      if (word.length >= 12 && /\d/.test(word) && /[A-Za-z]/.test(word)) continue;
-      budget -= word.length + 1;
-      if (budget < 0) return out.join(' ');
-      out.push(word);
-    }
-  }
-  return out.join(' ');
+function addressOnly(raw: string): string {
+  const end = raw.search(/[?#]/);
+  return end === -1 ? raw : raw.slice(0, end);
 }
 
 /**
- * The question a WebFetch is really asking: the url's own words (path segments,
- * plus the values of the few query keys that hold a topic) and the prompt the
- * agent attached. Ported from `hook-scripts.ts:1527-1548`, pure.
+ * The question a WebFetch is really asking: the page's address and the prompt
+ * the agent attached to it, both as written.
  *
- * A HOSTNAME NEVER ENTERS THE WORDS at all, only the path and the allow-listed
- * params; and PARAM VALUES ARE NOT SENT WHOLESALE, independent of masking,
- * because a query string is where an api key, an account id and a presigned
- * signature live. The url has already left the machine via the fetch itself, so
- * this is not about hiding the address — the one shape that matters is a
- * credential in a path segment (`acme.com/download/ghp_.../file.pdf`), which the
- * allow-list never guarded, and which is masked HERE rather than left to the
- * spec's `[mask]`: a vendor prefix stops looking like a token the moment its
- * underscores are spaces, so the path is masked before its separators go and the
- * extension is stripped after, the order `churnQuery` already uses.
+ * THE ADDRESS STOPS AT THE FIRST `?` OR `#`. Everything before it goes as
+ * typed and nothing after it travels, because either run can hold a credential
+ * `mask` cannot see (see `addressOnly`). A url this build cannot parse, or one
+ * that is not a web address, is a fetch this arm has no words for.
  *
- * The port's own 512-character cut is gone: no arm has a length rule now, and
- * masking a string before it is cut is strictly safer than cutting a secret in
- * half first — which is why the one bound that survives here, the prompt head,
- * masks first too, and why the leg's 512 cut runs after the spec's `[mask]`.
+ * THE PARSER IS THE http(s) CHECK, NOT THE ADDRESS. Sending `url.origin +
+ * url.pathname` back out was a second rewrite wearing the parser's clothes: it
+ * lower-cases and punycodes the host, percent-encodes the path, folds `..`
+ * segments away, and strips the `user:pass@` that `mask` has its own rule for —
+ * four alterations nobody asked for, under a comment claiming one. The string
+ * the agent typed is the address; `URL` only says whether it is a web one.
  */
-function urlWords(raw: string): string | null {
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    const path = mask(decodeURIComponent(url.pathname))
-      .replace(/\.(html?|php|aspx?|md|txt)$/i, '')
-      .replace(/[/_]+/g, ' ');
-    return `${path} ${paramWords(url)}`.replace(/[^A-Za-z0-9@._-]+/g, ' ');
-  } catch {
-    // A url this build cannot parse is a url this arm has no words for.
-    return null;
-  }
-}
-
 export function fetchQuestion(toolInput: Record<string, unknown>): string {
-  const words = urlWords(typeof toolInput.url === 'string' ? toolInput.url : '');
-  if (words === null) return '';
-  // MASKED BEFORE IT IS CUT, for the same reason the leg's 512 cut runs after
-  // the spec's `[mask]`: a token straddling character 400 would otherwise leave
-  // a fragment too short for any redaction rule to recognize. `mask` is
-  // idempotent, so the spec's own pass over the joined string is harmless.
-  const prompt =
-    typeof toolInput.prompt === 'string' ? mask(toolInput.prompt).slice(0, PROMPT_HEAD) : '';
-  return stripControl(`${words} ${prompt}`).replace(/\s+/g, ' ').trim();
+  const raw = typeof toolInput.url === 'string' ? toolInput.url : '';
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return '';
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
+  const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt : '';
+  // The trim is the join's own: with no prompt attached there is nothing on the
+  // far side of the space to keep it for.
+  return `${addressOnly(raw)} ${prompt}`.trim();
 }
 
 /** WebSearch. The one arm `hooks.webSearch` speaks for. */
@@ -123,7 +87,6 @@ export const researchArm: Arm = lookupArm({
     const query = input.tool?.input.query;
     return typeof query === 'string' ? query.trim() : null;
   },
-  shape: [mask],
   shelves: ['team', 'public'],
   deliver: 'inject',
   after: (ctx) =>
@@ -142,7 +105,6 @@ export const fetchArm: Arm = lookupArm({
   // matcher widening, now a condition.
   enabled: (cfg) => cfg.hooks.push === 'on',
   text: (input) => fetchQuestion(input.tool?.input ?? {}),
-  shape: [mask],
   shelves: ['team', 'public'],
   deliver: 'inject',
 });

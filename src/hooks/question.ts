@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { condense, identifiersOf } from '../lib/query-condense';
 import { mask } from '../lib/redact';
 import { clean } from './text';
 import type { Question, SkipReason } from './types';
@@ -8,37 +7,29 @@ import type { Question, SkipReason } from './types';
  * What an arm asks, and the key the once-per-question gate is claimed on
  * (02-redesign.md §4).
  *
- * THE SHAPE LIST IS THE BEHAVIOUR. An arm hands `question()` the steps its text
- * goes through — `[mask]` for a search-shaped query, `[mask, condense]` for a
- * prompt — and there is no flag to read. Order is the list's: mask runs first so
- * a token condense would otherwise promote to an identifier is already a stub.
+ * A QUESTION IS WHAT THE AGENT TYPED, WITH ITS SECRETS STUBBED. `mask` is the
+ * only thing that happens to an arm's text here, and the search leg's cut at the
+ * shelf's 512 characters is the only other thing that happens to it before it
+ * leaves the machine (owner decision 2026-09-06). No condensing, no identifier
+ * lifting, no per-arm shaping: an arm that rewrites its own words is guessing at
+ * a question nobody asked, and the shelf ranks better on the sentence than on
+ * this machine's summary of it.
  *
- * `condense` is the one step with more to it than a string in and a string out,
- * because condensing is what produces the identifiers list and what can produce
- * nothing at all. Both are properties of that step, so they live beside it here
- * rather than as options on this function.
+ * LEADING AND TRAILING WHITESPACE COMES OFF, and is named here so the list is
+ * the real one rather than the tidy one. An arm trims the text it built
+ * (`research.ts`) and `buildSearchRequest` trims what it sends, which is also
+ * how a query of nothing but spaces becomes no question instead of a request
+ * the shelf refuses. It moves no word and reorders none, so it is not one of
+ * the rewrites above.
  */
 
-/** The query's character bound, cut at a whole token. The shelf's own cap is 512
- *  and the search leg makes that cut; this is the condensed query's bound, and
- *  the figure today's prompt arm calls `PROMPT_QUERY_CHARS`. */
-const QUERY_CHARS = 400;
-
-/** A prompt shorter than this is a conversational reply, not a question: 48 of
- *  474 real prompts, every sample a "yes" or a "fix it". */
-const PROMPT_MIN_CHARS = 80;
-/** And longer than this is a pasted payload: 40 of 474, every one a hook log. */
-const PROMPT_MAX_CHARS = 4000;
-
 /** What a SKIPPED text is stored as. Not a query bound — nothing is asked — but
- *  the row still lands in `loop.db`, and the skip most likely to carry a
- *  credential or another session's transcript is `long`, which by definition is
- *  a 4000-character paste. Today's arm stored the same 512 (`push-scripts.ts`
- *  `recordEvent`), and it is the scrubbed head, never the raw text. */
+ *  the row still lands in `loop.db`, and a refused prompt is exactly where a
+ *  pasted transcript and a credential live. Masked first, then cut, so a token
+ *  is a stub before anything is thrown away. */
 const SKIP_TEXT_CHARS = 512;
 
-/** The text a {@link Skip} carries into `fires.question`: masked first, so a
- *  token is a stub before the cut, then cut. */
+/** The text a {@link Skip} carries into `fires.question`. */
 export function skipText(text: string): string {
   return clean(mask(text), SKIP_TEXT_CHARS);
 }
@@ -66,39 +57,30 @@ export function questionKeyOf(text: string): string {
 }
 
 /**
- * Run `shape` over `text` in order and key the result. This never skips: an arm
- * that will not ask says so with a {@link SkipReason} before it gets here.
+ * Mask the text and key the result. This never skips: an arm that will not ask
+ * says so with a {@link SkipReason} before it gets here.
  */
-export function question(text: string, shape: Array<(t: string) => string>): Question {
-  let out = text;
-  let identifiers: string[] | undefined;
-  for (const step of shape) {
-    if (step === condense) {
-      // Read off the text going IN to condense — the masked prompt — because
-      // condensing drops the prose the identifiers were lifted out of.
-      const found = identifiersOf(out);
-      if (found.length > 0) identifiers = found;
-      const condensed = condense(out);
-      // WHEN CONDENSING LEAVES NOTHING the head goes instead. Seven three-word
-      // questions have no identifier and no clause of four words, and an empty
-      // query still spends a request on both shelves to say nothing.
-      out = clean(condensed.length > 0 ? condensed : out.slice(0, QUERY_CHARS), QUERY_CHARS);
-      continue;
-    }
-    out = step(out);
-  }
-  return {
-    text: out,
-    questionKey: questionKeyOf(out),
-    ...(identifiers !== undefined ? { identifiers } : {}),
-  };
+export function question(text: string): Question {
+  const out = mask(text);
+  return { text: out, questionKey: questionKeyOf(out) };
 }
 
 /**
- * The prompt arm's four junk filters, verbatim from the generated arm they
- * replace (`push-scripts.ts:1180-1189`) and PROMPT-ONLY: they are measured
- * against typed prose, and a search query is short and slash-free by nature.
- * Each reason is its own, so the ledger says which one bit.
+ * Text that was typed into the prompt channel and addressed to the harness
+ * rather than to anyone. `<task-notification>` and `<agent-message` are a
+ * subagent's own plumbing arriving as a prompt, and `[SYSTEM NOTIFICATION` is
+ * the harness talking to itself; a shelf has nothing to say about any of them.
+ */
+const HARNESS_PREFIXES = ['<task-notification>', '<agent-message', '[SYSTEM NOTIFICATION'];
+
+/**
+ * The prompt arm's junk rules, and no one else's. All three say the same thing:
+ * this text is addressed to the harness, or it is not words at all.
+ *
+ * THERE IS NO LENGTH RULE. A short question is a question and a long paste is
+ * still what the person is asking about; both go as typed, and the search leg's
+ * 512-character cut is the only bound either meets. Each reason is its own, so
+ * the ledger says which one bit.
  *
  * `words` counts the MASKED text, not the raw one: a prompt that is three
  * identifiers and no prose is a question, and a masked credential must not count
@@ -106,9 +88,8 @@ export function question(text: string, shape: Array<(t: string) => string>): Que
  * which is `no-question`, and the arm returns null for it before asking here.
  */
 export function promptSkip(text: string): SkipReason | null {
-  if (text.length < PROMPT_MIN_CHARS) return 'short';
-  if (text.length > PROMPT_MAX_CHARS) return 'long';
   if (text.startsWith('/')) return 'slash';
+  if (HARNESS_PREFIXES.some((prefix) => text.startsWith(prefix))) return 'harness';
   if (wordCount(mask(text)) < 3) return 'words';
   return null;
 }

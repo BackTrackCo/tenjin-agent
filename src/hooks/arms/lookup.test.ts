@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mask } from '../../lib/redact';
 import type { Answer, Arm, Plan, Skip, SkipReason } from '../types';
 import { lookupArm, type LookupSpec } from './lookup';
 import { cleanup, fireContext, freshDb, hookInput, kernelConfig, toolInput } from './test-support';
@@ -29,7 +28,6 @@ function spec(over: Partial<LookupSpec> = {}): LookupSpec {
     trigger: 'prompt',
     enabled: () => true,
     text: (input) => input.prompt ?? null,
-    shape: [mask],
     shelves: ['team', 'public'],
     deliver: 'inject',
     ...over,
@@ -58,10 +56,11 @@ describe('lookupArm wiring', () => {
     expect(stages[0]?.map((l) => l.shelf)).toEqual(['team', 'public']);
   });
 
-  it('runs the shape list over the text and keys the question on the result', () => {
+  it('masks the text and keys the question on the result', () => {
     const plan = planOf(lookupArm(spec()), 'the token is ghp_0123456789abcdefghijklmnopqrstuvwxyz');
     const q = (plan as Plan).question;
     expect(q.text).not.toContain('ghp_0123456789abcdefghijklmnopqrstuvwxyz');
+    expect(q.text.startsWith('the token is ')).toBe(true);
     expect(q.questionKey).toMatch(/^[0-9a-f]{32}$/);
   });
 });
@@ -77,13 +76,9 @@ describe('lookupArm, the three ways to ask nothing', () => {
   });
 
   it('a skip passes the reason AND the text through, so the row keeps both', () => {
-    const skip: (t: string) => SkipReason | null = (t) => (t.length < 10 ? 'short' : null);
-    const planned = planOf(lookupArm(spec({ skip })), 'yes');
-    expect(planned).toEqual({ reason: 'short', text: 'yes' });
-  });
-
-  it('a shape that empties the text is no-question, never an empty query on the wire', () => {
-    expect(planOf(lookupArm(spec({ shape: [() => ''] })))).toBeNull();
+    const skip: (t: string) => SkipReason | null = (t) => (t.startsWith('/') ? 'slash' : null);
+    const planned = planOf(lookupArm(spec({ skip })), '/compact');
+    expect(planned).toEqual({ reason: 'slash', text: '/compact' });
   });
 });
 
@@ -130,12 +125,12 @@ describe('lookupArm delivery', () => {
 });
 
 describe('lookupArm trigger', () => {
-  it('takes a function of the input, for the one arm that asks two questions', () => {
+  it('takes a function of the input, for a spec that covers two moments', () => {
     const arm = lookupArm(
       spec({
         on: [{ event: 'tool.after', kind: 'read' }],
-        trigger: (input) => (input.event === 'tool.after' ? 'read' : 'churn'),
-        text: () => 'zod gotcha bug workaround',
+        trigger: (input) => (input.event === 'tool.after' ? 'research' : 'prompt'),
+        text: () => 'why the collation flipped',
       }),
     );
     const db = freshDb();
