@@ -19,7 +19,7 @@ own reason on the row: `slash` (a harness command), `words` (fewer than three
 words of three characters once masked), and a new `harness` for text the tooling
 sent through the prompt channel — `<task-notification>`, `<agent-message`,
 `[SYSTEM NOTIFICATION`. A `WebFetch` now asks about the page's address and the
-prompt attached to it, both as written; only the query string is dropped,
+prompt attached to it, both as written; the address stops at its first `?` or `#`; everything after that character is dropped,
 because a signed url keeps its credential in a parameter value whose shape
 masking has no rule for. The `identifiers` list is no longer sent beside the
 query at all: the shelf lifts identifiers out of the query itself, so sending a
