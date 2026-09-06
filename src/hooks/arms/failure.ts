@@ -1,6 +1,7 @@
 import { basename } from 'node:path';
 import type { HookTool } from '../../adapters/types';
 import { mask } from '../../lib/redact';
+import { projectId, teamCoarseKey } from '../../lib/state-store';
 import { deliver } from '../deliver';
 import {
   closeOpenPairings,
@@ -9,24 +10,16 @@ import {
   openPairing,
   pairingAnswer,
   pairingIdOf,
-  projectOf,
   rememberReplay,
-  safeCommand,
 } from '../failure/pairings';
 import { repoSlugOf } from '../failure/repo';
-import {
-  allowedHeads,
-  errorLine,
-  filesInError,
-  saltedCoarse,
-  sigV1,
-  type Signature,
-} from '../failure/signature';
+import { allowedHeads, errorLine, filesInError, sigV1, type Signature } from '../failure/signature';
 import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-identity';
 import { getMark } from '../gates';
 import { localLeg } from '../legs/local';
 import { keysLeg, teamOrigin } from '../legs/shelf';
 import type { Arm, FireContext, Leg } from '../types';
+import { BASH_START } from './context';
 
 /**
  * The failure arm (13-pr-d-local-arms.md, "failure"). An agent's command
@@ -42,8 +35,6 @@ import type { Arm, FireContext, Leg } from '../types';
  * `PostToolUse` whose output carries an error marker (decision 9). The arm
  * never reads text to decide WHETHER something failed, only WHAT.
  */
-
-const BASH_START = 'bashstart';
 
 /** What `plan` derived, kept for `after` under the same fire: `after` must
  *  write what was ASKED, and the test-identity read is not repeatable. */
@@ -119,8 +110,10 @@ export const failureArm: Arm = {
     const found = errorLine(text);
     const sig = found === null ? null : sigV1(found.line, found.block);
     // The context arm's stamp for THIS call, so a report from the run before
-    // it cannot be read as this run's.
-    const since = Number(getMark(db, ctx.actor, BASH_START));
+    // it cannot be read as this run's. No stamp, no artifact leg: `Number(null)`
+    // is 0, which would accept any report ever written.
+    const stamp = getMark(db, ctx.actor, BASH_START);
+    const since = stamp === null ? Number.NaN : Number(stamp);
     const identity = await testIdentityOf(
       text,
       cwd,
@@ -130,11 +123,11 @@ export const failureArm: Arm = {
     const testSig = identity === null ? null : sigV1Test(identity);
     if (sig === null && testSig === null) return null;
     const repo = await repoSlugOf(cwd);
-    const project = projectOf(cwd);
+    const project = projectId(cwd);
     planned.set(ctx, {
       head,
       cwd,
-      command: safeCommand(command),
+      command: mask(command),
       errorLine: found === null ? '' : mask(found.line),
       errorFiles: found === null ? [] : filesInError(found.block),
       sig,
@@ -157,13 +150,13 @@ export const failureArm: Arm = {
     const fine: string[] = [];
     if (sig !== null) fine.push('sig_v1:' + sig.key);
     if (sig !== null && sig.coarseKey !== null && repo.length > 0)
-      fine.push('sig_v1c:' + saltedCoarse(sig.coarseKey, repo));
+      fine.push('sig_v1c:' + teamCoarseKey(sig.coarseKey, repo));
     if (testSig !== null) fine.push('sig_v1_test:' + testSig.key);
     const team = teamOrigin(cfg) !== null;
     const stages: Leg[][] = [team ? [local, keysLeg(cfg, fine)] : [local]];
     if (team && testSig !== null && repo.length > 0) {
       stages.push([
-        pointerLeg(keysLeg(cfg, ['sig_v1_test_c:' + saltedCoarse(testSig.coarseKey, repo)])),
+        pointerLeg(keysLeg(cfg, ['sig_v1_test_c:' + teamCoarseKey(testSig.coarseKey, repo)])),
       ]);
     }
     return {

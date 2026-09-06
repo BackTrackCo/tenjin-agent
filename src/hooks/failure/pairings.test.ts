@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { projectId } from '../../lib/state-store';
 import { CHILD, LEAD, NOW, cleanup, freshDb } from '../arms/test-support';
 import { getFact } from '../facts';
 import { setMark } from '../gates';
@@ -11,7 +12,6 @@ import {
   linkPost,
   openPairing,
   pairingAnswer,
-  projectOf,
   rememberReplay,
   repoPath,
   replayedPairings,
@@ -24,7 +24,7 @@ import {
  */
 
 const REPO = '/repo/one';
-const PROJECT = projectOf(REPO);
+const PROJECT = projectId(REPO);
 const OTHER_SESSION: Actor = { session: 's2', agent: '' };
 
 let db: LoopDb;
@@ -204,7 +204,7 @@ describe('the lookup', () => {
     open();
     edited(LEAD, `${REPO}/src/migrate.ts`, NOW + 10);
     pass();
-    expect(findPairing(db, projectOf('/repo/two'), 'k-fine', 'k-coarse')).toBeNull();
+    expect(findPairing(db, projectId('/repo/two'), 'k-fine', 'k-coarse')).toBeNull();
   });
 });
 
@@ -224,10 +224,12 @@ describe('the record as an Answer', () => {
     pass(LEAD, 'DATABASE_URL=postgres://app:hunter2@db/x pnpm db:migrate');
     const match = findPairing(db, PROJECT, 'k-fine', 'k-coarse');
     const answer = pairingAnswer(match!, true);
-    expect(answer).toMatchObject({
+    // No url and no price: nothing under it can point at a `tenjin read`.
+    expect(answer).toEqual({
       shelf: 'local',
       resourceId: `pairing:${id}`,
       title: "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
+      text: expect.any(String),
     });
     expect(answer.text?.split('\n')).toEqual([
       'Someone once fixed this by touching: src/migrate.ts.',
@@ -247,13 +249,13 @@ describe('the record as an Answer', () => {
     expect(answer.text).toContain('Fixed here 2 time(s) by changing: src/migrate.ts.');
   });
 
-  it('is a pointer with no text for a coarse test-identity match', () => {
+  it('says only that the file was fixed before on a coarse test-identity match, never the fix', () => {
     open({ kind: 'sig_v1_test', errorFiles: ['a.test.ts'] });
     edited(LEAD, `${REPO}/src/a.test.ts`, NOW + 10);
     pass();
     const answer = pairingAnswer(findPairing(db, PROJECT, 'k-fine', null)!, false);
-    expect(answer.text).toBeUndefined();
-    expect(answer.excerpt).toBe('A similar failure in a.test.ts has been fixed here before.');
+    expect(answer.text).toBe('A similar failure in a.test.ts has been fixed here before.');
+    expect(answer.text).not.toContain('src/a.test.ts');
   });
 });
 

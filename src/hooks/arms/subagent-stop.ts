@@ -1,5 +1,4 @@
-import { ask, harvest } from '../capture';
-import { getMark } from '../gates';
+import { stop } from '../capture';
 import type { Arm } from '../types';
 import { lookupArm } from './lookup';
 
@@ -11,8 +10,6 @@ import { lookupArm } from './lookup';
  * (`stopFuse`) is not a report and is harvested instead.
  */
 
-const ASKED = 'capture:asked';
-
 export const subagentStopArm: Arm = lookupArm({
   id: 'subagent-stop',
   wait: 'tool',
@@ -22,11 +19,5 @@ export const subagentStopArm: Arm = lookupArm({
   text: (input) => (input.stopFuse === true ? null : (input.lastMessage ?? null)),
   shelves: ['team', 'public'],
   deliver: 'log',
-  after(ctx) {
-    // A disabled arm does nothing at all, the ask included.
-    if (ctx.deps.config().hooks.push !== 'on') return null;
-    if (getMark(ctx.deps.db, ctx.actor, ASKED) === null) return ask(ctx, 'child');
-    harvest(ctx);
-    return null;
-  },
+  after: (ctx) => stop(ctx, 'child'),
 });

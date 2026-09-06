@@ -257,6 +257,27 @@ describe('what a failure leaves behind', () => {
     });
   });
 
+  it("reads a test report only behind this call's own `bashstart` stamp", async () => {
+    shelf([[]]);
+    // A report from an earlier run sits in the checkout, naming another file.
+    writeFileSync(
+      join(repo, '.vitest-report.json'),
+      JSON.stringify({
+        startTime: NOW - 1000,
+        endTime: NOW - 100,
+        failed: [{ file: join(repo, 'src/a.test.ts'), suite: 's', test: 't' }],
+      }),
+    );
+    await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL }));
+    // No stamp (the PreToolUse fire never reached the daemon): the console
+    // header is the identity, not the stale report.
+    expect(pairings()).toMatchObject([{ kind: 'sig_v1_test', error_files: '["date.test.ts"]' }]);
+
+    setMark(db, LEAD, 'bashstart', String(NOW - 2000), NOW - 2000);
+    await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL }));
+    expect(pairings().at(-1)).toMatchObject({ kind: 'sig_v1_test', error_files: '["a.test.ts"]' });
+  });
+
   it('opens nothing when the error named no file and no shelf answered', async () => {
     shelf([[]]);
     const noFile = 'ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile"\n';

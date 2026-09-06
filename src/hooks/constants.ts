@@ -47,10 +47,6 @@ export const HEALTH_MS = 200;
  */
 export const SPAWN_BACKOFF_MS = 60_000;
 
-/** A parked parent-to-child handoff and the parent-answer fallback live this
- *  long. A dispatch that never became a child must not seed a stranger later. */
-export const HANDOFF_TTL_MS = 120_000;
-
 /** Ledger rows older than this are deleted at the daemon's idle exit. Matches
  *  Claude Code's own transcript sweep default. */
 export const RETENTION_DAYS = 30;

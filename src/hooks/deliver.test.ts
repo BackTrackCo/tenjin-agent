@@ -50,6 +50,18 @@ describe('deliver', () => {
     expect(out.text).not.toContain('the image tag changed');
   });
 
+  it("a record of this machine's own has no url, no price and no pointer", () => {
+    const out = deliver(
+      { shelf: 'local', resourceId: 'pairing:12', title: 'Error: ENOENT', text: 'Touched: a.ts.' },
+      'local',
+    );
+    const lines = (out.text ?? '').split('\n');
+    expect(lines[0]).toBe(LOCAL_OPENER);
+    expect(lines[1]).toBe('"Error: ENOENT"');
+    expect(out.text).not.toContain('tenjin read');
+    expect(out.text).not.toContain('tenjin inspect');
+  });
+
   it('prices a paid piece and points at inspect instead of read', () => {
     const out = deliver(answer({ price: '100000' }), 'team');
     expect(out.text).toContain(' · $0.10 (paid) · by @ali');

@@ -1,4 +1,5 @@
 import { STARTED_MARK } from '../actor';
+import { HANDOFF_MISS } from '../capture';
 import { deliver } from '../deliver';
 import { setMark } from '../gates';
 import { claim } from '../handoff';
@@ -16,8 +17,6 @@ import type { Arm } from '../types';
  * `before` writes `started` whatever else happens: it is what `actorOf`
  * requires at `agent.stop`, and a stop with no start is a phantom.
  */
-
-const HANDOFF_MISS = 'handoff:miss';
 
 export const subagentStartArm: Arm = {
   id: 'subagent-start',

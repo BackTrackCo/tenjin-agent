@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import { COMMAND_SEPARATOR_RE, shortHash } from './signature';
+import { shortHash } from '../../lib/state-store';
+import { COMMAND_SEPARATOR_RE, LINE_SCAN_MAX } from './signature';
 
 /**
  * The `sig_v1_test` lane (tenjin-agent#267): a key on what the test runner
@@ -148,10 +149,6 @@ async function identityFromArtifact(
  *  nothing specific in it, and yields no identity rather than a guessed one. */
 const TEST_FAIL_HEADER_RE = /^ {0,2}FAIL {1,4}(\S+) {0,4}>\s*(.+)$/;
 
-/** How far up the output the header scan looks: the tail is where the
- *  specific failure lives, pages of an earlier one further back. */
-const LINE_SCAN_MAX = 400;
-
 /** The console fallback, for a repo with no reporter: the LAST header line. */
 function identityFromConsole(text: string): TestIdentity | null {
   const lines = text.split('\n');
@@ -211,7 +208,7 @@ export interface TestSignature {
 }
 
 /** The test-identity keys: fine = file+suite+test, coarse = file+suite.
- *  Unsalted, like `sig_v1`'s: the salt is a wire concern (`saltedCoarse`). */
+ *  Unsalted, like `sig_v1`'s: the salt is a wire concern (`teamCoarseKey`). */
 export function sigV1Test(identity: TestIdentity): TestSignature {
   const base = identity.file + '|' + identity.suite;
   return {

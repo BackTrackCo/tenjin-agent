@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { mask } from '../../lib/redact';
+import { projectId, shortHash } from '../../lib/state-store';
+import { EDITED_PREFIX } from '../arms/context';
 import { getFact, setFact } from '../facts';
 import { getMark, setMark } from '../gates';
+import { PAIRING_FIXED, PAIRING_ONCE, PAIRING_PASSED, PAIRING_SIMILAR } from '../prose';
 import type { LoopDb } from '../store';
 import type { Actor, Answer } from '../types';
-import { shortHash } from './signature';
 
 /**
  * This machine's error-to-fix record (13-pr-d-local-arms.md, "failure"):
@@ -49,12 +51,6 @@ export interface OpenPairing {
   errorFiles: string[];
 }
 
-/** The `project` column: the checkout the failure happened in, so a fix in
- *  one checkout never closes or answers a pairing from another. */
-export function projectOf(cwd: string): string | null {
-  return cwd.length > 0 ? shortHash(cwd) : null;
-}
-
 /** The `machine` column, as `state-store.ts` stamped it: host and user, so
  *  two containers sharing a hostname stay apart. */
 function machineId(): string {
@@ -72,14 +68,6 @@ function machineId(): string {
     user = uid === null ? '' : 'uid:' + uid;
   }
   return shortHash(host + ' ' + user);
-}
-
-/** The command as it may be STORED and REPLAYED: an allowlisted
- *  `DATABASE_URL=postgres://app:pw@db/x pnpm drizzle-kit migrate` passes the
- *  head check and would otherwise land verbatim in a row that is read back
- *  into a later session's context. The same `mask` every query goes through. */
-export function safeCommand(command: string): string {
-  return mask(command);
 }
 
 function parseList(v: unknown): string[] {
@@ -128,7 +116,7 @@ export function openPairing(db: LoopDb, row: OpenPairing, now: number): number {
       randomUUID(),
       now,
       row.session,
-      projectOf(row.cwd),
+      projectId(row.cwd),
       machineId(),
       row.kind,
       row.key,
@@ -301,8 +289,6 @@ export function repoPath(cwd: string, path: string): string | null {
   return rel.split(sep).join('/');
 }
 
-const EDITED_PREFIX = 'edited:';
-
 /** Tracked, in-repo paths THIS AGENT edited after `sinceMs`, off the context
  *  arm's `edited:` marks (the value is the path, the time is `marks.at`).
  *  Scoped by agent because the rule's whole content is "the thing that failed
@@ -416,8 +402,12 @@ export function closeOpenPairings(
   heads: string[],
   now: number,
 ): void {
-  const passed = safeCommand(command);
-  const project = projectOf(cwd);
+  // The command as it may be STORED and READ BACK into a later session's
+  // context: an allowlisted `DATABASE_URL=postgres://app:pw@db/x pnpm
+  // drizzle-kit migrate` passes the head check. The same `mask` every query
+  // goes through.
+  const passed = mask(command);
+  const project = projectId(cwd);
   const closeIf = (pairing: Pairing | null): void => {
     if (pairing === null || pairing.project !== project) return;
     const changed = editedSince(db, actor, cwd, pairing.at);
@@ -454,33 +444,30 @@ export function pairingIdOf(resourceId: string): number | null {
 
 /**
  * The record as an `Answer` on the `local` shelf, rendered by `deliver()`
- * like any other: the error line is the title, the two-or-three-line record
- * is the text. `fine` is whether the match was on the row's own key; a
- * coarse test-identity match says "this file/suite has been fixed before",
- * not "this exact test", which is a claim too weak for the fix body, so it
- * carries no text and renders as a pointer with the file as its excerpt.
+ * like any other: the error line is the title, the sentences (`prose.ts`)
+ * are the text. No url and no price: it is this machine's own row, and
+ * `tenjin read` takes a post id, so a pointer under it would name a command
+ * that does not exist. `fine` is whether the match was on the row's own key;
+ * a coarse test-identity match says "this file/suite has been fixed before",
+ * not "this exact test", which is a claim too weak for the fix body.
  */
 export function pairingAnswer(pairing: Pairing, fine: boolean): Answer {
   const answer: Answer = {
     shelf: 'local',
     resourceId: RESOURCE_PREFIX + pairing.id,
     title: pairing.errorLine ?? '',
-    price: '0',
   };
   if (!fine) {
-    const where = pairing.errorFiles[0] ?? 'this file';
-    return { ...answer, excerpt: 'A similar failure in ' + where + ' has been fixed here before.' };
+    return { ...answer, text: PAIRING_SIMILAR(pairing.errorFiles[0] ?? 'this file') };
   }
   const files = pairing.fixFiles.join(', ');
   const lines = [
-    pairing.status === 'verified'
-      ? 'Fixed here ' + pairing.closes + ' time(s) by changing: ' + files + '.'
-      : 'Someone once fixed this by touching: ' + files + '.',
+    pairing.status === 'verified' ? PAIRING_FIXED(pairing.closes, files) : PAIRING_ONCE(files),
   ];
   // Masked again on the way OUT: a row written by a build whose rules were
   // weaker must not be the thing that carries a credential forward.
   if (pairing.fixCmd !== null && pairing.fixCmd.length > 0) {
-    lines.push('It passed afterwards on: ' + safeCommand(pairing.fixCmd));
+    lines.push(PAIRING_PASSED(mask(pairing.fixCmd)));
   }
   return { ...answer, text: lines.join('\n') };
 }

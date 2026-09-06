@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { hasErrorMarker } from '../../adapters/error-markers';
+import { shortHash } from '../../lib/state-store';
 
 /**
  * The failure arm's pure half (13-pr-d-local-arms.md, "failure"): which
@@ -10,12 +10,6 @@ import { hasErrorMarker } from '../../adapters/error-markers';
  * unchanged: the team shelf's `--key` publishes are `sig_v1` today, and a
  * changed byte would strand every one of them.
  */
-
-/** sha256, hex, 16 characters: the shape of every key and salt here, and of
- *  `pairings.project`. The same bytes as `state-store.ts`'s `shortHash`. */
-export function shortHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').slice(0, 16);
-}
 
 // ---- which commands ----
 
@@ -308,8 +302,8 @@ const RUNNER_HEADER_RE =
 /** How far a block may extend either way from its marker line. */
 const BLOCK_SCAN_MAX = 60;
 /** How far up the output the marker scan looks: the tail is where a runner
- *  puts its verdict. */
-const LINE_SCAN_MAX = 400;
+ *  puts its verdict. `test-identity.ts` scans the same window for its header. */
+export const LINE_SCAN_MAX = 400;
 
 function isBlank(lines: string[], j: number): boolean {
   return (lines[j] ?? '').trim().length === 0;
@@ -524,16 +518,4 @@ export function filesInError(text: string): string[] {
     found.add((m[1] ?? '').split(/[/\\]/).pop() ?? '');
   }
   return [...found].filter((f) => f.length > 0 && f.length <= 80 && !NOT_A_FILE.has(f));
-}
-
-/**
- * The coarse key AS IT GOES ON THE TEAM-SHELF WIRE: `shortHash(coarse + '|' +
- * repo)` over the STORED, unsalted hash, where `repo` is `repoSlug`'s
- * `host/full/path`. Without the salt an `ERR_PNPM_OUTDATED_LOCKFILE`-class
- * message would match a fix from any repo the team has. Mirrored by
- * `teamCoarseKey` in `state-store.ts`, which `tenjin sync` publishes with;
- * the two must produce the same bytes or a query and its post never meet.
- */
-export function saltedCoarse(coarseKey: string, repo: string): string {
-  return shortHash(coarseKey + '|' + repo);
 }

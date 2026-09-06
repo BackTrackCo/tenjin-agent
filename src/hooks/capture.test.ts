@@ -66,11 +66,11 @@ function started(db: LoopDb, agentType = 'general-purpose'): void {
 }
 
 /** One ledger row, as a fire by `actor` on `arm` would have left it. */
-function seedFire(db: LoopDb, actor: Actor, arm: string, reason: string): void {
+function seedFire(db: LoopDb, actor: Actor, arm: string, reason: string, event = 'prompt'): void {
   db.prepare(
     `INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms,
-       elapsed_ms, reason) VALUES (?, ?, ?, ?, ?, 'claude', 'x', '', 'tool', 1, 1, ?)`,
-  ).run(randomUUID(), NOW - 50, actor.session, actor.agent, arm, reason);
+       elapsed_ms, reason) VALUES (?, ?, ?, ?, ?, 'claude', ?, '', 'tool', 1, 1, ?)`,
+  ).run(randomUUID(), NOW - 50, actor.session, actor.agent, arm, event, reason);
 }
 
 function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW - 10): string {
@@ -146,7 +146,7 @@ describe('the child ask', () => {
   it('an edit, one Read row, or a claimed handoff miss each earn the ask, and the mark says which', async () => {
     const cases: Array<[string, (db: LoopDb) => void]> = [
       ['edited', (db) => setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW)],
-      ['research', (db) => seedFire(db, CHILD, 'context', 'no-question')],
+      ['research', (db) => seedFire(db, CHILD, 'context', 'no-question', 'tool.after')],
       ['handoff-miss', (db) => setMark(db, CHILD, 'handoff:miss', SEARCH_ID, NOW)],
     ];
     for (const [kind, seed] of cases) {
@@ -167,11 +167,19 @@ describe('the child ask', () => {
     }
   });
 
-  it('a child with no evidence, a nudge machine, and a workflow child are not asked', async () => {
+  it('a child with no evidence, a Bash-only child, a nudge machine, and a workflow child are not asked', async () => {
     const bare = freshDb();
     started(bare);
     expect(await fire(bare, childStop())).toBeNull();
     expect(getMark(bare, CHILD, 'capture:asked')).toBeNull();
+
+    // A Bash call is a context row too, on `tool.before`; decision 2 names
+    // WebSearch, WebFetch, edit and Read, and no more.
+    const bashOnly = freshDb();
+    started(bashOnly);
+    seedFire(bashOnly, CHILD, 'context', 'no-question', 'tool.before');
+    expect(await fire(bashOnly, childStop())).toBeNull();
+    expect(getMark(bashOnly, CHILD, 'capture:asked')).toBeNull();
 
     const nudge = freshDb();
     started(nudge);
@@ -262,6 +270,12 @@ describe('the lead ask', () => {
     expect(first?.block?.reason.startsWith(CAPTURE_OPENING)).toBe(true);
     expect(first?.block?.reason).not.toContain('--agent');
     expect(getMark(db, LEAD, 'capture:asked')).toBe('lookup');
+    await fire(
+      db,
+      leadStop({ stopFuse: true, lastMessage: fence('first answer') }),
+      TEAM,
+      () => NOW + 5,
+    );
     expect(await fire(db, leadStop())).toBeNull();
 
     setFact(db, 'published:abc', '{}', NOW + 10);
@@ -274,7 +288,18 @@ describe('the lead ask', () => {
       `- ${id} general-purpose subagent ${CHILD.agent}, search ${SEARCH_ID}: "ox 0.14 keeps Bytes.from"`,
     );
     expect(again?.block?.reason).toContain(QUEUED_FINDINGS_TAIL);
-    expect(await fire(db, leadStop(), TEAM, () => NOW + 50)).toBeNull();
+    // The second answer turn is harvested too: once per ask, not once per lead.
+    await fire(
+      db,
+      leadStop({ stopFuse: true, lastMessage: fence('second answer') }),
+      TEAM,
+      () => NOW + 50,
+    );
+    expect(findings(db).filter((f) => f.agent === '')).toMatchObject([
+      { body: 'first answer' },
+      { body: 'second answer' },
+    ]);
+    expect(await fire(db, leadStop(), TEAM, () => NOW + 60)).toBeNull();
   });
 
   it('a queued finding alone is evidence, and the lines name this session only, titles cleaned', async () => {

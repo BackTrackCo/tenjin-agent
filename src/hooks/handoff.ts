@@ -9,7 +9,10 @@ import type { Answer } from './types';
  * everything else (decision 14).
  *
  * Oldest first within a turn, so two dispatches in one turn hand their rows
- * to two children in dispatch order. A harness with no turn id parks
+ * to two children in dispatch order. The claim is positional and nothing
+ * else: a `SubagentStart` carries nothing to match a row on, so a dispatch
+ * whose child never starts (a denied permission prompt) hands its row to the
+ * next child of the turn (decision 14). A harness with no turn id parks
  * `promptId` undefined and claims with it undefined, which degrades to
  * arrival order across the session; a claim from a harness WITH turn ids never
  * crosses turns.
@@ -27,8 +30,6 @@ export interface Handoff {
   answer?: Answer;
 }
 
-export type ClaimedHandoff = Handoff & { id: number };
-
 export function park(db: LoopDb, row: Handoff): void {
   db.prepare(
     `INSERT INTO handoff (session, prompt_id, at, outcome, question, search_id, answer)
@@ -44,11 +45,7 @@ export function park(db: LoopDb, row: Handoff): void {
   );
 }
 
-export function claim(
-  db: LoopDb,
-  session: string,
-  promptId: string | undefined,
-): ClaimedHandoff | null {
+export function claim(db: LoopDb, session: string, promptId: string | undefined): Handoff | null {
   const row = db
     .prepare(
       `DELETE FROM handoff WHERE id = (
@@ -67,7 +64,6 @@ export function claim(
     }
   }
   return {
-    id: Number(row.id),
     session: String(row.session),
     ...(typeof row.prompt_id === 'string' ? { promptId: row.prompt_id } : {}),
     at: Number(row.at),

@@ -52,43 +52,33 @@ export function priceLabel(answer: Answer): string {
   return shown === null ? 'paid' : '$' + shown + ' (paid)';
 }
 
-/** Title, url, price, author. The title is QUOTED and the whole block is
- *  labelled as marketplace text: this lands in a trusted context.
+/** Title, then the url, price and author the answer carries: a shelf piece has
+ *  all three, this machine's own record (a pairing) none of them. The title is
+ *  QUOTED and the whole block is labelled as marketplace text: this lands in a
+ *  trusted context.
  *
  *  EVERY FIELD ON THIS LINE IS CLEANED, the url included. The line sits ABOVE
  *  the fence and speaks in the hook's own voice, so a newline in any of them
  *  would end our line early and let the rest of that field speak as ours — and
  *  a url is display text the shelf authored, not a link this machine follows. */
 export function headerLine(answer: Answer): string {
-  const title = clean(answer.title, 160).replace(/"/g, "'");
   const url = clean(answer.url ?? '', 200);
   const handle = clean(answer.handle, 80);
-  return (
-    '"' +
-    title +
-    '" · ' +
-    url +
-    ' · ' +
-    priceLabel(answer) +
-    (handle !== '' ? ' · by @' + handle : '')
-  );
-}
-
-/** The head every card form opens with: the shelf's opener, the pointer line,
- *  and the excerpt when there is one. Shared so the parent's card and the
- *  child's cannot drift apart. */
-export function cardHead(answer: Answer, opener: string): string[] {
-  const lines = [opener, headerLine(answer)];
-  const excerpt = clean(answer.excerpt, 300);
-  if (excerpt !== '') lines.push(excerpt);
-  return lines;
+  return [
+    '"' + clean(answer.title, 160).replace(/"/g, "'") + '"',
+    ...(url !== '' ? [url] : []),
+    ...(answer.price !== undefined ? [priceLabel(answer)] : []),
+    ...(handle !== '' ? ['by @' + handle] : []),
+  ].join(' · ');
 }
 
 /** ~80 tokens: the pointer plus a one-line excerpt. `opener` names which shelf
  *  the piece came from; everything below it is the same either way, because both
  *  shelves are Tenjin deployments serving the same card. */
 export function shortForm(answer: Answer, opener: string): string {
-  const lines = cardHead(answer, opener);
+  const lines = [opener, headerLine(answer)];
+  const excerpt = clean(answer.excerpt, 300);
+  if (excerpt !== '') lines.push(excerpt);
   lines.push((isFree(answer) ? READ_POINTER : INSPECT_POINTER) + answer.resourceId);
   return lines.join('\n');
 }

@@ -6,7 +6,6 @@ import {
   errorLine,
   filesInError,
   normalizeForSig,
-  saltedCoarse,
   sigV1,
   topFrameFile,
 } from './signature';
@@ -244,10 +243,5 @@ describe('sig_v1', () => {
         'src/app.ts(12,3): error\n    at run (src/migrate.ts:12:3)\n  File "<string>", line 1',
       ),
     ).toEqual(['app.ts', 'migrate.ts']);
-  });
-
-  it("salts the coarse key with the repo the way `tenjin sync` does: state-store's pinned value", () => {
-    expect(saltedCoarse('abc123', 'https://github.com/acme/widgets.git')).toBe('a7b33a270638732d');
-    expect(saltedCoarse('abc123', 'repo-a')).not.toBe(saltedCoarse('abc123', 'repo-b'));
   });
 });

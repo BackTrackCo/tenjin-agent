@@ -1,5 +1,4 @@
-import { ask, harvest } from '../capture';
-import { getMark } from '../gates';
+import { stop } from '../capture';
 import type { Arm } from '../types';
 
 /**
@@ -10,17 +9,9 @@ import type { Arm } from '../types';
  * finding re-arms the ask at the next stop.
  */
 
-const ASKED = 'capture:asked';
-
 export const stopArm: Arm = {
   id: 'stop',
   wait: 'human',
   on: [{ event: 'turn.end' }],
-  after(ctx) {
-    if (ctx.input.stopFuse === true && getMark(ctx.deps.db, ctx.actor, ASKED) !== null) {
-      harvest(ctx);
-      return null;
-    }
-    return ask(ctx, 'lead');
-  },
+  after: (ctx) => stop(ctx, 'lead'),
 };

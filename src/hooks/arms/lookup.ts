@@ -77,8 +77,8 @@ export interface LookupSpec {
 /**
  * Turn a spec into the kernel's `Arm`.
  *
- * `enabled` gates `before` too: an arm that is off is off, and marks are as
- * much of its behaviour as questions are. Text of length zero is `null` and
+ * `enabled` gates `before` and `after` too: an arm that is off is off, and
+ * marks are as much of its behaviour as questions are. Text of length zero is `null` and
  * not a skip — a skip means the arm HAD words and refused them, which is the
  * distinction the ledger's three skip reasons exist to keep.
  */
@@ -125,6 +125,10 @@ export function lookupArm(spec: LookupSpec): Arm {
       if (spec.enabled(ctx.deps.config())) before(ctx);
     };
   }
-  if (spec.after !== undefined) arm.after = spec.after;
+  if (spec.after !== undefined) {
+    const after = spec.after;
+    arm.after = (ctx, result, question) =>
+      spec.enabled(ctx.deps.config()) ? after(ctx, result, question) : null;
+  }
   return arm;
 }

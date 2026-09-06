@@ -5,8 +5,10 @@ import { dirname, join } from 'node:path';
 import type { Emit } from '../adapters/types';
 import { AGENT_ID_RE } from '../lib/grade';
 import { mask } from '../lib/redact';
+import { projectId } from '../lib/state-store';
+import { STARTED_MARK } from './actor';
+import { EDITED_PREFIX } from './arms/context';
 import { factsWithPrefix, setFact } from './facts';
-import { projectOf } from './failure/pairings';
 import { getMark, setMark } from './gates';
 import { teamOrigin } from './legs/shelf';
 import { captureAsk, FINDING_TAG, type QueuedLine } from './prose';
@@ -31,9 +33,8 @@ import type { Actor, FireContext } from './types';
 
 const ASKED = 'capture:asked';
 const HARVESTED = 'capture:harvested';
-const HANDOFF_MISS = 'handoff:miss';
-const STARTED = 'started';
-const EDITED_PREFIX = 'edited:';
+/** Written by subagent-start on a claimed miss, valued with the search id. */
+export const HANDOFF_MISS = 'handoff:miss';
 const ACTIVITY_PREFIX = 'activity:';
 const FINDING_PREFIX = 'finding:';
 
@@ -41,13 +42,15 @@ const FINDING_PREFIX = 'finding:';
  *  written: it has no turn left to answer an ask in (pr298, probed). */
 const WORKFLOW_AGENT_TYPE = 'workflow-subagent';
 
-export type Evidence = 'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding';
+type Evidence = 'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding';
 
-/** Any WebSearch, WebFetch, edit, Read or Bash fire by the child counts. */
-const CHILD_ARMS = ['research', 'fetch', 'context'];
-const LEAD_ARMS = ['prompt', 'research', 'fetch'];
-/** The reasons that mean a lookup actually ran, as opposed to being skipped. */
-const LOOKUP_RAN = ['hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server'];
+/** Any WebSearch, WebFetch or Read row by the child counts (decision 2). The
+ *  context arm's other row, a Bash call on `tool.before`, is not evidence. */
+const CHILD_RESEARCH_SQL =
+  "(arm IN ('research', 'fetch') OR (arm = 'context' AND event = 'tool.after'))";
+/** The lead's own lookups that actually ran, as opposed to being skipped. */
+const LEAD_LOOKUP_SQL =
+  "arm IN ('prompt', 'research', 'fetch') AND reason IN ('hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server')";
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   return (
@@ -66,15 +69,11 @@ function markAt(db: LoopDb, actor: Actor, key: string): number | null {
   return typeof row?.at === 'number' ? row.at : null;
 }
 
-function fired(db: LoopDb, actor: Actor, arms: string[], reasons: string[] | null): boolean {
-  const marks = (list: string[]) => list.map(() => '?').join(', ');
-  const where = reasons === null ? '' : ` AND reason IN (${marks(reasons)})`;
+function fired(db: LoopDb, actor: Actor, where: string): boolean {
   return (
     db
-      .prepare(
-        `SELECT 1 FROM fires WHERE session = ? AND agent = ? AND arm IN (${marks(arms)})${where} LIMIT 1`,
-      )
-      .get(actor.session, actor.agent, ...arms, ...(reasons ?? [])) !== undefined
+      .prepare(`SELECT 1 FROM fires WHERE session = ? AND agent = ? AND ${where} LIMIT 1`)
+      .get(actor.session, actor.agent) !== undefined
   );
 }
 
@@ -108,16 +107,16 @@ function childFindings(db: LoopDb, session: string): Array<{ id: string; finding
 }
 
 /** The kind of evidence that earns this actor an ask, or null. */
-export function evidence(ctx: FireContext): Evidence | null {
+function evidence(ctx: FireContext): Evidence | null {
   const { db } = ctx.deps;
   const actor = ctx.actor;
   if (actor.agent !== '') {
     if (hasMark(db, actor, EDITED_PREFIX)) return 'edited';
-    if (fired(db, actor, CHILD_ARMS, null)) return 'research';
+    if (fired(db, actor, CHILD_RESEARCH_SQL)) return 'research';
     if (getMark(db, actor, HANDOFF_MISS) !== null) return 'handoff-miss';
     return null;
   }
-  if (fired(db, actor, LEAD_ARMS, LOOKUP_RAN)) return 'lookup';
+  if (fired(db, actor, LEAD_LOOKUP_SQL)) return 'lookup';
   if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
     return 'activity';
   if (childFindings(db, actor.session).length > 0) return 'finding';
@@ -131,7 +130,7 @@ export function evidence(ctx: FireContext): Evidence | null {
  * `auto`. A file owned by someone else is skipped, as the CLI skips it. Every
  * failure is null and the global mode answers.
  */
-export function projectPublishMode(start: string): string | null {
+function projectPublishMode(start: string): string | null {
   if (start.length === 0) return null;
   try {
     const home = homedir();
@@ -169,7 +168,7 @@ export function projectPublishMode(start: string): string | null {
 
 /** The child's type: the stop payload's, else what its start recorded. */
 function agentTypeOf(ctx: FireContext): string {
-  return ctx.input.agentType ?? getMark(ctx.deps.db, ctx.actor, STARTED) ?? '';
+  return ctx.input.agentType ?? getMark(ctx.deps.db, ctx.actor, STARTED_MARK) ?? '';
 }
 
 /**
@@ -179,7 +178,7 @@ function agentTypeOf(ctx: FireContext): string {
  * hook has no non-blocking channel to the child, so asking IS blocking — and
  * never when it is a workflow child with no turn left.
  */
-export function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
+function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const cfg = ctx.deps.config();
   const { db, clock } = ctx.deps;
   const { actor, input } = ctx;
@@ -301,12 +300,14 @@ export function findingBlock(text: string): { title: string; body: string } | nu
 /**
  * The stop after an ask: one `finding:<uid>` fact when the last message
  * carries the fence, and the `capture:harvested` mark either way, so a later
- * stop is a no-op rather than a re-parse.
+ * stop is a no-op rather than a re-parse. Once PER ASK: a lead re-armed by a
+ * child's finding answers a second time, and that answer is read too.
  */
-export function harvest(ctx: FireContext): void {
+function harvest(ctx: FireContext): void {
   const { db, clock } = ctx.deps;
   const { actor, input } = ctx;
-  if (getMark(db, actor, HARVESTED) !== null) return;
+  const harvestedAt = markAt(db, actor, HARVESTED);
+  if (harvestedAt !== null && harvestedAt >= (markAt(db, actor, ASKED) ?? 0)) return;
   const block = findingBlock(input.lastMessage ?? '');
   let value = 'none';
   if (block !== null) {
@@ -316,7 +317,7 @@ export function harvest(ctx: FireContext): void {
       session: actor.session,
       agent: actor.agent,
       agentType: actor.agent === '' ? '' : agentTypeOf(ctx),
-      project: projectOf(input.cwd),
+      project: projectId(input.cwd),
       searchId: getMark(db, actor, HANDOFF_MISS) ?? '',
       at: clock(),
     };
@@ -324,4 +325,19 @@ export function harvest(ctx: FireContext): void {
     value = id;
   }
   setMark(db, actor, HARVESTED, value, clock());
+}
+
+/**
+ * The one stop entry for both arms: an actor not yet asked is asked; a child
+ * already asked is on its answer turn and is harvested; a lead already asked
+ * is harvested on its answer turn (`stopFuse`) and otherwise re-asked only if
+ * a newer child finding re-arms it (`ask`).
+ */
+export function stop(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
+  const asked = getMark(ctx.deps.db, ctx.actor, ASKED) !== null;
+  if (asked && (audience === 'child' || ctx.input.stopFuse === true)) {
+    harvest(ctx);
+    return null;
+  }
+  return ask(ctx, audience);
 }

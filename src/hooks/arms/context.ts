@@ -36,8 +36,9 @@ function pathKey(path: string): string {
   return createHash('sha256').update(path).digest('hex').slice(0, 32);
 }
 
-const BASH_START = 'bashstart';
-const EDITED_PREFIX = 'edited:';
+/** The marks this arm writes and the failure and capture arms read back. */
+export const BASH_START = 'bashstart';
+export const EDITED_PREFIX = 'edited:';
 const ACTIVITY_PREFIX = 'activity:';
 
 function filePathOf(ctx: FireContext): string {
