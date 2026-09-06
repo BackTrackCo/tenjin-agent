@@ -9,6 +9,7 @@ import {
   recentFindingIds,
   type ChildFinding,
 } from './child-findings';
+import { findings as scanFindings } from './redact';
 import { openStore, STORE_FINDING_HOOK, STORE_SQL } from './state-store';
 
 /**
@@ -131,10 +132,10 @@ describe('recentFindingIds', () => {
 });
 
 /**
- * The publish-side title (tenjin-agent#228 PR 1).
+ * The publish-side title (tenjin-agent#228).
  *
- * The harvest splits a child's `# ` line off its block BEFORE it flattens the
- * rest, so the ordinary path here is a join of two stored fields. What the rest
+ * The harvest splits a child's `# ` line off its block and stores it beside the
+ * body, so the ordinary path here is a join of two stored fields. What the rest
  * pin is the fallback for a row captured before that split: a title comes off
  * the finding's own opening words and the BODY IS NEVER REWRITTEN, because the
  * publish path's scan detectors are line-scoped and a body cut in two stops one
@@ -214,6 +215,23 @@ describe('findingDocument', () => {
     expect(findingDocument(finding('# Does pinning help? Yes, on 4.1.'))).toBe(
       '# Does pinning help?\n\n# Does pinning help? Yes, on 4.1.',
     );
+  });
+
+  it('keeps a secret run on one line, where the line-scoped scan still sees it', () => {
+    // The scan detectors are line-scoped: a BIP-39 run is twelve wordlist words
+    // on ONE line. Cutting the derived title out of the body and splicing a
+    // blank line in split this stored line in two and dropped both halves under
+    // twelve words. The body goes out whole, so the run is still one line.
+    const stored =
+      '# the export is still on the published tag so the shim is dead weight and the words below prove it out ' +
+      'abandon ability able about above absent absorb abstract absurd abuse access accident';
+    const doc = findingDocument(finding(stored));
+    // The derived title ends inside the run, which is where the old cut landed.
+    expect(doc.split('\n')[0]).toMatch(/ abandon ability$/);
+    expect(doc.endsWith(`\n\n${stored}`)).toBe(true);
+    const seed = scanFindings(doc, 'publish').filter((f) => f.check === 'bip39-seed-phrase');
+    expect(seed).toHaveLength(1);
+    expect(seed[0]?.excerpt).toContain('12-word');
   });
 
   it('hands back a body it can derive nothing from, untouched', () => {

@@ -52,12 +52,12 @@ export interface ChildFinding {
   /** The search whose open loop signalled the ask this finding answers. */
   searchId: string | null;
   /**
-   * The child's own `# ` title line, split off the block at capture BEFORE the
-   * body was flattened to one line (`splitFinding` in lib/push-scripts.ts).
+   * The child's own `# ` title line, split off the block at capture
+   * (`splitFinding` in hooks/capture.ts) and stored beside the body.
    *
-   * Null for a row a build older than tenjin-agent#228 PR 1 wrote, and for a
-   * block whose first line was no title: {@link findingDocument} derives one
-   * there without taking anything out of the body.
+   * Null for a row written before that split existed, and for a block whose
+   * first line was no title: {@link findingDocument} derives one there without
+   * taking anything out of the body.
    */
   title: string | null;
   body: string;
@@ -177,10 +177,9 @@ export function describeChildFinding(finding: ChildFinding): string {
 }
 
 /**
- * How long a title may run, at capture and in the fallback below. Well under the
- * server's own 200, because a title cut at the limit reads as a truncation and a
- * short one reads as a title. Read by lib/push-scripts.ts, which substitutes it
- * into the generated subagent script, so the split and the fallback agree.
+ * How long a derived title may run. Well under the server's own 200, because a
+ * title cut at the limit reads as a truncation and a short one reads as a
+ * title. A stored title is the child's own and is never cut here.
  */
 export const FINDING_TITLE_MAX = 120;
 
@@ -188,17 +187,17 @@ export const FINDING_TITLE_MAX = 120;
  * A stored finding as a Markdown document: `# <title>`, then the finding.
  *
  * THE TITLE IS THE CHILD'S, VERBATIM. The harvest splits the block's `# ` first
- * line off before it flattens the rest (`splitFinding` in lib/push-scripts.ts)
- * and stores it beside the body, so the ordinary path here is a join. Publishing
+ * line off (`splitFinding` in hooks/capture.ts) and stores it beside the body,
+ * so the ordinary path here is a join. Publishing
  * the stored body verbatim used to send the shelf no title at all and fail with
  * `USAGE: A published post needs a title`, which is what cost the one finding the
  * measured week its attribution: the parent republished from a file and
  * discarded the held id (tenjin-agent#228).
  *
- * THE FALLBACK NEVER REWRITES THE BODY (round-2 review, major 1). A row written
- * before the split existed, or one whose first line was no title, has the whole
- * finding on one line; a title is derived from its opening words and the BODY IS
- * PASSED THROUGH WHOLE. It has to be: the publish path's scan detectors are
+ * THE FALLBACK NEVER REWRITES THE BODY. A row written before the split existed,
+ * or one whose first line was no title, holds the whole finding with no title
+ * beside it; a title is derived from its opening words and the BODY IS PASSED
+ * THROUGH WHOLE. It has to be: the publish path's scan detectors are
  * line-scoped, so cutting the derived words out and splicing a blank line in
  * split one stored line into two and stopped a credential that spanned the cut
  * from being found. The derived title repeats the body's first words instead,

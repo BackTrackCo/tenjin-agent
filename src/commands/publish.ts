@@ -889,9 +889,10 @@ async function resolveSource(
       });
     }
     // THE TITLE IS THE CHILD'S OWN (tenjin-agent#228). The harvest splits the
-    // block's `# ` first line off before it flattens the rest, so this is a
-    // join; a row captured before that split derives a title from its opening
-    // words instead, and either way the body is passed through whole. A publish
+    // block's `# ` first line off (`splitFinding` in hooks/capture.ts) and
+    // stores it beside the body, so this is a join; a row captured before that
+    // split derives a title from its opening words instead, and either way the
+    // body is passed through whole. A publish
     // of a stored finding used to reach the shelf with no title at all and fail
     // there. Nothing else about `--finding` changes: the body is still the
     // child's words, and every gate below is the one a file publish takes.
