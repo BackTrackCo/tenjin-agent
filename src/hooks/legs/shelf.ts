@@ -47,6 +47,14 @@ const SEARCH_LIMIT = 3;
  *  ledger stores what was sent, so `fire.ts` cuts the row to the same bound. */
 export const QUERY_MAX = 512;
 
+/** The team shelf's origin, or null when `baseUrl` is the public marketplace:
+ *  keys go to a team shelf only (there is no public resolve), and the primer
+ *  and the capture ask pick their wording by the same test. */
+export function teamOrigin(cfg: KernelConfig): string | null {
+  const origin = tryOriginOf(cfg.baseUrl);
+  return origin !== null && isTeamShelfOrigin(origin, cfg.publicShelfUrl) ? origin : null;
+}
+
 interface Route {
   baseUrl: string;
   bypass?: ShelfBypass;

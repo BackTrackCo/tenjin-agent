@@ -48,6 +48,7 @@ const CONFIG: KernelConfig = {
   baseUrl: CONFIG_DEFAULTS.baseUrl,
   publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
   shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  publish: CONFIG_DEFAULTS.publish,
 };
 
 function input(over: Partial<HookInput> = {}): HookInput {

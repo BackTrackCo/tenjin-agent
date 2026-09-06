@@ -2,9 +2,14 @@ import { readFileSync, statSync } from 'node:fs';
 import pkg from '../../package.json';
 import { claudeAdapter } from '../adapters/claude';
 import { contextArm } from '../hooks/arms/context';
+import { dispatchArm } from '../hooks/arms/dispatch';
 import { failureArm } from '../hooks/arms/failure';
+import { primerArm } from '../hooks/arms/primer';
 import { promptArm } from '../hooks/arms/prompt';
 import { fetchArm, researchArm } from '../hooks/arms/research';
+import { stopArm } from '../hooks/arms/stop';
+import { subagentStartArm } from '../hooks/arms/subagent-start';
+import { subagentStopArm } from '../hooks/arms/subagent-stop';
 import { openLoopDb } from '../hooks/store';
 import { readToken, resolveDataDir } from '../hooks/shim';
 import type { Arm, Deps, KernelConfig } from '../hooks/types';
@@ -18,16 +23,29 @@ import { createHookServer } from './server';
  * serves every session and every subagent on the machine until it has been
  * idle for `loop.idle_exit_min`.
  *
- * ARMS: the three lookup arms of PR C, PR D's `failure`, and `context`, which
+ * ARMS: the four lookup arms (prompt, research, fetch, dispatch), PR D's
+ * `failure`, the two subagent arms, `stop`, `primer`, and `context`, which
  * asks nothing and only writes the marks the other arms read. ORDER IS THE MAP
  * — `selectArm` takes the first arm whose `on` matches, so a later arm can be
- * shadowed by an earlier one. These five cannot shadow each other: they key on
- * disjoint (event, kind) pairs, and `context` is last regardless because it is
- * the only one with more than one. Every entry `install` writes for an arm PR
- * D has yet to add finds nothing here, records `no-question` and answers 204.
+ * shadowed by an earlier one. These ten cannot shadow each other: they key on
+ * disjoint (event, kind) pairs (`failure` takes `tool.after/shell`, `context`
+ * takes `tool.before/shell` and `tool.after/read`), and `context` is last
+ * regardless because it is the only one with more than one. Every one of the
+ * eleven entries `install` writes now finds an arm.
  */
 
-const ARMS: Arm[] = [promptArm, researchArm, fetchArm, failureArm, contextArm];
+const ARMS: Arm[] = [
+  promptArm,
+  researchArm,
+  fetchArm,
+  dispatchArm,
+  failureArm,
+  subagentStartArm,
+  subagentStopArm,
+  stopArm,
+  primerArm,
+  contextArm,
+];
 
 /**
  * Config is read here without `loadConfig`'s hooks-key migration: the daemon
@@ -46,6 +64,7 @@ const DEFAULTS: KernelConfig = {
   baseUrl: CONFIG_DEFAULTS.baseUrl,
   publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
   shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+  publish: CONFIG_DEFAULTS.publish,
 };
 
 function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConfig {
@@ -63,6 +82,7 @@ function readKernelConfig(dataDir: string, log: (l: string) => void): KernelConf
       baseUrl: r.baseUrl ?? DEFAULTS.baseUrl,
       publicShelfUrl: r.publicShelfUrl ?? DEFAULTS.publicShelfUrl,
       shelfBypassSecret: r.shelfBypassSecret ?? DEFAULTS.shelfBypassSecret,
+      publish: { ...CONFIG_DEFAULTS.publish, ...(r.publish ?? {}) } as KernelConfig['publish'],
     };
   } catch {
     return DEFAULTS;

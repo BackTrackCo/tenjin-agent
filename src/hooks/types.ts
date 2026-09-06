@@ -204,11 +204,13 @@ export interface Arm {
 /**
  * What a fire reads off `config.json`. The three shelf fields are here because
  * the search leg resolves its own origin and bypass per shelf: `baseUrl` (with
- * the secret) is the team shelf, `publicShelfUrl` is the public one.
+ * the secret) is the team shelf, `publicShelfUrl` is the public one. `publish`
+ * is the capture ask's `<mode>` when the checkout has no `.tenjin.json` of its
+ * own: the ask names the consent a publish will actually run under.
  */
 export type KernelConfig = Pick<
   Config,
-  'loop' | 'team' | 'hooks' | 'baseUrl' | 'publicShelfUrl' | 'shelfBypassSecret'
+  'loop' | 'team' | 'hooks' | 'baseUrl' | 'publicShelfUrl' | 'shelfBypassSecret' | 'publish'
 >;
 
 export interface Deps {

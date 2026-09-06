@@ -44,6 +44,7 @@ function config(publicFallback: PublicFallback): KernelConfig {
     baseUrl: CONFIG_DEFAULTS.baseUrl,
     publicShelfUrl: CONFIG_DEFAULTS.publicShelfUrl,
     shelfBypassSecret: CONFIG_DEFAULTS.shelfBypassSecret,
+    publish: CONFIG_DEFAULTS.publish,
   };
 }
 

@@ -1,8 +1,6 @@
 import { basename } from 'node:path';
 import type { HookTool } from '../../adapters/types';
 import { mask } from '../../lib/redact';
-import { isTeamShelfOrigin } from '../../lib/settings';
-import { tryOriginOf } from '../../lib/url';
 import { deliver } from '../deliver';
 import {
   closeOpenPairings,
@@ -27,8 +25,8 @@ import {
 import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-identity';
 import { getMark } from '../gates';
 import { localLeg } from '../legs/local';
-import { keysLeg } from '../legs/shelf';
-import type { Arm, FireContext, KernelConfig, Leg } from '../types';
+import { keysLeg, teamOrigin } from '../legs/shelf';
+import type { Arm, FireContext, Leg } from '../types';
 
 /**
  * The failure arm (13-pr-d-local-arms.md, "failure"). An agent's command
@@ -73,13 +71,6 @@ function failureText(tool: HookTool | undefined): string {
   return [r?.stdout, r?.stderr, r?.error, r?.text]
     .filter((t): t is string => typeof t === 'string')
     .join('\n');
-}
-
-/** The team shelf's origin, or null when `baseUrl` is the public marketplace:
- *  keys go to a team shelf only (there is no public resolve). */
-function teamOrigin(cfg: KernelConfig): string | null {
-  const origin = tryOriginOf(cfg.baseUrl);
-  return origin !== null && isTeamShelfOrigin(origin, cfg.publicShelfUrl) ? origin : null;
 }
 
 /** The stage-1 leg: a coarse test-identity hit says "same file and suite",

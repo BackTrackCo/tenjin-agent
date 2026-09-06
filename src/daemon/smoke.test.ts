@@ -276,9 +276,17 @@ describe('the daemon, cold-started from the real bundle', () => {
     expect(body.data_dir).toBe(dataDir);
   });
 
-  it('answers 204 to every valid Claude event fixture', async () => {
+  it('answers 204 to every valid Claude event fixture, and the primer to SessionStart', async () => {
     for (const f of fixtures) {
       const res = await fetch(hookUrl(), { method: 'POST', headers: authHeaders(), body: f.body });
+      if (f.event === 'SessionStart') {
+        // `hooks.sessionPrimer` defaults to `on`, so the one event the lead's
+        // session opens with carries the primer paragraph.
+        expect(res.status, f.name).toBe(200);
+        const out = (await res.json()) as { hookSpecificOutput?: { additionalContext?: string } };
+        expect(out.hookSpecificOutput?.additionalContext).toContain('Tenjin');
+        continue;
+      }
       expect(res.status, f.name).toBe(204);
       expect(await res.text(), f.name).toBe('');
     }
@@ -303,16 +311,14 @@ describe('the daemon, cold-started from the real bundle', () => {
       // and nothing is asked of any shelf. `arm` still names the arm that
       // declined — the WebFetch fixture reaches `fetch`, the Bash result
       // reaches `failure`, the Bash call and the Read reach `context` — and
-      // `none` is only for an event no arm claims.
+      // every installed entry now finds an arm.
       for (const r of rows) {
         expect(r.reason, r.event).toBe('no-question');
-        expect(['none', 'prompt', 'research', 'fetch', 'failure', 'context']).toContain(r.arm);
+        expect(r.arm).not.toBe('none');
       }
-      // No arm registers on `agent.stop` yet, so nothing ever writes the
-      // `started` mark SubagentStop requires (actor.ts). There is no "prior
-      // SubagentStart" case that behaves differently yet: every SubagentStop
-      // looks like a phantom stop and leaves no row at all, including this
-      // one even though its matching SubagentStart fixture ran first.
+      // The SubagentStop fixture is from another session than the
+      // SubagentStart one, so no `started` mark exists for it (actor.ts): a
+      // phantom stop, and it leaves no row at all.
       expect(rows.some((r) => r.event === 'agent.stop')).toBe(false);
       // Every fire the child sent but its stop is filed under the child's own
       // id (the start, and its two tool fires from the captured 2.1.261 turn).
@@ -538,6 +544,126 @@ describe('the daemon, cold-started from the real bundle', () => {
       expect(legs.find((l) => l.shelf === 'team')?.outcome).toBe('hit');
     } finally {
       db.close();
+    }
+  }, 15_000);
+
+  /**
+   * THE ONE END-TO-END PASS OF PR D: the captured events of one dispatched
+   * turn (2.1.261) against the stub shelf. The parent's dispatch parks a
+   * handoff; the child claims it at its start and gets the finding whole; the
+   * child's stop is asked (block) and its answer turn harvested; the lead's
+   * stop is asked and names the queued finding.
+   */
+  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked, the lead told', async () => {
+    const original = await readFile(configPath(dataDir), 'utf8');
+    await writeFile(
+      configPath(dataDir),
+      JSON.stringify({
+        loop: { port: 0 },
+        baseUrl: shelfUrl,
+        publicShelfUrl: shelfUrl,
+        hooks: { push: 'on', capture: 'block' },
+      }),
+    );
+    const session = 's-loop-dispatch';
+    const turn = 'p-loop-2';
+    const agent = 'a59db2769b6f0fcd1';
+    const post = async (body: Record<string, unknown>) => {
+      const res = await fetch(hookUrl(), {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ session_id: session, cwd: '/tmp/proj', prompt_id: turn, ...body }),
+      });
+      return {
+        status: res.status,
+        body: res.status === 200 ? ((await res.json()) as Record<string, unknown>) : null,
+      };
+    };
+    const contextOf = (r: { body: Record<string, unknown> | null }) =>
+      (r.body?.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext;
+    const reasonOf = (r: { body: Record<string, unknown> | null }) =>
+      r.body?.decision === 'block' ? String(r.body.reason) : undefined;
+    const handoffCount = () => {
+      const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+      try {
+        return Number((db.prepare('SELECT COUNT(*) AS n FROM handoff').get() as { n: number }).n);
+      } finally {
+        db.close();
+      }
+    };
+    try {
+      // 1. The parent dispatches: log-only for the parent, a row parked.
+      const dispatched = await post({
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Agent',
+        tool_input: {
+          description: 'collation probe',
+          prompt: 'find why the pgvector testcontainer flipped its collation after the image bump',
+          subagent_type: 'Explore',
+        },
+      });
+      expect(dispatched.status).toBe(204);
+      expect(handoffCount()).toBe(1);
+
+      // 2. The child starts and is handed the finding whole; the row is gone.
+      const startRes = await post({
+        hook_event_name: 'SubagentStart',
+        agent_id: agent,
+        agent_type: 'Explore',
+      });
+      expect(startRes.status).toBe(200);
+      expect(contextOf(startRes)).toContain(SHELF_BODY);
+      expect(handoffCount()).toBe(0);
+
+      // 3. The child reads a file: one context row, which is its evidence.
+      const read = await post({
+        hook_event_name: 'PostToolUse',
+        agent_id: agent,
+        agent_type: 'Explore',
+        tool_name: 'Read',
+        tool_input: { file_path: '/tmp/proj/README.md' },
+        tool_response: { text: '# proj' },
+      });
+      expect(read.status).toBe(204);
+      await waitForFires(countFires());
+
+      // 4. The child stops: asked, with a block, under its own id.
+      const stopRes = await post({
+        hook_event_name: 'SubagentStop',
+        agent_id: agent,
+        agent_type: 'Explore',
+        stop_hook_active: false,
+        last_assistant_message: 'The collation flipped with the image tag.',
+      });
+      expect(stopRes.status).toBe(200);
+      const childAsk = reasonOf(stopRes) ?? '';
+      expect(childAsk).toContain('Before you finish');
+      expect(childAsk).toContain(`--agent ${agent}`);
+
+      // 5. The child answers with the fence: harvested, silently.
+      const answered = await post({
+        hook_event_name: 'SubagentStop',
+        agent_id: agent,
+        agent_type: 'Explore',
+        stop_hook_active: true,
+        last_assistant_message:
+          'Recorded:\n```tenjin-finding\n# The image tag flips the collation\nPin pg16 and re-seed.\n```\n',
+      });
+      expect(answered.status).toBe(204);
+
+      // 6. The lead stops: asked, and told what its child queued.
+      const leadRes = await post({
+        hook_event_name: 'Stop',
+        stop_hook_active: false,
+        last_assistant_message: 'done',
+      });
+      expect(leadRes.status).toBe(200);
+      const leadAsk = reasonOf(leadRes) ?? '';
+      expect(leadAsk).toContain('Before you finish');
+      expect(leadAsk).toContain(`Explore subagent ${agent}`);
+      expect(leadAsk).toContain('"The image tag flips the collation"');
+    } finally {
+      await writeFile(configPath(dataDir), original);
     }
   }, 15_000);
 

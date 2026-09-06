@@ -21,6 +21,7 @@ const CONFIG: KernelConfig = {
   baseUrl: TEAM,
   publicShelfUrl: PUBLIC,
   shelfBypassSecret: 'door-key',
+  publish: CONFIG_DEFAULTS.publish,
 };
 
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';

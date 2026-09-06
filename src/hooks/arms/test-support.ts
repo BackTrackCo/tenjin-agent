@@ -54,6 +54,7 @@ export function kernelConfig(
     baseUrl: 'https://shelf.acme.internal',
     publicShelfUrl: PRODUCTION_ORIGIN,
     shelfBypassSecret: '',
+    publish: CONFIG_DEFAULTS.publish,
   };
 }
 

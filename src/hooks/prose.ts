@@ -88,17 +88,27 @@ export const PRIMER_TEXT_TEAM =
   'Tenjin team mode: a shelf of findings about this project, with the public marketplace behind it. Before real effort on any durable question — this codebase, its services, or a past decision — run `tenjin search "<one sentence>" --json`; a team read is free and a miss takes a second. Use it in research and subagent prompts too. Skip live data and what the docs answer in a line.';
 
 /**
+ * The capture ask's first sentence, the same whichever evidence earned the ask
+ * (decision 8): a child is asked on one Read as readily as on a research run,
+ * so the opener names the whole set rather than guessing which one it was.
+ */
+export const CAPTURE_OPENING =
+  'Before you finish: this task did work worth a second look (files changed, research run, or a question no shelf could answer).';
+
+/**
  * The capture ask. TWO WORDINGS, ONE ASK, and the difference is the BAR: the
  * public ask keeps the marketplace's (public, durable, rights-clean, worth a
  * stranger's money); the team ask drops it to "would a teammate on this
- * project want to know". `<mode>` is the resolved publish.mode, substituted at
- * run time.
+ * project want to know". `<mode>` is the resolved publish.mode and `<flags>`
+ * the attribution a child's publish carries (` --agent`, ` --search-id`), both
+ * substituted at run time by {@link captureAsk}. The #289 text, less its
+ * "Before ending:" lead, which {@link CAPTURE_OPENING} now says.
  */
 export const CAPTURE_REASON =
-  'Before ending: if this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
+  'If this session settled anything reusable about third-party behaviour (a probe result, a version-specific gotcha, a tested workaround or comparison) and it is public, durable and rights-clean, publish it now: write it to a file and run `tenjin publish <file><flags>` with the title as the first `# ` heading of the file (one per finding; publish.mode is <mode>). If nothing durable was learned, just stop again.';
 
 export const CAPTURE_REASON_TEAM =
-  'Before ending: if this session settled anything a teammate on this project would reuse, publish one conclusion-first finding, a decision and why, or a durable code map to the team shelf now (publish.mode is <mode>). Name the repository and commit/version where known, but scope code references to repo-relative paths and components only, never absolute paths. State the evidence and explicit exclusions. Put the natural-language questions a teammate would ask in the answer card, and repeat exact repository, component, file, identifier, and error-symbol terms in the visible title/body as well as the card so future search finds them. Treat repo findings as snapshots: set `temporalMode=snapshot`, `asOf`, and a `validUntil` 14 days later by default, never more than 30 days later. Remove credentials, wallet identifiers, requester identifiers, personal data, customer data, and any private or restricted third-party data/material. Never paste raw shell/tool output, logs, transcripts, or diffs; summarize the evidence. Do not present unmerged or unverified work as shipped behaviour: omit it or label it clearly. Write it to a file and run `tenjin publish <file>` with the title as the first `# ` heading of the file (one per finding). If nothing durable was learned, just stop again.';
+  'If this session settled anything a teammate on this project would reuse, publish one conclusion-first finding, a decision and why, or a durable code map to the team shelf now (publish.mode is <mode>). Name the repository and commit/version where known, but scope code references to repo-relative paths and components only, never absolute paths. State the evidence and explicit exclusions. Put the natural-language questions a teammate would ask in the answer card, and repeat exact repository, component, file, identifier, and error-symbol terms in the visible title/body as well as the card so future search finds them. Treat repo findings as snapshots: set `temporalMode=snapshot`, `asOf`, and a `validUntil` 14 days later by default, never more than 30 days later. Remove credentials, wallet identifiers, requester identifiers, personal data, customer data, and any private or restricted third-party data/material. Never paste raw shell/tool output, logs, transcripts, or diffs; summarize the evidence. Do not present unmerged or unverified work as shipped behaviour: omit it or label it clearly. Write it to a file and run `tenjin publish <file><flags>` with the title as the first `# ` heading of the file (one per finding). If nothing durable was learned, just stop again.';
 
 /** The info-string of the fenced block a finding comes back in when a publish
  *  refused; `capture.harvest` reads it out of the last message. */
@@ -113,3 +123,53 @@ export const FENCE_FALLBACK =
   'If that command REFUSES (it exits NEEDS_CONFIRMATION, or PUBLISH_BLOCKED), or you cannot run it at all, that is an expected answer and not something to retry or work around: state the finding instead in your final answer inside a fenced block whose opening line is exactly ```' +
   FINDING_TAG +
   ' and whose closing line is exactly ```. Make its FIRST line inside the fence `# ` and a short title for the finding, then a few sentences, self-contained, and it is recorded locally for your parent to publish or discard. Either way: no credentials, no customer or account names, no live data. If you settled nothing durable, ignore this and finish as you were.';
+
+/**
+ * The lead's ask also names what its children queued this session, one line
+ * per finding, by the id `publish --finding` takes. Only this session's
+ * (decision 12): a person lists the machine's whole queue with the CLI.
+ */
+export const QUEUED_FINDINGS_HEAD =
+  " finding(s) this session's subagents stated at their own end, held locally and unpublished:";
+export const QUEUED_FINDINGS_TAIL =
+  'Read one with `tenjin publish --finding <id> --dry-run`, which publishes nothing and runs the same scan a publish runs. Publish the ones that hold up with `tenjin publish --finding <id>`, one per finding, under the same publish.mode consent as any other publish. Drop one you do not want with `tenjin publish --finding <id> --discard`.';
+
+/** One queued finding as the lead's ask lists it: id, who, which search, title. */
+export interface QueuedLine {
+  id: string;
+  agentType: string;
+  agent: string;
+  searchId: string;
+  title: string;
+}
+
+/**
+ * The one ask template, the audience as data (decision 16): the opener, the
+ * shelf's wording with its two substitutions, the fence fallback, and for the
+ * lead the queued lines. Nothing else builds this sentence.
+ */
+export function captureAsk(a: {
+  team: boolean;
+  mode: string;
+  flags: string;
+  queued: QueuedLine[];
+}): string {
+  const reason = (a.team ? CAPTURE_REASON_TEAM : CAPTURE_REASON)
+    .replace('<mode>', a.mode)
+    .replace('<flags>', a.flags);
+  const lines = [CAPTURE_OPENING + ' ' + reason + ' ' + FENCE_FALLBACK];
+  if (a.queued.length > 0) {
+    lines.push(String(a.queued.length) + QUEUED_FINDINGS_HEAD);
+    for (const q of a.queued) {
+      const who =
+        (q.agentType === '' ? 'a' : q.agentType) +
+        ' subagent' +
+        (q.agent === '' ? '' : ' ' + q.agent);
+      const search = q.searchId === '' ? '' : ', search ' + q.searchId;
+      const title = q.title === '' ? '' : ': "' + q.title + '"';
+      lines.push('- ' + q.id + ' ' + who + search + title);
+    }
+    lines.push(QUEUED_FINDINGS_TAIL);
+  }
+  return lines.join('\n');
+}
