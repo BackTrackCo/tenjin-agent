@@ -199,6 +199,24 @@ describe('fetchQuestion', () => {
     expect(q).toBe('https://example.com/search');
   });
 
+  it('keeps the fragment: on a docs page it is the topic word', () => {
+    expect(fetchQuestion({ url: 'https://vitest.dev/config/#restoremocks' })).toBe(
+      'https://vitest.dev/config/#restoremocks',
+    );
+    // The query goes and both sides of it stay.
+    expect(fetchQuestion({ url: 'https://vitest.dev/config/?q=1#restoremocks' })).toBe(
+      'https://vitest.dev/config/#restoremocks',
+    );
+  });
+
+  it('sends the address as typed, not the parser’s re-spelling of it', () => {
+    // `new URL(...).origin + .pathname` would lower-case the host, drop the
+    // default port, fold `..`, percent-encode the space and take the `#` off.
+    const raw = 'https://Docs.Acme.dev:443/a/../guide/pg vector.html#collation';
+    expect(fetchQuestion({ url: raw })).toBe(raw);
+    expect(fetchQuestion({ url: 'https://例え.jp/パス' })).toBe('https://例え.jp/パス');
+  });
+
   it('is empty for a non-http url and for a malformed one', () => {
     expect(fetchQuestion({ url: 'file:///etc/passwd' })).toBe('');
     expect(fetchQuestion({ url: 'not a url' })).toBe('');

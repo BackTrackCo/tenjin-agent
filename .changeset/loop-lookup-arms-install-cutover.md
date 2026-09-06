@@ -8,17 +8,17 @@ POST the harness's own payload to the loop daemon on `127.0.0.1`, and two run th
 shim so a daemon is up before the turn's first tool call. Nothing spawns a
 generated `.mjs` script any more. Three arms answer over one factory, one search
 leg and one delivery: `prompt` (your prompt, before the turn starts), `research`
-and `fetch` (a `WebSearch` query, and a `WebFetch`'s url words plus its prompt
-head — separate arms with separate claims, so a run of page fetches cannot spend
-the search's), and `context` (a package a file you read imports, and the fourth
-edit of one file), which stays log-only. The failure, dispatch, subagent, stop and
+and `fetch` (a `WebSearch` query, and a `WebFetch`'s url plus its prompt —
+separate arms with separate claims, so a run of page fetches cannot spend the
+search's), and `context`, which asks nothing and only stamps the local marks the
+other arms read. The failure, dispatch, subagent, stop and
 primer arms land in the next release; until then their entries fire, and the
 daemon records each fire and answers with nothing.
 
 **What an agent sees differently.** Every question is masked and nothing else is
 stripped, the WebSearch query included — it used to travel raw. A search query is
 never condensed (condensing damaged 131 of 184 real ones; `pgvector testcontainer
-collation` came out empty), while a prompt still is. A hit is the first of three
+collation` came out empty), and neither is a prompt. A hit is the first of three
 candidates the shelf marks `strong`, so a strong rank 2 lands over an un-strong
 rank 1; with none of the three marked strong nothing is injected — the fire is a
 miss, reason `no-hit`, because the client has no quality rule of its own and rank 1
@@ -32,9 +32,7 @@ pointers, as before. The shelf sends the whole free piece and the CLIENT owns th
 cut, at 6,000 characters on a word boundary, because what a long body costs is the
 reading agent's context and the shelf cannot see that budget; a cut body carries one
 line naming the resource id, which is how the agent learns it has a preview and that
-`tenjin read <id>` is the rest. Nothing published today is long enough to reach it. The read and churn lookups send the package or the basename as
-query text and no `appliesTo` filter, which matched nothing on a shelf where 93 of
-106 pieces carry no card. **The client-side rate limit is deleted**: it refused 246
+`tenjin read <id>` is the rest. Nothing published today is long enough to reach it. **The client-side rate limit is deleted**: it refused 246
 research fires for every 25 that reached an agent, and the runaway guard is the
 shelf's own 429, recorded as `rate-server`. The loop keeps two numbers,
 `loop.human_wait_ms` and `loop.tool_wait_ms`; `loop.rate_per_min` and `loop.burst`

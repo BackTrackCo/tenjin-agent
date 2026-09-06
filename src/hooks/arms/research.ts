@@ -28,15 +28,38 @@ export const REMIND_LINE =
   'Tenjin (a marketplace of tested, paid answers) may already have this: `tenjin search "<question>" --json` is free and anonymous.';
 
 /**
+ * The url as typed with its query string cut out of it: a url's query is the
+ * run from the first `?` to the `#` that ends it, so that run goes and both
+ * sides of it stay. The fragment is one of those sides and is kept — on a docs
+ * page it is the topic word (`vitest.dev/config/#restoremocks`), which is
+ * exactly what the shelf ranks on.
+ */
+function withoutQuery(raw: string): string {
+  const hash = raw.indexOf('#');
+  const end = hash === -1 ? raw.length : hash;
+  const start = raw.indexOf('?');
+  if (start === -1 || start > end) return raw;
+  return raw.slice(0, start) + raw.slice(end);
+}
+
+/**
  * The question a WebFetch is really asking: the page's address and the prompt
  * the agent attached to it, both as written.
  *
  * THE QUERY STRING IS THE ONE THING DROPPED. A signed url carries its
  * credential as a parameter value in a shape `mask` has no rule for — a
  * presigned signature, an account id, a vendor's own token spelling — so
- * `?...` never travels while the origin and the path do. Everything else goes
+ * `?...` never travels while the rest of the address does. Everything else goes
  * as typed; a url this build cannot parse, or one that is not a web address, is
  * a fetch this arm has no words for.
+ *
+ * THE PARSER IS THE http(s) CHECK, NOT THE ADDRESS. Sending `url.origin +
+ * url.pathname` back out was a second rewrite wearing the parser's clothes: it
+ * lower-cases and punycodes the host, percent-encodes the path, folds `..`
+ * segments away, throws out the fragment, and strips the `user:pass@` that
+ * `mask` has its own rule for — five alterations nobody asked for, under a
+ * comment claiming one. The string the agent typed is the address; `URL` only
+ * says whether it is a web one.
  */
 export function fetchQuestion(toolInput: Record<string, unknown>): string {
   const raw = typeof toolInput.url === 'string' ? toolInput.url : '';
@@ -48,7 +71,9 @@ export function fetchQuestion(toolInput: Record<string, unknown>): string {
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
   const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt : '';
-  return `${url.origin}${url.pathname} ${prompt}`.trim();
+  // The trim is the join's own: with no prompt attached there is nothing on the
+  // far side of the space to keep it for.
+  return `${withoutQuery(raw)} ${prompt}`.trim();
 }
 
 /** WebSearch. The one arm `hooks.webSearch` speaks for. */

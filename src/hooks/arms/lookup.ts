@@ -57,6 +57,9 @@ export interface LookupSpec {
    * `ask.ts` drops the public leg under `team.publicFallback: off`.
    */
   shelves: Array<'team' | 'public'>;
+  /** No arm in this release is `log`: the read and churn lookups that were
+   *  log-only are deleted. It stays for PR D's subagent-stop arm, which looks a
+   *  child's ending up and says nothing because the child is over. */
   deliver: 'inject' | 'log';
   /** Local writes, before anything is asked. */
   before?(ctx: FireContext): void;
@@ -99,10 +102,10 @@ export function lookupArm(spec: LookupSpec): Arm {
       return { question: q, stages: [spec.shelves.map((s) => searchLeg(s, trigger, cfg))] };
     },
     /**
-     * `log` is a real delivery, not a missing one: the arm looked something up
-     * to earn a precision number and says nothing. The kernel still writes the
-     * row, and it does NOT burn the once-per-piece mark — nothing was shown, so
-     * the prompt arm may still inject that piece a second later (`fire.ts`).
+     * `log` is a real delivery, not a missing one: an arm with nobody left to
+     * speak to still looked something up, and the kernel still writes the row.
+     * It does NOT burn the once-per-piece mark — nothing was shown, so the
+     * prompt arm may still inject that piece a second later (`fire.ts`).
      */
     deliver(answer): Delivery {
       return spec.deliver === 'log'

@@ -14,6 +14,13 @@ import type { Question, SkipReason } from './types';
  * lifting, no per-arm shaping: an arm that rewrites its own words is guessing at
  * a question nobody asked, and the shelf ranks better on the sentence than on
  * this machine's summary of it.
+ *
+ * LEADING AND TRAILING WHITESPACE COMES OFF, and is named here so the list is
+ * the real one rather than the tidy one. An arm trims the text it built
+ * (`research.ts`) and `buildSearchRequest` trims what it sends, which is also
+ * how a query of nothing but spaces becomes no question instead of a request
+ * the shelf refuses. It moves no word and reorders none, so it is not one of
+ * the rewrites above.
  */
 
 /** What a SKIPPED text is stored as. Not a query bound — nothing is asked — but
