@@ -1534,25 +1534,60 @@ describe('concurrency', () => {
       await shelf.close();
     }
   }, 30_000);
+});
 
-  /**
-   * THE SAME EIGHT, ON THE JOURNAL THE GIVE-UP LEAVES THEM (#246).
-   *
-   * "Every statement in this module runs correctly on a rollback journal" is the
-   * sentence the give-up rests on, and it was a claim rather than an observation.
-   * The eight-process case above exists because this class of thing is not
-   * obvious under contention, so it is the right instrument to point at it: WAL
-   * is what lets these overlap, and taking it away leaves eight processes
-   * serialising through a 250 ms busy timeout for every read and every write.
-   *
-   * STUBBED, NOT LOCKED. A held lock is the OTHER way to force the give-up, and
-   * it cannot be used here: the same lock that refuses the pragma refuses the
-   * eight processes' rows, so the test would prove nothing about a rollback
-   * journal and everything about a lock. Forcing the switch to throw leaves the
-   * file genuinely and permanently on a rollback journal — the durable case, a
-   * data dir on a filesystem that cannot do WAL — with every other line of the
-   * hook untouched and real.
-   */
+/**
+ * The dispatch relay's arbiter, pinned on its own.
+ *
+ * Every other test that touches it drives the prompt arm through
+ * `alreadyShownOrLiveRelay`, which reads the `relayed` ROW; the DO UPDATE
+ * success path — an expired holder displaced — had no assertion at all, so
+ * mutating the WHERE clause to constant false kept the suite green while the
+ * session's handoff slot became unclaimable for the rest of the session.
+ */
+describe('claimStateFresh arbitrates on the holder age', () => {
+  it('takes a free slot, refuses a fresh holder, and displaces an expired one', async () => {
+    await writeConfig();
+    (await openStore(dataDir))?.close();
+    const handle = db();
+    try {
+      const claim = (value: string, heldSinceMs: number): number => {
+        const now = Date.now();
+        const result = handle
+          .prepare(STORE_SQL.claimStateFresh)
+          .run('s', 'relay:handoff', JSON.stringify(value), now, now - heldSinceMs);
+        return Number(result.changes);
+      };
+      const held = (): unknown =>
+        JSON.parse(
+          (
+            handle
+              .prepare('SELECT value FROM session_state WHERE session = ? AND key = ?')
+              .get('s', 'relay:handoff') as unknown as { value: string }
+          ).value,
+        );
+
+      // Absent: taken, and the value marks who took it.
+      expect(claim('piece-a', 60_000)).toBe(1);
+      expect(held()).toBe('piece-a');
+
+      // A holder younger than the window: refused, and it keeps the slot.
+      expect(claim('piece-b', 60_000)).toBe(0);
+      expect(held()).toBe('piece-a');
+
+      // The holder ages past the window: displaced. Backdated rather than
+      // waited out, because the window is minutes of wall clock and a timer
+      // would be a flake. Without this path the slot is a permanent claim, and
+      // one unconsumed handoff suppresses relaying for the whole session.
+      handle
+        .prepare('UPDATE session_state SET at = at - ? WHERE session = ? AND key = ?')
+        .run(120_000, 's', 'relay:handoff');
+      expect(claim('piece-c', 60_000)).toBe(1);
+      expect(held()).toBe('piece-c');
+    } finally {
+      handle.close();
+    }
+  });
 
   /**
    * AND IT FAILS CLOSED, which is the half the SQL cannot show.
