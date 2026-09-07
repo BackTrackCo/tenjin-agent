@@ -373,22 +373,29 @@ describe('edit flag forwarding (the dispatcher mapping)', () => {
   });
 });
 
-// `outcome`'s batch selectors, read back through refusals that resolve before
-// any request: an uncollected `--search-id` would keep the LAST id and drop the
-// rest, and an `--all-open` that never reached the arg would exit 0 doing nothing.
-describe('outcome batch flags (the dispatcher mapping)', () => {
+// `outcome`'s one selector, read back through a refusal that resolves before any
+// request: an uncollected `--search-id` would keep the LAST id and drop the rest,
+// and a report with no id at all must name the flag rather than guess a search.
+describe('outcome selector (the dispatcher mapping)', () => {
   const ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-  it('--all-open reaches the arg, and is refused at any status but regenerated', async () => {
+  it('refuses a report with no --search-id, naming the flag', async () => {
     const cap = captureIo();
-    const code = await main(['outcome', '--all-open', '--status', 'used', '--json'], cap.io);
+    const code = await main(['outcome', '--status', 'used', '--json'], cap.io);
     expect(code).toBe(2);
     const parsed = JSON.parse(cap.stdout());
     expect(parsed.command).toBe('outcome');
-    expect(parsed.error.message).toContain('--all-open');
+    expect(parsed.error.fix).toContain('--search-id');
   });
 
-  it('--search-id repeats rather than replacing, and refuses to mix with --all-open', async () => {
+  it('rejects --last, which no longer exists', async () => {
+    const cap = captureIo();
+    const code = await main(['outcome', '--last', '--status', 'used', '--json'], cap.io);
+    expect(code).toBe(2);
+    expect(cap.stdout() + cap.stderr()).toContain('--last');
+  });
+
+  it('--search-id repeats rather than replacing', async () => {
     const cap = captureIo();
     const code = await main(
       [
@@ -396,8 +403,7 @@ describe('outcome batch flags (the dispatcher mapping)', () => {
         '--search-id',
         ID,
         '--search-id',
-        ID,
-        '--all-open',
+        'not-a-uuid',
         '--status',
         'regenerated',
         '--json',
@@ -405,7 +411,7 @@ describe('outcome batch flags (the dispatcher mapping)', () => {
       cap.io,
     );
     expect(code).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.message).toContain('not several');
+    expect(JSON.parse(cap.stdout()).error.message).toContain('not-a-uuid');
   });
 });
 

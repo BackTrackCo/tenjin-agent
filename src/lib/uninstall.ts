@@ -65,8 +65,8 @@ import { OPTIONAL_SKILL_NAMES } from './skills-source';
  * `~/.tenjin/state.db` IS KEPT, and that is a reversal of an earlier call in
  * this branch. It reads like hook state and is written by the hooks, but what
  * it HOLDS is the operator's: the error/fix pairings this machine worked out
- * for itself, the outcome history, and the open search loops `outcome --last`
- * and the Stop reminder are raised from. That is the same class as the wallet,
+ * for itself, the outcome history, and the open search loops the turn-end ask
+ * is raised from. That is the same class as the wallet,
  * the config and the library — their own record, unrecoverable if deleted, and
  * `install` did not create it. A reinstall picks the store back up untouched,
  * because the schema gate only ever moves forward. The `-wal`/`-shm` sidecars

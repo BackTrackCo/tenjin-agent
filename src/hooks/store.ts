@@ -7,8 +7,9 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  * `loop.db`: the daemon's ledger and gate state (02-redesign.md §10).
  *
  * ONE WRITER ON THE HOOK PATH. The daemon is the only process that writes
- * `fires`, `legs` and `marks`; the CLI opens the file directly (PR E)
- * to read them and to write its own tables, rarely and briefly. That is why
+ * `fires`, `legs` and `marks`; the CLI opens the file directly (`lib/loop-db.ts`)
+ * to read them and to write its own tables — `searches` is the CLI's, one row per
+ * `tenjin search` — rarely and briefly. That is why
  * there is no bootstrap lock, no busy-wait tier and no WAL retry here (compare
  * `state-store.ts` `openStore`, written for eight processes racing one file):
  * `busy_timeout` alone covers the CLI's occasional write.
@@ -96,6 +97,23 @@ CREATE TABLE IF NOT EXISTS facts (
   value TEXT NOT NULL,
   at    INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS searches (
+  search_id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  agent_id TEXT,
+  question TEXT NOT NULL,
+  fingerprint TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  candidates TEXT NOT NULL,
+  source TEXT,
+  shelf_base_url TEXT,
+  paid_browse_count INTEGER,
+  resolved_by TEXT,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS searches_at ON searches(at);
+CREATE INDEX IF NOT EXISTS searches_session_at ON searches(session, at);
 CREATE TABLE IF NOT EXISTS pairings (
   id INTEGER PRIMARY KEY,
   uid TEXT NOT NULL UNIQUE,
@@ -178,6 +196,21 @@ const LOOP_SHAPE: Record<string, readonly string[]> = {
   marks: ['session', 'agent', 'key', 'value', 'at'],
   handoff: ['id', 'session', 'prompt_id', 'at', 'question', 'search_id', 'answer'],
   facts: ['key', 'value', 'at'],
+  searches: [
+    'search_id',
+    'at',
+    'session',
+    'agent_id',
+    'question',
+    'fingerprint',
+    'decision',
+    'candidates',
+    'source',
+    'shelf_base_url',
+    'paid_browse_count',
+    'resolved_by',
+    'resolved_at',
+  ],
   pairings: [
     'id',
     'uid',
@@ -218,8 +251,16 @@ function shapeMatches(db: LoopDb): boolean {
 export type LoopDb = DatabaseSync;
 
 export interface OpenLoopDbOptions {
-  /** `busy_timeout` in ms. The daemon's default; the CLI passes its own (PR E). */
+  /** `busy_timeout` in ms. The daemon's default; the CLI passes its own. */
   busyTimeoutMs?: number;
+  /**
+   * Delete and rebuild a file whose shape is not this build's. The daemon owns
+   * the ledger, so it does; the CLI (`lib/loop-db.ts`) passes false, because a
+   * CLI of one build must never unlink the ledger a daemon of another build is
+   * writing — two worktrees on one laptop is the ordinary case. There the
+   * mismatch is reported instead, and the file is left exactly as it was.
+   */
+  rebuild?: boolean;
 }
 
 /**
@@ -251,11 +292,14 @@ export function openLoopDb(dataDir: string, opts: OpenLoopDbOptions = {}): LoopD
 
   let db = open();
   if (!shapeMatches(db)) {
+    db.close();
+    if (opts.rebuild === false) {
+      throw new Error('loop.db is from another build; run tenjin daemon stop and retry');
+    }
     // Deleted with its WAL companions: a stale `-wal` would replay the old shape
     // straight back into the new file. Exactly once — the rebuilt file is this
     // build's DDL by construction, so a second mismatch would be a bug in
     // LOOP_SHAPE and must not become a loop that deletes the ledger every open.
-    db.close();
     for (const suffix of ['', '-wal', '-shm']) rmSync(`${path}${suffix}`, { force: true });
     db = open();
   }

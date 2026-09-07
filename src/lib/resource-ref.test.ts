@@ -4,13 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assertOnBaseOrigin, resolveResourceRef, type ResourceRefNetOptions } from './resource-ref';
 import { CliError } from './errors';
-import {
-  openStore,
-  recordSearch,
-  searchFingerprint,
-  STATE_PAIRING_POST_PREFIX,
-  STORE_SQL,
-} from './state-store';
+import { recordSearch, searchFingerprint } from './searches';
+import { withLoopDb } from './loop-db';
 import { knownDeploymentOrigins } from './production-origin';
 
 let dir: string;
@@ -42,27 +37,20 @@ async function seedDecoySearches(
   to: number,
   startAtMs: number,
 ): Promise<void> {
-  const store = await openStore(dataDir);
-  if (store === null) throw new Error('no store');
-  try {
+  withLoopDb(dataDir, (db) => {
+    const stmt = db.prepare(
+      `INSERT INTO searches (search_id, at, session, agent_id, question, fingerprint,
+         decision, candidates, source, shelf_base_url, paid_browse_count)
+       VALUES (?, ?, '', NULL, 'decoy', ?, 'MISS', '[]', NULL, NULL, NULL)`,
+    );
     for (let i = from; i < to; i += 1) {
-      store.run(STORE_SQL.recordSearch, [
+      stmt.run(
         `0197bbbb-cccc-dddd-eeee-${String(i).padStart(12, '0')}`,
         startAtMs + i,
-        '',
-        null,
-        'decoy',
         searchFingerprint('decoy'),
-        'MISS',
-        '[]',
-        null,
-        null,
-        null,
-      ]);
+      );
     }
-  } finally {
-    store.close();
-  }
+  });
 }
 
 describe('resolveResourceRef', () => {
@@ -150,64 +138,6 @@ describe('resolveResourceRef', () => {
     });
   });
 
-  /**
-   * tenjin-agent#252: `tenjin sync` publishes a pairing to the team shelf and
-   * links it under `pairing_post:<n>` (own: true), but never records it as a
-   * search — so `inspect <id>`/`read <id>` on a post this machine's own CLI
-   * just published refused with RESOURCE_NOT_FOUND, because `findStoredCandidate`
-   * only ever looks at `searches`. This is the fallback: a pairing link that
-   * carries a `url` (stamped from `publishPost`'s own response) resolves too.
-   */
-  it('resolves a uuid via an own-published pairing_post link when no search knows it', async () => {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.setState, [
-        '',
-        STATE_PAIRING_POST_PREFIX + '1',
-        JSON.stringify({
-          postId: RES,
-          origin: BASE,
-          at: Date.now(),
-          own: true,
-          url: 'https://tenjin.blog/api/read/team/fix-pairing',
-          title: 'Fix: pnpm vitest run — TS2345',
-          price: '0',
-        }),
-        Date.now(),
-      ]);
-    } finally {
-      store.close();
-    }
-    await expect(resolveResourceRef(RES, dir, BASE)).resolves.toEqual({
-      url: 'https://tenjin.blog/api/read/team/fix-pairing',
-      resourceId: RES,
-      shelfBaseUrl: BASE,
-    });
-  });
-
-  /** A `held` link (a teammate's post whose slug this machine never fetched)
-   *  carries no `url`, and there is no unauthenticated by-id route to fall
-   *  through to — it stays RESOURCE_NOT_FOUND rather than inventing a request
-   *  the server has nowhere to answer. */
-  it('does not resolve a pairing_post link with no stored url', async () => {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.setState, [
-        '',
-        STATE_PAIRING_POST_PREFIX + '2',
-        JSON.stringify({ postId: RES, origin: BASE, at: Date.now(), held: true }),
-        Date.now(),
-      ]);
-    } finally {
-      store.close();
-    }
-    await expect(resolveResourceRef(RES, dir, BASE)).rejects.toMatchObject({
-      code: 'RESOURCE_NOT_FOUND',
-    });
-  });
-
   it('fails USAGE for something that is neither a URL nor a uuid', async () => {
     await expect(resolveResourceRef('iris/slug', dir, BASE)).rejects.toMatchObject({
       code: 'USAGE',
@@ -230,13 +160,11 @@ function stubFetch(status: number, body: unknown): { fetch: typeof fetch; calls:
 }
 
 /**
- * tenjin-agent#252 item 1 / tenjin#803: `tenjin publish` returns a resourceId
- * neither `findStoredCandidate` (no search ever ran) nor `findPairingCandidate`
- * (that link is for a machine's own `tenjin sync`, not `publish`) knows about,
- * so a bare `tenjin inspect <that-id>` used to refuse with RESOURCE_NOT_FOUND
- * even though the CLI itself had just printed the id. This is the fallback:
- * when a caller supplies network capability, a double local miss on a bare
- * uuid is checked against the public `GET /api/posts/<id>/public` route
+ * tenjin-agent#252 item 1 / tenjin#803: `tenjin publish` returns a resourceId no
+ * search ever surfaced, so a bare `tenjin inspect <that-id>` used to refuse with
+ * RESOURCE_NOT_FOUND even though the CLI itself had just printed the id. This is
+ * the fallback: when a caller supplies network capability, a local miss on a
+ * bare uuid is checked against the public `GET /api/posts/<id>/public` route
  * (`getPostMetadata`) before giving up.
  */
 describe('resolveResourceRef bare-id network fallback', () => {
@@ -319,33 +247,6 @@ describe('resolveResourceRef bare-id network fallback', () => {
         { resourceId: RES, url: 'https://tenjin.blog/api/read/iris/slug', title: 't', price: '1' },
       ],
     });
-    const { fetch, calls } = stubFetch(200, POST);
-    const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
-    await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toMatchObject({
-      resourceId: RES,
-    });
-    expect(calls).toHaveLength(0);
-  });
-
-  it('never calls the network when a pairing_post link already resolves it', async () => {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.setState, [
-        '',
-        STATE_PAIRING_POST_PREFIX + '3',
-        JSON.stringify({
-          postId: RES,
-          origin: BASE,
-          at: Date.now(),
-          own: true,
-          url: 'https://tenjin.blog/api/read/team/fix-pairing',
-        }),
-        Date.now(),
-      ]);
-    } finally {
-      store.close();
-    }
     const { fetch, calls } = stubFetch(200, POST);
     const net: ResourceRefNetOptions = { timeoutMs: 5000, fetchImpl: fetch };
     await expect(resolveResourceRef(RES, dir, BASE, undefined, net)).resolves.toMatchObject({

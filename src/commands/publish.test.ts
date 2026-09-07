@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
-import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
-import { openStore } from '../lib/state-store';
+import { loadSearches, markSearchResolved, recordSearch } from '../lib/searches';
+import { withLoopDb } from '../lib/loop-db';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
@@ -1614,11 +1614,11 @@ describe('runPublish — a search the store could not close reports closed:false
     // is no lock any more (tenjin-agent#209), so an ABORT trigger on the table
     // makes exactly the resolve fail — deterministically, and without the 5s
     // wait the lock timeout used to cost.
-    const store = await openStore(dir);
-    store?.run(
-      "CREATE TRIGGER no_resolve BEFORE UPDATE ON searches BEGIN SELECT RAISE(ABORT, 'read-only'); END",
+    withLoopDb(dir, (db) =>
+      db.exec(
+        "CREATE TRIGGER no_resolve BEFORE UPDATE ON searches BEGIN SELECT RAISE(ABORT, 'read-only'); END",
+      ),
     );
-    store?.close();
     const { fetch, calls } = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
     try {
@@ -1636,9 +1636,7 @@ describe('runPublish — a search the store could not close reports closed:false
       // And the loop really is still open, so the reminder is right to fire.
       expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
     } finally {
-      const cleanup = await openStore(dir);
-      cleanup?.run('DROP TRIGGER IF EXISTS no_resolve');
-      cleanup?.close();
+      withLoopDb(dir, (db) => db.exec('DROP TRIGGER IF EXISTS no_resolve'));
     }
   });
 });

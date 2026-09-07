@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runOutcome } from './outcome';
-import { loadSearches, recordSearch, type StoredSearch } from '../lib/state-store';
+import { loadSearches, recordSearch, type StoredSearch } from '../lib/searches';
 import type { CommandContext } from '../context';
 
 let dir: string;
@@ -75,39 +75,15 @@ describe('runOutcome', () => {
     expect(urls[0]).toBe(`https://preview.example/api/searches/${LOOKUP}/outcomes`);
   });
 
-  it('--last targets the most recent local search', async () => {
-    await recordSearch(dir, {
-      searchId: LOOKUP,
-      at: new Date().toISOString(),
-      question: 'q',
-      decision: 'CANDIDATES',
-      candidates: [],
-    });
+  // No search to name is a usage error that names the flag, not a shortcut that
+  // guesses which search was meant: in a fan-out the CLI cannot tell one agent's
+  // search from a sibling's, so there is one way to say it and it is the id.
+  it('rejects a report with no --search-id, and names the flag', async () => {
     const { fetch, urls } = stub();
-    await runOutcome({ last: true, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch });
-    expect(urls[0]).toContain(LOOKUP);
-  });
-
-  it('--last with no local search is a SEARCH_NOT_FOUND error', async () => {
-    const { fetch } = stub();
-    await expect(
-      runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'SEARCH_NOT_FOUND', exitCode: 1 });
-  });
-
-  it('rejects passing neither --search-id nor --last', async () => {
-    const { fetch, urls } = stub();
-    await expect(
-      runOutcome({ status: 'used' }, makeCtx(), { fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
+    const call = runOutcome({ status: 'used' }, makeCtx(), { fetchImpl: fetch });
+    await expect(call).rejects.toMatchObject({ code: 'USAGE' });
+    await expect(call).rejects.toMatchObject({ fix: expect.stringContaining('--search-id') });
     expect(urls).toHaveLength(0);
-  });
-
-  it('rejects passing both --search-id and --last', async () => {
-    const { fetch } = stub();
-    await expect(
-      runOutcome({ searchId: LOOKUP, last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
   });
 
   it('rejects an unknown status before any request', async () => {
@@ -119,14 +95,16 @@ describe('runOutcome', () => {
   });
 });
 
-// `--last` binds to the newest local search, which in a multi-search session is
-// often not the one the agent means. The echo is the guard that makes that
-// visible at the moment of the report rather than in the marketplace's data.
+// A report aimed at the wrong id is the failure this echo exists to catch: it
+// makes the misfire visible at the moment of the report rather than in the
+// marketplace's data.
 describe('runOutcome, the targeted search is echoed back', () => {
   it('echoes the question in the human line and the machine data', async () => {
     await record({ decision: 'CANDIDATES', candidates: [CANDIDATE] });
     const { fetch } = stub();
-    const res = await runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch });
+    const res = await runOutcome({ searchId: LOOKUP, status: 'used' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
     expect(res.data).toMatchObject({ question: 'how do I rotate a session key' });
     expect(res.humanLines?.[0]).toBe(
       `Reported used for search ${LOOKUP} "how do I rotate a session key" (accepted 1).`,
@@ -136,7 +114,9 @@ describe('runOutcome, the targeted search is echoed back', () => {
   it('marks a truncated question so a cut one cannot read as a shorter one', async () => {
     await record({ question: 'x'.repeat(200) });
     const { fetch } = stub();
-    const res = await runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch });
+    const res = await runOutcome({ searchId: LOOKUP, status: 'used' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
     const echoed = (res.data as { question: string }).question;
     expect(echoed).toHaveLength(80);
     expect(echoed.endsWith('…')).toBe(true);
@@ -171,7 +151,9 @@ describe('runOutcome, locally incoherent statuses', () => {
     await record();
     const { fetch, urls } = stub();
     await expect(
-      runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(urls).toHaveLength(0);
   });
@@ -181,7 +163,7 @@ describe('runOutcome, locally incoherent statuses', () => {
   it('names the search and its question in the refusal', async () => {
     await record();
     const { fetch } = stub();
-    const call = runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), {
+    const call = runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
       fetchImpl: fetch,
     });
     await expect(call).rejects.toThrow(LOOKUP);
@@ -199,7 +181,9 @@ describe('runOutcome, locally incoherent statuses', () => {
   ])('allows purchase_declined when the search offered %s', async (_label, over) => {
     await record(over);
     const { fetch, urls } = stub();
-    await runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch });
+    await runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
     expect(urls).toHaveLength(1);
   });
 
@@ -213,7 +197,9 @@ describe('runOutcome, locally incoherent statuses', () => {
     await record(over);
     const { fetch, urls } = stub();
     await expect(
-      runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(urls).toHaveLength(0);
   });
@@ -231,7 +217,9 @@ describe('runOutcome, locally incoherent statuses', () => {
       candidates: [FREE_CANDIDATE],
     });
     const { fetch, urls } = stub();
-    await runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch });
+    await runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
     expect(urls).toHaveLength(1);
   });
 
@@ -243,7 +231,7 @@ describe('runOutcome, locally incoherent statuses', () => {
     async (status) => {
       await record();
       const { fetch, urls } = stub();
-      await runOutcome({ last: true, status }, makeCtx(), { fetchImpl: fetch });
+      await runOutcome({ searchId: LOOKUP, status }, makeCtx(), { fetchImpl: fetch });
       expect(urls).toHaveLength(1);
     },
   );
@@ -258,7 +246,9 @@ describe('runOutcome, locally incoherent statuses', () => {
       paidBrowseCount: 0,
     });
     const { fetch, urls } = stub();
-    await runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch });
+    await runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+      fetchImpl: fetch,
+    });
     expect(urls).toHaveLength(1);
   });
 
@@ -271,7 +261,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       await record(MIXED);
       const { fetch, urls } = stub();
       const call = runOutcome(
-        { last: true, status: 'purchase_declined', resource: FREE_CANDIDATE.resourceId },
+        { searchId: LOOKUP, status: 'purchase_declined', resource: FREE_CANDIDATE.resourceId },
         makeCtx(),
         { fetchImpl: fetch },
       );
@@ -284,7 +274,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       await record(MIXED);
       const { fetch, urls } = stub();
       await runOutcome(
-        { last: true, status: 'purchase_declined', resource: CANDIDATE.resourceId },
+        { searchId: LOOKUP, status: 'purchase_declined', resource: CANDIDATE.resourceId },
         makeCtx(),
         { fetchImpl: fetch },
       );
@@ -301,7 +291,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       const { fetch, urls } = stub();
       const call = runOutcome(
         {
-          last: true,
+          searchId: LOOKUP,
           status: 'purchase_declined',
           resource: '0197aaaa-bbbb-cccc-dddd-888888888888',
         },
@@ -320,7 +310,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       await record({ decision: 'CANDIDATES', candidates: [CANDIDATE] });
       const { fetch, urls } = stub();
       const call = runOutcome(
-        { last: true, status: 'used', resource: '0197aaaa-bbbb-cccc-dddd-888888888888' },
+        { searchId: LOOKUP, status: 'used', resource: '0197aaaa-bbbb-cccc-dddd-888888888888' },
         makeCtx(),
         { fetchImpl: fetch },
       );
@@ -336,7 +326,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       await record({ decision: 'CANDIDATES', candidates: [FREE_CANDIDATE, CANDIDATE] });
       const { fetch, urls } = stub();
       await runOutcome(
-        { last: true, status: 'used', resource: FREE_CANDIDATE.resourceId },
+        { searchId: LOOKUP, status: 'used', resource: FREE_CANDIDATE.resourceId },
         makeCtx(),
         { fetchImpl: fetch },
       );
@@ -348,7 +338,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       await record({ decision: 'MISS', paidBrowseCount: 0 });
       const { fetch, urls } = stub();
       await runOutcome(
-        { last: true, status: 'used', resource: '0197aaaa-bbbb-cccc-dddd-888888888888' },
+        { searchId: LOOKUP, status: 'used', resource: '0197aaaa-bbbb-cccc-dddd-888888888888' },
         makeCtx(),
         { fetchImpl: fetch },
       );
@@ -363,7 +353,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       const { fetch, urls } = stub();
       await runOutcome(
         {
-          last: true,
+          searchId: LOOKUP,
           status: 'purchase_declined',
           resource: '0197aaaa-bbbb-cccc-dddd-999999999999',
         },
@@ -381,7 +371,7 @@ describe('runOutcome, locally incoherent statuses', () => {
       });
       const { fetch, urls } = stub();
       await runOutcome(
-        { last: true, status: 'purchase_declined', resource: CANDIDATE.resourceId },
+        { searchId: LOOKUP, status: 'purchase_declined', resource: CANDIDATE.resourceId },
         makeCtx(),
         { fetchImpl: fetch },
       );
@@ -393,7 +383,7 @@ describe('runOutcome, locally incoherent statuses', () => {
     await record();
     const { fetch } = stub();
     await expect(
-      runOutcome({ last: true, status: 'loved-it' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, status: 'loved-it' }, makeCtx(), { fetchImpl: fetch }),
     ).rejects.toThrow('Invalid outcome status');
   });
 });
@@ -405,13 +395,6 @@ describe('runOutcome closes the open loop locally', () => {
     await record();
     const { fetch } = stub();
     await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch });
-    expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
-  });
-
-  it('marks the right search when --last resolved the target', async () => {
-    await record();
-    const { fetch } = stub();
-    await runOutcome({ last: true, status: 'used' }, makeCtx(), { fetchImpl: fetch });
     expect((await loadSearches(dir))[0]?.resolved?.by).toBe('outcome');
   });
 
@@ -434,73 +417,21 @@ describe('runOutcome closes the open loop locally', () => {
     await record({ decision: 'MISS', paidBrowseCount: 0 });
     const { fetch, urls } = stub();
     await expect(
-      runOutcome({ last: true, status: 'purchase_declined' }, makeCtx(), { fetchImpl: fetch }),
+      runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
+        fetchImpl: fetch,
+      }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(urls).toHaveLength(0);
     expect((await loadSearches(dir))[0]?.resolved).toBeUndefined();
   });
 });
 
-// The other meeting point: a search the WebSearch hook recorded is an ordinary
-// store entry, so #106's echo and coherence gate apply to it exactly as they do
-// to a deliberate `tenjin search`, and reporting on it closes the loop. Reached
-// by EXPLICIT --search-id only: `--last` skips hook entries, because in auto mode
-// the hook prepends one on every web search and an unfiltered `--last` would
-// re-target the agent's report at a ridealong query it never chose (found in
-// dogfooding; the Stop hook's reminder hands the agent the explicit id).
-describe('runOutcome over a websearch-hook-sourced search', () => {
-  it('--last skips it and refuses when no deliberate search exists', async () => {
-    await record({ source: 'websearch-hook', question: 'a query the hook rode along with' });
-    const { fetch, urls } = stub();
-    await expect(
-      runOutcome({ last: true, status: 'regenerated' }, makeCtx(), { fetchImpl: fetch }),
-    ).rejects.toMatchObject({ code: 'SEARCH_NOT_FOUND' });
-    expect(urls).toHaveLength(0);
-  });
-
-  it('--last targets the deliberate search under a newer hook entry', async () => {
-    await record({ question: 'the question the agent actually asked' });
-    await record({
-      source: 'websearch-hook',
-      searchId: '0197aaaa-bbbb-cccc-dddd-222222222222',
-      question: 'a query the hook rode along with',
-    });
-    const { fetch } = stub();
-    const res = await runOutcome({ last: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-    });
-    expect(res.data).toMatchObject({ question: 'the question the agent actually asked' });
-  });
-
-  it('echoes it, resolves it, and keeps its source (by explicit --search-id)', async () => {
-    await record({ source: 'websearch-hook', question: 'a query the hook rode along with' });
-    const { fetch } = stub();
-    const res = await runOutcome({ searchId: LOOKUP, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-    });
-    expect(res.data).toMatchObject({ question: 'a query the hook rode along with' });
-    const [stored] = await loadSearches(dir);
-    expect(stored?.resolved?.by).toBe('outcome');
-    expect(stored?.source).toBe('websearch-hook');
-  });
-
-  it('refuses purchase_declined on one that offered nothing to buy', async () => {
-    await record({ source: 'websearch-hook', decision: 'MISS', paidBrowseCount: 0 });
-    const { fetch, urls } = stub();
-    await expect(
-      runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
-        fetchImpl: fetch,
-      }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
-    expect(urls).toHaveLength(0);
-  });
-
-  // The hook does not record `paidBrowseCount` (it would need a third mirrored
-  // copy of the price predicate in a standalone script). Absent reads as unknown,
-  // which is #106's documented fail-open: an honest report is never refused on a
-  // guess. Pinned so a later change to the hook's writer is a deliberate one.
-  it('fails open on a hook entry with no paidBrowseCount', async () => {
-    await record({ source: 'websearch-hook', decision: 'MISS', paidBrowseCount: undefined });
+// A row with no `paidBrowseCount` — one written before the field existed —
+// cannot answer whether anything was payable. That is #106's documented
+// fail-open: an honest report is never refused on a guess.
+describe('runOutcome on a row that cannot answer the price question', () => {
+  it('fails open when paidBrowseCount is absent', async () => {
+    await record({ decision: 'MISS', paidBrowseCount: undefined });
     const { fetch, urls } = stub();
     const res = await runOutcome({ searchId: LOOKUP, status: 'purchase_declined' }, makeCtx(), {
       fetchImpl: fetch,
@@ -510,8 +441,8 @@ describe('runOutcome over a websearch-hook-sourced search', () => {
   });
 });
 
-/** ONE STATUS, MANY SEARCHES: the two shapes that replace seventeen sequential
- *  closes, and the refusals that keep a blanket close from becoming a claim. */
+/** ONE STATUS, MANY SEARCHES: the shape that replaces seventeen sequential
+ *  closes, and the refusals that keep a batch close from becoming a claim. */
 describe('runOutcome, closing several searches at once', () => {
   const id = (n: number): string => `0197aaaa-bbbb-cccc-dddd-00000000000${n}`;
 
@@ -523,7 +454,7 @@ describe('runOutcome, closing several searches at once', () => {
       decision: 'MISS',
       candidates: [],
       paidBrowseCount: 0,
-      source: 'websearch-hook',
+      source: 'cli',
       ...over,
     });
     return id(n);
@@ -569,131 +500,6 @@ describe('runOutcome, closing several searches at once', () => {
     });
   });
 
-  it("--all-open closes the hook's open loops and leaves deliberate ones alone", async () => {
-    await seed(1);
-    await seed(2, { source: 'cli', question: 'a question I chose to ask' });
-    await seed(3, { resolved: { by: 'publish', at: new Date().toISOString() } });
-    const { fetch, urls } = stub();
-    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-    });
-    expect(urls).toHaveLength(1);
-    expect(urls[0]).toContain(id(1));
-    expect(res.data).toMatchObject({ closed: 1, deliberateLeftOpen: 1 });
-    expect(res.humanLines?.join('\n')).toContain('1 deliberate search(es) left open');
-  });
-
-  // The hook records CANDIDATES under the same source, and `regenerated` there
-  // would overwrite the only positive attribution the loop collects.
-  it('--all-open leaves a hook search Tenjin answered open, and counts it', async () => {
-    await seed(1);
-    await seed(2, { decision: 'CANDIDATES', candidates: [CANDIDATE] });
-    const { fetch, urls } = stub();
-    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-    });
-    expect(urls).toHaveLength(1);
-    expect(urls[0]).toContain(id(1));
-    expect(urls.join(' ')).not.toContain(id(2));
-    expect(res.data).toMatchObject({ closed: 1, answeredLeftOpen: 1 });
-    expect(res.humanLines?.join('\n')).toContain('1 hook search(es) Tenjin answered left open');
-    const stored = await loadSearches(dir);
-    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
-  });
-
-  // Per session by design: a session's loops are its own.
-  it("--all-open sweeps this session's loops and never a sibling's", async () => {
-    await seed(1, { sessionId: 'session-A' });
-    await seed(2, { sessionId: 'session-B' });
-    await seed(3);
-    const { fetch, urls } = stub();
-    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-      env: { TENJIN_SESSION_ID: 'session-A' },
-    });
-    // This session's stamped entry and the unstamped one, never session-B's.
-    expect(urls).toHaveLength(2);
-    expect(urls.join(' ')).toContain(id(1));
-    expect(urls.join(' ')).toContain(id(3));
-    expect(urls.join(' ')).not.toContain(id(2));
-    expect(res.data).toMatchObject({ closed: 2 });
-    const stored = await loadSearches(dir);
-    expect(stored.find((s) => s.searchId === id(2))?.resolved).toBeUndefined();
-  });
-
-  it('reads CLAUDE_CODE_SESSION_ID when no operator override is set', async () => {
-    await seed(1, { sessionId: 'session-A' });
-    await seed(2, { sessionId: 'session-B' });
-    const { fetch, urls } = stub();
-    await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-      env: { CLAUDE_CODE_SESSION_ID: 'session-B' },
-    });
-    expect(urls).toHaveLength(1);
-    expect(urls[0]).toContain(id(2));
-  });
-
-  // Raised in every session, so closable in every session: nothing strands.
-  it('sweeps every open hook MISS when the harness names no session', async () => {
-    await seed(1, { sessionId: 'session-A' });
-    await seed(2);
-    const { fetch, urls } = stub();
-    await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-      env: {},
-    });
-    expect(urls).toHaveLength(2);
-  });
-
-  // An entry written before sources existed was a deliberate search.
-  it('--all-open leaves a sourceless entry open', async () => {
-    await seed(1, { source: undefined });
-    const { fetch, urls } = stub();
-    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-    });
-    expect(urls).toHaveLength(0);
-    expect(res.data).toMatchObject({ closed: 0, deliberateLeftOpen: 1 });
-  });
-
-  // A blanket `used` over queries nobody examined would be attribution the
-  // marketplace is right to trust and wrong to believe.
-  it.each(['used', 'partially_used', 'rejected', 'purchase_declined'])(
-    '--all-open refuses --status %s before sending anything',
-    async (status) => {
-      await seed(1);
-      const { fetch, urls } = stub();
-      await expect(
-        runOutcome({ allOpen: true, status }, makeCtx(), { fetchImpl: fetch }),
-      ).rejects.toMatchObject({ code: 'USAGE' });
-      expect(urls).toHaveLength(0);
-    },
-  );
-
-  it.each([
-    ['--search-id', { searchId: ['0197aaaa-bbbb-cccc-dddd-000000000001'] }],
-    ['--last', { last: true }],
-  ])('--all-open refuses to combine with %s', async (_label, over) => {
-    await seed(1);
-    const { fetch, urls } = stub();
-    await expect(
-      runOutcome({ allOpen: true, status: 'regenerated', ...over }, makeCtx(), {
-        fetchImpl: fetch,
-      }),
-    ).rejects.toMatchObject({ code: 'USAGE' });
-    expect(urls).toHaveLength(0);
-  });
-
-  it('--all-open with nothing open is a no-op, not an error', async () => {
-    const { fetch, urls } = stub();
-    const res = await runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), {
-      fetchImpl: fetch,
-    });
-    expect(urls).toHaveLength(0);
-    expect(res.data).toMatchObject({ closed: 0 });
-    expect(res.humanLines?.join('\n')).toContain('No open web-search loops in this session.');
-  });
-
   it('refuses a --resource that cannot describe a batch', async () => {
     await seed(1);
     await seed(2);
@@ -701,21 +507,6 @@ describe('runOutcome, closing several searches at once', () => {
     await expect(
       runOutcome(
         { searchId: [id(1), id(2)], status: 'used', resource: CANDIDATE.resourceId },
-        makeCtx(),
-        { fetchImpl: fetch },
-      ),
-    ).rejects.toMatchObject({ code: 'USAGE' });
-    expect(urls).toHaveLength(0);
-  });
-
-  // Otherwise a one-entry sweep attaches the resource to whatever it happened to
-  // find, and a zero-entry sweep ignores it in silence.
-  it('refuses --resource under --all-open, however many loops are open', async () => {
-    await seed(1);
-    const { fetch, urls } = stub();
-    await expect(
-      runOutcome(
-        { allOpen: true, status: 'regenerated', resource: CANDIDATE.resourceId },
         makeCtx(),
         { fetchImpl: fetch },
       ),
@@ -800,16 +591,18 @@ describe('runOutcome, closing several searches at once', () => {
     await expect(call).rejects.toMatchObject({ fix: `Retry with --search-id ${id(2)}` });
   });
 
-  // One sweep can spend 50 of the 60/min budget. An open loop is the safe state:
-  // the Stop hook raises it again.
-  it('stops the sweep at the first rate limit and reports the rest untouched', async () => {
+  // One batch can spend 50 of the 60/min budget. An open loop is the safe state:
+  // the turn-end ask raises it again.
+  it('stops the batch at the first rate limit and reports the rest untouched', async () => {
     for (const n of [1, 2, 3]) await seed(n);
     const urls: string[] = [];
     const fetchImpl = (async (url: string) => {
       urls.push(String(url));
       return new Response('slow down', { status: 429, headers: { 'retry-after': '30' } });
     }) as unknown as typeof fetch;
-    const call = runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), { fetchImpl });
+    const call = runOutcome({ searchId: [id(1), id(2), id(3)], status: 'regenerated' }, makeCtx(), {
+      fetchImpl,
+    });
     await expect(call).rejects.toMatchObject({
       code: 'RATE_LIMITED',
       details: { closed: 0 },
@@ -842,7 +635,9 @@ describe('runOutcome, closing several searches at once', () => {
           });
     }) as unknown as typeof fetch;
     await expect(
-      runOutcome({ allOpen: true, status: 'regenerated' }, makeCtx(), { fetchImpl }),
+      runOutcome({ searchId: [id(1), id(2), id(3)], status: 'regenerated' }, makeCtx(), {
+        fetchImpl,
+      }),
     ).rejects.toMatchObject({ details: { closed: 2 } });
     expect(urls).toHaveLength(3);
   });

@@ -43,7 +43,16 @@ function names(db: LoopDb, type: 'table' | 'index'): string[] {
     .sort();
 }
 
-const TABLES = ['facts', 'fires', 'handoff', 'legs', 'marks', 'pairing_closes', 'pairings'];
+const TABLES = [
+  'facts',
+  'fires',
+  'handoff',
+  'legs',
+  'marks',
+  'pairing_closes',
+  'pairings',
+  'searches',
+];
 
 const FIRE = {
   id: 'f1',
@@ -77,7 +86,7 @@ function insertFire(db: LoopDb, id = FIRE.id): void {
 }
 
 describe('openLoopDb', () => {
-  it('creates loop.db with its seven tables and their indexes', async () => {
+  it('creates loop.db with its eight tables and their indexes', async () => {
     // A nested, not-yet-existing dataDir: the daemon may be the first thing to
     // touch ~/.tenjin on a fresh machine.
     const dir = join(await freshDir(), 'nested', 'data');
@@ -91,6 +100,8 @@ describe('openLoopDb', () => {
       'pairings_coarse_status',
       'pairings_key_status',
       'pairings_open_head',
+      'searches_at',
+      'searches_session_at',
     ]);
   });
 

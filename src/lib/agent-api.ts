@@ -497,7 +497,7 @@ export async function postOutcomes(
 ): Promise<{ accepted: number }> {
   if (!SEARCH_ID_RE.test(searchId)) {
     throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
-      fix: 'Pass the searchId from a prior search (or use --last).',
+      fix: 'Pass the searchId from a prior search; `tenjin search` prints it.',
     });
   }
   if (items.length === 0 || items.length > 10) {

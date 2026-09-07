@@ -49,7 +49,7 @@ Hooks are read once at session start, so restart Claude Code after registering t
 
 Removes what `tenjin install` wrote: Tenjin skills, the loop daemon and its files, Tenjin hook entries, Tenjin permission rules, and older pointer lines in `CLAUDE.md` or `AGENTS.md`. It takes the entries out of the settings file first, then stops the daemon, so a session that has not re-read that file yet never meets a port with nothing behind it.
 
-Your wallet, config (including `publish.mode`), library and hook state stores under `~/.tenjin` stay in place. The stores (`~/.tenjin/state.db` and the loop's `~/.tenjin/loop.db`, with their `-wal`/`-shm` sidecars) are kept for the same reason the others are: they hold the error→fix pairings this machine worked out for itself, your outcome history, the open search loops `outcome --last` is raised from, and the loop's own fires — your own record, not something `install` created. A later `install` picks them up exactly as they were. The one thing removed there is `~/.tenjin/hooks` — the two daemon bundles, the daemon's token, pid and spawn files, and any generated script left over from the previous release — which `install` wrote and puts back. It is safe to run twice.
+Your wallet, config (including `publish.mode`), library and hook state stores under `~/.tenjin` stay in place. The stores (`~/.tenjin/state.db` and the loop's `~/.tenjin/loop.db`, with their `-wal`/`-shm` sidecars) are kept for the same reason the others are: they hold the error→fix pairings this machine worked out for itself, your outcome history, the open search loops the turn-end ask is raised from, and the loop's own fires — your own record, not something `install` created. A later `install` picks them up exactly as they were. The one thing removed there is `~/.tenjin/hooks` — the two daemon bundles, the daemon's token, pid and spawn files, and any generated script left over from the previous release — which `install` wrote and puts back. It is safe to run twice.
 
 The removal does not read `hooks.push`: every entry of ours goes whatever that key says, since `tenjin push off` deliberately leaves the wiring in place.
 
@@ -214,14 +214,12 @@ pay lane's registry evidence.
 
 Reports how a search ended.
 
-| Flag                    | Values                                                                   | Effect                                                                                                                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                                                                                                                                                                                      |
-| `--search-id <uuid>`    |                                                                          | Search to report against. Repeatable; one status covers all of them.                                                                                                                                          |
-| `--last`                |                                                                          | Target the most recent manual `tenjin search`.                                                                                                                                                                |
-| `--all-open`            |                                                                          | Close this session's open web-search-hook MISSes. `regenerated` only. Deliberate searches, and hook searches Tenjin answered, are left open and counted. Another session's loops are that session's to close. |
-| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                                                                                                                                                                                |
-| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                                                                                                                                                                                  |
+| Flag                    | Values                                                                   | Effect                                                               |
+| ----------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| `--status <status>`     | `used`, `partially_used`, `rejected`, `regenerated`, `purchase_declined` | Required outcome status.                                             |
+| `--search-id <uuid>`    |                                                                          | Search to report against. Repeatable; one status covers all of them. |
+| `--resource <uuid>`     |                                                                          | Resource the outcome concerns.                                       |
+| `--content-hash <hash>` |                                                                          | Hash of the exact body read.                                         |
 
 ## Publishing and editing
 

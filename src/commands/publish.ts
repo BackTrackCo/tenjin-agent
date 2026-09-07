@@ -7,7 +7,7 @@ import {
   linkSearchesToDraft,
   markSearchResolved,
   type StoredSearch,
-} from '../lib/state-store';
+} from '../lib/searches';
 import { findings as scanFindings, type Finding, type ReportScope } from '../lib/redact';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';

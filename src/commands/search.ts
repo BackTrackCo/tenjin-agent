@@ -2,7 +2,7 @@ import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
-import { recordSearch } from '../lib/state-store';
+import { recordSearch } from '../lib/searches';
 import { readSessionId } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
@@ -11,7 +11,7 @@ import type { CommandContext, CommandResult } from '../context';
 /**
  * `tenjin search "<question>"`, one POST to /api/search with `view: "decision"`.
  * Prints the compact result (spec 10) and records the searchId + items locally so
- * `outcome --last` and `buy <resourceId>` can use them. No wallet, no signing:
+ * `outcome --search-id` and `buy <resourceId>` can use them. No wallet, no signing:
  * search is anonymous.
  *
  * The machine envelope is the server's response verbatim plus exactly one
@@ -240,19 +240,15 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
       );
     }
   }
-  // Derived, never read off the wire: v3 has no `decision` field. The store keeps
-  // the two words because entries written by older CLIs and by the WebSearch hook
-  // carry them and `outcome` branches on them, so a rename here would split the
-  // ledger rather than clean it up.
+  // Derived, never read off the wire: v3 has no `decision` field. The two words
+  // are what `outcome` branches on, so they are written here rather than
+  // re-derived by every reader from the candidate count.
   const decision = response.items.length > 0 ? 'CANDIDATES' : 'MISS';
   await recordSearch(q.ctx.dataDir, {
     searchId: response.searchId,
     at: new Date().toISOString(),
     question: q.request.query,
     decision,
-    // A deliberate search, as opposed to one the WebSearch hook rode along with.
-    // The Stop hook nags on the two differently, so the tag has to be written
-    // here rather than inferred later from anything.
     source: 'cli',
     // THE LEG THAT ANSWERED, not the configured base. In team mode the public
     // fallthrough mints its searchId in the public marketplace's database, and a
@@ -274,8 +270,7 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     // pointer was offered and none of them cost money. `outcome` reads this to
     // tell a search that offered nothing to buy from one that put a payable
     // pointer in front of the agent, and under v3 the answer is always the
-    // former. The field stays on the store because entries written by older CLIs
-    // still carry a real count, and `undefined` there must keep reading as
+    // former. `undefined` stays reachable on the column and must keep reading as
     // "unknown" rather than as zero.
     paidBrowseCount: 0,
   });
