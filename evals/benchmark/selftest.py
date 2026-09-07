@@ -39,6 +39,7 @@ SUBJECTS = {
     "test_loop_join": "Loop 2 delivery join on the exact actor, read-only, WAL refusal",
     "test_manifest": "manifest validation, hashing, and pin rules",
     "test_output": "what the lane prints: module table, step summary, report reading",
+    "test_reap": "deterministic cleanup: kill by recorded identity, never by name",
     "test_records": "immutable records, publish without overwrite, resume selection",
     "test_reduce": "task-equal reduction, amortization, seeded bootstrap intervals",
     "test_report": "publishable projection and the redaction guard",

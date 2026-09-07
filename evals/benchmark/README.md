@@ -233,6 +233,27 @@ execution after shutdown, and the public-request and credential sentinels. Retai
 artifacts. The numbers are evidence that the machinery works on a real agent and are never a
 savings claim, and no percentage from them belongs outside this repository.
 
+## Cleanup
+
+Every process this package starts leads its own session, and its group is recorded under
+`<run>/pids/` before the run waits on it. The spawn kills the group and clears the record on its
+way out whatever happened, an interrupt included, so an ordinary run leaves nothing behind. If a
+run is killed outright, the records survive it and one command acts on them:
+
+```bash
+python3 -m evals.benchmark.cli cleanup --run /tmp/bench1-run
+```
+
+It reads the ledger, and before signalling anything it checks each record against the live
+process: same start time and same process group, or the record is dropped unkilled. A pid is
+reused, so killing a recycled one kills a stranger.
+
+Never clean up by matching a process name. A pattern such as `pkill -f bin/claude` also matches
+the operator's own unrelated sessions, and on 2026-09-07 exactly that command, run to tidy one
+spawned child, killed every other Claude Code session on the machine. The ban is executable
+rather than remembered: a test parses every module in this package and fails on a name-matching
+kill in code.
+
 ## Execution and isolation contract
 
 Each trial gets fresh `home`, `profile`, `TENJIN_DATA_DIR`, repository, and output roots under

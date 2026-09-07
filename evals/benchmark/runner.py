@@ -27,6 +27,7 @@ from typing import Any, Callable
 
 from . import artifact, claude_usage, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
+from . import reap
 from .schedule import Trial
 
 Clock = Callable[[], float]
@@ -56,7 +57,14 @@ class TrialResult:
 
 
 def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
-    """The only place this package starts a process. Own session, no shell."""
+    """The only place this package starts a process. Own session, no shell.
+
+    The group is recorded before it is waited on and released only once it is
+    dead, so a leftover is a file under `<run>/pids/` that `cli.py cleanup`
+    acts on. Nothing here, and nothing an operator or an agent has to do
+    afterwards, matches a process by name: that is how a cleanup aimed at one
+    trial reaches an unrelated session.
+    """
     process = subprocess.Popen(
         launch.argv,
         cwd=launch.cwd,
@@ -69,14 +77,33 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
         start_new_session=True,
         shell=False,
     )
+    reap.register(roots.run_dir, roots.trial_id, process.pid, launch.argv[0])
     timed_out = False
     try:
-        _, stderr = process.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _kill_group(process)
-        _, stderr = process.communicate()
+        try:
+            _, stderr = process.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            _kill_group(process)
+            _, stderr = process.communicate()
+    finally:
+        # An exception on the way out, an interrupt included, must not leave a
+        # paid agent running. This is the guarantee that makes a manual kill
+        # unnecessary rather than merely discouraged.
+        if process.poll() is None:
+            _kill_group(process)
+            try:
+                process.communicate(timeout=_ORPHAN_WAIT_S)
+            except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
+                pass
+        reap.release(roots.run_dir, roots.trial_id)
     return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
+
+
+# How long the finally-path waits for a SIGKILLed group before giving up on
+# collecting its output. The signal has already been sent; this only bounds the
+# read.
+_ORPHAN_WAIT_S = 5.0
 
 
 def _kill_group(process: subprocess.Popen[str]) -> None:

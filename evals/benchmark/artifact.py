@@ -88,6 +88,17 @@ class TrialRoots:
     stopped: bool = False
 
     @property
+    def run_dir(self) -> Path:
+        """`<run>/trials/<trial_id>` is the layout `create` builds, so the run
+        directory and the trial id are already on hand here. Reading them back
+        keeps the spawn seam's signature unchanged."""
+        return self.base.parent.parent
+
+    @property
+    def trial_id(self) -> str:
+        return self.base.name
+
+    @property
     def verify(self) -> Path:
         return self.base / "verify"
 

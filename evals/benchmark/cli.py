@@ -29,6 +29,7 @@ from typing import Any, Mapping
 
 from . import (
     FIXTURES,
+    reap as reap_module,
     artifact,
     executor,
     manifest as manifest_module,
@@ -250,7 +251,18 @@ def main(argv: list[str] | None = None) -> int:
     # did without a reader piping JSON through another tool.
     summary = commands.add_parser("summary", help="read a finished run's report.json as text")
     summary.add_argument("--run", required=True, type=Path)
+    # The one supported way to clean up after an interrupted run. It acts on the
+    # run's own process ledger and verifies each record against the live process
+    # before signalling, so it cannot reach anything this package did not start.
+    # Matching a process by name instead, `pkill -f bin/claude` and its
+    # relatives, also matches an operator's unrelated sessions; do not.
+    cleanup = commands.add_parser("cleanup", help="kill any process this run started and left behind")
+    cleanup.add_argument("--run", required=True, type=Path)
     args = parser.parse_args(argv)
+    if args.command == "cleanup":
+        json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
     if args.command == "summary":
         published = json.loads((args.run / "report.json").read_text(encoding="utf-8"))
         sys.stdout.write(report_module.render(published) + "\n")
