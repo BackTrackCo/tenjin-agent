@@ -921,6 +921,11 @@ class StreamEnvelopeTest(LiveCase):
         # One request happened. The stream repeats it, and the total must not.
         self.assertEqual(len(session.records), 1)
         self.assertEqual(session.records[0].input_total + session.records[0].output_total, 352)
+        # And the envelope has to reach the reconciliation, not merely the
+        # record: a `pass` carrying `no_envelope` is refused when it is written,
+        # which is how the second live smoke failed after the first was fixed.
+        self.assertEqual(session.reconciliation["status"], "matched")
+        self.assertIsNone(session.invalid_reason)
 
     def test_a_transcript_that_carries_its_own_envelope_keeps_it(self) -> None:
         # The fake executors write theirs into the transcript, so the stream is

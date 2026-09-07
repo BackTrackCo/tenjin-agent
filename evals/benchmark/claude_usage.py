@@ -568,7 +568,7 @@ def parse_session_dir(
         actors=sorted(actors),
         parent_edges=edges,
         envelope=envelope,
-        reconciliation=reconcile(root.envelope, records, root_actor, models.get(root_actor, set())),
+        reconciliation=reconcile(envelope, records, root_actor, models.get(root_actor, set())),
         tool_counts=tool_counts,
         diagnostics=diagnostics,
     )
