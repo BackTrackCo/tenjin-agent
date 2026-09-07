@@ -255,8 +255,10 @@ function str(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-/** The piece behind a delivered fire. `inject:` with nothing after it is a
- *  local pairing, which has no resource id anywhere. */
+/** The piece behind a delivered fire. A local pairing carries one too:
+ *  `pairingAnswer` delivers it under `pairing:<id>`, so a delivered pairing
+ *  counts as a finding like any shelf piece. Only a bare `inject:` names
+ *  nothing, and only a uuid is a marketplace resource the shelf will take. */
 function resourceIdOf(delivered: unknown): string | null {
   if (typeof delivered !== 'string' || !delivered.startsWith(INJECTED)) return null;
   return str(delivered.slice(INJECTED.length));
@@ -555,7 +557,7 @@ export async function runPushGrade(
       args.label !== undefined
         ? [labelOne(db, args.label)]
         : await gradeSessions(db, ctx, args, deps, { sinceMs, now });
-    const posted = await postGraded(db, ctx, deps, now, sinceMs);
+    const posted = await postGraded(db, ctx, deps, now);
     return {
       data: buildGradeData(since, graded, posted),
       humanLines: gradeLines(since, graded, posted, args.explain === true),
@@ -602,7 +604,8 @@ function labelOne(db: LoopDb, label: string[]): GradedRow {
   }
   const key: LegKey = { fire, stage: Number(row.stage ?? 0), shelf: str(row.shelf) ?? 'unknown' };
   // The verdict clears `posted_at` with it, so a re-labelled leg is owed to the
-  // shelf again and the post step below picks it up.
+  // shelf again. The post step below selects on that stamp alone, with no time
+  // bound, so a fire older than `--since` is still posted on this same run.
   setVerdict(db, key, { outcome: status, by: 'hand' });
   return {
     ...key,
@@ -912,16 +915,19 @@ async function postGraded(
   ctx: CommandContext,
   deps: PushGradeDeps,
   now: number,
-  sinceMs: number,
 ): Promise<PostTally> {
   const tally: PostTally = { posted: 0, failed: 0, skipped: [] };
+  // NO TIME WINDOW. `--since` chooses which fires this run GRADES; a verdict
+  // already recorded is owed to the shelf whenever it was made, and the NULL
+  // stamp is the whole debt. So a hand `--label` on a fire older than `--since`
+  // is posted here, and a leg whose post failed last run is retried forever.
   const rows = all(
     db,
     `SELECT f.id AS id, f.delivered AS delivered, l.stage AS stage, l.shelf AS shelf,
             l.search_id AS search_id, l.url AS url, l.graded AS graded
        FROM fires f JOIN legs l ON l.fire_id = f.id
-      WHERE f.at >= ? AND l.graded IS NOT NULL AND l.posted_at IS NULL`,
-    [now - sinceMs],
+      WHERE l.graded IS NOT NULL AND l.posted_at IS NULL`,
+    [],
   );
   if (rows.length === 0) return tally;
   const settings = await resolveContextSettings(ctx);

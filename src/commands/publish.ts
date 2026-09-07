@@ -583,8 +583,8 @@ export async function runPublish(
       agentId,
       ...(finding === undefined ? {} : { findingId: finding.id }),
     });
+    stampPairings(ctx.dataDir, keys, result.resourceId);
   }
-  stampPairings(ctx.dataDir, keys, result.resourceId);
   // Park the named claims on the draft (record's own spelling: the store matches
   // ids by exact string), so the promotion can send what this create withheld.
   if (parksPrivately) {
@@ -649,6 +649,10 @@ export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
  * the stamp matches on the part after the prefix, and only where nothing has
  * claimed the row yet — a second piece under the same key does not displace the
  * first, and re-running the same publish is not a second stamp.
+ *
+ * NOT ON A DRAFT, which is why the call sits under the same `!parksPrivately`
+ * guard as the dedup record: a draft answered nobody, so the pairing is still
+ * owed a write-up and must stay on offer until the promotion publishes one.
  *
  * BEST EFFORT, BECAUSE THE PUBLISH HAS ALREADY LANDED. A `loop.db` that cannot
  * be opened or written costs one repeat of the ask at the next turn end;
