@@ -6,14 +6,17 @@ grandchild into the trial output root and never spawn a real tool, so CI
 exercises the whole chain, recursion included, with zero spend. The rows
 follow the shapes `claude_usage.py` freezes.
 
-`live` marks a spec that would start a real agent. No entry in this registry
-sets it, which is what keeps CI off the live path; `artifact.require_isolation`
-is what refuses a publishable live run without an isolation attestation.
+`live` marks a spec that would start a real agent. The one entry that sets it
+is `claude_live`, which lives in its own module and is imported only when a
+manifest names it; CI reaches it through `cli.py live-run --dry-run` and
+nowhere else. `artifact.require_isolation` refuses a publishable live run
+without an isolation attestation, and refuses any live run under CI.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import random
@@ -24,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import REPO_ROOT
+from . import REPO_ROOT, artifact
 
 NATIVE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 BEHAVIORS = ("pass", "wrong-answer", "hang")
@@ -33,28 +36,54 @@ HANG_S = 300
 
 
 @dataclass(frozen=True)
+class LaunchRequest:
+    """Everything a spec may read to build one attempt's argv. All of it data."""
+
+    trial_id: str
+    roots: artifact.TrialRoots
+    task: dict[str, Any]
+    arm: dict[str, Any]
+    pins: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class Launch:
     argv: list[str]
     cwd: Path
     root_session_id: str
+    # A spec that needs more than the roots' own allowlist (a live one needs
+    # the credential seam) owns its child environment here. `None` keeps the
+    # roots' default, which is what every fake spec uses.
+    env: dict[str, str] | None = None
+
+
+# Where a finished trial's transcripts are, given its roots and root session
+# id. The fakes write under the output root; a live harness writes wherever it
+# keeps sessions inside the trial's own HOME.
+SessionsResolver = Callable[[artifact.TrialRoots, str], Path]
+
+
+def output_sessions(roots: artifact.TrialRoots, root_session_id: str) -> Path:
+    return roots.output / "sessions"
 
 
 @dataclass(frozen=True)
 class ExecutorSpec:
     name: str
     harness: str
-    launch: Callable[[str, Path, Path, dict], Launch]
+    launch: Callable[[LaunchRequest], Launch]
     live: bool = False
     required_origins: tuple[str, ...] = field(default_factory=tuple)
+    sessions: SessionsResolver = output_sessions
 
 
 class ExecutorError(ValueError):
     pass
 
 
-def _fake_launch(behavior: str) -> Callable[[str, Path, Path, dict], Launch]:
-    def launch(trial_id: str, repo: Path, output: Path, arm: dict) -> Launch:
-        session = f"fake-{trial_id}"
+def _fake_launch(behavior: str) -> Callable[[LaunchRequest], Launch]:
+    def launch(request: LaunchRequest) -> Launch:
+        session = f"fake-{request.trial_id}"
         argv = [
             sys.executable,
             "-m",
@@ -63,15 +92,15 @@ def _fake_launch(behavior: str) -> Callable[[str, Path, Path, dict], Launch]:
             "--behavior",
             behavior,
             "--repo",
-            str(repo),
+            str(request.roots.repo),
             "--output",
-            str(output),
+            str(request.roots.output),
             "--session",
             session,
             "--seed",
-            trial_id,
+            request.trial_id,
             "--arm",
-            str(arm["id"]),
+            str(request.arm["id"]),
         ]
         return Launch(argv=argv, cwd=REPO_ROOT, root_session_id=session)
 
@@ -83,8 +112,16 @@ REGISTRY: dict[str, ExecutorSpec] = {
     "fake_hang": ExecutorSpec(name="fake_hang", harness="claude", launch=_fake_launch("hang")),
 }
 
+# An executor whose implementation is its own module registers itself when that
+# module is imported. Naming the module here keeps `lookup` the single entry
+# point without importing a live executor into every process that loads this
+# one, and without a circular import back from that module.
+DEFERRED = {"claude_live": "evals.benchmark.claude_live"}
+
 
 def lookup(name: str) -> ExecutorSpec:
+    if name not in REGISTRY and name in DEFERRED:
+        importlib.import_module(DEFERRED[name])
     spec = REGISTRY.get(name)
     if spec is None:
         raise ExecutorError(f"unknown executor {name!r}")

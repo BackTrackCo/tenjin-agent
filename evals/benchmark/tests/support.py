@@ -66,11 +66,15 @@ def synthetic_manifest(
     verifier_name: str = "fake_answer_file",
     wall_clock_s: int = 30,
     auxiliary_usage: str = "none",
+    live: bool = False,
+    prompt: str = "Write 42 into answer.txt.",
 ) -> manifest_module.Manifest:
     """A manifest object for runner and schedule cases, with a disposable fixture.
 
     `manifest.load` and its validation have their own cases; building the
     object here keeps an execution case from also being a manifest case.
+    `live=True` adds the fields a live executor needs and nothing else, so a
+    fake case and a live case differ by exactly those fields.
     """
     fixture = tmp / "fixture"
     fixture.mkdir(parents=True, exist_ok=True)
@@ -100,6 +104,7 @@ def synthetic_manifest(
                 "fixture": "fixture",
                 "fixture_hash": manifest_module.fixture_hash(fixture),
                 "verifier": verifier_name,
+                **({"prompt": prompt} if live else {}),
             }
             for index in range(tasks)
         ],
@@ -115,6 +120,19 @@ def synthetic_manifest(
             for arm in arms
         ],
     }
+    if live:
+        data["pins"].update(
+            {
+                "permission_mode": "dontAsk",
+                "max_budget_usd": 0.25,
+                "credential_env": "ANTHROPIC_API_KEY",
+                "tools": ["Read", "Write"],
+                "allowed_tools": ["Read(./**)", "Write(./**)"],
+            }
+        )
+        for arm in data["arms"]:
+            arm["settings"] = {"env": {"BENCH_ARM": arm["id"]}}
+            arm["settings_hash"] = "sha256:" + sha256_json(arm["settings"])
     path = tmp / "manifest.json"
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return manifest_module.Manifest(data=data, path=path, hash=sha256_json(data))

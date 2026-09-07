@@ -35,14 +35,17 @@ evals/benchmark/
   executor.py      executor registry (code-owned argv, shell=False) and the fake executors;
                    `write_transcripts` emits a root, an optional child, and an optional
                    grandchild in the frozen Claude shapes
+  claude_live.py   the live Claude Code executor: validated argv, minted session id,
+                   per-trial settings, child environment allowlist, sessions resolver
   verifier.py      hidden verifier registry, hidden layer, and the fixed fake verifiers
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection and its redaction guard
-  cli.py           fake-run | verify | reduce | report
+  cli.py           fake-run | live-run | verify | reduce | report
   selftest.py      offline unittest entry (what .github/workflows/benchmark.yml runs)
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
+  fixtures/live/   the live plumbing smoke manifest and its repo fixture
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
 
@@ -105,43 +108,120 @@ records alone, so a finished run can be re-reduced without re-running anything.
 
 ## The operator-only live command
 
-There is no live subcommand, and no executor in `executor.REGISTRY` sets `live`, so nothing in
-this repository can start a model process today. That is deliberate: the first live executor
-lands with the operator live smoke, and until then CI cannot reach a live path even by
-accident.
+`claude_live` is the only executor in the registry that starts a real agent, and `live-run` is
+the only command that reaches it. The two commands refuse each other's manifests: `live-run` on
+a fake manifest and `fake-run` on a live one both stop before any trial root exists, so neither
+path can quietly run the other's executor.
 
-A live run is `runner.run(manifest, trials, run_dir, schedule_hash, runtime)` with a `Runtime`
-the operator builds:
+```bash
+# what it would run. No process starts, nothing is spent.
+python3 -m evals.benchmark.cli live-run \
+  --manifest evals/benchmark/fixtures/live/smoke-manifest.json \
+  --out ~/bench1-live --dry-run
 
-```python
-runtime = runner.Runtime(
-    publishable=True,
-    attestation=artifact.Attestation(
-        kind="container",           # or "vm"
-        instance_id="...",          # the disposable instance this run owns
-        image="...@sha256:...",     # the pinned image it booted from
-        fresh_roots=True,
-        wallet_present=False,
-        credential_seam="env_injection",
-        network_allowlist=("api.provider.example", "shelf.example"),
-    ),
-)
+# the real run, operator side only, inside the disposable instance
+python3 -m evals.benchmark.cli live-run \
+  --manifest evals/benchmark/fixtures/live/smoke-manifest.json \
+  --out ~/bench1-live --attestation ~/bench1-attestation.json
 ```
 
-It runs on the operator's side only, never in CI, and only inside a disposable container or
-VM: a sanitized benchmark repository, fresh home, profile, and data roots, no wallet, an
-explicit model credential seam, and network allowlisted to the provider plus the arm under
-test. Project-scoped tool permissions and transcript redaction are retention controls, not an
+`--dry-run` builds each trial's roots and its argv exactly as `runner.run_trial` would, prints
+them, and stops before the spawn. It is the only live-path behavior CI exercises and it is how
+a reviewer reads the real command without paying for it. One trial prints its roots, the names
+(never the values) in its child environment, and one copyable argv line:
+
+```text
+claude -p '<the task prompt>' --output-format stream-json --verbose --include-hook-events
+  --model claude-fable-5-1 --max-budget-usd 0.50 --strict-mcp-config
+  --setting-sources project --settings <run>/trials/<trial_id>/settings.json
+  --tools Read,Edit,Write,Glob,Grep
+  --allowedTools 'Read(./**)' 'Edit(./**)' 'Write(./**)' 'Glob(./**)' 'Grep(./**)'
+  --permission-mode dontAsk --session-id <uuid5 of the trial id>
+```
+
+Every flag there is a literal in `claude_live.py`. The manifest supplies values only, and each
+one is checked against a declared allowlist before it becomes an argument: a model id shaped
+like a flag, a tool outside the declared set, an allowed-tool rule carrying a shell fragment, a
+budget above the ceiling, a prompt that is not a plain string, and a settings key outside the
+declared set are all refused. Nothing is quoted or escaped, because nothing reaches a shell:
+`runner.process_spawn` runs the list with `shell=False`.
+
+Four properties of a live trial are worth naming.
+
+- **The session id is minted, not read back.** `--session-id` takes a UUID the caller chooses,
+  so it is derived from the trial id with `uuid5`. A resumed or re-derived schedule names the
+  same session, and every trial gets its own.
+- **Session persistence stays on.** A child agent's usage exists only in the persisted
+  transcripts, so the runner reads `<trial home>/.claude/projects/<cwd slug>/` through the
+  spec's sessions resolver. The slug is the working directory with every character outside
+  `[A-Za-z0-9]` replaced by `-`, and that directory's layout is byte-identical to what the fake
+  path writes, so the usage adapter is unchanged.
+- **The arm is a settings file.** The arm's settings fragment is written to the trial's own
+  `settings.json` and passed with `--settings`, with `--setting-sources project` and
+  `--strict-mcp-config` so the operator's own configuration cannot leak into a measured run.
+  The fragment has to hash to the arm's declared `settings_hash` or the trial is refused, since
+  that hash is what the record calls the treatment.
+- **The child environment is an allowlist.** `HOME`, `CLAUDE_CONFIG_DIR`, and `TENJIN_DATA_DIR`
+  are the trial's own roots; `PATH`, `TERM`, `LANG`, and the one named credential variable are
+  inherited. A wallet key, a shelf secret, and the operator's own `CLAUDE_CONFIG_DIR` have no
+  way through.
+
+Without `--dry-run` the command requires `--attestation` and refuses an automated environment
+(`CI` or `GITHUB_ACTIONS` set), on top of the refusals `artifact.require_isolation` already
+owns: a live executor in CI, and a publishable live run with no attestation.
+
+### The attestation file
+
+```json
+{
+  "kind": "container",
+  "instance_id": "bench1-smoke-01",
+  "image": "ghcr.io/example/bench1@sha256:0000",
+  "fresh_roots": true,
+  "wallet_present": false,
+  "credential_seam": "ANTHROPIC_API_KEY",
+  "network_allowlist": ["api.anthropic.com"]
+}
+```
+
+Every field is stated; none is defaulted. `kind` is `container` or `vm`, `fresh_roots` must be
+true, `wallet_present` must be false, and the allowlist may be neither empty, nor a wildcard,
+nor missing an origin the executor requires (`api.anthropic.com` for `claude_live`). The
+attestation's hash goes into every record, so a published result names the isolation it ran
+under.
+
+### What the operator prepares
+
+- a disposable container or VM that is thrown away after the run, booted from a pinned image;
+- fresh home, profile, data, repository, and output roots, which the run directory owns;
+- no wallet and no shelf secret anywhere in the image or the environment;
+- the model credential in exactly one allowlisted variable (`ANTHROPIC_API_KEY`,
+  `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`), named by `pins.credential_env`;
+- network allowlisted to the provider plus the arm under test, matching the attestation; and
+- `pins.image`, `pins.harness_version`, and `pins.model` set to the image, the CLI version, and
+  the model this instance actually runs.
+
+Project-scoped tool permissions and transcript redaction are retention controls, not an
 operating-system sandbox, and a temp directory does not isolate a keychain (tenjin-agent#71).
-`artifact.require_isolation` enforces the part it can see: a live executor in CI is refused
-outright, and a publishable live run without an attestation is refused before any spend. The
-attestation hash goes into every record so a published result names the isolation it ran under.
+
+### The smoke manifest and gate 3
+
+`fixtures/live/smoke-manifest.json` is a plumbing smoke, not a benchmark task set: one trivial
+task under the fixed hidden verifier, two arms that differ by a marker in their settings, two
+repeats, four attempts. Bench-2 and Bench-3 own the real task sets and the real treatment arms.
+
+Gate 3 of the plan is four to eight live integration attempts. What they prove is plumbing:
+disposable isolation, recursive settlement, usage capture from real transcripts, verifier
+execution after shutdown, and the public-request and credential sentinels. Retain the raw
+artifacts. The numbers are evidence that the machinery works on a real agent and are never a
+savings claim, and no percentage from them belongs outside this repository.
 
 ## Execution and isolation contract
 
 Each trial gets fresh `home`, `profile`, `TENJIN_DATA_DIR`, repository, and output roots under
 `<run>/trials/<trial_id>/`, and the process sees an allowlisted environment rather than the
-operator's. `runner.process_spawn` is the only place this package starts a process:
+operator's: the roots' own by default, or the one a live launch built when it needs the
+credential seam as well. `runner.process_spawn` is the only place this package starts a process:
 `shell=False`, its own session, and on the wall-clock pin it kills the whole process group so
 a grandchild cannot outlive the trial. The clock, the settlement barrier, and the process
 boundary are injected, so every offline case except the process-group one runs without real

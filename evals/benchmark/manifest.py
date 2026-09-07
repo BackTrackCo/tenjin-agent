@@ -47,6 +47,12 @@ PIN_KEYS = frozenset(
 )
 TASK_KEYS = frozenset({"id", "family", "transfer_distance", "fixture", "fixture_hash", "verifier"})
 ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "memory_snapshot_hash", "auxiliary_usage"})
+# What a live executor needs and a fake one has no use for. Coarse shapes are
+# checked here so a bad manifest costs nothing; the executor that turns these
+# into argv owns the flag and value allowlists (`claude_live.py`).
+OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env"})
+OPTIONAL_TASK_KEYS = frozenset({"prompt"})
+OPTIONAL_ARM_KEYS = frozenset({"settings"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
 TRANSFER_DISTANCES = frozenset({"none", "same_task", "same_family", "cross_family"})
 # What an arm's memory product can prove about its own model spend. `none` is a
@@ -126,6 +132,21 @@ def _require_count(name: str, value: Any, minimum: int = 0) -> None:
         raise ManifestError(f"{name} must be an integer of at least {minimum}")
 
 
+def _require_optional_shapes(name: str, item: dict[str, Any]) -> None:
+    """Coarse types for the optional live fields, before any of them is an argument."""
+    for key in ("prompt", "credential_env"):
+        if key in item and (not isinstance(item[key], str) or not item[key].strip()):
+            raise ManifestError(f"{name}.{key} must be a non-empty string")
+    for key in ("tools", "allowed_tools"):
+        if key in item and not (isinstance(item[key], list) and all(isinstance(value, str) for value in item[key])):
+            raise ManifestError(f"{name}.{key} must be a list of strings")
+    if "settings" in item and not isinstance(item["settings"], dict):
+        raise ManifestError(f"{name}.settings must be an object")
+    budget = item.get("max_budget_usd")
+    if "max_budget_usd" in item and (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0):
+        raise ManifestError(f"{name}.max_budget_usd must be a positive number")
+
+
 def validate(data: dict[str, Any], base: Path) -> None:
     _require_keys("manifest", data, TOP_KEYS, OPTIONAL_TOP_KEYS)
     if data["schema_version"] != SCHEMA_VERSION:
@@ -137,7 +158,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
     _require_count("seed", data["seed"])
     _require_count("repeats", data["repeats"], 1)
     pins = data["pins"]
-    _require_keys("pins", pins, PIN_KEYS)
+    _require_keys("pins", pins, PIN_KEYS, OPTIONAL_PIN_KEYS)
+    _require_optional_shapes("pins", pins)
     for key in ("model", "harness_version", "effort", "image", "permission_mode"):
         if not _pinned(pins[key]):
             raise ManifestError(f"pins.{key} is not pinned")
@@ -156,7 +178,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
         raise ManifestError("arms must list at least two arms")
     seen: set[str] = set()
     for task in data["tasks"]:
-        _require_keys("task", task, TASK_KEYS)
+        _require_keys("task", task, TASK_KEYS, OPTIONAL_TASK_KEYS)
+        _require_optional_shapes("task", task)
         task_id = _require_id("task", task["id"])
         if task_id in seen:
             raise ManifestError(f"duplicate task id {task_id!r}")
@@ -176,7 +199,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
     seen.clear()
     executors: set[str] = set()
     for arm in data["arms"]:
-        _require_keys("arm", arm, ARM_KEYS)
+        _require_keys("arm", arm, ARM_KEYS, OPTIONAL_ARM_KEYS)
+        _require_optional_shapes("arm", arm)
         arm_id = _require_id("arm", arm["id"])
         if arm_id in seen:
             raise ManifestError(f"duplicate arm id {arm_id!r}")

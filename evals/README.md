@@ -22,9 +22,10 @@ python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake     # read that re
 python3 evals/benchmark/selftest.py                              # what .github/workflows/benchmark.yml runs
 ```
 
-There is no live subcommand and no registered executor starts a model, so CI cannot reach a
-live path. Live runs are operator-only, require a disposable container or VM attestation, and
-are refused without one; the benchmark README's live section is the whole rule.
+`live-run` is the operator's command and the only one that reaches a live executor. CI may run
+`live-run --dry-run`, which prints the argv and the roots each trial would use and starts no
+process; a real live run is operator-only, refuses an automated environment, and requires a
+disposable container or VM attestation. The benchmark README's live section is the whole rule.
 
 What the README covers: the manifest, attempt, usage, verifier, and invalid-run contracts; the
 reduction and interval rules; the private versus publishable artifact boundary; and how

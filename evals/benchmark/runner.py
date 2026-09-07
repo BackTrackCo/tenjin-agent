@@ -60,7 +60,9 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
     process = subprocess.Popen(
         launch.argv,
         cwd=launch.cwd,
-        env=roots.environment(os.environ.get("PATH", "")),
+        # A launch that owns its environment has already allowlisted it; the
+        # roots' default is what every executor without that need gets.
+        env=launch.env if launch.env is not None else roots.environment(os.environ.get("PATH", "")),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
@@ -168,12 +170,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin
     roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)
-    launch = spec.launch(trial.trial_id, roots.repo, roots.output, arm)
+    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins))
     hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
 
     started = runtime.clock()
     completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
-    sessions = roots.output / "sessions"
+    # The spec says where its harness left the transcripts; the parser and the
+    # settlement scan read that directory whatever the harness is.
+    sessions = spec.sessions(roots, launch.root_session_id)
     if completed.timed_out:
         result_row, unresolved = scan(sessions, launch.root_session_id)
         settlement = Settlement(result_row, unresolved, 0.0, False)

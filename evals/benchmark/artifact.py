@@ -16,6 +16,7 @@ credential seam, and a network allowlist); without one it is refused.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import asdict, dataclass, field
@@ -29,6 +30,9 @@ CREDENTIAL_FILE = ".benchmark-credential"
 PUBLIC_ORIGIN_VAR = "BENCHMARK_PUBLIC_ORIGIN"
 SCAN_CHUNK = 1 << 16
 ATTESTATION_KINDS = frozenset({"container", "vm"})
+ATTESTATION_KEYS = frozenset(
+    {"kind", "instance_id", "image", "fresh_roots", "wallet_present", "credential_seam", "network_allowlist"}
+)
 # An allowlist that names one of these is not an allowlist.
 WILDCARDS = frozenset({"*", "any", "all", "0.0.0.0/0", "::/0"})
 
@@ -216,6 +220,39 @@ class Attestation:
         payload = asdict(self)
         payload["network_allowlist"] = sorted(self.network_allowlist)
         return "sha256:" + sha256_json(payload)
+
+
+def load_attestation(path: Path) -> Attestation:
+    """Read the operator's attestation file. Every field is stated, none defaulted."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise IsolationError("attestation_unreadable", f"cannot read the attestation: {error}") from error
+    if not isinstance(data, dict):
+        raise IsolationError("attestation_shape", "the attestation must be a JSON object")
+    unknown = sorted(set(data) - ATTESTATION_KEYS)
+    missing = sorted(ATTESTATION_KEYS - set(data))
+    if unknown or missing:
+        detail = f"unknown keys: {', '.join(unknown)}" if unknown else f"missing keys: {', '.join(missing)}"
+        raise IsolationError("attestation_shape", f"the attestation has {detail}")
+    for name in ("fresh_roots", "wallet_present"):
+        if not isinstance(data[name], bool):
+            raise IsolationError("attestation_shape", f"attestation {name} must be true or false")
+    origins = data["network_allowlist"]
+    if not isinstance(origins, list) or not all(isinstance(entry, str) for entry in origins):
+        raise IsolationError("attestation_shape", "attestation network_allowlist must be a list of strings")
+    for name in ("kind", "instance_id", "image", "credential_seam"):
+        if not isinstance(data[name], str):
+            raise IsolationError("attestation_shape", f"attestation {name} must be a string")
+    return Attestation(
+        kind=data["kind"],
+        instance_id=data["instance_id"],
+        image=data["image"],
+        fresh_roots=data["fresh_roots"],
+        wallet_present=data["wallet_present"],
+        credential_seam=data["credential_seam"],
+        network_allowlist=tuple(origins),
+    )
 
 
 def check_attestation(attestation: Attestation, required_origins: tuple[str, ...] = ()) -> None:
