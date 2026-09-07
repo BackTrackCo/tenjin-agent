@@ -132,7 +132,7 @@ tenjin search "<question>"
 tenjin inspect <url-or-resource-id>
 tenjin read <url-or-resource-id>
 tenjin buy <url-or-resource-id>
-tenjin outcome --last --status used
+tenjin outcome --search-id <id> --status used
 tenjin publish ./finding.md --price 0.10
 tenjin edit <post-id>
 tenjin profile set --handle <handle>

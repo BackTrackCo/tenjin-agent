@@ -385,7 +385,14 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: RawInstallConfigSchema.optional(),
-    hooks: HooksConfigSchema.partial().passthrough().optional(),
+    // A `capture` value this build does not know reads as the default instead of
+    // failing the parse: one unreadable hooks value must not turn every verb into
+    // CONFIG_INVALID, least of all `config set`, which reads this file before it
+    // can write the value that would repair it. The next set drops the stray value.
+    hooks: HooksConfigSchema.partial()
+      .extend({ capture: CaptureModeSchema.catch(() => CONFIG_DEFAULTS.hooks.capture).optional() })
+      .passthrough()
+      .optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),

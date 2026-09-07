@@ -47,7 +47,7 @@ Hooks are read once at session start, so restart Claude Code after registering t
 
 ### `tenjin uninstall`
 
-Removes what `tenjin install` wrote: Tenjin skills, the loop daemon and its files, Tenjin hook entries, Tenjin permission rules, and older pointer lines in `CLAUDE.md` or `AGENTS.md`. It takes the entries out of the settings file first, then stops the daemon, so a session that has not re-read that file yet never meets a port with nothing behind it.
+Removes what `tenjin install` wrote: Tenjin skills, the loop daemon and its files, Tenjin hook entries, and Tenjin permission rules. It takes the entries out of the settings file first, then stops the daemon, so a session that has not re-read that file yet never meets a port with nothing behind it.
 
 Your wallet, config (including `publish.mode`), library and loop database under `~/.tenjin` stay in place. `~/.tenjin/loop.db` (with its `-wal`/`-shm` sidecars) is kept for the same reason the others are: it holds the error→fix pairings this machine worked out for itself, its search record, its outcome history and its own fires — your own record, not something `install` created. A later `install` picks it up exactly as it was. The one thing removed there is `~/.tenjin/hooks` — the daemon and shim bundles, the vitest reporter, and the daemon's token, pid and spawn files — which `install` wrote and puts back. It is safe to run twice.
 

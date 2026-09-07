@@ -230,11 +230,25 @@ describe('hooks block: push and capture', () => {
     expect(s.hooksCapture).toEqual({ value: 'on', source: 'default' });
   });
 
-  it('rejects a value outside either enum', async () => {
+  it('rejects a push value outside the enum', async () => {
     await writeFile(configFile(), JSON.stringify({ hooks: { push: 'sometimes' } }));
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
-    await writeFile(configFile(), JSON.stringify({ hooks: { capture: 'sometimes' } }));
-    await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
+  });
+
+  // The ask has one channel now, so a file written against a wider set of capture
+  // values still has to load: every verb reads this file, `config set` before it can
+  // write the value that would repair it, so an unreadable capture is the default,
+  // not a dead CLI. The rest of the file — baseUrl, publish.mode, the wallet
+  // pointers — keeps working while the stray value sits there.
+  it('reads a capture value it does not know as the default, keeping the rest of the file', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({ baseUrl: 'https://example.test', hooks: { push: 'off', capture: 'block' } }),
+    );
+    const cfg = await loadConfig(dir);
+    expect(cfg.hooks.capture).toBe(CONFIG_DEFAULTS.hooks.capture);
+    expect(cfg.hooks.push).toBe('off');
+    expect(cfg.baseUrl).toBe('https://example.test');
   });
 });
 
