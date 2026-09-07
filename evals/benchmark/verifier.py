@@ -7,21 +7,34 @@ copy after shutdown, never in the agent-visible fixture. Exit 0 is pass, 1 is
 fail, anything else is invalid: the measurement, not the task, is what broke.
 
 A manifest names a verifier; it never supplies one. An unknown name, a target
-outside the run directory, and a shell-shaped value all fail closed here.
+outside the run directory, and a shell-shaped value all fail closed here, and
+the verifier process gets the same treatment as the agent's: an allowlisted
+environment rather than the operator's, so a wallet or shelf variable is not
+in scope for code that reads a trial's final worktree.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from . import REPO_ROOT
 
 OUTPUT_LIMIT = 800
+# What a `python3 -m` child needs to run at all. Everything else the operator
+# happens to have exported stays out of the verifier process.
+INHERITED = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+
+
+def child_environment(parent: Mapping[str, str] | None = None) -> dict[str, str]:
+    """An allowlist, not the operator's environment with additions."""
+    source = os.environ if parent is None else parent
+    return {name: source[name] for name in INHERITED if source.get(name)}
 
 
 @dataclass(frozen=True)
@@ -78,6 +91,7 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path) -> Verdict:
         completed = subprocess.run(
             argv,
             cwd=REPO_ROOT,
+            env=child_environment(),
             capture_output=True,
             text=True,
             timeout=spec.timeout_s,

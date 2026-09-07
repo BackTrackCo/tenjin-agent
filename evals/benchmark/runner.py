@@ -91,7 +91,11 @@ def _kill_group(process: subprocess.Popen[str]) -> None:
 class Runtime:
     clock: Clock = time.monotonic
     sleep: Sleep = time.sleep
-    spawn: Spawn = process_spawn
+    # Resolved when a Runtime is built, not when this class is defined. A
+    # plain default would bind the function object once and for all, and a
+    # test that replaces `runner.process_spawn` to prove nothing starts would
+    # then be guarding a name the runtime no longer reads.
+    spawn: Spawn = field(default_factory=lambda: process_spawn)
     settle_cap_s: float = 30.0
     settle_interval_s: float = 0.25
     sentinel: artifact.SentinelLike | None = None
@@ -166,6 +170,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         publishable=runtime.publishable,
         attestation=runtime.attestation,
         required_origins=spec.required_origins,
+        credential_seam=None if spec.credential_seam is None else spec.credential_seam(manifest.pins),
         ci=runtime.ci,
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin

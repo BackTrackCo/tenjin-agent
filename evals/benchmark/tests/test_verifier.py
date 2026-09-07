@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from evals.benchmark import executor, manifest as manifest_module, verifier
 from evals.benchmark.manifest import ManifestError
@@ -75,6 +77,29 @@ class VerifierRegistryTest(unittest.TestCase):
         # decide: the measurement broke, not the task.
         crashed = verifier.run(verifier.lookup("fake_crash"), self.repo, self.run_dir)
         self.assertEqual((crashed.outcome, crashed.exit_code), ("invalid", 3))
+
+    def test_the_verifier_process_gets_an_allowlist_not_the_operators_environment(self) -> None:
+        parent = {
+            "PATH": "/usr/bin:/bin",
+            "LANG": "en_US.UTF-8",
+            "TENJIN_WALLET_PRIVATE_KEY": "0xdead",
+            "TENJIN_SHELF_TOKEN": "shelf-secret",
+            "ANTHROPIC_API_KEY": "sk-operator-key",
+            "HOME": "/Users/operator",
+        }
+        env = verifier.child_environment(parent)
+        self.assertEqual(sorted(env), ["LANG", "PATH"])
+        for denied in ("TENJIN_WALLET_PRIVATE_KEY", "TENJIN_SHELF_TOKEN", "ANTHROPIC_API_KEY", "HOME"):
+            self.assertNotIn(denied, env)
+
+    def test_the_run_hands_that_allowlist_to_the_process(self) -> None:
+        # The environment is not just built, it is the one the child gets.
+        with mock.patch.dict(os.environ, {"TENJIN_SHELF_TOKEN": "shelf-secret"}):
+            with mock.patch.object(verifier.subprocess, "run", wraps=verifier.subprocess.run) as spawned:
+                verifier.run(verifier.lookup("fake_answer_file"), self.repo, self.run_dir)
+        passed = spawned.call_args.kwargs["env"]
+        self.assertNotIn("TENJIN_SHELF_TOKEN", passed)
+        self.assertIn("PATH", passed)
 
     def test_verifier_output_is_bounded(self) -> None:
         verdict = verifier.run(_echo(5000), self.repo, self.run_dir)

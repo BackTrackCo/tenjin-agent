@@ -67,6 +67,12 @@ def output_sessions(roots: artifact.TrialRoots, root_session_id: str) -> Path:
     return roots.output / "sessions"
 
 
+# The credential variable a live spec passes into the child, read from the
+# manifest's pins. The attestation has to name the same one, and the operator
+# command refuses before spend when the shell does not have it set.
+CredentialSeam = Callable[[dict[str, Any]], str]
+
+
 @dataclass(frozen=True)
 class ExecutorSpec:
     name: str
@@ -75,6 +81,7 @@ class ExecutorSpec:
     live: bool = False
     required_origins: tuple[str, ...] = field(default_factory=tuple)
     sessions: SessionsResolver = output_sessions
+    credential_seam: CredentialSeam | None = None
 
 
 class ExecutorError(ValueError):

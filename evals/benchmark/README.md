@@ -141,10 +141,11 @@ claude -p '<the task prompt>' --output-format stream-json --verbose --include-ho
 
 Every flag there is a literal in `claude_live.py`. The manifest supplies values only, and each
 one is checked against a declared allowlist before it becomes an argument: a model id shaped
-like a flag, a tool outside the declared set, an allowed-tool rule carrying a shell fragment, a
-budget above the ceiling, a prompt that is not a plain string, and a settings key outside the
-declared set are all refused. Nothing is quoted or escaped, because nothing reaches a shell:
-`runner.process_spawn` runs the list with `shell=False`.
+like a flag, a tool outside the declared set, an allowed-tool rule carrying a shell fragment or
+naming a tool the trial does not pass, a budget above the ceiling, a prompt that is not a plain
+string, and a settings key outside the declared set are all refused. No argument this module
+builds is quoted or escaped, because none of them reaches a shell: `runner.process_spawn` runs
+the list with `shell=False`.
 
 Four properties of a live trial are worth naming.
 
@@ -152,23 +153,39 @@ Four properties of a live trial are worth naming.
   so it is derived from the trial id with `uuid5`. A resumed or re-derived schedule names the
   same session, and every trial gets its own.
 - **Session persistence stays on.** A child agent's usage exists only in the persisted
-  transcripts, so the runner reads `<trial home>/.claude/projects/<cwd slug>/` through the
-  spec's sessions resolver. The slug is the working directory with every character outside
-  `[A-Za-z0-9]` replaced by `-`, and that directory's layout is byte-identical to what the fake
-  path writes, so the usage adapter is unchanged.
+  transcripts, so the runner reads them through the spec's sessions resolver. Claude Code hangs
+  its transcript tree off `CLAUDE_CONFIG_DIR`, which is the trial's profile root and not its
+  home, and names the directory after `CLAUDE_CODE_PROJECT_DIR_NAME` when both variables are
+  set. A trial sets both, so the transcripts are at
+  `<trial profile>/projects/<root session id>/`; the cwd slug directory is the fallback for a
+  CLI that does not read the variable, so an attempt that was paid for is read either way. The
+  layout inside is byte-identical to what the fake path writes, so the usage adapter is
+  unchanged.
 - **The arm is a settings file.** The arm's settings fragment is written to the trial's own
   `settings.json` and passed with `--settings`, with `--setting-sources project` and
   `--strict-mcp-config` so the operator's own configuration cannot leak into a measured run.
-  The fragment has to hash to the arm's declared `settings_hash` or the trial is refused, since
-  that hash is what the record calls the treatment.
-- **The child environment is an allowlist.** `HOME`, `CLAUDE_CONFIG_DIR`, and `TENJIN_DATA_DIR`
-  are the trial's own roots; `PATH`, `TERM`, `LANG`, and the one named credential variable are
-  inherited. A wallet key, a shelf secret, and the operator's own `CLAUDE_CONFIG_DIR` have no
-  way through.
+  The fragment is checked to the leaf, not only at its top level: `env` may not name a variable
+  the trial's own roots or the credential seam own, `permissions` may narrow the flag pins but
+  never widen them, and `hooks` is shape-checked. It also has to hash to the arm's declared
+  `settings_hash`, which proves the fragment is the treatment the record names and proves
+  nothing about whether it is safe.
+- **A hook command is operator-authored code, and the fixture is too.** Claude Code runs a
+  hook's `command` string through a shell in the child, which is what a hooks arm is for. The
+  manifest hash and the arm's `settings_hash` name exactly which commands ran; the container the
+  attestation describes is what contains them. For the same reason a task fixture may not carry
+  a `.claude` directory: `--setting-sources project` would load it, and it would be a settings
+  channel no record names.
+- **The child environment is an allowlist.** `HOME`, `CLAUDE_CONFIG_DIR`, `TENJIN_DATA_DIR`, and
+  `CLAUDE_CODE_PROJECT_DIR_NAME` are the trial's own; `PATH`, `TERM`, `LANG`, and the one named
+  credential variable are inherited, and nothing else in the operator's environment is. A wallet
+  key, a shelf secret, and the operator's own `CLAUDE_CONFIG_DIR` have no way through, through
+  the spawn or through the arm's `settings.env`.
 
-Without `--dry-run` the command requires `--attestation` and refuses an automated environment
-(`CI` or `GITHUB_ACTIONS` set), on top of the refusals `artifact.require_isolation` already
-owns: a live executor in CI, and a publishable live run with no attestation.
+Without `--dry-run` the command requires `--attestation`, refuses an automated environment
+(`CI` or `GITHUB_ACTIONS` set), and refuses a shell that does not have `pins.credential_env`
+set, on top of the refusals `artifact.require_isolation` already owns: a live executor in CI, a
+publishable live run with no attestation, and an attestation whose `credential_seam` is not the
+variable the run actually passes.
 
 ### The attestation file
 
@@ -185,10 +202,10 @@ owns: a live executor in CI, and a publishable live run with no attestation.
 ```
 
 Every field is stated; none is defaulted. `kind` is `container` or `vm`, `fresh_roots` must be
-true, `wallet_present` must be false, and the allowlist may be neither empty, nor a wildcard,
-nor missing an origin the executor requires (`api.anthropic.com` for `claude_live`). The
-attestation's hash goes into every record, so a published result names the isolation it ran
-under.
+true, `wallet_present` must be false, the allowlist may be neither empty, nor a wildcard, nor
+missing an origin the executor requires (`api.anthropic.com` for `claude_live`), and
+`credential_seam` must be the variable `pins.credential_env` names. The attestation's hash goes
+into every record, so a published result names the isolation it ran under.
 
 ### What the operator prepares
 
@@ -221,7 +238,9 @@ savings claim, and no percentage from them belongs outside this repository.
 Each trial gets fresh `home`, `profile`, `TENJIN_DATA_DIR`, repository, and output roots under
 `<run>/trials/<trial_id>/`, and the process sees an allowlisted environment rather than the
 operator's: the roots' own by default, or the one a live launch built when it needs the
-credential seam as well. `runner.process_spawn` is the only place this package starts a process:
+credential seam as well. The verifier process gets an allowlist too (`PATH` and the locale
+names, nothing else), so code that reads a finished worktree is not handed a wallet or a shelf
+variable. `runner.process_spawn` is the only place this package starts a process:
 `shell=False`, its own session, and on the wall-clock pin it kills the whole process group so
 a grandchild cannot outlive the trial. The clock, the settlement barrier, and the process
 boundary are injected, so every offline case except the process-group one runs without real

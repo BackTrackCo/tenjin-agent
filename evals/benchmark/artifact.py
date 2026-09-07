@@ -255,7 +255,7 @@ def load_attestation(path: Path) -> Attestation:
     )
 
 
-def check_attestation(attestation: Attestation, required_origins: tuple[str, ...] = ()) -> None:
+def check_attestation(attestation: Attestation, required_origins: tuple[str, ...] = (), credential_seam: str | None = None) -> None:
     if attestation.kind not in ATTESTATION_KINDS:
         raise IsolationError("attestation_kind", f"isolation kind must be one of {', '.join(sorted(ATTESTATION_KINDS))}")
     for name in ("instance_id", "image", "credential_seam"):
@@ -274,6 +274,13 @@ def check_attestation(attestation: Attestation, required_origins: tuple[str, ...
     missing = sorted(origin for origin in required_origins if origin not in allowlist)
     if missing:
         raise IsolationError("allowlist_gap", f"the network allowlist is missing {', '.join(missing)}")
+    # The seam is the one variable that crosses into the child. An attestation
+    # that names a different one describes an image the run is not using.
+    if credential_seam is not None and attestation.credential_seam != credential_seam:
+        raise IsolationError(
+            "credential_seam_mismatch",
+            f"the attestation names seam {attestation.credential_seam!r}, the run passes {credential_seam!r}",
+        )
 
 
 def require_isolation(
@@ -282,6 +289,7 @@ def require_isolation(
     publishable: bool,
     attestation: Attestation | None,
     required_origins: tuple[str, ...] = (),
+    credential_seam: str | None = None,
     ci: bool = False,
 ) -> dict[str, Any]:
     """The isolation slice of an attempt record, or a refusal to run at all."""
@@ -298,7 +306,7 @@ def require_isolation(
     if publishable and attestation is None:
         raise IsolationError("attestation_missing", "a publishable live run requires an isolation attestation")
     if attestation is not None:
-        check_attestation(attestation, required_origins)
+        check_attestation(attestation, required_origins, credential_seam)
     return {
         "live": True,
         "publishable": publishable,

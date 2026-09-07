@@ -11,13 +11,15 @@ refuse each other's manifests, so neither can quietly run the other's
 executor. `--dry-run` prints the argv and the roots each trial would use and
 starts nothing, which is the only part of the live path CI may exercise and is
 how a reviewer reads the real command without running it. Without `--dry-run`
-it requires an isolation attestation and refuses an automated environment, on
-top of the refusals `artifact.require_isolation` already owns.
+it requires an isolation attestation, refuses an automated environment, and
+refuses a shell that does not have the credential seam variable set, on top of
+the refusals `artifact.require_isolation` already owns.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import shlex
@@ -61,14 +63,20 @@ def load_run(run_dir: Path) -> tuple[manifest_module.Manifest, str]:
     return manifest, payload["schedule_hash"]
 
 
-def require_executor(manifest: manifest_module.Manifest, *, live: bool) -> None:
-    """`fake-run` refuses a live executor and `live-run` refuses a fake one."""
+def require_executor(manifest: manifest_module.Manifest, *, live: bool) -> executor.ExecutorSpec:
+    """`fake-run` refuses a live executor and `live-run` refuses a fake one.
+
+    Returns the one spec every arm shares, which `manifest.validate` enforces.
+    """
     command = "live-run" if live else "fake-run"
+    specs = []
     for arm in manifest.arms:
         spec = executor.lookup(arm["executor"])
         if spec.live is not live:
             kind = "live" if spec.live else "fake"
             raise CliError(f"{command} refuses arm {arm['id']!r}: executor {spec.name!r} is {kind}")
+        specs.append(spec)
+    return specs[0]
 
 
 def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
@@ -100,6 +108,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
     spec = executor.lookup(arm["executor"])
     roots = artifact.create(out, trial.trial_id, manifest.fixture_path(task))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins))
+    settings = arm.get("settings") or {}
     return {
         "trial_id": trial.trial_id,
         "task_id": trial.task_id,
@@ -109,11 +118,18 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         "roots": {
             "cwd": str(launch.cwd),
             "home": str(roots.home),
+            # The profile is `CLAUDE_CONFIG_DIR`, and the transcript directory
+            # hangs off it, so a reviewer can see the two agree.
+            "profile": str(roots.profile),
             "data": str(roots.data_dir),
             "output": str(roots.output),
             "sessions": str(spec.sessions(roots, launch.root_session_id)),
         },
         "environment": sorted(launch.env or {}),
+        # The arm's settings file is a second environment channel into the
+        # same process, so the dry run names those variables too.
+        "settings_env": sorted(settings.get("env") or {}),
+        "settings_hooks": sorted(settings.get("hooks") or {}),
     }
 
 
@@ -124,6 +140,8 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
         "nothing was started: --dry-run stops before the spawn.",
         "env names the child allowlist and prints no value; the credential seam "
         "variable is on that line only when this shell has it set.",
+        "arm env and arm hooks name what the arm's own settings file adds to "
+        "that process, again without values.",
     ]
     for index, plan in enumerate(plans, start=1):
         lines.append("")
@@ -132,9 +150,11 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
             f"task={plan['task_id']} arm={plan['arm_id']} repeat={plan['repeat']}"
         )
         for name, value in plan["roots"].items():
-            lines.append(f"  {name:9}{value}")
-        lines.append(f"  {'env':9}{' '.join(plan['environment'])}")
-        lines.append(f"  {'argv':9}{shlex.join(plan['argv'])}")
+            lines.append(f"  {name:10}{value}")
+        lines.append(f"  {'env':10}{' '.join(plan['environment'])}")
+        lines.append(f"  {'arm env':10}{' '.join(plan['settings_env']) or '(none)'}")
+        lines.append(f"  {'arm hooks':10}{' '.join(plan['settings_hooks']) or '(none)'}")
+        lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
 
 
@@ -146,10 +166,11 @@ def live_run(
     dry_run: bool = False,
     environ: Mapping[str, str] | None = None,
     stream: Any = None,
+    runtime: runner.Runtime | None = None,
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
     manifest = manifest_module.load(manifest_path)
-    require_executor(manifest, live=True)
+    spec = require_executor(manifest, live=True)
     trials = schedule.expand(manifest)
     if dry_run:
         plans = [plan_trial(manifest, trial, out) for trial in trials]
@@ -160,8 +181,20 @@ def live_run(
         raise CliError(f"live-run refuses an automated environment: {', '.join(automated)} is set")
     if attestation_path is None:
         raise CliError("live-run requires --attestation: a publishable live run states the isolation it ran under")
+    seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
+    # A run launched from a shell without the credential would spend the
+    # wall-clock cap on attempts that cannot reach the provider.
+    if seam is not None and not environ.get(seam):
+        raise CliError(f"live-run needs the credential seam {seam} set in this shell")
     attestation = artifact.load_attestation(attestation_path)
-    runtime = runner.Runtime(attestation=attestation, publishable=True, ci=bool(environ.get("CI")))
+    # The gates stay code-owned: an injected runtime supplies the clock, the
+    # settlement barrier, or the process seam, never the isolation contract.
+    runtime = dataclasses.replace(
+        runtime or runner.Runtime(),
+        attestation=attestation,
+        publishable=True,
+        ci=any(bool(environ.get(name)) for name in AUTOMATION_ENV),
+    )
     return execute(manifest, trials, out, runtime)
 
 
