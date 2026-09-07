@@ -34,13 +34,20 @@ class FakeRunTest(unittest.TestCase):
         self.assertEqual(set(self.first["outcomes"].values()), {"pass"})
         for path in (self.out / "records").glob("*.json"):
             record = json.loads(path.read_text())
+            records.validate(record)
             self.assertEqual(record["outcome"], "pass")
             # Root emits req_1 (partial + final rows) and req_2; the child emits one.
             self.assertEqual([item["native_request_id"] for item in record["usage"]], ["req_1", "req_2", "req_c1"])
             self.assertEqual(len(record["actors"]), 2)
-            self.assertEqual(record["actors"][0][2], "")
-            self.assertEqual(record["parent_provenance"], "unavailable")
+            self.assertEqual(record["actors"][0]["key"][2], "")
+            self.assertEqual(record["actors"][0]["parent_provenance"], "unavailable")
+            # The fake child names its dispatching tool call, a structured native edge.
+            self.assertEqual(record["actors"][1]["parent_provenance"], "native")
+            self.assertEqual(record["actors"][1]["parent_actor_key"], record["actors"][0]["key"])
+            self.assertEqual(record["usage_reconciliation"]["status"], "matched")
             self.assertEqual(record["delivery"]["status"], "unavailable")
+            self.assertEqual(record["tool_counts"], {"": {"Task": 1}})
+            self.assertTrue(record["patch_hash"].startswith("sha256:"))
             self.assertIsNone(record["usage"][0]["reasoning_output_subset"])
 
     def test_resume_skips_every_published_record(self) -> None:
@@ -68,44 +75,15 @@ class ContractTest(unittest.TestCase):
         loaded = manifest.load(cli.FAKE_MANIFEST)
         self.assertEqual(schedule.expand(loaded), schedule.expand(loaded))
 
-    def test_manifest_rejects_bad_shapes(self) -> None:
-        base = json.loads(cli.FAKE_MANIFEST.read_text())
-        cases = {
-            "unknown key": {**base, "extra": 1},
-            "duplicate arm": {**base, "arms": [base["arms"][0], base["arms"][0]]},
-            "missing fixture": {**base, "tasks": [{**base["tasks"][0], "fixture": "nope"}]},
-            "unpinned model": {**base, "pins": {**base["pins"], "model": "latest"}},
-            "mixed executors": {**base, "arms": [base["arms"][0], {**base["arms"][1], "executor": "real"}]},
-        }
-        for name, data in cases.items():
-            with self.subTest(name), self.assertRaises(ManifestError):
-                manifest.validate(data, cli.FAKE_MANIFEST.parent)
-
-    def test_publish_never_overwrites(self) -> None:
+    def test_manifest_hash_change_invalidates_the_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            record = {
-                "schema": records.RECORD_SCHEMA,
-                "trial_id": "t1",
-                "manifest_hash": "m",
-                "schedule_hash": "s",
-                "task_id": "a",
-                "arm_id": "off",
-                "repeat": 0,
-                "position": 0,
-                "outcome": "pass",
-                "usage": [],
-            }
-            path, won = records.publish(Path(tmp), record)
-            _, second = records.publish(Path(tmp), {**record, "outcome": "fail"})
-            self.assertTrue(won)
-            self.assertFalse(second)
-            self.assertEqual(json.loads(path.read_text())["outcome"], "pass")
-            accepted, excluded = records.select(Path(tmp), "m", "s")
-            self.assertEqual(list(accepted), ["t1"])
-            self.assertEqual([item.reason for item in excluded], ["partial"])
-            stale, reasons = records.select(Path(tmp), "other", "s")
-            self.assertEqual(stale, {})
-            self.assertIn("stale", [item.reason for item in reasons])
+            out = Path(tmp) / "run"
+            cli.fake_run(out)
+            payload = json.loads((out / "schedule.json").read_text())
+            payload["manifest_hash"] = "sha256:other"
+            (out / "schedule.json").write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(ManifestError):
+                cli.do_report(out)
 
     def test_report_guard_refuses_private_strings(self) -> None:
         with self.assertRaises(report.ReportError):

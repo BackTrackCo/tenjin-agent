@@ -3,8 +3,9 @@
 Write a unique partial file, flush it, publish the final path without
 overwrite. `os.link` is the publish step because it fails atomically when the
 final path exists, so two writers for one trial_id cannot both win. Resume
-accepts only a final record whose manifest and schedule hashes match; every
-other file is excluded with a machine-readable reason.
+accepts only a final record whose manifest and schedule hashes match and whose
+trial_id derives from its own fields; every other file is excluded with a
+machine-readable reason and never reaches the reducer.
 """
 
 from __future__ import annotations
@@ -16,8 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-RECORD_SCHEMA = "bench1.attempt.v0"
+from . import loop_join, usage
+from .schedule import trial_id as derive_trial_id
+
+RECORD_SCHEMA = "bench1.attempt.v1"
 OUTCOMES = frozenset({"pass", "fail", "capped", "interrupted", "invalid"})
+STOP_REASONS = frozenset({"exit", "timeout", "interrupted"})
+PROVENANCE = frozenset({"native", "observed", "unavailable"})
 REQUIRED = frozenset(
     {
         "schema",
@@ -28,8 +34,28 @@ REQUIRED = frozenset(
         "arm_id",
         "repeat",
         "position",
-        "outcome",
+        "settings_hash",
+        "environment_hash",
+        "harness",
+        "native_root_id",
+        "actors",
+        "parent_edges",
         "usage",
+        "usage_reconciliation",
+        "auxiliary",
+        "outcome",
+        "invalid_reason",
+        "verifier",
+        "patch_hash",
+        "stop_reason",
+        "wall_time_s",
+        "turns",
+        "tool_counts",
+        "cost_usd",
+        "delivery",
+        "sentinel",
+        "isolation",
+        "private_hashes",
     }
 )
 
@@ -67,16 +93,156 @@ def publish(records_dir: Path, record: dict[str, Any]) -> tuple[Path, bool]:
     return final, True
 
 
+def _count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _require_str(record: dict[str, Any], name: str) -> str:
+    value = record[name]
+    if not isinstance(value, str) or not value:
+        raise RecordError(f"{name} must be a non-empty string")
+    return value
+
+
+def _actor(value: Any, harness: str, root: str) -> tuple[str, str, str]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise RecordError("actor key must be [harness, root_session_id, native_actor_id]")
+    try:
+        key = usage.actor_key(*value)
+    except (usage.UsageError, TypeError) as error:
+        raise RecordError(f"invalid actor key: {error}") from error
+    if key[0] != harness or key[1] != root:
+        raise RecordError("actor key names another harness or root session")
+    return key
+
+
 def validate(record: dict[str, Any]) -> None:
+    if not isinstance(record, dict):
+        raise RecordError("record must be an object")
     missing = sorted(REQUIRED - set(record))
+    unknown = sorted(set(record) - REQUIRED)
     if missing:
         raise RecordError(f"record is missing keys: {', '.join(missing)}")
+    if unknown:
+        raise RecordError(f"record has unknown keys: {', '.join(unknown)}")
     if record["schema"] != RECORD_SCHEMA:
         raise RecordError(f"record schema must be {RECORD_SCHEMA}")
+    for name in ("trial_id", "manifest_hash", "schedule_hash", "task_id", "arm_id", "settings_hash", "environment_hash"):
+        _require_str(record, name)
+    for name in ("repeat", "position"):
+        if not _count(record[name]):
+            raise RecordError(f"{name} must be a non-negative integer")
+    expected = derive_trial_id(record["manifest_hash"], record["task_id"], record["arm_id"], record["repeat"], record["position"])
+    if record["trial_id"] != expected:
+        raise RecordError("trial_id does not derive from manifest_hash, task, arm, repeat, and position")
+    harness = _require_str(record, "harness")
+    if harness not in usage.HARNESSES:
+        raise RecordError(f"unknown harness {harness!r}")
+    root = _require_str(record, "native_root_id")
     if record["outcome"] not in OUTCOMES:
         raise RecordError(f"unknown outcome {record['outcome']!r}")
+    reason = record["invalid_reason"]
+    if record["outcome"] == "invalid" and (not isinstance(reason, str) or not reason):
+        raise RecordError("an invalid attempt must carry invalid_reason")
+    if record["outcome"] != "invalid" and reason is not None:
+        raise RecordError("only an invalid attempt carries invalid_reason")
+    if record["stop_reason"] not in STOP_REASONS:
+        raise RecordError(f"unknown stop_reason {record['stop_reason']!r}")
+
+    actors: set[tuple[str, str, str]] = set()
+    if not isinstance(record["actors"], list):
+        raise RecordError("actors must be a list")
+    for entry in record["actors"]:
+        if not isinstance(entry, dict) or set(entry) != {"key", "parent_actor_key", "parent_provenance"}:
+            raise RecordError("actor entries carry key, parent_actor_key, and parent_provenance")
+        key = _actor(entry["key"], harness, root)
+        if key in actors:
+            raise RecordError(f"actor {key[2]!r} is listed twice")
+        actors.add(key)
+        provenance = entry["parent_provenance"]
+        if provenance not in PROVENANCE:
+            raise RecordError(f"unknown parent provenance {provenance!r}")
+        if (entry["parent_actor_key"] is None) != (provenance == "unavailable"):
+            raise RecordError("parent_actor_key is null exactly when its provenance is unavailable")
+        if entry["parent_actor_key"] is not None:
+            parent = _actor(entry["parent_actor_key"], harness, root)
+            if parent == key:
+                raise RecordError("an actor cannot be its own parent")
+    if record["outcome"] != "invalid" and (harness, root, "") not in actors:
+        raise RecordError("the lead actor is missing from a scored attempt")
+    for entry in record["actors"]:
+        if entry["parent_actor_key"] is not None and tuple(entry["parent_actor_key"]) not in actors:
+            raise RecordError("parent_actor_key names an actor outside the attempt")
+    if not isinstance(record["parent_edges"], list):
+        raise RecordError("parent_edges must be a list")
+    for edge in record["parent_edges"]:
+        if not isinstance(edge, dict) or set(edge) != {"child", "parent", "provenance"}:
+            raise RecordError("parent edges carry child, parent, and provenance")
+        if edge["provenance"] not in PROVENANCE - {"unavailable"}:
+            raise RecordError("a stored parent edge needs native or observed provenance")
+        if _actor(edge["child"], harness, root) not in actors or _actor(edge["parent"], harness, root) not in actors:
+            raise RecordError("parent edge names an actor outside the attempt")
+
     if not isinstance(record["usage"], list):
         raise RecordError("usage must be a list")
+    parsed = []
+    for item in record["usage"]:
+        try:
+            parsed.append(usage.from_json(item))
+        except usage.UsageError as error:
+            raise RecordError(f"usage entry: {error}") from error
+    for item in parsed:
+        if item.trial_id != record["trial_id"]:
+            raise RecordError("usage entry belongs to another trial")
+        if item.actor_key not in actors:
+            raise RecordError("usage entry names an actor outside the attempt")
+    try:
+        deduped = usage.dedupe(parsed)
+        receipts = [usage.receipt_from_json(item) for item in record["auxiliary"]]
+        usage.check_receipts(receipts, deduped)
+    except (usage.UsageError, TypeError) as error:
+        raise RecordError(f"usage: {error}") from error
+    if len(deduped) != len(parsed):
+        raise RecordError("usage entries are not deduplicated")
+    for receipt in receipts:
+        if receipt.trial_id != record["trial_id"]:
+            raise RecordError("auxiliary receipt belongs to another trial")
+
+    reconciliation = record["usage_reconciliation"]
+    if not isinstance(reconciliation, dict) or not isinstance(reconciliation.get("status"), str):
+        raise RecordError("usage_reconciliation must carry a status")
+    delivery = record["delivery"]
+    if not isinstance(delivery, dict) or delivery.get("status") not in loop_join.STATUSES:
+        raise RecordError("delivery must carry a known status")
+    for name in ("fires", "legs", "unmatched_fires"):
+        if not isinstance(delivery.get(name), list):
+            raise RecordError(f"delivery.{name} must be a list")
+    for fire in delivery["fires"]:
+        if _actor(fire.get("actor"), harness, root) not in actors:
+            raise RecordError("a joined fire names an actor outside the attempt")
+    for name in ("tool_counts", "sentinel", "isolation", "private_hashes"):
+        if not isinstance(record[name], dict):
+            raise RecordError(f"{name} must be an object")
+    if record["wall_time_s"] is not None and (
+        isinstance(record["wall_time_s"], bool) or not isinstance(record["wall_time_s"], (int, float)) or record["wall_time_s"] < 0
+    ):
+        raise RecordError("wall_time_s must be null or a non-negative number")
+    if record["turns"] is not None and not _count(record["turns"]):
+        raise RecordError("turns must be null or a count")
+    if record["cost_usd"] is not None and (
+        isinstance(record["cost_usd"], bool) or not isinstance(record["cost_usd"], (int, float)) or record["cost_usd"] < 0
+    ):
+        raise RecordError("cost_usd must be null or a non-negative number")
+    for name in ("patch_hash",):
+        if record[name] is not None and (not isinstance(record[name], str) or not record[name]):
+            raise RecordError(f"{name} must be null or a hash")
+    verifier = record["verifier"]
+    if verifier is not None and (not isinstance(verifier, dict) or not isinstance(verifier.get("id"), str)):
+        raise RecordError("verifier must be null or carry an id")
+    if record["outcome"] in ("pass", "fail") and verifier is None:
+        raise RecordError("a pass or fail outcome needs a verifier verdict")
+    if not _count(record["sentinel"].get("public_requests")):
+        raise RecordError("sentinel.public_requests must be a count")
 
 
 def select(
@@ -91,7 +257,8 @@ def select(
         if ".partial." in path.name:
             excluded.append(Excluded(path.name, "partial"))
             continue
-        if path.suffix != ".json":
+        if path.suffix != ".json" or not path.is_file():
+            excluded.append(Excluded(path.name, "foreign"))
             continue
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -110,3 +277,4 @@ def select(
             continue
         accepted[record["trial_id"]] = record
     return accepted, excluded
+

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, executor, loop_join, records, sha256_file, sha256_text, verifier
+from . import artifact, claude_usage, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, verifier
 from .manifest import Manifest
 from .schedule import Trial
 
@@ -58,8 +58,10 @@ def settle(sessions: Path, root_session_id: str) -> tuple[dict[str, Any] | None,
 def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str, clock: Clock) -> dict[str, Any]:
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task))
     spec = executor.lookup(arm["executor"])
+    if spec.harness != manifest.harness:
+        raise executor.ExecutorError(f"executor {spec.name!r} runs {spec.harness!r}, manifest pins {manifest.harness!r}")
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task))
     launch = spec.launch(trial.trial_id, roots.repo, roots.output, arm)
     started = clock()
     stop_reason = "exit"
@@ -83,18 +85,26 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
 
     sessions = roots.output / "sessions"
     result_row, unresolved = settle(sessions, launch.root_session_id)
-    usage: list[dict[str, Any]] = []
-    actors: list[list[str]] = []
     outcome = "invalid"
     invalid_reason: str | None = None
+    session: claude_usage.SessionUsage | None = None
     try:
-        usage_records = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id)
-        usage = [record.to_json() for record in usage_records]
-        actors = [list(key) for key in sorted({record.actor_key for record in usage_records})]
+        session = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id)
+        invalid_reason = session.invalid_reason
     except claude_usage.ClaudeUsageError as error:
-        invalid_reason = f"usage: {error}"
+        invalid_reason = f"usage:{error.code}"
+
+    actors = [] if session is None else session.actors
+    try:
+        delivery = loop_join.project(roots.data_dir / "loop.db", actors)
+    except loop_join.LoopJoinError:
+        delivery = loop_join.unavailable()
+        invalid_reason = invalid_reason or "delivery:wal_live"
+    if delivery["unmatched_fires"]:
+        invalid_reason = invalid_reason or "delivery:fire_without_usage"
 
     verdict: verifier.Verdict | None = None
+    patch_hash: str | None = None
     if invalid_reason is not None:
         pass
     elif stop_reason == "timeout":
@@ -103,13 +113,35 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         invalid_reason = f"executor exited {process.returncode}"
     elif result_row is None or unresolved:
         invalid_reason = "unsettled: " + ", ".join(["root"] if result_row is None else unresolved)
+    elif session is not None and session.envelope is not None and session.envelope.capped:
+        outcome = "capped"
+    elif session is not None and session.envelope is not None and session.envelope.is_error:
+        invalid_reason = f"harness: {session.envelope.subtype}"
     else:
-        verdict = verifier.run(verifier.lookup(task["verifier"]), roots.hidden_copy(), run_dir)
+        copy = roots.hidden_copy()
+        patch_hash = "sha256:" + sha256_dir(copy)
+        verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir)
         outcome = verdict.outcome
         if outcome == "invalid":
             invalid_reason = f"verifier: {verdict.detail}"
+    if invalid_reason is not None:
+        outcome = "invalid"
 
     root_transcript = sessions / f"{launch.root_session_id}.jsonl"
+    usage_fields = (
+        {
+            "native_root_id": launch.root_session_id,
+            "actors": [],
+            "parent_edges": [],
+            "usage": [],
+            "usage_reconciliation": {"status": "unparsed"},
+            "tool_counts": {},
+            "turns": None,
+            "cost_usd": None,
+        }
+        if session is None
+        else session.record_fields()
+    )
     return {
         "schema": records.RECORD_SCHEMA,
         "trial_id": trial.trial_id,
@@ -120,20 +152,17 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "repeat": trial.repeat,
         "position": trial.position,
         "settings_hash": arm["settings_hash"],
+        "environment_hash": "sha256:" + sha256_json(manifest.pins),
         "harness": spec.harness,
-        "native_root_id": launch.root_session_id,
-        "actors": actors,
-        "parent_edges": [],
-        "parent_provenance": "unavailable",
-        "usage": usage,
+        **usage_fields,
         "auxiliary": [],
         "outcome": outcome,
         "invalid_reason": invalid_reason,
         "verifier": None if verdict is None else {"id": verdict.verifier_id, "exit_code": verdict.exit_code},
+        "patch_hash": patch_hash,
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
-        "turns": None if result_row is None else result_row.get("num_turns"),
-        "delivery": loop_join.project(roots.data_dir / "loop.db", [tuple(key) for key in actors]),
+        "delivery": delivery,
         "sentinel": {"public_requests": 0},
         "isolation": {"fresh_roots": True, "attested_container": False},
         "private_hashes": {

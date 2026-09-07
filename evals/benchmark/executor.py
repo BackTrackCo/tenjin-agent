@@ -3,6 +3,7 @@
 The fake executor is this module run as a script. It writes synthetic
 Claude-shaped JSONL for one root and one child into the trial output root and
 never spawns a real tool, so CI exercises the whole chain with zero spend.
+The rows follow the shapes `claude_usage.py` freezes.
 """
 
 from __future__ import annotations
@@ -13,9 +14,11 @@ import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from . import REPO_ROOT
+
+NATIVE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 
 
 @dataclass(frozen=True)
@@ -78,12 +81,30 @@ def _usage(rng: random.Random, scale: int) -> dict[str, int]:
     }
 
 
-def _row(kind: str, request_id: str, message_id: str, usage: dict[str, int], **extra: str) -> str:
+def _row(
+    session: str,
+    request_id: str,
+    message_id: str,
+    usage: dict[str, int],
+    content: list[dict[str, Any]],
+    stop_reason: str | None,
+    **extra: Any,
+) -> str:
     return json.dumps(
         {
-            "type": kind,
+            "type": "assistant",
+            "session_id": session,
             "requestId": request_id,
-            "message": {"id": message_id, "role": "assistant", "usage": usage},
+            "parent_tool_use_id": None,
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": "fake-model-0",
+                "content": content,
+                "stop_reason": stop_reason,
+                "usage": usage,
+            },
             **extra,
         }
     )
@@ -98,20 +119,43 @@ def fake_agent(args: argparse.Namespace) -> int:
     # A treatment arm reads slightly less: an arm-shaped difference the reducer
     # must show, not a claim about any product.
     scale = 800 if args.arm == "off" else 600
+    text = [{"type": "text", "text": "[redacted]"}]
+    dispatch = [{"type": "tool_use", "id": "toolu_dispatch", "name": "Task", "input": {}}]
 
+    first, second = _usage(rng, scale), _usage(rng, scale)
+    child_usage = _usage(rng, scale // 2)
     root_lines = [json.dumps({"type": "system", "subtype": "init", "session_id": args.session, "model": "fake-model-0"})]
-    first = _usage(rng, scale)
-    partial = {**first, "output_tokens": 1}
-    root_lines.append(_row("assistant", "req_1", "msg_1", partial))
-    root_lines.append(_row("assistant", "req_1", "msg_1", first))
-    root_lines.append(json.dumps({"type": "user", "message": {"role": "user", "content": "child dispatched"}}))
-    root_lines.append(_row("assistant", "req_2", "msg_2", _usage(rng, scale)))
-    root_lines.append(json.dumps({"type": "result", "subtype": "success", "num_turns": 2, "total_cost_usd": 0.0, "is_error": False}))
+    root_lines.append(_row(args.session, "req_1", "msg_1", {**first, "output_tokens": 1}, text, None))
+    root_lines.append(_row(args.session, "req_1", "msg_1", first, dispatch, "tool_use"))
+    root_lines.append(
+        json.dumps(
+            {
+                "type": "user",
+                "session_id": args.session,
+                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_dispatch", "content": "[redacted]"}]},
+            }
+        )
+    )
+    root_lines.append(_row(args.session, "req_2", "msg_2", second, text, "end_turn"))
+    root_lines.append(
+        json.dumps(
+            {
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "num_turns": 2,
+                "total_cost_usd": 0.0,
+                "session_id": args.session,
+                "usage": {name: first[name] + second[name] for name in NATIVE},
+                "modelUsage": {"fake-model-0": {"inputTokens": first["input_tokens"] + second["input_tokens"]}},
+            }
+        )
+    )
     (sessions / f"{args.session}.jsonl").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
 
     child_lines = [
-        _row("assistant", "req_c1", "msg_c1", _usage(rng, scale // 2), agentId=child_id),
-        json.dumps({"type": "result", "subtype": "success", "num_turns": 1, "agentId": child_id}),
+        _row(args.session, "req_c1", "msg_c1", child_usage, text, "end_turn", agentId=child_id, parent_tool_use_id="toolu_dispatch"),
+        json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "agentId": child_id}),
     ]
     (child_dir / f"agent-{child_id}.jsonl").write_text("\n".join(child_lines) + "\n", encoding="utf-8")
 

@@ -36,3 +36,11 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 16), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sha256_dir(root: Path) -> str:
+    """Content hash of a directory: sorted relative paths and file digests."""
+    entries = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        entries.append([path.relative_to(root).as_posix(), sha256_file(path)])
+    return sha256_json(entries)
