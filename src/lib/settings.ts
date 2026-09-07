@@ -35,6 +35,13 @@ import type { CommandContext } from '../context';
  */
 export interface ResolvedSettings {
   baseUrl: string;
+  /**
+   * `baseUrl` AS THE CONFIG FILE NAMES IT, before `--base-url`/`TENJIN_BASE_URL`.
+   * Anything that wallet-signs pins to this rather than to {@link baseUrl}: a
+   * flag can point a run at another host, and an agent that names one must not
+   * thereby move the pin. Same rule, same reason, as {@link resolveShelfBypass}.
+   */
+  configuredBaseUrl: string;
   /** The public marketplace: the second shelf a team-mode search falls through
    *  to, and the one other origin `read`/`buy`/`inspect` will resolve against. */
   publicShelfUrl: string;
@@ -153,8 +160,8 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
  * public guidance until the next install.
  *
  * A secret with `baseUrl` still on the marketplace is NOT team mode, per
- * docs/command-reference.md#team-shelf: that half-set state runs as ordinary
- * public mode rather than treating tenjin.blog as a private shelf.
+ * {@link isTeamShelfOrigin}: that half-set state runs as ordinary public mode
+ * rather than treating tenjin.blog as a private shelf.
  */
 export function isTeamModeConfig(config: PartialConfig): boolean {
   const secret = config.shelfBypassSecret ?? CONFIG_DEFAULTS.shelfBypassSecret;
@@ -254,6 +261,7 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
   const bypass = resolveShelfBypass(config, s);
   return {
     baseUrl: s.baseUrl.value,
+    configuredBaseUrl: config.baseUrl ?? CONFIG_DEFAULTS.baseUrl,
     publicShelfUrl: s.publicShelfUrl.value,
     ...(bypass !== undefined ? { bypass } : {}),
     teamMode: bypass !== undefined,

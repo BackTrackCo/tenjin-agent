@@ -378,9 +378,9 @@ describe('isTeamModeConfig — the machine mode, not the invocation', () => {
     expect(isTeamModeConfig({ baseUrl: TEAM, shelfBypassSecret: '' })).toBe(false);
   });
 
-  // The half-set state docs/command-reference.md#team-shelf documents: a secret
-  // landed before the baseUrl did. Team mode there would render team guidance on a
-  // machine still publishing to the public marketplace.
+  // The half-set state `isTeamShelfOrigin` rules out: a secret landed before the
+  // baseUrl did. Team mode there would render team guidance on a machine still
+  // publishing to the public marketplace.
   it('is false for a secret with baseUrl still on the marketplace, alias included', () => {
     expect(isTeamModeConfig({ baseUrl: 'https://tenjin.blog', shelfBypassSecret: SECRET })).toBe(
       false,

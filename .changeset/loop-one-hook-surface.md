@@ -20,8 +20,8 @@ the `--search-hooks` flag goes with the prompt it settled: everything is on, and
 there is one place to change it.
 
 **`tenjin hooks`** is that place. It prints one row per arm — `ARM`, `STATE`,
-`EVENT`, `FIRED 7d`, `HIT 7d`, counted off `loop.db` — plus a line for the
-daemon, with `--json`. `tenjin hooks enable|disable <arm>` writes the same
+`EVENT`, `FIRED 7d`, `HIT 7d`, counted off `loop.db` — plus a last line naming
+the daemon and the ledger it counted, with `--json`. `tenjin hooks enable|disable <arm>` writes the same
 boolean `tenjin config set hooks.<arm>` writes, through the same locked merge;
 the daemon re-reads it per fire, so nothing restarts and nothing re-installs.
 
@@ -41,8 +41,12 @@ SIWX code is duplicated for reading. `read` is auto-allowed by default and now
 opens the keystore and signs, which `docs/agent-permissions.md` says in as many
 words; the test pin that `read` never reached the wallet goes, since `publish`
 was auto-allowed with full wallet access already and the pin bought nothing. The
-refusal's `entitlementCheck` loses `not_performed` and gains `no_wallet`, and no
-fix line names a session command.
+mint is pinned the way `wallet fund` is: `read` presents and mints only against
+`baseUrl` or `publicShelfUrl` as the CONFIG FILE names them, so an allowlisted
+`read --base-url <host>` still fetches a free piece from that host and signs
+nothing for it. The refusal's `entitlementCheck` loses `not_performed` and gains
+`no_wallet` and `origin_not_configured`, and no fix line names a session
+command.
 
 **Install asks two things** — the publish mode (which is also the consent for
 the harness allowlist) and whether to create a wallet — and prints ten rows. The
@@ -56,3 +60,7 @@ module probe goes; `api` and `search` are two verdicts on one `openapi.json`
 fetch; the `test-reporters` project lint goes, leaving the vitest-reporter regex
 one home in `test-identity.ts`; the session-key check goes with the verb.
 `--prune` and `--json` are unchanged.
+
+**`docs/command-reference.md` is deleted.** `tenjin <command> --help` carries the
+flags, `tenjin hooks` prints the arms and the ledger's path, and the README,
+`docs/agent-permissions.md` and `docs/safety-model.md` carry the rest.

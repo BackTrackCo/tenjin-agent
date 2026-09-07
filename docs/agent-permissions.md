@@ -323,9 +323,10 @@ mints can only ever fund your own wallet, the CLI refuses any checkout host but
 gate. The `--base-url` caveat that qualifies every other prefix rule does not
 apply here: `fund` is pinned to the production origin and takes no override from
 the flag, the environment, or config, so an allowlisted invocation cannot steer
-where the wallet's SIWX proof goes. That is the pin `read` does not have: an
-allowlisted `read` carrying `--base-url` can mint against the host it names, which
-is why the free tier discloses keystore access above rather than claiming none.
+where the wallet's SIWX proof goes. `read` is pinned the same way, one step
+wider: it presents and mints only against `baseUrl` or `publicShelfUrl` as the
+config file names them, so `read --base-url <host>` still fetches a free piece
+from that host but signs nothing for it.
 
 ### `tenjin wallet send`, the escape hatch
 
@@ -442,11 +443,13 @@ POST the harness's own hook payload to a Tenjin daemon on `127.0.0.1` — your
 machine only, authorized by a token in that file, which is why it is written mode
 0600 — and two run `~/.tenjin/hooks/tenjin-shim.mjs` so that daemon is up before
 the turn's first tool call. No arm can block or change a tool call; every one of
-them only adds context beside it. Before a web search, a page fetch, or on your
-own prompts, the arms ask your configured shelf the same question and mention a
-tested answer if one exists: the query text leaves the machine, redacted, and
-nothing else does. The files you read and re-edit are looked up the same way but
-never spoken about, only recorded, so the arms can be measured.
+them only adds context beside it. The arms ask your configured shelf a question
+and mention a tested answer if one exists. Five things leave the machine, each
+with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
+WebSearch query, a WebFetch address and the prompt beside it, the work order a
+subagent is dispatched with, and — to the team shelf only — the fingerprint of a
+failed command. Nothing else does. The files you read and re-edit are looked up
+the same way but never spoken about, only recorded, so the arms can be measured.
 There is one key per arm, all on out of the box:
 `tenjin config set hooks.web-search false` silences that one without unwiring
 anything, and `tenjin config` lists the seven. Hooks are read once at session

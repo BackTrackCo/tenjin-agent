@@ -705,13 +705,13 @@ describe('runRead, module boundary', () => {
 });
 
 /**
- * The origin binding (the fix for the `--base-url` credential leak). A session
- * file records the origin it was minted against, and `read` presents only there.
- * Without this, `tenjin read <url> --base-url <attacker>` — one command line an
- * always-safe rule already clears — hands the delegation to a host the agent
- * chose, with `assertOnBaseOrigin` satisfied because the same flag set both sides.
+ * THE MINT PIN AND THE ORIGIN BINDING, the two halves of the fix for the
+ * `--base-url` credential leak. `assertOnBaseOrigin` is satisfied on such a run
+ * because the same flag set both of its sides, so what stops the leak is here:
+ * the wallet signs only for a deployment the CONFIG FILE names, and a cached
+ * delegation is presented only to the origin it was minted against.
  */
-describe('runRead, the session key is bound to the origin it was minted for', () => {
+describe('runRead, nothing is signed for a host the config does not name', () => {
   const OTHER = 'https://evil.example';
 
   it('never presents a session minted elsewhere, even when the flag sets both sides', async () => {
@@ -734,59 +734,44 @@ describe('runRead, the session key is bound to the origin it was minted for', ()
     expect(calls.map((c) => c.phase)).toEqual(['plain']);
     expect(calls[0]?.headers['tenjin-session-delegation']).toBeUndefined();
     expect(calls[0]?.headers.signature).toBeUndefined();
-    expect(cliErr.details).toMatchObject({ entitlementCheck: 'session_origin_mismatch' });
+    expect(cliErr.details).toMatchObject({ entitlementCheck: 'origin_not_configured' });
   });
 
-  // A mismatch is the ONE state that refuses to mint. Every other unusable
-  // session ends in a fresh one, so without this an agent still carrying the
-  // `--base-url` that caused the mismatch would wallet-sign a delegation against
-  // the attacker host and clobber the good prod session.
-  it('never mints against another origin while a session for one is cached', async () => {
-    const { file } = await testSessionKey(); // minted for TEST_ORIGIN
-    await saveSessionFile(dir, file);
-    const { fetch } = makeReadServer({
-      plain: () => reply.paymentRequired(buildPaymentRequired()),
-      session: () => reply.entitled(readBody()),
-    });
-    const err = (await runRead(
-      { ref: `${OTHER}/api/read/iris/slug` },
-      makeCtx({ baseUrl: OTHER }),
-      { fetchImpl: fetch },
-    ).catch((e: unknown) => e)) as CliError;
-
-    expect(err.details).not.toHaveProperty('sessionCommand');
-    expect(err.fix).not.toContain('tenjin session start');
-    // The remedy it DOES give: stop redirecting the CLI.
-    expect(err.fix).toMatch(/minted for a different Tenjin deployment/i);
-    expect(err.fix).toContain('tenjin config get baseUrl');
-    // ...while with no cached session at all the same command MINTS and reads,
-    // so this is a real distinction rather than the fix line having been blanked:
-    // a mismatch is the one state that refuses to mint.
-    await rm(join(dir, 'session.json'));
-    const delivered = await runRead(
-      { ref: `${OTHER}/api/read/iris/slug` },
-      makeCtx({ baseUrl: OTHER }),
-      { fetchImpl: fetch, provider: testWalletProvider() },
-    );
-    expect((delivered.data as { entitlement: string }).entitlement).toBe('entitled');
-  });
-
-  it('presents to the origin it WAS minted for, so the binding is not just a refusal', async () => {
-    const { file } = await testSessionKey({ origin: OTHER });
-    await saveSessionFile(dir, file);
+  /**
+   * The pin holds with NOTHING on disk, which is the case the origin binding
+   * cannot cover: with no session there is no origin to compare, and an agent
+   * carrying `--base-url` would otherwise get a fresh wallet signature for the
+   * host it named. The keystore must not even be opened, so the provider here
+   * throws if it is.
+   */
+  it('never opens the keystore for an origin the config does not name', async () => {
     const { fetch, calls } = makeReadServer({
       plain: () => reply.paymentRequired(buildPaymentRequired()),
       session: () => reply.entitled(readBody()),
     });
-    const result = await runRead(
+    const provider = {
+      ...testWalletProvider(),
+      getSigner: () => {
+        throw new Error('the keystore must not be opened for an unconfigured origin');
+      },
+    };
+    const err = (await runRead(
       { ref: `${OTHER}/api/read/iris/slug` },
       makeCtx({ baseUrl: OTHER }),
-      {
-        fetchImpl: fetch,
-      },
-    );
-    expect((result.data as { entitlement: string }).entitlement).toBe('entitled');
-    expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
+      { fetchImpl: fetch, provider },
+    ).catch((e: unknown) => e)) as CliError;
+
+    expect(err.code).toBe('REFUSED');
+    expect(err.details).toMatchObject({ entitlementCheck: 'origin_not_configured' });
+    expect(calls.map((c) => c.phase)).toEqual(['plain']);
+    expect(await readdir(dir)).not.toContain('session.json');
+    // ...while the same command against the CONFIGURED origin MINTS and reads, so
+    // the pin is a distinction rather than a refusal that swallowed everything.
+    const delivered = await runRead({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: testWalletProvider(),
+    });
+    expect((delivered.data as { entitlement: string }).entitlement).toBe('entitled');
   });
 });
 
@@ -984,6 +969,44 @@ describe('runRead across two shelves', () => {
     });
     await runRead({ ref: resourceId }, shelfCtx(), { fetchImpl: fetch });
     expect(calls[0]?.url).toBe(PUBLIC_URL);
+  });
+
+  /**
+   * THE ORIGIN BINDING, between the two origins that are both configured — the
+   * only place it is still reachable now that the mint is pinned. A team-shelf
+   * delegation is not offered to the public shelf, and a public-shelf read does
+   * not mint over it: the good credential survives, and the refusal says so.
+   */
+  it('never mints against the public shelf while a team-shelf session is cached', async () => {
+    await writeShelfConfig();
+    const { file } = await testSessionKey({ origin: TEAM });
+    await saveSessionFile(dir, file);
+    const { fetch } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const err = (await runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: fetch }).catch(
+      (e: unknown) => e,
+    )) as CliError;
+
+    expect(err.details).toMatchObject({ entitlementCheck: 'session_origin_mismatch' });
+    expect(err.fix).toMatch(/minted for a different Tenjin deployment/i);
+    expect(err.fix).toContain('tenjin config get baseUrl');
+    // The cached delegation is still there, unclobbered.
+    expect(await readdir(dir)).toContain('session.json');
+  });
+
+  it('presents to the origin it WAS minted for, so the binding is not just a refusal', async () => {
+    await writeShelfConfig();
+    const { file } = await testSessionKey({ origin: TEST_ORIGIN });
+    await saveSessionFile(dir, file);
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const result = await runRead({ ref: PUBLIC_URL }, shelfCtx(), { fetchImpl: fetch });
+    expect((result.data as { entitlement: string }).entitlement).toBe('entitled');
+    expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
   });
 
   it('still refuses an origin that is neither shelf', async () => {

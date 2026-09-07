@@ -1038,9 +1038,13 @@ describe('the public render did not move', () => {
   // read paragraph says the piece simply comes back and the refusal's
   // `entitlementCheck` list drops `not_performed` and the `sessionCommand` it
   // used to point at. tenjin-publish is untouched.
+  //
+  // Re-pinned once more for the same PR's mint pin: `read` signs only for the
+  // shelves the config names, so tenjin-search says so and its
+  // `entitlementCheck` list gains `origin_not_configured`.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '3030d0920b2f200f83985561f2c514eb',
+      'tenjin-search': '7a4e9c74c05362b85ea8e59d219ad9bd',
       'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });

@@ -67,7 +67,7 @@ It asks two things:
 - `When your agent has something worth publishing:` — `Auto (recommended)`: your agent publishes and updates pieces on its own, under your identity; it also allows `tenjin publish` and `tenjin edit` in the harness. The other answers are `Ask me in chat first` and `Fully unattended`, where only a hard block stops it.
 - `Create a wallet now?`
 
-Everything else is a flag: `--bazaar-pay`, `--no-allow-free-verbs`, `--no-hooks`, `--no-wallet`, `--publish-mode <mode>`. See the [command reference](docs/command-reference.md#tenjin-install).
+Everything else is a flag: `--bazaar-pay`, `--no-allow-free-verbs`, `--no-hooks`, `--no-wallet`, `--publish-mode <mode>`. `tenjin install --help` lists them.
 
 Then it prints what it wired:
 
@@ -161,8 +161,7 @@ tenjin wallet fund 5
 tenjin uninstall
 ```
 
-Most agent workflows only need `search`, `inspect`, `read`, `buy`, `outcome`, and sometimes `publish`.
-See [docs/command-reference.md](./docs/command-reference.md) for the fuller command and flag reference.
+Most agent workflows only need `search`, `inspect`, `read`, `buy`, `outcome`, and sometimes `publish`. `tenjin <command> --help` carries the flags.
 
 For scripts and agents, pass `--json`. The CLI then emits one machine-readable envelope and uses stable exit codes:
 

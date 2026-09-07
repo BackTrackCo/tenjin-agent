@@ -25,9 +25,8 @@ import type { LoopDb, Row } from '../hooks/store';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin grade` (docs/command-reference.md, "Hooks"): the report on what the
- * hook arms delivered, and the only thing that tells a shelf whether its answer
- * was worth serving.
+ * `tenjin grade`: the report on what the hook arms delivered, and the only
+ * thing that tells a shelf whether its answer was worth serving.
  *
  * It is a REPORT, not a switch: which arms run is `tenjin hooks`, and the rows
  * it grades are the `fires`/`legs` the daemon wrote to `loop.db`. Opens the
@@ -71,9 +70,8 @@ function verdictOf(graded: unknown): { outcome: string; by: string } | null {
 }
 
 /**
- * `tenjin grade` (docs/command-reference.md#tenjin-grade): read each
- * session's transcript, decide whether the agent used what the arms showed it,
- * and tell the shelf that served the row.
+ * `tenjin grade`: read each session's transcript, decide whether the agent used
+ * what the arms showed it, and tell the shelf that served the row.
  *
  * `loop.db` already holds every fire and the shelf already holds every lookup;
  * what neither has is the one fact the loop is judged on, which is

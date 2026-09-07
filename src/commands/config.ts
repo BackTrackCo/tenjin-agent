@@ -697,9 +697,8 @@ export async function persistInstallHarness(
 /**
  * Record the EXACT free-verb rules `install` declined, through the same locked
  * read-modify-write every `config set` uses. Set to whatever was pending at the
- * moment of `--no-allow-free-verbs` or an interactive "no"; cleared back to
- * `[]` the moment an install actually wires the allowlist, or finds it already
- * fully satisfied. `--refresh` subtracts this list from what it would otherwise
+ * moment of `--no-allow-free-verbs`; cleared back to `[]` the moment an install
+ * actually wires the allowlist, or finds it already fully satisfied. `--refresh` subtracts this list from what it would otherwise
  * report as pending, so a settled no stays settled per rule — without also
  * silencing a genuinely NEW rule a later version adds (tenjin-agent#234).
  */

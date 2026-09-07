@@ -2,14 +2,14 @@ import { CliError } from '../lib/errors';
 import { HOOK_ARMS, loadConfig, type HookArm } from '../lib/config';
 import { persistHookArm } from './config';
 import { withLoopDb } from '../lib/loop-db';
+import { loopDbPath } from '../lib/paths';
 import { health, readPid } from '../hooks/shim';
 import type { LoopDb, Row } from '../hooks/store';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin hooks` (docs/command-reference.md, "Hooks"): the seven arms, whether
- * each is on, the harness event it answers, and what it has done in the last
- * week. `tenjin hooks enable|disable <arm>` is the switch.
+ * `tenjin hooks`: the seven arms, whether each is on, the harness event it
+ * answers, and what it has done in the last week. `tenjin hooks enable|disable <arm>` is the switch.
  *
  * One surface for a thing that had several: the state comes from the same
  * `hooks.<arm>` booleans `tenjin config` reads and is written through the same
@@ -29,7 +29,7 @@ const ARM_EVENTS: Record<HookArm, string> = {
   prompt: 'UserPromptSubmit',
   'web-search': 'WebSearch',
   'web-fetch': 'WebFetch',
-  subagent: 'SubagentStart',
+  subagent: 'Agent, SubagentStart',
   failure: 'PostToolUse failure',
   publish: 'Stop',
   primer: 'SessionStart',
@@ -133,9 +133,10 @@ export async function runHooksList(
       hit,
     };
   });
+  const ledger = loopDbPath(ctx.dataDir);
   return {
-    data: { windowDays: WINDOW_DAYS, arms: rows, daemon },
-    humanLines: [...tableLines(rows), daemonSummary(daemon)],
+    data: { windowDays: WINDOW_DAYS, arms: rows, daemon, ledger },
+    humanLines: [...tableLines(rows), daemonSummary(daemon, ledger)],
   };
 }
 
@@ -155,10 +156,13 @@ function tableLines(rows: ArmRow[]): string[] {
   );
 }
 
-function daemonSummary(d: DaemonState): string {
-  return d.running
+/** The daemon behind the arms, and the file every count above was read from —
+ *  the one place the ledger's path is printed, so `sqlite3` needs no doc. */
+function daemonSummary(d: DaemonState, ledger: string): string {
+  const line = d.running
     ? `daemon: 127.0.0.1:${d.port}, pid ${d.pid}, v${d.version}`
     : 'daemon: not running (it starts on the next hook fire)';
+  return `${line}; ledger ${ledger}`;
 }
 
 /**

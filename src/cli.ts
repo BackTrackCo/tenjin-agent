@@ -840,9 +840,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
 
   // ---- the loop's hook arms ----
-  // `tenjin hooks` is the one surface for which arms run (docs/command-reference.md,
-  // "Hooks"): the table with its 7-day counts, and enable/disable over the same
-  // `hooks.<arm>` booleans `tenjin config` reads. Group-level flags so
+  // `tenjin hooks` is the one surface for which arms run: the table with its
+  // 7-day counts, and enable/disable over the same `hooks.<arm>` booleans
+  // `tenjin config` reads. Group-level flags so
   // `tenjin hooks --json` parses like the wallet and config groups.
   const hooks = addGlobalFlags(
     program
