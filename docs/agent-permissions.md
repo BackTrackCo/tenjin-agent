@@ -7,8 +7,7 @@ forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
 behind which verbs are on that list, which three are separate opt-ins, and which are
-never recommended at all, and it is where `tenjin install` and `tenjin doctor`
-send you. The [README](../README.md#permissions) carries the paste block and the
+never recommended at all, and it is where `tenjin install` sends you. The [README](../README.md#permissions) carries the paste block and the
 three-tier summary.
 
 ## The free tier
@@ -105,8 +104,10 @@ landed and in which file, on its `permissions` row.
 `tenjin doctor --json` carries this whole recommendation as data under
 `permissions` (every rule, every per-verb note, both caveats, on the failure
 envelope as well as the success one) so an agent that just got denied can point
-you at the exact line. Its human render is the check list plus one link back
-here.
+you at the exact line. Its human render is the check list and nothing else,
+except on a machine whose own publish mode is missing a rule: that one line names
+the rule, because it is a finding about the machine rather than a standing
+recommendation.
 
 ## A prefix rule pins the verb, not the flags
 

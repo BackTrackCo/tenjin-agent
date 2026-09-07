@@ -599,10 +599,10 @@ describe('runInstall: doctor as the final step', () => {
     const failing: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
-      checks: [{ name: 'api-contract', status: 'fail', required: true, detail: 'down' }],
+      checks: [{ name: 'api', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
-        result: { name: 'api-contract', status: 'fail', required: true, detail: 'down' },
+        result: { name: 'api', status: 'fail', required: true, detail: 'down' },
       },
     };
     const { data: d } = await runInstall(

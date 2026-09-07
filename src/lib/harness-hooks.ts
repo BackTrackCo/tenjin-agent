@@ -345,32 +345,42 @@ function urlPort(url: string): number | null {
   }
 }
 
-/** The port a settings entry of ours currently names, or null when none does. */
-export async function registeredHookPort(homeDir: string, dataDir: string): Promise<number | null> {
+/**
+ * What this machine has registered: how many entries of ours the settings file
+ * carries, and the port they name. `port` is null when no entry of ours names
+ * one, which is also what an absent or unreadable settings file answers — the
+ * two are the same thing to every caller: nothing of ours is wired here.
+ */
+export async function registeredHooks(
+  homeDir: string,
+  dataDir: string,
+): Promise<{ port: number | null; entries: number }> {
   let hooks: unknown;
   try {
     const parsed: unknown = JSON.parse(await readFile(claudeSettingsPath(homeDir), 'utf8'));
     hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
   } catch {
-    return null;
+    return { port: null, entries: 0 };
   }
-  if (!isPlainObject(hooks)) return null;
+  if (!isPlainObject(hooks)) return { port: null, entries: 0 };
+  let entries = 0;
+  let port: number | null = null;
   for (const list of Object.values(hooks)) {
     if (!Array.isArray(list)) continue;
     for (const entry of list) {
       if (!ownsHookEntry(entry, dataDir)) continue;
+      entries += 1;
       for (const handler of (entry as { hooks: unknown[] }).hooks) {
         // OURS ONLY, and parsed defensively even then: an entry someone
         // hand-merged their own handler into sits beside ours, and a relative
         // `url` in theirs would otherwise throw ERR_INVALID_URL out of doctor.
         if (!ownsHandler(handler, dataDir)) continue;
         if (!isPlainObject(handler) || typeof handler.url !== 'string') continue;
-        const port = urlPort(handler.url);
-        if (port !== null) return port;
+        port ??= urlPort(handler.url);
       }
     }
   }
-  return null;
+  return { port, entries };
 }
 
 export interface WriteClaudeHooksOptions {

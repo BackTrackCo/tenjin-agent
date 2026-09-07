@@ -483,27 +483,8 @@ export const PERMISSIONS_DOC_URL =
   'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md';
 
 /**
- * The single line that replaced the block: what is on the page, and its URL. It
- * names the counts rather than the rules so the operator knows whether the page
- * answers their question before they open it.
- *
- * Subagent delegation is named here rather than on a second line, because doctor
- * deliberately closes with ONE pointer (#81) and the operator deciding what to
- * hand a subagent is reading exactly this line. The free tier IS the
- * subagent-safe set, so the counts already answer the question; which verbs stay
- * human-gated lives on the page with every other caveat.
- */
-export function permissionsPointer(): string {
-  return (
-    `Auto-mode permission allowlist and subagent delegation (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
-    `${OPT_IN_ALLOWLIST.length} opt-ins, the --base-url caveat): ${PERMISSIONS_DOC_URL}`
-  );
-}
-
-/**
  * The rules the current mode is missing, or null when it needs none. This one
- * DOES name them,
- * unlike {@link permissionsPointer}: they are not a tier to weigh and paste, they
+ * DOES name them: they are not a tier to weigh and paste, they
  * are lines that should already be in the operator's settings file, and an
  * operator whose agent is being prompted for work the mode said not to ask about
  * needs to see exactly which rules are missing.

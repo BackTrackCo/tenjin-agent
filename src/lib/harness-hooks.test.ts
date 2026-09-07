@@ -33,7 +33,7 @@ import {
   hookBundlesPresent,
   ownsHookEntry,
   pruneOurHandlers,
-  registeredHookPort,
+  registeredHooks,
   writeClaudeHooks,
 } from './harness-hooks';
 import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from './paths';
@@ -276,10 +276,10 @@ describe('writeClaudeHooks: the cutover', () => {
 
   it('drops an entry of ours whose port has moved, and re-adds it on the new one', async () => {
     await write({ start: (d) => fakeStart(d, 40_001) });
-    expect(await registeredHookPort(home, data)).toBe(40_001);
+    expect(await registeredHooks(home, data)).toEqual({ port: 40_001, entries: 11 });
     await write({ start: (d) => fakeStart(d, 40_002) });
     expect(allEntries(await readSettings())).toHaveLength(11);
-    expect(await registeredHookPort(home, data)).toBe(40_002);
+    expect(await registeredHooks(home, data)).toEqual({ port: 40_002, entries: 11 });
   });
 });
 
@@ -373,7 +373,7 @@ describe('ownership', () => {
     expect(pruneOurHandlers(foreign, data)).toBe(foreign);
   });
 
-  it('registeredHookPort reads past a foreign handler with an unparsable url', async () => {
+  it('registeredHooks reads past a foreign handler with an unparsable url', async () => {
     // Someone hand-merged their own handler into our entry, and theirs carries
     // a relative url. `new URL` on it would throw ERR_INVALID_URL out of doctor.
     await write({ start: (d) => fakeStart(d, 41_234) });
@@ -381,7 +381,7 @@ describe('ownership', () => {
     const entry = settings.hooks.PreToolUse?.[0];
     entry?.hooks.unshift({ type: 'http', url: 'hooks/x' });
     await writeSettings(settings);
-    expect(await registeredHookPort(home, data)).toBe(41_234);
+    expect((await registeredHooks(home, data)).port).toBe(41_234);
   });
 
   it('hasClaudeHooks answers no for a missing, unreadable or foreign settings file', async () => {

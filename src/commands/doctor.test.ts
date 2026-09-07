@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
-import { isNoWalletCheck, runDoctor, runDoctorPrune } from './doctor';
+import { runDoctor, runDoctorPrune } from './doctor';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
@@ -28,7 +28,7 @@ const balanceMock = vi.mocked(getUsdcBalance);
 const OPENAPI_OK = {
   openapi: '3.1.0',
   info: { title: 'Tenjin', version: '0.1.0' },
-  // A healthy deploy advertises the search endpoint, so the search-contract
+  // A healthy deploy advertises the search endpoint, so the `search`
   // check is ok (no extra fix line): "all required checks green" stays true.
   paths: { '/api/search': {} },
 };
@@ -230,28 +230,25 @@ describe('runDoctor — passing outcomes', () => {
     });
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
-    expect(find(data.checks, 'api-contract').detail).toContain('0.1.0');
+    expect(find(data.checks, 'api').detail).toContain('0.1.0');
     expect(find(data.checks, 'wallet').status).toBe('warn');
-    // `install` suppresses this one check as a duplicate of its own wallet line,
-    // and recognises it by this marker rather than by the name it shares with
-    // every other wallet warning.
-    expect(isNoWalletCheck(find(data.checks, 'wallet'))).toBe(true);
-    expect(find(data.checks, 'search-contract').status).toBe('ok');
+    expect(find(data.checks, 'search').status).toBe('ok');
     // A bare temp HOME has no skills, so the wiring check warns with a fix too.
     expect(find(data.checks, 'skills').status).toBe('warn');
-    // checks + a wallet-warn fix line + a skills-warn fix line, then a blank
-    // separator and the one pointer line — and nothing after it (#81).
-    const checkLines = data.checks.length + 2; // wallet + skills warns add a fix line each
-    expect(res.humanLines?.[checkLines]).toBe('');
-    expect(res.humanLines?.[checkLines + 1]).toContain(PERMISSIONS_DOC_URL);
-    expect((res.humanLines ?? []).length).toBe(checkLines + 2);
+    // Group headings + one line per check + a fix line under each of the two
+    // warns, then the blank and the tally — and nothing after it.
+    const lines = res.humanLines ?? [];
+    expect(lines.at(-2)).toBe('');
+    expect(lines.at(-1)).toBe(
+      `${data.checks.length} checks: ${data.checks.length - 2} ok, 2 warn.`,
+    );
   });
 
   // The alias is what a stale deployment advertises: it is deprecated and answers
   // 410 after one release, so a deploy carrying ONLY it is the case this check has
   // to warn about. Passing on the alias would send `tenjin search` at a path that
   // is about to stop answering, which is the entire point of the probe.
-  it('search-contract warns when the deploy advertises only the deprecated alias', async () => {
+  it('search warns when the deploy advertises only the deprecated alias', async () => {
     const aliasOnly = routeFetch({
       '/openapi.json': {
         body: {
@@ -270,13 +267,13 @@ describe('runDoctor — passing outcomes', () => {
       fetchImpl: aliasOnly,
     });
     const data = res.data as { status: string; checks: CheckResult[] };
-    expect(data.status).toBe('pass'); // still passes: search-contract is not required
-    const check = find(data.checks, 'search-contract');
+    expect(data.status).toBe('pass'); // still passes: `search` is not required
+    const check = find(data.checks, 'search');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('POST /api/search');
   });
 
-  it('search-contract warns (never fails doctor) when the deploy omits the search path', async () => {
+  it('search warns (never fails doctor) when the deploy omits the search path', async () => {
     const noSearch = routeFetch({
       '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
       '/api/articles': { body: ARTICLES_OK },
@@ -289,8 +286,8 @@ describe('runDoctor — passing outcomes', () => {
       fetchImpl: noSearch,
     });
     const data = res.data as { status: string; checks: CheckResult[] };
-    expect(data.status).toBe('pass'); // still passes: search-contract is not required
-    expect(find(data.checks, 'search-contract').status).toBe('warn');
+    expect(data.status).toBe('pass'); // still passes: `search` is not required
+    expect(find(data.checks, 'search').status).toBe('warn');
   });
 
   it('wallet present but not 0600: warns on perms, still passes', async () => {
@@ -406,7 +403,7 @@ describe('runDoctor — passing outcomes', () => {
     expect(data.checks.some((c) => c.name === 'balance')).toBe(false);
   });
 
-  it('read-path probe sends no q parameter (never fabricate search demand)', async () => {
+  it('the read probe sends no q parameter (never fabricate search demand)', async () => {
     // The server logs every nonblank first-page `q` as agent search demand, so a
     // health probe must never inject one. This assertion must never regress.
     let readPathUrl: string | undefined;
@@ -445,8 +442,8 @@ describe('runDoctor — passing outcomes', () => {
       env: {},
       fetchImpl: capturing,
     });
-    // api-contract, search-contract, and read-path each fetch (three requests).
-    expect(headersSeen.length).toBeGreaterThanOrEqual(3);
+    // Two fetches: one openapi.json behind `api` and `search`, plus the read path.
+    expect(headersSeen.length).toBe(2);
     for (const headers of headersSeen) {
       expect(headers['user-agent']).toMatch(/^tenjin-cli\//);
       expect(headers['x-tenjin-client']).toBeUndefined();
@@ -501,7 +498,8 @@ describe('runDoctor — passing outcomes', () => {
 
     it('carries the key on the configured shelf', async () => {
       const seen = await probe({ baseUrl: undefined });
-      expect(seen.length).toBeGreaterThanOrEqual(3);
+      // Two probes, not three: `api` and `search` are two verdicts on one fetch.
+      expect(seen.length).toBe(2);
       for (const headers of seen) expect(headers[BYPASS_HEADER]).toBe(SECRET);
     });
 
@@ -560,7 +558,7 @@ describe('runDoctor — passing outcomes', () => {
         await probe({ baseUrl: 'https://attacker.example' }),
         await probe({ baseUrl: undefined }, { TENJIN_BASE_URL: 'https://attacker.example' }),
       ]) {
-        expect(seen.length).toBeGreaterThanOrEqual(3);
+        expect(seen.length).toBe(2);
         for (const headers of seen) expect(headers[BYPASS_HEADER]).toBeUndefined();
       }
     });
@@ -672,7 +670,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     const err = await catchDoctor(rejecting);
     expect(err.code).toBe('API_UNREACHABLE');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    expect(find(checks, 'api-contract').status).toBe('fail');
+    expect(find(checks, 'api').status).toBe('fail');
   });
 
   it('a 200 with garbage JSON at openapi is CONTRACT_MISMATCH', async () => {
@@ -706,7 +704,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     );
     const err = await catchDoctor(GATE_PAGE);
     expect(err.code).toBe('CONTRACT_MISMATCH');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.detail).toContain('HTML page');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('config set baseUrl');
@@ -740,7 +738,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
         env: {},
         fetchImpl: GATE_PAGE,
       }).catch((e: unknown) => e)) as CliError;
-      const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+      const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
       // Still names what actually came back: that part is true either way.
       expect(check.detail).toContain('HTML page');
       expect(check.fix).not.toContain('shelfBypassSecret');
@@ -764,13 +762,13 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     const err = await catchDoctor(GATE_PAGE);
     expect(err.code).toBe('CONTRACT_MISMATCH');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    const check = find(checks, 'api-contract');
+    const check = find(checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('set the team shelf key');
-    // search-contract hits the same page; its fix must not hand out a second
-    // verdict ("check the base URL") beside api-contract's in --json.
-    expect(find(checks, 'search-contract').fix).toContain('stale or rotated');
+    // search hits the same page; its fix must not hand out a second
+    // verdict ("check the base URL") beside `api`'s in --json.
+    expect(find(checks, 'search').fix).toContain('stale or rotated');
     // A secret is configured on this run, so this assertion can actually fail.
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
@@ -792,7 +790,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     const err = await catchDoctor(GATE_PAGE, SHELF);
     expect(err.code).toBe('CONTRACT_MISMATCH');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    const check = find(checks, 'api-contract');
+    const check = find(checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(JSON.stringify(checks)).not.toContain(SECRET);
   });
@@ -813,7 +811,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.detail).toContain('401');
     expect(check.detail).toContain('HTML page');
     expect(check.fix).toContain('shelfBypassSecret');
@@ -839,7 +837,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(check.fix).not.toContain('config get baseUrl');
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
@@ -867,7 +865,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
     );
     const err = await catchDoctor(JSON_401);
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('shelfBypassSecret');
     // The classification is untouched: nothing claims a page answered.
     expect(check.detail).not.toContain('HTML page');
@@ -881,7 +879,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: SECRET }),
     );
     const err = await catchDoctor(JSON_401);
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('stale or rotated');
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
@@ -889,7 +887,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
   it('a JSON 401 from the marketplace keeps the ordinary advice and names no key', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({}));
     const err = await catchDoctor(JSON_401);
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).not.toContain('shelfBypassSecret');
     expect(check.fix).toContain('config get baseUrl');
   });
@@ -918,14 +916,14 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.fix).toContain('canonical host');
     expect(check.fix).not.toContain('stale or rotated');
     expect(check.fix).not.toContain('shelfBypassSecret');
     expect(JSON.stringify(err.details)).not.toContain(SECRET);
   });
 
-  it('a gated read path points at the key too, not only api-contract', async () => {
+  it('a gated read path points at the key too, not only `api`', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://backtrack.tenjin.sh' }),
@@ -940,7 +938,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       }),
     );
     expect(err.code).toBe('API_UNREACHABLE');
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'read-path');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'read');
     expect(check.status).toBe('fail');
     expect(check.fix).toContain('shelfBypassSecret');
     expect(check.fix).not.toContain('config get baseUrl');
@@ -953,7 +951,7 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
         '/api/articles': { body: ARTICLES_OK },
       }),
     );
-    const check = find((err.details as { checks: CheckResult[] }).checks, 'api-contract');
+    const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
     expect(check.detail).toContain('was not valid JSON');
     expect(check.fix).toContain('config set baseUrl');
     expect(check.fix).not.toContain('shelfBypassSecret');
@@ -978,8 +976,8 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
     );
     expect(err.code).toBe('API_UNREACHABLE');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    expect(find(checks, 'api-contract').status).toBe('ok');
-    expect(find(checks, 'read-path').status).toBe('fail');
+    expect(find(checks, 'api').status).toBe('ok');
+    expect(find(checks, 'read').status).toBe('fail');
   });
 
   it('invalid config JSON is CONFIG_INVALID (exit 2 by default mapping)', async () => {
@@ -1222,7 +1220,6 @@ describe('runDoctor — skill wiring', () => {
     expect(skills.detail).toContain(
       `${claudeSkills()}: the hosted tenjin skill is here but neither CLI skill is wired`,
     );
-    expect(skills.detail).toContain('hosted skill only, no CLI skills here');
     expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
@@ -1259,11 +1256,12 @@ describe('runDoctor — skill wiring', () => {
     expect(skills.detail).toContain(
       `${claudeSkills()}: tenjin-publish installed but not model-invocable (disable-model-invocation: true)`,
     );
-    expect(skills.detail).toContain('[disabled]');
     expect(skills.fix).toBe('tenjin install --harness claude');
   });
 
-  it('both CLI skills wired alongside the hosted mirror: ok, and says which takes precedence', async () => {
+  // A passing line is one clause. Which directory holds what is the per-directory
+  // `data` payload's job, and it is asserted on its own below.
+  it('both CLI skills wired alongside the hosted mirror: ok, in one clause', async () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
@@ -1276,8 +1274,7 @@ describe('runDoctor — skill wiring', () => {
     });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain('tenjin-search + tenjin-publish wired');
-    expect(skills.detail).toContain('CLI skills wired, take precedence over the hosted mirror');
+    expect(skills.detail).toBe('tenjin-search + tenjin-publish, current');
   });
 
   it('reports the shared ~/.agents/skills target too, not just Claude Code', async () => {
@@ -1293,7 +1290,7 @@ describe('runDoctor — skill wiring', () => {
     });
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain(sharedSkills());
+    expect(JSON.stringify(skills.data)).toContain(sharedSkills());
   });
 
   it('an unreadable skill is not reported as disable-model-invocation', async () => {
@@ -1311,7 +1308,6 @@ describe('runDoctor — skill wiring', () => {
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain('unreadable or disable-model-invocation');
-      expect(skills.detail).toContain('[unreadable]');
     } finally {
       await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o600);
     }
@@ -1341,24 +1337,6 @@ describe('runDoctor — skill wiring', () => {
     } finally {
       await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o600);
     }
-  });
-
-  it('a wired directory with no mirror does not claim precedence over one', async () => {
-    await writeSkill('tenjin-search');
-    await writeSkill('tenjin-publish');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
-    expect(skills.status).toBe('ok');
-    expect(skills.detail).toContain(
-      `${claudeSkills()} -> tenjin-search, tenjin-publish (CLI skills wired)`,
-    );
-    expect(skills.detail).not.toContain('take precedence');
   });
 
   // The optional tenjin-pay skill's presence must match the bazaarPay toggle:
@@ -1440,12 +1418,9 @@ describe('runDoctor — skill wiring', () => {
       // The regression: a union across directories announced both CLI skills
       // missing in the same sentence that listed them wired.
       expect(skills.detail).not.toContain('missing');
-      expect(skills.detail).toContain(
-        `${claudeSkills()} -> tenjin-search, tenjin-publish, tenjin (CLI skills wired`,
-      );
-      expect(skills.detail).toContain(
-        `${sharedSkills()} -> tenjin (hosted skill only, no CLI skills here)`,
-      );
+      const dirs = (skills.data as { directories: { dir: string; state: string }[] }).directories;
+      expect(dirs.find((d) => d.dir === claudeSkills())?.state).toBe('wired');
+      expect(dirs.find((d) => d.dir === sharedSkills())?.state).toBe('hosted-only');
     });
 
     it('shadowed in one directory and missing in the other names BOTH, with both fixes', async () => {
@@ -1551,8 +1526,9 @@ describe('runDoctor — skill wiring', () => {
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('ok');
       expect(skills.fix).toBeUndefined();
-      // Still fully described, just not warned about.
-      expect(skills.detail).toContain(`${sharedSkills()} -> tenjin-search (only one CLI skill)`);
+      // Still fully described in the data, just not warned about.
+      const dirs = (skills.data as { directories: { dir: string; state: string }[] }).directories;
+      expect(dirs.find((d) => d.dir === sharedSkills())?.state).toBe('partial');
     });
 
     // The other half of the narrowing: detection cannot see a harness the CLI does
@@ -1804,10 +1780,11 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
   });
 
-  // #81: the human render is the check list plus ONE pointer. The rules, the
-  // opt-in notes, the exclusions and both caveats live on the page it points at
-  // and in `--json` (asserted above), so none of them may be back in the terminal.
-  it('prints no allowlist rule at all, only the pointer', async () => {
+  // #81: the human render is the check list and nothing else. The rules, the
+  // opt-in notes, the exclusions and both caveats live in `--json` (asserted
+  // above) and on the page it documents, so none may be back in the terminal —
+  // and neither may a standing pointer at that page on a run with no finding.
+  it('prints no allowlist rule at all, and no pointer', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
@@ -1819,7 +1796,7 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     }
     expect(text).not.toContain('Never recommended');
     expect(text).not.toContain('mcp__tenjin__tenjin_publish');
-    expect(text).toContain(PERMISSIONS_DOC_URL);
+    expect(text).not.toContain(PERMISSIONS_DOC_URL);
   });
 
   // The essay was ~60 lines above a check list of ~9. Pinned as a budget rather
@@ -1833,15 +1810,16 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     });
     const data = res.data as { checks: CheckResult[] };
     const fixes = data.checks.filter((c) => c.status !== 'ok' && c.fix !== undefined).length;
-    // checks + their fix lines + one blank separator + the pointer.
-    expect((res.humanLines ?? []).length).toBe(data.checks.length + fixes + 2);
+    const headings = (res.humanLines ?? []).filter((l) => /^[A-Z]/.test(l)).length;
+    // checks + their fix lines + a group heading each + one blank + the tally.
+    expect((res.humanLines ?? []).length).toBe(data.checks.length + fixes + headings + 2);
   });
 });
 
 /**
- * The one rule doctor DOES name. An operator whose agent is being prompted for
- * every publish, on a mode that says not to ask, is reading exactly this line —
- * and the pointer, which names no rule at all, cannot tell them which one to add.
+ * The one rule doctor DOES name, and the only line it prints below the tally.
+ * An operator whose agent is being prompted for every publish, on a mode that
+ * says not to ask, is reading exactly this line.
  */
 describe('runDoctor — the rule the publish mode carries', () => {
   let home: string;
@@ -1931,8 +1909,8 @@ describe('runDoctor — the rule the publish mode carries', () => {
     const text = await run();
     expect(text).toContain('Bash(tenjin publish:*)');
     expect(text).toContain('publish.mode=auto');
-    // Still above the one pointer that closes every doctor run.
-    expect(text.trimEnd().endsWith(PERMISSIONS_DOC_URL)).toBe(true);
+    // Below the tally: it is a finding about this machine, not a check.
+    expect(text.trimEnd().split('\n').at(-1)).toContain('publish.mode=auto');
   });
 
   it('names the rule on full-auto', async () => {
@@ -2088,7 +2066,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
     expect(text).toContain('error: Read path');
     expect(text).toContain('fix: ');
     expect(text).not.toContain(PERMISSIONS_DOC_URL);
-    expect(text).not.toContain('api-contract'); // no check list on this path
+    expect(text).not.toContain('Environment'); // no check list on this path
   });
 
   // `info.version` is server-controlled and now renders directly above a block
@@ -2113,7 +2091,7 @@ describe('runDoctor — allowlist on the failure path and terminal safety', () =
       fetchImpl: hostile,
     });
     const lines = res.humanLines ?? [];
-    const apiLine = lines.find((l) => l.includes('api-contract')) ?? '';
+    const apiLine = lines.find((l) => l.includes('api')) ?? '';
     // The payload survives as inert text on ONE line: no newline to start a
     // forged block, and no escape sequence left to repaint it.
     expect(apiLine).toContain('Bash(tenjin:*)');
@@ -2468,7 +2446,7 @@ describe('runDoctor — session key', () => {
     };
     expect(await detailAt(() => Date.parse(file.exp) + 1)).toContain('normal after 24h');
     expect(await detailAt(() => Date.parse(file.exp) - 3_600_000)).toContain(
-      `Session key ${file.address}`,
+      `${file.address}, scope`,
     );
   });
 });
@@ -2562,7 +2540,7 @@ describe('runDoctor — session key, the states loadSessionFile flattens', () =>
     const data = res.data as { status: string; checks: CheckResult[] };
     // Every other check still ran, and the session one warns with its fix.
     expect(data.status).toBe('pass');
-    expect(find(data.checks, 'api-contract').status).toBe('ok');
+    expect(find(data.checks, 'api').status).toBe('ok');
     const check = find(data.checks, 'session');
     expect(check.status).toBe('warn');
     expect(check.fix).toBe('tenjin session start --scope read');
@@ -2611,90 +2589,13 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
 });
 
 /**
- * The `sig_v1_test` lane (tenjin-agent#267, redesigned round 3) reads a
- * report `tenjin-vitest-reporter.mjs` wrote when one exists; this is the hint
- * that tells an operator whose project has no such reporter that they are
- * losing precision. Silent unless there is something to report, so most of
- * these assert the check is ABSENT.
- */
-describe('runDoctor — test reporter hint', () => {
-  async function reporterCheck(): Promise<CheckResult | undefined> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-      cwd: dir,
-    });
-    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'test-reporters');
-  }
-
-  it('stays quiet when the project has no vitest at all', async () => {
-    expect(await reporterCheck()).toBeUndefined();
-  });
-
-  it('detects a vitest config with no tenjin reporter', async () => {
-    await writeFile(
-      join(dir, 'vitest.config.ts'),
-      "export default { test: { environment: 'node' } };",
-    );
-    const check = await reporterCheck();
-    expect(check?.status).toBe('warn');
-    expect(check?.required).toBe(false);
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
-    expect(check?.fix).toContain("reporters: ['default', ['");
-    expect(check?.fix).toContain('tenjin-vitest-reporter.mjs');
-    expect(check?.fix).toContain("{ outputFile: '.vitest-report.json' }]]");
-  });
-
-  it('detects vitest as a bare devDependency with no config file', async () => {
-    await writeFile(
-      join(dir, 'package.json'),
-      JSON.stringify({ name: 'x', devDependencies: { vitest: '^2.0.0' } }),
-    );
-    const check = await reporterCheck();
-    expect(check?.status).toBe('warn');
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
-  });
-
-  it('a vite.config.* with no test block is not read as an unconfigured vitest', async () => {
-    await writeFile(join(dir, 'vite.config.ts'), 'export default { plugins: [] };');
-    expect(await reporterCheck()).toBeUndefined();
-  });
-
-  it('stays quiet when the config already wires the tenjin reporter', async () => {
-    await writeFile(
-      join(dir, 'vitest.config.ts'),
-      "export default { test: { reporters: ['default', ['/home/x/.tenjin/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }]] } };",
-    );
-    expect(await reporterCheck()).toBeUndefined();
-  });
-
-  // tenjin-agent#278 round 3: the stock `json` reporter carries no
-  // `startTime`/`endTime`, so an artifact it writes now fails the failure
-  // arm's window check outright — a config still wired to it is exactly as
-  // unwired, precision-wise, as one with no reporter at all, and the hint
-  // must say so rather than reading the old shape as "already fixed".
-  it('still warns when the config only wires the stock json reporter, not the tenjin one', async () => {
-    await writeFile(
-      join(dir, 'vitest.config.ts'),
-      "export default { test: { reporters: ['default', ['json', { outputFile: '.vitest-report.json' }]] } };",
-    );
-    const check = await reporterCheck();
-    expect(check?.status).toBe('warn');
-    expect(check?.detail).toMatch(/vitest detected without the tenjin reporter/);
-  });
-});
-
-/**
  * The one hook failure that is silent in the wild: the URL in settings.json
  * carries the port the daemon had bound when install ran, and a daemon that
  * later came back on another one makes every tool fire a non-blocking
  * `HTTP hook error` the operator never sees.
  */
 describe('runDoctor — loop hook wiring', () => {
-  async function loopCheck(): Promise<CheckResult | undefined> {
+  async function hookChecks(): Promise<CheckResult[]> {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       homeDir: skillHome,
@@ -2702,7 +2603,12 @@ describe('runDoctor — loop hook wiring', () => {
       env: {},
       fetchImpl: healthyFetch,
     });
-    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'loop hooks');
+    const checks = (res.data as { checks: CheckResult[] }).checks;
+    return checks.filter((c) => c.name === 'daemon' || c.name === 'entries');
+  }
+
+  async function loopCheck(): Promise<CheckResult | undefined> {
+    return (await hookChecks()).find((c) => c.name === 'daemon');
   }
 
   async function wireAt(port: number): Promise<void> {
@@ -2733,7 +2639,16 @@ describe('runDoctor — loop hook wiring', () => {
   }
 
   it('says nothing on a machine with no hook entries of ours', async () => {
-    expect(await loopCheck()).toBeUndefined();
+    expect(await hookChecks()).toEqual([]);
+  });
+
+  // Two facts, two lines: whether the daemon answers, and what the file holds.
+  it('counts the entries and names the file they are in', async () => {
+    await wireAt(31_999);
+    const entries = (await hookChecks()).find((c) => c.name === 'entries');
+    expect(entries?.status).toBe('ok');
+    expect(entries?.detail).toBe(`1 in ${join(skillHome, '.claude', 'settings.json')}`);
+    expect(entries?.fix).toBeUndefined();
   });
 
   it('warns with "daemon not running" when nothing answers the registered port', async () => {
@@ -2760,8 +2675,119 @@ describe('runDoctor — loop hook wiring', () => {
     if (process.platform === 'win32') return;
     await wireAt(31_999);
     await chmod(join(skillHome, '.claude', 'settings.json'), 0o644);
-    const check = await loopCheck();
-    expect(check?.detail).toContain('wider than 0600');
+    const entries = (await hookChecks()).find((c) => c.name === 'entries');
+    expect(entries?.status).toBe('warn');
+    expect(entries?.detail).toContain('wider than 0600');
+    expect(entries?.fix).toContain('chmod 600');
+  });
+});
+
+/**
+ * The page itself: four groups, one line per check, a `fix:` only where there is
+ * something to fix, one tally. The wall this replaced was fifteen ungrouped
+ * lines, a paragraph of `fix:` under every one of them, and a standing pointer.
+ */
+describe('runDoctor — the grouped page', () => {
+  async function page(): Promise<{ lines: string[]; checks: CheckResult[] }> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return { lines: res.humanLines ?? [], checks: (res.data as { checks: CheckResult[] }).checks };
+  }
+
+  it('prints the four groups in order, with every check under one of them', async () => {
+    const { lines, checks } = await page();
+    const headings = lines.filter((l) => /^[A-Z]/.test(l));
+    expect(headings).toEqual(['Environment', 'Shelf', 'Hooks', 'Wallet']);
+    // A check whose name is in no group would render nowhere at all.
+    for (const c of checks) {
+      expect(lines.some((l) => l.startsWith(`  `) && l.includes(` ${c.name} `))).toBe(true);
+    }
+  });
+
+  it('indents each check under its heading and aligns the detail column', async () => {
+    const { lines, checks } = await page();
+    const width = Math.max(...checks.map((c) => c.name.length));
+    const icon = { ok: '\u2713', warn: '!', fail: '\u2717' };
+    for (const c of checks) {
+      expect(lines).toContain(`  ${icon[c.status]} ${c.name.padEnd(width)}  ${c.detail}`);
+    }
+  });
+
+  it('prints a fix line only under a warn or a fail', async () => {
+    const { lines, checks } = await page();
+    const fixes = lines.filter((l) => l.trimStart().startsWith('fix: '));
+    const failing = checks.filter((c) => c.status !== 'ok' && c.fix !== undefined);
+    expect(fixes.length).toBe(failing.length);
+    for (const c of checks.filter((x) => x.status === 'ok' && x.fix !== undefined)) {
+      expect(fixes.some((l) => l.includes(c.fix ?? ''))).toBe(false);
+    }
+  });
+
+  it('closes with one tally, after a blank line', async () => {
+    const { lines, checks } = await page();
+    const warns = checks.filter((c) => c.status === 'warn').length;
+    expect(lines.at(-2)).toBe('');
+    expect(lines.at(-1)).toBe(
+      `${checks.length} checks: ${checks.length - warns} ok, ${warns} warn.`,
+    );
+  });
+});
+
+/**
+ * The `pairings` line: fixes this machine worked out that no piece explains yet.
+ * Never a defect and never a fix line — the write-up is the agent's to make, and
+ * the turn-end ask is where it is asked for.
+ */
+describe('runDoctor — pending pairings', () => {
+  const TEAM = { baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: 'shelf-secret-abc' };
+
+  async function pairing(post_id: string | null, scope = 'code', closed = 1): Promise<void> {
+    const db = openLoopDb(dir);
+    db.prepare(
+      `INSERT INTO pairings (uid, at, session, machine, kind, key, scope, status, closes, closed_at, post_id)
+       VALUES (?, 1, 's', 'm', 'sig_v1', 'sig_v1:abc', ?, 'unverified', 1, ?, ?)`,
+    ).run(`p-${Math.random()}`, scope, closed === 1 ? 2 : null, post_id);
+    db.close();
+  }
+
+  async function pairingsCheck(): Promise<CheckResult | undefined> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'pairings');
+  }
+
+  it('says nothing on a machine that is not on a team shelf', async () => {
+    await pairing(null);
+    expect(await pairingsCheck()).toBeUndefined();
+  });
+
+  it('counts the closed code-scope fixes no piece explains yet', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify(TEAM));
+    await pairing(null);
+    await pairing(null);
+    const check = await pairingsCheck();
+    expect(check?.status).toBe('ok');
+    expect(check?.detail).toBe('2 fixed, not yet written up (the turn-end ask names them)');
+    expect(check?.fix).toBeUndefined();
+  });
+
+  it('counts neither a stamped pairing, a user-scope one, nor an open one', async () => {
+    await writeFile(join(dir, 'config.json'), JSON.stringify(TEAM));
+    await pairing('post-1');
+    await pairing(null, 'user');
+    await pairing(null, 'code', 0);
+    const check = await pairingsCheck();
+    expect(check?.detail).toBe('none waiting for the shelf');
   });
 });
 

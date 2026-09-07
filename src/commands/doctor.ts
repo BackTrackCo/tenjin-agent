@@ -3,7 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lstat, readFile, rm, stat } from 'node:fs/promises';
+import { lstat, rm, stat } from 'node:fs/promises';
 import {
   OPTIONAL_PAY_SKILL,
   OPTIONAL_SKILL_NAMES,
@@ -27,12 +27,7 @@ import {
   shadowedCliSkills,
 } from '../lib/skill-wiring';
 import { skillMaterialize } from '../lib/skill-materialize';
-import type {
-  DirState,
-  HarnessTarget,
-  HarnessWiring,
-  NotInvocableReason,
-} from '../lib/skill-wiring';
+import type { HarnessTarget, HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import {
@@ -42,24 +37,18 @@ import {
   resolveShelfBypass,
 } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
-import {
-  configPath,
-  dataDir as resolveDataDir,
-  loopDbPath,
-  sessionPath,
-  vitestReporterPath,
-} from '../lib/paths';
+import { configPath, dataDir as resolveDataDir, loopDbPath, sessionPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
-import { modeGatedPointer, permissionsPointer, recommendedPermissions } from '../lib/permissions';
+import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
   claudeSettingsPath,
   inspectFreeVerbRules,
   MODE_GATED_RULES,
 } from '../lib/harness-permissions';
-import { hookBundlesPresent, registeredHookPort } from '../lib/harness-hooks';
+import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
 import { health, readPid } from '../hooks/shim';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
@@ -72,6 +61,7 @@ import type {
 } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { openLoopDbForCli } from '../lib/loop-db';
+import type { LoopDb } from '../hooks/store';
 import { runRetention } from '../daemon/retention';
 
 /**
@@ -115,15 +105,10 @@ const FIX_CHECK_NETWORK_AND_BASE_URL =
  * The base URL was RIGHT and the credential was missing. Sending the operator to
  * `baseUrl` here (what a bare CONTRACT_MISMATCH did, #218) asks them to change
  * the one setting that was already correct. Names the config key and no value:
- * the secret itself never reaches any check output. Says "if" because the page
- * signal alone does not prove protection; only the off-host redirect does, and
- * the detail line carries that distinction. Names the alternative for the same
- * reason {@link FIX_ROTATE_SHELF_BYPASS} does: an HTML page also answers a
- * `baseUrl` that is one typo off any site on the web, and setting a key would
- * not touch that.
+ * the secret itself never reaches any check output.
  */
 const FIX_SET_SHELF_BYPASS =
-  'If that deployment is access-protected these probes did not get past it; set the team shelf key: `tenjin config set shelfBypassSecret <value>`. If it is not, something else answered instead (a proxy, WAF, or a base URL that is not the shelf you meant); confirm which before setting one.';
+  'If that deployment is access-protected, set the team shelf key: `tenjin config set shelfBypassSecret <value>`.';
 /**
  * Same page, but the probe CARRIED the configured key and still did not get
  * past. Telling this machine to set the secret it already sent (the stale-key
@@ -131,7 +116,7 @@ const FIX_SET_SHELF_BYPASS =
  * 307 interstitial) would read as "doctor says my config is fine as is".
  */
 const FIX_ROTATE_SHELF_BYPASS =
-  'The configured shelfBypassSecret was sent and did not get past. Either the key is stale or rotated (update it: `tenjin config set shelfBypassSecret <value>`), or something between you and the shelf answered instead (a proxy, WAF, or another sign-in layer); confirm which before rotating.';
+  'The configured shelfBypassSecret was sent and did not get past, so it is stale or rotated: `tenjin config set shelfBypassSecret <value>`.';
 /**
  * A keyed probe was redirected, but to the SAME host it asked for: an `http://`
  * base URL that 301s to https, or a host normalising to its canonical name. The
@@ -139,21 +124,21 @@ const FIX_ROTATE_SHELF_BYPASS =
  * again, blaming the setting that was right. `baseUrl` is the one that moves.
  */
 const FIX_FOLLOW_REDIRECT_IN_BASE_URL =
-  'That URL redirects, and a probe carrying the team shelf key does not follow redirects. Point the configured base URL at the canonical host and scheme it redirects to: `tenjin config set baseUrl <url>`.';
+  'That URL redirects: point the configured base URL at the canonical host it names (`tenjin config set baseUrl <url>`).';
 /**
  * The same page, from a URL where the team key is not the answer. Naming
  * `baseUrl` would be wrong too: something answered, it just was not Tenjin. So
- * this describes what happened and points at the two things that can cause it,
- * without prescribing either.
+ * this describes what happened rather than prescribing a setting.
  */
 const FIX_PAGE_NOT_THE_API =
-  'Something between this machine and that URL answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall). Check your network path and the configured base URL (`tenjin config get baseUrl`).';
+  'Something answered with a page instead of the API (a proxy, a captive portal, or a sign-in wall); check your network path and the configured base URL (`tenjin config get baseUrl`).';
 
 /**
  * A CheckResult plus the error code to raise if it is a *required* failure. Only
  * required checks carry a `failCode`; the outcome step raises the first one, so
- * the failure envelope's `error.code` names what actually broke (api-contract
- * unreachable vs malformed differ) while still carrying the whole check list.
+ * the failure envelope's `error.code` names what actually broke (an `api` that
+ * is unreachable and one that is malformed differ) while still carrying the
+ * whole check list.
  */
 interface BuiltCheck {
   result: CheckResult;
@@ -249,9 +234,11 @@ export async function collectDoctorChecks(
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
+  const teamMode = isTeamModeConfig(config);
   const built: BuiltCheck[] = [
     checkNode(),
-    checkStore(ctx.dataDir, deps.openLoopDb ?? openLoopDbForCli),
+    // One open, two facts: the file opens, and what it holds that is waiting.
+    ...checkLoopDb(ctx.dataDir, deps.openLoopDb ?? openLoopDbForCli, teamMode),
   ];
   // Only when there is something to say: a machine on the default data dir is
   // the ordinary case and gets no line about it.
@@ -259,16 +246,16 @@ export async function collectDoctorChecks(
   if (redirected !== null) built.push(redirected);
   built.push(
     configCheck,
-    // The three baseUrl probes carry the team shelf's bypass. Without it every
-    // one of them reports a protected team deployment as unreachable, which is
-    // the check saying "your CLI is broken" about the one setting that is right.
-    await checkApiContract(
+    // The two baseUrl probes carry the team shelf's bypass. Without it both
+    // report a protected team deployment as unreachable, which is the check
+    // saying "your CLI is broken" about the one setting that is right.
+    ...(await checkShelfContract(
       baseUrl,
       ctx.flags.timeout,
       deps.fetchImpl,
       bypass,
       shelfKeyIsTheRemedy(settings, bypass),
-    ),
+    )),
     await checkReadPath(
       baseUrl,
       ctx.flags.timeout,
@@ -276,13 +263,17 @@ export async function collectDoctorChecks(
       bypass,
       shelfKeyIsTheRemedy(settings, bypass),
     ),
-    await checkSearchContract(
-      baseUrl,
-      ctx.flags.timeout,
-      deps.fetchImpl,
-      bypass,
-      shelfKeyIsTheRemedy(settings, bypass),
-    ),
+  );
+
+  // Silent unless one of the two settings claims a team shelf, so a default
+  // machine gets no check about a feature it never turned on.
+  const teamShelf = checkTeamShelf(settings, bypass);
+  if (teamShelf !== null) built.push(teamShelf);
+
+  // Silent (nothing pushed) on a machine with no hook entries of ours at all;
+  // see checkHooks.
+  built.push(
+    ...(await checkHooks(home, ctx.dataDir)),
     await checkSkills(
       home,
       which,
@@ -292,25 +283,10 @@ export async function collectDoctorChecks(
       // The raw config, not resolved settings: the staleness compare has to shape
       // the packaged copies the way the WRITERS shaped them, and they read the
       // machine's configured mode with no flag layer (lib/skill-materialize).
-      isTeamModeConfig(config),
+      teamMode,
     ),
     await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   );
-
-  // Silent (no check pushed) on a machine with no hook entries of ours at all;
-  // see checkLoopHooks.
-  const loopHooks = await checkLoopHooks(home, ctx.dataDir);
-  if (loopHooks !== null) built.push(loopHooks);
-
-  // Same rule: silent unless one of the two settings claims a team shelf, so a
-  // default machine gets no check about a feature it never turned on.
-  const teamShelf = checkTeamShelf(settings, bypass);
-  if (teamShelf !== null) built.push(teamShelf);
-
-  // Same rule again: silent when this project has no vitest, or already wires
-  // the reporter the failure arm's test-identity lane (tenjin-agent#267) prefers.
-  const testReporterHint = await checkTestReporterHints(cwd, ctx.dataDir);
-  if (testReporterHint !== null) built.push(testReporterHint);
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
   // describe() and diagnostics(), so doctor never runs its own fs/env probe.
@@ -355,15 +331,11 @@ export async function runDoctor(
     });
   }
 
-  // The discoverability surface for the auto-mode denial problem (#33), now one
-  // line rather than the ~60 that used to bury the check list this command was
-  // run for: an operator whose agent just got denied still learns the allowlist
-  // exists and where to get it. It reports nothing about the local machine, so it
-  // is deliberately NOT a check: it can never pass or fail. `--json` is unchanged
-  // and still carries the whole recommendation as data.
-  // The mode-gated line goes ABOVE the pointer, and only when there is one: it
-  // names a rule this machine's own mode needs, which is closer to a finding than
-  // to the standing recommendation the pointer links to.
+  // The one line doctor adds to the check list, and only when there is one: it
+  // names a rule this machine's own mode is missing, which is a finding. The
+  // standing recommendation is `--json`'s `permissions` payload and the page it
+  // documents; a pointer at that page on every run was a nag with no action
+  // behind it, so there is none.
   // An env-set mode needs `config set`, not `install`: install resolves the mode
   // from the global file, so it would write nothing for a mode that only exists
   // in this process's environment.
@@ -382,9 +354,7 @@ export async function runDoctor(
     data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
     humanLines: [
       ...renderDoctorHuman(ctx.io, checks),
-      '',
-      ...(showModeLine && modeLine !== null ? [modeLine] : []),
-      permissionsPointer(),
+      ...(showModeLine && modeLine !== null ? ['', modeLine] : []),
     ],
   };
 }
@@ -460,22 +430,22 @@ function checkNode(): BuiltCheck {
   const version = process.versions.node;
   const major = Number.parseInt(version.split('.')[0] ?? '0', 10);
   if (major >= 24) {
-    return { result: { name: 'node', status: 'ok', required: true, detail: `Node ${version}` } };
+    return { result: { name: 'node', status: 'ok', required: true, detail: version } };
   }
   return {
     result: {
       name: 'node',
       status: 'fail',
       required: true,
-      detail: `Node ${version} is unsupported (need >= 24)`,
-      fix: 'Install Node 24 or newer',
+      detail: `${version}, below the 24 this CLI needs`,
+      fix: 'Install Node 24 or newer.',
     },
     failCode: 'NODE_UNSUPPORTED',
   };
 }
 
 /**
- * Does this machine's loop database open?
+ * Does this machine's loop database open, and what is it holding?
  *
  * The whole of the loop's state — every fire and leg, the gate marks, the
  * error→fix pairings, the search record, the finding queue — is one SQLite
@@ -485,35 +455,77 @@ function checkNode(): BuiltCheck {
  * looks identical from the outside to one that simply had nothing to say. So
  * doctor opens it, which proves the module, the file and its shape in one go.
  *
- * THE OPEN IS THE PROBE. There used to be a separate `node:sqlite` import
- * check beside this; it answered a strict subset of what opening the real file
- * answers.
+ * THE OPEN IS THE PROBE: a separate `node:sqlite` import check answers a
+ * strict subset of what opening the real file answers. The same open serves
+ * the `pairings` line below, so the diagnosis costs one handle, not two.
  */
-function checkStore(dir: string, open: typeof openLoopDbForCli): BuiltCheck {
+function checkLoopDb(dir: string, open: typeof openLoopDbForCli, teamMode: boolean): BuiltCheck[] {
   const path = loopDbPath(dir);
   try {
-    open(dir).close();
-    return {
-      result: { name: 'store', status: 'ok', required: true, detail: `${path} open` },
-    };
+    const db = open(dir);
+    try {
+      return [
+        { result: { name: 'store', status: 'ok', required: true, detail: `${path} open` } },
+        ...(teamMode ? [checkPairings(db)] : []),
+      ];
+    } finally {
+      db.close();
+    }
   } catch (err) {
-    return {
-      result: {
-        name: 'store',
-        status: 'fail',
-        required: true,
-        // Anyone reading this already cleared the >=24 preflight in src/index.ts,
-        // so "upgrade Node" cannot be the remedy: the runtime is supported and
-        // the open still failed, which points at the install — a damaged or
-        // re-bundled dist (tsup once shipped `import("sqlite")`,
-        // tenjin-agent#225), a patched runtime — or at a file another build's
-        // daemon is holding open.
-        detail: `${path} could not be opened, so the loop keeps no state at all: ${err instanceof Error ? err.message : String(err)}`,
-        fix: 'Run `tenjin daemon stop` and retry; if it persists, reinstall tenjin-cli (npm i -g tenjin-cli@latest).',
+    return [
+      {
+        result: {
+          name: 'store',
+          status: 'fail',
+          required: true,
+          // Anyone reading this already cleared the >=24 preflight in src/index.ts,
+          // so "upgrade Node" cannot be the remedy: the runtime is supported and
+          // the open still failed, which points at the install — a damaged or
+          // re-bundled dist (tsup once shipped `import("sqlite")`,
+          // tenjin-agent#225), a patched runtime — or at a file another build's
+          // daemon is holding open.
+          detail: `${path} could not be opened, so the loop keeps no state at all: ${err instanceof Error ? err.message : String(err)}`,
+          fix: 'Run `tenjin daemon stop` and retry; if it persists, reinstall tenjin-cli (npm i -g tenjin-cli@latest).',
+        },
+        failCode: 'INTERNAL',
       },
-      failCode: 'INTERNAL',
-    };
+    ];
   }
+}
+
+/**
+ * Fixes this machine worked out that no piece explains yet.
+ *
+ * A closed code-scope pairing with no `post_id` is an error someone already
+ * solved here and nowhere else: the turn-end ask names each one with its key,
+ * and `publish --key` stamps the pairing when the write-up lands. So this is a
+ * count of what the shelf is still missing, never a defect — `ok` either way,
+ * with no fix line, because the remedy is a piece only the agent that made the
+ * fix can write.
+ *
+ * TEAM MODE ONLY: on the public marketplace there is no shelf for a teammate to
+ * find the answer on, so the number would be a standing reproach with nowhere
+ * to send it.
+ */
+function checkPairings(db: LoopDb): BuiltCheck {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM pairings
+       WHERE post_id IS NULL AND scope = 'code' AND closed_at IS NOT NULL`,
+    )
+    .get() as unknown as { n?: unknown };
+  const waiting = typeof row?.n === 'number' ? row.n : 0;
+  return {
+    result: {
+      name: 'pairings',
+      status: 'ok',
+      required: false,
+      detail:
+        waiting === 0
+          ? 'none waiting for the shelf'
+          : `${waiting} fixed, not yet written up (the turn-end ask names them)`,
+    },
+  };
 }
 
 /**
@@ -534,7 +546,7 @@ function checkDataDirOverride(env: NodeJS.ProcessEnv): BuiltCheck | null {
       name: 'data-dir',
       status: 'ok',
       required: false,
-      detail: `TENJIN_DATA_DIR=${resolveDataDir(env)} — this profile has its own config, wallet and loop database, and skill self-healing stands down while it is set`,
+      detail: `${resolveDataDir(env)} (TENJIN_DATA_DIR); skill self-healing stands down while it is set`,
     },
   };
 }
@@ -551,9 +563,7 @@ async function loadConfigForDoctor(
   try {
     const config = await loadRawConfig(dataDir);
     const detail =
-      Object.keys(config).length === 0
-        ? 'No config file; using defaults'
-        : `Config at ${configPath(dataDir)} is valid`;
+      Object.keys(config).length === 0 ? 'no config file; using defaults' : configPath(dataDir);
     return { config, check: { result: { name: 'config', status: 'ok', required: true, detail } } };
   } catch (err) {
     if (err instanceof CliError && err.code === 'CONFIG_INVALID') {
@@ -623,7 +633,7 @@ function shelfGateFix(
 /**
  * What a gate-suspected failure SAYS happened, shared by the probes that print
  * one so a `detail` and its `fix` cannot tell different stories about one
- * response (read-path used to print the transport's raw "was not valid JSON"
+ * response (`read` used to print the transport's raw "was not valid JSON"
  * beside a fix about the key). Claims no more than the signal proves: an
  * off-host landing proves a sign-in redirect, an HTML content-type alone proves
  * only that a page answered. The status rides both arms, since a 401 is the
@@ -636,14 +646,28 @@ function gateDetail(url: string, res: FetchJsonFailure): string {
     : `${url} answered${status} with an HTML page, not JSON`;
 }
 
-async function checkApiContract(
+/**
+ * ONE `openapi.json`, two verdicts.
+ *
+ * `api` is required: the document proves a Tenjin API answered and names its
+ * version. `search` is warn-only and rides the same response — the deployment
+ * either advertises `/api/search` or predates search v3 (tenjin#137), which
+ * `tenjin search` and the buy path that starts there need. Two fetches of one
+ * document is what this was, and the second one's failure branch existed mostly
+ * to avoid contradicting the first.
+ *
+ * It probes `/api/search`, the path the client actually calls. The
+ * `/api/agent/search` alias it replaced answers 410 after one release, so a
+ * deployment advertising ONLY the alias is exactly the case to warn about.
+ */
+async function checkShelfContract(
   baseUrl: string,
   timeoutMs: number,
   fetchImpl?: typeof fetch,
   bypass?: ShelfBypass,
   /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
   shelfKeyRemedy = false,
-): Promise<BuiltCheck> {
+): Promise<BuiltCheck[]> {
   const url = `${trimSlash(baseUrl)}/openapi.json`;
   const res = await fetchJson(url, {
     timeoutMs,
@@ -659,104 +683,75 @@ async function checkApiContract(
     // than the signal proves: an off-host landing proves a sign-in redirect, an
     // HTML content-type alone proves only that a page answered.
     const gated = res.gateSuspected === true;
-    return {
-      result: {
-        name: 'api-contract',
-        status: 'fail',
-        required: true,
-        detail: gated
-          ? gateDetail(url, res)
-          : malformed
-            ? `OpenAPI document at ${url} was not valid JSON`
-            : `Could not reach the Tenjin API at ${url}: ${res.message}`,
-        fix:
-          shelfGateFix(res, bypass, shelfKeyRemedy) ??
-          (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL),
+    // The gate-aware fix rides BOTH verdicts: one response cannot be told to
+    // set a key on one line and to check the base URL on the next.
+    const fix =
+      shelfGateFix(res, bypass, shelfKeyRemedy) ??
+      (malformed ? FIX_POINT_AT_TENJIN_API : FIX_CHECK_NETWORK_AND_BASE_URL);
+    return [
+      {
+        result: {
+          name: 'api',
+          status: 'fail',
+          required: true,
+          detail: gated
+            ? gateDetail(url, res)
+            : malformed
+              ? `OpenAPI document at ${url} was not valid JSON`
+              : `Could not reach the Tenjin API at ${url}: ${res.message}`,
+          fix,
+        },
+        failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
       },
-      failCode: malformed ? 'CONTRACT_MISMATCH' : 'API_UNREACHABLE',
-    };
-  }
-  const version = infoVersion(res.json);
-  if (version === undefined) {
-    return {
-      result: {
-        name: 'api-contract',
-        status: 'fail',
-        required: true,
-        detail: `OpenAPI document at ${url} is missing a string info.version`,
-        fix: FIX_POINT_AT_TENJIN_API,
-      },
-      failCode: 'CONTRACT_MISMATCH',
-    };
-  }
-  return {
-    result: {
-      name: 'api-contract',
-      status: 'ok',
-      required: true,
-      detail: `Tenjin API ${version} at ${baseUrl}`,
-    },
-  };
-}
-
-/**
- * WARN-level (never fails doctor): is the search endpoint advertised in the
- * OpenAPI doc? Absent means the deployment predates search v3 (tenjin#137), so
- * `tenjin search` and the buy path that starts there will not work against it.
- * Warn-only because doctor's job is a working READ path, and search is additive.
- *
- * It probes `/api/search`, the path the client actually calls. The
- * `/api/agent/search` alias it replaced is deprecated and answers 410 after one
- * release, so a deployment advertising ONLY the alias is exactly the case this
- * check has to warn about rather than pass.
- */
-async function checkSearchContract(
-  baseUrl: string,
-  timeoutMs: number,
-  fetchImpl?: typeof fetch,
-  bypass?: ShelfBypass,
-  /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
-  shelfKeyRemedy = false,
-): Promise<BuiltCheck> {
-  const url = `${trimSlash(baseUrl)}/openapi.json`;
-  const res = await fetchJson(url, {
-    timeoutMs,
-    fetchImpl,
-    ...(bypass !== undefined ? { bypass } : {}),
-  });
-  if (!res.ok) {
-    // The gate-aware fix rides here too: a gated failure answers all three
-    // probes at once, `--json` carries every check, and a "check the base URL"
-    // here beside a "set the key" on api-contract is two verdicts on one cause.
-    return {
-      result: {
-        name: 'search-contract',
-        status: 'warn',
-        required: false,
-        detail: `Could not confirm the search endpoint at ${url}`,
-        fix:
-          shelfGateFix(res, bypass, shelfKeyRemedy) ??
-          'Check the configured base URL (`tenjin config get baseUrl`); search/buy need the A2 endpoints deployed.',
-      },
-    };
-  }
-  const present = hasSearchPath(res.json);
-  return {
-    result: present
-      ? {
-          name: 'search-contract',
-          status: 'ok',
-          required: false,
-          detail: 'Search endpoint advertised',
-        }
-      : {
-          name: 'search-contract',
+      {
+        result: {
+          name: 'search',
           status: 'warn',
           required: false,
-          detail: 'This deployment does not advertise POST /api/search (it predates search v3)',
-          fix: 'search/buy need search v3 deployed; point the configured base URL at a deploy that has it (`tenjin config set baseUrl <url>`).',
+          detail: 'not confirmed: the same document did not answer',
+          fix,
         },
-  };
+      },
+    ];
+  }
+  const search: BuiltCheck = hasSearchPath(res.json)
+    ? { result: { name: 'search', status: 'ok', required: false, detail: 'advertised' } }
+    : {
+        result: {
+          name: 'search',
+          status: 'warn',
+          required: false,
+          detail: 'POST /api/search not advertised (this deployment predates search v3)',
+          fix: 'Point the configured base URL at a deploy that has search v3: `tenjin config set baseUrl <url>`.',
+        },
+      };
+  const version = infoVersion(res.json);
+  if (version === undefined) {
+    return [
+      {
+        result: {
+          name: 'api',
+          status: 'fail',
+          required: true,
+          detail: `OpenAPI document at ${url} is missing a string info.version`,
+          fix: FIX_POINT_AT_TENJIN_API,
+        },
+        failCode: 'CONTRACT_MISMATCH',
+      },
+      search,
+    ];
+  }
+  return [
+    {
+      result: {
+        name: 'api',
+        status: 'ok',
+        required: true,
+        detail: `Tenjin ${version} at ${baseUrl}`,
+      },
+    },
+    search,
+  ];
 }
 
 function hasSearchPath(json: unknown): boolean {
@@ -848,7 +843,7 @@ async function checkSkills(
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${broken.map(describeProblem).join('; ')}. Full state: ${describeWiring(inPlay)}`,
+        detail: broken.map(describeProblem).join('; '),
         fix: fixFor(home, broken),
         data,
       },
@@ -903,7 +898,7 @@ async function checkSkills(
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read, so whether they are current is unknown`,
+        detail: `${CLI_SKILL_NAMES.join(' + ')} wired, but this build's packaged copies could not be read`,
         // NOT `tenjin update`: this warning means the packaged copies are
         // unreadable, which a current version answers with "up to date" and no
         // work at all. Reinstalling the same version is the actual repair.
@@ -918,7 +913,7 @@ async function checkSkills(
         name: 'skills',
         status: 'warn',
         required: false,
-        detail: `${CLI_SKILL_NAMES.join(' + ')} wired but not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
+        detail: `not from this CLI build (${stale.join(', ')}); agents are reading an older version's instructions`,
         // fixFor, like every neighbouring branch: a plain `tenjin install` targets
         // DETECTED harnesses only, so for a directory that exists because someone
         // passed --harness it would be a fix that never clears the warning.
@@ -936,7 +931,7 @@ async function checkSkills(
       name: 'skills',
       status: 'ok',
       required: false,
-      detail: `${CLI_SKILL_NAMES.join(' + ')} wired: ${describeWiring(inPlay)}`,
+      detail: `${CLI_SKILL_NAMES.join(' + ')}, current`,
       data,
     },
   };
@@ -1048,11 +1043,6 @@ function reasonFor(w: HarnessWiring, name: string): NotInvocableReason | undefin
   return w.skills.find((s) => s.name === name)?.reason;
 }
 
-/** Is the hosted zero-install mirror in THIS directory? */
-function hostedHere(w: HarnessWiring): boolean {
-  return w.skills.find((s) => s.name === HOSTED_SKILL_NAME)?.present === true;
-}
-
 /**
  * A fix that can actually clear the warning. A bare `tenjin install` only targets
  * the directories detection picks, so a problem in ~/.agents/skills on a
@@ -1062,43 +1052,6 @@ function fixFor(home: string, dirs: HarnessWiring[]): string {
   const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
   return `tenjin install ${flags.map((f) => `--harness ${f}`).join(' ')}`;
 }
-
-/** One-line per-directory summary: `<dir> -> <skills> (<posture>)`. */
-function describeWiring(wiring: HarnessWiring[]): string {
-  return wiring
-    .map((w) => {
-      const parts = w.skills
-        .filter((s) => s.present)
-        .map((s) =>
-          s.modelInvocable === false ? `${s.name} [${s.reason ?? 'shadowed'}]` : s.name,
-        );
-      return `${w.dir} -> ${parts.join(', ')} (${posture(w)})`;
-    })
-    .join('; ');
-}
-
-/**
- * The precedence half of the `wired` posture is only true when there is a mirror
- * here to take precedence OVER. `classify` keys `wired` off the two CLI skills
- * alone, so a directory whose mirror was deleted is `wired` with no `tenjin` in it,
- * and the unconditional string claimed a file the same line had just not listed.
- */
-function posture(w: HarnessWiring): string {
-  if (w.state !== 'wired') return POSTURE[w.state];
-  return hostedHere(w)
-    ? 'CLI skills wired, take precedence over the hosted mirror'
-    : 'CLI skills wired';
-}
-
-const POSTURE: Record<DirState, string> = {
-  empty: 'no Tenjin skills',
-  'hosted-only': 'hosted skill only, no CLI skills here',
-  partial: 'only one CLI skill',
-  // "at least one": a directory with one CLI skill shadowed and the other absent
-  // classifies as `shadowed` too, and "CLI skills present" would be false there.
-  shadowed: 'at least one CLI skill present but not model-invocable',
-  wired: 'CLI skills wired, take precedence over the hosted mirror',
-};
 
 /**
  * Is team mode actually on, and does the operator know which answer they got?
@@ -1130,7 +1083,7 @@ function checkTeamShelf(
         name: 'team shelf',
         status: 'ok',
         required: false,
-        detail: `team mode: baseUrl is ${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
+        detail: `${sanitizeForTerminal(baseUrl)}, and requests to it carry the bypass header`,
       },
     };
   }
@@ -1153,7 +1106,7 @@ function checkTeamShelf(
         // and lib/permissions FLAG_CAVEAT): doctor's lines reach an unattended
         // agent, and an override is what a prompt-injected one would reach for.
         // So this says an override happened, never how to make one.
-        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}) rather than from config, so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
+        detail: `this run's base URL came from ${settings.baseUrl.source === 'flag' ? 'a command-line override' : 'the environment'} (${sanitizeForTerminal(baseUrl)}), so the team shelf's bypass key was withheld and these probes ran unauthenticated`,
         fix: 'Run doctor with no base-URL override to check the configured team shelf.',
       },
     };
@@ -1163,7 +1116,7 @@ function checkTeamShelf(
       name: 'team shelf',
       status: 'warn',
       required: false,
-      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode: publishes go to the marketplace with the client scan and the confirm cascade on, and there is no second shelf to fall through to`,
+      detail: `shelfBypassSecret is set, but baseUrl is the public marketplace (${sanitizeForTerminal(baseUrl)}), so this machine is in PUBLIC mode`,
       fix: 'Point the base URL at the team deployment: `tenjin config set baseUrl <team shelf url>` (or clear the secret with `tenjin config set shelfBypassSecret ""`).',
     },
   };
@@ -1224,212 +1177,78 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
       name: 'team shelf',
       status: 'warn',
       required: false,
-      detail: `baseUrl is ${sanitizeForTerminal(baseUrl)}, a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated; if that deployment is access-protected they were answered by its protection page rather than by Tenjin`,
+      detail: `${sanitizeForTerminal(baseUrl)} is a shelf of your own, but no shelfBypassSecret is set, so every probe above ran unauthenticated`,
       fix: 'Set the team shelf key so requests get past deployment protection: `tenjin config set shelfBypassSecret <value>`.',
     },
   };
 }
 
 /**
- * One test framework's reporter hint: how to spot its config, how to tell
- * whether the tenjin reporter is already wired, and what to suggest when it
- * is not. A row here is worth adding only once a reporter exists for that
- * framework — `sig_v1_test` (tenjin-agent#267) ships `tenjin-vitest-reporter`
- * today and has no pytest/jest equivalent yet, so this table carries exactly
- * one row until one does.
- */
-interface TestReporterFramework {
-  /** Name used in the hint text. */
-  name: string;
-  /** Dedicated config filenames to look for in cwd, in priority order. */
-  configFiles: string[];
-  /** package.json dependency key that marks this framework present with no dedicated config file. */
-  depName: string;
-  /**
-   * A config file shared with other tooling (`vite.config.*`) only counts when
-   * its source matches this pattern; otherwise a Vite-only project with no
-   * test block at all would be misread as an unconfigured vitest.
-   */
-  sharedConfigNeedsPattern?: RegExp;
-  /**
-   * Heuristic, plain-text scan of the config source — never a config
-   * evaluation. Answers whether the tenjin reporter looks already wired.
-   */
-  hasJsonReporter: (source: string) => boolean;
-  /** Doctor detail line for a framework detected without that reporter. */
-  detail: string;
-  /** Doctor fix line: the snippet to add. */
-  fix: (reporterPath: string) => string;
-}
-
-const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
-  {
-    name: 'vitest',
-    // Kept in step with the failure arm's own TEST_CONFIG_FILES
-    // (hooks/failure/test-identity.ts): a repo on `vitest.config.cts`/`.cjs` that
-    // clears the arm's read must not be told it is missing the reporter.
-    configFiles: [
-      'vitest.config.ts',
-      'vitest.config.mts',
-      'vitest.config.cts',
-      'vitest.config.js',
-      'vitest.config.mjs',
-      'vitest.config.cjs',
-      'vite.config.ts',
-      'vite.config.mts',
-      'vite.config.js',
-      'vite.config.mjs',
-    ],
-    depName: 'vitest',
-    sharedConfigNeedsPattern: /\btest\s*:/,
-    // ANCHORED ON THE REPORTER'S OWN FILENAME (tenjin-agent#278 round 3), not on
-    // a bare `json`/`outputFile` pair: the stock `json` reporter this used to
-    // recommend carries no `startTime`/`endTime`, so an artifact it writes now
-    // fails the failure arm's window check outright and is worth exactly as
-    // little as no reporter at all — this check has to tell "wired" from
-    // "wired to the wrong thing", not just spot an `outputFile` option.
-    hasJsonReporter: (source) =>
-      /reporters\s*:/.test(source) && /tenjin-vitest-reporter/.test(source),
-    detail:
-      'vitest detected without the tenjin reporter — test-failure matching falls back to console parsing (lower precision)',
-    // The reporter's own path, not a relative guess: `tenjin install`/`push on`
-    // always writes it to this exact spot, so the snippet works pasted verbatim.
-    // Also names WHERE the report lands: it holds every failure's full message
-    // and stack, absolute paths included (tenjin-agent#278, round 1 verdict
-    // note) — worth telling an operator adopting this for the first time.
-    fix: (reporterPath) =>
-      `Add to vitest.config.ts: reporters: ['default', ['${reporterPath}', { outputFile: '.vitest-report.json' }]] — and add .vitest-report.json to .gitignore (it holds full failure messages and absolute paths)`,
-  },
-];
-
-/** What {@link detectFrameworkConfig} found, or 'dep-only' for a dependency with no dedicated config file. */
-type FrameworkConfigFound = { path: string; source: string } | 'dep-only';
-
-/**
- * Does this project have `fw` at all, and if so, from what? A dedicated config
- * file wins over a bare dependency, since only the file's source can be
- * scanned for a reporter; a `vite.config.*` file only counts once its source
- * matches {@link TestReporterFramework.sharedConfigNeedsPattern}, so a Vite
- * project with no `test:` block is not read as unconfigured vitest.
- */
-async function detectFrameworkConfig(
-  cwd: string,
-  fw: TestReporterFramework,
-): Promise<FrameworkConfigFound | null> {
-  for (const file of fw.configFiles) {
-    let source: string;
-    try {
-      source = await readFile(join(cwd, file), 'utf8');
-    } catch {
-      continue;
-    }
-    if (
-      file.startsWith('vite.config') &&
-      fw.sharedConfigNeedsPattern !== undefined &&
-      !fw.sharedConfigNeedsPattern.test(source)
-    ) {
-      continue;
-    }
-    return { path: join(cwd, file), source };
-  }
-  try {
-    const pkg = JSON.parse(await readFile(join(cwd, 'package.json'), 'utf8')) as {
-      devDependencies?: Record<string, unknown>;
-      dependencies?: Record<string, unknown>;
-    };
-    if (fw.depName in (pkg.devDependencies ?? {}) || fw.depName in (pkg.dependencies ?? {})) {
-      return 'dep-only';
-    }
-  } catch {
-    // No package.json, or it does not parse; nothing more to detect from.
-  }
-  return null;
-}
-
-/**
- * WARN-level (never fails doctor), and silent unless there is something to
- * say: a project with no vitest, or one whose config already wires the
- * tenjin reporter the `sig_v1_test` lane (tenjin-agent#267, redesigned round
- * 3) prefers, gets no line at all — the same "nothing to report" posture as
- * {@link checkDataDirOverride}. Detection is a plain-text scan of config source,
- * described as heuristic in every doc that mentions it: never a config
- * evaluation, so it can both miss a reporter wired through a shared helper
- * and mistake a commented-out one for live.
- */
-async function checkTestReporterHints(cwd: string, dataDir: string): Promise<BuiltCheck | null> {
-  const reporterPath = vitestReporterPath(dataDir);
-  for (const fw of TEST_REPORTER_FRAMEWORKS) {
-    const found = await detectFrameworkConfig(cwd, fw);
-    if (found === null) continue;
-    const hasReporter = found !== 'dep-only' && fw.hasJsonReporter(found.source);
-    if (hasReporter) continue;
-    return {
-      result: {
-        name: 'test-reporters',
-        status: 'warn',
-        required: false,
-        detail: fw.detail,
-        fix: fw.fix(reporterPath),
-      },
-    };
-  }
-  return null;
-}
-
-/**
- * Do the registered hook entries reach a daemon that is actually answering?
+ * Two facts about the loop's wiring, and both are silent on a machine with no
+ * entry of ours: a fresh machine that never ran `tenjin install` is the skills
+ * check's business, not this one's.
  *
- * ONE COMPARISON, and it is the one that fails silently in the wild: the URL in
+ * `daemon` is the comparison that fails silently in the wild: the URL in
  * settings.json carries the port the daemon had bound WHEN INSTALL RAN, and a
  * daemon that later lost that port (a pinned `loop.port` changed, a foreign
  * listener took it, a second profile) comes back on another one. Claude Code
  * then posts every tool fire into a closed port and reports a non-blocking
- * `HTTP hook error` the operator never sees. `/health` on the registered port is
- * what tells the two apart.
+ * `HTTP hook error` the operator never sees. `/health` tells the two apart.
  *
- * Silent (`null`) on a machine with no entry of ours: a fresh machine that never
- * ran `tenjin install` is the skills check's business, not this one's.
- *
- * The MODE is checked in the same breath because the same file now carries the
- * daemon token as a literal, and a settings.json anything on the machine can
- * read is a token anything on the machine can present.
+ * `entries` is the file itself: how many of ours are registered, and its mode,
+ * because that file now carries the daemon token as a literal — a settings.json
+ * anything on the machine can read is a token anything on the machine can
+ * present.
  */
-async function checkLoopHooks(homeDir: string, dataDir: string): Promise<BuiltCheck | null> {
-  const port = await registeredHookPort(homeDir, dataDir);
-  if (port === null) return null;
-  const bundles = await hookBundlesPresent(dataDir);
-  const live = await health(port);
-  const pid = readPid(dataDir);
+async function checkHooks(homeDir: string, dataDir: string): Promise<BuiltCheck[]> {
+  const { port, entries } = await registeredHooks(homeDir, dataDir);
+  if (port === null) return [];
+  const path = claudeSettingsPath(homeDir);
   const mode = await settingsMode(homeDir);
   const wide = mode !== null && (mode & 0o077) !== 0;
-  const modeNote =
-    wide === true
-      ? ` ${claudeSettingsPath(homeDir)} is mode ${mode.toString(8).padStart(3, '0')}, wider than 0600, and it carries the daemon token: \`chmod 600\` it.`
-      : '';
+  return [
+    await checkDaemon(port, dataDir),
+    {
+      result: wide
+        ? {
+            name: 'entries',
+            status: 'warn',
+            required: false,
+            detail: `${entries} in ${path}, mode ${mode.toString(8).padStart(3, '0')} — wider than 0600, and it carries the daemon token`,
+            fix: `chmod 600 ${path}`,
+          }
+        : {
+            name: 'entries',
+            status: 'ok',
+            required: false,
+            detail: `${entries} in ${path}`,
+          },
+    },
+  ];
+}
+
+async function checkDaemon(port: number, dataDir: string): Promise<BuiltCheck> {
+  const live = await health(port);
   if (live !== null && live.data_dir === dataDir) {
     return {
       result: {
-        name: 'loop hooks',
-        status: wide ? 'warn' : 'ok',
+        name: 'daemon',
+        status: 'ok',
         required: false,
-        detail: `hook entries point at 127.0.0.1:${port}, and the daemon there answers (pid ${live.pid}, v${live.version}).${modeNote}`,
-        ...(wide ? { fix: `chmod 600 ${claudeSettingsPath(homeDir)}` } : {}),
+        detail: `127.0.0.1:${port}, pid ${live.pid}, v${live.version}`,
       },
     };
   }
-  const where =
-    pid === null
-      ? 'daemon not running'
-      : pid.port === port
-        ? 'daemon not running'
-        : `the daemon is on port ${pid.port} instead`;
+  const pid = readPid(dataDir);
+  const moved = pid !== null && pid.port !== port;
+  const bundles = await hookBundlesPresent(dataDir);
   return {
     result: {
-      name: 'loop hooks',
+      name: 'daemon',
       status: 'warn',
       required: false,
-      detail: `hook entries point at 127.0.0.1:${port}, but ${where}${bundles ? '' : ', and no daemon bundle is installed'}; every hook fire is a silent HTTP error until it is back.${modeNote}`,
-      fix: pid !== null && pid.port !== port ? 'tenjin install' : 'tenjin daemon start',
+      detail: `the entries point at 127.0.0.1:${port}, but ${moved ? `the daemon is on port ${pid.port} instead` : 'daemon not running'}${bundles ? '' : ', and no daemon bundle is installed'}; every hook fire is a silent HTTP error until it is back`,
+      fix: moved ? 'tenjin install' : 'tenjin daemon start',
     },
   };
 }
@@ -1492,14 +1311,13 @@ async function checkSession(
         name: 'session',
         status: 'ok',
         required: false,
-        detail:
-          'No session key; `tenjin read` delivers free and locally-cached pieces (`tenjin session start --scope read` adds owned-piece recovery)',
+        detail: 'No session key; `tenjin session start --scope read` adds owned-piece recovery',
       },
     };
   }
   if (state.kind === 'loosened') {
     return warn(
-      `Session key at ${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused; it holds a wallet-derived credential and was changed out of band. Delete it and re-mint`,
+      `${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused: it holds a wallet-derived credential and was changed out of band`,
     );
   }
   // Same standing as `absent`: a cache this CLI cannot use, re-minted by one
@@ -1510,15 +1328,15 @@ async function checkSession(
         name: 'session',
         status: 'ok',
         required: false,
-        detail: `Cached session key at ${sessionPath(dataDir)} predates this CLI version (no \`${state.field}\`) and is not used; \`tenjin session start --scope read\` mints a current one`,
+        detail: `predates this CLI version (no \`${state.field}\`, so no origin match) and is not used; \`tenjin session start --scope read\` mints a current one`,
       },
     };
   }
   if (state.kind === 'corrupt') {
-    return warn(`Session key at ${sessionPath(dataDir)} could not be parsed (${state.reason})`);
+    return warn(`could not be parsed (${state.reason})`);
   }
   if (state.kind === 'unreadable') {
-    return warn(`Session key at ${sessionPath(dataDir)} could not be read: ${state.message}`);
+    return warn(`could not be read: ${state.message}`);
   }
 
   const file = state.file;
@@ -1531,7 +1349,7 @@ async function checkSession(
         name: 'session',
         status: 'warn',
         required: false,
-        detail: `Session key was minted for ${file.origin}, but the configured base URL is not an http(s) origin, so it cannot be matched`,
+        detail: `minted for ${file.origin}, but the configured base URL is not an http(s) origin, so it cannot be matched`,
         fix: 'Set an absolute http(s) base URL: `tenjin config set baseUrl <url>`.',
         data: { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp },
       },
@@ -1540,7 +1358,7 @@ async function checkSession(
   const data = { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp };
   if (file.origin !== origin) {
     return warn(
-      `Session key was minted for ${file.origin}, but the configured base URL is ${origin}; it is not presented off its own origin`,
+      `minted for ${file.origin}, but the configured base URL is ${origin}; it is not presented off its own origin`,
       data,
     );
   }
@@ -1552,10 +1370,7 @@ async function checkSession(
   // does not PARSE is a different thing and stays a warning: that is a malformed
   // file, not a spent one.
   if (!Number.isFinite(Date.parse(file.exp))) {
-    return warn(
-      `Session key for ${file.address} carries an unparseable expiry (exp ${file.exp})`,
-      data,
-    );
+    return warn(`${file.address} carries an unparseable expiry (exp ${file.exp})`, data);
   }
   if (!scopeSatisfies(file.scope, 'read')) {
     return {
@@ -1563,7 +1378,7 @@ async function checkSession(
         name: 'session',
         status: 'ok',
         required: false,
-        detail: `Session key has scope ${file.scope}, which does not cover reading; \`tenjin session start --scope read\` mints one that does`,
+        detail: `scope ${file.scope} does not cover reading; \`tenjin session start --scope read\` mints one that does`,
         data,
       },
     };
@@ -1574,8 +1389,7 @@ async function checkSession(
         name: 'session',
         status: 'ok',
         required: false,
-        detail:
-          'Session key expired (normal after 24h); mint one with `tenjin session start --scope read` when you want free re-reads of owned pieces',
+        detail: 'expired (normal after 24h); `tenjin session start --scope read` mints another',
         data,
       },
     };
@@ -1585,7 +1399,7 @@ async function checkSession(
       name: 'session',
       status: 'ok',
       required: false,
-      detail: `Session key ${file.address}, scope ${file.scope}, for ${file.origin}, expires ${file.exp}`,
+      detail: `${file.address}, scope ${file.scope}, for ${file.origin}, expires ${file.exp}`,
       data,
     },
   };
@@ -1599,7 +1413,8 @@ async function checkReadPath(
   /** Whether the bypass key is a remedy this machine can use; see {@link shelfKeyIsTheRemedy}. */
   shelfKeyRemedy = false,
 ): Promise<BuiltCheck> {
-  // The shipped public read path, separate from the search-contract check above.
+  // The shipped public read path, its own request: `api` and `search` share the
+  // openapi document, and this probes what a reader actually fetches.
   // Probe the UNFILTERED listing: the server logs every nonblank first-page `q`
   // as agent search demand, so a `q` here would fabricate that demand into the
   // experiment this CLI exists to measure. Never add a `q` to this probe.
@@ -1612,7 +1427,7 @@ async function checkReadPath(
   if (!res.ok) {
     return {
       result: {
-        name: 'read-path',
+        name: 'read',
         status: 'fail',
         required: true,
         // Gate-aware on BOTH halves. The transport's message for a gate page is
@@ -1622,7 +1437,7 @@ async function checkReadPath(
           res.gateSuspected === true
             ? `Read path ${gateDetail(url, res)}`
             : `Read path ${url} failed: ${res.message}`,
-        // Same gate-aware fix as api-contract (see shelfGateFix): the identical
+        // Same gate-aware fix as `api` (see shelfGateFix): the identical
         // protection page answers this probe too, and `--json` carries both.
         fix: shelfGateFix(res, bypass, shelfKeyRemedy) ?? FIX_CHECK_NETWORK_AND_BASE_URL,
       },
@@ -1633,7 +1448,7 @@ async function checkReadPath(
   if (!Array.isArray(items)) {
     return {
       result: {
-        name: 'read-path',
+        name: 'read',
         status: 'fail',
         required: true,
         detail: `Read path ${url} did not return an items array`,
@@ -1643,7 +1458,7 @@ async function checkReadPath(
     };
   }
   return {
-    result: { name: 'read-path', status: 'ok', required: true, detail: `Read path OK at ${url}` },
+    result: { name: 'read', status: 'ok', required: true, detail: 'ok' },
   };
 }
 
@@ -1739,7 +1554,7 @@ async function verifyWallet(provider: WalletProvider): Promise<WalletVerificatio
  * the exit code.
  */
 function walletCheck(desc: WalletDescription, v: WalletVerification): CheckResult {
-  const head = `Wallet ${desc.address} (${desc.credentialSource})`;
+  const head = `${desc.address} (${desc.credentialSource})`;
   if (v.status === 'broken') {
     return {
       name: 'wallet',
@@ -1766,21 +1581,10 @@ function noWalletCheck(): CheckResult {
     name: 'wallet',
     status: 'warn',
     required: false,
-    detail: 'No wallet; needed only for buy/publish',
+    detail: 'none; needed only for buy/publish',
     fix: 'tenjin wallet create',
     data: { credential: 'absent' },
   };
-}
-
-/**
- * Is this the check that says there is no credential at all? `install` prints its
- * own line for that state and drops the duplicate, so it has to recognise THIS
- * check and not merely one named `wallet`: a warn about a credential that exists
- * and does not work (an unopenable keystore, an invalid TENJIN_WALLET_KEY) shares
- * the name and is the one wallet state nothing else in install's output carries.
- */
-export function isNoWalletCheck(c: CheckResult): boolean {
-  return c.name === 'wallet' && isRecord(c.data) && c.data.credential === 'absent';
 }
 
 function walletWarn(err: unknown): CheckResult {
@@ -1807,7 +1611,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
         name: 'balance',
         status: 'warn',
         required: false,
-        detail: 'Wallet USDC balance is 0',
+        detail: '$0.00 USDC',
         fix: 'Fund it with `tenjin wallet fund` (card via Coinbase), or send USDC on Base. $5 covers ~50 typical resources.',
       };
     }
@@ -1819,7 +1623,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
         name: 'balance',
         status: 'warn',
         required: false,
-        detail: `Balance ${money.usd} USDC is above the ~$20 pocket-money ceiling`,
+        detail: `${money.usd} USDC, above the ~$20 pocket-money ceiling`,
         fix: 'Keep only small change in the CLI wallet; sweep the excess to cold storage.',
       };
     }
@@ -1827,43 +1631,84 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
       name: 'balance',
       status: 'ok',
       required: false,
-      detail: `Balance ${money.usd} USDC (${money.atomic} atomic)`,
+      detail: `${money.usd} USDC (${money.atomic} atomic)`,
     };
   } catch (err) {
     return {
       name: 'balance',
       status: 'warn',
       required: false,
-      detail: `Could not read balance: ${err instanceof Error ? err.message : String(err)}`,
+      detail: `could not be read: ${err instanceof Error ? err.message : String(err)}`,
       fix: 'Check rpcUrl or retry; a balance read failure never fails doctor.',
     };
   }
 }
 
+/**
+ * Where each check belongs on the page, and the order within a group.
+ *
+ * Four questions an operator actually asks — is this machine able to run the
+ * CLI, can it reach the shelf, is the loop wired, can it pay — instead of one
+ * flat list of fifteen. A check whose name is missing here would not render, so
+ * the doctor test walks a full run and asserts every name is placed.
+ */
+const CHECK_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ['Environment', ['node', 'store', 'config', 'data-dir']],
+  ['Shelf', ['api', 'read', 'search', 'team shelf']],
+  ['Hooks', ['daemon', 'entries', 'skills', 'pairings']],
+  ['Wallet', ['wallet', 'wallet-custody', 'session', 'balance']],
+];
+
+/**
+ * One line per check under its group heading, and a `fix:` line ONLY where
+ * there is something to fix. A fix under a passing check is advice nobody
+ * asked for, and fifteen of them is the wall this rendering replaced.
+ */
 export function renderDoctorHuman(io: Io, checks: CheckResult[]): string[] {
   const nameWidth = Math.max(...checks.map((c) => c.name.length));
   const lines: string[] = [];
-  for (const c of checks) {
-    const icon =
-      c.status === 'ok'
-        ? paint(io, 'green', '✓')
-        : c.status === 'warn'
-          ? paint(io, 'yellow', '!')
-          : paint(io, 'red', '✗');
-    // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
-    // info.version, a provider's error text), so a newline or ANSI in a hostile
-    // deployment's version string could forge extra lines here — including a
-    // convincing closing pointer at a URL of its choosing. Sanitize at the render
-    // seam: output.ts exempts doctor on the assumption it only paints its OWN
-    // text, which has not been true since these lines began carrying server text.
-    lines.push(
-      `${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
-    );
-    if (c.status !== 'ok' && c.fix !== undefined) {
-      lines.push(`    ${paint(io, 'dim', `fix: ${sanitizeForTerminal(c.fix)}`)}`);
+  for (const [group, names] of CHECK_GROUPS) {
+    // The GROUP's order, not the build order: the page reads the same however
+    // the checks were assembled. A name can match twice (a provider with two
+    // custody warnings), so this filters rather than finds.
+    const here = names.flatMap((name) => checks.filter((c) => c.name === name));
+    if (here.length === 0) continue;
+    lines.push(group);
+    for (const c of here) {
+      const icon =
+        c.status === 'ok'
+          ? paint(io, 'green', '✓')
+          : c.status === 'warn'
+            ? paint(io, 'yellow', '!')
+            : paint(io, 'red', '✗');
+      // `detail` and `fix` interpolate SERVER-sourced strings (the OpenAPI
+      // info.version, a provider's error text), so a newline or ANSI in a
+      // hostile deployment's version string could forge extra lines here.
+      // Sanitize at the render seam: output.ts exempts doctor on the assumption
+      // it only paints its OWN text, which has not been true since these lines
+      // began carrying server text.
+      lines.push(
+        `  ${icon} ${c.name.padEnd(nameWidth)}  ${paint(io, 'dim', sanitizeForTerminal(c.detail))}`,
+      );
+      if (c.status !== 'ok' && c.fix !== undefined) {
+        lines.push(`    ${paint(io, 'dim', `fix: ${sanitizeForTerminal(c.fix)}`)}`);
+      }
     }
   }
+  lines.push('', tally(checks));
   return lines;
+}
+
+/** `12 checks: 10 ok, 2 warn.` — a status with no count is left out. */
+function tally(checks: CheckResult[]): string {
+  const count = (status: CheckResult['status']): number =>
+    checks.filter((c) => c.status === status).length;
+  const parts = [
+    `${count('ok')} ok`,
+    ...(count('warn') > 0 ? [`${count('warn')} warn`] : []),
+    ...(count('fail') > 0 ? [`${count('fail')} fail`] : []),
+  ];
+  return `${checks.length} checks: ${parts.join(', ')}.`;
 }
 
 /**

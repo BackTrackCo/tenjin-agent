@@ -13,8 +13,6 @@ import {
   modeGatedPointer,
   NEVER_ALLOWLISTED,
   OPT_IN_ALLOWLIST,
-  PERMISSIONS_DOC_URL,
-  permissionsPointer,
   PUBLISH_MODE_ALLOWLIST,
   recommendedPermissions,
   recommendedRules,
@@ -257,7 +255,7 @@ describe('the rule publish.mode carries', () => {
       expect(modeGatedPointer('auto', [])).toBeNull();
     });
 
-    // Unlike permissionsPointer, this one NAMES its rules: the operator is
+    // This one NAMES its rules, and the page it links to does not: the operator is
     // looking for the missing line, not for a page about tiers.
     it('names the mode and only the rules actually missing, in one line', () => {
       const line = modeGatedPointer('auto', both) ?? '';
@@ -376,33 +374,6 @@ describe('claims made about the recommended set are true of the code', () => {
     expect(note).toMatch(/cannot spend and cannot open the keystore/i);
     expect(note).not.toMatch(/no signing/i);
     expect(note).toMatch(/session/i);
-  });
-});
-
-describe('the human pointer that replaced the printed block', () => {
-  const line = permissionsPointer();
-
-  it('is one line, so it cannot grow back into an essay', () => {
-    expect(line).not.toContain('\n');
-  });
-
-  it('carries the URL of the page the caveats live on', () => {
-    expect(line).toContain(PERMISSIONS_DOC_URL);
-    expect(PERMISSIONS_DOC_URL).toMatch(/docs\/agent-permissions\.md$/);
-  });
-
-  // The counts are what tell an operator whether the page answers their question.
-  // Derived, so adding a rule cannot leave the line advertising the old number.
-  it('counts the tiers from the constants rather than hardcoding them', () => {
-    expect(line).toContain(`${ALWAYS_SAFE_ALLOWLIST.length} free verbs`);
-    expect(line).toContain(`${OPT_IN_ALLOWLIST.length} opt-ins`);
-  });
-
-  // The whole point of the split: a rule an operator could paste out of the
-  // terminal is a rule that never got read in context. Names none of them.
-  it('pastes no rule and names no excluded verb', () => {
-    for (const rule of recommendedRules()) expect(line).not.toContain(rule);
-    for (const e of NEVER_ALLOWLISTED) expect(line).not.toContain(e.command);
   });
 });
 
