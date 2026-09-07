@@ -40,37 +40,41 @@ evals/benchmark/
   verifier.py      hidden verifier registry, hidden layer, and the fixed fake verifiers
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
-  report.py        publishable projection and its redaction guard
-  cli.py           fake-run | live-run | verify | reduce | report
-  selftest.py      offline unittest entry (what .github/workflows/benchmark.yml runs)
+  report.py        publishable projection, its redaction guard, and the isolation stamp
+  regress.py       informational regression check against the committed baseline
+  cli.py           fake-run | live-run | verify | reduce | report | summary | regress | cleanup
+  selftest.py      offline unittest entry (a step of the required CI workflow)
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
-  fixtures/live/   the live plumbing smoke manifest and its repo fixture
+  fixtures/live/   the live plumbing smoke manifest, its repo fixture, and the regression baseline
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
 
-## Its own CI lane
+## Its CI lanes
 
-`.github/workflows/benchmark.yml` runs `python3 evals/benchmark/selftest.py` on a pull request
-that touches `evals/benchmark/**` or that workflow file, and on manual dispatch. It is not the
-required check on `main`, and the required check does not run this suite.
+The offline suite is part of the required `CI` workflow (`.github/workflows/ci.yml`), on every
+pull request with no path filter: the interpreter floor check, `python3 evals/benchmark/selftest.py`,
+then the fake manifest driven to a published report, the hidden verifiers re-run over the
+finished run, and `cli.py summary` printed to the log and the run page. A change that breaks
+this package fails the pull request. The steps need no dependency install and no interpreter
+setup: standard library only, on the runner's own `python3`, with 3.11 as the floor, and a
+runner below the floor fails rather than skips, because a skipped gate reads exactly like a
+passing one. `selftest.py` enforces a 60-second wall-clock budget on itself and exits non-zero
+when it runs long. Every number the fake run prints is synthetic.
 
-The split is deliberate in both directions. This package is eval-only and ships in no artifact,
-so a benchmark change must never red a release pull request. The required lane is what gates the
-published CLI, so a CLI change must never wait on a benchmark suite that will grow with every
-later Bench. The lane needs no dependency install and no interpreter setup: standard library
-only, on the runner's own `python3`, with 3.11 as the floor. A runner below the floor fails the
-run rather than skipping the step, because a skipped gate reads exactly like a passing one.
-
-`selftest.py` enforces a 60-second wall-clock budget on itself and exits non-zero when it runs
-long, so a suite that gets slow fails in its own lane instead of quietly getting slower.
-
-The lane is built to be read, not only to go green. The suite runs one module at a time under
-`--verbosity 2 --groups`, so each module is its own collapsible section naming every case it
-ran, and `--summary` writes a per-module table of counts, times, and subjects to the run page.
-A second step then drives the fake manifest to a published report, re-runs the hidden verifiers
-over the finished run, and prints `cli.py summary`, so the log shows what the benchmark produced
-and not merely that its tests passed. Every number there is synthetic.
+The live plumbing smoke has its own lane, `.github/workflows/benchmark-live.yml`, job
+`benchmark live (plumbing smoke)`, on a pull request that touches `evals/benchmark/**` or that
+workflow file, and on manual dispatch. It installs a pinned Claude Code, runs
+`live-run --plumbing --ci-live` over the smoke manifest with the repository secret
+`CLAUDE_CODE_OAUTH_TOKEN` (minted with `claude setup-token`) on that one step, then `verify`,
+`summary`, `regress`, and `cleanup`, and uploads `report.json` only: records, transcripts, and
+worktrees stay on the runner. Every record from it is stamped automated and non-publishable, so
+the lane is evidence that the chain runs on a real agent and never a number anyone may quote. It
+is informational: not in the ruleset's required checks, never blocking, and not
+`continue-on-error` either, because a red run is meant to be seen. On a fork pull request the
+secret is absent, the live steps skip, and the run page says no attempt ran. `regress` adds
+warnings on the checks tab where the run is worse than the committed baseline. A publishable
+run still needs an operator and an attested disposable instance.
 
 ## The fake command
 
@@ -101,7 +105,10 @@ nothing. It prints every arm rather than the best one, because an arm shown alon
 rather than a result.
 
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
-opaque ids, and hashes only; `report.guard` refuses anything else.
+opaque ids, and hashes only; `report.guard` refuses anything else. It also carries the run's
+isolation stamp, `publishable` and `isolation` (`fake`, `attested`, `operator_plumbing`, or
+`automated_plumbing`): one non-publishable record makes the whole report non-publishable and
+no comparison in it headline eligible, and `summary` says so in its header.
 
 `reduce` and `report` rebuild the aggregates and the publishable projection from the immutable
 records alone, so a finished run can be re-reduced without re-running anything.
@@ -126,9 +133,10 @@ python3 -m evals.benchmark.cli live-run \
 ```
 
 `--dry-run` builds each trial's roots and its argv exactly as `runner.run_trial` would, prints
-them, and stops before the spawn. It is the only live-path behavior CI exercises and it is how
-a reviewer reads the real command without paying for it. One trial prints its roots, the names
-(never the values) in its child environment, and one copyable argv line:
+them, and stops before the spawn. It is how a reviewer reads the real command without paying
+for it, and the only live-path behavior an automated environment reaches without `--ci-live`.
+One trial prints its roots, the names (never the values) in its child environment, and one
+copyable argv line:
 
 ```text
 claude -p '<the task prompt>' --output-format stream-json --verbose --include-hook-events
@@ -181,11 +189,15 @@ Four properties of a live trial are worth naming.
   key, a shelf secret, and the operator's own `CLAUDE_CONFIG_DIR` have no way through, through
   the spawn or through the arm's `settings.env`.
 
-Without `--dry-run` the command requires `--attestation`, refuses an automated environment
-(`CI` or `GITHUB_ACTIONS` set), and refuses a shell that does not have `pins.credential_env`
-set, on top of the refusals `artifact.require_isolation` already owns: a live executor in CI, a
-publishable live run with no attestation, and an attestation whose `credential_seam` is not the
-variable the run actually passes.
+Without `--dry-run` the command requires `--attestation` (or `--plumbing`, below), refuses an
+automated environment (`CI` or `GITHUB_ACTIONS` set) unless `--ci-live` is given, and refuses a
+shell that does not have `pins.credential_env` set, on top of the refusals
+`artifact.require_isolation` already owns: a live executor in CI that is not automated
+plumbing, a publishable live run with no attestation, an automated run that claims to be
+publishable or attested, and an attestation whose `credential_seam` is not the variable the run
+actually passes. `--ci-live` is valid only with `--plumbing` and never with `--attestation`; it
+stamps `isolation.automated: true` into every record, so a CI run is distinguishable from an
+operator's plumbing run and can never be published.
 
 ### The attestation file
 
@@ -231,7 +243,18 @@ Gate 3 of the plan is four to eight live integration attempts. What they prove i
 disposable isolation, recursive settlement, usage capture from real transcripts, verifier
 execution after shutdown, and the public-request and credential sentinels. Retain the raw
 artifacts. The numbers are evidence that the machinery works on a real agent and are never a
-savings claim, and no percentage from them belongs outside this repository.
+savings claim, and no percentage from them belongs outside this repository. An operator runs
+the smoke with `--plumbing`; the live CI lane runs the same smoke with `--plumbing --ci-live`
+as non-publishable evidence on every benchmark pull request, and a publishable run still needs
+an attested disposable instance.
+
+`fixtures/live/baseline.json` holds the per-arm figures of the last operator plumbing run
+(attempts, passes, mean tokens, mean cost in USD) and the tolerance `regress` applies, 25% to
+start because four attempts on a trivial task are noisy. `cli.py regress --run <dir>` warns
+where a run has a lower pass rate, more tokens or cost per attempt than the tolerance allows,
+an invalid attempt, or an excluded record, and exits 0 whatever it finds. To refresh the
+baseline, run the smoke, copy the numbers from `summary` and the records' `cost_usd` into the
+file, and bump `date`; the figures are plumbing evidence inside this repository only.
 
 ## Cleanup
 
@@ -508,8 +531,10 @@ prompts, memory bodies, patches, executor stderr, and the disposable roots thems
 carry hashes of those inputs, never their bodies or host paths. Retain raw artifacts encrypted
 by benchmark version if they are retained at all.
 
-`report.json` is the only publishable artifact. `report.project` copies named fields rather than
-filtering a record, and `report.guard` then refuses the result as a unit. A publishable string
+`report.json` is the only publishable artifact, and only when its own `publishable` stamp is
+true: a plumbing run's report is retained as evidence and never published. `report.project`
+copies named fields rather than filtering a record, and `report.guard` then refuses the result
+as a unit. A publishable string
 is a SHA-256 token or an opaque token of at most 64 characters from `[A-Za-z0-9_.:+-]`, so a
 path separator, a space, a newline, or a quote is a refusal by construction and prose cannot be
 spelled at all. On top of that the guard refuses known credential shapes and the benchmark's own
