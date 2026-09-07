@@ -196,7 +196,7 @@ variable the run actually passes.
   "image": "ghcr.io/example/bench1@sha256:0000",
   "fresh_roots": true,
   "wallet_present": false,
-  "credential_seam": "ANTHROPIC_API_KEY",
+  "credential_seam": "CLAUDE_CODE_OAUTH_TOKEN",
   "network_allowlist": ["api.anthropic.com"]
 }
 ```

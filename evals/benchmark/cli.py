@@ -165,6 +165,7 @@ def live_run(
     attestation_path: Path | None = None,
     *,
     dry_run: bool = False,
+    plumbing: bool = False,
     environ: Mapping[str, str] | None = None,
     stream: Any = None,
     runtime: runner.Runtime | None = None,
@@ -180,20 +181,27 @@ def live_run(
     automated = [name for name in AUTOMATION_ENV if environ.get(name)]
     if automated:
         raise CliError(f"live-run refuses an automated environment: {', '.join(automated)} is set")
-    if attestation_path is None:
-        raise CliError("live-run requires --attestation: a publishable live run states the isolation it ran under")
+    if attestation_path is None and not plumbing:
+        raise CliError(
+            "live-run requires --attestation, or --plumbing for a non-publishable smoke: "
+            "a publishable live run states the isolation it ran under"
+        )
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
     # wall-clock cap on attempts that cannot reach the provider.
     if seam is not None and not environ.get(seam):
         raise CliError(f"live-run needs the credential seam {seam} set in this shell")
-    attestation = artifact.load_attestation(attestation_path)
+    attestation = None if attestation_path is None else artifact.load_attestation(attestation_path)
     # The gates stay code-owned: an injected runtime supplies the clock, the
     # settlement barrier, or the process seam, never the isolation contract.
+    # `--plumbing` buys one thing and states its price: a run with no attestation
+    # is stamped non-publishable in every record, so gate 3 can prove the chain
+    # end to end on a host that is not a disposable instance, and no number from
+    # it can be quoted as a result.
     runtime = dataclasses.replace(
         runtime or runner.Runtime(),
         attestation=attestation,
-        publishable=True,
+        publishable=not plumbing,
         ci=any(bool(environ.get(name)) for name in AUTOMATION_ENV),
     )
     return execute(manifest, trials, out, runtime)
@@ -243,6 +251,11 @@ def main(argv: list[str] | None = None) -> int:
     live.add_argument("--manifest", required=True, type=Path)
     live.add_argument("--out", required=True, type=Path)
     live.add_argument("--attestation", type=Path, help="isolation attestation JSON; required without --dry-run")
+    live.add_argument(
+        "--plumbing",
+        action="store_true",
+        help="run without an attestation and stamp every record non-publishable (gate 3 smoke only)",
+    )
     live.add_argument("--dry-run", action="store_true", help="print each trial's argv and roots, start nothing")
     for name in ("verify", "reduce", "report"):
         commands.add_parser(name).add_argument("--run", required=True, type=Path)
@@ -269,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "live-run":
         try:
-            payload = live_run(args.out, args.manifest, args.attestation, dry_run=args.dry_run)
+            payload = live_run(args.out, args.manifest, args.attestation, dry_run=args.dry_run, plumbing=args.plumbing)
         except CliError as error:
             sys.stderr.write(f"{error}\n")
             return 2

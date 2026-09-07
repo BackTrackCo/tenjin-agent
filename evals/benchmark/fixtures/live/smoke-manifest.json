@@ -5,7 +5,7 @@
   "seed": 20260907,
   "repeats": 2,
   "pins": {
-    "model": "claude-fable-5-1",
+    "model": "claude-opus-5",
     "harness_version": "2.1.263",
     "effort": "default",
     "image": "operator-container",
@@ -14,7 +14,7 @@
     "wall_clock_s": 600,
     "turn_budget": 20,
     "max_budget_usd": 0.5,
-    "credential_env": "ANTHROPIC_API_KEY",
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
     "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
     "allowed_tools": ["Read(./**)", "Edit(./**)", "Write(./**)", "Glob(./**)", "Grep(./**)"]
   },

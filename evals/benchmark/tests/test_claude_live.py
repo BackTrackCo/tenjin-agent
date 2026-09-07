@@ -45,18 +45,20 @@ from evals.benchmark.tests.support import ATTESTED
 
 # The smoke manifest's own provider origin, which `SPEC.required_origins`
 # makes the attestation state.
-LIVE_ATTESTED = dataclasses.replace(ATTESTED, network_allowlist=("api.anthropic.com",), credential_seam="ANTHROPIC_API_KEY")
+LIVE_ATTESTED = dataclasses.replace(
+    ATTESTED, network_allowlist=("api.anthropic.com",), credential_seam="CLAUDE_CODE_OAUTH_TOKEN"
+)
 ATTESTATION_JSON = {
     "kind": "container",
     "instance_id": "bench1-smoke-01",
     "image": "ghcr.io/example/bench1@sha256:0000",
     "fresh_roots": True,
     "wallet_present": False,
-    "credential_seam": "ANTHROPIC_API_KEY",
+    "credential_seam": "CLAUDE_CODE_OAUTH_TOKEN",
     "network_allowlist": ["api.anthropic.com"],
 }
 # A shell with the credential seam set, which `live-run` requires before spend.
-LIVE_ENV = {"ANTHROPIC_API_KEY": "sk-not-a-real-key"}
+LIVE_ENV = {"CLAUDE_CODE_OAUTH_TOKEN": "not-a-real-token"}
 
 
 def smoke() -> manifest_module.Manifest:
@@ -119,7 +121,7 @@ class ArgvTest(LiveCase):
                 "--verbose",
                 "--include-hook-events",
                 "--model",
-                "claude-fable-5-1",
+                "claude-opus-5",
                 "--max-budget-usd",
                 "0.50",
                 "--strict-mcp-config",
@@ -429,7 +431,7 @@ class RunnerReadsTheResolverTest(LiveCase):
     def test_an_attestation_naming_another_credential_seam_is_refused(self) -> None:
         manifest = smoke()
         trial = schedule.expand(manifest)[0]
-        attestation = dataclasses.replace(LIVE_ATTESTED, credential_seam="CLAUDE_CODE_OAUTH_TOKEN")
+        attestation = dataclasses.replace(LIVE_ATTESTED, credential_seam="ANTHROPIC_AUTH_TOKEN")
         runtime = dataclasses.replace(self.runtime(), attestation=attestation)
         with self.assertRaises(IsolationError) as caught:
             runner.run_trial(manifest, trial, self.run_dir, "sha256:schedule", runtime)
@@ -638,7 +640,7 @@ class LiveRunRefusalTest(LiveCase):
     def test_a_live_run_from_a_shell_without_the_credential_seam_is_refused(self) -> None:
         with NoProcess(self), self.assertRaises(cli.CliError) as caught:
             cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, self.attestation_file(), environ={})
-        self.assertIn("ANTHROPIC_API_KEY", str(caught.exception))
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", str(caught.exception))
         self.assertFalse(self.run_dir.exists())
 
     def test_a_live_run_in_an_automated_environment_is_refused(self) -> None:
@@ -667,7 +669,7 @@ class LiveRunRefusalTest(LiveCase):
             "--attestation": dict(LIVE_ENV),
             "CI": {**LIVE_ENV, "CI": "1"},
             "GITHUB_ACTIONS": {**LIVE_ENV, "GITHUB_ACTIONS": "1"},
-            "ANTHROPIC_API_KEY": {},
+            "CLAUDE_CODE_OAUTH_TOKEN": {},
         }
         for expected, environ in cases.items():
             with self.subTest(expected):
@@ -685,7 +687,7 @@ class AttestationFileTest(LiveCase):
     def test_the_documented_attestation_file_loads_and_satisfies_the_live_gate(self) -> None:
         attestation = artifact.load_attestation(self.attestation_file())
         self.assertEqual(attestation.network_allowlist, ("api.anthropic.com",))
-        artifact.check_attestation(attestation, claude_live.SPEC.required_origins, "ANTHROPIC_API_KEY")
+        artifact.check_attestation(attestation, claude_live.SPEC.required_origins, "CLAUDE_CODE_OAUTH_TOKEN")
 
     def test_an_attestation_missing_a_field_is_refused(self) -> None:
         path = self.dir / "partial.json"
@@ -723,7 +725,7 @@ class LiveExecutorRegistryTest(unittest.TestCase):
         self.assertIs(spec, claude_live.SPEC)
         self.assertTrue(spec.live)
         self.assertEqual(spec.harness, "claude")
-        self.assertEqual(spec.credential_seam(smoke().pins), "ANTHROPIC_API_KEY")
+        self.assertEqual(spec.credential_seam(smoke().pins), "CLAUDE_CODE_OAUTH_TOKEN")
 
     def test_the_fake_specs_stay_offline(self) -> None:
         self.assertFalse(any(executor.lookup(name).live for name in ("fake", "fake_hang")))
@@ -731,3 +733,96 @@ class LiveExecutorRegistryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlumbingModeTest(unittest.TestCase):
+    """`--plumbing` trades the attestation for a stamp, and states the price.
+
+    Gate 3 asks whether the chain works end to end on real transcripts. That
+    question is answerable on a host that is not a disposable instance, so the
+    mode exists; what it must never do is let such a run look publishable.
+    """
+
+    def setUp(self) -> None:
+        self.out = Path(tempfile.mkdtemp(prefix="bench1-plumbing-"))
+        self.manifest = cli.SMOKE_MANIFEST
+
+    def test_a_run_without_an_attestation_is_refused_unless_it_says_plumbing(self) -> None:
+        with self.assertRaises(cli.CliError) as refusal:
+            cli.live_run(self.out, self.manifest, None, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
+        self.assertIn("--plumbing", str(refusal.exception))
+
+    def test_plumbing_still_refuses_an_automated_environment(self) -> None:
+        with self.assertRaises(cli.CliError) as refusal:
+            cli.live_run(self.out, self.manifest, None, plumbing=True, environ={"CI": "1"})
+        self.assertIn("automated", str(refusal.exception))
+
+    def test_plumbing_still_needs_the_credential_seam(self) -> None:
+        with self.assertRaises(cli.CliError) as refusal:
+            cli.live_run(self.out, self.manifest, None, plumbing=True, environ={})
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", str(refusal.exception))
+
+    def test_a_plumbing_run_is_stamped_unpublishable_before_anything_starts(self) -> None:
+        # The stamp is on the runtime the executor receives, so it reaches every
+        # record; a run that never spawns is enough to prove the wiring.
+        seen: list[bool] = []
+
+        def refuse(*_args, **_kwargs):
+            seen.append(True)
+            raise AssertionError("a test must not start a live process")
+
+        runtime = runner.Runtime(spawn=refuse)
+        captured: list[runner.Runtime] = []
+        real_execute = cli.execute
+
+        def capture(manifest, trials, out, rt):
+            captured.append(rt)
+            return {"trials": 0}
+
+        cli.execute = capture  # type: ignore[assignment]
+        try:
+            cli.live_run(
+                self.out,
+                self.manifest,
+                None,
+                plumbing=True,
+                environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"},
+                runtime=runtime,
+            )
+        finally:
+            cli.execute = real_execute  # type: ignore[assignment]
+        self.assertEqual(len(captured), 1)
+        self.assertFalse(captured[0].publishable, "a plumbing run must never be publishable")
+        self.assertIsNone(captured[0].attestation)
+        self.assertEqual(seen, [])
+
+    def test_an_attested_run_stays_publishable(self) -> None:
+        captured: list[runner.Runtime] = []
+        real_execute = cli.execute
+
+        def capture(manifest, trials, out, rt):
+            captured.append(rt)
+            return {"trials": 0}
+
+        attestation = self.out / "attestation.json"
+        attestation.write_text(
+            json.dumps(
+                {
+                    "kind": "container",
+                    "instance_id": "i-1",
+                    "image": "bench1-live:2.1.263",
+                    "fresh_roots": True,
+                    "wallet_present": False,
+                    "credential_seam": "CLAUDE_CODE_OAUTH_TOKEN",
+                    "network_allowlist": ["api.anthropic.com"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        cli.execute = capture  # type: ignore[assignment]
+        try:
+            cli.live_run(self.out, self.manifest, attestation, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
+        finally:
+            cli.execute = real_execute  # type: ignore[assignment]
+        self.assertTrue(captured[0].publishable)
+        self.assertIsNotNone(captured[0].attestation)
