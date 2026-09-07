@@ -1,0 +1,146 @@
+{
+  "actors": [
+    {
+      "key": ["claude", "fake-3d2b42fa0e2286197c28ff76", ""],
+      "parent_actor_key": null,
+      "parent_provenance": "unavailable"
+    },
+    {
+      "key": ["claude", "fake-3d2b42fa0e2286197c28ff76", "child-80997"],
+      "parent_actor_key": ["claude", "fake-3d2b42fa0e2286197c28ff76", ""],
+      "parent_provenance": "native"
+    }
+  ],
+  "arm_id": "on",
+  "auxiliary": [
+    {
+      "component": "observer",
+      "input_total": 400,
+      "native_request_id": "aux-obs-3d2b42fa0e",
+      "output_total": 100,
+      "phase": "consumer",
+      "source_hash": "sha256:73b12982cbb1883fe6ea968fa0e0df8ec7a2f72d01c7b54bec3803a10e280cba",
+      "trial_id": "3d2b42fa0e2286197c28ff76"
+    }
+  ],
+  "cost_usd": 0.0,
+  "delivery": {
+    "fires": [
+      {
+        "actor": ["claude", "fake-3d2b42fa0e2286197c28ff76", ""],
+        "at": 1757000009,
+        "delivered": "piece_a1b2c3",
+        "event": "prompt",
+        "fire_id": "fire-3d2b42fa",
+        "hook_arm": "kernel",
+        "prompt_id": "p-3d2b42fa",
+        "reason": "hit"
+      }
+    ],
+    "legs": [
+      {
+        "actor": ["claude", "fake-3d2b42fa0e2286197c28ff76", ""],
+        "calibration": "high",
+        "fire_id": "fire-3d2b42fa",
+        "form": "piece",
+        "outcome": "hit",
+        "search_id": "s-3d2b42fa",
+        "shelf": "team",
+        "stage": "team",
+        "status": "ok"
+      }
+    ],
+    "status": "joined",
+    "unmatched_fires": []
+  },
+  "environment_hash": "sha256:9b60e2b46629201a64e51f9123ec58cca646d10e5c556adb542907e6090b84cf",
+  "harness": "claude",
+  "invalid_reason": null,
+  "isolation": {
+    "attestation_hash": null,
+    "attested_container": false,
+    "fresh_roots": true,
+    "live": false,
+    "publishable": true
+  },
+  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
+  "native_root_id": "fake-3d2b42fa0e2286197c28ff76",
+  "outcome": "pass",
+  "parent_edges": [
+    {
+      "child": ["claude", "fake-3d2b42fa0e2286197c28ff76", "child-80997"],
+      "parent": ["claude", "fake-3d2b42fa0e2286197c28ff76", ""],
+      "provenance": "native"
+    }
+  ],
+  "patch_hash": "sha256:866852bc85b0e5b248fabd693dc4f3ccf77136c7910da6a58cae5600f221fb6f",
+  "position": 9,
+  "private_hashes": {
+    "executor_stderr": null,
+    "root_transcript": "sha256:8e324d86381c00f28ca0a4a5ca5370dbdea198d670f89b5f00da03908bf995a1"
+  },
+  "repeat": 1,
+  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "schema": "bench1.attempt.v1",
+  "sentinel": {
+    "credential_exposures": 0,
+    "public_requests": 0
+  },
+  "settings_hash": "sha256:on",
+  "stop_reason": "exit",
+  "task_id": "slug-rename",
+  "tool_counts": {
+    "": {
+      "Task": 1
+    }
+  },
+  "trial_id": "3d2b42fa0e2286197c28ff76",
+  "turns": 3,
+  "unresolved_actors": [],
+  "usage": [
+    {
+      "actor_key": ["claude", "fake-3d2b42fa0e2286197c28ff76", ""],
+      "adapter": "claude",
+      "adapter_version": "1",
+      "cache_read": 1200,
+      "cache_write": 300,
+      "completion_state": "complete",
+      "input_total": 3000,
+      "native_request_cost": null,
+      "native_request_id": "req_1",
+      "output_total": 600,
+      "provider_total": null,
+      "reasoning_output_subset": 120,
+      "source_hash": "sha256:8bc0ab742986b902bc2b7cf553d83ba00a34d09fc41a487ea86c3773942c099a",
+      "trial_id": "3d2b42fa0e2286197c28ff76",
+      "uncached_input": 1500
+    },
+    {
+      "actor_key": ["claude", "fake-3d2b42fa0e2286197c28ff76", "child-80997"],
+      "adapter": "claude",
+      "adapter_version": "1",
+      "cache_read": 840,
+      "cache_write": 210,
+      "completion_state": "complete",
+      "input_total": 2100,
+      "native_request_cost": null,
+      "native_request_id": "req_c1",
+      "output_total": 300,
+      "provider_total": null,
+      "reasoning_output_subset": null,
+      "source_hash": "sha256:6929f4c38205c6098ea6ed2cc15a5dac4303f85e63439ca0b7f954265581dce5",
+      "trial_id": "3d2b42fa0e2286197c28ff76",
+      "uncached_input": 1050
+    }
+  ],
+  "usage_reconciliation": {
+    "categories": {},
+    "status": "matched",
+    "unattributed": null
+  },
+  "verifier": {
+    "exit_code": 0,
+    "id": "fake_answer_file"
+  },
+  "wall_time_s": 12.5
+}

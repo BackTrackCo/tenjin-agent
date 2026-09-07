@@ -1,0 +1,1 @@
+Not a record. The reducer excludes it as foreign.

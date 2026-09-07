@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evals.benchmark import cli, manifest, records, report, schedule
+from evals.benchmark import artifact, cli, executor, manifest, records, report, runner, schedule
 from evals.benchmark.manifest import ManifestError
 
 
@@ -83,6 +83,57 @@ class FakeRunTest(unittest.TestCase):
             answer.write_text(original, encoding="utf-8")
         self.assertEqual(second["disagreements"], [trial_id])
         self.assertEqual(second["trials"][trial_id], {"status": "fail", "recorded": "pass", "agrees": False})
+
+
+class EndToEndTest(unittest.TestCase):
+    """The whole offline path in one case, with a real interruption in it.
+
+    Every other case injects a seam. This one drives the shipped CLI: real
+    executor processes, a hard interruption between two trials, a resume, a
+    fresh verifier pass, the reducer, and the publishable report.
+    """
+
+    def test_run_interrupt_resume_verify_reduce_and_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "run"
+            spawns: list[str] = []
+
+            def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+                spawns.append(launch.root_session_id)
+                if len(spawns) == 2:
+                    raise KeyboardInterrupt
+                return runner.process_spawn(launch, roots, timeout_s)
+
+            with self.assertRaises(KeyboardInterrupt):
+                cli.fake_run(out, runtime=runner.Runtime(spawn=spawn))
+            records_dir = out / "records"
+            # The interrupted trial published nothing; the finished one is final.
+            self.assertEqual(len(list(records_dir.glob("*.json"))), 1)
+            self.assertEqual(list(records_dir.glob("*.partial.*")), [])
+            self.assertFalse((out / "report.json").exists())
+            first = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
+
+            resumed = cli.fake_run(out)
+            self.assertEqual(resumed["trials"], 2)
+            self.assertEqual(resumed["resumed"], 1)
+            self.assertEqual(set(resumed["outcomes"].values()), {"pass"})
+            after = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
+            self.assertEqual(len(after), 2)
+            for name, value in first.items():
+                self.assertEqual(after[name], value, f"{name} was rewritten on resume")
+
+            self.assertEqual(cli.do_verify(out)["disagreements"], [])
+            reduction = cli.do_reduce(out)
+            self.assertEqual(reduction["baseline"], "off")
+            self.assertEqual(reduction["excluded"], [])
+            self.assertEqual(reduction["invalid"], [])
+            self.assertEqual(reduction["arms"]["on"]["accounting"], "complete")
+
+            published = json.loads((out / "report.json").read_text(encoding="utf-8"))
+            report.guard(published)
+            self.assertEqual(published["baseline"], "off")
+            self.assertLess(published["comparisons"]["on"]["token_ratio"], 1.0)
+            self.assertEqual(published["comparisons"]["on"]["interval"]["tasks"], 1)
 
 
 class ContractTest(unittest.TestCase):

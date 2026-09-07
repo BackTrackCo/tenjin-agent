@@ -3,23 +3,41 @@
 
 No model, no network, no spend. Run directly or through
 `src/evals-benchmark.test.ts`, which is what puts it in CI.
+
+The suite owns a wall-clock budget as well as a result. Bench-1 rides an
+existing required lane, so a suite that grows past `BUDGET_S` fails here
+rather than quietly taxing every push.
 """
 
 from __future__ import annotations
 
 import sys
+import time
 import unittest
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE.parent.parent
+BUDGET_S = 60.0
+
+
+def over_budget(elapsed_s: float, budget_s: float = BUDGET_S) -> bool:
+    return elapsed_s > budget_s
 
 
 def main() -> int:
     sys.path.insert(0, str(REPO_ROOT))
     suite = unittest.defaultTestLoader.discover(str(PACKAGE / "tests"), top_level_dir=str(REPO_ROOT))
+    started = time.monotonic()
     result = unittest.TextTestRunner(verbosity=1).run(suite)
-    return 0 if result.wasSuccessful() else 1
+    elapsed = time.monotonic() - started
+    if not result.wasSuccessful():
+        return 1
+    if over_budget(elapsed):
+        print(f"benchmark self-test took {elapsed:.1f}s, over its {BUDGET_S:.0f}s budget")
+        return 1
+    print(f"benchmark self-test finished in {elapsed:.1f}s, budget {BUDGET_S:.0f}s")
+    return 0
 
 
 if __name__ == "__main__":

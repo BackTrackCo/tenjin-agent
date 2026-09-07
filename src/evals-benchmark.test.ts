@@ -8,12 +8,18 @@ import { fileURLToPath } from 'node:url';
 // with no model, no network and no spend; this bridge puts it in the same CI
 // gate as everything else, the way the harness scoring self-test already is.
 const SELFTEST = fileURLToPath(new URL('../evals/benchmark/selftest.py', import.meta.url));
+// Bench-1 rides an existing required lane, so it owes that lane a budget as
+// well as a result. `selftest.py` fails itself on the same number.
+const BUDGET_MS = 60_000;
 
 describe('benchmark foundation', () => {
-  it('the fake end-to-end self-test passes', () => {
-    const result = spawnSync('python3', [SELFTEST], { encoding: 'utf8', timeout: 60_000 });
+  it('the fake end-to-end self-test passes inside its budget', () => {
+    const started = Date.now();
+    const result = spawnSync('python3', [SELFTEST], { encoding: 'utf8', timeout: BUDGET_MS });
+    const elapsed = Date.now() - started;
 
     expect(result.error, 'python3 is required to run the benchmark self-test').toBeUndefined();
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
-  }, 60_000);
+    expect(elapsed, `the benchmark self-test took ${elapsed}ms`).toBeLessThan(BUDGET_MS);
+  }, 90_000);
 });

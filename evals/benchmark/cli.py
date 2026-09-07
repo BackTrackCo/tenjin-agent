@@ -3,8 +3,12 @@
 The fake path is the CI path: no model, no network, no spend. `verify` re-runs
 the hidden verifiers over a finished run's retained worktrees and reports where
 a fresh verdict disagrees with the recorded one, which is the check an operator
-runs before trusting a run they did not watch. Later steps add the operator-only
-live command behind the isolation attestation in `artifact.py`.
+runs before trusting a run they did not watch. `reduce` and `report` rebuild
+the aggregates and the publishable projection from the immutable records alone.
+
+There is deliberately no live subcommand: a live run is operator-only, is built
+in code around `runner.Runtime` and the isolation attestation in `artifact.py`,
+and is refused in CI. See the README's live section.
 """
 
 from __future__ import annotations
@@ -29,6 +33,11 @@ from . import (
 FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
 
 
+def baseline(manifest: manifest_module.Manifest) -> str:
+    """The first arm in the manifest is the control every other arm is read against."""
+    return str(manifest.arms[0]["id"])
+
+
 def load_run(run_dir: Path) -> tuple[manifest_module.Manifest, str]:
     payload = json.loads((run_dir / "schedule.json").read_text(encoding="utf-8"))
     manifest = manifest_module.load(Path(json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["path"]))
@@ -37,13 +46,13 @@ def load_run(run_dir: Path) -> tuple[manifest_module.Manifest, str]:
     return manifest, payload["schedule_hash"]
 
 
-def fake_run(out: Path, manifest_path: Path = FAKE_MANIFEST) -> dict[str, Any]:
+def fake_run(out: Path, manifest_path: Path = FAKE_MANIFEST, runtime: runner.Runtime | None = None) -> dict[str, Any]:
     manifest = manifest_module.load(manifest_path)
     trials = schedule.expand(manifest)
     out.mkdir(parents=True, exist_ok=True)
     (out / "manifest.json").write_text(json.dumps({"path": str(manifest.path), "hash": manifest.hash}, indent=2) + "\n", encoding="utf-8")
     digest = schedule.write(out, manifest, trials)
-    results = runner.run(manifest, trials, out, digest)
+    results = runner.run(manifest, trials, out, digest, runtime or runner.Runtime())
     report = do_report(out)
     return {
         "trials": len(results),
@@ -77,13 +86,13 @@ def do_verify(run_dir: Path) -> dict[str, Any]:
 def do_reduce(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
-    return reduce_module.reduce(accepted, excluded)
+    return reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"])
 
 
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
-    reduction = reduce_module.reduce(accepted, excluded)
+    reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"])
     report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted)
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report

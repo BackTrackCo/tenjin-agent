@@ -1,0 +1,65 @@
+{
+  "arms": [
+    {
+      "executor": "fake",
+      "id": "off",
+      "memory_snapshot_hash": "sha256:empty",
+      "product_version": "none",
+      "settings_hash": "sha256:off"
+    },
+    {
+      "executor": "fake",
+      "id": "on",
+      "memory_snapshot_hash": "sha256:empty",
+      "product_version": "none",
+      "settings_hash": "sha256:on"
+    }
+  ],
+  "benchmark_version": "bench1-fake-corpus-0",
+  "harness": "claude",
+  "phases": {
+    "capture": "fake-capture",
+    "consumer": "fake-consumer",
+    "producer": "fake-producer"
+  },
+  "pins": {
+    "dependency_lock_hash": "sha256:none",
+    "effort": "default",
+    "harness_version": "0.0.0",
+    "image": "none",
+    "model": "fake-model-0",
+    "permission_mode": "default",
+    "turn_budget": 4,
+    "wall_clock_s": 30
+  },
+  "price_sheet_version": "fake-2026-09",
+  "repeats": 2,
+  "schema_version": 1,
+  "seed": 20260907,
+  "tasks": [
+    {
+      "family": "fake",
+      "fixture": "repo",
+      "fixture_hash": "sha256:6998c67be9267b08089ffd7a98d01e961987efc3ba1cbaec68b79f3a7782e768",
+      "id": "answer-file",
+      "transfer_distance": "same_task",
+      "verifier": "fake_answer_file"
+    },
+    {
+      "family": "fake",
+      "fixture": "repo",
+      "fixture_hash": "sha256:6998c67be9267b08089ffd7a98d01e961987efc3ba1cbaec68b79f3a7782e768",
+      "id": "budget-guard",
+      "transfer_distance": "same_family",
+      "verifier": "fake_answer_file"
+    },
+    {
+      "family": "fake",
+      "fixture": "repo",
+      "fixture_hash": "sha256:6998c67be9267b08089ffd7a98d01e961987efc3ba1cbaec68b79f3a7782e768",
+      "id": "slug-rename",
+      "transfer_distance": "same_family",
+      "verifier": "fake_answer_file"
+    }
+  ]
+}

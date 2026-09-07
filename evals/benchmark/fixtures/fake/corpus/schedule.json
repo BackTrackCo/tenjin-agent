@@ -1,0 +1,90 @@
+{
+  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
+  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "trials": [
+    {
+      "arm_id": "on",
+      "position": 0,
+      "repeat": 0,
+      "task_id": "slug-rename",
+      "trial_id": "a9f97a213beff1468ae0b147"
+    },
+    {
+      "arm_id": "off",
+      "position": 1,
+      "repeat": 0,
+      "task_id": "slug-rename",
+      "trial_id": "cd6c954477cf8e86847c9f89"
+    },
+    {
+      "arm_id": "off",
+      "position": 2,
+      "repeat": 0,
+      "task_id": "budget-guard",
+      "trial_id": "df69afce65b14dbaefab8a3e"
+    },
+    {
+      "arm_id": "on",
+      "position": 3,
+      "repeat": 0,
+      "task_id": "budget-guard",
+      "trial_id": "3a257280891cfb93e2edb21b"
+    },
+    {
+      "arm_id": "on",
+      "position": 4,
+      "repeat": 0,
+      "task_id": "answer-file",
+      "trial_id": "2cdc7db434721babdb0f8467"
+    },
+    {
+      "arm_id": "off",
+      "position": 5,
+      "repeat": 0,
+      "task_id": "answer-file",
+      "trial_id": "bd8fee0717055529eb1c5de1"
+    },
+    {
+      "arm_id": "on",
+      "position": 6,
+      "repeat": 1,
+      "task_id": "budget-guard",
+      "trial_id": "a1df23025d4f3e560b7a5af0"
+    },
+    {
+      "arm_id": "off",
+      "position": 7,
+      "repeat": 1,
+      "task_id": "budget-guard",
+      "trial_id": "047de44bb24581e5acbbfd85"
+    },
+    {
+      "arm_id": "off",
+      "position": 8,
+      "repeat": 1,
+      "task_id": "slug-rename",
+      "trial_id": "385604c7203c941ffdb88ad1"
+    },
+    {
+      "arm_id": "on",
+      "position": 9,
+      "repeat": 1,
+      "task_id": "slug-rename",
+      "trial_id": "3d2b42fa0e2286197c28ff76"
+    },
+    {
+      "arm_id": "off",
+      "position": 10,
+      "repeat": 1,
+      "task_id": "answer-file",
+      "trial_id": "f01f551024e08febb652ffde"
+    },
+    {
+      "arm_id": "on",
+      "position": 11,
+      "repeat": 1,
+      "task_id": "answer-file",
+      "trial_id": "10aead4151382022efcd71b9"
+    }
+  ]
+}

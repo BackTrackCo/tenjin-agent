@@ -1,0 +1,82 @@
+{
+  "actors": [
+    {
+      "key": ["claude", "fake-385604c7203c941ffdb88ad1", ""],
+      "parent_actor_key": null,
+      "parent_provenance": "unavailable"
+    }
+  ],
+  "arm_id": "off",
+  "auxiliary": [],
+  "cost_usd": null,
+  "delivery": {
+    "fires": [],
+    "legs": [],
+    "status": "unavailable",
+    "unmatched_fires": []
+  },
+  "environment_hash": "sha256:9b60e2b46629201a64e51f9123ec58cca646d10e5c556adb542907e6090b84cf",
+  "harness": "claude",
+  "invalid_reason": null,
+  "isolation": {
+    "attestation_hash": null,
+    "attested_container": false,
+    "fresh_roots": true,
+    "live": false,
+    "publishable": true
+  },
+  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
+  "native_root_id": "fake-385604c7203c941ffdb88ad1",
+  "outcome": "interrupted",
+  "parent_edges": [],
+  "patch_hash": null,
+  "position": 8,
+  "private_hashes": {
+    "executor_stderr": null,
+    "root_transcript": "sha256:34422bb7361d19bbc1be175534295620a7adb64b02a2766de81edfca1f892f2f"
+  },
+  "repeat": 1,
+  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "schema": "bench1.attempt.v1",
+  "sentinel": {
+    "credential_exposures": 0,
+    "public_requests": 0
+  },
+  "settings_hash": "sha256:off",
+  "stop_reason": "interrupted",
+  "task_id": "slug-rename",
+  "tool_counts": {
+    "": {
+      "Task": 1
+    }
+  },
+  "trial_id": "385604c7203c941ffdb88ad1",
+  "turns": null,
+  "unresolved_actors": ["child-30a14"],
+  "usage": [
+    {
+      "actor_key": ["claude", "fake-385604c7203c941ffdb88ad1", ""],
+      "adapter": "claude",
+      "adapter_version": "1",
+      "cache_read": 1120,
+      "cache_write": 280,
+      "completion_state": "partial",
+      "input_total": 2800,
+      "native_request_cost": null,
+      "native_request_id": "req_1",
+      "output_total": 1200,
+      "provider_total": null,
+      "reasoning_output_subset": null,
+      "source_hash": "sha256:796b2660cf2d1ef76f761e7cd3b50889e0af99cbf5d2255fa0720d7886fd3d0d",
+      "trial_id": "385604c7203c941ffdb88ad1",
+      "uncached_input": 1400
+    }
+  ],
+  "usage_reconciliation": {
+    "categories": {},
+    "status": "no_envelope",
+    "unattributed": null
+  },
+  "verifier": null,
+  "wall_time_s": 12.5
+}

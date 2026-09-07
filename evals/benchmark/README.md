@@ -5,9 +5,21 @@ stdlib Python only. This package measures trials: for one task and one quality b
 model tokens did the complete agent run consume with and without a knowledge system. It does
 not itself produce a savings number, and nothing here touches the product runtime.
 
-Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. The contract sections below are
-frozen by the accounting and execution commit groups; the remaining operator sections (the
-live command and reducer intervals) land with the reduction group.
+Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. Every contract below is frozen:
+changing one is a benchmark version bump, not an edit.
+
+What Bench-1 does not measure, and will not be made to measure:
+
+- the product's own `tokens saved` counter. It is a product diagnostic computed from product
+  state, not an independent observation, so it can never be the outcome that judges the product.
+- `tenjin push grade`. It stays an explanatory field; the hidden verifier decides pass and fail.
+- provider usage-limit percentages, quota depletion, and surge-hour multipliers. They move for
+  reasons that have nothing to do with tokens and never enter the reducer.
+- an LLM judge. A judge, if one is ever added, is benchmark overhead reported in its own field:
+  it is not product cost and it is not correctness.
+
+The outcome is raw provider token counts under an executable verifier. Cost and wall time are
+secondary, and this package produces no savings claim of its own.
 
 ## Layout
 
@@ -23,12 +35,12 @@ evals/benchmark/
   executor.py      executor registry (code-owned argv, shell=False) and the fake executors
   verifier.py      hidden verifier registry, hidden layer, and the fixed fake verifiers
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
-  reduce.py        failure-inclusive task-equal reducer
+  reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection and its redaction guard
   cli.py           fake-run | verify | reduce | report
   selftest.py      offline unittest entry (what src/evals-benchmark.test.ts runs)
   tests/           unittest modules, one per contract
-  fixtures/fake/   the fake manifest and fake repo
+  fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
 
@@ -39,6 +51,8 @@ From the repository root:
 ```bash
 python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
 python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake
+python3 -m evals.benchmark.cli reduce --run /tmp/bench1-fake
+python3 -m evals.benchmark.cli report --run /tmp/bench1-fake
 python3 evals/benchmark/selftest.py
 ```
 
@@ -55,9 +69,42 @@ the trials where a fresh verdict disagrees with the recorded one.
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only; `report.guard` refuses anything else.
 
-There is no live command yet, and no registry executor sets `live`, so CI cannot reach a live
-path. A live run is operator-only and is refused when it would be publishable without the
-isolation attestation below.
+`reduce` and `report` rebuild the aggregates and the publishable projection from the immutable
+records alone, so a finished run can be re-reduced without re-running anything.
+
+## The operator-only live command
+
+There is no live subcommand, and no executor in `executor.REGISTRY` sets `live`, so nothing in
+this repository can start a model process today. That is deliberate: the first live executor
+lands with the operator live smoke, and until then CI cannot reach a live path even by
+accident.
+
+A live run is `runner.run(manifest, trials, run_dir, schedule_hash, runtime)` with a `Runtime`
+the operator builds:
+
+```python
+runtime = runner.Runtime(
+    publishable=True,
+    attestation=artifact.Attestation(
+        kind="container",           # or "vm"
+        instance_id="...",          # the disposable instance this run owns
+        image="...@sha256:...",     # the pinned image it booted from
+        fresh_roots=True,
+        wallet_present=False,
+        credential_seam="env_injection",
+        network_allowlist=("api.provider.example", "shelf.example"),
+    ),
+)
+```
+
+It runs on the operator's side only, never in CI, and only inside a disposable container or
+VM: a sanitized benchmark repository, fresh home, profile, and data roots, no wallet, an
+explicit model credential seam, and network allowlisted to the provider plus the arm under
+test. Project-scoped tool permissions and transcript redaction are retention controls, not an
+operating-system sandbox, and a temp directory does not isolate a keychain (tenjin-agent#71).
+`artifact.require_isolation` enforces the part it can see: a live executor in CI is refused
+outright, and a publishable live run without an attestation is refused before any spend. The
+attestation hash goes into every record so a published result names the isolation it ran under.
 
 ## Execution and isolation contract
 
@@ -99,6 +146,35 @@ id and image, fresh roots, no wallet, a named credential seam, and a network all
 neither empty, nor a wildcard, nor missing an origin the executor requires. Its hash goes into
 the record's `isolation` field. A temp directory is not a sandbox and this package never
 claims otherwise.
+
+## Verifier and invalid-run contract
+
+The manifest names a verifier id; it never supplies a verifier. `verifier.REGISTRY` owns the
+argv, the timeout, the allowed target, and the output parser, and runs it with `shell=False`
+only after every model process and memory worker has stopped. Hidden test bytes live in the
+registry's code-owned hidden layer, which `artifact.TrialRoots.hidden_copy` mounts into a copy
+of the final worktree after shutdown; the agent-visible mount never holds them. An unknown
+verifier id, a target outside the run directory, a symlink that escapes the worktree, and a
+manifest value shaped like a shell command all fail closed before the verifier runs.
+
+Exit 0 is `pass`, exit 1 is `fail`, and any other exit or a timeout means the measurement broke
+rather than the task, so the attempt is `invalid`. The five outcomes stay distinct:
+
+| Outcome       | Meaning                                             | Usage               | Scored                 |
+| ------------- | --------------------------------------------------- | ------------------- | ---------------------- |
+| `pass`        | the verifier decided, correctly                     | retained            | yes                    |
+| `fail`        | the verifier decided, incorrectly                   | retained            | yes                    |
+| `capped`      | the wall-clock pin or a native budget ended it      | retained, partial   | yes, as a task outcome |
+| `interrupted` | descendants never settled inside the settlement cap | retained, partial   | yes, as a task outcome |
+| `invalid`     | the measurement is incomplete or contradictory      | retained in history | never                  |
+
+`invalid` is never a miss, never a failure, and never a zero-token run. Its machine-readable
+reason names the gate that refused it: `executor:exit_N`, `usage:<code>`, `delivery:<code>`,
+`harness:<subtype>`, `verifier:<id>`, `isolation:symlink_escape`, `sentinel:public_request`,
+`sentinel:credential_exposure`. A malformed or incomplete record fails toward `invalid`, never
+toward fewer tokens or a pass. An infrastructure-invalid attempt may be retried under the
+preregistered rule; every paid retry stays in attempt history and in the cost appendix, and a
+task failure gets no free retry unless the same rule applies to every arm.
 
 ## Manifest contract
 
@@ -225,6 +301,55 @@ error (`delivery:fire_without_usage`), never as a zero-token actor. A native act
 fire is normal. Projected fields are ids, timestamps, enums, and the `delivered` resource
 token; `question`, `cwd`, `emit`, `error`, `title`, and `url` stay private.
 
+## Reduction contract
+
+`reduce.reduce(accepted, excluded, baseline, seed)` turns immutable records into aggregates.
+
+- The numerator is consumer actor-set usage plus the consumer-phase auxiliary receipts the
+  attempt caused. Failed, capped, and interrupted attempts keep every token they spent.
+- Totals are taken per attempt and then added. A native request id is unique inside one attempt
+  and repeats across attempts, so pooling first would let one attempt's request cancel another's.
+- Invalid attempts are counted in `arms[*].outcomes` and listed in `invalid` with a reason code.
+  They never enter a task cell.
+- Every task weighs the same. A cell is one `(arm, task)` pair; an arm figure is the mean over
+  its task cells, never a sum over attempts, so a task with more repeats or bigger prompts does
+  not speak louder.
+- Pass rate and token ratio are separate axes and nothing folds them into one number.
+- `tokens_per_verified_resolution` is null with reason `no_verified_resolution` when a cell has
+  no pass, and an arm figure is null when any of its tasks is.
+- Injected text is already inside the consumer's input and the reasoning subset is already
+  inside `output_total`. Both appear under `diagnostics` with `counted_in_tokens: false` and are
+  never added to the total.
+- Producer and capture phase receipts are one-time knowledge cost. They leave the per-attempt
+  numerator, are counted once per native request id however many attempts record them, and come
+  back through `amortization` at reuse 1, 2, 5, and 10.
+- `comparisons[arm]` pairs each task against the baseline arm (the first arm in the manifest),
+  reports the mean per-task ratio, and attaches a `task_paired_percentile` interval from
+  `paired_bootstrap`: `random.Random(seed)`, 2000 resamples of the task set with replacement, a
+  stated nearest-rank index, and floats rounded to 12 places so one frozen seed reproduces one
+  interval. `fixtures/fake/bootstrap-golden.json` pins that output.
+- An arm whose usage cannot be fully attributed (a reconciliation that is not `matched` or
+  `matched_with_descendants`, or an actor that never settled outside a declared cap) is
+  `accounting_incomplete` and `headline_eligible: false`. A declared cap is `partial_by_cap`,
+  which stays eligible: the gap is named by the outcome itself.
+
+## Private and publishable boundaries
+
+Everything under a run directory is private: transcripts, worktrees, stores, model prose,
+prompts, memory bodies, patches, executor stderr, and the disposable roots themselves. Records
+carry hashes of those inputs, never their bodies or host paths. Retain raw artifacts encrypted
+by benchmark version if they are retained at all.
+
+`report.json` is the only publishable artifact. `report.project` copies named fields rather than
+filtering a record, and `report.guard` then refuses the result as a unit. A publishable string
+is a SHA-256 token or an opaque token of at most 64 characters from `[A-Za-z0-9_.:+-]`, so a
+path separator, a space, a newline, or a quote is a refusal by construction and prose cannot be
+spelled at all. On top of that the guard refuses known credential shapes and the benchmark's own
+canary by value, and refuses a private-sounding key (`prompt`, `transcript`, `question`,
+`memory`, `stderr`, `cwd`, `argv`, `home`, `url`, `title`, `private_hashes`, and the rest of
+`report.FORBIDDEN_KEYS`) before reading its value. Each refusal carries a code: `host_path`,
+`credential`, `not_opaque`, `private_field`, `unpublishable_type`.
+
 ## Fixtures
 
 `fixtures/claude/sessions/` holds one synthetic session per case: `sess-root-only`,
@@ -234,3 +359,40 @@ token; `question`, `cwd`, `emit`, `error`, `title`, and `url` stay private.
 `sess-duplicate`, `sess-capped` (killed mid-request), `sess-capped-turns`, `sess-ambiguous`,
 `sess-mismatch`, `sess-side-models`. The `loop.db` fixture is built at test time from the
 product's own `LOOP_DDL` in `src/hooks/store.ts`. Real transcripts are never read.
+
+`fixtures/fake/` holds the offline end-to-end data:
+
+- `manifest.json` and `repo/`: the one-task, two-arm manifest `cli.py fake-run` drives.
+- `corpus-manifest.json` and `corpus/`: a frozen attempt corpus of 12 immutable records over
+  three tasks, two arms, and two repeats, including a `fail`, a `capped`, an `interrupted`, an
+  `invalid`, consumer-phase and capture-phase auxiliary receipts, and joined delivery fires,
+  plus a stale record, a partial file, and a foreign file for the exclusion path. Its
+  `schedule.json` pins the expansion. The corpus is data, not a builder: a record or manifest
+  change means editing the checked-in JSON, and `test_reduce.py` names every aggregate that
+  depends on it.
+- `bootstrap-golden.json`: frozen `paired_bootstrap` output for four seeded inputs.
+
+## Extending the foundation
+
+Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
+
+- A new task is a manifest entry plus a fixture directory and a verifier id. The fixture hash is
+  `manifest.fixture_hash(dir)`; the verifier is a new `verifier.REGISTRY` entry with its own
+  code-owned argv and hidden layer. No reducer or record change.
+- A new arm is a manifest entry plus an `executor.REGISTRY` entry. Arms in one manifest share
+  one executor, because arms running different harnesses do not have comparable token totals.
+  A driver that installs a competing memory hook gets its own image, home, and data roots; never
+  co-install two memory hooks in one profile.
+- A new harness is one module implementing the usage adapter contract: return logical model
+  requests as `usage.UsageRecord`, one per native request, with nulls for categories the
+  provider does not expose. Add the harness id to `usage.HARNESSES`. Claude's JSONL reader is
+  the first implementation of that contract, not the architecture.
+- A memory product that spends model tokens of its own emits `usage.AuxiliaryReceipt` values
+  keyed by trial, component, phase, and native request id. An arm that cannot expose them is
+  `accounting_incomplete` and cannot enter a headline; do not estimate them from text length.
+- Bench-3's team cases run with `team.publicFallback` on. The delivery projection records the
+  origin and leg sequence; Bench-1 does not treat a public result as team transfer, and Bench-3
+  reports any public fallback separately.
+
+None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
+that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.

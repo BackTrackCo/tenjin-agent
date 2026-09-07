@@ -8,10 +8,29 @@ half (does the server return the right piece for a question) lives in the tenjin
 ## Benchmark (Bench-1)
 
 `evals/benchmark/` is a separate package: the trial-level token benchmark foundation, not a
-skill eval. It has its own README at [`benchmark/README.md`](./benchmark/README.md), its own
-offline self-test (`python3 evals/benchmark/selftest.py`, run in CI by
-`src/evals-benchmark.test.ts`), and a fake end-to-end command
-(`python3 -m evals.benchmark.cli fake-run --out DIR`). Nothing below this section applies to it.
+skill eval. It measures whole agent runs, and nothing below this section applies to it. Read
+[`benchmark/README.md`](./benchmark/README.md) before touching it; that file is the contract.
+
+The offline path, from the repository root:
+
+```bash
+python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake   # manifest to report, no spend
+python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake     # re-run the hidden verifiers
+python3 -m evals.benchmark.cli reduce --run /tmp/bench1-fake     # task-equal aggregates
+python3 -m evals.benchmark.cli report --run /tmp/bench1-fake     # the publishable projection
+python3 evals/benchmark/selftest.py                              # what src/evals-benchmark.test.ts runs in CI
+```
+
+There is no live subcommand and no registered executor starts a model, so CI cannot reach a
+live path. Live runs are operator-only, require a disposable container or VM attestation, and
+are refused without one; the benchmark README's live section is the whole rule.
+
+What the README covers: the manifest, attempt, usage, verifier, and invalid-run contracts; the
+reduction and interval rules; the private versus publishable artifact boundary; and how
+Bench-2, Bench-3, and Bench-6 add fixtures and adapters without changing the foundation. It
+also records what Bench-1 deliberately does not measure: the product's `tokens saved` counter,
+`tenjin push grade`, provider usage-limit percentages, and LLM judging are not primary
+benchmark outcomes.
 
 ## Layout
 

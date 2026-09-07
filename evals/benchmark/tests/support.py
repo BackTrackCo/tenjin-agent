@@ -124,6 +124,129 @@ def fake_spawn(
     return spawn
 
 
+REDUCE_MANIFEST_HASH = "sha256:reduce"
+REDUCE_SCHEDULE_HASH = "sha256:reduce-schedule"
+
+
+def reduction_record(
+    task_id: str,
+    arm_id: str,
+    repeat: int,
+    position: int,
+    tokens: int,
+    outcome: str = "pass",
+    *,
+    reasoning: int | None = None,
+    auxiliary: tuple[dict[str, Any], ...] = (),
+    reconciliation: str = "matched",
+    deliveries: int = 0,
+    manifest_hash: str = REDUCE_MANIFEST_HASH,
+) -> dict[str, Any]:
+    """A valid attempt record with exactly the token total a reducer case needs.
+
+    The reducer cases are about arithmetic and weighting, so this builds the
+    record directly rather than parsing a session; the parse path has its own
+    cases in `test_claude_usage.py`.
+    """
+    trial = schedule.trial_id(manifest_hash, task_id, arm_id, repeat, position)
+    session = f"fake-{trial}"
+    lead = ["claude", session, ""]
+    input_total = tokens * 2 // 3
+    usage = [
+        {
+            "adapter": "claude",
+            "adapter_version": "1",
+            "trial_id": trial,
+            "actor_key": lead,
+            "native_request_id": "req_1",
+            "input_total": input_total,
+            "uncached_input": None,
+            "cache_read": None,
+            "cache_write": None,
+            "output_total": tokens - input_total,
+            "reasoning_output_subset": reasoning,
+            "provider_total": None,
+            "native_request_cost": None,
+            "completion_state": "complete" if outcome in ("pass", "fail") else "partial",
+            "source_hash": "sha256:source",
+        }
+    ]
+    fires = [
+        {
+            "fire_id": f"fire-{index}",
+            "actor": lead,
+            "at": 1757000000 + index,
+            "event": "prompt",
+            "hook_arm": "kernel",
+            "prompt_id": f"p-{index}",
+            "reason": "hit",
+            "delivered": "piece_a1b2c3",
+        }
+        for index in range(deliveries)
+    ]
+    return {
+        "schema": records.RECORD_SCHEMA,
+        "trial_id": trial,
+        "manifest_hash": manifest_hash,
+        "schedule_hash": REDUCE_SCHEDULE_HASH,
+        "task_id": task_id,
+        "arm_id": arm_id,
+        "repeat": repeat,
+        "position": position,
+        "settings_hash": f"sha256:{arm_id}",
+        "environment_hash": "sha256:pins",
+        "harness": "claude",
+        "native_root_id": session,
+        "actors": [{"key": lead, "parent_actor_key": None, "parent_provenance": "unavailable"}],
+        "parent_edges": [],
+        "usage": usage,
+        "usage_reconciliation": {"status": reconciliation, "categories": {}, "unattributed": None},
+        "auxiliary": [dict(receipt, trial_id=trial) for receipt in auxiliary],
+        "outcome": outcome,
+        "invalid_reason": "usage:mismatch" if outcome == "invalid" else None,
+        "verifier": {"id": "fake_answer_file", "exit_code": 0 if outcome == "pass" else 1}
+        if outcome in ("pass", "fail")
+        else None,
+        "patch_hash": "sha256:patch",
+        "stop_reason": {"capped": "timeout", "interrupted": "interrupted"}.get(outcome, "exit"),
+        "wall_time_s": 1.0,
+        "unresolved_actors": [""] if outcome in ("capped", "interrupted") else [],
+        "turns": 2,
+        "tool_counts": {},
+        "cost_usd": None,
+        "delivery": {
+            "status": "joined" if fires else "unavailable",
+            "fires": fires,
+            "legs": [],
+            "unmatched_fires": [],
+        },
+        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None},
+        "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
+    }
+
+
+def receipt(component: str, phase: str, request: str, input_total: int, output_total: int) -> dict[str, Any]:
+    return {
+        "trial_id": "",
+        "component": component,
+        "phase": phase,
+        "native_request_id": request,
+        "input_total": input_total,
+        "output_total": output_total,
+        "source_hash": "sha256:receipt",
+    }
+
+
+def accept(*built: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Records keyed the way `records.select` hands them to the reducer."""
+    accepted = {}
+    for record in built:
+        records.validate(record)
+        accepted[record["trial_id"]] = record
+    return accepted
+
+
 def read_rows(path: Path) -> list[Any]:
     """Rows as dicts, or the raw line when it is not JSON (malformed fixtures)."""
     rows: list[Any] = []
