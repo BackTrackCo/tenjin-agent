@@ -3236,19 +3236,16 @@ describe('runInstall: search hooks', () => {
     const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
     return raw === null ? {} : (JSON.parse(raw) as Record<string, unknown>);
   }
-  async function persistedMode(): Promise<string | undefined> {
+  async function persistedHooks(): Promise<Record<string, string> | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    const hooks = (JSON.parse(raw) as { hooks?: { webSearch?: string; searchMode?: string } })
-      .hooks;
-    return hooks?.webSearch ?? hooks?.searchMode;
+    return (JSON.parse(raw) as { hooks?: Record<string, string> }).hooks;
+  }
+  async function persistedMode(): Promise<string | undefined> {
+    return (await persistedHooks())?.webSearch;
   }
   async function persistedAgentMode(): Promise<string | undefined> {
-    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
-    if (raw === null) return undefined;
-    const hooks = (JSON.parse(raw) as { hooks?: { agentDispatch?: string; dispatchMode?: string } })
-      .hooks;
-    return hooks?.agentDispatch ?? hooks?.dispatchMode;
+    return (await persistedHooks())?.agentDispatch;
   }
 
   // A bare headless install is the one that most needs the hooks, and it is the
