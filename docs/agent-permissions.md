@@ -448,11 +448,36 @@ and mention a tested answer if one exists. Five things leave the machine, each
 with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
 WebSearch query, a WebFetch address and the prompt beside it, the work order a
 subagent is dispatched with, and — to the team shelf only — the fingerprint of a
-failed command. Nothing else does. The files you read and re-edit are looked up
-the same way but never spoken about, only recorded, so the arms can be measured.
-There is one key per arm, all on out of the box:
-`tenjin config set hooks.web-search false` silences that one without unwiring
-anything, and `tenjin config` lists the seven. Hooks are read once at session
+failed command. Nothing else does. The files you read and edit are recorded
+locally and asked about nowhere, so the failure and publish arms can tell your
+last command from the one before it.
+
+The seven arms, in the order `tenjin hooks` prints them:
+
+- **prompt** — you press enter. Your prompt goes to the team shelf and the
+  public one, and a piece that answers it is named beside what you typed.
+- **web-search** — before a WebSearch runs. The query goes to both shelves as
+  typed, and an answer already paid for is named beside the search.
+- **web-fetch** — before a WebFetch runs. The address goes to both shelves, cut
+  at the first `?` or `#` so a token in the query string or the fragment stays
+  here, along with the prompt attached to the fetch.
+- **subagent** — you dispatch a subagent, and that subagent starts. The work
+  order goes to both shelves at dispatch; you are told nothing, and whatever it
+  found opens the subagent's first turn instead. The start itself sends nothing.
+- **failure** — a shell command fails. The failure's fingerprint, a hash rather
+  than your error text, goes to the team shelf only, and this machine's own
+  record of errors it has already fixed is read beside it. A later passing run
+  closes the pair. With no team shelf configured, nothing leaves at all.
+- **publish** — your turn ends, and each subagent's turn ends. If there is
+  something worth writing up, you are asked once whether to publish it, and the
+  answer is kept here. It sends nothing: publishing is `tenjin publish`, which
+  you run.
+- **primer** — a session starts, including a clear and a compact. Two paragraphs
+  about the shelf go in front of the model. It sends nothing.
+
+There is one key per arm, all on out of the box: `tenjin hooks` lists the seven
+with what each has fired and hit this week, and `tenjin hooks disable web-fetch`
+silences that one without unwiring anything. Hooks are read once at session
 start, so Claude Code has to be restarted.
 
 **Publishing.** `publish.mode` in `~/.tenjin/config.json`, from the select above.

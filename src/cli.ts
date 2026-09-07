@@ -64,9 +64,9 @@ const INTEGRATION = 'Integration:';
  * `tenjin --help` shows for it, and carrying the global flags. The heading goes
  * on the command itself rather than through commander's `commandsGroup()`
  * default so commands can be declared in the order that reads best (`read`
- * before `buy`) instead of in heading order. `helpCommand(false)` drops
- * commander's implicit `help [command]`, leaving `tenjin <command> --help` as
- * the one way to read a command's help.
+ * before `buy`) instead of in heading order. `helpCommand(false)` drops the
+ * implicit `help [command]` INSIDE a group (`tenjin hooks help enable` is a
+ * third spelling of one thing); the root keeps it, see {@link rootHelpCommand}.
  */
 function leaf(program: Command, group: string, nameAndArgs: string, summary: string): Command {
   return addGlobalFlags(
@@ -80,6 +80,22 @@ function leaf(program: Command, group: string, nameAndArgs: string, summary: str
       // options block, which would leave each command a block holding `-h` alone.
       .helpOption('-h, --help', 'show this help'),
   );
+}
+
+/**
+ * `tenjin help <command>`, the second way in that gh, git, cargo and docker all
+ * accept beside `<command> --help`. Built here rather than left implicit so it
+ * carries a heading: an ungrouped command falls into commander's `Commands:`
+ * bucket, which would put a sixth list on `tenjin --help` holding one line.
+ * Commander dispatches it by name, so it needs no action.
+ */
+function rootHelpCommand(): Command {
+  return new Command('help')
+    .argument('[command]', 'the command to show help for')
+    .helpGroup(SETUP)
+    .summary('show help for a command')
+    .description('Show help for a command. `tenjin <command> --help` says the same thing.')
+    .helpOption(false);
 }
 
 function buildContext(cmd: Command, io: Io): CommandContext {
@@ -176,7 +192,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // Everything the root itself takes prints in one block, so the five command
     // groups below are the only other lists on `tenjin --help`.
     .optionsGroup('Global options:')
-    .helpCommand(false)
+    .addHelpCommand(rootHelpCommand())
     .configureOutput({
       // --help / --version print here (stdout). Nothing else uses writeOut, so
       // stdout stays a single JSON object for every real command.
@@ -1145,6 +1161,11 @@ function handleParseError(err: unknown, io: Io, program: Command): number {
     if (err.code === 'commander.version' || err.code === 'commander.helpDisplayed') {
       return 0;
     }
+    // `tenjin help [command]` asked for that text and got it on stdout. It
+    // reports `commander.help` like a bare `tenjin` does, and the exit code is
+    // what tells them apart: commander raises the bare case to 1 by writing its
+    // help to stderr as an error, and the help command's stays 0.
+    if (err.code === 'commander.help' && err.exitCode === 0) return 0;
     // commander.help (bare or incomplete command) and every usage error (unknown
     // command/option, missing/excess argument, invalid value) are usage exit 2.
     // In machine mode emit the machine contract to STDOUT — json:true so

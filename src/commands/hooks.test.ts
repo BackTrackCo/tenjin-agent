@@ -122,9 +122,7 @@ describe('tenjin hooks list', () => {
     });
     expect(rows(result.data).get('web-fetch')?.state).toBe('disabled');
     expect(rows(result.data).get('web-search')?.state).toBe('enabled');
-    expect(result.humanLines?.at(-1)).toBe(
-      `daemon: 127.0.0.1:30412, pid 8123, v0.9.2; ledger ${join(ctx.dataDir, 'loop.db')}`,
-    );
+    expect(result.humanLines?.at(-1)).toBe('daemon: 127.0.0.1:30412, pid 8123, v0.9.2');
   });
 
   it('renders a header row and one padded line per arm', async () => {

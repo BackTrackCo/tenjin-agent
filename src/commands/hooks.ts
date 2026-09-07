@@ -2,7 +2,6 @@ import { CliError } from '../lib/errors';
 import { HOOK_ARMS, loadConfig, type HookArm } from '../lib/config';
 import { persistHookArm } from './config';
 import { withLoopDb } from '../lib/loop-db';
-import { loopDbPath } from '../lib/paths';
 import { health, readPid } from '../hooks/shim';
 import type { LoopDb, Row } from '../hooks/store';
 import type { CommandContext, CommandResult } from '../context';
@@ -133,10 +132,9 @@ export async function runHooksList(
       hit,
     };
   });
-  const ledger = loopDbPath(ctx.dataDir);
   return {
-    data: { windowDays: WINDOW_DAYS, arms: rows, daemon, ledger },
-    humanLines: [...tableLines(rows), daemonSummary(daemon, ledger)],
+    data: { windowDays: WINDOW_DAYS, arms: rows, daemon },
+    humanLines: [...tableLines(rows), daemonSummary(daemon)],
   };
 }
 
@@ -156,13 +154,12 @@ function tableLines(rows: ArmRow[]): string[] {
   );
 }
 
-/** The daemon behind the arms, and the file every count above was read from —
- *  the one place the ledger's path is printed, so `sqlite3` needs no doc. */
-function daemonSummary(d: DaemonState, ledger: string): string {
-  const line = d.running
+/** The daemon behind the arms. The database every count above was read from is
+ *  `tenjin doctor`'s `store` line, which prints its path. */
+function daemonSummary(d: DaemonState): string {
+  return d.running
     ? `daemon: 127.0.0.1:${d.port}, pid ${d.pid}, v${d.version}`
     : 'daemon: not running (it starts on the next hook fire)';
-  return `${line}; ledger ${ledger}`;
 }
 
 /**

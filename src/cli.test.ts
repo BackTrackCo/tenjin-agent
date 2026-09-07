@@ -129,6 +129,24 @@ describe('main', () => {
     expect(help).not.toMatch(/^Commands:$/m);
   });
 
+  /**
+   * gh, git, cargo and docker all take both spellings, so this one does too.
+   * The heading matters as much as the command: `help` is the one command
+   * commander files itself, and an ungrouped one is exactly the stray
+   * `Commands:` block the case above forbids. Exit 0, because the text was
+   * asked for — a bare `tenjin` is the usage error, and stays one.
+   */
+  it('takes `tenjin help <command>` as well as `<command> --help`', async () => {
+    const root = captureIo();
+    expect(await main(['--help'], root.io)).toBe(0);
+    expect(root.stdout()).toContain('help [command]');
+
+    const cap = captureIo();
+    expect(await main(['help', 'hooks'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('Usage: tenjin hooks');
+    expect(cap.stdout()).toContain('$ tenjin hooks disable web-fetch');
+  });
+
   // vercel's rule, applied here: a global flag is listed once, on the root. The
   // per-command copies still PARSE (`tenjin doctor --json`, covered below); they
   // are hidden so a command's own flags are what its help shows.

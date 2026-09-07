@@ -21,7 +21,7 @@ there is one place to change it.
 
 **`tenjin hooks`** is that place. It prints one row per arm — `ARM`, `STATE`,
 `EVENT`, `FIRED 7d`, `HIT 7d`, counted off `loop.db` — plus a last line naming
-the daemon and the ledger it counted, with `--json`. `tenjin hooks enable|disable <arm>` writes the same
+the daemon behind them, with `--json`. `tenjin hooks enable|disable <arm>` writes the same
 boolean `tenjin config set hooks.<arm>` writes, through the same locked merge;
 the daemon re-reads it per fire, so nothing restarts and nothing re-installs.
 
@@ -68,11 +68,12 @@ and examples and pointers at the end; each command's own help is a usage line,
 at most two sentences, its flags, and an example where the flags are not
 obvious. The four commands that page alone documented — `pay`, `discover`,
 `delete` and `daemon` — say their piece there now, `tenjin hooks` prints the
-arms and the ledger path, and the README, `docs/agent-permissions.md` and
-`docs/safety-model.md` carry the rest. The audit that came with the reshape
-took the dead surface with it: `tenjin help <command>` goes so
-`tenjin <command> --help` is the one way in, `(default: [])` stops trailing the
-nine repeatable flags, and the globals still parse after a subcommand without
-being re-listed under every one. The README's "Core commands" list, which
+arms, `docs/agent-permissions.md` describes each one in a line — when it fires,
+what it does, what leaves the machine — and the README and
+`docs/safety-model.md` carry the rest. `tenjin help <command>` stays, filed
+under Setup rather than left ungrouped, because gh, git, cargo and docker all
+take both spellings. The audit that came with the reshape took the dead surface
+with it: `(default: [])` stops trailing the nine repeatable flags, and the
+globals still parse after a subcommand without being re-listed under every one. The README's "Core commands" list, which
 restated all of this and had fallen behind it, goes the same way, and the arm
 table stays what `tenjin hooks` prints rather than a snapshot in help.
