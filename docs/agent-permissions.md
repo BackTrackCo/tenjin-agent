@@ -6,7 +6,7 @@ denies the free verbs too, which breaks the whole marketplace loop: the skills
 forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
-behind which verbs are on that list, which three are separate opt-ins, and which are
+behind which verbs are on that list, which two are separate opt-ins, and which are
 never recommended at all, and it is where `tenjin install` sends you. The [README](../README.md#permissions) carries the paste block and the
 three-tier summary.
 

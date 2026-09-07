@@ -111,6 +111,49 @@ describe('main', () => {
     );
   });
 
+  /**
+   * The shape `tenjin --help` is expected to hold (clig.dev's "display the most
+   * common flags and commands at the start", gh's grouped root list): five
+   * headings, one line per command, the globals listed once, and examples plus
+   * pointers at the end. A command that lands outside the five falls into
+   * commander's ungrouped `Commands:` bucket, which is what this catches.
+   */
+  it('files every command under the five headings, in order', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    const groups = ['Setup:', 'Search and read:', 'Publish:', 'Wallet:', 'Integration:'];
+    const at = groups.map((group) => help.indexOf(group));
+    expect(at.filter((i) => i === -1)).toEqual([]);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+    expect(help).not.toMatch(/^Commands:$/m);
+  });
+
+  // vercel's rule, applied here: a global flag is listed once, on the root. The
+  // per-command copies still PARSE (`tenjin doctor --json`, covered below); they
+  // are hidden so a command's own flags are what its help shows.
+  it('lists the globals once, on the root, and not again under a command', async () => {
+    const root = captureIo();
+    expect(await main(['--help'], root.io)).toBe(0);
+    expect(root.stdout()).toContain('Global options:');
+    expect(root.stdout()).toContain('emit one machine JSON envelope on stdout');
+
+    const leafHelp = captureIo();
+    expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
+    expect(leafHelp.stdout()).toContain('--prune');
+    expect(leafHelp.stdout()).not.toContain('--base-url');
+  });
+
+  it('ends with examples and the pointers, not a second copy of the docs', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('Examples:');
+    expect(help).toContain('$ tenjin install');
+    expect(help).toContain('Run `tenjin <command> --help` for one command.');
+    expect(help).toContain(PERMISSIONS_DOC_URL);
+  });
+
   // A pointer in help has to work from wherever the reader is standing, which is
   // their own project and not this package. A repo-relative `docs/...` path reads
   // as a file they can open and is not one.
@@ -459,6 +502,17 @@ describe('the deleted verbs and their replacements', () => {
     expect(help).toContain('list');
     expect(help).toContain('enable [options] <arm>');
     expect(help).toContain('disable [options] <arm>');
+    // How to run it and how to switch an arm, with one example.
+    expect(help).toContain('$ tenjin hooks disable web-fetch');
+  });
+
+  // The arm -> event -> counts table is two thirds live state, so it ships as the
+  // command's OUTPUT and is never snapshotted into help, where it would rot.
+  it('leaves the arms table to `tenjin hooks` itself, not its help', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const column of ['ARM', 'STATE', 'FIRED', 'HIT']) expect(help).not.toContain(column);
   });
 
   it('`tenjin hooks disable` on an unknown arm is USAGE naming the seven', async () => {

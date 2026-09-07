@@ -64,3 +64,14 @@ one home in `test-identity.ts`; the session-key check goes with the verb.
 **`docs/command-reference.md` is deleted.** `tenjin <command> --help` carries the
 flags, `tenjin hooks` prints the arms and the ledger's path, and the README,
 `docs/agent-permissions.md` and `docs/safety-model.md` carry the rest.
+
+**Help is the reference now.** `tenjin --help` groups every command under Setup,
+Search and read, Publish, Wallet and Integration, one line each, with the three
+global flags listed once and examples and pointers at the end. Each command's own
+help is a usage line, two sentences, its flags, and an example where the flags are
+not obvious; the globals still parse after the subcommand but are no longer
+re-listed under every one, `(default: [])` no longer trails every repeatable flag,
+and `tenjin help <command>` goes so `tenjin <command> --help` is the one way in.
+The arm table stays what `tenjin hooks` prints, never a snapshot in help. The
+README's "Core commands" list, which restated all of this and had fallen behind
+it, goes the same way.
