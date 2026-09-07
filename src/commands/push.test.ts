@@ -1041,7 +1041,9 @@ describe('runPushGrade', () => {
       {},
       { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
     );
-    expect(result.data).toMatchObject({ posted: 0 });
+    // `postSkipped: 0` is the assertion that fails without the clause: the old
+    // query selected the leg, failed the uuid guard and counted it as skipped.
+    expect(result.data).toMatchObject({ posted: 0, postSkipped: 0 });
     expect(calls).toHaveLength(0);
     expect(gradedLegs()).toEqual([{ fire_id: 'f-local', graded: 'used:hand', posted_at: null }]);
   });
