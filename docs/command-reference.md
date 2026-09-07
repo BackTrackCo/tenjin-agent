@@ -54,9 +54,9 @@ The rules, the entries and the keystore are described once, in [What install wri
 
 `install` registers **eleven** Claude Code entries and writes them as one set. Nine are `http` entries that POST the harness's own hook payload to the loop daemon on `127.0.0.1`, authorized by the token in `~/.tenjin/daemon.token` — which is why the settings file is written mode 0600. The other two are `command` entries, on `SessionStart` and `UserPromptSubmit`, that run `~/.tenjin/hooks/tenjin-shim.mjs` so a daemon is up before the turn's first tool call. The events covered: `SessionStart`, `UserPromptSubmit`, `PreToolUse` (`WebSearch|WebFetch`, `Agent|Task`, `Edit|Write|MultiEdit|Bash`), `PostToolUse` (`Bash`, `Read`), `PostToolUseFailure` (`Bash`), `SubagentStart`, `SubagentStop` and `Stop`.
 
-The set does not vary. The seven `hooks.*` keys add and remove no entry; they decide which arm inside the daemon answers a fire, and an arm with nothing to say costs one loopback request. `tenjin config set hooks.web-search false` silences the research arm on the next tool call and leaves the entries, the daemon and every other arm exactly where they are. Nothing about hooks needs a re-install to take effect, and install writes no hooks key at all: every arm is on out of the box. The only run that registers nothing is `tenjin install --no-hooks`, which is a decision about that run and writes no config.
+The set does not vary. The seven `hooks.*` keys add and remove no entry; they decide which arm inside the daemon answers a fire, and an arm with nothing to say costs one loopback request. `tenjin hooks disable web-search` silences that arm on the next tool call and leaves the entries, the daemon and every other arm exactly where they are; `tenjin hooks` shows which are on and what each has done this week. Nothing about hooks needs a re-install to take effect, and install writes no hooks key at all: every arm is on out of the box. The only run that registers nothing is `tenjin install --no-hooks`, which is a decision about that run and writes no config.
 
-**Which arms answer.** One key per arm, named for what the arm does:
+**Which arms answer.** One key per arm, named for what the arm does; `tenjin hooks` prints this table with each arm's state and its fires:
 
 | Key                | Harness event                                  | What the arm does                                                                                                        |
 | ------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -209,6 +209,8 @@ The piece's title surfaces in the output when it is available — from the 402 p
 
 Delivers free, local-library, or already-owned pieces. It refuses with exit 3 rather than paying.
 
+A piece you own but have never read on this machine comes back free, and nothing has to be set up first: `read` establishes or reuses a read-scoped session key exactly as `publish` and `edit` do, so the first one opens the keystore once and every later owned read signs with the cached ≤24h delegation. The delegation is minted and presented only for the origin of the piece being read, and never for a second origin while one for another is cached.
+
 | Flag                       | Effect                                          |
 | -------------------------- | ----------------------------------------------- |
 | `--print-body`             | Include the full body in machine output.        |
@@ -226,14 +228,6 @@ Re-checks entitlement and price, then pays through x402.
 | `--sections <token-count>` | Include leading sections within a token budget. |
 
 `read` and `buy` are split so a command named `read` never spends money.
-
-### `tenjin session start`
-
-Mints a read-scoped session key so `tenjin read` can recover pieces you already own without reopening the wallet each time. It spends nothing, but it does open the keystore.
-
-| Flag              | Values | Effect                                            |
-| ----------------- | ------ | ------------------------------------------------- |
-| `--scope <scope>` | `read` | Session scope. This version only supports `read`. |
 
 ## Paying any x402 endpoint
 
@@ -461,7 +455,7 @@ Opens or prints a Coinbase Onramp checkout for this wallet. The payment itself h
 | `--no-open` | Print the checkout link without opening a browser. |
 | `--no-wait` | Return once the link is issued instead of polling. |
 
-### `tenjin send <amount> usdc <to>`
+### `tenjin wallet send <amount> usdc <to>`
 
 Escape hatch for moving USDC out of the agent wallet. It is deliberately not part of the recommended agent flow.
 
@@ -506,11 +500,19 @@ One environment variable, not a config key:
 | ----------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `TENJIN_DATA_DIR` | `~/.tenjin` | Where `config.json`, the wallet, the library and `loop.db` live. Point it somewhere ephemeral for CI, a throwaway agent or a test, or somewhere durable for a second profile beside your own. Every verb reads it, and the hook entries a `tenjin install` writes under it name that directory, so two profiles never share state. Skill self-healing stands down while it is set: the skills belong to the harness profile, not to the data dir, and a redirected run must not rewrite the ones your ordinary sessions read. `tenjin doctor` prints one line when it is in effect. |
 
-## Push (experimental)
+## The hook arms
 
-The push arms flip Tenjin from a tool the agent calls into a sidecar that watches beside it: a published finding surfaces next to a prompt, a web search or a page fetch, without anyone asking for it. A vanilla install turns them on; `tenjin config set hooks.<arm> false` silences one without unwiring anything, and the daemon re-reads `config.json` on every fire, so a change takes effect on your next prompt with nothing to install and no process to restart. The hook entries stay registered whatever the keys say; to take them, the daemon and its files away entirely, run `tenjin uninstall`.
+The arms flip Tenjin from a tool the agent calls into a sidecar that watches beside it: a published finding surfaces next to a prompt, a web search or a page fetch, without anyone asking for it. A vanilla install turns all seven on; `tenjin hooks disable <arm>` silences one without unwiring anything, and the daemon re-reads `config.json` on every fire, so a change takes effect on your next prompt with nothing to install and no process to restart. The hook entries stay registered whatever the keys say; to take them, the daemon and its files away entirely, run `tenjin uninstall`.
 
-### The arms
+The loop's whole state is `~/.tenjin/loop.db`: `fires` and `legs` (the ledger), `marks` (per-actor gate state), `handoff` (the dispatch queue), `facts` (the CLI's key-value table — the publish dedup, the child-finding queue, the draft-search links), `searches` (one row per `tenjin search`) and `pairings` (the local error→fix record). Read it with `sqlite3 ~/.tenjin/loop.db`.
+
+### What each arm does
+
+The names in this table are the arm ids the ledger records, which is what
+`tenjin grade` and `fires.arm` speak. The switch is one level up: `tenjin hooks`
+lists the seven `hooks.<arm>` keys, and two of them cover two ids each —
+`subagent` is `dispatch` plus the child's start, `publish` is `stop` plus
+`subagent-stop`.
 
 | Arm        | Event(s)                                         | Matcher                                    | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | ---------- | ------------------------------------------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -588,21 +590,19 @@ export default defineConfig({
 
 **There is no client-side rate limit.** The loop keeps two numbers, `loop.human_wait_ms` (2500) and `loop.tool_wait_ms` (4000), and both are about how long a fire may take rather than how many fires there may be. A per-trigger cap shipped in an earlier release and was measured to ration exactly the traffic this exists to catch: one research subagent fires 15 to 18 web lookups a minute at peak, 43 in five minutes, and the caps refused 246 research fires for every 25 that reached an agent. The runaway guard is the shelf's own rate limit instead, recorded on the row as `rate-server` when it answers 429 (the leg's own status is `http_429`). What is still bounded is bounded per question, not per minute: a question already asked this session is not asked again (the fire is `asked` or `cached`), and a finding already delivered is not delivered again (`seen`).
 
-### `tenjin push status [--json]`
+### `tenjin hooks [list] [--json]`
 
-Reports BOTH halves of "wired": whether the daemon bundles are present under `~/.tenjin/hooks`, and whether the hook entries are registered in the settings file. Either half alone is a healthy-looking sidecar that does nothing — a daemon nothing points at never fires, entries with no bundle behind them fail silently — so both lines have to read yes. Which arms are on is `tenjin config`'s to report.
+One row per arm — `ARM`, `STATE` (enabled/disabled), `EVENT` (the harness event it answers), `FIRED 7d` and `HIT 7d`, counted off the `fires` rows in `~/.tenjin/loop.db` — and one last line for the loop daemon: its port, pid and version, or that it is not running (which is normal; it starts on the next fire). A bare `tenjin hooks` is `tenjin hooks list`.
 
-Then a tally of the last 7 days of `~/.tenjin/loop.db`: how many fires the kernel committed, how many of those put a piece in front of the agent (`fires.delivered` starting `inject:`), and how many distinct pieces that was. Under it, one line per arm giving that arm's fires by `fires.reason` — `hit` for the one that delivered something, and the words the kernel closes a fire with otherwise (`no-question`, `slash`, `harness`, `words`, `seen`, `cached`, `no-hit`, `no-answer`, `rate-server`, `asked`, `deadline`, `error`) — sorted by count, so a gate that is throttling the loop reads first. Then one line of `legs` by the shelf each asked: `team`, `public`, `keys` (the fingerprint lane) or `local` (this machine's own pairings and parked handoffs). The vocabulary is read off the rows rather than listed in the reader, so a reason a later build starts writing shows up here the day it does, and a retired one keeps counting out of the rows that still hold it. The counts are complete for the window: the rows are indexed, so nothing is a floor.
+`FIRED` counts every fire the arm committed in the window and `HIT` the ones that had an answer, so the two together are the arm's own hit rate. Two arms cover two events each and their rows count both: `subagent` fires on the dispatch and again at the child's start, and `publish` at the lead's turn end and at each subagent's. The `context` arm has no row because it has no key — it asks nothing and delivers nothing, and stamps the marks `failure` and `publish` read.
 
-Then one line for the mechanical lane, always printed: the error→fix pairings opened in the same window, how many a later pass closed, how many two independent passes verified, how many an agent has since published the explanation for (`publish --key` stamps `pairings.post_id`), the scope the closed ones landed in (`code` is what the turn-end ask offers to publish, `user` never leaves the machine, `ambiguous` is neither yet), and the command heads that opened them — zero opened after a week of failing builds means the allowlist is too tight, and one head dominating means it is too loose.
+### `tenjin hooks enable <arm>` / `tenjin hooks disable <arm>`
 
-Under that, what `tenjin push grade` has made of the legs that were actually shown, one line per arm and split by shelf: `used`, `rejected`, `unobserved`, `ungraded` (shown but not yet judged) and `posted` (verdicts that reached the shelf). A fire that delivered nothing is not counted here — nothing was shown, so there is no verdict anybody owes.
+Turns one arm on or off. It writes the same `hooks.<arm>` boolean `tenjin config set hooks.<arm> true|false` writes, through the same locked merge; the daemon re-reads it per fire, so there is nothing to restart and nothing to re-install. The arms are `prompt`, `web-search`, `web-fetch`, `subagent`, `failure`, `publish` and `primer`; any other name is a usage error listing the seven.
 
-Last of the always-printed blocks, one `GET /api/lookups/stats?days=7` per configured shelf — the base URL always, plus the public marketplace when you are in team mode — rendered as `server <shelf> (7d):` with `lookups`, `hits`, `candidates`, `used`, `wrong` and `useRate` per trigger. That is the same window from the shelf's side, summed across every caller it serves, rather than this machine alone. A shelf that cannot be reached prints `server <shelf>: unavailable` and the local counts are still shown: a shelf that is down and a shelf with no demand are different facts.
+### `tenjin grade [--since 7d] [--session <id>] [--explain] [--label <fire id> <status>]`
 
-### `tenjin push grade [--since 7d] [--session <id>] [--explain] [--label <fire id> <status>]`
-
-Decides whether the agent actually used what the arms showed it, and tells the shelf that served each finding. `loop.db` records what was delivered and the shelf records what it served; neither can see what happened next, so without this the push experiment has no measure of its own precision.
+Decides whether the agent actually used what the arms showed it, and tells the shelf that served each finding. `loop.db` records what was delivered and the shelf records what it served; neither can see what happened next, so without this the loop has no measure of its own precision.
 
 The population is every fire whose `delivered` starts `inject:`, joined to its winning leg (`legs.outcome = 'hit'`) with no verdict yet (`legs.graded IS NULL`). The target it matches on is the resource id off `delivered` plus that leg's `title` and `url`. A verdict is written back as `legs.graded = '<outcome>:<by>'` and the posted stamp as `legs.posted_at`, so a fire is graded once and posted once.
 
@@ -624,21 +624,9 @@ The default summary line breaks `used` down by which of the three ways above ear
 `--explain` prints, per row, the fire id, the transcript line the delivery landed on, the agent id when the fire ran inside a subagent, the file that was actually read, and the evidence behind the verdict (the matched command, span, or prose-named identifier, or the next three tool inputs when nothing matched) — the first thing to look at when a verdict reads wrong. `--label <fire id> <status>` sets one verdict by hand (`used` or `rejected`, recorded as a hand verdict) and posts it, for a fire the transcript cannot answer for. Only a fire that actually delivered a piece can be labelled: an outcome is a report about a piece the agent was shown, and an arm's decision _not_ to show one was shown to nobody.
 
 ```bash
-tenjin push status --json
-tenjin push grade --explain
-tenjin config set hooks.web-search false
-```
-
-## State store
-
-`~/.tenjin/loop.db` is the whole of the loop's state: `fires` and `legs` (the ledger), `marks` (per-actor gate state), `handoff` (the dispatch queue), `facts` (the CLI's key-value table — the publish dedup, the child-finding queue, the draft-search links), `searches` (one row per `tenjin search`), and `pairings` with `pairing_closes`. It runs in WAL mode, so **inspect it with `sqlite3 ~/.tenjin/loop.db`, not `sqlite3 -readonly ~/.tenjin/loop.db`** — the standalone binary's `-readonly` open still wants to touch the `-shm` sidecar, which fails from a subshell with `unable to open database file (14)`; a plain open works.
-
-### `tenjin state query "<sql>"`
-
-A read-only escape hatch that does not have that failure mode: one `SELECT` (or `WITH ... SELECT`) statement, run through the CLI's own `node:sqlite` driver opened `readOnly`, with rows printed as JSON. Anything else — a second `;`-separated statement, an INSERT/UPDATE/DELETE/PRAGMA — is refused before the file is ever opened, so the verb is read-only by contract rather than by the flag it happens to pass the driver.
-
-```bash
-tenjin state query "SELECT key, at FROM facts WHERE key LIKE 'finding:%' LIMIT 20"
+tenjin hooks
+tenjin hooks disable web-search
+tenjin grade --explain
 ```
 
 ## MCP

@@ -58,7 +58,7 @@ export interface ResolvedSettings {
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
   bazaarRegistries: string[];
   /**
-   * Hard per-send cap for `tenjin send`: SEND_MAX_UNSET = never configured
+   * Hard per-send cap for `tenjin wallet send`: SEND_MAX_UNSET = never configured
    * (send refuses until `config set sendMaxAmount`), null = explicit "none"
    * (uncapped opt-in), 0n = disabled, otherwise the atomic cap.
    */

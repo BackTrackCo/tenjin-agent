@@ -16,8 +16,8 @@ import type { PublishMode } from './config';
  *    It takes a {@link PublishMode}, and that selects between exactly two
  *    hardcoded constants: {@link FREE_VERB_RULES}, and those plus
  *    {@link MODE_GATED_RULES}. So there is no call path — no flag, no config
- *    key, no future caller — that can make it write `buy`, `session start`,
- *    `send`, `config set`, `wallet create`, `mcp`, `install`, or a broad
+ *    key, no future caller — that can make it write `buy`, `wallet send`,
+ *    `config set`, `wallet create`, `mcp`, `install`, or a broad
  *    `Bash(tenjin:*)`. A CLI that could widen its own permission grant is exactly
  *    what this shape rules out.
  *
@@ -121,8 +121,7 @@ export const MODE_GATED_RULES: readonly string[] = [PUBLISH_MODE_RULE, EDIT_MODE
  */
 export const MODE_GATED_FORBIDDEN_FRAGMENTS: readonly string[] = [
   'tenjin buy',
-  'tenjin session',
-  'tenjin send',
+  'tenjin wallet send',
   // The mode carries publish and edit and stops there. `delete` destroys what
   // those two put up, and consent to publish is not consent to destroy.
   'tenjin delete',
@@ -194,8 +193,7 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
   'tenjin publish',
   'tenjin edit',
   'tenjin delete',
-  'tenjin session',
-  'tenjin send',
+  'tenjin wallet send',
   'tenjin config set',
   'tenjin wallet create',
   'tenjin mcp',

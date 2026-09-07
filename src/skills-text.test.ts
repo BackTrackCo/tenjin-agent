@@ -248,7 +248,7 @@ describe('send and the other money/state verbs stay out of the recommended allow
   });
 
   it('tenjin-search names send explicitly as never-allowlisted', () => {
-    expect(permissionsRef).toMatch(/Never propose an allowlist line for `?tenjin send/i);
+    expect(permissionsRef).toMatch(/Never propose an allowlist line for `?tenjin wallet send/i);
   });
 
   // The earlier version of this test ran a multiline-anchored regex against
@@ -634,7 +634,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
   // read-only in order to justify it is not.
   it('the permissions doc does not call the free set read-only', () => {
     expect(PERMISSIONS_DOC).not.toMatch(/free, read-only verbs/i);
-    expect(PERMISSIONS_DOC).toMatch(/None of those can spend, and none can move your keys/i);
+    expect(PERMISSIONS_DOC).toMatch(/None of those can spend;/i);
     // Every surface that states the tier also names doctor's local decrypt, or
     // the tier reads as no key access at all. The skill is here because agents
     // repeat it to users verbatim.
@@ -1032,9 +1032,15 @@ describe('the public render did not move', () => {
   // this session closed and the key it was recorded under, so tenjin-publish
   // says to pass that key as `--key fingerprint=<key>`. tenjin-search is
   // untouched.
+  //
+  // Re-pinned for one hook surface (PR E2, decision 15): `tenjin session start`
+  // is deleted and `read` mints its own read-scoped session, so tenjin-search's
+  // read paragraph says the piece simply comes back and the refusal's
+  // `entitlementCheck` list drops `not_performed` and the `sessionCommand` it
+  // used to point at. tenjin-publish is untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '3f48712445088ec79d48efba47da0b63',
+      'tenjin-search': '3030d0920b2f200f83985561f2c514eb',
       'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });

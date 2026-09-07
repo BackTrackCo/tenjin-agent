@@ -236,7 +236,7 @@ export async function runPublish(
     const dropped = await dequeueFinding(ctx.dataDir, target.id);
     if (!dropped) {
       throw new CliError('INTERNAL', `Could not take finding ${target.id} off the queue.`, {
-        fix: 'The local store could not be opened or written. Nothing changed; re-run once it is reachable (`tenjin push status` reports the store).',
+        fix: 'The local store could not be opened or written. Nothing changed; re-run once it is reachable (`tenjin doctor` reports the store).',
       });
     }
     return {

@@ -116,7 +116,7 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   sessionBudget: 'cap on total auto-spend per session',
   confirm: 'when to ask before paying',
   sendMaxAmount:
-    'hard cap per tenjin send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
+    'hard cap per tenjin wallet send; unset = send refuses until set, 0 disables send, none = uncapped; never bypassed by --yes',
   allowlistCreators: 'only auto-pay these creators (empty = any)',
   baseUrl: 'Tenjin API base URL: what publish/read/search go to (the team shelf, in team mode)',
   publicShelfUrl:
@@ -573,10 +573,7 @@ async function setHooksKey(
 ): Promise<CommandResult> {
   const arm = key.slice('hooks.'.length) as HookArm;
   const parsed = parseBoolean(value);
-  await persist(ctx.dataDir, (existing) => ({
-    ...existing,
-    hooks: { ...existing.hooks, [arm]: parsed },
-  }));
+  await persistHookArm(ctx.dataDir, arm, parsed);
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   // NO STALENESS WARNING, and there is nothing left to warn about: every hooks
   // key is read out of `config.json` by the daemon on each fire, so a value set
@@ -646,6 +643,19 @@ function parsePublishMode(value: string): string {
   throw new CliError('USAGE', `Invalid publish mode: ${JSON.stringify(value)}`, {
     fix: 'Use "review", "auto", or "full-auto".',
   });
+}
+
+/**
+ * The one writer of a `hooks.<arm>` boolean, through the same locked merge-write
+ * every `config set` uses, so a sibling arm or an unknown block a newer CLI
+ * wrote survives. `config set hooks.<arm>` and `tenjin hooks enable|disable`
+ * are two spellings of this call and never two writers.
+ */
+export async function persistHookArm(dir: string, arm: HookArm, value: boolean): Promise<void> {
+  await persist(dir, (existing) => ({
+    ...existing,
+    hooks: { ...existing.hooks, [arm]: value },
+  }));
 }
 
 /**

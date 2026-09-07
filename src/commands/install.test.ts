@@ -92,7 +92,7 @@ import {
 import { CLI_SKILL_NAMES } from '../lib/skill-wiring';
 import { CliError } from '../lib/errors';
 import type { DaemonStart } from '../daemon/control';
-import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
+import { configPath, daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -1044,9 +1044,9 @@ describe('runInstall: the ten rows', () => {
     expect(lines[3]).toBe(
       `  permissions  ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in ${claudeSettingsPath(home)}`,
     );
-    expect(lines[4]).toBe(
-      `  hooks        11 entries -> loop daemon on 127.0.0.1:${DAEMON_PORT} (loopback only)`,
-    );
+    // The arms and the one command that changes them. The entry count and the
+    // port live in `tenjin doctor`, under Hooks.
+    expect(lines[4]).toBe('  hooks        7 enabled; change: tenjin hooks disable <arm>');
     expect(lines[5]).toBe('  publishing   auto - your agent publishes under your identity');
     expect(lines[6]).toBe(`  wallet       ${STUB_ADDRESS}, $0 - fund with: tenjin wallet fund`);
     expect(lines[7]).toBe('');
@@ -1182,13 +1182,24 @@ describe('runInstall: the ten rows', () => {
   });
 
   /** A re-run registers the same eleven and says so rather than reporting zero. */
-  it('does not report zero entries on a run that changed nothing', async () => {
+  it('reports the arms that answer, not the entries, on a run that changed nothing', async () => {
     await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     const text = human(
       await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true })),
     );
-    expect(text).not.toContain('0 entries');
-    expect(text).toContain(`11 entries -> loop daemon on 127.0.0.1:${DAEMON_PORT}`);
+    expect(text).not.toContain('entries');
+    expect(text).toContain('hooks        7 enabled; change: tenjin hooks disable <arm>');
+  });
+
+  // The row counts what config says, so a machine that turned two arms off says
+  // so rather than repeating the default at every operator who reads it.
+  it('counts only the arms config leaves on', async () => {
+    await writeFile(
+      configPath(data),
+      JSON.stringify({ hooks: { 'web-search': false, primer: false } }),
+    );
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    expect(human(res)).toContain('hooks        5 enabled; change: tenjin hooks disable <arm>');
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
@@ -1206,7 +1217,6 @@ describe('runInstall: the ten rows', () => {
     expect(d.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
       'Bash(tenjin pay:*)',
-      'Bash(tenjin session start:*)',
     ]);
   });
 
@@ -1963,10 +1973,10 @@ describe('runInstall: permissions decision', () => {
       expect(grant.state).toBe('added');
       expect(grant.disclosure).toContain('publish.mode auto');
       expect(grant.disclosure).toContain('without a harness prompt');
-      // The keystore is the part the free-tier wording does not cover, and the
-      // part `tenjin session start` exists as an explicit opt-in for. The rest of
-      // what the pair clears is in docs/agent-permissions.md; this line stays one
-      // sentence.
+      // The keystore is the part the free-tier wording does not cover at this
+      // scope: `read` opens it for a read-scoped key, and this pair mints a
+      // strictly broader read+write one. The rest of what the pair clears is in
+      // docs/agent-permissions.md; this line stays one sentence.
       expect(grant.disclosure).toContain('open your wallet keystore');
       expect(grant.undo).toEqual([
         'tenjin install --publish-mode review',

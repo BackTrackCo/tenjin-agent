@@ -68,7 +68,7 @@ import { CliError } from './errors';
  * Storing the injected text is a second schema change and is not this one.
  *
  * The functions here are pure over parsed rows, except the two that touch the
- * filesystem at the bottom; the command in commands/push.ts owns the store.
+ * filesystem at the bottom; the command in commands/grade.ts owns the store.
  */
 
 /** How many tool calls after the anchor a copied span may still be evidence. */

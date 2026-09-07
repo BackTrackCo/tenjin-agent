@@ -37,10 +37,9 @@ import {
   resolveShelfBypass,
 } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
-import { configPath, dataDir as resolveDataDir, loopDbPath, sessionPath } from '../lib/paths';
+import { configPath, dataDir as resolveDataDir, loopDbPath } from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
-import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
@@ -285,7 +284,6 @@ export async function collectDoctorChecks(
       // machine's configured mode with no flag layer (lib/skill-materialize).
       teamMode,
     ),
-    await checkSession(ctx.dataDir, deps.now ?? Date.now, tryOriginOf(baseUrl)),
   );
 
   // The wallet/custody/balance checks all come from the ACTIVE provider: it owns
@@ -1263,148 +1261,6 @@ async function settingsMode(homeDir: string): Promise<number | null> {
   }
 }
 
-/**
- * The delegated session key `tenjin read` presents to recover a piece this wallet
- * already owns (`tenjin session start --scope read` mints it). Never required and
- * never a fail — `read` works without one — so ABSENT is `ok`: the normal
- * posture, not a defect. So are the states that are ordinary decay rather than
- * damage: an older CLI's file, a spent 24h expiry, a scope that does not cover
- * reading. One command re-mints all of them, and a check that yellowed on them
- * would be permanently yellow on any machine that ever minted a key.
- *
- * A genuine fault still warns, and the states are kept apart on purpose. A 0600 file
- * that is now group-readable, or one whose contents no longer parse, is a TAMPER
- * signal on a wallet-derived credential; `loadSessionFile` fails closed on both
- * and collapses them to "no session", which is the right instruction for a caller
- * that can re-mint and exactly the wrong report for the verb an operator runs
- * when something looks wrong. `readSessionFile` keeps them distinguishable and
- * this is the one caller that needs them.
- *
- * An unreadable file (EACCES after a `sudo` run, EIO) warns rather than throwing:
- * doctor is diagnostics, and a session cache nobody asked about must never take
- * down the run that was going to explain the rest of the machine.
- *
- * Reports address / origin / scope / expiry and nothing else. The delegation and
- * the private JWK never reach this output — doctor's payload is the single most
- * likely thing in this CLI to be pasted into an issue.
- */
-async function checkSession(
-  dataDir: string,
-  now: () => number,
-  origin: string | null,
-): Promise<BuiltCheck> {
-  const warn = (detail: string, data?: unknown): BuiltCheck => ({
-    result: {
-      name: 'session',
-      status: 'warn',
-      required: false,
-      detail,
-      fix: 'tenjin session start --scope read',
-      ...(data !== undefined ? { data } : {}),
-    },
-  });
-
-  const state = await readSessionFile(dataDir);
-  if (state.kind === 'absent') {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail: 'No session key; `tenjin session start --scope read` adds owned-piece recovery',
-      },
-    };
-  }
-  if (state.kind === 'loosened') {
-    return warn(
-      `${sessionPath(dataDir)} is mode 0${state.mode.toString(8)}, not 0600, so it is refused: it holds a wallet-derived credential and was changed out of band`,
-    );
-  }
-  // Same standing as `absent`: a cache this CLI cannot use, re-minted by one
-  // command. A failing check here meant a permanent post-update warning.
-  if (state.kind === 'outdated') {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail: `predates this CLI version (no \`${state.field}\`, so no origin match) and is not used; \`tenjin session start --scope read\` mints a current one`,
-      },
-    };
-  }
-  if (state.kind === 'corrupt') {
-    return warn(`could not be parsed (${state.reason})`);
-  }
-  if (state.kind === 'unreadable') {
-    return warn(`could not be read: ${state.message}`);
-  }
-
-  const file = state.file;
-  // A base URL that is not an http(s) origin cannot be compared against, and this
-  // is the diagnostic verb: it reports that and keeps going. The `config` check
-  // above owns the fix for the value itself.
-  if (origin === null) {
-    return {
-      result: {
-        name: 'session',
-        status: 'warn',
-        required: false,
-        detail: `minted for ${file.origin}, but the configured base URL is not an http(s) origin, so it cannot be matched`,
-        fix: 'Set an absolute http(s) base URL: `tenjin config set baseUrl <url>`.',
-        data: { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp },
-      },
-    };
-  }
-  const data = { address: file.address, origin: file.origin, scope: file.scope, exp: file.exp };
-  if (file.origin !== origin) {
-    return warn(
-      `minted for ${file.origin}, but the configured base URL is ${origin}; it is not presented off its own origin`,
-      data,
-    );
-  }
-  // Expiry and scope are DESIGNED DECAY, not faults. A delegation lives 24h by
-  // construction, so warning on a spent one made every machine that ever ran
-  // `tenjin session start` permanently yellow for behaving exactly as intended —
-  // the same permanent-warning trap `outdated` above was already pulled out of.
-  // Both are re-minted by the one command named in the detail. An expiry that
-  // does not PARSE is a different thing and stays a warning: that is a malformed
-  // file, not a spent one.
-  if (!Number.isFinite(Date.parse(file.exp))) {
-    return warn(`${file.address} carries an unparseable expiry (exp ${file.exp})`, data);
-  }
-  if (!scopeSatisfies(file.scope, 'read')) {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail: `scope ${file.scope} does not cover reading; \`tenjin session start --scope read\` mints one that does`,
-        data,
-      },
-    };
-  }
-  if (!isSessionPresentable(file, now(), 'read', origin)) {
-    return {
-      result: {
-        name: 'session',
-        status: 'ok',
-        required: false,
-        detail: 'expired (normal after 24h); `tenjin session start --scope read` mints another',
-        data,
-      },
-    };
-  }
-  return {
-    result: {
-      name: 'session',
-      status: 'ok',
-      required: false,
-      detail: `${file.address}, scope ${file.scope}, for ${file.origin}, expires ${file.exp}`,
-      data,
-    },
-  };
-}
-
 async function checkReadPath(
   baseUrl: string,
   timeoutMs: number,
@@ -1656,7 +1512,7 @@ const CHECK_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Environment', ['node', 'store', 'config', 'data-dir']],
   ['Shelf', ['api', 'read', 'search', 'team shelf']],
   ['Hooks', ['daemon', 'entries', 'skills', 'pairings']],
-  ['Wallet', ['wallet', 'wallet-custody', 'session', 'balance']],
+  ['Wallet', ['wallet', 'wallet-custody', 'balance']],
 ];
 
 /**

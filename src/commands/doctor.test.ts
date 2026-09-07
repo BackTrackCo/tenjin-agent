@@ -15,10 +15,7 @@ import { fakeRecord } from '../lib/wallet/test-support';
 import { ALWAYS_SAFE_ALLOWLIST, OPT_IN_ALLOWLIST, PERMISSIONS_DOC_URL } from '../lib/permissions';
 import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
-import { saveSessionFile } from '../lib/session-key';
-import { sessionPath } from '../lib/paths';
 import { openLoopDb } from '../hooks/store';
-import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 
 // doctor loads viem's balance read lazily; the mock keeps every test off-chain.
@@ -1775,9 +1772,8 @@ describe('runDoctor — recommended auto-mode allowlist (#33)', () => {
     expect(data.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
       'Bash(tenjin pay:*)',
-      'Bash(tenjin session start:*)',
     ]);
-    expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin send');
+    expect(data.permissions.neverAllowlisted.map((e) => e.command)).toContain('tenjin wallet send');
   });
 
   // #81: the human render is the check list and nothing else. The rules, the
@@ -2312,241 +2308,6 @@ describe('runDoctor — a pipe at a skill path cannot hang the diagnostic', () =
   }, 15000);
 });
 
-describe('runDoctor — session key', () => {
-  it('reports ok with no session, naming the verb that would mint one', async () => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.required).toBe(false);
-    expect(check.detail).toContain('No session key');
-    expect(check.detail).toContain('tenjin session start --scope read');
-    expect(check.data).toBeUndefined();
-  });
-
-  it('reports a live session as ok with address, scope and expiry — never key material', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.data).toEqual({
-      address: file.address,
-      origin: file.origin,
-      scope: 'read',
-      exp: file.exp,
-    });
-    const rendered = JSON.stringify(res.data) + (res.humanLines ?? []).join('\n');
-    expect(rendered).not.toContain(file.delegation);
-    expect(rendered).not.toContain(String((file.privateKeyJwk as { d?: string }).d));
-  });
-
-  // 24h expiry is designed decay, not a fault. Warning on it made every machine
-  // that ever ran `tenjin session start` permanently yellow for working as
-  // intended, so a spent key reads as ok and names the verb that re-mints it.
-  it('reports an expired session as ok, naming the verb that re-mints', async () => {
-    const { file } = await testSessionKey({ exp: new Date(Date.now() - 1000).toISOString() });
-    await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.required).toBe(false);
-    expect(check.detail).toContain('normal after 24h');
-    expect(check.detail).toContain('tenjin session start --scope read');
-    // No `fix` on an ok check: the command rides the detail, as `absent` and
-    // `outdated` already do.
-    expect(check.fix).toBeUndefined();
-    expect(data.status).toBe('pass');
-  });
-
-  // Decay is ok; a file whose expiry cannot be READ is not — that is malformed,
-  // not spent, and it must not be laundered through the friendly branch.
-  it('still warns when the expiry does not parse', async () => {
-    const { file } = await testSessionKey({ exp: 'whenever' });
-    await saveSessionFile(dir, file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('unparseable expiry');
-    expect(check.fix).toBe('tenjin session start --scope read');
-    expect(data.status).toBe('pass');
-  });
-
-  // The cache an older CLI left behind. Reported as a fact about the file, not as
-  // a failing check: it is unusable for the same reason an absent one is, and a
-  // machine that updated should not carry a permanent warning about it.
-  it('reports a pre-origin cache as ok, naming the field and the verb that re-mints', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    const stale: Record<string, unknown> = { ...file };
-    delete stale.origin;
-    await writeFile(sessionPath(dir), JSON.stringify(stale), { mode: 0o600 });
-
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('ok');
-    expect(check.detail).toContain('predates this CLI version');
-    expect(check.detail).toContain('origin');
-    expect(check.detail).toContain('tenjin session start --scope read');
-    expect(check.detail).not.toContain('could not be parsed');
-    expect(data.status).toBe('pass');
-  });
-
-  // A tamper signal must not be laundered through the friendly branch above.
-  it('still warns when a session field is present but the wrong type', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    await writeFile(sessionPath(dir), JSON.stringify({ ...file, origin: 42 }), { mode: 0o600 });
-
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('could not be parsed');
-  });
-
-  // Both directions off ONE file, so the clock is provably what decides: expiry
-  // is no longer a status change, so the detail is what has to carry it.
-  it('uses the injected clock, so expiry is decided rather than observed', async () => {
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    const detailAt = async (now: () => number): Promise<string> => {
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        env: {},
-        fetchImpl: healthyFetch,
-        now,
-      });
-      return find((res.data as { checks: CheckResult[] }).checks, 'session').detail;
-    };
-    expect(await detailAt(() => Date.parse(file.exp) + 1)).toContain('normal after 24h');
-    expect(await detailAt(() => Date.parse(file.exp) - 3_600_000)).toContain(
-      `${file.address}, scope`,
-    );
-  });
-});
-
-/**
- * The tamper and failure states. `loadSessionFile` collapses all of these to
- * null, which is the right instruction for a caller that can re-mint and exactly
- * the wrong report for the verb an operator runs when something looks wrong: a
- * 0644 file holding a wallet-derived credential was changed out of band, and
- * "No session key" hides that.
- */
-describe('runDoctor — session key, the states loadSessionFile flattens', () => {
-  it('warns on a group-readable file rather than calling it absent', async () => {
-    if (process.platform === 'win32') return;
-    const { file } = await testSessionKey();
-    await saveSessionFile(dir, file);
-    await chmod(join(dir, 'session.json'), 0o644);
-    const check = find(
-      (
-        (
-          await runDoctor(ctxFor(), {
-            walletPassphrase: NO_OS_STORE,
-            env: {},
-            fetchImpl: healthyFetch,
-          })
-        ).data as {
-          checks: CheckResult[];
-        }
-      ).checks,
-      'session',
-    );
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('0644');
-    expect(check.detail).toMatch(/out of band/i);
-  });
-
-  it('warns on a corrupt file, naming it as unparseable rather than missing', async () => {
-    await writeFile(join(dir, 'session.json'), 'not json {{{', { mode: 0o600 });
-    const check = find(
-      (
-        (
-          await runDoctor(ctxFor(), {
-            walletPassphrase: NO_OS_STORE,
-            env: {},
-            fetchImpl: healthyFetch,
-          })
-        ).data as {
-          checks: CheckResult[];
-        }
-      ).checks,
-      'session',
-    );
-    expect(check.status).toBe('warn');
-    expect(check.detail).toMatch(/could not be parsed/i);
-  });
-
-  it('warns when the session belongs to another origin than the configured base URL', async () => {
-    const { file } = await testSessionKey({ origin: 'https://other.example' });
-    await saveSessionFile(dir, file);
-    const check = find(
-      (
-        (
-          await runDoctor(ctxFor(), {
-            walletPassphrase: NO_OS_STORE,
-            env: {},
-            fetchImpl: healthyFetch,
-          })
-        ).data as {
-          checks: CheckResult[];
-        }
-      ).checks,
-      'session',
-    );
-    expect(check.status).toBe('warn');
-    expect(check.detail).toContain('https://other.example');
-    expect(check.detail).toMatch(/not presented off its own origin/i);
-  });
-
-  it('never aborts the whole run when the session cache cannot be read', async () => {
-    // doctor is diagnostics. An unreadable session cache (EACCES after a `sudo`
-    // run, EIO) used to throw INTERNAL out of the check array and take down the
-    // one command an operator reaches for when the install is broken.
-    if (process.platform === 'win32' || process.getuid?.() === 0) return;
-    await writeFile(join(dir, 'session.json'), '{}', { mode: 0o600 });
-    await chmod(join(dir, 'session.json'), 0o000);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    const data = res.data as { status: string; checks: CheckResult[] };
-    // Every other check still ran, and the session one warns with its fix.
-    expect(data.status).toBe('pass');
-    expect(find(data.checks, 'api').status).toBe('ok');
-    const check = find(data.checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.fix).toBe('tenjin session start --scope read');
-  });
-});
-
 /**
  * The regression this round nearly shipped: `originOf` throws USAGE, and calling
  * it inline while building the check array took down the whole diagnostic before
@@ -2571,20 +2332,8 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
     const data = res.data as { checks: CheckResult[] };
     // The run produced a check list at all, which is the whole point.
     expect(data.checks.length).toBeGreaterThan(3);
-    expect(find(data.checks, 'session').status).toBe('ok'); // absent, and absent is ok
-  });
-
-  it('warns that a cached session cannot be matched, instead of throwing', async () => {
-    await saveSessionFile(dir, (await testSessionKey()).file);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      env: { TENJIN_BASE_URL: 'foo://tenjin.blog' },
-      fetchImpl: healthyFetch,
-    });
-    const check = find((res.data as { checks: CheckResult[] }).checks, 'session');
-    expect(check.status).toBe('warn');
-    expect(check.detail).toMatch(/not an http\(s\) origin/i);
-    expect(check.fix).toMatch(/config set baseUrl/);
+    // The `config` check is what owns the bad value; the rest still ran.
+    expect(find(data.checks, 'node').status).toBe('ok');
   });
 });
 

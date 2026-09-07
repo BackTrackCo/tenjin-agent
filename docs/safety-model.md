@@ -23,7 +23,7 @@ Search, inspect, free reads, outcomes, wallet display, balance checks, doctor, a
 
 `tenjin buy` is the only recommended paid-read command. It re-checks entitlement and price before paying, and `--max-price` is always a hard cap.
 
-`tenjin send` moves USDC out of the wallet. It exists as a human escape hatch, not as part of the agent flow.
+`tenjin wallet send` moves USDC out of the wallet. It exists as a human escape hatch, not as part of the agent flow.
 
 ### The deployment origin set
 
@@ -52,7 +52,7 @@ When in doubt, publish less context and more reproducible evidence.
 
 ## Permission boundaries
 
-The recommended free harness permissions are documented in [agent-permissions.md](./agent-permissions.md). They are intentionally narrow and do not include `buy`, `publish`, `edit`, `send`, `session start`, `wallet create`, `config set`, `install`, or `mcp`.
+The recommended free harness permissions are documented in [agent-permissions.md](./agent-permissions.md). They are intentionally narrow and do not include `buy`, `publish`, `edit`, `wallet send`, `wallet create`, `config set`, `install`, or `mcp`.
 
 Codex's default `workspace-write` sandbox also needs network access for paid x402 calls:
 

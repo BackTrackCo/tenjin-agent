@@ -228,11 +228,11 @@ export const ConfigSchema = z.object({
   sessionBudget: atomicString,
   confirm: z.union([z.literal('always'), z.string().regex(/^above:\d+$/)]),
   /**
-   * Hard per-send cap for `tenjin send`, NOT satisfiable by --yes or a prompt
+   * Hard per-send cap for `tenjin wallet send`, NOT satisfiable by --yes or a prompt
    * (the spend-policy posture): an atomic amount caps each send, "0" disables
    * the verb entirely, and "none" = explicitly uncapped (send exists to drain
    * the wallet, but uncapped is an opt-in, never a default). The key has NO
-   * usable default: absent from config.json, `tenjin send` refuses until it is
+   * usable default: absent from config.json, `tenjin wallet send` refuses until it is
    * set (see resolveSendMaxAmount). Client-enforced like every spend key (see
    * the note above).
    */
@@ -345,7 +345,7 @@ export function resolveFreeVerbsDeclined(value: string[] | boolean | undefined):
 /**
  * The resolved-view sentinel for an absent sendMaxAmount. Never a persistable
  * value (ConfigSchema rejects it, and `config set` has no way to produce it);
- * while the resolved value is this sentinel, `tenjin send` refuses —
+ * while the resolved value is this sentinel, `tenjin wallet send` refuses —
  * require-set-before-first-send.
  */
 export const SEND_MAX_UNSET = 'unset';
@@ -372,7 +372,7 @@ export const CONFIG_DEFAULTS: Config = {
   confirm: 'always',
   // A type placeholder only, never honored: Config requires every key (and
   // CONFIG_KEYS derives from these). resolveSendMaxAmount never reads it — an
-  // absent key resolves to SEND_MAX_UNSET and `tenjin send` refuses until the
+  // absent key resolves to SEND_MAX_UNSET and `tenjin wallet send` refuses until the
   // cap is set. '0' (send disabled) rather than 'none' (uncapped) so that if a
   // future caller ever DOES read the cap through loadConfig/fileOrDefault, the
   // leak fails closed instead of silently running uncapped.
@@ -803,7 +803,7 @@ export async function writeConfig(dir: string, config: Config): Promise<void> {
  * sendMaxAmount deliberately bypasses fileOrDefault: it has no usable default
  * (the operator's require-set-before-first-send posture). Absent from
  * config.json it resolves to the SEND_MAX_UNSET sentinel with source 'default',
- * which `tenjin send` refuses outright — the cap must be set to an amount, "0"
+ * which `tenjin wallet send` refuses outright — the cap must be set to an amount, "0"
  * (disable), or an explicit "none" (uncapped opt-in) before the first send.
  */
 function resolveSendMaxAmount(config: PartialConfig): ResolvedSetting<string> {

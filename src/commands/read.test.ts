@@ -12,6 +12,7 @@ import {
   reply,
   TEST_ORIGIN,
   testSessionKey,
+  testWalletProvider,
   withTrailingSlashRedirect,
 } from '../lib/read-test-utils';
 import { saveSessionFile } from '../lib/session-key';
@@ -193,12 +194,13 @@ describe('runRead, entitled re-read', () => {
 });
 
 describe('runRead, paid refusal', () => {
-  it('exits 3 straight off the first 402 with no session on disk, and no second request', async () => {
-    // The cold-read case: paid, nothing in the local library, and no session key
-    // to present. The refusal lands on the FIRST 402. The mock is a triple trap:
-    // an SIWX re-check would have DELIVERED, a session presentation would have
-    // DELIVERED, and a payment would have SUCCEEDED — so all three absent phases
-    // are real assertions, not accidents of setup.
+  it('exits 3 on the first 402 when there is no wallet to ask the question with', async () => {
+    // The cold-read case on a machine with no key: paid, nothing in the local
+    // library, no session on disk, and no wallet to mint one. Ownership is
+    // UNKNOWN rather than denied, and the refusal still lands on the FIRST 402.
+    // The mock is a triple trap: an SIWX re-check would have DELIVERED, a session
+    // presentation would have DELIVERED, and a payment would have SUCCEEDED — so
+    // all three absent phases are real assertions, not accidents of setup.
     const pr = buildPaymentRequired();
     const { fetch, calls } = makeReadServer({
       plain: () => reply.paymentRequired(pr),
@@ -214,18 +216,18 @@ describe('runRead, paid refusal', () => {
     const cliErr = err as CliError;
     expect(cliErr.code).toBe('REFUSED');
     expect(cliErr.exitCode).toBe(3);
-    // The message names the price; the fix names the verb that can pay, and —
-    // because nothing was presented — the verb that might make it free.
+    // The message names the price; the fix names the verb that can pay, and the
+    // wallet that was missing — never a session verb, because there is none.
     expect(cliErr.message).toContain('0.10 USD');
     expect(cliErr.message).toContain('100000 atomic');
     expect(cliErr.fix).toContain('tenjin buy');
-    expect(cliErr.fix).toContain('tenjin session start --scope read');
+    expect(cliErr.fix).toContain('tenjin wallet create');
+    expect(cliErr.fix).not.toContain('session start');
     expect(cliErr.details).toMatchObject({
       reason: 'payment_required',
-      entitlementCheck: 'not_performed',
+      entitlementCheck: 'no_wallet',
       price: { usd: '0.1', atomic: '100000' },
       buyCommand: `tenjin buy ${URL_}`,
-      sessionCommand: 'tenjin session start --scope read',
     });
 
     // Exactly one unauthenticated probe. No SIWX, no session, no payment.
@@ -368,37 +370,61 @@ describe('runRead, owned-library recovery on a session key', () => {
     const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
       (e: unknown) => e,
     );
-    // Not API_UNREACHABLE: read cannot re-establish (that needs the wallet it
-    // lacks), so it declines. And NOT `'session'`: the server never answered the
-    // ownership question, so telling the agent to buy would spend money on a
-    // piece it may already own. Re-minting is the move, so `sessionCommand` rides.
+    // Not API_UNREACHABLE: exactly one presentation per run, so a delegation the
+    // server declined ends the attempt. And NOT `'session'`: the server never
+    // answered the ownership question, so telling the agent to buy would spend
+    // money on a piece it may already own.
     const cliErr = err as CliError;
     expect(cliErr.code).toBe('REFUSED');
-    expect(cliErr.details).toMatchObject({
-      entitlementCheck: 'session_rejected',
-      sessionCommand: 'tenjin session start --scope read',
-    });
-    expect(cliErr.fix).toContain('tenjin session start --scope read');
+    expect(cliErr.details).toMatchObject({ entitlementCheck: 'session_rejected' });
     expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
   });
 
-  it.each([
+  const UNUSABLE: Array<[string, Partial<SessionFile>]> = [
     ['expired', { exp: new Date(Date.now() - 1000).toISOString() }],
     ['too close to expiry for the 60s skew', { exp: new Date(Date.now() + 5000).toISOString() }],
     ['scoped to something the run does not cover', { scope: 'write' }],
-  ])('never presents a session that is %s', async (_name, over) => {
-    await seedSession(over as Partial<SessionFile>);
-    const { fetch, calls } = makeReadServer({
-      // No `session` handler: presenting one would throw rather than pass.
-      plain: () => reply.paymentRequired(buildPaymentRequired()),
-    });
-    const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
-      (e: unknown) => e,
-    );
-    expect((err as CliError).code).toBe('REFUSED');
-    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'not_performed' });
-    expect(calls.map((c) => c.phase)).toEqual(['plain']);
-  });
+  ];
+
+  it.each(UNUSABLE)(
+    'never presents a session that is %s, and cannot mint without a wallet',
+    async (_name, over) => {
+      await seedSession(over);
+      const { fetch, calls } = makeReadServer({
+        // No `session` handler: presenting one would throw rather than pass.
+        plain: () => reply.paymentRequired(buildPaymentRequired()),
+      });
+      const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
+        (e: unknown) => e,
+      );
+      expect((err as CliError).code).toBe('REFUSED');
+      expect((err as CliError).details).toMatchObject({ entitlementCheck: 'no_wallet' });
+      expect(calls.map((c) => c.phase)).toEqual(['plain']);
+    },
+  );
+
+  it.each(UNUSABLE)(
+    'mints a fresh session over one that is %s, and presents that',
+    async (_name, over) => {
+      const stale = await seedSession(over);
+      const { fetch, calls } = makeReadServer({
+        plain: () => reply.paymentRequired(buildPaymentRequired()),
+        session: () => reply.entitled(readBody()),
+      });
+      const result = await runRead({ ref: URL_ }, makeCtx(), {
+        fetchImpl: fetch,
+        provider: testWalletProvider(),
+      });
+      expect((result.data as { entitlement: string }).entitlement).toBe('entitled');
+      expect(calls.map((c) => c.phase)).toEqual(['plain', 'session']);
+      // The stale delegation was replaced on disk, not presented: what went out is
+      // the new one, minted for the same origin at read scope.
+      const onDisk = JSON.parse(await readFile(join(dir, 'session.json'), 'utf8')) as SessionFile;
+      expect(onDisk.delegation).not.toBe(stale.delegation);
+      expect(onDisk.scope).toBe('read');
+      expect(onDisk.origin).toBe(TEST_ORIGIN);
+    },
+  );
 
   it('never presents a session for a piece already in the library (no network at all)', async () => {
     await seedSession();
@@ -415,6 +441,76 @@ describe('runRead, owned-library recovery on a session key', () => {
     });
     const result = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: neverFetch });
     expect((result.data as { alreadyDelivered: boolean }).alreadyDelivered).toBe(true);
+  });
+
+  /** A provider that counts how many times the keystore was actually opened. */
+  function countingProvider(): {
+    provider: ReturnType<typeof testWalletProvider>;
+    unlocks: number;
+  } {
+    const inner = testWalletProvider();
+    const state = { unlocks: 0 };
+    return {
+      provider: {
+        ...inner,
+        getSigner: async () => {
+          state.unlocks += 1;
+          return inner.getSigner();
+        },
+      },
+      get unlocks() {
+        return state.unlocks;
+      },
+    };
+  }
+
+  it('opens the keystore once for an owned piece and reuses the delegation after', async () => {
+    // The case a separate minting verb used to exist for: paid, owned, and not on
+    // this machine. The first read mints; the second finds the delegation on disk and
+    // asks the wallet for nothing.
+    const counting = countingProvider();
+    const { fetch, calls } = makeReadServer({
+      plain: () => reply.paymentRequired(buildPaymentRequired()),
+      session: () => reply.entitled(readBody()),
+    });
+    const first = await runRead({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: counting.provider,
+    });
+    expect((first.data as { entitlement: string }).entitlement).toBe('entitled');
+    expect(counting.unlocks).toBe(1);
+    const minted = JSON.parse(await readFile(join(dir, 'session.json'), 'utf8')) as SessionFile;
+    expect(minted.scope).toBe('read');
+    expect(minted.origin).toBe(TEST_ORIGIN);
+
+    // The piece is in the library now, so a second read of the SAME url would not
+    // reach step 3 at all. Ask for another one on the same origin instead.
+    const other = 'https://tenjin.blog/api/read/iris/other';
+    const second = await runRead({ ref: other }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: counting.provider,
+    });
+    expect((second.data as { entitlement: string }).entitlement).toBe('entitled');
+    expect(counting.unlocks).toBe(1);
+    expect(calls.map((c) => c.phase)).toEqual(['plain', 'session', 'plain', 'session']);
+    expect(
+      JSON.parse(await readFile(join(dir, 'session.json'), 'utf8')) as SessionFile,
+    ).toStrictEqual(minted);
+  });
+
+  it('never touches the keystore for a free piece', async () => {
+    // Step 2 delivers, so nothing below it runs. The provider fails the test if
+    // it is reached at all: a free read must cost no wallet interaction, which is
+    // what keeps `read` usable on a machine with no wallet.
+    const counting = countingProvider();
+    const { fetch, calls } = makeReadServer({ plain: () => reply.entitled(readBody()) });
+    const result = await runRead({ ref: URL_ }, makeCtx(), {
+      fetchImpl: fetch,
+      provider: counting.provider,
+    });
+    expect((result.data as { entitlement: string }).entitlement).toBe('free');
+    expect(counting.unlocks).toBe(0);
+    expect(calls.map((c) => c.phase)).toEqual(['plain']);
   });
 
   it('fails closed on a redirect during the signed retry, saving nothing', async () => {
@@ -480,39 +576,22 @@ describe('runRead, module boundary', () => {
     expect(importSpecs("await import('../lib/x402-pay`)")).toEqual([]);
   });
 
-  // The structural pin the whole verb rests on: `read` must be UNABLE to pay OR
-  // open a keystore, not merely choose not to. This walks read's transitive local
-  // graph and asserts it never reaches:
-  //   - lib/x402-pay        (the payment builder, imported by exactly one command: buy)
-  //   - lib/session-key     (establishSession — MINTS wallet-signed delegations)
-  //   - lib/wallet/*        (the keystore: provider resolution, local store, spend
-  //                          authorizer), EXCEPT lib/wallet/provider, which is
-  //                          type-only interface declarations with no runtime code —
-  //                          lib/siwx names TenjinSigner in a signature, and a type
-  //                          cannot unlock anything.
+  // The structural pin the whole verb rests on: `read` must be UNABLE to pay, not
+  // merely choose not to. This walks read's transitive local graph and asserts it
+  // never reaches `lib/x402-pay`, the payment builder, imported by exactly one
+  // command: buy.
   //
-  // `lib/session-present` is ALLOWED and is the whole point of the module split:
-  // read may LOAD a delegation that already exists and sign one request with it,
-  // which is how an owned-but-uncached piece comes back without paying. It may not
-  // MINT one, because minting is the half that needs the wallet — and that half
-  // stayed in lib/session-key, which is still banned above. The key read can
-  // therefore hold is P-256: wrong curve for the EIP-712/secp256k1 signature an
-  // EIP-3009 payment authorization needs, so no refactor inside this graph pays
-  // for anything. That is the whole claim — the delegation's SCOPE is not part of
-  // it, and must not be re-imported here (see permissions.ts).
+  // It is the ONE ban left. `read` mints its own read-scoped delegation now
+  // (decision 15), so `lib/session-key` and the wallet are legitimately in the
+  // graph and banning them would only be banning the feature. What still holds,
+  // structurally, is that the key it ends up signing with is P-256: the wrong
+  // curve for the EIP-712/secp256k1 signature an EIP-3009 payment authorization
+  // needs, so no refactor inside this graph pays for anything.
   //
-  // A future refactor that routes read through a paying or MINTING helper fails
-  // here rather than in production.
-  it('never reaches lib/x402-pay, lib/session-key, or the wallet through any transitive import', async () => {
+  // A future refactor that routes read through a paying helper fails here rather
+  // than in production.
+  it('never reaches lib/x402-pay through any transitive import', async () => {
     const seen = new Set<string>();
-
-    function bannedReason(resolved: string): string | null {
-      if (resolved.includes('/lib/x402-pay')) return 'the payment module';
-      if (resolved.includes('/lib/session-key')) return 'the session-key module';
-      if (resolved.includes('/lib/wallet') && !resolved.endsWith('/wallet/provider'))
-        return 'a wallet module';
-      return null;
-    }
 
     async function walk(file: string): Promise<void> {
       if (seen.has(file)) return;
@@ -525,11 +604,10 @@ describe('runRead, module boundary', () => {
       }
       for (const spec of importSpecs(source)) {
         const resolved = join(file, '..', spec);
-        const reason = bannedReason(resolved);
         expect(
-          reason,
-          `${file} reaches ${spec}: ${reason ?? ''} must never be in read's graph`,
-        ).toBeNull();
+          resolved.includes('/lib/x402-pay'),
+          `${file} reaches ${spec}: the payment module must never be in read's graph`,
+        ).toBe(false);
         await walk(`${resolved}.ts`);
         await walk(join(resolved, 'index.ts'));
       }
@@ -539,31 +617,12 @@ describe('runRead, module boundary', () => {
     // Sanity: a broken walk would pass vacuously.
     expect(seen.size).toBeGreaterThan(5);
     expect([...seen].some((f) => f.includes('delivery'))).toBe(true);
-    // The allowed half is actually IN the graph. Without this the "session-key is
-    // banned" assertion above would stay green if read stopped presenting a
-    // session at all, and the split would have quietly lost its reason to exist.
+    // Both halves of the session layer are actually IN the graph: the present
+    // half it signs with, and the mint half it now reaches through the same
+    // `resolveWriteAuth` publish uses. Stated positively so the ban above cannot
+    // stay green over a read that quietly stopped recovering owned pieces.
     expect([...seen].some((f) => f.endsWith('/lib/session-present.ts'))).toBe(true);
-    // ...and the banned half is genuinely absent, stated positively rather than
-    // resting on the walk having visited anything at all.
-    expect([...seen].some((f) => f.endsWith('/lib/session-key.ts'))).toBe(false);
-
-    // Name-level backstop, graph-wide (available now that the wallet barrel left
-    // the graph): no file read can reach resolves a provider, opens a session, or
-    // invokes a signer. `getSigner` is banned as a CALL (`.getSigner(`) because
-    // lib/wallet/provider legitimately DECLARES it in the WalletProvider interface.
-    for (const file of seen) {
-      let source: string;
-      try {
-        source = await readFile(file, 'utf8');
-      } catch {
-        continue;
-      }
-      const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-      for (const banned of ['establishSession', 'resolveWalletProvider', 'describeWallet']) {
-        expect(code, `${file} must not reference ${banned}`).not.toContain(banned);
-      }
-      expect(code, `${file} must not call getSigner`).not.toMatch(/\.\s*getSigner\s*\(/);
-    }
+    expect([...seen].some((f) => f.endsWith('/lib/session-key.ts'))).toBe(true);
   });
 
   // The split's own invariant, pinned where the guarantee is claimed. The graph
@@ -615,32 +674,33 @@ describe('runRead, module boundary', () => {
   });
 
   // read makes exactly ONE class of signature: a session-key signature over a
-  // request it is about to send, with a delegation it loaded from disk. Not a
-  // transfer authorization, not a SIWX auth message, not a fresh delegation. The
-  // scan is an EXACT-SET assertion rather than a ban list, so a new `signFoo(`
-  // appearing here fails even if nobody thought to ban it.
-  it('signs only with a loaded session key: exactly one sign* call, no wallet or siwx import', async () => {
+  // request it is about to send. Not a transfer authorization. The scan is an
+  // EXACT-SET assertion rather than a ban list, so a new `signFoo(` appearing
+  // here fails even if nobody thought to ban it. `buildSiwxHeader` is absent
+  // because read does not call it: the delegation's one wallet signature is made
+  // inside `session-key.ts`, through `resolveWriteAuth`, which is the whole point
+  // of routing the mint there rather than open-coding it.
+  it('signs only through the session layer: exactly one sign* call, no SIWX of its own', async () => {
     const source = await readFile(join(here, 'read.ts'), 'utf8');
     const signCalls = [...source.matchAll(/\b(sign[A-Za-z]*)\s*\(/g)].map((m) => m[1]);
     expect(signCalls).toEqual(['signWithSession']);
-    // The presentation is actually WIRED, not merely importable. A type-only
-    // import keeps `session-present` in the graph walk above, and an extracted
-    // helper keeps a `signWithSession(` call in the file, so without these the
-    // pins stay green over a read that quietly stopped presenting anything —
-    // which is how a security-relevant path becomes dead code unnoticed.
+    // The presentation and the mint are actually WIRED, not merely importable. A
+    // type-only import keeps a module in the graph walk above, so without these
+    // the pins stay green over a read that quietly stopped doing either.
     const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '');
-    for (const wired of ['loadSessionFile(', 'isSessionPresentable(', 'originOf(']) {
+    for (const wired of [
+      'loadSessionFile(',
+      'isSessionPresentable(',
+      'resolveWriteAuth(',
+      'originOf(',
+    ]) {
       expect(code, `read.ts must still call ${wired}`).toContain(wired);
     }
-    for (const spec of importSpecs(source)) {
-      // `session-present` is deliberately NOT matched here: the ban is on the
-      // minting module (`session-key`), which is the one that needs a wallet.
-      expect(spec).not.toMatch(/\/(wallet|siwx|session-key)(\/|$)/);
-    }
     expect(source).not.toContain('buildSiwxHeader');
-    // The mint entry point by name, in case it is ever re-exported through an
-    // allowed path: the graph walk covers modules, this covers the symbol.
-    expect(source).not.toContain('establishSession');
+    // The scope it asks for, pinned: a wider one would leave a write-capable
+    // credential on disk behind an always-safe verb.
+    expect(code).toContain("scope: 'read'");
+    expect(code).not.toContain('read+write');
   });
 });
 
@@ -677,12 +737,11 @@ describe('runRead, the session key is bound to the origin it was minted for', ()
     expect(cliErr.details).toMatchObject({ entitlementCheck: 'session_origin_mismatch' });
   });
 
-  // The refusal after a redirected read must NOT read like "you have no session",
-  // because the remedy for that is `session start` — the one verb that opens the
-  // keystore. An agent still carrying the `--base-url` that caused the mismatch
-  // would wallet-sign a delegation against the attacker host and clobber the good
-  // prod session. So the mismatch state drops sessionCommand entirely.
-  it('never recommends minting a session after an origin mismatch', async () => {
+  // A mismatch is the ONE state that refuses to mint. Every other unusable
+  // session ends in a fresh one, so without this an agent still carrying the
+  // `--base-url` that caused the mismatch would wallet-sign a delegation against
+  // the attacker host and clobber the good prod session.
+  it('never mints against another origin while a session for one is cached', async () => {
     const { file } = await testSessionKey(); // minted for TEST_ORIGIN
     await saveSessionFile(dir, file);
     const { fetch } = makeReadServer({
@@ -700,16 +759,16 @@ describe('runRead, the session key is bound to the origin it was minted for', ()
     // The remedy it DOES give: stop redirecting the CLI.
     expect(err.fix).toMatch(/minted for a different Tenjin deployment/i);
     expect(err.fix).toContain('tenjin config get baseUrl');
-    // ...while an ordinary no-session refusal still points at minting, so this is
-    // a real distinction rather than the fix line having been blanked.
+    // ...while with no cached session at all the same command MINTS and reads,
+    // so this is a real distinction rather than the fix line having been blanked:
+    // a mismatch is the one state that refuses to mint.
     await rm(join(dir, 'session.json'));
-    const plain = (await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
-      (e: unknown) => e,
-    )) as CliError;
-    expect(plain.details).toMatchObject({
-      entitlementCheck: 'not_performed',
-      sessionCommand: 'tenjin session start --scope read',
-    });
+    const delivered = await runRead(
+      { ref: `${OTHER}/api/read/iris/slug` },
+      makeCtx({ baseUrl: OTHER }),
+      { fetchImpl: fetch, provider: testWalletProvider() },
+    );
+    expect((delivered.data as { entitlement: string }).entitlement).toBe('entitled');
   });
 
   it('presents to the origin it WAS minted for, so the binding is not just a refusal', async () => {
@@ -762,7 +821,7 @@ describe('runRead, a session file that cannot sign', () => {
     const err = await runRead({ ref: URL_ }, makeCtx(), { fetchImpl: fetch }).catch(
       (e: unknown) => e,
     );
-    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'not_performed' });
+    expect((err as CliError).details).toMatchObject({ entitlementCheck: 'no_wallet' });
   });
 });
 
@@ -780,10 +839,7 @@ describe('runRead, the signed GET never loses the price it already knows', () =>
     expect(cliErr.code).toBe('REFUSED');
     expect(cliErr.message).toContain('0.10 USD');
     // The check did not complete, so buying is not the recommendation.
-    expect(cliErr.details).toMatchObject({
-      entitlementCheck: 'session_inconclusive',
-      sessionCommand: 'tenjin session start --scope read',
-    });
+    expect(cliErr.details).toMatchObject({ entitlementCheck: 'session_inconclusive' });
   });
 
   it('a 409 on the signed GET never becomes "this costs $X, run buy"', async () => {

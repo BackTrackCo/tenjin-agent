@@ -432,50 +432,53 @@ describe('publish --search-id collects (the dispatcher mapping)', () => {
 });
 
 /**
- * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
- * so the cases here are the ones that resolve BEFORE it — the group exists, the
- * leaf exists, and a bad `--scope` is USAGE.
+ * The verbs decision 15 deleted, and the ones that replaced them. Dispatcher
+ * level only: `wallet send` reaches a wallet and `hooks list` reaches loop.db,
+ * so what is asserted here is what resolves BEFORE either — the command exists,
+ * or it does not.
  */
-describe('session command group', () => {
-  it('registers `session start` as a subcommand, not a bare verb', async () => {
+describe('the deleted verbs and their replacements', () => {
+  it.each(['push', 'state', 'session', 'send'])('`tenjin %s` is not a command', async (verb) => {
     const cap = captureIo();
-    expect(await main(['session', '--help'], cap.io)).toBe(0);
-    expect(cap.stdout()).toContain('start [options]');
-  });
-
-  it('a bare `tenjin session` is USAGE, never a silent mint', async () => {
-    const cap = captureIo();
-    expect(await main(['session'], cap.io)).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
-  });
-
-  it('--scope read+write is refused as USAGE, before any wallet work', async () => {
-    const cap = captureIo();
-    const code = await main(['session', 'start', '--scope', 'read+write', '--json'], cap.io);
-    expect(code).toBe(2);
+    expect(await main([verb, '--json'], cap.io)).toBe(2);
     const parsed = JSON.parse(cap.stdout()) as { error: { code: string; message: string } };
     expect(parsed.error.code).toBe('USAGE');
-    expect(parsed.error.message).toContain('read+write');
+    expect(parsed.error.message).toContain(`unknown command '${verb}'`);
   });
 
-  it('the leaf takes trailing global flags like every other command', async () => {
+  it('`tenjin wallet send` is registered under the wallet group', async () => {
     const cap = captureIo();
-    // A bad --timeout is a dispatcher-level USAGE, which proves the leaf parsed
-    // the global flag rather than passing it through as an unknown option.
-    const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
-    expect(code).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    expect(await main(['wallet', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('send [options] <amount> <token> <to>');
+  });
+
+  it('`tenjin hooks` carries list, enable and disable', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('list');
+    expect(help).toContain('enable [options] <arm>');
+    expect(help).toContain('disable [options] <arm>');
+  });
+
+  it('`tenjin hooks disable` on an unknown arm is USAGE naming the seven', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', 'disable', 'nope', '--json'], cap.io)).toBe(2);
+    const parsed = JSON.parse(cap.stdout()) as { error: { code: string; fix?: string } };
+    expect(parsed.error.code).toBe('USAGE');
+    expect(parsed.error.fix).toContain('prompt, web-search, web-fetch, subagent, failure');
+  });
+
+  it('`tenjin grade` is a top-level verb carrying the four grading flags', async () => {
+    const cap = captureIo();
+    expect(await main(['grade', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const flag of ['--since', '--session', '--explain', '--label']) {
+      expect(help).toContain(flag);
+    }
   });
 });
 
-/**
- * The stored-finding source on `publish`, at the dispatcher.
- *
- * There is no `finding` COMMAND GROUP to reach the queue with: the id the
- * capture ask prints is an argument to the command the ask already names, so
- * what has to hold here is that the flag exists and that a wrong id fails the
- * way every other missing resource in this CLI does — before any wallet touch.
- */
 describe('publish --finding', () => {
   it('is registered on publish rather than as a command group of its own', async () => {
     const help = captureIo();

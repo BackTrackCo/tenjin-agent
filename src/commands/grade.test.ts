@@ -1,31 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPushGrade, runPushStatus } from './push';
-import { claudeSettingsPath } from '../lib/harness-permissions';
-import { hooksDir, shimBundlePath } from '../lib/paths';
+import { runGrade } from './grade';
 import { openLoopDb, type LoopDb } from '../hooks/store';
 import type { TranscriptLookup } from '../lib/grade';
 import type { CommandContext } from '../context';
 
 let dir: string;
-let home: string;
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-push-cmd-'));
-  home = await mkdtemp(join(tmpdir(), 'tenjin-push-home-'));
+  dir = await mkdtemp(join(tmpdir(), 'tenjin-grade-cmd-'));
 });
 afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
-  await rm(home, { recursive: true, force: true });
 });
-
-/** No existing status test may reach the network: the default `lookupStats` is a
- *  real GET, so every call below hands in a shelf that is down. The rendering of
- *  a reachable one has its own case. */
-const shelfDown = async (): Promise<never> => {
-  throw new Error('shelf unreachable');
-};
 
 function makeCtx(): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
@@ -40,12 +28,12 @@ function makeCtx(): CommandContext {
 interface SeedLeg {
   stage?: number;
   shelf: string;
-  /** `hit` is the winning leg — the only one `status` and `grade` count. */
+  /** `hit` is the winning leg — the only one `grade` counts. */
   outcome?: 'hit' | 'miss' | 'shadowed' | 'no-answer';
   searchId?: string | null;
   title?: string;
   url?: string;
-  /** `<outcome>:<by>`, as `push grade` writes it. */
+  /** `<outcome>:<by>`, as `tenjin grade` writes it. */
   graded?: string;
   postedAt?: number;
 }
@@ -110,228 +98,7 @@ function seedFires(fires: SeedFire[]): void {
   });
 }
 
-/** One pairing row, as the failure arm opens it, then closed as asked. */
-function seedPairing(
-  at: number,
-  head: string,
-  close?: { status: 'unverified' | 'verified'; scope: string; postId?: string },
-): void {
-  withDb((db) => {
-    const uid = `pair-${at}-${head}-${Math.random().toString(36).slice(2)}`;
-    db.prepare(
-      `INSERT INTO pairings (uid, at, session, project, machine, kind, key, cmd_head, cmd,
-         error_line, error_files, pkg_versions, scope, status, closed_at, post_id)
-       VALUES (?, ?, 'sess', 'proj', 'machine', 'sig_v1', ?, ?, ?, 'Error: ENOENT', '["a.ts"]', '{}',
-         ?, ?, ?, ?)`,
-    ).run(
-      uid,
-      at,
-      `key-${uid}`,
-      head,
-      `${head} test`,
-      close?.scope ?? 'ambiguous',
-      close?.status ?? 'open',
-      close === undefined ? null : at + 1,
-      close?.postId ?? null,
-    );
-  });
-}
-
-describe('runPushStatus', () => {
-  it('reports nothing-wired and an empty ledger on a fresh dir', async () => {
-    const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(result.data).toEqual({
-      daemonInstalled: false,
-      hooksRegistered: false,
-      ledger: {
-        windowDays: 7,
-        rows: 0,
-        byArmReason: {},
-        byShelf: {},
-        delivered: 0,
-        candidates: 0,
-        pairings: { opened: 0, closed: 0, verified: 0, scope: {}, byHead: {}, published: 0 },
-        graded: {},
-      },
-      // Public mode is one shelf, and it is unreachable in this test.
-      server: { public: null },
-    });
-    expect(result.humanLines?.join('\n')).toContain(
-      'pairings, last 7d: 0 opened, 0 closed, 0 verified, 0 published',
-    );
-  });
-
-  /**
-   * BOTH HALVES, and either alone reports an armed sidecar that does nothing: a
-   * daemon bundle nobody registered entries for, or entries pointing at a hooks
-   * dir with no bundle in it. The fix names `tenjin install`, the one verb that
-   * writes both.
-   */
-  it('is only armed when the daemon is installed AND the entries are registered', async () => {
-    const bare = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(bare.data).toMatchObject({ daemonInstalled: false, hooksRegistered: false });
-
-    // Bundle on disk, nothing registered: the half that would read healthy.
-    await mkdir(hooksDir(dir), { recursive: true });
-    await writeFile(shimBundlePath(dir), '// shim');
-    const halfWired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(halfWired.data).toMatchObject({ daemonInstalled: true, hooksRegistered: false });
-
-    await mkdir(join(home, '.claude'), { recursive: true });
-    await writeFile(
-      claudeSettingsPath(home),
-      JSON.stringify({
-        hooks: { Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:31999/hook/claude' }] }] },
-      }),
-    );
-    const wired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(wired.data).toMatchObject({ daemonInstalled: true, hooksRegistered: true });
-    const lines = wired.humanLines?.join('\n') ?? '';
-    expect(lines).toContain('daemon installed: yes');
-    expect(lines).toContain('hook entries registered: yes');
-  });
-
-  /**
-   * A week of `fires` and their `legs`: how many fired, what closed them, which
-   * shelves were asked, how many actually put a piece in front of the agent and
-   * how many distinct pieces that was. The vocabulary is read off the rows, so
-   * a reason this build has never heard of still counts.
-   */
-  it('tallies the last 7 days of fires by arm x reason, legs by shelf, and the delivered rows', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const recent = now - 60_000;
-    const stale = now - 8 * 24 * 60 * 60 * 1000;
-    seedFires([
-      {
-        id: 'f-1',
-        at: recent,
-        arm: 'failure',
-        reason: 'hit',
-        delivered: 'inject:res-1',
-        legs: [{ shelf: 'keys' }, { stage: 1, shelf: 'public', outcome: 'shadowed' }],
-      },
-      {
-        id: 'f-2',
-        at: recent,
-        arm: 'failure',
-        reason: 'seen',
-        delivered: null,
-        legs: [{ shelf: 'keys', outcome: 'miss' }],
-      },
-      // Delivered but only recorded: never shown, so it is not a candidate.
-      { id: 'f-3', at: recent, arm: 'context', reason: 'hit', delivered: 'log:res-9' },
-      { id: 'f-4', at: recent, arm: 'prompt', reason: 'no-question', delivered: null },
-      // Outside the 7-day window: must not be counted at all.
-      {
-        id: 'f-stale',
-        at: stale,
-        arm: 'failure',
-        reason: 'hit',
-        delivered: 'inject:res-stale',
-        legs: [{ shelf: 'team' }],
-      },
-    ]);
-
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => now,
-      lookupStats: shelfDown,
-    });
-    expect(result.data).toMatchObject({
-      ledger: {
-        windowDays: 7,
-        rows: 4,
-        byArmReason: {
-          failure: { hit: 1, seen: 1 },
-          context: { hit: 1 },
-          prompt: { 'no-question': 1 },
-        },
-        byShelf: { keys: 2, public: 1 },
-        delivered: 1,
-        candidates: 1,
-      },
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('4 fire(s), 1 delivered, 1 finding(s)');
-    expect(human).toContain('failure: hit=1, seen=1');
-    expect(human).toContain('shelf: keys=2, public=1');
-  });
-
-  /** Two rows about the same piece are one finding, and a local pairing is a
-   *  piece like any other: it is delivered under `pairing:<id>`, so it counts. */
-  it('counts distinct pieces, not deliveries', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    seedFires([
-      { id: 'f-1', at: now - 1000, arm: 'prompt', reason: 'hit', delivered: 'inject:res-a' },
-      { id: 'f-2', at: now - 900, arm: 'context', reason: 'hit', delivered: 'inject:res-a' },
-      { id: 'f-3', at: now - 800, arm: 'failure', reason: 'hit', delivered: 'inject:res-b' },
-      // A local pairing: no marketplace piece behind it, but it was shown, and
-      // `pairingAnswer` gives it a resource id of its own.
-      { id: 'f-4', at: now - 700, arm: 'failure', reason: 'hit', delivered: 'inject:pairing:9' },
-    ]);
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => now,
-      lookupStats: shelfDown,
-    });
-    expect(result.data).toMatchObject({ ledger: { delivered: 4, candidates: 3 } });
-  });
-
-  /**
-   * The mechanical lane's own line: how many pairings the machine opened, how
-   * many a later pass closed and verified, what scope they landed in, which
-   * heads opened them, and how many an agent has since published a fix note for
-   * (`publish --key` stamps `post_id`).
-   */
-  it('reports the pairings opened in the window: closed, verified, scope, heads, published', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const recent = now - 60_000;
-    const stale = now - 8 * 24 * 60 * 60 * 1000;
-    seedPairing(recent, 'pnpm');
-    seedPairing(recent, 'pnpm', { status: 'unverified', scope: 'code' });
-    seedPairing(recent, 'pytest', { status: 'verified', scope: 'code', postId: 'post-1' });
-    seedPairing(recent, 'tsc', { status: 'unverified', scope: 'user' });
-    seedPairing(stale, 'cargo', { status: 'unverified', scope: 'code' });
-
-    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
-    expect(result.data).toMatchObject({
-      ledger: {
-        pairings: {
-          opened: 4,
-          closed: 3,
-          verified: 1,
-          published: 1,
-          scope: { code: 2, user: 1 },
-          byHead: { pnpm: 2, pytest: 1, tsc: 1 },
-        },
-      },
-    });
-    expect(result.humanLines?.join('\n')).toContain(
-      'pairings, last 7d: 4 opened, 3 closed, 1 verified, 1 published; scope: code=2, user=1; heads: pnpm=2, pytest=1, tsc=1',
-    );
-  });
-
-  /** Complete, not a floor: the rows are indexed, so the window is the window. */
-  it('counts the whole window on a large ledger', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    seedFires(
-      Array.from({ length: 2000 }, (_, i) => ({
-        id: `f-${i}`,
-        at: now - 60_000 - i,
-        arm: 'prompt',
-        reason: 'no-answer',
-      })),
-    );
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => now,
-      lookupStats: shelfDown,
-    });
-    expect((result.data as { ledger: { rows: number } }).ledger.rows).toBe(2000);
-  });
-});
-
-describe('runPushGrade', () => {
+describe('runGrade', () => {
   const SEARCH = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const RES = '0197aaaa-bbbb-cccc-dddd-ffffffffffff';
   const URL = 'https://tenjin.blog/p/the-collation-trap';
@@ -455,7 +222,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       {},
       {
@@ -567,7 +334,7 @@ describe('runPushGrade', () => {
       },
     ]);
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { explain: true },
       {
@@ -620,7 +387,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl, calls } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { explain: true },
       { now: () => NOW, fetchImpl, ...transcriptDeps({}, { unreadable: ['blocked'] }) },
@@ -660,7 +427,7 @@ describe('runPushGrade', () => {
       },
     ]);
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { explain: true },
       { now: () => NOW, ...transcriptDeps({}) },
@@ -720,7 +487,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl, calls } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       {},
       {
@@ -805,7 +572,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl, calls } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { explain: true },
       {
@@ -857,7 +624,7 @@ describe('runPushGrade', () => {
     });
 
     const down = acceptingShelf(500);
-    const first = await runPushGrade(
+    const first = await runGrade(
       makeCtx(),
       {},
       { now: () => NOW, fetchImpl: down.fetchImpl, ...transcripts },
@@ -868,7 +635,7 @@ describe('runPushGrade', () => {
     // The verdict is recorded, so the second run has nothing to grade — and the
     // post it still owes is sent anyway.
     const up = acceptingShelf();
-    const second = await runPushGrade(
+    const second = await runGrade(
       makeCtx(),
       {},
       { now: () => NOW, fetchImpl: up.fetchImpl, ...transcripts },
@@ -878,7 +645,7 @@ describe('runPushGrade', () => {
       posted: 1,
     });
 
-    const third = await runPushGrade(
+    const third = await runGrade(
       makeCtx(),
       {},
       { now: () => NOW, fetchImpl: up.fetchImpl, ...transcripts },
@@ -911,7 +678,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl, calls } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { label: ['f-1', 'used'] },
       { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
@@ -924,19 +691,19 @@ describe('runPushGrade', () => {
     expect((JSON.parse(String(calls[0]?.init.body)) as { status: string }).status).toBe('used');
 
     await expect(
-      runPushGrade(makeCtx(), { label: ['f-1', 'regenerated'] }, { now: () => NOW, fetchImpl }),
+      runGrade(makeCtx(), { label: ['f-1', 'regenerated'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     await expect(
-      runPushGrade(makeCtx(), { label: ['f-missing', 'used'] }, { now: () => NOW, fetchImpl }),
+      runGrade(makeCtx(), { label: ['f-missing', 'used'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     // A fire that showed nothing is not labellable: a verdict is a report about
     // a piece the agent was SHOWN, and posting one for a log-only decision would
     // tell the shelf a story about a piece it never served.
     await expect(
-      runPushGrade(makeCtx(), { label: ['f-logonly', 'used'] }, { now: () => NOW, fetchImpl }),
+      runGrade(makeCtx(), { label: ['f-logonly', 'used'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     await expect(
-      runPushGrade(makeCtx(), { label: ['f-1'] }, { now: () => NOW, fetchImpl }),
+      runGrade(makeCtx(), { label: ['f-1'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     expect(gradedLegs()).toEqual([
       { fire_id: 'f-1', graded: 'used:hand', posted_at: NOW },
@@ -965,7 +732,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl, calls } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { label: ['f-old', 'used'], since: '1d' },
       { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
@@ -989,7 +756,7 @@ describe('runPushGrade', () => {
     ]);
     const { fetchImpl } = acceptingShelf();
 
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { explain: true },
       {
@@ -1011,7 +778,7 @@ describe('runPushGrade', () => {
   });
 
   it('refuses a --since window it cannot read, before touching the ledger', async () => {
-    await expect(runPushGrade(makeCtx(), { since: 'a while' })).rejects.toMatchObject({
+    await expect(runGrade(makeCtx(), { since: 'a while' })).rejects.toMatchObject({
       code: 'USAGE',
     });
   });
@@ -1046,172 +813,11 @@ describe('runPushGrade', () => {
         legs: [{ shelf: 'public' }],
       },
     ]);
-    const result = await runPushGrade(
+    const result = await runGrade(
       makeCtx(),
       { session: 's2' },
       { now: () => NOW, ...transcriptDeps({}) },
     );
     expect((result.data as { rows: { fire: string }[] }).rows.map((r) => r.fire)).toEqual(['f-2']);
-  });
-});
-
-describe('runPushStatus: the graded rollup and the shelf stats', () => {
-  const NOW = Date.parse('2026-08-22T00:00:00Z');
-
-  const STATS = {
-    windowDays: 7,
-    triggers: [
-      {
-        trigger: 'failure',
-        lookups: 12,
-        hits: 3,
-        candidates: 7,
-        used: 1,
-        wrong: 2,
-        useRate: 1 / 3,
-      },
-    ],
-  };
-
-  it('rolls the verdicts per arm x shelf and renders each shelf under it', async () => {
-    seedFires([
-      {
-        id: 'g-1',
-        at: NOW - 1000,
-        arm: 'failure',
-        reason: 'hit',
-        delivered: 'inject:res-a',
-        legs: [{ shelf: 'public', graded: 'used:read', postedAt: NOW }],
-      },
-      {
-        id: 'g-2',
-        at: NOW - 1000,
-        arm: 'failure',
-        reason: 'hit',
-        delivered: 'inject:res-b',
-        legs: [{ shelf: 'public', graded: 'rejected:none' }],
-      },
-      {
-        id: 'g-3',
-        at: NOW - 1000,
-        arm: 'failure',
-        reason: 'hit',
-        delivered: 'inject:res-c',
-        legs: [{ shelf: 'team' }],
-      },
-      // Never shown, so it is not a verdict anybody owes.
-      {
-        id: 'g-4',
-        at: NOW - 1000,
-        arm: 'prompt',
-        reason: 'seen',
-        delivered: null,
-        legs: [{ shelf: 'public', outcome: 'miss' }],
-      },
-    ]);
-
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => NOW,
-      lookupStats: async () => STATS,
-    });
-    expect(result.data).toMatchObject({
-      ledger: {
-        graded: {
-          failure: {
-            public: { used: 1, rejected: 1, unobserved: 0, ungraded: 0, posted: 1 },
-            team: { used: 0, rejected: 0, unobserved: 0, ungraded: 1, posted: 0 },
-          },
-        },
-      },
-      server: { public: STATS },
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).not.toContain('prompt: public used=');
-    expect(human).toContain('failure: public used=1 rejected=1 unobserved=0 ungraded=0 posted=1');
-    expect(human).toContain('server public (7d):');
-    expect(human).toContain('failure: lookups=12 hits=3 candidates=7 used=1 wrong=2 useRate=0.33');
-  });
-
-  /** An unreachable shelf and a shelf with no demand are different facts. */
-  it('prints server: unavailable and still shows the local counts', async () => {
-    seedFires([
-      {
-        id: 'g-1',
-        at: NOW - 1000,
-        arm: 'failure',
-        reason: 'hit',
-        delivered: 'inject:res-a',
-        legs: [{ shelf: 'public' }],
-      },
-    ]);
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => NOW,
-      lookupStats: shelfDown,
-    });
-    expect(result.data).toMatchObject({ server: { public: null } });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('server public: unavailable');
-    expect(human).toContain('failure: public used=0 rejected=0 unobserved=0 ungraded=1 posted=0');
-  });
-
-  /**
-   * tenjin-agent#252: `GET /api/lookups/stats` is cached server-side for
-   * several minutes, so a `used` count that has not moved since `push grade`
-   * ran is routinely the cache, not proof grading never reached the shelf.
-   * `Age` is what tells the two apart, surfaced right on the header line.
-   */
-  it('renders "shelf stats as of ~Ns ago" when the response carried an Age header', async () => {
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => NOW,
-      lookupStats: async () => ({ ...STATS, ageSeconds: 137 }),
-    });
-    expect(result.humanLines?.join('\n')).toContain(
-      'server public (7d) — shelf stats as of ~137s ago:',
-    );
-  });
-
-  /** No `Age` header, no claim about freshness — the header line reads exactly
-   *  as it did before this field existed. */
-  it('omits the as-of clause with no Age header', async () => {
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => NOW,
-      lookupStats: async () => STATS,
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('server public (7d):');
-    expect(human).not.toContain('shelf stats as of');
-  });
-
-  /**
-   * The trigger name is the shelf's text, and this line is the only place it is
-   * drawn. The response schema bounds it and this strips it: a length bound is
-   * not an escape-sequence bound, and the two layers fail differently.
-   */
-  it('strips terminal escapes out of a trigger name before drawing it', async () => {
-    const result = await runPushStatus(makeCtx(), {
-      homeDir: home,
-      now: () => NOW,
-      lookupStats: async () => ({
-        windowDays: 7,
-        triggers: [
-          {
-            trigger: '\u001b[2K\u001b[1Gfailure',
-            lookups: 1,
-            hits: 0,
-            candidates: 0,
-            used: 0,
-            wrong: 0,
-            useRate: null,
-          },
-        ],
-      }),
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('  failure: lookups=1');
-    expect(human).not.toContain('\u001b');
   });
 });

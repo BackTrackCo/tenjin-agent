@@ -374,14 +374,15 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   // The funds-out ESCAPE HATCH: human-invoked only. Deliberately absent from the
   // MCP toolset (src/mcp/server.ts) and the skill adapters; no model-facing
-  // surface gains a send trigger (both exclusions are pinned by tests).
-  addGlobalFlags(program.command('send <amount> <token> <to>'))
+  // surface gains a send trigger (both exclusions are pinned by tests). It lives
+  // under `wallet` with every other verb that operates on the wallet.
+  addGlobalFlags(wallet.command('send <amount> <token> <to>'))
     .description(
       'Move funds OUT of the agent wallet (escape hatch): preview the resolved recipient and amount, confirm explicitly, then transfer on Base and print the tx hash. USDC only',
     )
     .option('--yes', 'skip the interactive confirm (required to send when not at a TTY)')
     .action(async function (this: Command, amount: string, token: string, to: string) {
-      await runCommand('send', this, async (ctx) => {
+      await runCommand('wallet.send', this, async (ctx) => {
         const o = this.opts();
         const { runSend } = await import('./commands/send');
         return runSend({ amount, token, to, ...(o.yes === true ? { yes: true } : {}) }, ctx);
@@ -449,30 +450,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
           },
           ctx,
         );
-      });
-    });
-
-  // The attended half of read's recovery path: `read` cannot open a keystore, so
-  // the ONE wallet signature an owned-library recovery needs is minted here, on
-  // purpose, by a verb the operator opts into. Group-level flags so `tenjin
-  // session --json start` parses like the wallet and config groups.
-  const session = addGlobalFlags(
-    program
-      .command('session')
-      .description(
-        'Manage the delegated session key `tenjin read` presents to recover owned pieces',
-      ),
-  );
-  addGlobalFlags(session.command('start'))
-    .description(
-      'Open the wallet ONCE and mint a read-scoped session key (≤24h) so `tenjin read` can recover pieces you already own without paying. Spends nothing and can never spend: the delegated key is P-256, the wrong curve to authorize a payment. It is still a wallet-derived credential, so it is stored 0600 and only ever presented to the origin it was minted for. Reuses a live session instead of signing again',
-    )
-    .option('--scope <scope>', 'session scope; this version mints `read` only (default: read)')
-    .action(async function (this: Command) {
-      await runCommand('session.start', this, async (ctx) => {
-        const o = this.opts();
-        const { runSessionStart } = await import('./commands/session');
-        return runSessionStart(typeof o.scope === 'string' ? { scope: o.scope } : {}, ctx);
       });
     });
 
@@ -850,20 +827,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  // `tenjin state query "<sql>"` (docs/command-reference.md, "State store"):
-  // read-only ad hoc SQL against ~/.tenjin/loop.db, for an operator debugging a
-  // fire, a pairing, a search, or a fact by hand. See commands/state.ts for why
-  // this exists instead of `sqlite3 -readonly`.
-  const state = addGlobalFlags(program.command('state').description('Inspect the loop database'));
-  addGlobalFlags(state.command('query <sql>'))
-    .description('Run one read-only SELECT against the loop database and print the rows as JSON')
-    .action(async function (this: Command, sql: string) {
-      await runCommand('state.query', this, async (ctx) => {
-        const { runStateQuery } = await import('./commands/state');
-        return runStateQuery({ sql }, ctx);
-      });
-    });
-
   // `mcp` is NOT routed through runCommand: it hands stdout to the MCP transport
   // and blocks until the client disconnects, so it prints no envelope and sets no
   // exit code on success. buildContext reuses the same flag/dataDir plumbing every
@@ -876,31 +839,52 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       await runMcpServer({ dataDir: ctx.dataDir, flags: ctx.flags });
     });
 
-  // ---- push (sidecar) ----
-  // `tenjin push status|grade` (docs/command-reference.md#push-experimental): the
-  // report on the sidecar, which surfaces a Tenjin finding beside a failing
-  // command, a stuck edit loop, or a subagent dispatch, without being asked. See
-  // commands/push.ts for the mechanism; this block only wires the two verbs.
-  const push = addGlobalFlags(
+  // ---- the loop's hook arms ----
+  // `tenjin hooks` is the one surface for which arms run (docs/command-reference.md,
+  // "Hooks"): the table with its 7-day counts, and enable/disable over the same
+  // `hooks.<arm>` booleans `tenjin config` reads. Group-level flags so
+  // `tenjin hooks --json` parses like the wallet and config groups.
+  const hooks = addGlobalFlags(
     program
-      .command('push')
+      .command('hooks')
       .description(
-        'The push experiment (docs/command-reference.md, "Push (experimental)"): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push status`',
+        "Show the loop's seven hook arms: which are on, the harness event each answers, and what each has fired and hit in the last 7 days",
       ),
   );
-  addGlobalFlags(push.command('status'))
-    .description(
-      "Show whether the daemon bundles are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
-    )
+  hooks.action(async function (this: Command) {
+    await runCommand('hooks', this, async (ctx) => {
+      const { runHooksList } = await import('./commands/hooks');
+      return runHooksList(ctx);
+    });
+  });
+  addGlobalFlags(hooks.command('list'))
+    .description('The same table a bare `tenjin hooks` prints')
     .action(async function (this: Command) {
-      await runCommand('push.status', this, async (ctx) => {
-        const { runPushStatus } = await import('./commands/push');
-        return runPushStatus(ctx);
+      await runCommand('hooks.list', this, async (ctx) => {
+        const { runHooksList } = await import('./commands/hooks');
+        return runHooksList(ctx);
       });
     });
-  addGlobalFlags(push.command('grade'))
+  addGlobalFlags(hooks.command('enable <arm>'))
+    .description('Turn one arm on; it takes effect on the next fire, with nothing to restart')
+    .action(async function (this: Command, arm: string) {
+      await runCommand('hooks.enable', this, async (ctx) => {
+        const { runHooksToggle } = await import('./commands/hooks');
+        return runHooksToggle(arm, true, ctx);
+      });
+    });
+  addGlobalFlags(hooks.command('disable <arm>'))
+    .description('Turn one arm off; the entries stay registered and the arm no-ops')
+    .action(async function (this: Command, arm: string) {
+      await runCommand('hooks.disable', this, async (ctx) => {
+        const { runHooksToggle } = await import('./commands/hooks');
+        return runHooksToggle(arm, false, ctx);
+      });
+    });
+
+  addGlobalFlags(program.command('grade'))
     .description(
-      'Grade what the push hooks showed: read each session transcript, mark every injection used, rejected or unobserved, and report the verdicts to the shelf that served them',
+      'Grade what the hook arms showed: read each session transcript, mark every delivery used, rejected or unobserved, and report the verdicts to the shelf that served them',
     )
     .option('--since <window>', 'How far back to grade (e.g. 7d, 24h, 30m)', '7d')
     .option('--session <id>', 'Grade one session only')
@@ -910,10 +894,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     // usable on its own. The pair is validated in the command.
     .option('--label <values...>', 'Set one verdict by hand: <uid> used|rejected')
     .action(async function (this: Command) {
-      await runCommand('push.grade', this, async (ctx) => {
+      await runCommand('grade', this, async (ctx) => {
         const opts = this.opts();
-        const { runPushGrade } = await import('./commands/push');
-        return runPushGrade(ctx, {
+        const { runGrade } = await import('./commands/grade');
+        return runGrade(ctx, {
           ...(typeof opts.since === 'string' ? { since: opts.since } : {}),
           ...(typeof opts.session === 'string' ? { session: opts.session } : {}),
           ...(opts.explain === true ? { explain: true } : {}),

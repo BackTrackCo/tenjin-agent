@@ -28,12 +28,13 @@ import {
 import type { HarnessTarget } from '../lib/skill-wiring';
 import {
   CONFIG_DEFAULTS,
+  HOOK_ARMS,
   loadRawConfig,
   PublishModeSchema,
   parsePublishModeFlag,
   resolveFreeVerbsDeclined,
 } from '../lib/config';
-import type { PublishMode } from '../lib/config';
+import type { PartialConfig, PublishMode } from '../lib/config';
 import {
   persistBazaarPay,
   persistFreeVerbsDeclined,
@@ -709,6 +710,7 @@ async function installBody(
     publishMode,
     permissions,
     hooks,
+    hooksEnabled: enabledArms(rawConfig),
     wallet,
     doctor,
   });
@@ -749,6 +751,8 @@ interface WalkthroughState {
   publishMode: PublishModeSelection;
   permissions: PermissionsResult;
   hooks: HooksResult;
+  /** Arms answering after this run; every one is on unless config turned it off. */
+  hooksEnabled: number;
   wallet: WalletOutcome;
   doctor: DoctorChecks;
 }
@@ -781,12 +785,18 @@ function rows(io: Io, s: WalkthroughState): string[] {
   const entries: [string, string][] = [
     ['skills', skillsValue(s.harnesses)],
     ['permissions', permissionsValue(s.permissions)],
-    ['hooks', hooksValue(s.hooks)],
+    ['hooks', hooksValue(s.hooks, s.hooksEnabled)],
     ['publishing', `${s.publishMode.value} - ${modeBlurb(s.publishMode.value)}`],
     ['wallet', walletValue(s.wallet)],
   ];
   const width = Math.max(...entries.map(([label]) => label.length));
   return entries.map(([label, value]) => `  ${paint(io, 'bold', label.padEnd(width))}  ${value}`);
+}
+
+/** Arms not turned off in config; install writes no hook key, so this is the
+ *  machine's own answer rather than anything this run decided. */
+function enabledArms(config: PartialConfig): number {
+  return HOOK_ARMS.filter((arm) => config.hooks?.[arm] !== false).length;
 }
 
 function harnessNames(harnesses: HarnessResult[]): string {
@@ -863,14 +873,14 @@ function permissionsValue(p: PermissionsResult): string {
 }
 
 /**
- * The entries and the local process they point at, read off the RESULT rather
- * than off a flag, so what is reported is what was actually wired.
+ * What the operator can act on: how many arms are answering, and the one command
+ * that changes that. The entry count and the port the daemon bound are wiring
+ * facts nobody tunes — `tenjin doctor` reports both, under Hooks — so the row
+ * spends its width on the state instead.
  */
-function hooksValue(h: HooksResult): string {
+function hooksValue(h: HooksResult, enabled: number): string {
   if (h.skipped === undefined) {
-    return h.daemon === undefined
-      ? `${h.entries} entries in ${h.path}`
-      : `${h.entries} entries -> loop daemon on 127.0.0.1:${h.daemon.port} (loopback only)`;
+    return `${enabled} enabled; change: tenjin hooks disable <arm>`;
   }
   if (h.skipped === 'harness-not-claude') return 'not wired (Claude Code only)';
   if (h.skipped === 'dry-run') return `${h.entries} entries unchanged (dry run)`;
