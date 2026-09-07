@@ -11,6 +11,7 @@ import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
 import { installDaemonFiles } from './control';
+import { HARNESS_MS } from '../hooks/constants';
 import { ensureDaemon, readToken } from '../hooks/shim';
 import {
   configPath,
@@ -156,18 +157,45 @@ function isAlive(pid: number): boolean {
 }
 
 /**
- * The ledger row is written AFTER the response flushes (server.ts defers
- * `commit` past the send), so a reader that opens loop.db the instant a POST
- * returns can be one row early on a slow runner. Wait for it, briefly.
+ * THE LEDGER ROW LANDS AFTER THE RESPONSE FLUSHES. `server.ts` defers `commit`
+ * to a `setImmediate` past the send, so a reader that opens `loop.db` the
+ * instant a POST resolves can be one row early: measured 0 ms late on an idle
+ * laptop and 4 to 48 ms late under CPU contention, which is why this only ever
+ * reddens CI.
+ *
+ * So every read of `fires` here is POLLED to the count the case expects, never
+ * taken once. `expect.poll` and not a hand-rolled helper: the helper this
+ * replaces took "wait until there are at least n", and two call sites handed it
+ * the count they had just read, which it satisfies without waiting at all.
+ *
+ * The bound is {@link HARNESS_MS}, the daemon's own backstop for one fire: a
+ * row still missing after it is a broken daemon, not a slow runner.
  */
-async function waitForFires(n: number, ms = 2000): Promise<number> {
-  const until = Date.now() + ms;
-  let count = countFires();
-  while (count < n && Date.now() < until) {
-    await new Promise((r) => setTimeout(r, 20));
-    count = countFires();
+const POLL = { timeout: HARNESS_MS, interval: 20 } as const;
+
+/** A `type` and not an `interface`: only an object type literal gets the
+ *  implicit index signature that lets `node:sqlite`'s row type cast to it. */
+type FireRow = {
+  id: string;
+  arm: string;
+  event: string;
+  reason: string;
+  delivered: string | null;
+};
+
+/** The `fires` rows for one session, or for one agent within that session. */
+function firesOf(session: string, agent?: string): FireRow[] {
+  const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+  try {
+    const stmt = db.prepare(
+      `SELECT id, arm, event, reason, delivered FROM fires WHERE session = ?${
+        agent === undefined ? '' : ' AND agent = ?'
+      }`,
+    );
+    return (agent === undefined ? stmt.all(session) : stmt.all(session, agent)) as FireRow[];
+  } finally {
+    db.close();
   }
-  return count;
 }
 
 function countFires(): number {
@@ -308,7 +336,7 @@ describe('the daemon, cold-started from the real bundle', () => {
 
   it('writes one no-question fires row per valid event except a phantom SubagentStop', async () => {
     const stops = fixtures.filter((f) => f.event === 'SubagentStop').length;
-    await waitForFires(fixtures.length - stops);
+    await expect.poll(countFires, POLL).toBe(fixtures.length - stops);
     const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
     try {
       const rows = db
@@ -438,7 +466,7 @@ describe('the daemon, cold-started from the real bundle', () => {
     );
     expect(result.code).toBe(0);
     expect(result.stdout).toBe('');
-    expect(await waitForFires(before + 1)).toBe(before + 1);
+    await expect.poll(countFires, POLL).toBe(before + 1);
   });
 
   it('the bind race: a second daemon on the same port exits 0 within 2 s, the first keeps serving', async () => {
@@ -523,22 +551,18 @@ describe('the daemon, cold-started from the real bundle', () => {
     expect(shelfBodies).toHaveLength(2);
     for (const body of shelfBodies) expect(body.trigger).toBe('prompt');
 
-    await waitForFires(countFires());
+    // The response flushing is not the row landing. Wait for the row, then
+    // read it: the fire and its legs go in ONE transaction (`ledger.ts`), so a
+    // visible `fires` row means the `legs` rows are visible too.
+    await expect.poll(() => firesOf('s-loop-prompt').length, POLL).toBe(1);
+    const fires = firesOf('s-loop-prompt');
+    expect(fires).toHaveLength(1);
+    const fire = fires[0];
+    expect(fire?.arm).toBe('prompt');
+    expect(fire?.reason).toBe('hit');
+    expect(fire?.delivered).toMatch(/^inject:/);
     const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
     try {
-      const fires = db
-        .prepare('SELECT id, arm, reason, delivered FROM fires WHERE session = ?')
-        .all('s-loop-prompt') as Array<{
-        id: string;
-        arm: string;
-        reason: string;
-        delivered: string | null;
-      }>;
-      expect(fires).toHaveLength(1);
-      const fire = fires[0];
-      expect(fire?.arm).toBe('prompt');
-      expect(fire?.reason).toBe('hit');
-      expect(fire?.delivered).toMatch(/^inject:/);
       const legs = db
         .prepare(
           'SELECT shelf, status, outcome, calibration FROM legs WHERE fire_id = ? ORDER BY shelf',
@@ -637,7 +661,13 @@ describe('the daemon, cold-started from the real bundle', () => {
         tool_response: { text: '# proj' },
       });
       expect(read.status).toBe(204);
-      await waitForFires(countFires());
+      // The child's stop is asked only when its Read is ALREADY in the ledger:
+      // `capture.ts` reads `fires` for the child's evidence (`arm = 'context'`
+      // on `tool.after`), and that row lands after this 204. Polling the total
+      // count would race the same way, so wait for the row itself.
+      await expect
+        .poll(() => firesOf(session, agent).filter((f) => f.arm === 'context').length, POLL)
+        .toBe(1);
 
       // 4. The child stops: asked as context, under its own id.
       const stopRes = await post({

@@ -1022,6 +1022,30 @@ describe('runPushGrade', () => {
     expect(gradedLegs()).toEqual([{ fire_id: 'f-old', graded: 'used:hand', posted_at: NOW }]);
   });
 
+  it('never selects a local-pairing leg for posting: no search id, no shelf owed', async () => {
+    seedFires([
+      {
+        id: 'f-local',
+        at: NOW - 1000,
+        arm: 'failure',
+        reason: 'hit',
+        session: 's1',
+        delivered: 'inject:pairing:7',
+        legs: [{ shelf: 'local', graded: 'used:hand' }],
+      },
+    ]);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      {},
+      { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
+    );
+    expect(result.data).toMatchObject({ posted: 0 });
+    expect(calls).toHaveLength(0);
+    expect(gradedLegs()).toEqual([{ fire_id: 'f-local', graded: 'used:hand', posted_at: null }]);
+  });
+
   it('--explain names the anchor line and the evidence behind each verdict', async () => {
     seedFires([
       {
