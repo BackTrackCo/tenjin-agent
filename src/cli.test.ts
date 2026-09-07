@@ -125,6 +125,27 @@ describe('main', () => {
     expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
+  // The Bazaar lane and the search-hook mode are flags now, not prompts, so they
+  // have to be discoverable where every other flag is.
+  it('offers the lanes install no longer asks about as flags', async () => {
+    const cap = captureIo();
+    expect(await main(['install', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--bazaar-pay');
+    expect(help).toContain('--search-hooks <mode>');
+  });
+
+  // The compat no-ops are gone rather than hidden: `install` writes no CLAUDE.md
+  // line, and `--allow-free-verbs` only ever restated the default. Rejected at
+  // parse time, so the action never runs.
+  it('rejects the compat no-op flags', async () => {
+    for (const flag of ['--claude-md', '--no-claude-md', '--allow-free-verbs']) {
+      const cap = captureIo();
+      expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);
+      expect(cap.stdout(), flag).toContain(`unknown option '${flag}'`);
+    }
+  });
+
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
     const cap = captureIo(true);
     const code = await main([], cap.io);

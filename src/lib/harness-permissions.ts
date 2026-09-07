@@ -7,12 +7,10 @@ import type { PublishMode } from './config';
  * The one place the CLI WRITES a permission grant into a harness's own settings
  * file, so the invariants live here rather than at the call site:
  *
- *  - OPT-OUT, AND DISCLOSED. An interactive install asks; a non-interactive one
- *    writes the free tier by default, because an unattended agent that gets
- *    denied is the failure this whole file exists to prevent, and a machine run
- *    has no one to ask. `--no-allow-free-verbs` refuses it outright, and every
- *    run that writes says which rules landed, in which file, and how to remove
- *    them. What keeps that defensible is the next two invariants: the grant is a
+ *  - OPT-OUT, AND DISCLOSED. Every install writes the free tier, because an
+ *    unattended agent that gets denied is the failure this whole file exists to
+ *    prevent. `--no-allow-free-verbs` refuses it outright, and every run that
+ *    writes says how many rules landed and in which file. What keeps that defensible is the next two invariants: the grant is a
  *    fixed free tier, and it can never widen.
  *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
  *    It takes a {@link PublishMode}, and that selects between exactly two
@@ -353,11 +351,11 @@ function fixFor(reason: PermissionsSkipReason): string {
     case 'not-requested':
     case 'declined':
     case 'dry-run':
-      return 'Add them with `tenjin install --allow-free-verbs`.';
+      return 'Add them with `tenjin install`.';
     case 'changed-since-read':
       return 'Another process changed the file mid-run; re-run `tenjin install`.';
     default:
-      return 'Fix the reported file, then run `tenjin install --allow-free-verbs`.';
+      return 'Fix the reported file, then run `tenjin install`.';
   }
 }
 

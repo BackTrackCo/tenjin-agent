@@ -82,11 +82,6 @@ export interface HooksResult {
   fix?: string;
 }
 
-/** The undo, stated the same way everywhere it is shown. */
-export function hooksUndo(settingsPath: string, dir: string): string {
-  return `Undo anytime: \`tenjin uninstall\` removes the entries from ${settingsPath} and the daemon from ${dir}; \`tenjin config set hooks.push off\` silences the arms without unwiring anything.`;
-}
-
 function skip(
   reason: HooksSkipReason,
   args: {

@@ -14,20 +14,38 @@ Every command accepts the global flags:
 
 ### `tenjin install`
 
-Detects Claude Code, Codex, or a shared Agent Skills directory; wires Tenjin skills, whose text is shaped by whether this machine is in [team mode](#team-shelf); can add the free command permissions; can register the loop's hook entries and start the daemon behind them; can create a local Base wallet; then runs `doctor`.
+Detects Claude Code, Codex, or a shared Agent Skills directory; wires Tenjin skills, whose text is shaped by whether this machine is in [team mode](#team-shelf); writes the command permissions; registers the loop's hook entries and starts the daemon behind them; creates a local Base wallet; then runs `doctor`.
 
-Useful flags:
+It asks two things: the publish mode, and whether to create a wallet. The publish-mode select is also the consent for the harness allowlist, because `auto` is the answer that adds `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)`; what each rule clears is in [agent permissions](agent-permissions.md). Everything else is a flag, and a run with no TTY (or under `--json`) asks nothing and takes the same defaults.
 
-| Flag                    | Values                        | Effect                                                                                                                           |
-| ----------------------- | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.                                                                                                  |
-| `--dry-run`             |                               | Print what would change without writing, including the permission rules a real run would add.                                    |
-| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent non-interactively. Defaults to `auto`, which also writes `Bash(tenjin publish:*)` and `Bash(tenjin edit:*)`. |
-| `--no-allow-free-verbs` |                               | Do not write harness permission rules.                                                                                           |
-| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register the hook entries in this mode.                                                                                          |
-| `--no-hooks`            |                               | Register no hooks this run.                                                                                                      |
-| `--no-wallet`           |                               | Create no wallet.                                                                                                                |
-| `--refresh`             |                               | Re-materialize what this machine already has, at this build. Never prompts, never creates a wallet, never writes config.         |
+| Flag                    | Values                        | Effect                                                                                                                   |
+| ----------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `--harness <name>`      | `claude`, `codex`, `shared`   | Target one harness. Repeatable.                                                                                          |
+| `--dry-run`             |                               | Print what would change without writing, including the permission rules a real run would add.                            |
+| `--publish-mode <mode>` | `review`, `auto`, `full-auto` | Set publish consent without the prompt. Defaults to `auto`, which also writes the publish and edit rules.                |
+| `--no-allow-free-verbs` |                               | Do not write harness permission rules.                                                                                   |
+| `--search-hooks <mode>` | `auto`, `remind`, `off`       | Register the hook entries in this mode, and write it to `hooks.webSearch` and `hooks.agentDispatch`. Defaults to `auto`. |
+| `--bazaar-pay`          |                               | Turn on the Bazaar pay lane and install the skill that teaches it. Off unless asked for.                                 |
+| `--no-hooks`            |                               | Register no hooks this run, and write no config.                                                                         |
+| `--no-wallet`           |                               | Create no wallet.                                                                                                        |
+| `--refresh`             |                               | Re-materialize what this machine already has, at this build. Never prompts, never creates a wallet, never writes config. |
+
+On success it prints ten rows: what was wired, how to undo it, and one line for the `doctor` run it just did.
+
+```
+tenjin is wired for Claude Code.
+
+  skills       3 in ~/.claude/skills
+  permissions  11 tenjin commands in ~/.claude/settings.json
+  hooks        11 entries -> loop daemon on 127.0.0.1:30412 (loopback only)
+  publishing   auto - your agent publishes under your identity
+  wallet       0x1234…abcd, $0 - fund with: tenjin wallet fund
+
+Restart Claude Code to load the hooks. Undo everything: tenjin uninstall
+tenjin doctor: 11 checks, all pass.
+```
+
+The rules, the entries and the keystore are described once, in [What install writes](agent-permissions.md#what-install-writes); `--json` carries the same facts as data.
 
 `install` is idempotent, and it converges rather than merges: the hook entries are written as one whole set, so a second run produces a byte-identical file and a machine still carrying an older install's entries is brought to the current set in place. There is no "uninstall first" step. Re-run it after upgrading the CLI or changing harnesses.
 

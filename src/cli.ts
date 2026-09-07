@@ -1,4 +1,4 @@
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { z } from 'zod';
 import pkg from '../package.json';
 import { CliError } from './lib/errors';
@@ -174,30 +174,20 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'set the publish consent mode non-interactively: review | auto | full-auto',
     )
     .option('--no-wallet', 'create no wallet (the default is to create one)')
-    // The two affirmative flags are pre-default-on compat only: released docs and
-    // the alpha.9 doctor's fix strings name them, so they must parse, but they add
-    // nothing over the default and would only clutter --help. Hidden, not removed.
-    // Both spellings are compat no-ops: `install` writes no CLAUDE.md/AGENTS.md
-    // line any more, and one that is already there is removed. Kept parseable so a
-    // released doc or a pinned script does not fail on an unknown option.
-    .addOption(new Option('--claude-md', 'compat no-op; no nudge is written').hideHelp())
-    .addOption(new Option('--no-claude-md', 'compat no-op; no nudge is written').hideHelp())
-    .addOption(
-      new Option(
-        '--allow-free-verbs',
-        // The absolute URL, like every other pointer: `docs/agent-permissions.md`
-        // resolves against the reader's cwd, and an operator running `--help` is in
-        // their own project, not in this package.
-        `compat no-op; the allowlist is the default, full caveats: ${PERMISSIONS_DOC_URL}`,
-      ).hideHelp(),
-    )
     .option(
       '--no-allow-free-verbs',
+      // The absolute URL, like every other pointer: `docs/agent-permissions.md`
+      // resolves against the reader's cwd, and an operator running `--help` is in
+      // their own project, not in this package.
       `write no harness permission rules at all; the default allowlist is the free tier only: none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
     )
     .option(
       '--search-hooks <mode>',
       'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.webSearch and hooks.agentDispatch (both auto by default, disjoint)',
+    )
+    .option(
+      '--bazaar-pay',
+      'let `tenjin pay` pay Bazaar-listed non-Tenjin endpoints under your spend policy, and install the skill that teaches the lane',
     )
     .option('--no-hooks', 'register no harness hooks this run (writes no config)')
     .option(
@@ -207,13 +197,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .action(async function (this: Command) {
       await runCommand('install', this, async (ctx) => {
         const o = this.opts();
-        // `claudeMd` is tri-state: only forward it when the flag was actually given,
-        // so an omitted flag stays undefined (ask interactively, else skip).
-        const claudeMdGiven = this.getOptionValueSource('claudeMd') !== 'default';
-        // `allowFreeVerbs` is tri-state for the same reason, but the arms differ:
-        // undefined asks when it can and WRITES when it cannot, so only an explicit
-        // --no-allow-free-verbs suppresses the allowlist.
-        const allowGiven = this.getOptionValueSource('allowFreeVerbs') !== 'default';
         const { runInstall } = await import('./commands/install');
         return runInstall(
           {
@@ -223,11 +206,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(o.dryRun === true ? { dryRun: true } : {}),
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
-            ...(claudeMdGiven && typeof o.claudeMd === 'boolean' ? { claudeMd: o.claudeMd } : {}),
-            ...(allowGiven && typeof o.allowFreeVerbs === 'boolean'
-              ? { allowFreeVerbs: o.allowFreeVerbs }
-              : {}),
+            ...(o.allowFreeVerbs === false ? { noAllowFreeVerbs: true } : {}),
             ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
+            ...(o.bazaarPay === true ? { bazaarPay: true } : {}),
             ...(o.hooks === false ? { noHooks: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
           },

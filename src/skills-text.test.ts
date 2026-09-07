@@ -9,12 +9,7 @@ import {
   SHIPPED_SKILL_FILES,
 } from './lib/skills-source';
 import { renderSkillMarkdown } from './lib/skill-materialize';
-import {
-  PERMISSIONS_QUESTION,
-  PUBLISH_MODE_CHOICES,
-  PUBLISH_MODE_QUESTION,
-  WALLET_QUESTION,
-} from './commands/install';
+import { PUBLISH_MODE_CHOICES, PUBLISH_MODE_QUESTION, WALLET_QUESTION } from './commands/install';
 import {
   ALWAYS_SAFE_ALLOWLIST,
   MCP_CAVEAT,
@@ -685,19 +680,21 @@ describe('the published docs do not drift from the allowlist constants', () => {
     expect(README).toContain('docs/agent-permissions.md');
   });
 
-  // Both pages QUOTE the consent question, and a quote is exactly the thing that
-  // goes stale silently. Compared against the shipped constant with markdown
-  // wrapping normalized away, so a reworded prompt fails here rather than
-  // shipping docs that promise something the CLI no longer says.
-  it('both pages quote the consent question the CLI actually asks', () => {
+  // The `auto` hint IS the consent for the harness allowlist: it is the only
+  // place the operator is told that this mode adds the publish and edit rules.
+  // Both pages quote it, and a quote is exactly the thing that goes stale
+  // silently, so it is compared against the shipped constant with markdown
+  // wrapping normalized away.
+  it('both pages quote the consent the CLI actually asks for', () => {
     const flatten = (s: string): string =>
       s
         .replace(/^\s*>\s?/gm, '')
         .replace(/[`*]/g, '')
         .replace(/\s+/g, ' ');
-    const question = flatten(PERMISSIONS_QUESTION);
-    expect(flatten(README)).toContain(question);
-    expect(flatten(PERMISSIONS_DOC)).toContain(question);
+    const auto = PUBLISH_MODE_CHOICES.find((c) => c.value === 'auto');
+    const hint = flatten(auto?.hint ?? '');
+    expect(flatten(README)).toContain(hint);
+    expect(flatten(PERMISSIONS_DOC)).toContain(hint);
   });
 
   // The MCP section is a SECURITY list: a tool missing from it reads as "safe to
@@ -714,8 +711,7 @@ describe('the published docs do not drift from the allowlist constants', () => {
     for (const tool of new Set(tools)) expect(PERMISSIONS_DOC).toContain(tool);
   });
 
-  // The README quotes all three walkthrough prompts, not just the permissions
-  // one, so all three are pinned to their shipped constants.
+  // The README quotes both prompts, so both are pinned to their shipped constants.
   it('the README quotes the publish-mode and wallet prompts the CLI actually asks', () => {
     const flatten = (s: string): string =>
       s

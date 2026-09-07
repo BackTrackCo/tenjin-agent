@@ -265,8 +265,8 @@ const InstallConfigSchema = z.object({
   harness: z.array(z.enum(HARNESS_TARGETS)),
   /**
    * The EXACT rule strings still pending the last time an install explicitly
-   * declined the free-verb allowlist (`--no-allow-free-verbs`, or "no" at the
-   * interactive prompt), so `--refresh` can subtract them from what it would
+   * declined the free-verb allowlist (`--no-allow-free-verbs`), so `--refresh`
+   * can subtract them from what it would
    * otherwise report as pending instead of recomputing from the settings file
    * and nagging about a settled "no" on every refresh (tenjin-agent#234).
    *

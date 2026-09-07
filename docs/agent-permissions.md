@@ -75,19 +75,20 @@ three. It cannot unlock a keystore and never consults the spend policy.
 ## Getting the rules onto your machine
 
 `tenjin install` writes the nine rules into `~/.claude/settings.json` for you,
-plus the two rules your publish mode carries (below). It is one of the four setup
-decisions, and at a terminal it asks:
+plus the two rules your publish mode carries (below). It does not ask a question
+of its own about them. Installing tenjin is the consent for the free nine, and
+the publish-mode select is the consent for the pair, because that is the answer
+that adds them:
 
-> Let your agent use tenjin without permission popups? Adds 9 command rules to
-> `~/.claude/settings.json`. None of them can spend your money. Details:
-> https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
+> Auto (recommended) — your agent publishes and updates pieces on its own, under
+> your identity; it also allows `tenjin publish` and `tenjin edit` in the
+> harness.
 
-On an `auto` or `full-auto` publish mode the same question says 11 rules, and adds
-that your agent will publish under your identity on its own. The question is two
-sentences and a link on purpose: this page is where the detail lives, and an
-operator answering a yes/no cannot act on a rule string they have not met yet.
+One prompt, one consent: a second yes/no naming the same grant would ask twice
+for one thing, and put a rule string in front of an operator with no way to act on
+it mid-install. This page is where the detail lives.
 
-Answer yes and it merges them in. The write appends the rules that are missing and
+It merges the rules in. The write appends the rules that are missing and
 never reorders or rewrites an existing entry or any other key in the file. It
 removes exactly two things: a rule an older version of this CLI wrote and this one
 no longer does, and, when your `publish.mode` is back to `review`, the two rules
@@ -96,12 +97,10 @@ it is, never repaired. The rules it may write are fixed constants selected by yo
 publish mode, so no flag or config value can widen it to `buy`, `session start`,
 `send`, `config set`, or a blanket `Bash(tenjin:*)`.
 
-A non-interactive install (piped, or under `--json`) does the same write BY
-DEFAULT, with no flag: the machine most likely to be denied mid-task is the
-headless one, and there is nobody there to answer. `--no-allow-free-verbs` opts
-out; `--allow-free-verbs` states the default explicitly. Every run that writes
-reports how many rules landed, in which file, and that deleting those lines undoes
-it.
+A non-interactive install (piped, or under `--json`) does the same write, for the
+same reason: the machine most likely to be denied mid-task is the headless one.
+`--no-allow-free-verbs` is the only opt-out. Every run reports how many rules
+landed and in which file, on its `permissions` row.
 
 `tenjin doctor --json` carries this whole recommendation as data under
 `permissions` (every rule, every per-verb note, both caveats, on the failure
@@ -439,3 +438,42 @@ clear it: it never reads `publish.mode`, so an ungated call comes back as
 
 This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
 that one gates **who you may pay**, this one gates **which commands may run**.
+
+## What install writes
+
+`tenjin install` prints five rows and this page carries the rest. What is behind
+each row:
+
+**Skills.** The packaged skills, copied into every harness directory it detected
+(`~/.claude/skills`, `~/.agents/skills`). A skill already there is replaced by
+this package's copy; your own files beside it are left alone.
+
+**Permissions.** The rules above, in `~/.claude/settings.json`. Nine on `review`,
+eleven on `auto` and `full-auto`. Deleting those lines undoes it, and so does
+`tenjin uninstall`.
+
+**Hooks.** Eleven Claude Code entries in the same file, written as one set. Nine
+POST the harness's own hook payload to a Tenjin daemon on `127.0.0.1` — your
+machine only, authorized by a token in that file, which is why it is written mode
+0600 — and two run `~/.tenjin/hooks/tenjin-shim.mjs` so that daemon is up before
+the turn's first tool call. No arm can block or change a tool call; every one of
+them only adds context beside it. Before a web search, a page fetch, or on your
+own prompts, the arms ask your configured shelf the same question and mention a
+tested answer if one exists: the query text leaves the machine, redacted, and
+nothing else does. The files you read and re-edit are looked up the same way but
+never spoken about, only recorded, so the arms can be measured.
+`tenjin config set hooks.push off` silences them all without unwiring anything;
+`--search-hooks remind` installs the reminder-only mode, which sends nothing.
+Hooks are read once at session start, so Claude Code has to be restarted.
+
+**Publishing.** `publish.mode` in `~/.tenjin/config.json`, from the select above.
+`tenjin config set publish.mode review` puts it back to asking first.
+
+**Wallet.** A local Base wallet at `~/.tenjin/wallet.json`, unless `--no-wallet`.
+The key is encrypted at rest (keystore v3, scrypt, mode 0600) and never leaves
+this machine; the passphrase goes to your OS credential store, or to
+`TENJIN_WALLET_PASSPHRASE` if you set one. With neither, nothing is created and
+the run says so. It holds $0: funding is a human step, `tenjin wallet fund`.
+
+`tenjin uninstall` removes all of it except the wallet, the config, the library
+and the loop database, which are yours rather than something install created.
