@@ -96,10 +96,9 @@ describe('runConfigList', () => {
     });
     expect(d['hooks.webSearch']).toEqual({ value: 'auto', source: 'default' });
     expect(d['hooks.agentDispatch']).toEqual({ value: 'auto', source: 'default' });
-    expect(d['hooks.stopNag']).toEqual({ value: 'on', source: 'default' });
     expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
-    expect(d['hooks.push']).toEqual({ value: 'off', source: 'default' });
-    expect(d['hooks.capture']).toEqual({ value: 'off', source: 'default' });
+    expect(d['hooks.push']).toEqual({ value: 'on', source: 'default' });
+    expect(d['hooks.capture']).toEqual({ value: 'on', source: 'default' });
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
     expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     // REDACTED even here, on a fresh dir where the value is empty: the rendered
@@ -107,10 +106,10 @@ describe('runConfigList', () => {
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
-    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 6 hooks.*
-    // (webSearch, agentDispatch, stopNag, sessionPrimer, push, capture)
+    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 5 hooks.*
+    // (webSearch, agentDispatch, sessionPrimer, push, capture)
     // + 1 update.mode + 4 loop.* + 1 team.publicFallback.
-    expect(humanLines).toHaveLength(27);
+    expect(humanLines).toHaveLength(26);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -660,7 +659,7 @@ describe('update.mode', () => {
   it('survives a write to another block', async () => {
     const ctx = makeCtx();
     await runConfigSet({ key: 'update.mode', value: 'off' }, ctx);
-    await runConfigSet({ key: 'hooks.stopNag', value: 'off' }, ctx);
+    await runConfigSet({ key: 'hooks.sessionPrimer', value: 'off' }, ctx);
     expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
       data: { value: 'off', source: 'file' },
     });
@@ -1022,10 +1021,9 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     for (const [key, value] of [
       ['hooks.webSearch', 'remind'],
       ['hooks.agentDispatch', 'off'],
-      ['hooks.stopNag', 'off'],
       ['hooks.sessionPrimer', 'off'],
-      ['hooks.push', 'on'],
-      ['hooks.capture', 'block'],
+      ['hooks.push', 'off'],
+      ['hooks.capture', 'off'],
     ] as const) {
       const set = await runConfigSet({ key, value }, ctx);
       expect(set.data).toMatchObject({ key, value, source: 'file' });
@@ -1033,26 +1031,16 @@ describe('the hooks block is set through config, which stays human-gated', () =>
         data: { key, value, source: 'file' },
       });
     }
-    // Legacy aliases still work and map to the new keys.
-    expect(await runConfigGet({ key: 'hooks.searchMode' }, ctx)).toMatchObject({
-      data: { value: 'remind' },
-    });
-    expect(await runConfigGet({ key: 'hooks.dispatchMode' }, ctx)).toMatchObject({
-      data: { value: 'off' },
-    });
     // Every subkey survives the others' writes, so silencing one hook cannot
     // silently reset another.
     expect(await runConfigGet({ key: 'hooks.webSearch' }, ctx)).toMatchObject({
       data: { value: 'remind' },
     });
-    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
+    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
       data: { value: 'off' },
     });
-    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
-      data: { value: 'on' },
-    });
     expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
-      data: { value: 'block' },
+      data: { value: 'off' },
     });
 
     expect(await runConfigGet({ key: 'hooks.agentDispatch' }, ctx)).toMatchObject({
@@ -1071,12 +1059,14 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(primer.code).toBe('USAGE');
     expect(primer.fix).toContain('"off"');
 
-    const bad = await caught(() => runConfigSet({ key: 'hooks.stopNag', value: 'sometimes' }, ctx));
-    expect(bad.code).toBe('USAGE');
-    expect(bad.fix).toContain('"on"');
-    // The middle setting is offered by name, or an operator hunting for it
-    // finds only the cliff.
-    expect(bad.fix).toContain('"deliberate-only"');
+    // A key this table does not know is a usage error on both verbs, never a
+    // silently accepted alias — the raw hooks block passes unknown fields
+    // through, so nothing else refuses one.
+    const unknown = 'hooks.notAKey';
+    expect((await caught(() => runConfigSet({ key: unknown, value: 'off' }, ctx))).code).toBe(
+      'USAGE',
+    );
+    expect((await caught(() => runConfigGet({ key: unknown }, ctx))).code).toBe('USAGE');
 
     const badPush = await caught(() =>
       runConfigSet({ key: 'hooks.push', value: 'sometimes' }, ctx),
@@ -1089,8 +1079,8 @@ describe('the hooks block is set through config, which stays human-gated', () =>
       runConfigSet({ key: 'hooks.capture', value: 'sometimes' }, ctx),
     );
     expect(badCapture.code).toBe('USAGE');
-    expect(badCapture.fix).toContain('"block"');
-    expect(badCapture.fix).toContain('"nudge"');
+    expect(badCapture.fix).toContain('"on"');
+    expect(badCapture.fix).toContain('"off"');
   });
 
   /**
@@ -1103,9 +1093,9 @@ describe('the hooks block is set through config, which stays human-gated', () =>
   it('stores a hooks key and says one thing about it, whatever the key', async () => {
     const ctx = makeCtx();
     for (const [key, value] of [
-      ['hooks.push', 'on'],
-      ['hooks.capture', 'block'],
-      ['hooks.stopNag', 'deliberate-only'],
+      ['hooks.push', 'off'],
+      ['hooks.capture', 'off'],
+      ['hooks.sessionPrimer', 'off'],
     ] as const) {
       const set = await runConfigSet({ key, value }, ctx);
       expect(set.data, key).toMatchObject({ key, value, source: 'file' });
@@ -1116,17 +1106,6 @@ describe('the hooks block is set through config, which stays human-gated', () =>
         data: { value, source: 'file' },
       });
     }
-  });
-
-  // The arm-level toggle (#162): silencing the batched web-search reminders
-  // without silencing the deliberate-search ones.
-  it('round-trips deliberate-only, the middle stopNag setting', async () => {
-    const ctx = makeCtx();
-    const set = await runConfigSet({ key: 'hooks.stopNag', value: 'deliberate-only' }, ctx);
-    expect(set.data).toMatchObject({ value: 'deliberate-only', source: 'file' });
-    expect(await runConfigGet({ key: 'hooks.stopNag' }, ctx)).toMatchObject({
-      data: { value: 'deliberate-only', source: 'file' },
-    });
   });
 });
 

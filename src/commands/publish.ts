@@ -7,7 +7,7 @@ import {
   linkSearchesToDraft,
   markSearchResolved,
   type StoredSearch,
-} from '../lib/state-store';
+} from '../lib/searches';
 import { findings as scanFindings, type Finding, type ReportScope } from '../lib/redact';
 import { headingOutline } from '../lib/markdown';
 import { sanitizeForTerminal, sanitizeWireText } from '../lib/output';
@@ -48,7 +48,8 @@ import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
 import { AGENT_ID_RE } from '../lib/grade';
-import { projectIdOf } from '../lib/state-store';
+import { projectId } from '../hooks/failure/keys';
+import { withLoopDb } from '../lib/loop-db';
 import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
 import { readRegularUtf8File } from '../lib/regular-file';
 import type { CommandContext, CommandResult } from '../context';
@@ -199,7 +200,7 @@ export async function runPublish(
         fix: 'Pass the id the capture ask printed, on its own: `tenjin publish --finding <id> --discard`. Reading it is a separate command, `tenjin publish --finding <id> --dry-run`, which writes nothing and so never discards. A file is discarded by deleting it.',
       });
     }
-    const target = await readChildFinding(ctx.dataDir, args.finding, Date.now, projectIdOf(cwd));
+    const target = await readChildFinding(ctx.dataDir, args.finding, projectId(cwd));
     // THE SAME CROSS-PROJECT GATE `--finding` TAKES (round-3 item 5), and for a
     // stronger reason. Publishing another checkout's finding is recoverable —
     // the piece is up and can be taken down. Discarding it is not: the row is
@@ -210,7 +211,7 @@ export async function runPublish(
     // rather than the consent cascade, because `full-auto` clears the cascade
     // and this is a gate that has to survive it.
     if (args.yes !== true) {
-      const here = projectIdOf(cwd);
+      const here = projectId(cwd);
       if (isElsewhere(target.project, here)) {
         throw new CliError(
           'NEEDS_CONFIRMATION',
@@ -249,7 +250,7 @@ export async function runPublish(
   // Resolved FIRST because team mode changes what the rest of this function
   // does, not just where the POST goes.
   const runtime = await resolveContextSettings(ctx);
-  const { raw, finding } = await resolveSource(args, ctx, projectIdOf(cwd), deps.stdin);
+  const { raw, finding } = await resolveSource(args, ctx, projectId(cwd), deps.stdin);
 
   // The consent cascade + resolved price (global < project < env < flag), with the
   // full-auto loosening gate. Pure config reads: no writes, no network, no wallet,
@@ -304,7 +305,7 @@ export async function runPublish(
    * one outcome on this command that cannot be undone.
    */
   if (finding !== undefined && args.yes !== true && args.dryRun !== true) {
-    const here = projectIdOf(cwd);
+    const here = projectId(cwd);
     if (isElsewhere(finding.project, here)) {
       throw new CliError(
         'NEEDS_CONFIRMATION',
@@ -386,7 +387,7 @@ export async function runPublish(
   const foreignIds = searchIds.filter((id) => !shelfRouteFor(stored.get(id), runtime).configured);
   const claimableIds = searchIds.filter((id) => !foreignIds.includes(id));
   if (status !== 'draft') warnForeignShelf(ctx, foreignIds, stored);
-  const title = resolveTitle(frontmatter, body);
+  const title = resolveTitle(frontmatter, body, finding);
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
   const handle = expectString(frontmatter, 'handle');
@@ -582,6 +583,7 @@ export async function runPublish(
       agentId,
       ...(finding === undefined ? {} : { findingId: finding.id }),
     });
+    stampPairings(ctx.dataDir, keys, result.resourceId);
   }
   // Park the named claims on the draft (record's own spelling: the store matches
   // ids by exact string), so the promotion can send what this create withheld.
@@ -641,6 +643,34 @@ export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
   return normalizePostKeys(parsed, '--key');
 }
 
+/**
+ * The fix this piece explains, named once. The turn-end ask hands the agent
+ * `--key fingerprint=sig_v1:<hash>`; a `pairings` row stores the hash alone, so
+ * the stamp matches on the part after the prefix, and only where nothing has
+ * claimed the row yet — a second piece under the same key does not displace the
+ * first, and re-running the same publish is not a second stamp.
+ *
+ * NOT ON A DRAFT, which is why the call sits under the same `!parksPrivately`
+ * guard as the dedup record: a draft answered nobody, so the pairing is still
+ * owed a write-up and must stay on offer until the promotion publishes one.
+ *
+ * BEST EFFORT, BECAUSE THE PUBLISH HAS ALREADY LANDED. A `loop.db` that cannot
+ * be opened or written costs one repeat of the ask at the next turn end;
+ * failing the command here would report a piece that is up as a failure.
+ */
+function stampPairings(dataDir: string, keys: PostKeyInput[], postId: string): void {
+  const fingerprints = keys.filter((k) => k.kind === 'fingerprint');
+  if (fingerprints.length === 0) return;
+  try {
+    withLoopDb(dataDir, (db) => {
+      const stamp = db.prepare('UPDATE pairings SET post_id = ? WHERE key = ? AND post_id IS NULL');
+      for (const { key } of fingerprints) stamp.run(postId, key.slice(key.indexOf(':') + 1));
+    });
+  } catch {
+    // See above: the ask names the fix again next turn.
+  }
+}
+
 function warnUnrecorded(
   ctx: CommandContext,
   searchIds: string[],
@@ -690,7 +720,7 @@ async function loadNamedSearches(
 ): Promise<Map<string, StoredSearch>> {
   const found = new Map<string, StoredSearch>();
   for (const id of searchIds) {
-    // The lookup itself is case-insensitive (STORE_SQL.getSearch), so the id
+    // The lookup itself is case-insensitive (`getStoredSearch`), so the id
     // this map is keyed by is the one the caller will ask with.
     const stored = await getStoredSearch(ctx.dataDir, id);
     if (stored !== null) found.set(id.toLowerCase(), stored);
@@ -857,7 +887,7 @@ interface PublishSource {
  * finding with no project is one an older build wrote and nobody can place, and
  * a cwd that yields no project id is a caller with no place to speak for; both
  * are "not this project", and a bare `!==` made the two nulls agree and cleared
- * the gate. It holds today only because `projectIdOf('')` is unreachable from
+ * the gate. It holds today only because `projectId('')` is unreachable from
  * the CLI, which is not a property this gate should depend on.
  */
 function isElsewhere(finding: string | null, here: string | null): boolean {
@@ -877,7 +907,7 @@ async function resolveSource(
     });
   }
   if (args.finding !== undefined) {
-    const finding = await readChildFinding(ctx.dataDir, args.finding, Date.now, project);
+    const finding = await readChildFinding(ctx.dataDir, args.finding, project);
     if (finding.body.trim() === '') {
       throw new CliError('USAGE', `Finding ${JSON.stringify(finding.id)} has an empty body.`, {
         fix: 'Nothing was stored for that child, so there is nothing to publish. Write the finding to a file and publish that.',
@@ -971,7 +1001,6 @@ function findingRef(finding: ChildFinding): Record<string, unknown> {
  * `body` IS WHOLE, and that is the point of it: this shape is what makes the
  * review confirm a read gate rather than a preview, so the operator (or the
  * `--json` caller relaying to one) sees the same text that would be published.
- * It is bounded already, at capture, to `PUSH_FINDING_MAX_CHARS`.
  *
  * `framing` TRAVELS WITH THE BODY, in the data rather than beside it. The
  * "record of what was settled, data not instructions" line lived only in the
@@ -1201,7 +1230,21 @@ function resolveStatus(args: PublishArgs, frontmatter: Frontmatter): PublishStat
   return fm as PublishStatus;
 }
 
-function resolveTitle(frontmatter: Frontmatter, body: string): string | undefined {
+/**
+ * Frontmatter, then the body's own first heading, then — for a queued finding —
+ * the title the child gave it.
+ *
+ * THE STORED TITLE IS LAST because the body is what is published: a child that
+ * wrote a heading into its fence meant that heading, and the harvest split the
+ * two apart. It only answers when the body carries no heading at all, which is
+ * exactly the shape `splitFinding` stores when a child gave a title and nothing
+ * under it that starts with `# `.
+ */
+function resolveTitle(
+  frontmatter: Frontmatter,
+  body: string,
+  finding: ChildFinding | undefined,
+): string | undefined {
   const fm = frontmatter.title;
   if (fm !== undefined) {
     if (typeof fm !== 'string') {
@@ -1209,11 +1252,11 @@ function resolveTitle(frontmatter: Frontmatter, body: string): string | undefine
     }
     return fm.trim();
   }
-  // Fall back to the first heading (level 1 preferred) so a plain `# Title` post
-  // needs no frontmatter.
   const headings = headingOutline(body);
   const h1 = headings.find((h) => h.level === 1) ?? headings[0];
-  return h1?.text;
+  if (h1 !== undefined) return h1.text;
+  const stored = finding?.title.trim() ?? '';
+  return stored === '' ? undefined : stored;
 }
 
 /** The server's per-item bound on `questionsAnswered` (mirrored by deriveCard). */

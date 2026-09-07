@@ -497,7 +497,7 @@ export async function postOutcomes(
 ): Promise<{ accepted: number }> {
   if (!SEARCH_ID_RE.test(searchId)) {
     throw new CliError('USAGE', `Invalid search id: ${JSON.stringify(searchId)}`, {
-      fix: 'Pass the searchId from a prior search (or use --last).',
+      fix: 'Pass the searchId from a prior search; `tenjin search` prints it.',
     });
   }
   if (items.length === 0 || items.length > 10) {
@@ -710,12 +710,10 @@ export interface PostMetadata {
 
 /**
  * GET /api/posts/<id>/public — the public id lookup for a PUBLISHED post
- * (tenjin PR #803, sibling of the tenjin-agent#252 local-bookkeeping removal
- * in PR 277 round-2 review: `state-store.ts`'s `findPairingCandidate` used to
- * synthesize `title: ''` / `price: '0'` for a link missing them, which is
- * exactly the "invented value" this function exists not to produce). A
- * sibling route to the owner-scoped SIWX `GET /api/posts/<id>`, not a
- * relaxation of it.
+ * (tenjin PR #803). A sibling route to the owner-scoped SIWX
+ * `GET /api/posts/<id>`, not a relaxation of it. It answers with what the
+ * server holds or with nothing: a synthesized `title: ''` / `price: '0'` is
+ * exactly the invented value this function exists not to produce.
  *
  * Every failure collapses to `null`: a 404 (draft, unlisted, unknown id, a
  * malformed id, or a deployment that predates this route — all

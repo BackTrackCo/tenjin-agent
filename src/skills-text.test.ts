@@ -1026,10 +1026,20 @@ describe('the public render did not move', () => {
   // its item bullet gained `strong` and `body`, the two candidate fields the
   // shelf sends since search learned to say which item answers and to carry a
   // free piece whole. Both arms moved.
+  //
+  // Re-pinned for the CLI on `loop.db` (PR E): `outcome --last` and `--all-open`
+  // are deleted — the CLI knows the harness session but never the agent inside
+  // it, so in a fan-out `--last` could rate a sibling's search — and the outcome
+  // paragraph names `--search-id <id>` alone. tenjin-publish is untouched.
+  //
+  // Re-pinned again for the same PR's fix lane: the turn-end ask names a fix
+  // this session closed and the key it was recorded under, so tenjin-publish
+  // says to pass that key as `--key fingerprint=<key>`. tenjin-search is
+  // untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '6ff3a2a6816ee8e42a9293cf032f9f63',
-      'tenjin-publish': 'e7c516189259f5498c7f0067813a801e',
+      'tenjin-search': '3f48712445088ec79d48efba47da0b63',
+      'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });
 

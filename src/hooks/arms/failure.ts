@@ -1,18 +1,16 @@
 import { basename } from 'node:path';
 import type { HookTool } from '../../adapters/types';
 import { mask } from '../../lib/redact';
-import { projectId, teamCoarseKey } from '../../lib/state-store';
 import { deliver } from '../deliver';
+import { projectId } from '../failure/keys';
 import {
   closeOpenPairings,
   findPairing,
-  linkPost,
   openPairing,
   pairingAnswer,
   pairingIdOf,
   rememberReplay,
 } from '../failure/pairings';
-import { repoSlugOf } from '../failure/repo';
 import { allowedHeads, errorLine, filesInError, sigV1, type Signature } from '../failure/signature';
 import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-identity';
 import { getMark } from '../gates';
@@ -64,21 +62,6 @@ function failureText(tool: HookTool | undefined): string {
     .join('\n');
 }
 
-/** The stage-1 leg: a coarse test-identity hit says "same file and suite",
- *  never "same test", and the server does not say which key matched, so its
- *  answer is a pointer and never a fix body. */
-function pointerLeg(leg: Leg): Leg {
-  return {
-    ...leg,
-    verdict(result) {
-      const answer = leg.verdict(result);
-      if (answer === null) return null;
-      const { text: body, ...pointer } = answer;
-      return body === undefined ? answer : pointer;
-    },
-  };
-}
-
 export const failureArm: Arm = {
   id: 'failure',
   wait: 'tool',
@@ -122,7 +105,6 @@ export const failureArm: Arm = {
     );
     const testSig = identity === null ? null : sigV1Test(identity);
     if (sig === null && testSig === null) return null;
-    const repo = await repoSlugOf(cwd);
     const project = projectId(cwd);
     planned.set(ctx, {
       head,
@@ -135,30 +117,17 @@ export const failureArm: Arm = {
     });
 
     const local = localLeg('local', () => {
-      if (sig !== null) {
-        const match = findPairing(db, project, sig.key, sig.coarseKey);
-        if (match !== null) return pairingAnswer(match, true);
-      }
-      if (testSig !== null) {
-        const match = findPairing(db, project, testSig.key, testSig.coarseKey);
-        if (match !== null) return pairingAnswer(match, match.key === testSig.key);
+      for (const key of [sig?.key, testSig?.key]) {
+        if (key === undefined) continue;
+        const match = findPairing(db, project, key);
+        if (match !== null) return pairingAnswer(match);
       }
       return null;
     });
-    // The fine keys travel with or without a git origin; only a coarse key
-    // is salted with the repo, and without one it is not sent at all.
     const fine: string[] = [];
     if (sig !== null) fine.push('sig_v1:' + sig.key);
-    if (sig !== null && sig.coarseKey !== null && repo.length > 0)
-      fine.push('sig_v1c:' + teamCoarseKey(sig.coarseKey, repo));
     if (testSig !== null) fine.push('sig_v1_test:' + testSig.key);
-    const team = teamOrigin(cfg) !== null;
-    const stages: Leg[][] = [team ? [local, keysLeg(cfg, fine)] : [local]];
-    if (team && testSig !== null && repo.length > 0) {
-      stages.push([
-        pointerLeg(keysLeg(cfg, ['sig_v1_test_c:' + teamCoarseKey(testSig.coarseKey, repo)])),
-      ]);
-    }
+    const stages: Leg[][] = teamOrigin(cfg) !== null ? [[local, keysLeg(cfg, fine)]] : [[local]];
     return {
       question: { text: '', questionKey: sig?.key ?? testSig?.key ?? '' },
       stages,
@@ -172,11 +141,11 @@ export const failureArm: Arm = {
   /**
    * Every local write, on any outcome but `deadline` (which never reaches
    * here). A local hit is remembered so this agent's later pass can be its
-   * second closer; a keys hit opens a pairing even with no file, linked to
-   * the post, so this machine's later close can be carried back; anything
-   * else opens the rows the failure earned. A question another fire of this
-   * actor already holds or answered (`asked`, `cached`, `seen`) opened its
-   * rows then: a re-run is one problem, not two.
+   * second closer; a keys hit opens a pairing even with no file, so this
+   * machine's later close is recorded too; anything else opens the rows the
+   * failure earned. A question another fire of this actor already holds or
+   * answered (`asked`, `cached`, `seen`) opened its rows then: a re-run is one
+   * problem, not two.
    */
   after(ctx, result, question) {
     const failure = planned.get(ctx);
@@ -209,7 +178,6 @@ export const failureArm: Arm = {
             ...base,
             kind: 'sig_v1',
             key: failure.sig.key,
-            coarseKey: failure.sig.coarseKey,
             errorFiles: failure.errorFiles,
           },
           now,
@@ -224,7 +192,6 @@ export const failureArm: Arm = {
             ...base,
             kind: 'sig_v1_test',
             key: failure.testSig.key,
-            coarseKey: failure.testSig.coarseKey,
             // The basename: the close rule compares basenames, and the key
             // already keeps the directory apart.
             errorFiles: [basename(failure.testSig.file)],
@@ -234,11 +201,7 @@ export const failureArm: Arm = {
       );
     }
     if (post !== null) {
-      const origin = teamOrigin(ctx.deps.config()) ?? '';
-      for (const id of opened) {
-        rememberReplay(db, ctx.actor, failure.head, id, now);
-        linkPost(db, id, post.resourceId, origin, now);
-      }
+      for (const id of opened) rememberReplay(db, ctx.actor, failure.head, id, now);
     }
     return null;
   },

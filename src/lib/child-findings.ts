@@ -1,33 +1,27 @@
+import { factsWithPrefix, getFact } from '../hooks/facts';
 import { CliError } from './errors';
-import { openStore, STORE_SQL, type Store } from './state-store';
+import { withLoopDb } from './loop-db';
 
 /**
  * Reading the child-finding queue the `SubagentStop` harvest writes
  * (tenjin-agent#228).
  *
- * A finding is one `events` row under `hook = 'finding'` whose JSON `data`
- * carries the child's own words, the agent that produced them and the search the
- * ask was signalled by. The hook side reads it through the generated store
- * source; this is the same queue read from a CLI process, and it lives here
- * rather than in a command module because `publish --finding` is not the only
- * caller that will ever want it.
+ * A finding is one `facts` row on `loop.db` under `finding:<uid>`, whose JSON
+ * value carries the child's own words, the title it gave them, the agent that
+ * produced them and the search the ask was signalled by. The harvest writes it
+ * from inside the daemon; this is the same queue read from a CLI process, and it
+ * lives here rather than in a command module because `publish --finding` is not
+ * the only caller that will ever want it.
  *
  * READ-ONLY AND LOCAL: it opens no wallet, contacts no shelf and writes nothing.
  * What it hands back is a CHILD'S WORDS, which is data every caller has to frame
  * as a record rather than as instructions.
  */
 
-/** The window a not-found error reports over, matching the capture ask's own so
- *  a finding and the ask that named it age out together. */
-const FINDING_WINDOW_MS = 8 * 60 * 60 * 1000;
+const FINDING_PREFIX = 'finding:';
 
-/** How many ids the not-found error names. Enough to recognise the one you
- *  meant, short enough to stay one line of a `fix`. */
-const RECENT_ID_MAX = 10;
-
-/** One queued finding, whole. `body` is bounded at capture
- *  (`PUSH_FINDING_MAX_CHARS`), not here: a body cut on the way out of the store
- *  would be a different finding from the one that was stored. */
+/** One queued finding, whole. Nothing is cut on the way out: a body trimmed
+ *  here would be a different finding from the one that was stored. */
 export interface ChildFinding {
   id: string;
   /** When the harvest filed it, ISO-8601. */
@@ -35,8 +29,7 @@ export interface ChildFinding {
   /** The harness session whose child wrote it. */
   session: string;
   /**
-   * The project the child ran in (`events.project`), or null for a row written
-   * with no cwd on the payload or by a build that did not carry it.
+   * The project the child ran in, or null for a row written with no cwd.
    *
    * WHY A PUBLISH PATH NEEDS IT. `publish.mode` resolves from the CURRENT
    * directory and this queue is machine-wide, so without it a finding harvested
@@ -51,57 +44,47 @@ export interface ChildFinding {
   agentId: string | null;
   /** The search whose open loop signalled the ask this finding answers. */
   searchId: string | null;
+  /** The `# ` heading the child gave it, or '' when it gave none. The title a
+   *  `--finding` publish falls back to when the body carries no heading. */
+  title: string;
   body: string;
 }
 
-async function withStore<T>(dataDir: string, fallback: T, fn: (store: Store) => T): Promise<T> {
-  const store = await openStore(dataDir);
-  if (store === null) return fallback;
-  try {
-    return fn(store);
-  } finally {
-    store.close();
-  }
-}
-
-/**
- * A stored row read back defensively, field by field.
- *
- * The `data` column is JSON this build wrote, but an older build wrote some of
- * these rows and a newer one will write the next: a missing field reads as
- * absent rather than failing the caller, which is the same contract
- * `readLedgerTallies` holds to over the same tables.
- */
-function rowToFinding(row: Record<string, unknown>): ChildFinding | null {
-  if (typeof row.uid !== 'string' || row.uid === '') return null;
+/** A stored fact read back defensively, field by field: the row was written by
+ *  whichever build was installed when the child stopped, so a field that build
+ *  did not write reads as absent rather than failing the caller. */
+function toFinding(id: string, value: string): ChildFinding | null {
+  if (id === '') return null;
   let data: unknown;
   try {
-    data = typeof row.data === 'string' ? JSON.parse(row.data) : null;
+    data = JSON.parse(value);
   } catch {
     return null;
   }
   if (data === null || typeof data !== 'object') return null;
-  const fields = data as Record<string, unknown>;
-  const at = typeof row.at === 'number' ? row.at : 0;
+  const f = data as Record<string, unknown>;
+  const at = typeof f.at === 'number' ? f.at : 0;
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const orNull = (v: unknown): string | null => {
+    const s = str(v);
+    return s === '' ? null : s;
+  };
   return {
-    id: row.uid,
+    id,
     at: new Date(at).toISOString(),
-    session: typeof row.session === 'string' ? row.session : '',
-    project: typeof row.project === 'string' && row.project !== '' ? row.project : null,
-    agentType:
-      typeof fields.agentType === 'string' && fields.agentType !== '' ? fields.agentType : null,
-    // THE COLUMN (tenjin-agent#247's store v2), not a `data` field. A row a
-    // pre-v2 build wrote carries NULL here, which is the same "no agent named"
-    // this parse has always reported.
-    agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
-    searchId: typeof fields.searchId === 'string' ? fields.searchId : null,
-    body: typeof fields.body === 'string' ? fields.body : '',
+    session: str(f.session),
+    project: orNull(f.project),
+    agentType: orNull(f.agentType),
+    agentId: orNull(f.agent),
+    searchId: orNull(f.searchId),
+    title: str(f.title),
+    body: str(f.body),
   };
 }
 
 /**
- * One finding by the id the capture ask printed, or a not-found error naming the
- * ids this machine actually holds.
+ * One finding by the id the turn-end ask printed, or a not-found error naming
+ * the ids this machine actually holds.
  *
  * The ids are in the ERROR rather than behind a listing verb because that is the
  * only moment a caller needs them: it typed an id and was wrong, and the ask it
@@ -110,49 +93,45 @@ function rowToFinding(row: Record<string, unknown>): ChildFinding | null {
 export async function readChildFinding(
   dataDir: string,
   id: string,
-  now: () => number = Date.now,
   project: string | null = null,
 ): Promise<ChildFinding> {
-  const row = await withStore<Record<string, unknown> | null>(dataDir, null, (store) =>
-    store.get(STORE_SQL.findingByUid, [id]),
-  );
-  const finding = row === null ? null : rowToFinding(row);
+  const value = withLoopDb(dataDir, (db) => getFact(db, FINDING_PREFIX + id));
+  const finding = value === null ? null : toFinding(id, value);
   if (finding !== null) return finding;
-  const known = await recentFindingIds(dataDir, now, project);
+  const known = await recentFindingIds(dataDir, project);
   throw new CliError('RESOURCE_NOT_FOUND', `No stored finding with id ${JSON.stringify(id)}`, {
     fix:
       known.length === 0
         ? 'No findings are held for this project. They are harvested from a subagent at its own end and need `hooks.capture` on (`tenjin push status`).'
-        : `Captured in this project in the last ${FINDING_WINDOW_MS / (60 * 60 * 1000)}h: ${known.join(', ')}. That listing is what the window bounds; a finding itself is never rewritten and stays publishable by its own id, so an id that does not resolve is one this project never captured.`,
+        : `Captured in this project: ${known.join(', ')}. A finding is never rewritten and stays publishable by its own id, so an id that does not resolve is one this project never captured.`,
     details: { id, known },
   });
 }
 
 /**
- * The ids THIS PROJECT holds inside the capture window, newest first.
+ * The ids THIS PROJECT holds, newest first. No window and no cap: a finding is
+ * publishable by its own id forever, so a listing that aged rows out named
+ * fewer ids than the queue actually held and made a real id look like a typo.
  *
  * DELIBERATELY IDS ONLY. Bodies are what a finding costs to carry, and the only
  * caller is an error line; handing back a body here would rebuild the listing
  * this queue deliberately does not have.
  *
  * AND DELIBERATELY NOT MACHINE-WIDE (round-3 item 5). The queue is machine-wide
- * and the capture ask marks which of its rows came from elsewhere, but this is
- * an error path reached by typing an id wrong: enumerating every checkout's
- * findings there hands one project a listing of another's work for the price of
- * a typo. A null project matches the rows that carry none.
+ * and the ask marks which of its rows came from elsewhere, but this is an error
+ * path reached by typing an id wrong: enumerating every checkout's findings
+ * there hands one project a listing of another's work for the price of a typo.
+ * A null project matches the rows that carry none.
  */
 export async function recentFindingIds(
   dataDir: string,
-  now: () => number = Date.now,
   project: string | null = null,
 ): Promise<string[]> {
-  const since = now() - FINDING_WINDOW_MS;
-  const rows = await withStore<Record<string, unknown>[]>(dataDir, [], (store) =>
-    store.all(STORE_SQL.findingsRecent, [since, project, RECENT_ID_MAX]),
-  );
-  return rows
-    .map(rowToFinding)
-    .filter((f): f is ChildFinding => f !== null)
+  const facts = withLoopDb(dataDir, (db) => factsWithPrefix(db, FINDING_PREFIX));
+  return facts
+    .map((fact) => toFinding(fact.key.slice(FINDING_PREFIX.length), fact.value))
+    .filter((f): f is ChildFinding => f !== null && f.project === project)
+    .reverse()
     .map((f) => f.id);
 }
 

@@ -54,10 +54,7 @@ function mergeEmit(delivery: Outcome['delivery'], after: Emit | null): Emit | nu
   const context = [delivery?.mode === 'inject' ? delivery.text : undefined, after?.context].filter(
     (t): t is string => typeof t === 'string' && t.length > 0,
   );
-  const out: Emit = {};
-  if (context.length > 0) out.context = context.join('\n\n');
-  if (after?.block) out.block = after.block;
-  return Object.keys(out).length === 0 ? null : out;
+  return context.length === 0 ? null : { context: context.join('\n\n') };
 }
 
 export async function runFire(

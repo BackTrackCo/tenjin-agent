@@ -7,11 +7,10 @@ import type { Actor } from './types';
 export const STARTED_MARK = 'started';
 
 /**
- * `actor = (session, agent ?? '')`. Three answers, kept from `identityOf`
- * (`hook-scripts.ts`): absent agent is the lead; a valid one is a child; a
- * present-but-invalid one never reaches here (the adapter's `decode` returns
- * null and the fire is dropped, so a child's work is never filed under the
- * lead).
+ * `actor = (session, agent ?? '')`. Three answers: absent agent is the lead; a
+ * valid one is a child; a present-but-invalid one never reaches here (the
+ * adapter's `decode` returns null and the fire is dropped, so a child's work is
+ * never filed under the lead).
  *
  * One addition: an `agent.stop` needs a `started` mark from that actor's
  * `agent.start`. A stop with no start is a phantom (68% of last week's

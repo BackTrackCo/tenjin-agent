@@ -12,7 +12,6 @@ import { ownsAnyLock, releaseOwnedLocks } from '../lib/lock';
 import { skillMaterialize } from '../lib/skill-materialize';
 import { installSkill } from '../lib/skill-writer';
 import { PRODUCTION_HOST } from '../lib/production-origin';
-import { removeRetiredState } from '../lib/state-store';
 import {
   hookFallthroughAsked,
   hookFallthroughHost,
@@ -75,7 +74,6 @@ import { hasClaudeHooks, hooksSkipped, hooksUndo, writeClaudeHooks } from '../li
 import type { WriteClaudeHooksOptions } from '../lib/harness-hooks';
 import { healWiredSkills } from '../lib/skill-heal';
 import type { HealOutcome } from '../lib/skill-heal';
-import { removeMarkerLines } from '../lib/uninstall';
 import type { HooksResult } from '../lib/harness-hooks';
 import { confirmChoice, intro as clackIntro, outro as clackOutro, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
@@ -645,14 +643,6 @@ async function installBody(
       ),
     );
   }
-  // One-time cleanup of the pointer line older versions wrote into the operator's
-  // CLAUDE.md / AGENTS.md. `install` writes no such line now: a skill's own
-  // frontmatter description is the trigger surface the harness loads at session
-  // start, so the line only duplicated it. Removing it here is what gets the
-  // footprint off machines that already have one, since most people re-run
-  // `install` far more often than they would run a cleanup command.
-  const pointerCleanup = dryRun ? [] : await removeMarkerLines(home);
-
   // The five decisions, in order. Each one is skipped (with its own recorded
   // reason) when a flag already settled it or when there is no one to ask.
   if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
@@ -675,18 +665,6 @@ async function installBody(
     resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun, canPrompt }),
   );
 
-  // One-time cleanup of the files the state store replaced (tenjin-agent#209:
-  // push-ledger.jsonl, the push/ working directory and its markers,
-  // searches.json and its lock directory, and the long-dead candidates/). There
-  // is deliberately no import path — plan 03, owner decision 3 — so the sidecar
-  // starts clean. Reported rather than silent: it is the operator's data dir.
-  //
-  // AFTER THE SCRIPTS ARE REWRITTEN, not before. Until `resolveHooks` has
-  // replaced them, the scripts on disk are the OLD ones and the harness may
-  // still fire them — so a cleanup that ran first could have `push/` or
-  // `searches.json` recreated behind it seconds later, and since this runs once
-  // per install, nothing would ever remove them again.
-  const retiredState = dryRun ? [] : await removeRetiredState(ctx.dataDir);
   // On BOTH paths now: the loop this command sets up needs a key, so a headless
   // run creates one rather than leaving the operator a setup that stops at the
   // first buy or publish.
@@ -746,13 +724,6 @@ async function installBody(
     dryRun,
     skillsSource,
     harnesses,
-    // One-time cleanup, reported because it edits a file the operator owns. Older
-    // versions wrote a pointer line into CLAUDE.md/AGENTS.md; nothing writes one
-    // now, so an install that finds one removes it and says which file it touched.
-    pointerCleanup,
-    // Same reason as the pointer line: files under the operator's data dir were
-    // deleted, so the run says which ones.
-    retiredState,
     doctor: { status: doctor.failure !== undefined ? 'fail' : 'pass', checks: doctor.checks },
     publishMode,
     bazaarPay,
@@ -773,8 +744,6 @@ async function installBody(
   // Human path: the walkthrough as humanLines (the global emitSuccess prints them
   // to stdout at a TTY and never an envelope).
   const humanLines = buildWalkthrough(ctx.io, {
-    pointerCleanup,
-    retiredState,
     dryRun,
     dataDir: ctx.dataDir,
     harnesses,
@@ -822,11 +791,6 @@ const EXAMPLE_QUESTION = "what actually changed in <library> v3's public API";
 
 interface WalkthroughState {
   dryRun: boolean;
-  /** Legacy pointer files this run cleaned; disclosed because they are the
-   *  operator's own notes and we edited them. */
-  pointerCleanup: string[];
-  /** Retired sidecar state this run deleted; disclosed for the same reason. */
-  retiredState: string[];
   /** Where the wallet keystore lives, for the create disclosure. */
   dataDir: string;
   harnesses: HarnessResult[];
@@ -889,21 +853,6 @@ function noticeLines(io: Io, s: WalkthroughState): string[] {
       for (const rl of h.codexNetworkRule.split('\n')) lines.push(paint(io, 'dim', `  ${rl}`));
     }
     for (const w of h.warnings) lines.push(paint(io, 'yellow', `! ${w}`));
-  }
-  // Not dim: we edited a file the operator writes their own notes in, and a line
-  // saying so is the only way they learn it happened.
-  if (s.pointerCleanup.length > 0) {
-    lines.push(
-      `Removed the old Tenjin pointer line from ${s.pointerCleanup.join(' and ')}; the skills carry their own triggers now.`,
-    );
-  }
-  // Same again: files under ~/.tenjin were deleted, and the operator learns it
-  // here or not at all. Named individually because "old sidecar state" could
-  // mean anything, and one of them is the push experiment's own record.
-  if (s.retiredState.length > 0) {
-    lines.push(
-      `Removed ${s.retiredState.join(', ')}: the hook sidecar keeps its state in ~/.tenjin/state.db now, and starts fresh.`,
-    );
   }
   // Same reason as the pointer line above: we edited the operator's settings.json
   // to REMOVE something, and the only way they learn it happened is a line here.
@@ -1000,7 +949,7 @@ export function hooksDisclosure(
   const local = `Wired ${h.entries} hook entries in ${h.path ?? 'your settings'}: nine POST to a Tenjin daemon on ${h.url ?? 'loopback'} (your machine only, authorized by a token in that file, which is why it is now mode 0600), and two run ${h.hooksDir}/tenjin-shim.mjs to make sure that daemon is up. Nothing here can block or change a tool call; every arm only adds context beside it.`;
   const asks =
     h.mode === 'remind'
-      ? `On a web search the arms print a one-line reminder that ${shelfHost} may have an answer rather than looking one up.`
+      ? `On a web search and on a subagent dispatch the arms print a one-line reminder that ${shelfHost} may have an answer rather than looking one up. That answer covers those two moments only: your own prompts and the pages you fetch are still asked of ${shelfHost} under \`hooks.push\`, which is on.`
       : `Before a web search, a page fetch, or on your own prompts, the arms ask ${shelfHost} the same question (free, ~2.5s budget, 5s harness kill) and mention a tested answer if one exists; the query text leaves the machine, redacted, and nothing else does.${
           fallthroughAsked
             ? ` A question ${shelfHost} has nothing for is then asked of ${fallthroughHost} as well.`
@@ -1728,9 +1677,13 @@ export function searchHooksChoices(
     {
       value: 'remind',
       label: 'Just remind me',
-      hint: 'a one-line reminder, nothing sent off-machine',
+      hint: 'a one-line reminder instead of the lookup, on those two moments only; the prompt and page-fetch arms follow `hooks.push`',
     },
-    { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
+    {
+      value: 'off',
+      label: 'No hooks',
+      hint: 'no web-search or subagent lookup at all; the prompt and page-fetch arms follow `hooks.push`',
+    },
   ];
 }
 
@@ -1758,25 +1711,10 @@ async function resolveHooks(args: {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
   const rawConfig = await loadRawConfig(dataDir);
-  const rawHooks = rawConfig.hooks as
-    | {
-        webSearch?: WebSearchMode;
-        searchMode?: WebSearchMode;
-        agentDispatch?: WebSearchMode;
-        dispatchMode?: string;
-      }
-    | undefined;
-  const stored = rawHooks?.webSearch ?? rawHooks?.searchMode;
-  const storedWebSearch = rawHooks?.webSearch ?? rawHooks?.searchMode;
-  const storedAgentDispatchRaw =
-    rawHooks?.agentDispatch ??
-    (rawHooks?.dispatchMode === 'inherit'
-      ? storedWebSearch
-      : (rawHooks?.dispatchMode as WebSearchMode | undefined));
-  const storedAgentDispatch =
-    storedAgentDispatchRaw ?? (rawHooks?.searchMode !== undefined ? storedWebSearch : undefined);
-  const storedWebSearchEff = storedWebSearch ?? DEFAULT_HOOK_MODE;
-  const storedAgentDispatchEff = storedAgentDispatch ?? storedWebSearch ?? DEFAULT_HOOK_MODE;
+  const rawHooks = rawConfig.hooks;
+  const stored = rawHooks?.webSearch;
+  const storedWebSearchEff = stored ?? DEFAULT_HOOK_MODE;
+  const storedAgentDispatchEff = rawHooks?.agentDispatch ?? stored ?? DEFAULT_HOOK_MODE;
   // Whether a past `tenjin push on` armed the push experiment (docs/command-reference.md#push-experimental): a
   // durable config key, read here rather than passed in, so this run's hooks
   // stay in step with it with no separate flag to remember.
@@ -1813,11 +1751,7 @@ async function resolveHooks(args: {
   // and must never clobber a diverged agentDispatch (e.g. webSearch auto + agentDispatch off
   // -> flagless reinstall would otherwise silently re-enable dispatch). See A1igator R2 review.
   const isExplicitChoice = flag !== undefined || (canPrompt && !dryRun);
-  const hasAnyHookKey =
-    rawHooks?.webSearch !== undefined ||
-    rawHooks?.agentDispatch !== undefined ||
-    rawHooks?.searchMode !== undefined ||
-    rawHooks?.dispatchMode !== undefined;
+  const hasAnyHookKey = rawHooks?.webSearch !== undefined || rawHooks?.agentDispatch !== undefined;
   const needsSync = isExplicitChoice
     ? rawHooks?.webSearch === undefined ||
       rawHooks?.agentDispatch === undefined ||

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
-import { isNoWalletCheck, runDoctor } from './doctor';
+import { isNoWalletCheck, runDoctor, runDoctorPrune } from './doctor';
 import type { CheckResult } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
@@ -17,6 +17,7 @@ import type { CommandContext } from '../context';
 import type { Io } from '../lib/output';
 import { saveSessionFile } from '../lib/session-key';
 import { sessionPath } from '../lib/paths';
+import { openLoopDb } from '../hooks/store';
 import { testSessionKey } from '../lib/read-test-utils';
 import type { WalletProvider } from '../lib/wallet';
 
@@ -136,18 +137,23 @@ async function writeWallet(mode: number): Promise<void> {
 }
 
 describe('runDoctor — passing outcomes', () => {
-  // The preflight in src/index.ts already refused anything below Node 24, so a
-  // failing probe here is never "upgrade Node": the runtime is supported and the
-  // import still failed, which is a damaged install or bundle (tsup once shipped
-  // `import("sqlite")`, tenjin-agent#225). The remedy and the code must say so,
-  // and must not collide with the preflight's NODE_UNSUPPORTED.
-  it('a failing node:sqlite probe on a supported Node blames the install, not Node', async () => {
+  /**
+   * THE OPEN IS THE PROBE. The preflight in src/index.ts already refused
+   * anything below Node 24, so a failing open here is never "upgrade Node": the
+   * runtime is supported and the file still would not open, which is a damaged
+   * install or bundle (tsup once shipped `import("sqlite")`, tenjin-agent#225)
+   * or another build's daemon holding the ledger. The remedy and the code must
+   * say so, and must not collide with the preflight's NODE_UNSUPPORTED.
+   */
+  it('a loop.db that will not open blames the install, not Node', async () => {
     const err = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       which: () => false,
       fetchImpl: healthyFetch,
-      probeSqlite: async () => ({ ok: false, version: null }),
+      openLoopDb: () => {
+        throw new Error('loop.db is from another build; run tenjin daemon stop and retry');
+      },
     }).then(
       () => {
         throw new Error('expected doctor to fail');
@@ -157,75 +163,53 @@ describe('runDoctor — passing outcomes', () => {
     expect(err).toBeInstanceOf(CliError);
     expect(err.code).toBe('INTERNAL');
     const checks = (err.details as { checks: CheckResult[] }).checks;
-    const store = find(checks, 'state-store');
+    const store = find(checks, 'store');
     expect(store.status).toBe('fail');
-    expect(store.detail).toContain(`Node ${process.versions.node}`);
-    expect(store.fix).toContain('Reinstall tenjin-cli');
+    expect(store.detail).toContain(join(dir, 'loop.db'));
+    expect(store.detail).toContain('from another build');
+    expect(store.fix).toContain('tenjin daemon stop');
     expect(store.fix).not.toMatch(/Node 24/);
   });
 
-  /**
-   * THE SAME ARGUMENT AS THE PROBE ABOVE, ONE STEP DOWN (#246).
-   *
-   * `PRAGMA journal_mode = wal` is the one statement in the store the busy
-   * timeout cannot protect, so an open that loses it twice runs on against a
-   * rollback journal — correct, but with the eight hooks a turn can fire now
-   * serialising. `openStore` records that in one row and nothing read it, which
-   * is the same invisibility the `node:sqlite` check exists to refuse.
-   */
-  it('reports a store stuck on a rollback journal, next to the node:sqlite line', async () => {
-    const at = Date.parse('2026-08-27T09:15:00.000Z');
+  /** The real open, which both proves `node:sqlite` and materializes the file. */
+  it('reports the loop database path when it opens', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
       which: () => false,
       fetchImpl: healthyFetch,
-      readStoreJournal: async () => ({ mode: 'rollback', at }),
     });
     const checks = (res.data as { checks: CheckResult[] }).checks;
-    const journal = find(checks, 'state-store-journal');
-    // WARN, NEVER FAIL, and never required: degradation is not absence. The
-    // store answers real counts on a rollback journal, so every bound still
-    // works and doctor must not tell the operator their install is broken.
-    expect(journal.status).toBe('warn');
-    expect(journal.required).toBe(false);
-    expect(journal.detail).toContain('rollback journal (WAL unavailable)');
-    expect(journal.detail).toContain('2026-08-27T09:15:00.000Z');
-    expect(journal.detail).toContain(join(dir, 'state.db'));
-    expect(journal.fix).toContain('TENJIN_DATA_DIR');
-    // `--json` readers get it as data, not only as prose.
-    expect(journal.data).toEqual({ mode: 'rollback', at });
-    // Beside the probe it belongs to, not at the bottom of the page.
-    expect(checks.map((c) => c.name).indexOf('state-store-journal')).toBe(
-      checks.map((c) => c.name).indexOf('state-store') + 1,
-    );
+    const store = find(checks, 'store');
+    expect(store.status).toBe('ok');
+    expect(store.detail).toBe(`${join(dir, 'loop.db')} open`);
+    expect(existsSync(join(dir, 'loop.db'))).toBe(true);
   });
 
   /**
-   * SILENT WHEN THERE IS NOTHING TO SAY. A permanently-present line about a
-   * pragma that has never failed is the noise that teaches an operator to skim
-   * the page, and the row self-heals, so a machine that got WAL back must stop
-   * mentioning it.
+   * #227: `TENJIN_DATA_DIR` is the documented way to run a second profile, and
+   * it is silent about one consequence — skill self-healing stands down under
+   * it (lib/skill-heal.ts). A note, never a warning: this is what the operator
+   * asked for.
    */
-  it('says nothing about the journal on a store that has WAL', async () => {
+  it('names a redirected data dir and says skill self-healing stands down', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
-      env: {},
+      env: { TENJIN_DATA_DIR: dir },
       which: () => false,
       fetchImpl: healthyFetch,
-      readStoreJournal: async () => ({ mode: 'wal', at: Date.now() }),
     });
     const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
+    const note = find(checks, 'data-dir');
+    expect(note.status).toBe('ok');
+    expect(note.required).toBe(false);
+    expect(note.detail).toContain(dir);
+    expect(note.detail).toContain('skill self-healing stands down');
   });
 
-  /**
-   * ...and the REAL reader, on a machine that has never run a hook. Doctor is
-   * reached for when something is already broken; it may not be the thing that
-   * first materialises the state database, so a missing file reads as nothing to
-   * report rather than as a store to bootstrap.
-   */
-  it('creates no state database just to look at the journal', async () => {
+  /** Silent on the machine's own data dir: a permanently-present line about the
+   *  default is the noise that teaches an operator to skim the page. */
+  it('says nothing about the data dir with no override set', async () => {
     const res = await runDoctor(ctxFor(), {
       walletPassphrase: NO_OS_STORE,
       env: {},
@@ -233,8 +217,7 @@ describe('runDoctor — passing outcomes', () => {
       fetchImpl: healthyFetch,
     });
     const checks = (res.data as { checks: CheckResult[] }).checks;
-    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
-    expect(existsSync(join(dir, 'state.db'))).toBe(false);
+    expect(checks.map((c) => c.name)).not.toContain('data-dir');
   });
 
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
@@ -2779,5 +2762,68 @@ describe('runDoctor — loop hook wiring', () => {
     await chmod(join(skillHome, '.claude', 'settings.json'), 0o644);
     const check = await loopCheck();
     expect(check?.detail).toContain('wider than 0600');
+  });
+});
+
+/**
+ * `tenjin doctor --prune`: the retention rule by hand, plus the retired store.
+ *
+ * NAMED ENTRIES ONLY. The data dir also holds the wallet, the config and the
+ * library, whose loss is unrecoverable, so the whole point of this command is
+ * that it deletes exactly what it names and reports each one.
+ */
+describe('runDoctorPrune', () => {
+  it('runs retention on loop.db, removes the retired store, and never the wallet', async () => {
+    const db = openLoopDb(dir);
+    const old = Date.now() - 400 * 24 * 60 * 60 * 1000;
+    db.prepare(
+      `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+         deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+       VALUES ('f-old', ?, 's', '', 'prompt', 'claude', 'prompt', NULL, '/r', 'tool', 1, 1,
+         'hit', NULL, NULL, NULL, NULL, NULL)`,
+    ).run(old);
+    db.prepare(
+      `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+         deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+       VALUES ('f-new', ?, 's', '', 'prompt', 'claude', 'prompt', NULL, '/r', 'tool', 1, 1,
+         'hit', NULL, NULL, NULL, NULL, NULL)`,
+    ).run(Date.now());
+    db.close();
+
+    for (const name of ['state.db', 'state.db-wal', 'state.db-shm', 'push-ledger.jsonl']) {
+      await writeFile(join(dir, name), 'x');
+    }
+    await mkdir(join(dir, 'candidates'), { recursive: true });
+    await writeWallet(0o600);
+    await writeFile(join(dir, 'config.json'), '{}');
+
+    const res = await runDoctorPrune(ctxFor());
+    expect(res.data).toMatchObject({ retention: { fires: 1 } });
+    const removed = (res.data as { removed: string[] }).removed;
+    expect(removed).toContain(join(dir, 'state.db'));
+    expect(removed).toContain(join(dir, 'state.db-wal'));
+    expect(removed).toContain(join(dir, 'state.db-shm'));
+    expect(removed).toContain(join(dir, 'push-ledger.jsonl'));
+    expect(removed).toContain(join(dir, 'candidates'));
+    expect(existsSync(join(dir, 'state.db'))).toBe(false);
+    expect(existsSync(join(dir, 'candidates'))).toBe(false);
+
+    // The operator's own property, untouched and said to be so.
+    expect(existsSync(join(dir, 'wallet.json'))).toBe(true);
+    expect(existsSync(join(dir, 'config.json'))).toBe(true);
+    const human = res.humanLines?.join('\n') ?? '';
+    expect(human).toContain('removed 1 fire(s)');
+    expect(human).toContain('Kept: your wallet, config and library');
+
+    // The fire inside the window is still there.
+    const after = openLoopDb(dir);
+    expect(after.prepare('SELECT id FROM fires').all()).toEqual([{ id: 'f-new' }]);
+    after.close();
+  });
+
+  it('says so when there is nothing retired left to remove', async () => {
+    const res = await runDoctorPrune(ctxFor());
+    expect((res.data as { removed: string[] }).removed).toEqual([]);
+    expect(res.humanLines?.join('\n')).toContain('Nothing retired left to remove.');
   });
 });

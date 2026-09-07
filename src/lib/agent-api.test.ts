@@ -808,11 +808,8 @@ describe('getLookupStats', () => {
 });
 
 /**
- * PR 277 round-2 review, nit on state-store.ts:4132: `findPairingCandidate`
- * used to synthesize `title: ''` / `price: '0'` for a `pairing_post` link
- * missing them — a false default a future spend-check could have trusted.
- * `getPostMetadata` is the replacement: `GET /api/posts/<id>/public`
- * (tenjin PR #803), a sibling of the owner-scoped-SIWX `GET /api/posts/<id>`
+ * `getPostMetadata`: `GET /api/posts/<id>/public` (tenjin PR #803), a sibling
+ * of the owner-scoped-SIWX `GET /api/posts/<id>`
  * route, serving `articleBase()`'s full shape (id, slug, title, excerpt,
  * coverImageId, price, arbiterId, status, publishedAt, tags, creator) for
  * PUBLISHED posts only. The schema asserts `id`/`slug`/`title`/`price`/
@@ -820,11 +817,11 @@ describe('getLookupStats', () => {
  * required set once `resolveResourceRef` (lib/resource-ref.ts) started using
  * this as its own by-id fallback: the read route is keyed by handle/slug, so
  * those two are what let a resolved id become a payable URL. Every other
- * field stays passthrough (PR 277 round-3 review nit) — a drift in a field
- * nothing here reads must not turn a good response into `null`. It must
- * never invent a value, so every failure mode (404, any other non-200, a
- * network error, or a body this CLI cannot read) collapses to the same
- * `null`.
+ * field stays passthrough — a drift in a field nothing here reads must not turn
+ * a good response into `null`. It must never invent a value (a synthesized
+ * `title: ''` / `price: '0'` is a false default a spend-check could trust), so
+ * every failure mode (404, any other non-200, a network error, or a body this
+ * CLI cannot read) collapses to the same `null`.
  */
 describe('getPostMetadata', () => {
   const POST = {

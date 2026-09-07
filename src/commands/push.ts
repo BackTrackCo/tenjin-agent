@@ -23,7 +23,9 @@ import {
   type TranscriptRow,
   type Verdict,
 } from '../lib/grade';
-import { openStore, STORE_SQL, type Store } from '../lib/state-store';
+import { openLoopDbForCli, withLoopDb } from '../lib/loop-db';
+import { clean } from '../hooks/text';
+import type { LoopDb, Row } from '../hooks/store';
 import type { ShelfBypass } from '../lib/http';
 import type { CommandContext, CommandResult } from '../context';
 
@@ -39,10 +41,18 @@ import type { CommandContext, CommandResult } from '../context';
  * `tenjin install` registers the whole entry set once, and the daemon re-stats
  * `config.json` per fire, so either value takes effect on the next prompt with
  * nothing to install and no process to restart.
+ *
+ * `status` and `grade` read `loop.db` directly (`lib/loop-db.ts`): the daemon
+ * writes one `fires` row per fire and one `legs` row per shelf it asked, and
+ * those two tables are the whole record.
  */
 
 const LEDGER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const LEDGER_WINDOW_DAYS = 7;
+
+/** The prefix `fires.delivered` carries when the fire actually showed a piece;
+ *  the rest of the value is the resource id, empty for a local pairing. */
+const INJECTED = 'inject:';
 
 /**
  * Turn the push arms on: persist `hooks.push=on` and stop.
@@ -84,122 +94,45 @@ export interface PushStatusDeps {
   bundlesPresent?: (dataDir: string) => Promise<boolean>;
   /** Home whose `.claude/settings.json` is read; defaults to os.homedir(). */
   homeDir?: string;
-  /** Seam for the store read; defaults to the real query. */
-  ledgerTallies?: (dataDir: string, nowMs: number) => Promise<PushLedgerTallies>;
-  /** Seam for the `--sessions` report; defaults to the real query. */
-  sessionScores?: (dataDir: string, nowMs: number) => Promise<PushSessionScore[]>;
+  /** Seam for the ledger read; defaults to the real query. */
+  ledgerTallies?: (dataDir: string, nowMs: number) => PushLedgerTallies;
   now?: () => number;
   /** Seam for the per-shelf server rollup; defaults to the real GET. */
   lookupStats?: typeof getLookupStats;
   fetchImpl?: typeof fetch;
 }
 
-export interface PushStatusOptions {
-  /** `--sessions`: append the importance-score report, one line per session. */
-  sessions?: boolean;
-}
-
-/**
- * The importance score of one session, as a REPORT (tenjin-agent#212): what the
- * Stop hook's capture gate WOULD have done had it been scored, printed beside
- * what actually happened, so a week of rows says whether the score skips the
- * asks nothing came of and never the session that published. No hook reads it.
- *
- * Five patterns, CommonTrace `detection.py` / `scoring.py`, each counted once
- * per session and weighted; then a bonus of up to 30% when the session's last
- * error resolution or reversal was within 300 s of its end.
- */
-export interface PushSessionScore {
-  session: string;
-  /**
-   * The agent these rows belong to, or null for the lead's own turn. One
-   * scored line per (session, agent): parallel subagents share their parent's
-   * session id, so a session is not a worker and scoring it whole credited one
-   * agent's failure to another's fix.
-   */
-  agent: string | null;
-  /** The weighted sum, bonus applied, to one decimal. */
-  score: number;
-  /** The patterns that fired, by name, in the order of {@link SCORE_WEIGHTS}. */
-  patterns: string[];
-  /** The recency multiplier actually applied (1.0 = none, up to 1.3). */
-  bonus: number;
-  events: number;
-  /** The Stop hook's capture ask fired in this session (`capture_asked`).
-   *  PER SESSION, so it is reported on the parent row only — the ask happens
-   *  once at the end of the turn, not once per subagent, and repeating it on
-   *  every child line would read as several asks. */
-  captureAsked: boolean;
-  /** `published:<hash>` and `agent_published:<...>` rows stamped between the
-   *  session's start and end (machine-wide rows, attributed by time, so a
-   *  concurrent session's publish can be counted here too: read it as "a
-   *  publish happened while this session was open"). Same count on every agent
-   *  row of one session, for that reason: the window is the session's. */
-  published: number;
-}
-
-/** The five patterns and their weights, CommonTrace `scoring.py`. */
-export const SCORE_WEIGHTS: Readonly<Record<ScorePattern, number>> = {
-  'error-edit-resolved': 3.0,
-  'edit-across-prompt': 2.5,
-  'write-over-edited': 2.5,
-  'fail-edit-pass': 2.0,
-  'research-then-edit': 2.0,
-};
-export type ScorePattern =
-  | 'error-edit-resolved'
-  | 'edit-across-prompt'
-  | 'write-over-edited'
-  | 'fail-edit-pass'
-  | 'research-then-edit';
-/** A resolution or reversal this close to the session's end earns the bonus,
- *  scaled linearly from +30% at 0 s to nothing at the edge. */
-export const SCORE_RECENCY_MS = 300_000;
-export const SCORE_RECENCY_BONUS = 0.3;
-/** Write over a file that has this many earlier edits in the session. */
-export const SCORE_WRITE_PRIOR_EDITS = 3;
-
 export interface PushLedgerTallies {
   windowDays: number;
+  /** `fires` rows in the window: one per fire the kernel committed. */
   rows: number;
-  byTriggerAction: Record<string, Record<string, number>>;
-  byShelf: Record<string, number>;
-  /** Why a row did not inject. The eleven the shipped core writes are
-   *  `lookup-cap`, `quiet`, `no-time` (a push-arm leg handed no wall clock;
-   *  a defensive clamp that no longer fires now that each leg is minted its
-   *  own deadline), `no-answer`, `miss`, `weak`, `shadowed`
-   *  (a strong public answer under a strong team answer on the same fire),
-   *  `already-injected`, `already-relayed` (this session already handed the
-   *  same piece to a subagent and that handoff has not expired),
-   *  `already-claimed` (a second agent in the session hit the same failure
-   *  signature and the first holds the claim) and `watchdog`
-   *  (docs/command-reference.md#push-experimental),
-   *  and the team leg by fingerprint adds `keys-off` (the shelf has
-   *  KNOWLEDGE_KEYS off; #212 PR B) and `no-remote` (the checkout has no
-   *  `origin`, so it has no repo scope to salt a coarse key with and nothing of
-   *  its own on the shelf to find; #249) — but the values are taken from the rows,
-   *  never from a list here, so a new reason shows up in `status` the day the
-   *  script starts writing it, and a retired one keeps counting out of the rows
-   *  that still hold it. */
-  byReason: Record<string, number>;
-  /** The local error→fix pairings opened in the window (plan 05 rows 9 and
-   *  11): how many, how many a later pass closed, how many two independent
-   *  passes verified, what scope the closed ones landed in, and which command
-   *  heads opened them — the last being what says whether the allowlist is
-   *  still letting one head dominate. */
-  pairings: PushPairingTallies;
-  /** Distinct findings surfaced in the window. A marketplace piece is keyed by
-   *  its resourceId and a local pairing by `pairing:<id>`; both land in
-   *  `injections.resource_id`. */
-  candidates: number;
-  injectedTokens: number;
   /**
-   * What `tenjin push grade` made of the injected rows, per hook x shelf.
+   * The daemon's own vocabulary, read off the rows rather than listed here: the
+   * arm that fired, and `fires.reason` — `hit` for the one that delivered
+   * something, and the skip words the kernel closes a fire with otherwise
+   * (`no-question`, `seen`, `cached`, `no-answer`, `deadline`, `error`, …). A
+   * reason a later build starts writing shows up in `status` the day it does,
+   * and a retired one keeps counting out of the rows that still hold it.
+   */
+  byArmReason: Record<string, Record<string, number>>;
+  /** Legs by the shelf they asked: `team`, `public`, `keys`, `local`. */
+  byShelf: Record<string, number>;
+  /** Fires that put a piece in front of the agent (`delivered LIKE 'inject:%'`). */
+  delivered: number;
+  /** Distinct pieces behind those fires, by the resource id on `delivered`. */
+  candidates: number;
+  /** The local error→fix pairings opened in the window: how many, how many a
+   *  later pass closed, how many two independent passes verified, what scope
+   *  the closed ones landed in, which command heads opened them, and how many
+   *  an agent has since published a fix note for (`post_id`). */
+  pairings: PushPairingTallies;
+  /**
+   * What `tenjin push grade` made of the delivered rows, per arm x shelf.
    *
    * SPLIT BY SHELF as well as by arm, because the two answer different
    * questions: the arm is what fired, and the shelf is whose piece it was. An
    * arm that only ever lands `rejected` on the public marketplace while its team
-   * hits stick is a routing story, not a precision one, and one number per hook
+   * hits stick is a routing story, not a precision one, and one number per arm
    * cannot tell them apart.
    */
   graded: Record<string, Record<string, GradeCounts>>;
@@ -211,7 +144,7 @@ export interface GradeCounts {
   unobserved: number;
   /** Shown, never judged: either still open, or `grade` has not run. */
   ungraded: number;
-  /** Verdicts that reached the shelf. `outcome_at` is the posted stamp. */
+  /** Verdicts that reached the shelf. `legs.posted_at` is the posted stamp. */
   posted: number;
 }
 
@@ -220,493 +153,120 @@ export interface PushPairingTallies {
   /** Rows a later pass closed: `unverified` plus `verified`. */
   closed: number;
   verified: number;
-  /** Of the closed rows: `code` may sync to the team shelf, `user` never
-   *  leaves the machine, `ambiguous` is counted for the day-14 revisit. */
+  /** Of the closed rows: `code` is what the ask offers to publish, `user` never
+   *  leaves the machine, `ambiguous` is neither yet. */
   scope: Record<string, number>;
   /** Opened rows by the command head they key on. */
   byHead: Record<string, number>;
+  /** Rows an agent has published the explanation for; `publish --key` stamps it. */
+  published: number;
 }
 
-const EMPTY_PAIRINGS: PushPairingTallies = {
-  opened: 0,
-  closed: 0,
-  verified: 0,
-  scope: {},
-  byHead: {},
-};
-
-const EMPTY_TALLIES: PushLedgerTallies = {
-  windowDays: LEDGER_WINDOW_DAYS,
-  rows: 0,
-  byTriggerAction: {},
-  byShelf: {},
-  byReason: {},
-  candidates: 0,
-  injectedTokens: 0,
-  pairings: EMPTY_PAIRINGS,
-  graded: {},
-};
-
 /**
- * Tally the last {@link LEDGER_WINDOW_DAYS} days of decision rows: total rows, a
- * trigger x action breakdown, a shelf breakdown, and the injected-token total.
+ * Tally the last {@link LEDGER_WINDOW_DAYS} days of `fires`, `legs` and
+ * `pairings`.
  *
- * COMPLETE, NOT A FLOOR. This used to read the last 256 KB of an append-only
- * `push-ledger.jsonl` and say so — `tail: true`, and a human line explaining
- * that the numbers an operator was reading as totals were not — because nothing
- * rotated the file and parsing months of it whole was not an option. The rows
- * are indexed now, so the window is the window and the field is gone with the
- * caveat it carried.
- *
- * Still defensive about the values: a row missing a field is counted under
+ * COMPLETE, NOT A FLOOR: the rows are indexed, so the window is the window.
+ * Still defensive about the values — a row missing a field is counted under
  * `unknown` rather than failing the command.
  */
-export async function readLedgerTallies(
-  dataDir: string,
-  nowMs: number,
-): Promise<PushLedgerTallies> {
-  const store = await openStore(dataDir);
-  if (store === null) return EMPTY_TALLIES;
-  try {
-    const rows = store.all(STORE_SQL.statusRows, [nowMs - LEDGER_WINDOW_MS]);
-    const byTriggerAction: Record<string, Record<string, number>> = {};
-    const byShelf: Record<string, number> = {};
-    const byReason: Record<string, number> = {};
+export function readLedgerTallies(dataDir: string, nowMs: number): PushLedgerTallies {
+  const since = nowMs - LEDGER_WINDOW_MS;
+  return withLoopDb(dataDir, (db) => {
+    const byArmReason: Record<string, Record<string, number>> = {};
     const candidates = new Set<string>();
-    let injectedTokens = 0;
-    for (const row of rows) {
-      const trigger = typeof row.hook === 'string' ? row.hook : 'unknown';
-      const action = typeof row.action === 'string' ? row.action : 'unknown';
-      const byAction = (byTriggerAction[trigger] ??= {});
-      byAction[action] = (byAction[action] ?? 0) + 1;
-      const shelf = typeof row.shelf === 'string' ? row.shelf : 'unknown';
+    let rows = 0;
+    let delivered = 0;
+    for (const row of all(db, 'SELECT arm, reason, delivered FROM fires WHERE at >= ?', [since])) {
+      rows += 1;
+      const arm = str(row.arm) ?? 'unknown';
+      const reason = str(row.reason) ?? 'unknown';
+      const byReason = (byArmReason[arm] ??= {});
+      byReason[reason] = (byReason[reason] ?? 0) + 1;
+      const resourceId = resourceIdOf(row.delivered);
+      if (typeof row.delivered === 'string' && row.delivered.startsWith(INJECTED)) delivered += 1;
+      if (resourceId !== null) candidates.add(resourceId);
+    }
+
+    const byShelf: Record<string, number> = {};
+    for (const row of all(
+      db,
+      'SELECT l.shelf AS shelf FROM legs l JOIN fires f ON f.id = l.fire_id WHERE f.at >= ?',
+      [since],
+    )) {
+      const shelf = str(row.shelf) ?? 'unknown';
       byShelf[shelf] = (byShelf[shelf] ?? 0) + 1;
-      if (typeof row.reason === 'string' && row.reason !== '') {
-        byReason[row.reason] = (byReason[row.reason] ?? 0) + 1;
-      }
-      if (typeof row.resource_id === 'string' && row.resource_id !== '') {
-        candidates.add(`${shelf}:${row.resource_id}`);
-      }
-      if (action === 'injected' && typeof row.tokens === 'number' && Number.isFinite(row.tokens)) {
-        injectedTokens += row.tokens;
-      }
     }
-    const pairings: PushPairingTallies = { ...EMPTY_PAIRINGS, scope: {}, byHead: {} };
-    for (const row of store.all(STORE_SQL.pairingsStatus, [nowMs - LEDGER_WINDOW_MS])) {
-      const n = typeof row.n === 'number' ? row.n : 0;
-      const status = typeof row.status === 'string' ? row.status : 'unknown';
-      pairings.opened += n;
+
+    const pairings: PushPairingTallies = {
+      opened: 0,
+      closed: 0,
+      verified: 0,
+      scope: {},
+      byHead: {},
+      published: 0,
+    };
+    for (const row of all(
+      db,
+      'SELECT status, scope, cmd_head, post_id FROM pairings WHERE at >= ?',
+      [since],
+    )) {
+      pairings.opened += 1;
+      const status = str(row.status) ?? 'unknown';
       if (status === 'unverified' || status === 'verified') {
-        pairings.closed += n;
-        if (status === 'verified') pairings.verified += n;
-        const scope = typeof row.scope === 'string' ? row.scope : 'unknown';
-        pairings.scope[scope] = (pairings.scope[scope] ?? 0) + n;
+        pairings.closed += 1;
+        if (status === 'verified') pairings.verified += 1;
+        const scope = str(row.scope) ?? 'unknown';
+        pairings.scope[scope] = (pairings.scope[scope] ?? 0) + 1;
       }
-      const head =
-        typeof row.cmd_head === 'string' && row.cmd_head !== '' ? row.cmd_head : '(none)';
-      pairings.byHead[head] = (pairings.byHead[head] ?? 0) + n;
+      const head = str(row.cmd_head) ?? '(none)';
+      pairings.byHead[head] = (pairings.byHead[head] ?? 0) + 1;
+      if (str(row.post_id) !== null) pairings.published += 1;
     }
+
     return {
       windowDays: LEDGER_WINDOW_DAYS,
-      rows: rows.length,
-      byTriggerAction,
+      rows,
+      byArmReason,
       byShelf,
-      byReason,
+      delivered,
       candidates: candidates.size,
-      injectedTokens,
       pairings,
-      // A second query over the same open store: `statusRows` counts every
-      // decision, and this one only the rows that were actually shown, which is
-      // the only population a verdict can describe.
-      graded: tallyGraded(store.all(STORE_SQL.gradeRows, [nowMs - LEDGER_WINDOW_MS])),
+      // A second query over the same handle: the one above counts every fire,
+      // and this one only the legs that were actually shown, which is the only
+      // population a verdict can describe.
+      graded: tallyGraded(all(db, GRADED_ROLLUP_SQL, [since])),
     };
-  } catch {
-    return EMPTY_TALLIES;
-  } finally {
-    store.close();
-  }
-}
-
-/** One event row as the score reads it. */
-export interface ScoreEvent {
-  at: number;
-  hook: string;
-  tool: string | null;
-  /** The agent that fired it (`events.agent_id`), or null for the lead's own
-   *  turn. The unit the score is scanned over: see {@link ScoreInput}. */
-  agentId: string | null;
-  /** The basenames the row names (`files`), or none. */
-  files: string[];
-  /** The failure row's `command` / the pass row's `head` / the prompt row's
-   *  `skipped`, whichever the hook wrote. */
-  command: string | null;
-  head: string | null;
-}
-
-export interface ScoreInput {
-  /**
-   * ONE AGENT'S ROWS, not one session's. Parallel subagents share their
-   * parent's `session_id` and are told apart only by `events.agent_id`, so a
-   * session-wide scan stitched one agent's failure to another's edit and a
-   * third's pass and called the result a fix. {@link readSessionScores}
-   * partitions before it calls this, and every pattern below is therefore
-   * "did ONE worker do this".
-   */
-  events: ScoreEvent[];
-  /**
-   * When THIS WORKER closed a pairing (`pairing_closes.at`), same partition as
-   * `events` and for the same reason: `error-edit-resolved` may be completed by
-   * a close, and a sibling's close is not this worker's fix. `pairing_closes`
-   * carries `agent_id` since store version 2, so the report reads it per
-   * (session, agent) rather than per session.
-   */
-  closes: number[];
-  /** When THIS WORKER ran a search (`searches.at`): the research signal the
-   *  `research` event under-reports, since that row is written on a hit only.
-   *  Partitioned like `closes`, so `research-then-edit` cannot pair one agent's
-   *  search with a sibling's edit. */
-  searches: number[];
-  /** The session's end, or the last thing on record when it has none. */
-  endedAt: number | null;
-}
-
-const MARKDOWN_RE = /\.(?:md|mdx|markdown)$/i;
-/** A test file by name: `x.test.ts`, `x.spec.ts`, `test_x.py`, `x_test.go`, a
- *  `__tests__` member. The fail→edit→pass pattern wants the FIX, not the test
- *  edited until it passes. */
-const TEST_FILE_RE = /(?:^|[._-])(?:test|spec)s?(?:[._-]|$)|^test_|_test\./i;
-
-/**
- * Score ONE AGENT's rows within a session. Pure, so the patterns are testable
- * on fixtures without a store; {@link readSessionScores} partitions and feeds
- * it, once per (session, agent).
- *
- * Every pattern is "did this sequence happen at least once", scanned in time
- * order over that agent's own rows — never across siblings, which is the whole
- * reason the caller partitions (see {@link ScoreInput.events}):
- *  - error-edit-resolved: a `failure`, then an `edit`, then a `pass` (any head)
- *    or a pairing close by this session. 3.0.
- *  - edit-across-prompt: the same non-markdown basename edited before and after
- *    a `prompt` row. 2.5.
- *  - write-over-edited: a `Write` over a basename with ≥ 3 earlier edits. 2.5.
- *    Also a REVERSAL for the bonus.
- *  - fail-edit-pass: a `failure` whose command names head H, then an edit of a
- *    non-test file, then a `pass` whose head is H. 2.0. (The failure row
- *    carries the command, not the head, so H is matched as a word of it.)
- *  - research-then-edit: a `research` event or a search, then an `edit`, with
- *    no `failure` between. 2.0.
- * A resolution (the pass or close that completed the first pattern) or a
- * reversal within {@link SCORE_RECENCY_MS} of the session's end multiplies the
- * sum by up to 1 + {@link SCORE_RECENCY_BONUS}, linearly by how close.
- */
-export function scoreSession(input: ScoreInput): {
-  score: number;
-  patterns: ScorePattern[];
-  bonus: number;
-} {
-  const events = [...input.events].sort((a, b) => a.at - b.at);
-  const closes = [...input.closes].sort((a, b) => a - b);
-  const searches = [...input.searches].sort((a, b) => a - b);
-  const fired = new Set<ScorePattern>();
-  /** Moments a resolution or reversal happened, for the bonus. */
-  const moments: number[] = [];
-
-  // error-edit-resolved and fail-edit-pass: walk failures forward.
-  for (let i = 0; i < events.length; i += 1) {
-    const failure = events[i]!;
-    if (failure.hook !== 'failure') continue;
-    let editAt: number | null = null;
-    let nonTestEditAt: number | null = null;
-    for (let j = i + 1; j < events.length; j += 1) {
-      const e = events[j]!;
-      if (e.hook === 'edit') {
-        editAt ??= e.at;
-        if (nonTestEditAt === null && !e.files.some((f) => TEST_FILE_RE.test(f))) {
-          nonTestEditAt = e.at;
-        }
-        continue;
-      }
-      if (e.hook !== 'pass') continue;
-      if (editAt !== null) {
-        fired.add('error-edit-resolved');
-        moments.push(e.at);
-      }
-      if (
-        nonTestEditAt !== null &&
-        e.head !== null &&
-        failure.command !== null &&
-        commandNamesHead(failure.command, e.head)
-      ) {
-        fired.add('fail-edit-pass');
-      }
-      // The first pass after the failure is the one that resolved it; a later
-      // pass belongs to a later story.
-      break;
-    }
-    // A close by this session is a resolution too, whether or not the pass
-    // event that made it was recorded (the close rule ran before the row did).
-    if (editAt !== null) {
-      const close = closes.find((at) => at >= editAt);
-      if (close !== undefined) {
-        fired.add('error-edit-resolved');
-        moments.push(close);
-      }
-    }
-  }
-
-  // edit-across-prompt: per basename, an edit before and after some prompt.
-  const prompts = events.filter((e) => e.hook === 'prompt').map((e) => e.at);
-  if (prompts.length > 0) {
-    const byFile = new Map<string, number[]>();
-    for (const e of events) {
-      if (e.hook !== 'edit') continue;
-      for (const f of e.files) {
-        if (MARKDOWN_RE.test(f)) continue;
-        (byFile.get(f) ?? byFile.set(f, []).get(f)!).push(e.at);
-      }
-    }
-    for (const ats of byFile.values()) {
-      const first = ats[0]!;
-      const last = ats[ats.length - 1]!;
-      if (prompts.some((p) => p > first && p < last)) {
-        fired.add('edit-across-prompt');
-        break;
-      }
-    }
-  }
-
-  // write-over-edited: a Write over a file with ≥ N earlier edits.
-  const priorEdits = new Map<string, number>();
-  for (const e of events) {
-    if (e.hook !== 'edit') continue;
-    for (const f of e.files) {
-      const n = priorEdits.get(f) ?? 0;
-      if (e.tool === 'Write' && n >= SCORE_WRITE_PRIOR_EDITS) {
-        fired.add('write-over-edited');
-        moments.push(e.at);
-      }
-      priorEdits.set(f, n + 1);
-    }
-  }
-
-  // research-then-edit: a research signal, then an edit, no failure between.
-  const research = [
-    ...events.filter((e) => e.hook === 'research').map((e) => e.at),
-    ...searches,
-  ].sort((a, b) => a - b);
-  for (const at of research) {
-    let broken = false;
-    for (const e of events) {
-      if (e.at < at) continue;
-      if (e.hook === 'failure') {
-        broken = true;
-        break;
-      }
-      if (e.hook === 'edit') {
-        fired.add('research-then-edit');
-        break;
-      }
-    }
-    if (fired.has('research-then-edit') || !broken) break;
-  }
-
-  const patterns = (Object.keys(SCORE_WEIGHTS) as ScorePattern[]).filter((p) => fired.has(p));
-  const base = patterns.reduce((sum, p) => sum + SCORE_WEIGHTS[p], 0);
-  const end =
-    input.endedAt ??
-    (events.length > 0 ? events[events.length - 1]!.at : (moments[moments.length - 1] ?? null));
-  let bonus = 1;
-  if (end !== null && moments.length > 0) {
-    const latest = Math.max(...moments);
-    const gap = end - latest;
-    if (gap >= 0 && gap < SCORE_RECENCY_MS) {
-      bonus = 1 + SCORE_RECENCY_BONUS * (1 - gap / SCORE_RECENCY_MS);
-    }
-  }
-  return {
-    score: Math.round(base * bonus * 10) / 10,
-    patterns,
-    bonus: Math.round(bonus * 100) / 100,
-  };
-}
-
-/** Whether `head` (`pnpm`, `pytest`) is a program the command line names: a
- *  whole word, or the basename of a path word. */
-function commandNamesHead(command: string, head: string): boolean {
-  return command.split(/[\s;&|()]+/).some((word) => {
-    const base = word.split(/[/\\]/).pop() ?? '';
-    return base === head;
   });
 }
 
-/**
- * THE ONE PARTITION KEY the `--sessions` report uses, for every input it scores:
- * a session id and the worker inside it. `agent_id` is SQL NULL for the lead's
- * own turn (and on every row written before store version 2), and the arms write
- * null rather than '' for a main-session fire, so both collapse to the same
- * empty bucket here. `\u0000` cannot occur in either half, so the join is
- * unambiguous.
- */
-function workerKey(session: string, agent: string | null): string {
-  return session + '\u0000' + (agent ?? '');
+/** The winning leg of every fire that delivered something, with its verdict. */
+const GRADED_ROLLUP_SQL = `
+  SELECT f.arm AS arm, l.shelf AS shelf, l.graded AS graded, l.posted_at AS posted_at
+    FROM fires f JOIN legs l ON l.fire_id = f.id
+   WHERE f.at >= ? AND f.delivered LIKE 'inject:%' AND l.outcome = 'hit'`;
+
+function all(db: LoopDb, sql: string, params: Array<number | string>): Row[] {
+  return db.prepare(sql).all(...params) as Row[];
 }
 
-/** The `agent_id` column as the partition reads it: a non-empty string is a
- *  subagent, and NULL, '' or a non-string is the lead's own turn. */
-function parseAgent(raw: unknown): string | null {
-  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+/** A non-empty string column, or null for everything else. */
+function str(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-function parseFiles(raw: unknown): string[] {
-  if (typeof raw !== 'string') return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((f): f is string => typeof f === 'string') : [];
-  } catch {
-    return [];
-  }
-}
-
-function parseData(raw: unknown): Record<string, unknown> {
-  if (typeof raw !== 'string') return {};
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : {};
-  } catch {
-    return {};
-  }
-}
-
-/**
- * The `--sessions` report: one line per (SESSION, AGENT) with an event row in
- * the last {@link LEDGER_WINDOW_DAYS} days, each scored by
- * {@link scoreSession}, with what the Stop hook actually did beside it.
- *
- * PER AGENT, because a session is not a worker. Every subagent files under its
- * parent's session id, so a session-wide scan read one child's failure, a
- * sibling's edit and the parent's pass as one fix and scored a session nobody
- * had fixed anything in. EVERY input is partitioned this way — the events, the
- * pairing closes and the searches, all three on {@link workerKey} — so no
- * pattern can pair one worker's row with a sibling's. The parent's own turn is
- * the null agent, and it is the row that carries the session-wide
- * `capture_asked`; the publish markers stay machine-wide, attributed by time.
- *
- * Sessions with the '' (machine) id are skipped: that bucket is where a payload
- * naming no session lands, and it is not a conversation anything could have
- * been asked in.
- */
-export async function readSessionScores(
-  dataDir: string,
-  nowMs: number,
-): Promise<PushSessionScore[]> {
-  const store = await openStore(dataDir);
-  if (store === null) return [];
-  try {
-    const since = nowMs - LEDGER_WINDOW_MS;
-    // KEYED BY (session, agent), not by session. `agent_id` is null for the
-    // lead's own turn and the child's id for a subagent's, and the two are
-    // scored apart: a session is the conversation, an agent is the worker, and
-    // fail -> edit -> pass is a claim about one worker.
-    const byWorker = new Map<
-      string,
-      { session: string; agent: string | null; events: ScoreEvent[] }
-    >();
-    for (const row of store.all(STORE_SQL.scoreEvents, [since])) {
-      const session = typeof row.session === 'string' ? row.session : '';
-      if (session === '') continue;
-      const data = parseData(row.data);
-      // A COLUMN, the one the prelude's `identityOf` fills; see `workerKey`.
-      const agent = parseAgent(row.agent_id);
-      const key = workerKey(session, agent);
-      const bucket =
-        byWorker.get(key) ?? byWorker.set(key, { session, agent, events: [] }).get(key)!;
-      bucket.events.push({
-        at: typeof row.at === 'number' ? row.at : 0,
-        hook: typeof row.hook === 'string' ? row.hook : 'unknown',
-        tool: typeof row.tool === 'string' ? row.tool : null,
-        agentId: agent,
-        files: parseFiles(row.files),
-        command: typeof data.command === 'string' ? data.command : null,
-        head: typeof data.head === 'string' ? data.head : null,
-      });
-    }
-    // KEYED THE SAME WAY THE EVENTS ARE. Both tables carry `agent_id` (store
-    // version 2), so the two patterns they feed — `error-edit-resolved`, whose
-    // resolution may be a close, and `research-then-edit` — no longer credit
-    // one worker with a sibling's close or search. `closersOf` is deliberately
-    // untouched: independence for a promotion is still per session.
-    const closes = new Map<string, number[]>();
-    for (const row of store.all(STORE_SQL.scoreCloses, [since])) {
-      if (typeof row.session !== 'string' || typeof row.at !== 'number') continue;
-      const key = workerKey(row.session, parseAgent(row.agent_id));
-      (closes.get(key) ?? closes.set(key, []).get(key)!).push(row.at);
-    }
-    const searches = new Map<string, number[]>();
-    for (const row of store.all(STORE_SQL.scoreSearches, [since])) {
-      if (typeof row.session !== 'string' || typeof row.at !== 'number') continue;
-      const key = workerKey(row.session, parseAgent(row.agent_id));
-      (searches.get(key) ?? searches.set(key, []).get(key)!).push(row.at);
-    }
-    const bounds = new Map<string, { started: number | null; ended: number | null }>();
-    for (const row of store.all(STORE_SQL.scoreSessions, [since, since])) {
-      if (typeof row.session !== 'string') continue;
-      bounds.set(row.session, {
-        started: typeof row.started_at === 'number' ? row.started_at : null,
-        ended: typeof row.ended_at === 'number' ? row.ended_at : null,
-      });
-    }
-    const asked = new Set<string>();
-    const publishedAt: number[] = [];
-    for (const row of store.all(STORE_SQL.scoreState, [since])) {
-      if (row.key === 'capture_asked' && typeof row.session === 'string') asked.add(row.session);
-      else if (typeof row.at === 'number') publishedAt.push(row.at);
-    }
-    const out: PushSessionScore[] = [];
-    for (const { session, agent, events } of byWorker.values()) {
-      const key = workerKey(session, agent);
-      const bound = bounds.get(session);
-      const started = bound?.started ?? events[0]!.at;
-      const endedAt = bound?.ended ?? null;
-      const endForPublish = endedAt ?? nowMs;
-      const scored = scoreSession({
-        events,
-        closes: closes.get(key) ?? [],
-        searches: searches.get(key) ?? [],
-        endedAt,
-      });
-      out.push({
-        session,
-        agent,
-        score: scored.score,
-        patterns: scored.patterns,
-        bonus: scored.bonus,
-        events: events.length,
-        // The parent's row carries it; a child never asks (see the field).
-        captureAsked: agent === null && asked.has(session),
-        published: publishedAt.filter((at) => at >= started && at <= endForPublish).length,
-      });
-    }
-    // Highest score first, so the top of the list is what a gate would keep;
-    // then the session, then the parent ahead of its children.
-    return out.sort(
-      (a, b) =>
-        b.score - a.score ||
-        a.session.localeCompare(b.session) ||
-        (a.agent ?? '').localeCompare(b.agent ?? ''),
-    );
-  } catch {
-    return [];
-  } finally {
-    store.close();
-  }
+/** The piece behind a delivered fire. A local pairing carries one too:
+ *  `pairingAnswer` delivers it under `pairing:<id>`, so a delivered pairing
+ *  counts as a finding like any shelf piece. Only a bare `inject:` names
+ *  nothing, and only a uuid is a marketplace resource the shelf will take. */
+function resourceIdOf(delivered: unknown): string | null {
+  if (typeof delivered !== 'string' || !delivered.startsWith(INJECTED)) return null;
+  return str(delivered.slice(INJECTED.length));
 }
 
 export async function runPushStatus(
   ctx: CommandContext,
   deps: PushStatusDeps = {},
-  options: PushStatusOptions = {},
 ): Promise<CommandResult> {
   const settings = resolveSettings({
     config: await loadRawConfig(ctx.dataDir),
@@ -718,56 +278,16 @@ export async function runPushStatus(
   // dir with no bundle in it (a half-finished uninstall).
   const bundles = await (deps.bundlesPresent ?? hookBundlesPresent)(ctx.dataDir);
   const registered = await hasClaudeHooks(deps.homeDir ?? homedir(), ctx.dataDir);
-  const ledger = await (deps.ledgerTallies ?? readLedgerTallies)(
-    ctx.dataDir,
-    (deps.now ?? Date.now)(),
-  );
-  const sessions =
-    options.sessions === true
-      ? await (deps.sessionScores ?? readSessionScores)(ctx.dataDir, (deps.now ?? Date.now)())
-      : undefined;
+  const ledger = (deps.ledgerTallies ?? readLedgerTallies)(ctx.dataDir, (deps.now ?? Date.now)());
   const data = {
     mode: settings.hooksPush.value,
     captureMode: settings.hooksCapture.value,
     daemonInstalled: bundles,
     hooksRegistered: registered,
     ledger,
-    ...(sessions === undefined ? {} : { sessions }),
     server: await readShelfStats(ctx, deps),
   };
-  return {
-    data,
-    humanLines: [
-      ...renderStatusLines(data),
-      ...(sessions === undefined ? [] : renderSessionLines(sessions, ledger.windowDays)),
-    ],
-  };
-}
-
-/**
- * One line per (session, agent): the score, the patterns behind it, and the two
- * facts it is judged against. `capture_asked` without a publish is the ask the
- * score might have saved; a publish under a low score is the session it would
- * have missed. The week's read (plan 06, "What to watch") is those two counts.
- *
- * `agent=''` IS THE LEAD'S OWN TURN, the same empty bucket the close rule's
- * state keys use for it, and a named agent is one subagent of the session above
- * it. Two lines sharing a session id are two workers in one conversation, not
- * one session counted twice.
- */
-function renderSessionLines(sessions: PushSessionScore[], windowDays: number): string[] {
-  const lines = [
-    `sessions, last ${windowDays}d: ${sessions.length} scored, one line per session x agent (importance score vs capture_asked vs published; report only, no hook reads it)`,
-  ];
-  for (const s of sessions) {
-    lines.push(
-      `  ${s.session.slice(0, 12).padEnd(12)} agent=${(s.agent ?? "''").slice(0, 12).padEnd(12)} score=${s.score.toFixed(1)}` +
-        (s.bonus > 1 ? ` (x${s.bonus.toFixed(2)} recency)` : '') +
-        ` events=${s.events} capture_asked=${s.captureAsked ? 'yes' : 'no'} published=${s.published}` +
-        (s.patterns.length > 0 ? ` [${s.patterns.join(', ')}]` : ''),
-    );
-  }
-  return lines;
+  return { data, humanLines: renderStatusLines(data) };
 }
 
 /**
@@ -801,9 +321,9 @@ async function readShelfStats(
   return out;
 }
 
-/** The shelf label a row's `injections.shelf` names, and where to reach it. In
- *  public mode there is one shelf and it is the public one; in team mode the
- *  configured base is the team shelf and the marketplace is the fallthrough. */
+/** The shelf label a leg's `shelf` names, and where to reach it. In public mode
+ *  there is one shelf and it is the public one; in team mode the configured
+ *  base is the team shelf and the marketplace is the fallthrough. */
 interface Shelf {
   label: string;
   baseUrl: string;
@@ -837,50 +357,41 @@ function renderStatusLines(data: {
     `capture: ${captureMode}`,
     `daemon installed: ${daemonInstalled ? 'yes' : 'no'}`,
     `hook entries registered: ${hooksRegistered ? 'yes' : 'no'}`,
-    `ledger, last ${ledger.windowDays}d: ${ledger.rows} row(s), ${ledger.candidates} finding(s), ~${ledger.injectedTokens} injected token(s)`,
+    `ledger, last ${ledger.windowDays}d: ${ledger.rows} fire(s), ${ledger.delivered} delivered, ${ledger.candidates} finding(s)`,
   ];
-  for (const [trigger, actions] of Object.entries(ledger.byTriggerAction)) {
-    const byAction = Object.entries(actions)
-      .map(([action, n]) => `${action}=${n}`)
-      .join(', ');
-    lines.push(`  ${trigger}: ${byAction}`);
-  }
-  const shelfEntries = Object.entries(ledger.byShelf);
-  if (shelfEntries.length > 0) {
-    lines.push(`  shelf: ${shelfEntries.map(([shelf, n]) => `${shelf}=${n}`).join(', ')}`);
-  }
-  // Sorted by count: an operator reading this wants to know what is holding the
-  // sidecar back most often, and `lookup-cap` climbing that list means the
-  // per-session lookup budget is the throttle rather than the matcher.
-  const reasonEntries = Object.entries(ledger.byReason).sort((a, b) => b[1] - a[1]);
-  if (reasonEntries.length > 0) {
-    lines.push(`  reasons: ${reasonEntries.map(([reason, n]) => `${reason}=${n}`).join(', ')}`);
-  }
-  // The mechanical lane's own line, always printed: zero opened after a week of
-  // failing builds is the allowlist being too tight, and the head breakdown is
-  // what says whether one head is still opening rows it should not.
-  const p = ledger.pairings;
   const counts = (record: Record<string, number>): string =>
     Object.entries(record)
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([k, n]) => `${k}=${n}`)
       .join(', ');
+  // Sorted by count within each arm: an operator reading this wants to know
+  // what is closing the fires most often, and `seen` or `cached` climbing that
+  // list means the gates are the throttle rather than the matcher.
+  for (const [arm, reasons] of Object.entries(ledger.byArmReason)) {
+    lines.push(`  ${arm}: ${counts(reasons)}`);
+  }
+  const shelfEntries = Object.entries(ledger.byShelf);
+  if (shelfEntries.length > 0) lines.push(`  shelf: ${counts(ledger.byShelf)}`);
+  // The mechanical lane's own line, always printed: zero opened after a week of
+  // failing builds is the allowlist being too tight, and the head breakdown is
+  // what says whether one head is still opening rows it should not.
+  const p = ledger.pairings;
   lines.push(
-    `pairings, last ${ledger.windowDays}d: ${p.opened} opened, ${p.closed} closed, ${p.verified} verified` +
+    `pairings, last ${ledger.windowDays}d: ${p.opened} opened, ${p.closed} closed, ${p.verified} verified, ${p.published} published` +
       (p.closed > 0 ? `; scope: ${counts(p.scope)}` : '') +
       (p.opened > 0 ? `; heads: ${counts(p.byHead)}` : ''),
   );
   const gradedEntries = Object.entries(ledger.graded);
   if (gradedEntries.length > 0) {
     lines.push('graded (`tenjin push grade`):');
-    for (const [hook, shelves] of gradedEntries) {
+    for (const [arm, shelves] of gradedEntries) {
       const perShelf = Object.entries(shelves)
         .map(
           ([shelf, c]) =>
             `${shelf} used=${c.used} rejected=${c.rejected} unobserved=${c.unobserved} ungraded=${c.ungraded} posted=${c.posted}`,
         )
         .join('; ');
-      lines.push(`  ${hook}: ${perShelf}`);
+      lines.push(`  ${arm}: ${perShelf}`);
     }
   }
   for (const [label, stats] of Object.entries(server)) {
@@ -913,24 +424,38 @@ function emptyGradeCounts(): GradeCounts {
   return { used: 0, rejected: 0, unobserved: 0, ungraded: 0, posted: 0 };
 }
 
-/** One pass over the injected rows in the window. Defensive about the values
+/** One pass over the delivered legs in the window. Defensive about the values
  *  like every other tally here: an outcome word this build does not know is
  *  counted nowhere rather than failing the read. */
-function tallyGraded(rows: Record<string, unknown>[]): Record<string, Record<string, GradeCounts>> {
+function tallyGraded(rows: Row[]): Record<string, Record<string, GradeCounts>> {
   const out: Record<string, Record<string, GradeCounts>> = {};
   for (const row of rows) {
-    const hook = typeof row.hook === 'string' ? row.hook : 'unknown';
-    const shelf = typeof row.shelf === 'string' ? row.shelf : 'unknown';
-    const byShelf = (out[hook] ??= {});
+    const arm = str(row.arm) ?? 'unknown';
+    const shelf = str(row.shelf) ?? 'unknown';
+    const byShelf = (out[arm] ??= {});
     const counts = (byShelf[shelf] ??= emptyGradeCounts());
-    const outcome = typeof row.outcome === 'string' ? row.outcome : null;
+    const outcome = verdictOf(row.graded)?.outcome ?? null;
     if (outcome === 'used') counts.used += 1;
     else if (outcome === 'rejected') counts.rejected += 1;
     else if (outcome === 'unobserved') counts.unobserved += 1;
     else if (outcome === null) counts.ungraded += 1;
-    if (typeof row.outcome_at === 'number') counts.posted += 1;
+    if (typeof row.posted_at === 'number') counts.posted += 1;
   }
   return out;
+}
+
+/** `legs.graded` is `<outcome>:<by>`, written as one string so a verdict and
+ *  the tier behind it can never disagree. */
+function verdictOf(graded: unknown): { outcome: string; by: string } | null {
+  const value = str(graded);
+  if (value === null) return null;
+  const at = value.indexOf(':');
+  return at === -1
+    ? { outcome: value, by: 'none' }
+    : {
+        outcome: value.slice(0, at),
+        by: value.slice(at + 1),
+      };
 }
 
 /**
@@ -938,14 +463,14 @@ function tallyGraded(rows: Record<string, unknown>[]): Record<string, Record<str
  * session's transcript, decide whether the agent used what the arms showed it,
  * and tell the shelf that served the row.
  *
- * The store already holds every injection and the shelf already holds every
- * lookup; what neither has is the one fact the experiment is judged on, which is
- * whether any of it was worth injecting. `lib/grade.ts` owns the reading and the
- * rule; this owns the store, the shelf routing and the report.
+ * `loop.db` already holds every fire and the shelf already holds every lookup;
+ * what neither has is the one fact the experiment is judged on, which is
+ * whether any of it was worth delivering. `lib/grade.ts` owns the reading and
+ * the rule; this owns the store, the shelf routing and the report.
  *
- * IDEMPOTENT BY CONSTRUCTION, in two independent places. A row with an
- * `outcome` is never re-graded (the query asks for `outcome IS NULL`), and a row
- * with an `outcome_at` is never re-posted, because `outcome_at` IS the posted
+ * IDEMPOTENT BY CONSTRUCTION, in two independent places. A leg with a `graded`
+ * verdict is never re-graded (the query asks for `graded IS NULL`), and a leg
+ * with a `posted_at` is never re-posted, because `posted_at` IS the posted
  * stamp rather than the graded one. So a post that failed keeps a NULL and is
  * retried on the next run, and a post that landed is never sent twice — which
  * matters because the server keeps the FIRST verdict per (lookup, post) and a
@@ -955,9 +480,9 @@ export interface PushGradeArgs {
   since?: string;
   session?: string;
   explain?: boolean;
-  /** `--label <uid> <status>`: a hand verdict, for a row the transcript cannot
-   *  answer for. Statuses `used` and `rejected` only — the other wire statuses
-   *  describe a search, not an injection. */
+  /** `--label <fire id> <status>`: a hand verdict, for a row the transcript
+   *  cannot answer for. Statuses `used` and `rejected` only — the other wire
+   *  statuses describe a search, not a delivery. */
   label?: string[];
 }
 
@@ -974,16 +499,21 @@ export interface PushGradeDeps {
   transcriptIdle?: typeof transcriptIdle;
 }
 
-/** What one graded row reports. `anchorLine` is where in the transcript the
- *  injection landed, which is the first thing to check when a verdict looks
- *  wrong. */
-interface GradedRow {
-  uid: string;
-  hook: string;
+/** The winning leg of one fire, as the grader addresses it. */
+interface LegKey {
+  fire: string;
+  stage: number;
   shelf: string;
+}
+
+/** What one graded row reports. `anchorLine` is where in the transcript the
+ *  delivery landed, which is the first thing to check when a verdict looks
+ *  wrong. */
+interface GradedRow extends LegKey {
+  arm: string;
   resourceId: string | null;
-  /** The subagent the row was written inside, or null for the main session. It
-   *  is what decided WHICH transcript answered for the row. */
+  /** The subagent the fire belongs to, or null for the lead's own turn. It is
+   *  what decided WHICH transcript answered for the row. */
   agentId: string | null;
   outcome: string;
   by: string;
@@ -998,6 +528,18 @@ interface GradedRow {
 
 const HALTING_FAILURES = new Set(['RATE_LIMITED', 'NETWORK_ERROR']);
 
+/** Every ungraded winning leg of a delivered fire in the window, newest last so
+ *  a session's rows are read in the order they happened. */
+const POPULATION_SQL = `
+  SELECT f.id AS id, f.at AS at, f.arm AS arm, f.session AS session, f.agent AS agent,
+         f.delivered AS delivered, l.stage AS stage, l.shelf AS shelf,
+         l.title AS title, l.url AS url
+    FROM fires f JOIN legs l ON l.fire_id = f.id
+   WHERE f.at >= ? AND f.delivered LIKE 'inject:%'
+     AND l.outcome = 'hit' AND l.graded IS NULL
+     AND (? = '' OR f.session = ?)
+   ORDER BY f.at`;
+
 export async function runPushGrade(
   ctx: CommandContext,
   args: PushGradeArgs = {},
@@ -1006,33 +548,31 @@ export async function runPushGrade(
   const since = args.since ?? '7d';
   const sinceMs = parseSince(since);
   const now = (deps.now ?? Date.now)();
-  const store = await openStore(ctx.dataDir);
-  if (store === null) {
-    throw new CliError('INTERNAL', 'The state store could not be opened, so nothing was graded.', {
-      fix: 'Run `tenjin doctor` to check the data dir, then retry.',
-    });
-  }
+  // ONE OPEN for the whole run: `grade` reads a population, writes a verdict
+  // per row and stamps what it posted, and re-opening between those would race
+  // the daemon for the write lock three times over.
+  const db = openLoopDbForCli(ctx.dataDir);
   try {
     const graded =
       args.label !== undefined
-        ? [labelOne(store, args.label)]
-        : await gradeSessions(store, ctx, args, deps, { sinceMs, now });
-    const posted = await postGraded(store, ctx, deps, now, sinceMs);
+        ? [labelOne(db, args.label)]
+        : await gradeSessions(db, ctx, args, deps, { sinceMs, now });
+    const posted = await postGraded(db, ctx, deps, now);
     return {
       data: buildGradeData(since, graded, posted),
       humanLines: gradeLines(since, graded, posted, args.explain === true),
     };
   } finally {
-    store.close();
+    db.close();
   }
 }
 
-/** `--label <uid> <status>`, as commander's variadic hands it over. */
-function labelOne(store: Store, label: string[]): GradedRow {
-  const [uid, status] = label;
-  if (label.length !== 2 || uid === undefined || status === undefined) {
-    throw new CliError('USAGE', '--label takes an injection uid and a status.', {
-      fix: 'tenjin push grade --label <uid> used|rejected',
+/** `--label <fire id> <status>`, as commander's variadic hands it over. */
+function labelOne(db: LoopDb, label: string[]): GradedRow {
+  const [fire, status] = label;
+  if (label.length !== 2 || fire === undefined || status === undefined) {
+    throw new CliError('USAGE', '--label takes a fire id and a status.', {
+      fix: 'tenjin push grade --label <fire id> used|rejected',
     });
   }
   if (status !== 'used' && status !== 'rejected') {
@@ -1040,30 +580,38 @@ function labelOne(store: Store, label: string[]): GradedRow {
       'USAGE',
       `A hand verdict is used or rejected (got ${JSON.stringify(status)}).`,
       {
-        fix: 'tenjin push grade --label <uid> used|rejected',
+        fix: 'tenjin push grade --label <fire id> used|rejected',
       },
     );
   }
-  // The query asks for an INJECTED row, so an unknown uid and a uid naming a
-  // decision the arm did not act on fail the same way — and neither can be
-  // labelled. A verdict is a report about a piece the agent was shown; a
-  // `skipped` row was shown to nobody, and posting "used" for one would tell
+  // The query asks for a DELIVERED fire, so an unknown id and an id naming a
+  // fire that showed nothing fail the same way — and neither can be labelled. A
+  // verdict is a report about a piece the agent was shown; a `seen` or
+  // `no-answer` fire was shown to nobody, and posting "used" for one would tell
   // the shelf a story about a piece it never served.
-  const row = store.get(STORE_SQL.injectionByUid, [uid]);
-  if (row === null) {
-    throw new CliError('USAGE', `No injected row ${uid} in this machine's store.`, {
-      fix: 'Take the uid from `tenjin push grade --explain`; only rows an arm actually injected can be labelled.',
+  const row = all(
+    db,
+    `SELECT f.arm AS arm, f.agent AS agent, f.delivered AS delivered,
+            l.stage AS stage, l.shelf AS shelf
+       FROM fires f JOIN legs l ON l.fire_id = f.id
+      WHERE f.id = ? AND f.delivered LIKE 'inject:%' AND l.outcome = 'hit'`,
+    [fire],
+  )[0];
+  if (row === undefined) {
+    throw new CliError('USAGE', `No delivered fire ${fire} in this machine's loop.db.`, {
+      fix: 'Take the id from `tenjin push grade --explain`; only a fire that actually delivered a piece can be labelled.',
     });
   }
-  // `setOutcome` clears `outcome_at` with the verdict, so a re-labelled row is
-  // owed to the shelf again and the post step below picks it up.
-  store.run(STORE_SQL.setOutcome, [status, 'hand', uid]);
+  const key: LegKey = { fire, stage: Number(row.stage ?? 0), shelf: str(row.shelf) ?? 'unknown' };
+  // The verdict clears `posted_at` with it, so a re-labelled leg is owed to the
+  // shelf again. The post step below selects on that stamp alone, with no time
+  // bound, so a fire older than `--since` is still posted on this same run.
+  setVerdict(db, key, { outcome: status, by: 'hand' });
   return {
-    uid,
-    hook: String(row.hook ?? 'unknown'),
-    shelf: String(row.shelf ?? 'unknown'),
-    resourceId: typeof row.resource_id === 'string' ? row.resource_id : null,
-    agentId: typeof row.agent_id === 'string' ? row.agent_id : null,
+    ...key,
+    arm: str(row.arm) ?? 'unknown',
+    resourceId: resourceIdOf(row.delivered),
+    agentId: str(row.agent),
     outcome: status,
     by: 'hand',
     anchorLine: null,
@@ -1071,31 +619,38 @@ function labelOne(store: Store, label: string[]): GradedRow {
   };
 }
 
+/** Write the verdict as `<outcome>:<by>` and re-open the post. */
+function setVerdict(db: LoopDb, key: LegKey, verdict: { outcome: string; by: string }): void {
+  db.prepare(
+    `UPDATE legs SET graded = ?, posted_at = NULL
+      WHERE fire_id = ? AND stage = ? AND shelf = ?`,
+  ).run(`${verdict.outcome}:${verdict.by}`, key.fire, key.stage, key.shelf);
+}
+
 /**
- * Every ungraded injection in the window, judged against the transcript it
+ * Every ungraded delivery in the window, judged against the transcript it
  * actually landed in.
  *
  * The transcript is parsed ONCE PER (SESSION, AGENT), not once per row: a busy
- * session has several injections and the file is the same file — but a row
- * written inside a subagent belongs to that CHILD's file, and the parent's holds
- * no word of what the child did, so the two are different reads under one
+ * session has several deliveries and the file is the same file — but a fire
+ * that ran inside a subagent belongs to that CHILD's file, and the parent's
+ * holds no word of what the child did, so the two are different reads under one
  * session id.
  *
- * A row whose hook is `subagent` is a finding RELAYED to a child, which has no
- * anchor row in any transcript; it is judged from the child's first tool call
- * onward. Only a relayed row with no agent id recorded — written before this
- * version, or by an arm that could not read one — has nothing to open, and
- * those stay `unobserved` as every subagent row used to.
+ * A `subagent-start` fire is a finding RELAYED to a child, which has no anchor
+ * row in any transcript; it is judged from the child's first tool call onward.
+ * Only a relayed fire with no agent recorded has nothing to open, and those
+ * settle as `unobserved`.
  */
 async function gradeSessions(
-  store: Store,
+  db: LoopDb,
   ctx: CommandContext,
   args: PushGradeArgs,
   deps: PushGradeDeps,
   window: { sinceMs: number; now: number },
 ): Promise<GradedRow[]> {
   const scope = args.session ?? '';
-  const rows = store.all(STORE_SQL.ungradedInjections, [window.now - window.sinceMs, scope, scope]);
+  const rows = all(db, POPULATION_SQL, [window.now - window.sinceMs, scope, scope]);
   const homeDir = deps.homeDir ?? homedir();
   const locate = deps.findTranscript ?? findTranscript;
   const readText = deps.transcriptText ?? ((path: string) => readFile(path, 'utf8'));
@@ -1104,26 +659,31 @@ async function gradeSessions(
   const out: GradedRow[] = [];
 
   for (const row of rows) {
-    const uid = String(row.uid ?? '');
-    const hook = String(row.hook ?? 'unknown');
-    const shelf = String(row.shelf ?? 'unknown');
-    const session = typeof row.session === 'string' ? row.session : '';
-    const agentId = typeof row.agent_id === 'string' ? row.agent_id : null;
-    const target: GradeTarget = {
-      resourceId: typeof row.resource_id === 'string' ? row.resource_id : null,
-      url: typeof row.url === 'string' ? row.url : null,
-      title: typeof row.title === 'string' ? row.title : null,
+    const key: LegKey = {
+      fire: String(row.id ?? ''),
+      stage: Number(row.stage ?? 0),
+      shelf: str(row.shelf) ?? 'unknown',
     };
+    const arm = str(row.arm) ?? 'unknown';
+    const session = str(row.session) ?? '';
+    const agentId = str(row.agent);
+    // Through `clean` on the way out, the same bounds `deliver.ts` drew them
+    // with: the title and url are shelf text, and this is where they are matched
+    // against a transcript rather than shown to anyone.
+    const target: GradeTarget = {
+      resourceId: resourceIdOf(row.delivered),
+      url: str(clean(str(row.url) ?? '', 200)),
+      title: str(clean(str(row.title) ?? '', 160)),
+    };
+    const relayed = arm === 'subagent-start';
     // Nothing names a file to open, and nothing ever will, so the row is closed
-    // rather than left open forever: a payload with no session at all, and a
-    // relayed finding whose child was never recorded (a row written before
-    // `agent_id` existed, or an arm that could read no id off its input).
-    if (session === '' || (hook === 'subagent' && agentId === null)) {
+    // rather than left open forever: a fire with no session at all, and a
+    // relayed finding whose child was not recorded.
+    if (session === '' || (relayed && agentId === null)) {
       out.push(
-        record(store, {
-          uid,
-          hook,
-          shelf,
+        record(db, {
+          key,
+          arm,
           target,
           agentId,
           verdict: { outcome: 'unobserved', by: 'none' },
@@ -1138,18 +698,17 @@ async function gradeSessions(
     }
     // Keyed by BOTH, because one session id covers the parent's file and one
     // file per child, and they answer for different rows.
-    const key = `${session} ${agentId ?? ''}`;
-    let state = parsed.get(key);
+    const parsedKey = `${session} ${agentId ?? ''}`;
+    let state = parsed.get(parsedKey);
     if (state === undefined) {
       state = await readSession(session, agentId, {
         homeDir,
         locate,
         readText,
         idle,
-        store,
         now: window.now,
       });
-      parsed.set(key, state);
+      parsed.set(parsedKey, state);
     }
     // NOT A FACT ABOUT THE SESSION. A projects directory that is missing or
     // unreadable says nothing about whether this row was ever shown, and
@@ -1157,14 +716,7 @@ async function gradeSessions(
     // would close every open row on the machine as never-seen.
     if (state.kind === 'unreadable') {
       out.push(
-        ungraded({
-          uid,
-          hook,
-          shelf,
-          target,
-          agentId,
-          note: `transcript unreadable (${state.reason})`,
-        }),
+        ungraded({ key, arm, target, agentId, note: `transcript unreadable (${state.reason})` }),
       );
       continue;
     }
@@ -1172,27 +724,19 @@ async function gradeSessions(
       // The transcript IS absent — the projects directory was read and holds no
       // file for this session (or for this child of it). That is only
       // `unobserved` once a transcript would have appeared by now: the harness
-      // writes the file as the session runs, so a row minted seconds ago whose
+      // writes the file as the session runs, so a fire minted seconds ago whose
       // session is still starting up has simply not been written yet.
       const at = typeof row.at === 'number' ? row.at : window.now;
-      if (!state.ended && at > window.now - ENDED_AFTER_MS) {
+      if (at > window.now - ENDED_AFTER_MS) {
         out.push(
-          ungraded({
-            uid,
-            hook,
-            shelf,
-            target,
-            agentId,
-            note: 'no transcript for this session yet',
-          }),
+          ungraded({ key, arm, target, agentId, note: 'no transcript for this session yet' }),
         );
         continue;
       }
       out.push(
-        record(store, {
-          uid,
-          hook,
-          shelf,
+        record(db, {
+          key,
+          arm,
           target,
           agentId,
           verdict: { outcome: 'unobserved', by: 'none' },
@@ -1205,16 +749,14 @@ async function gradeSessions(
     // as its opening context — so the child's first tool call is where its
     // evidence starts. Everything else is anchored on the context row that
     // carried it.
-    const relayed = hook === 'subagent';
     const anchor = relayed ? firstToolCall(state.rows) : findAnchor(state.rows, target);
     const verdict = relayed
       ? gradeRelayed(state.rows, target, { ended: state.ended })
       : gradeInjection(state.rows, anchor, target, { ended: state.ended });
     out.push(
-      record(store, {
-        uid,
-        hook,
-        shelf,
+      record(db, {
+        key,
+        arm,
         target,
         agentId,
         verdict,
@@ -1229,17 +771,15 @@ async function gradeSessions(
 /** A row this run declines to judge: nothing is written, and `--explain` says
  *  why. It stays in the queue for the next run. */
 function ungraded(input: {
-  uid: string;
-  hook: string;
-  shelf: string;
+  key: LegKey;
+  arm: string;
   target: GradeTarget;
   agentId: string | null;
   note: string;
 }): GradedRow {
   return {
-    uid: input.uid,
-    hook: input.hook,
-    shelf: input.shelf,
+    ...input.key,
+    arm: input.arm,
     resourceId: input.target.resourceId,
     agentId: input.agentId,
     outcome: 'open',
@@ -1257,10 +797,15 @@ function ungraded(input: {
  * Three answers, because the two ways of having no transcript lead to opposite
  * writes: `absent` is a fact about the session and can settle into a verdict,
  * `unreadable` is a fact about this run and must not.
+ *
+ * "Over" is the FILE going quiet, and only that. `loop.db` keeps no session
+ * table — the daemon serves many sessions and one ending is not an event it
+ * records — so the transcript's own idleness is the whole signal, and an absent
+ * file settles on the fire's age instead.
  */
 type SessionState =
   | { kind: 'read'; rows: TranscriptRow[]; ended: boolean; path: string }
-  | { kind: 'absent'; ended: boolean }
+  | { kind: 'absent' }
   | { kind: 'unreadable'; reason: string };
 
 async function readSession(
@@ -1271,19 +816,14 @@ async function readSession(
     locate: typeof findTranscript;
     readText: (path: string) => Promise<string>;
     idle: typeof transcriptIdle;
-    store: Store;
     now: number;
   },
 ): Promise<SessionState> {
   // With an agent id this is the CHILD's own file; the parent's is never
   // consulted for it, because it holds none of the child's tool calls.
   const found = await ctx.locate(ctx.homeDir, session, agentId);
-  const stamped = ctx.store.get(STORE_SQL.sessionEnded, [session]);
-  const endedAt = stamped !== null && typeof stamped.ended_at === 'number';
   if (found.kind === 'unreadable') return { kind: 'unreadable', reason: found.reason };
-  // With no file there is no mtime to go idle, so the store's stamp is the only
-  // half of "this session is over" that can answer.
-  if (found.kind === 'absent') return { kind: 'absent', ended: endedAt };
+  if (found.kind === 'absent') return { kind: 'absent' };
   let text: string;
   try {
     text = await ctx.readText(found.path);
@@ -1292,21 +832,17 @@ async function readSession(
     // and the row is owed another look rather than a verdict.
     return { kind: 'unreadable', reason: errorReason(err) };
   }
-  // Either half is enough. `ended_at` is the clean stop; a transcript nothing
-  // has touched for half an hour is the harness that was killed and never
-  // stamped one.
-  const ended = endedAt || (await ctx.idle(found.path, ctx.now));
+  const ended = await ctx.idle(found.path, ctx.now);
   return { kind: 'read', rows: parseTranscript(text), ended, path: found.path };
 }
 
-/** Write the verdict, unless there is none yet: a row the session may still
+/** Write the verdict, unless there is none yet: a leg the session may still
  *  answer stays NULL, and `grade` reports it as open. */
 function record(
-  store: Store,
+  db: LoopDb,
   input: {
-    uid: string;
-    hook: string;
-    shelf: string;
+    key: LegKey;
+    arm: string;
     target: GradeTarget;
     agentId: string | null;
     verdict: Verdict;
@@ -1316,9 +852,7 @@ function record(
   },
 ): GradedRow {
   const { verdict } = input;
-  if (verdict.outcome !== null) {
-    store.run(STORE_SQL.setOutcome, [verdict.outcome, verdict.by, input.uid]);
-  }
+  if (verdict.outcome !== null) setVerdict(db, input.key, verdict);
   const evidence =
     verdict.outcome === 'used'
       ? [verdict.evidence]
@@ -1326,9 +860,8 @@ function record(
         ? []
         : verdict.evidence;
   return {
-    uid: input.uid,
-    hook: input.hook,
-    shelf: input.shelf,
+    ...input.key,
+    arm: input.arm,
     resourceId: input.target.resourceId,
     agentId: input.agentId,
     outcome: verdict.outcome ?? 'open',
@@ -1351,72 +884,78 @@ interface PostTally {
 /**
  * Send every graded, unposted verdict to the shelf that served it.
  *
- * ROUTED BY THE ROW'S OWN URL, not by today's config. A search id is minted by
+ * ROUTED BY THE LEG'S OWN URL, not by today's config. A search id is minted by
  * one shelf and means nothing on another, and the two ways of picking a shelf
- * here are not equivalent: the row's `shelf` is a LABEL (`team`, `public`) whose
- * meaning depends on the config in force when the arm ran, and config changes —
- * a team base URL that moved, team mode switched on or off. Resolving the label
- * against the current config then sends the verdict somewhere that never served
- * the row, where it lands as a 202 (there is no existence oracle on that
- * endpoint, by design) and the row is stamped posted. The verdict is lost, and
- * nothing anywhere says so. Every injected row carries the read url it was shown
- * with, on the shelf that served it, so that origin is the address.
+ * here are not equivalent: the leg's `shelf` is a LABEL (`team`, `public`)
+ * whose meaning depends on the config in force when the arm ran, and config
+ * changes — a team base URL that moved, team mode switched on or off. Resolving
+ * the label against the current config then sends the verdict somewhere that
+ * never served the row, where it lands as a 202 (there is no existence oracle
+ * on that endpoint, by design) and the leg is stamped posted. The verdict is
+ * lost, and nothing anywhere says so. Every delivered leg carries the read url
+ * it was shown with, on the shelf that served it, so that origin is the address.
  *
- * THE BYPASS SECRET RIDES THE ROW'S SHELF LABEL, not today's config. The secret
- * belongs to the team — it is what gets a request past the team shelf's
- * protection — so a `team` row carries it and a `public` row never does.
- * Requiring the row's origin to equal the CONFIGURED team base URL instead tied
- * the credential to an address that moves: re-point the team shelf and every
- * unposted team verdict retries unauthenticated forever, since only a success
- * stamps the row.
- *
- * WHICH ORIGIN THE SECRET IS AUTHORIZED AT is a separate question, and the
- * answer is never the row's url — that is a candidate url the shelf chose (see
- * `injections.url`), so authorizing the key there would hand the team's shelf
- * key to any origin a search response cared to name. It is the search's
- * recorded `shelf_base_url`: the base the arm actually asked, read out of this
- * machine's own config at the time. The transport still does the final compare
- * against the request URL ({@link ShelfBypass}), so a row whose candidate url
- * wandered off that shelf posts unauthenticated rather than leaking the key.
+ * THE BYPASS SECRET RIDES THE LEG'S SHELF LABEL: the secret belongs to the team
+ * — it is what gets a request past the team shelf's protection — so a `team` leg
+ * carries it and a `public` one never does. The origin it is authorized at is
+ * this machine's configured team base, never the leg's url: that url is a
+ * candidate url the shelf chose, so authorizing the key there would hand the
+ * team's shelf key to any origin a search response cared to name. The transport
+ * does the final compare against the request URL ({@link ShelfBypass}), so a leg
+ * whose candidate url wandered off that shelf posts unauthenticated rather than
+ * leaking the key.
  *
  * A failure never fails the command — the verdicts are already recorded locally,
- * and the row keeps its NULL stamp so the next run retries it. A rate limit or a
- * dead network halts the rest of the batch for the same reason `outcome` does:
+ * and the leg keeps its NULL stamp so the next run retries it. A rate limit or a
+ * dead network halts the rest of the batch for the same reason a verdict does:
  * the next id fails the same way, and an unposted row is a recoverable state.
  */
 async function postGraded(
-  store: Store,
+  db: LoopDb,
   ctx: CommandContext,
   deps: PushGradeDeps,
   now: number,
-  sinceMs: number,
 ): Promise<PostTally> {
   const tally: PostTally = { posted: 0, failed: 0, skipped: [] };
-  const rows = store.all(STORE_SQL.unpostedOutcomes, [now - sinceMs]);
+  // NO TIME WINDOW. `--since` chooses which fires this run GRADES; a verdict
+  // already recorded is owed to the shelf whenever it was made, and the NULL
+  // stamp is the whole debt. So a hand `--label` on a fire older than `--since`
+  // is posted here, and a leg whose post failed last run is retried forever.
+  // A leg with no search id (a local pairing, this machine's own record) has no
+  // shelf to owe and is never selected, so it cannot pile up as "not routed".
+  const rows = all(
+    db,
+    `SELECT f.id AS id, f.delivered AS delivered, l.stage AS stage, l.shelf AS shelf,
+            l.search_id AS search_id, l.url AS url, l.graded AS graded
+       FROM fires f JOIN legs l ON l.fire_id = f.id
+      WHERE l.graded IS NOT NULL AND l.posted_at IS NULL AND l.search_id IS NOT NULL`,
+    [],
+  );
   if (rows.length === 0) return tally;
   const settings = await resolveContextSettings(ctx);
   let halted = false;
   for (const row of rows) {
     if (halted) break;
-    const uid = String(row.uid ?? '');
-    const searchId = typeof row.search_id === 'string' ? row.search_id : '';
+    const fire = String(row.id ?? '');
+    const searchId = str(row.search_id) ?? '';
     if (!UUID_RE.test(searchId)) {
-      tally.skipped.push(`${uid}: no search id to report against`);
+      tally.skipped.push(`${fire}: no search id to report against`);
       continue;
     }
-    const origin = shelfOrigin(typeof row.url === 'string' ? row.url : '');
+    const origin = shelfOrigin(str(row.url) ?? '');
     if (origin === null) {
-      tally.skipped.push(`${uid}: no usable url, so the shelf that served it is unknown`);
+      tally.skipped.push(`${fire}: no usable url, so the shelf that served it is unknown`);
       continue;
     }
-    const bypass =
-      row.shelf === 'team' ? teamBypass(row.shelf_base_url, settings.bypass) : undefined;
-    const resourceId = typeof row.resource_id === 'string' ? row.resource_id : '';
+    const verdict = verdictOf(row.graded);
+    if (verdict === null) continue;
+    const bypass = row.shelf === 'team' ? settings.bypass : undefined;
+    const resourceId = resourceIdOf(row.delivered) ?? '';
     try {
       const item = buildOutcomeItem({
-        status: wireStatus(String(row.outcome ?? ''), String(row.outcome_by ?? '')),
+        status: wireStatus(verdict.outcome, verdict.by),
         // Only a uuid: the server drops an outcome naming a non-candidate, and a
-        // local pairing id (`pairing:7`) is not a marketplace resource at all.
+        // local pairing has no marketplace resource at all.
         ...(UUID_RE.test(resourceId) ? { resourceId } : {}),
       });
       await postOutcomes(searchId, [item], {
@@ -1425,7 +964,12 @@ async function postGraded(
         ...(bypass !== undefined ? { bypass } : {}),
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       });
-      store.run(STORE_SQL.markPosted, [now, uid]);
+      db.prepare('UPDATE legs SET posted_at = ? WHERE fire_id = ? AND stage = ? AND shelf = ?').run(
+        now,
+        fire,
+        Number(row.stage ?? 0),
+        str(row.shelf) ?? 'unknown',
+      );
       tally.posted += 1;
     } catch (err) {
       tally.failed += 1;
@@ -1433,24 +977,6 @@ async function postGraded(
     }
   }
   return tally;
-}
-
-/**
- * The team's shelf key, authorized at the origin the search was actually asked
- * on rather than at whatever `baseUrl` says today.
- *
- * `shelfBaseUrl` is the search row's, which the arm wrote from config; a row
- * old enough not to carry one keeps the configured pairing, which is what it
- * has always had. The secret itself never changes — only the one origin it is
- * allowed to open, and only ever to a base this machine chose.
- */
-function teamBypass(
-  shelfBaseUrl: unknown,
-  configured: ShelfBypass | undefined,
-): ShelfBypass | undefined {
-  if (configured === undefined) return undefined;
-  const asked = typeof shelfBaseUrl === 'string' ? shelfOrigin(shelfBaseUrl) : null;
-  return asked === null ? configured : { origin: asked, secret: configured.secret };
 }
 
 /** The origin a shelf is reachable at, or null for anything this CLI would not
@@ -1468,7 +994,7 @@ function shelfOrigin(url: string): string | null {
  * The verdict as the shelf's outcome vocabulary.
  *
  * `partially_used` for a `span` or a `likely` match, and that is the honest
- * word for either: a phrase copied out of the injected text, or a command
+ * word for either: a phrase copied out of the delivered text, or a command
  * head / file basename named in its prose, says the agent took SOMETHING from
  * the piece, not that the piece answered the question. Only a followed
  * pointer, or a human saying so, is `used`.
@@ -1508,8 +1034,8 @@ function buildGradeData(
     postFailed: posted.failed,
     postSkipped: posted.skipped.length,
     rows: rows.map((row) => ({
-      uid: row.uid,
-      hook: row.hook,
+      fire: row.fire,
+      arm: row.arm,
       shelf: row.shelf,
       resourceId: row.resourceId,
       agentId: row.agentId,
@@ -1567,7 +1093,7 @@ function gradeLines(
   for (const row of rows) {
     const anchor = row.anchorLine === null ? 'no anchor' : `anchor line ${row.anchorLine}`;
     lines.push(
-      `${row.uid} ${row.hook}/${row.shelf} ${row.resourceId ?? '(no resource)'}: ${row.outcome} (${row.by}) ${anchor}`,
+      `${row.fire} ${row.arm}/${row.shelf} ${row.resourceId ?? '(no resource)'}: ${row.outcome} (${row.by}) ${anchor}`,
     );
     // Which child the row belongs to, and which file answered for it: the two
     // facts that say why a verdict was read out of the transcript it was.

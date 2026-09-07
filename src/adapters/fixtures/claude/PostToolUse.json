@@ -7,12 +7,12 @@
   "prompt_id": "01J9X4M2K7Q8R3T5V6W7Y8Z9A0",
   "tool_name": "Bash",
   "tool_input": {
-    "command": "pnpm vitest run src/lib/state-store.test.ts",
+    "command": "pnpm vitest run src/hooks/store.test.ts",
     "description": "Run the store tests"
   },
   "tool_use_id": "toolu_01Kp3Wq7Zx9Lm4Nv2Bt8Cy5R",
   "tool_response": {
-    "stdout": " ✓ src/lib/state-store.test.ts (42 tests) 812ms\n\n Test Files  1 passed (1)\n      Tests  42 passed (42)\n",
+    "stdout": " ✓ src/hooks/store.test.ts (42 tests) 812ms\n\n Test Files  1 passed (1)\n      Tests  42 passed (42)\n",
     "stderr": "",
     "interrupted": false,
     "isImage": false

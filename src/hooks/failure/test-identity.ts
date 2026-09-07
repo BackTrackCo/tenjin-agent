@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import { shortHash } from '../../lib/state-store';
+import { shortHash } from './keys';
 import { COMMAND_SEPARATOR_RE, LINE_SCAN_MAX } from './signature';
 
 /**
@@ -8,8 +8,7 @@ import { COMMAND_SEPARATOR_RE, LINE_SCAN_MAX } from './signature';
  * itself names — the file, the suite (its `describe` chain) and the test —
  * because two runs of the SAME test are the same key whatever the assertion
  * text says, which is exactly the variation `sig_v1`'s message hash cannot
- * survive (a vitest assertion almost never carries an errno, so its coarse
- * key was null for the dominant failure class).
+ * survive.
  *
  * Artifact first, console second, a guess never: this lane exists because a
  * guess is worse than silence. Every read is `fs.promises`: this runs on the
@@ -201,19 +200,13 @@ export async function testIdentityOf(
 
 export interface TestSignature {
   key: string;
-  /** Never null, unlike `sig_v1`'s: file and suite come from the runner's own
-   *  identity, so nothing here can be below the floor. */
-  coarseKey: string;
   file: string;
 }
 
-/** The test-identity keys: fine = file+suite+test, coarse = file+suite.
- *  Unsalted, like `sig_v1`'s: the salt is a wire concern (`teamCoarseKey`). */
+/** The test-identity key: file + suite + test, as the runner named them. */
 export function sigV1Test(identity: TestIdentity): TestSignature {
-  const base = identity.file + '|' + identity.suite;
   return {
-    key: shortHash('sig_v1_test|' + base + '|' + identity.test),
-    coarseKey: shortHash('sig_v1_test_c|' + base),
+    key: shortHash('sig_v1_test|' + identity.file + '|' + identity.suite + '|' + identity.test),
     file: identity.file,
   };
 }

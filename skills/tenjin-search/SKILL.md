@@ -157,7 +157,7 @@ tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]
 ## Report the outcome (always)
 
 ```bash
-tenjin outcome --json --last --status <status>
+tenjin outcome --json --search-id <id> --status <status>
 ```
 
 `<status>` is one of: `used`, `partially_used`, `rejected`, `regenerated`,
@@ -165,10 +165,9 @@ tenjin outcome --json --last --status <status>
 above is framed as runnable, and `a|b|c` copied verbatim into a shell is three
 piped commands whose first one posts `used`.
 
-Report honestly after acting on a search, rejections included. `--last` binds to
-the newest local search; after more than one, pass `--search-id` (repeatable, one
-status for all). `--all-open --status regenerated` closes this session's open
-web-search loops; searches you ran yourself stay open for you to report.
+Report honestly after acting on a search, rejections included. `<id>` is the
+`searchId` the search printed; `--search-id` repeats, so several searches close
+under one status in one call.
 
 ## After a miss: publish what you build
 

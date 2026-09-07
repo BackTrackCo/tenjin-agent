@@ -1,10 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../../adapters/types';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
-import { factsWithPrefix } from '../facts';
 import { runFire } from '../fire';
 import { getMark, setMark } from '../gates';
 import { LOCAL_OPENER, TEAM_OPENER } from '../prose';
@@ -24,10 +23,10 @@ import {
 } from './test-support';
 
 /**
- * The failure arm on the kernel. Under test: the plan's shape by config (a
- * keys leg only against a team origin, a coarse key only with a git origin),
- * the one stage where a teammate's piece outranks this machine's record, the
- * record rendered by the one formatter, and the pass that closes it.
+ * The failure arm on the kernel. Under test: the plan's shape by config (a keys
+ * leg only against a team origin), the one stage where a teammate's piece
+ * outranks this machine's record, the record rendered by the one formatter, and
+ * the pass that closes it.
  */
 
 const TEAM = kernelConfig({ push: 'on' });
@@ -42,23 +41,15 @@ const VITEST_FAIL =
 
 let db: LoopDb;
 let repo: string;
-let bare: string;
 
 beforeEach(() => {
   db = freshDb();
   repo = mkdtempSync(join(tmpdir(), 'tenjin-d-failure-repo-'));
-  mkdirSync(join(repo, '.git'));
-  writeFileSync(
-    join(repo, '.git', 'config'),
-    '[remote "origin"]\n\turl = git@github.com:acme/api.git\n',
-  );
-  bare = mkdtempSync(join(tmpdir(), 'tenjin-d-failure-bare-'));
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   rmSync(repo, { recursive: true, force: true });
-  rmSync(bare, { recursive: true, force: true });
   cleanup();
 });
 
@@ -208,32 +199,16 @@ describe('the plan', () => {
     });
   });
 
-  it('sends the fine keys without a git origin, and no coarse key', async () => {
-    const { bodies } = shelf([[]]);
-    const { row, legs } = await fire(
-      shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL, cwd: bare }),
-    );
-    expect(row.reason).toBe('no-hit');
-    expect(bodies).toHaveLength(1);
-    expect(keysOf(bodies[0]!)).toEqual(['sig_v1', 'sig_v1_test']);
-    // No stage 1: the coarse test key needs the repo slug too.
-    expect(legs.map((l) => [l.stage, l.shelf])).toEqual([
-      [0, 'keys'],
-      [0, 'local'],
-    ]);
-  });
-
-  it('salts the coarse keys with the repo and asks the coarse test key in a second stage', async () => {
+  it('asks two exact keys in one round, and nothing follows the miss', async () => {
     const { bodies } = shelf([[]]);
     const { row, legs } = await fire(
       shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('no-hit');
-    expect(bodies.map(keysOf)).toEqual([['sig_v1', 'sig_v1c', 'sig_v1_test'], ['sig_v1_test_c']]);
+    expect(bodies.map(keysOf)).toEqual([['sig_v1', 'sig_v1_test']]);
     expect(legs.map((l) => [l.stage, l.shelf, l.outcome])).toEqual([
       [0, 'keys', 'miss'],
       [0, 'local', 'miss'],
-      [1, 'keys', 'miss'],
     ]);
   });
 });
@@ -286,7 +261,7 @@ describe('what a failure leaves behind', () => {
     expect(pairings()).toEqual([]);
   });
 
-  it('opens a pairing even with no file on a keys hit, linked to the post', async () => {
+  it('opens a pairing even with no file on a keys hit', async () => {
     shelf([[candidate()]]);
     const noFile = 'ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile"\n';
     const { row, emit } = await fire(shell({ command: 'pnpm install', ok: false, stderr: noFile }));
@@ -294,9 +269,6 @@ describe('what a failure leaves behind', () => {
     expect(emit?.context).toContain(TEAM_OPENER);
     const [opened] = pairings();
     expect(opened).toMatchObject({ kind: 'sig_v1', status: 'open', error_files: '[]' });
-    expect(factsWithPrefix(db, 'pairing_post:').map((f) => [f.key, JSON.parse(f.value)])).toEqual([
-      [`pairing_post:${opened!.id}`, { postId: POST_ID, origin: TEAM.baseUrl, at: NOW }],
-    ]);
     expect(getMark(db, LEAD, 'replayed:pnpm')).toBe(`[${opened!.id}]`);
   });
 

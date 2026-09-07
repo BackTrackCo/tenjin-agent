@@ -235,10 +235,10 @@ const LIKELY_GENERIC = new Set([
   'e.g',
   'i.e',
   // The injection's OWN scaffolding, not anything a seller wrote: PUBLIC_OPENER,
-  // CLOSING_LINE and the body fence itself (`--- tenjin-body <nonce> ---`) in
-  // push-scripts.ts land in every full-form injection, so without these three
+  // CLOSING_LINE and the body fence itself (`--- tenjin-body <nonce> ---`) from
+  // hooks/prose.ts land in every full-form injection, so without these three
   // `likelyTokens(fullForm(...))` always nets its own boilerplate as a
-  // candidate — tenjin-agent#276 review round 2, minor 1.
+  // candidate.
   'third-party',
   're-verifying',
   'tenjin-body',

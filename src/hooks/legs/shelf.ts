@@ -39,8 +39,7 @@ import type {
  */
 
 /** Candidates asked for, so a search `verdict` can take a strong rank 2 or 3
- *  over an un-strong rank 1; the keys resolve asks for the same. Today's
- *  `PUSH_SEARCH_LIMIT`. */
+ *  over an un-strong rank 1; the keys resolve asks for the same. */
 const SEARCH_LIMIT = 3;
 
 /** The server's query bound (`lookupRequestSchema`). Exported because the

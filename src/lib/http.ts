@@ -99,9 +99,7 @@ function carriesBypassKey(headers: Record<string, string>): boolean {
 /**
  * The one place the identity is written for anything that can import it; both
  * transports funnel their Headers through it, so a third entry point on this
- * side cannot ship without it. The generated hook scripts are the one request
- * path that cannot reach here, and they carry their own mirrored composer
- * (`lib/hook-scripts.ts`) rather than an exemption. `.set` on a Headers
+ * side cannot ship without it. `.set` on a Headers
  * object is what makes this total: a caller header spelled `User-Agent` in any
  * case lands in the same slot and is overwritten, never duplicated, so a
  * call-specific header cannot erase the composed field or add a second one.

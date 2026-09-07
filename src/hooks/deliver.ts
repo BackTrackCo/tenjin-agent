@@ -5,9 +5,7 @@ import { clean, cut, stripControlKeepingLines } from './text';
 import type { Answer, Delivery, Shelf } from './types';
 
 /**
- * What the agent is told, ported from the generated arm it replaces
- * (`push-scripts.ts:570-665`) with every string unchanged. The fence below is a
- * reviewed security boundary and is not re-typed on a port.
+ * What the agent is told. The fence below is a reviewed security boundary.
  *
  * THE RULE: the whole finding when the shelf sent one, a pointer otherwise. The
  * server attaches a body to every FREE row and to no paid one, so free is the
@@ -143,8 +141,7 @@ export function fullForm(opener: string, header: string, body: string): string {
  * THE LINE UNDER A CUT BODY IS THE ONLY THING THAT SAYS EITHER FACT. The full
  * form's header carries the piece's url, not its resource id, and `tenjin read`
  * takes the id — so without this line the agent does not know it was handed a
- * preview, and could not fetch the rest if it guessed. It is today's line from
- * the arm this ports (`push-scripts.ts:563`), unchanged.
+ * preview, and could not fetch the rest if it guessed.
  */
 function boundedBody(text: string, resourceId: string): string {
   if (text.length <= BODY_MAX_CHARS) return text;

@@ -72,29 +72,11 @@ export function hooksDir(dir: string = dataDir()): string {
 }
 
 /**
- * Which searchIds the Stop hook has already nagged about, so each open loop is
- * raised once per turn-end rather than every turn.
- *
- * Not atomic, deliberately: two sessions ending at the same instant can both read
- * this file before either writes, and one loop is then named twice. The cost is a
- * duplicate line, and serializing it would put a cross-process wait at the end of
- * every turn to buy nothing but tidiness.
- *
- * STILL A FILE, and the last of the hook state that is. The searches it nags
- * about moved into `state.db` (tenjin-agent#209); this did not, because the plan
- * scopes it to a follow-up along with `hook-health.json`. Nothing but the Stop
- * hook writes it, and losing it costs one repeated nag.
- */
-export function nagStatePath(dir: string = dataDir()): string {
-  return join(dir, 'hook-nags.json');
-}
-
-/**
  * How the marketplace has been answering the dispatch hook lately, so a run of
  * failures stops the arm instead of paying the fetch budget per subagent through
- * an outage. Same conventions as {@link nagStatePath}: hook-written, unlocked,
- * and cheap to lose, since a missing file reads as "healthy". Its own file
- * because two hooks writing one unlocked file would erase each other.
+ * an outage. Hook-written, unlocked, and cheap to lose, since a missing file
+ * reads as "healthy". Its own file because two hooks writing one unlocked file
+ * would erase each other.
  */
 export function hookHealthPath(dir: string = dataDir()): string {
   return join(dir, 'hook-health.json');
@@ -132,9 +114,7 @@ export function archivedWalletPath(account: string, dir: string = dataDir()): st
 
 /**
  * The loop daemon's own state, all under the data dir (tenjin-notes
- * loop-redesign/02-redesign.md §4, §10). `loop.db` is a NEW file beside
- * `state.db`, never a rename: the old hook scripts keep writing `state.db`
- * until PR E deletes them, and a rename would strand their WAL frames.
+ * loop-redesign/02-redesign.md §4, §10).
  */
 export function loopDbPath(dir: string = dataDir()): string {
   return join(dir, 'loop.db');
@@ -173,4 +153,13 @@ export function daemonBundlePath(dir: string = dataDir()): string {
 /** The ensure-and-forward shim the two `command` hook entries run. */
 export function shimBundlePath(dir: string = dataDir()): string {
   return join(hooksDir(dir), 'tenjin-shim.mjs');
+}
+
+/** Tenjin's own vitest reporter, copied beside the bundles. NOT A HOOK ENTRY
+ *  and never spawned: a repo's own `vitest.config.ts` imports it by this
+ *  absolute path, which is why `doctor` can hint at it verbatim. */
+export const VITEST_REPORTER_FILE = 'tenjin-vitest-reporter.mjs';
+
+export function vitestReporterPath(dir: string = dataDir()): string {
+  return join(hooksDir(dir), VITEST_REPORTER_FILE);
 }

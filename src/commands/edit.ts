@@ -5,7 +5,7 @@ import { parsePublishModeFlag, type PublishMode } from '../lib/config';
 import { UUID_RE } from '../lib/ids';
 import { findings as scanFindings } from '../lib/redact';
 import { sanitizeForTerminal } from '../lib/output';
-import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/state-store';
+import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/searches';
 import { recordPublished } from '../lib/publish-dedup';
 import {
   deriveCard,

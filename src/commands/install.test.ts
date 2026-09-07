@@ -97,7 +97,6 @@ import {
 } from '../lib/harness-permissions';
 import { CliError } from '../lib/errors';
 import type { DaemonStart } from '../daemon/control';
-import { RETIRED_HOOK_FILES } from '../lib/harness-hooks';
 import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import { PRODUCTION_HOST } from '../lib/production-origin';
@@ -1366,20 +1365,17 @@ describe('runInstall: interactive walkthrough', () => {
     expect(text).not.toContain(MARKER_COMMENT);
   });
 
-  // One-time cleanup for the machines that already carry one. It edits a file the
-  // operator writes their own notes in, so it has to be disclosed.
-  it('removes a legacy pointer line and reports which file it cleaned', async () => {
+  /** `install` never wrote this file, so it never edits one the operator owns:
+   *  a CLAUDE.md carrying a pointer line from an older version is left exactly
+   *  as it is. */
+  it('leaves an operator CLAUDE.md byte for byte', async () => {
     const claudeMd = join(home, '.claude', 'CLAUDE.md');
     await mkdir(dirname(claudeMd), { recursive: true });
-    await writeFile(claudeMd, `# My notes\n${MARKER_COMMENT} Tenjin: old text\n## More notes\n`);
+    const before = `# My notes\n${MARKER_COMMENT} Tenjin: old text\n## More notes\n`;
+    await writeFile(claudeMd, before);
 
-    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    const after = await readFile(claudeMd, 'utf8');
-    expect(after).not.toContain(MARKER_COMMENT);
-    // Everything around it survives, byte for byte.
-    expect(after).toContain('# My notes');
-    expect(after).toContain('## More notes');
-    expect(human(res)).toContain(`Removed the old Tenjin pointer line from ${claudeMd}`);
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    expect(await readFile(claudeMd, 'utf8')).toBe(before);
   });
 
   /**
@@ -3801,17 +3797,6 @@ describe('runInstall: search hooks', () => {
     expect(entries.filter(([, e]) => e.hooks[0]?.type === 'http')).toHaveLength(9);
     expect(entries.filter(([, e]) => e.hooks[0]?.type === 'command')).toHaveLength(2);
     expect(await persistedMode()).toBe('auto');
-  });
-
-  /** The cutover: an old install's generated scripts go, by name. */
-  it('deletes the retired generated scripts it finds in the hooks dir', async () => {
-    await mkdir(join(data, 'hooks'), { recursive: true });
-    for (const f of RETIRED_HOOK_FILES) await writeFile(join(data, 'hooks', f), '// old');
-    const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    expect(hooksOf(res.data).removed).toHaveLength(RETIRED_HOOK_FILES.length);
-    for (const f of RETIRED_HOOK_FILES) {
-      expect(existsSync(join(data, 'hooks', f)), f).toBe(false);
-    }
   });
 
   // settings.json hooks load at session start, so an operator who does not

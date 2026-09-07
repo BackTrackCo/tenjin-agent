@@ -11,7 +11,6 @@ import {
 } from './production-origin';
 import { CONFIG_DEFAULTS } from './config';
 import { TENJIN_USER_AGENT } from './client-meta';
-import { websearchHookScript } from './hook-scripts';
 import { searchHooksChoices } from '../commands/install';
 import { hookRecipientHost } from './settings';
 
@@ -19,9 +18,9 @@ import { hookRecipientHost } from './settings';
  * The guard that makes the origin cutover (tenjin#402) a one-line edit: every
  * module that ships the production origin has to READ it from here, and nothing
  * else under src/ may spell the host out. Without this a flip lands in the
- * obvious places and leaves a stale default, a stale User-Agent, or a stale
- * generated hook script behind — a half-flip that no single test would catch,
- * because each of those modules is only ever compared against itself.
+ * obvious places and leaves a stale default or a stale User-Agent behind — a
+ * half-flip that no single test would catch, because each of those modules is
+ * only ever compared against itself.
  */
 describe('PRODUCTION_ORIGIN', () => {
   it('is a bare https origin, and the host is derived from it', () => {
@@ -39,12 +38,6 @@ describe('PRODUCTION_ORIGIN', () => {
 
   it('is the origin in the User-Agent comment', () => {
     expect(TENJIN_USER_AGENT.endsWith(` (+${PRODUCTION_ORIGIN})`)).toBe(true);
-  });
-
-  it('is the baseUrl fallback baked into the generated WebSearch hook', () => {
-    // The generated script is standalone JS with no import of this module, so
-    // the origin is inlined at generation time; assert the emitted text.
-    expect(websearchHookScript('/tmp/tenjin-data')).toContain(`: '${PRODUCTION_ORIGIN}';`);
   });
 
   it('is the host named in the install hook copy', () => {
@@ -72,12 +65,12 @@ describe('isSameDeployment', () => {
   const others = knownDeploymentOrigins().filter((o) => o !== PRODUCTION_ORIGIN);
 
   /**
-   * Exact, not `toContain`. This set ships baked into every released CLI and
-   * into every hook script written at install time, so it is live on machines
-   * the operator no longer controls until each one updates, and whoever holds a
-   * member origin receives wallet-signed credentials from a CLI configured on
-   * the sibling. Adding a member, or failing to remove one that was sold or
-   * repointed, has to be a line a human wrote on purpose in a reviewed diff.
+   * Exact, not `toContain`. This set ships baked into every released CLI, so it
+   * is live on machines the operator no longer controls until each one updates,
+   * and whoever holds a member origin receives wallet-signed credentials from a
+   * CLI configured on the sibling. Adding a member, or failing to remove one
+   * that was sold or repointed, has to be a line a human wrote on purpose in a
+   * reviewed diff.
    * The expected value is written out here rather than read from the module, for
    * the same reason. Removal runbook: docs/safety-model.md.
    */
@@ -119,11 +112,6 @@ describe('isSameDeployment', () => {
       expect(isSameDeployment(downgraded, other)).toBe(false);
       expect(isSameDeployment(ported, other)).toBe(false);
     }
-  });
-
-  it('is inlined into the generated hook script, which cannot import it', () => {
-    const script = websearchHookScript('/tmp/tenjin-data');
-    expect(script).toContain(`const KNOWN_ORIGINS = ${JSON.stringify(knownDeploymentOrigins())};`);
   });
 });
 
