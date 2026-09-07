@@ -314,7 +314,7 @@ def reduction_record(
             "unmatched_fires": [],
         },
         "sentinel": {"public_requests": 0, "credential_exposures": 0},
-        "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None},
+        "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None, "automated": False},
         "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
     }
 
@@ -404,7 +404,7 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
         "unresolved_actors": [],
         "delivery": {"status": "unavailable", "fires": [], "legs": [], "unmatched_fires": []},
         "sentinel": {"public_requests": 0, "credential_exposures": 0},
-        "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None},
+        "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None, "automated": False},
         "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
     }
     record.update(overrides)

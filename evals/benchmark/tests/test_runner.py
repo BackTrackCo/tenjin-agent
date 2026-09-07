@@ -490,6 +490,19 @@ class LiveRefusalTest(TrialCase):
             self.one_trial(self.manifest_live, self.runtime(publishable=False, ci=True, attestation=None))
         self.assertEqual(caught.exception.code, "live_in_ci")
 
+    def test_an_automated_plumbing_run_is_allowed_in_ci_and_stamped(self) -> None:
+        record = self.one_trial(self.manifest_live, self.runtime(publishable=False, ci=True, automated=True))
+        self.assertEqual(record["isolation"]["live"], True)
+        self.assertEqual(record["isolation"]["publishable"], False)
+        self.assertEqual(record["isolation"]["automated"], True)
+        self.assertEqual(record["isolation"]["attested_container"], False)
+
+    def test_an_automated_run_that_claims_publishable_is_refused_before_any_root_exists(self) -> None:
+        with self.assertRaises(IsolationError) as caught:
+            self.one_trial(self.manifest_live, self.runtime(publishable=True, ci=True, automated=True))
+        self.assertEqual(caught.exception.code, "automated_publishable")
+        self.assertFalse((self.run_dir / "trials").exists())
+
     def test_an_attested_live_run_records_its_attestation(self) -> None:
         record = self.one_trial(self.manifest_live, self.runtime(publishable=True, ci=False, attestation=ATTESTED))
         self.assertEqual(record["isolation"]["live"], True)

@@ -315,10 +315,17 @@ def require_isolation(
     required_origins: tuple[str, ...] = (),
     credential_seam: str | None = None,
     ci: bool = False,
+    automated: bool = False,
 ) -> dict[str, Any]:
-    """The isolation slice of an attempt record, or a refusal to run at all."""
-    if live and ci:
-        raise IsolationError("live_in_ci", "CI never runs a live executor")
+    """The isolation slice of an attempt record, or a refusal to run at all.
+
+    `automated` is the `--ci-live` stamp: a live run nobody is watching, which
+    CI may host only as non-publishable plumbing with no attestation to claim.
+    """
+    if automated and (publishable or attestation is not None):
+        raise IsolationError("automated_publishable", "an automated live run is never publishable and never attested")
+    if live and ci and not automated:
+        raise IsolationError("live_in_ci", "CI runs a live executor only as automated plumbing")
     if not live:
         return {
             "live": False,
@@ -326,6 +333,7 @@ def require_isolation(
             "fresh_roots": True,
             "attested_container": False,
             "attestation_hash": None,
+            "automated": automated,
         }
     if publishable and attestation is None:
         raise IsolationError("attestation_missing", "a publishable live run requires an isolation attestation")
@@ -337,4 +345,5 @@ def require_isolation(
         "fresh_roots": True,
         "attested_container": attestation is not None,
         "attestation_hash": None if attestation is None else attestation.hash(),
+        "automated": automated,
     }

@@ -133,6 +133,7 @@ class Runtime:
     attestation: artifact.Attestation | None = None
     publishable: bool = True
     ci: bool = field(default_factory=lambda: bool(os.environ.get("CI")))
+    automated: bool = False
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         required_origins=spec.required_origins,
         credential_seam=None if spec.credential_seam is None else spec.credential_seam(manifest.pins),
         ci=runtime.ci,
+        automated=runtime.automated,
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin
     roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)

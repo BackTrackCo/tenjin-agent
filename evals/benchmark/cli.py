@@ -1,4 +1,4 @@
-"""`python3 -m evals.benchmark.cli fake-run|live-run|verify|reduce|report`.
+"""`python3 -m evals.benchmark.cli fake-run|live-run|verify|reduce|report|regress`.
 
 The fake path is the CI path: no model, no network, no spend. `verify` re-runs
 the hidden verifiers over a finished run's retained worktrees and reports where
@@ -13,7 +13,9 @@ starts nothing, which is the only part of the live path CI may exercise and is
 how a reviewer reads the real command without running it. Without `--dry-run`
 it requires an isolation attestation, refuses an automated environment, and
 refuses a shell that does not have the credential seam variable set, on top of
-the refusals `artifact.require_isolation` already owns.
+the refusals `artifact.require_isolation` already owns. `--ci-live --plumbing`
+is the one automated exception: the plumbing smoke in its own CI lane, stamped
+automated and non-publishable in every record.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from . import (
     manifest as manifest_module,
     records,
     reduce as reduce_module,
+    regress as regress_module,
     report as report_module,
     runner,
     schedule,
@@ -43,7 +46,9 @@ from . import (
 
 FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
 SMOKE_MANIFEST = FIXTURES / "live" / "smoke-manifest.json"
-# A live run is a human at a terminal. These names mean nobody is watching.
+# These names mean nobody is watching. A live run under them needs `--ci-live`,
+# which trades the human for the budget cap, the wall-clock cap, and the job
+# timeout, and gives up any claim to a publishable number in return.
 AUTOMATION_ENV = ("CI", "GITHUB_ACTIONS")
 
 
@@ -166,6 +171,7 @@ def live_run(
     *,
     dry_run: bool = False,
     plumbing: bool = False,
+    ci_live: bool = False,
     environ: Mapping[str, str] | None = None,
     stream: Any = None,
     runtime: runner.Runtime | None = None,
@@ -178,9 +184,13 @@ def live_run(
         plans = [plan_trial(manifest, trial, out) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
         return {"dry_run": True, "trials": plans}
-    automated = [name for name in AUTOMATION_ENV if environ.get(name)]
-    if automated:
-        raise CliError(f"live-run refuses an automated environment: {', '.join(automated)} is set")
+    if ci_live and not plumbing:
+        raise CliError("--ci-live is valid only with --plumbing: an automated live run is never publishable")
+    if ci_live and attestation_path is not None:
+        raise CliError("--ci-live refuses --attestation: an automated live run claims no isolation")
+    automation = [name for name in AUTOMATION_ENV if environ.get(name)]
+    if automation and not ci_live:
+        raise CliError(f"live-run refuses an automated environment: {', '.join(automation)} is set")
     if attestation_path is None and not plumbing:
         raise CliError(
             "live-run requires --attestation, or --plumbing for a non-publishable smoke: "
@@ -202,7 +212,8 @@ def live_run(
         runtime or runner.Runtime(),
         attestation=attestation,
         publishable=not plumbing,
-        ci=any(bool(environ.get(name)) for name in AUTOMATION_ENV),
+        ci=bool(automation),
+        automated=ci_live,
     )
     return execute(manifest, trials, out, runtime)
 
@@ -242,6 +253,14 @@ def do_report(run_dir: Path) -> dict[str, Any]:
     return report
 
 
+def do_regress(run_dir: Path, baseline_path: Path, environ: Mapping[str, str] | None = None, stream: Any = None) -> dict[str, Any]:
+    """Warn where the run is worse than the committed baseline. Never a failure."""
+    manifest, digest = load_run(run_dir)
+    accepted, _ = records.select(run_dir / "records", manifest.hash, digest)
+    published = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+    return regress_module.check(published, accepted, baseline_path, environ, stream)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python3 -m evals.benchmark.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -256,6 +275,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run without an attestation and stamp every record non-publishable (gate 3 smoke only)",
     )
+    live.add_argument(
+        "--ci-live",
+        action="store_true",
+        help="allow an automated environment; only with --plumbing, and every record is stamped automated",
+    )
     live.add_argument("--dry-run", action="store_true", help="print each trial's argv and roots, start nothing")
     for name in ("verify", "reduce", "report"):
         commands.add_parser(name).add_argument("--run", required=True, type=Path)
@@ -264,6 +288,11 @@ def main(argv: list[str] | None = None) -> int:
     # did without a reader piping JSON through another tool.
     summary = commands.add_parser("summary", help="read a finished run's report.json as text")
     summary.add_argument("--run", required=True, type=Path)
+    # Informational by construction: it prints and annotates, and exits 0
+    # whatever it finds, so the live lane can warn without ever blocking.
+    regress = commands.add_parser("regress", help="warn where a finished run is worse than the committed baseline")
+    regress.add_argument("--run", required=True, type=Path)
+    regress.add_argument("--baseline", type=Path, default=regress_module.BASELINE)
     # The one supported way to clean up after an interrupted run. It acts on the
     # run's own process ledger and verifies each record against the live process
     # before signalling, so it cannot reach anything this package did not start.
@@ -280,9 +309,19 @@ def main(argv: list[str] | None = None) -> int:
         published = json.loads((args.run / "report.json").read_text(encoding="utf-8"))
         sys.stdout.write(report_module.render(published) + "\n")
         return 0
+    if args.command == "regress":
+        do_regress(args.run, args.baseline)
+        return 0
     if args.command == "live-run":
         try:
-            payload = live_run(args.out, args.manifest, args.attestation, dry_run=args.dry_run, plumbing=args.plumbing)
+            payload = live_run(
+                args.out,
+                args.manifest,
+                args.attestation,
+                dry_run=args.dry_run,
+                plumbing=args.plumbing,
+                ci_live=args.ci_live,
+            )
         except CliError as error:
             sys.stderr.write(f"{error}\n")
             return 2

@@ -157,12 +157,36 @@ class IsolationTest(unittest.TestCase):
 
     def test_an_unattested_live_run_can_never_be_publishable(self) -> None:
         isolation = artifact.require_isolation(live=True, publishable=False, attestation=None)
-        self.assertEqual(isolation, {"live": True, "publishable": False, "fresh_roots": True, "attested_container": False, "attestation_hash": None})
+        self.assertEqual(
+            isolation,
+            {
+                "live": True,
+                "publishable": False,
+                "fresh_roots": True,
+                "attested_container": False,
+                "attestation_hash": None,
+                "automated": False,
+            },
+        )
 
-    def test_ci_never_runs_a_live_executor(self) -> None:
+    def test_ci_never_runs_a_live_executor_unless_it_is_automated_plumbing(self) -> None:
         with self.assertRaises(IsolationError) as caught:
             artifact.require_isolation(live=True, publishable=False, attestation=ATTESTED, ci=True)
         self.assertEqual(caught.exception.code, "live_in_ci")
+        isolation = artifact.require_isolation(live=True, publishable=False, attestation=None, ci=True, automated=True)
+        self.assertEqual(isolation["automated"], True)
+        self.assertEqual(isolation["publishable"], False)
+        self.assertEqual(isolation["attested_container"], False)
+
+    def test_an_automated_live_run_can_be_neither_publishable_nor_attested(self) -> None:
+        cases = {
+            "publishable": dict(publishable=True, attestation=None),
+            "attested": dict(publishable=False, attestation=ATTESTED),
+        }
+        for name, claim in cases.items():
+            with self.subTest(name), self.assertRaises(IsolationError) as caught:
+                artifact.require_isolation(live=True, ci=True, automated=True, **claim)
+            self.assertEqual(caught.exception.code, "automated_publishable")
 
     def test_the_shipped_executor_registry_has_no_live_entry(self) -> None:
         self.assertEqual([spec.name for spec in executor.REGISTRY.values() if spec.live], [])

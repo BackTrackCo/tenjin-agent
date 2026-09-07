@@ -618,7 +618,7 @@ class DryRunTest(LiveCase):
         # A name, never a value: the arm marker's value is not on the line.
         self.assertIn("arm env", printed)
 
-    def test_the_dry_run_is_the_only_live_behavior_an_automated_environment_reaches(self) -> None:
+    def test_the_dry_run_is_the_only_live_behavior_an_automated_environment_reaches_without_ci_live(self) -> None:
         stream = io.StringIO()
         with NoProcess(self):
             cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, dry_run=True, stream=stream, environ={"CI": "1"})
@@ -797,6 +797,63 @@ class PlumbingModeTest(unittest.TestCase):
         self.assertFalse(captured[0].publishable, "a plumbing run must never be publishable")
         self.assertIsNone(captured[0].attestation)
         self.assertEqual(seen, [])
+
+    def test_ci_live_is_refused_without_plumbing(self) -> None:
+        with self.assertRaises(cli.CliError) as refusal:
+            cli.live_run(self.out, self.manifest, None, ci_live=True, environ={"CI": "1", **LIVE_ENV})
+        self.assertIn("--plumbing", str(refusal.exception))
+
+    def test_ci_live_is_refused_with_an_attestation(self) -> None:
+        attestation = self.out / "attestation.json"
+        attestation.write_text("{}", encoding="utf-8")
+        with self.assertRaises(cli.CliError) as refusal:
+            cli.live_run(self.out, self.manifest, attestation, plumbing=True, ci_live=True, environ={"CI": "1", **LIVE_ENV})
+        self.assertIn("--attestation", str(refusal.exception))
+
+    def test_ci_live_plumbing_reaches_the_spawn_seam_under_ci_stamped_automated(self) -> None:
+        environ = {"CI": "1", "GITHUB_ACTIONS": "true", **LIVE_ENV}
+        with SpawnSeam(), self.assertRaises(SpawnReached) as caught:
+            cli.live_run(self.out, self.manifest, None, plumbing=True, ci_live=True, environ=environ)
+        self.assertEqual(str(caught.exception), "process_spawn")
+        # The seam is reached from `runner.run_trial`, after `require_isolation`
+        # accepted the run, so the roots it built are the automated stamp's proof.
+        self.assertTrue((self.out / "trials").is_dir())
+        captured: list[runner.Runtime] = []
+        real_execute = cli.execute
+
+        def capture(manifest, trials, out, rt):
+            captured.append(rt)
+            return {"trials": 0}
+
+        cli.execute = capture  # type: ignore[assignment]
+        try:
+            cli.live_run(self.out, self.manifest, None, plumbing=True, ci_live=True, environ=environ)
+        finally:
+            cli.execute = real_execute  # type: ignore[assignment]
+        self.assertEqual((captured[0].publishable, captured[0].ci, captured[0].automated), (False, True, True))
+        self.assertIsNone(captured[0].attestation)
+
+    def test_ci_live_plumbing_writes_automated_non_publishable_records(self) -> None:
+        completed = runner.Completed(returncode=1, stderr="refused by the test, not by the CLI", timed_out=False)
+        runtime = runner.Runtime(spawn=lambda launch, roots, timeout_s: completed, settle_cap_s=0.0)
+        environ = {"GITHUB_ACTIONS": "true", **LIVE_ENV}
+        with mock.patch.object(subprocess, "Popen", _refuse("subprocess.Popen")):
+            payload = cli.live_run(self.out, self.manifest, None, plumbing=True, ci_live=True, environ=environ, runtime=runtime)
+        self.assertEqual(payload["trials"], 4)
+        for path in (self.out / "records").glob("*.json"):
+            record = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(record["isolation"]["publishable"], False)
+            self.assertEqual(record["isolation"]["automated"], True)
+            self.assertEqual(record["outcome"], "invalid")
+        published = json.loads((self.out / "report.json").read_text(encoding="utf-8"))
+        self.assertEqual((published["publishable"], published["isolation"]), (False, "automated_plumbing"))
+
+    def test_the_command_line_refuses_ci_live_without_plumbing(self) -> None:
+        printed = io.StringIO()
+        with NoProcess(self), contextlib.redirect_stderr(printed), mock.patch.dict(os.environ, {"CI": "1", **LIVE_ENV}):
+            code = cli.main(["live-run", "--manifest", str(self.manifest), "--out", str(self.out), "--ci-live"])
+        self.assertEqual(code, 2)
+        self.assertIn("--plumbing", printed.getvalue())
 
     def test_an_attested_run_stays_publishable(self) -> None:
         captured: list[runner.Runtime] = []

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Offline self-test entry: runs every case under evals/benchmark/tests/.
 
-No model, no network, no spend. Run directly or through
-`.github/workflows/benchmark.yml`, its own lane, separate from the required
-CLI check.
+No model, no network, no spend. Run directly or as a step of the required
+`CI` workflow, where a change that breaks the package fails the pull request.
 
 The suite runs one module at a time and reports each module's own count, time
 and subject, because "161 tests OK" tells a reader nothing about which contract
@@ -42,6 +41,7 @@ SUBJECTS = {
     "test_reap": "deterministic cleanup: kill by recorded identity, never by name",
     "test_records": "immutable records, publish without overwrite, resume selection",
     "test_reduce": "task-equal reduction, amortization, seeded bootstrap intervals",
+    "test_regress": "informational regression check against the committed baseline",
     "test_report": "publishable projection and the redaction guard",
     "test_runner": "trial execution, settlement, caps, process-group kill, resume",
     "test_schedule": "seeded balanced schedule and trial identity",
