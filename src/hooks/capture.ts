@@ -118,7 +118,8 @@ function childFindings(db: LoopDb, session: string): Array<{ id: string; finding
 
 /**
  * This session's deliberate `tenjin search` misses that nothing has closed,
- * oldest first, one line each.
+ * oldest first, one line each. THE LEAD'S ASK ONLY: an open search is the
+ * lead's loop to close, and a child cannot resolve one it never opened.
  *
  * THE CLI'S ROWS ONLY. `searches` is written by `tenjin search`, so every row is
  * a question the agent decided was worth asking; a null `source` is a row an
@@ -145,6 +146,8 @@ function missLines(db: LoopDb, session: string): string[] {
 
 /**
  * The errors this session closed that no piece explains yet, oldest first.
+ * THE LEAD'S ASK ONLY, like the misses: the session's closed pairings are not
+ * a child's to write up.
  *
  * CODE SCOPE ONLY: a `user`-scope pairing is a typo in a command, and its fix
  * teaches nobody. A row with a `post_id` has already been written up, so it is
@@ -299,8 +302,8 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const text = captureAsk({
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
-    misses: missLines(db, actor.session),
-    fixes: fixLines(db, actor.session),
+    misses: audience === 'lead' ? missLines(db, actor.session) : [],
+    fixes: audience === 'lead' ? fixLines(db, actor.session) : [],
     published: audience === 'lead' ? publishedLines(db, actor.session) : [],
     queued: queued.map((q): QueuedLine => ({
       id: q.id,

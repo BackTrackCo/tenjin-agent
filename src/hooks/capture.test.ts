@@ -21,8 +21,9 @@ import type { Actor, Deps, KernelConfig } from './types';
  * Capture through the two arms that call it (from #298's suite, re-keyed
  * onto the kernel). Both audiences are asked once, with evidence, as context;
  * the lead is re-armed only by what its children queue; the stop after an ask
- * harvests the fence whole. The ask also names what this session left open: its
- * unanswered searches, the errors it fixed, what its children published.
+ * harvests the fence whole. The LEAD's ask also names what this session left
+ * open: its unanswered searches, the errors it fixed, what its children queued
+ * and published. A child's ask carries none of those.
  */
 
 const TEAM = kernelConfig({ push: 'on', capture: 'on' });
@@ -296,6 +297,28 @@ describe('the child ask', () => {
     await fire(db, childStop({ stopFuse: true, lastMessage: fence('first') }));
     await fire(db, childStop({ stopFuse: true, lastMessage: fence('second') }));
     expect(findings(db)).toMatchObject([{ body: 'first', searchId: SEARCH_ID }]);
+  });
+
+  it('carries no miss or fix line, though the lead in the same session gets both', async () => {
+    const db = freshDb();
+    started(db);
+    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
+    seedSearch(db, { id: 'open-1' });
+    seedPairing(db, { key: 'ab12' });
+
+    // The open search and the closed pairing are the session's, and only the
+    // lead can act on either: a child must not be handed them.
+    const child = (await fire(db, childStop()))?.context ?? '';
+    expect(child.startsWith('Tenjin: this turn did work worth a second look.')).toBe(true);
+    expect(child).not.toContain('had no answer');
+    expect(child).not.toContain('open-1');
+    expect(child).not.toContain('You fixed');
+    expect(child).not.toContain('ab12');
+
+    seedFire(db, LEAD, 'research', 'hit');
+    const lead = (await fire(db, leadStop()))?.context ?? '';
+    expect(lead).toContain('(open-1) had no answer');
+    expect(lead).toContain('`--key fingerprint=sig_v1_test:ab12`');
   });
 
   it('push off is silent everywhere, whatever capture says', async () => {
