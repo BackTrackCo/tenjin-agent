@@ -65,13 +65,15 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
     afterwards, matches a process by name: that is how a cleanup aimed at one
     trial reaches an unrelated session.
     """
+    roots.output.mkdir(parents=True, exist_ok=True)
+    stream = roots.stream.open("w", encoding="utf-8")
     process = subprocess.Popen(
         launch.argv,
         cwd=launch.cwd,
         # A launch that owns its environment has already allowlisted it; the
         # roots' default is what every executor without that need gets.
         env=launch.env if launch.env is not None else roots.environment(os.environ.get("PATH", "")),
-        stdout=subprocess.DEVNULL,
+        stdout=stream,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
@@ -97,6 +99,7 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
             except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
                 pass
         reap.release(roots.run_dir, roots.trial_id)
+        stream.close()
     return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
 
 
@@ -154,8 +157,14 @@ def _terminal(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def scan(sessions: Path, root_session_id: str) -> tuple[dict[str, Any] | None, list[str]]:
-    """The root's result row, plus every actor still without a terminal row."""
+def scan(sessions: Path, root_session_id: str, stream: Path | None = None) -> tuple[dict[str, Any] | None, list[str]]:
+    """The root's result row, plus every actor still without a terminal row.
+
+    The row is looked for in the transcript first and then in the captured
+    stream, because a real Claude run puts its envelope only on stdout while
+    the fake executors write theirs into the transcript. Either source settles
+    the root; neither is read for usage, so nothing is counted twice.
+    """
     root = sessions / f"{root_session_id}.jsonl"
     if not root.is_file():
         return None, [""]
@@ -165,10 +174,12 @@ def scan(sessions: Path, root_session_id: str) -> tuple[dict[str, Any] | None, l
         if _terminal(child) is None
     ]
     result_row = _terminal(root)
+    if result_row is None and stream is not None and stream.is_file():
+        result_row = _terminal(stream)
     return result_row, ([""] if result_row is None else []) + unresolved
 
 
-def settle(sessions: Path, root_session_id: str, runtime: Runtime) -> Settlement:
+def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path | None = None) -> Settlement:
     """Wait for descendants to stop, up to the declared settlement cap.
 
     A root that exits while a child is live is not a complete attempt, so the
@@ -176,7 +187,7 @@ def settle(sessions: Path, root_session_id: str, runtime: Runtime) -> Settlement
     """
     started = runtime.clock()
     while True:
-        result_row, unresolved = scan(sessions, root_session_id)
+        result_row, unresolved = scan(sessions, root_session_id, stream)
         waited = runtime.clock() - started
         if result_row is not None and not unresolved:
             return Settlement(result_row, [], waited, False)
@@ -211,11 +222,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # settlement scan read that directory whatever the harness is.
     sessions = spec.sessions(roots, launch.root_session_id)
     if completed.timed_out:
-        result_row, unresolved = scan(sessions, launch.root_session_id)
+        result_row, unresolved = scan(sessions, launch.root_session_id, roots.stream)
         settlement = Settlement(result_row, unresolved, 0.0, False)
         stop_reason = "timeout"
     else:
-        settlement = settle(sessions, launch.root_session_id, runtime)
+        settlement = settle(sessions, launch.root_session_id, runtime, roots.stream)
         stop_reason = "interrupted" if settlement.capped else "exit"
     roots.mark_stopped()
     wall_time_s = runtime.clock() - started
@@ -231,7 +242,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     session: claude_usage.SessionUsage | None = None
     usage_reason: str | None = None
     try:
-        session = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id)
+        session = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id, roots.stream)
         usage_reason = session.invalid_reason
     except claude_usage.ClaudeUsageError as error:
         usage_reason = f"usage:{error.code}"

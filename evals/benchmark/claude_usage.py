@@ -473,7 +473,30 @@ def _child_id(path: Path) -> str:
     return path.stem.removeprefix("agent-")
 
 
-def parse_session_dir(sessions: Path, root_session_id: str, trial_id: str) -> SessionUsage:
+def stream_envelope(stream: Path | None, trial_id: str) -> Envelope | None:
+    """The `result` envelope from the harness's captured stdout, if it is there.
+
+    Only the envelope is taken. The stream also repeats the assistant rows the
+    transcript already holds, and counting those again would inflate every
+    attempt, so this reads one row type and no other.
+    """
+    if stream is None or not stream.is_file():
+        return None
+    for line in stream.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ClaudeUsageError("stream_unparsable", f"{stream.name}: {error}") from error
+        if isinstance(event, dict) and event.get("type") == "result":
+            return _envelope(event, line, stream.name)
+    return None
+
+
+def parse_session_dir(
+    sessions: Path, root_session_id: str, trial_id: str, stream: Path | None = None
+) -> SessionUsage:
     """Root transcript is actor ''; each `subagents/agent-<id>.jsonl` is one child actor."""
     root_path = sessions / f"{root_session_id}.jsonl"
     if not root_path.is_file():
@@ -534,13 +557,17 @@ def parse_session_dir(sessions: Path, root_session_id: str, trial_id: str) -> Se
         edges.append(ParentEdge(child=actor, parent=parent, provenance="native"))
 
     root = transcripts[0]
+    # A real Claude run's envelope arrives on stdout rather than in the
+    # transcript, so the captured stream is the second place to look. A
+    # transcript that carries its own envelope keeps it.
+    envelope = root.envelope if root.envelope is not None else stream_envelope(stream, trial_id)
     return SessionUsage(
         root_session_id=root_session_id,
         trial_id=trial_id,
         records=records,
         actors=sorted(actors),
         parent_edges=edges,
-        envelope=root.envelope,
+        envelope=envelope,
         reconciliation=reconcile(root.envelope, records, root_actor, models.get(root_actor, set())),
         tool_counts=tool_counts,
         diagnostics=diagnostics,

@@ -19,6 +19,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import uuid
@@ -29,6 +30,7 @@ from unittest import mock
 from evals.benchmark import (
     artifact,
     claude_live,
+    claude_usage,
     cli,
     executor,
     manifest as manifest_module,
@@ -826,3 +828,125 @@ class PlumbingModeTest(unittest.TestCase):
             cli.execute = real_execute  # type: ignore[assignment]
         self.assertTrue(captured[0].publishable)
         self.assertIsNotNone(captured[0].attestation)
+
+
+class StreamEnvelopeTest(LiveCase):
+    """The envelope is on stdout, and the 2026-09-07 smoke is why we know.
+
+    Four attempts wrote the right answer, the verifier never saw them, and every
+    one ended `interrupted`: the settlement was waiting for a `result` row that
+    a real Claude transcript never carries. Capturing stdout is the fix, and
+    these cases are what stop it being discarded again.
+    """
+
+    def transcript_rows(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "model": "claude-opus-5",
+                    "usage": {
+                        "input_tokens": 12,
+                        "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": 300,
+                        "output_tokens": 40,
+                    },
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                },
+                "requestId": "req_1",
+            }
+        ]
+
+    def envelope_row(self) -> dict[str, Any]:
+        # The shape a live `--output-format stream-json` run prints last.
+        return {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "num_turns": 2,
+            "total_cost_usd": 0.21,
+            "result": "done",
+            "usage": {
+                "input_tokens": 12,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 300,
+                "output_tokens": 40,
+            },
+        }
+
+    def write(self, sessions: Path, session_id: str, *, envelope_in_transcript: bool) -> Path:
+        sessions.mkdir(parents=True, exist_ok=True)
+        rows = self.transcript_rows()
+        if envelope_in_transcript:
+            rows.append(self.envelope_row())
+        (sessions / f"{session_id}.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+        )
+        return sessions / f"{session_id}.jsonl"
+
+    def stream_file(self, directory: Path) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        stream = directory / "stream.jsonl"
+        # A real stream repeats the assistant rows before its envelope.
+        rows = self.transcript_rows() + [self.envelope_row()]
+        stream.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+        return stream
+
+    def test_a_transcript_without_an_envelope_settles_from_the_stream(self) -> None:
+        base = Path(tempfile.mkdtemp(prefix="bench1-stream-"))
+        sessions = base / "sessions"
+        self.write(sessions, "s1", envelope_in_transcript=False)
+        stream = self.stream_file(base / "output")
+
+        without, unresolved = runner.scan(sessions, "s1")
+        self.assertIsNone(without, "the transcript alone must not settle a live root")
+        self.assertEqual(unresolved, [""])
+
+        with_stream, unresolved = runner.scan(sessions, "s1", stream)
+        self.assertIsNotNone(with_stream, "the captured stream settles the root")
+        self.assertEqual(unresolved, [])
+
+    def test_the_stream_supplies_the_envelope_without_counting_its_rows_twice(self) -> None:
+        base = Path(tempfile.mkdtemp(prefix="bench1-stream-"))
+        sessions = base / "sessions"
+        self.write(sessions, "s1", envelope_in_transcript=False)
+        stream = self.stream_file(base / "output")
+
+        session = claude_usage.parse_session_dir(sessions, "s1", "trial-1", stream)
+        self.assertIsNotNone(session.envelope)
+        self.assertEqual(session.envelope.num_turns, 2)
+        # One request happened. The stream repeats it, and the total must not.
+        self.assertEqual(len(session.records), 1)
+        self.assertEqual(session.records[0].input_total + session.records[0].output_total, 352)
+
+    def test_a_transcript_that_carries_its_own_envelope_keeps_it(self) -> None:
+        # The fake executors write theirs into the transcript, so the stream is
+        # a second source and never a replacement.
+        base = Path(tempfile.mkdtemp(prefix="bench1-stream-"))
+        sessions = base / "sessions"
+        self.write(sessions, "s1", envelope_in_transcript=True)
+        session = claude_usage.parse_session_dir(sessions, "s1", "trial-1", None)
+        self.assertIsNotNone(session.envelope)
+
+    def test_a_missing_stream_is_not_an_error(self) -> None:
+        base = Path(tempfile.mkdtemp(prefix="bench1-stream-"))
+        sessions = base / "sessions"
+        self.write(sessions, "s1", envelope_in_transcript=True)
+        self.assertIsNone(claude_usage.stream_envelope(base / "output" / "stream.jsonl", "trial-1"))
+
+    def test_the_spawn_keeps_stdout_rather_than_discarding_it(self) -> None:
+        # The regression in one line: a run whose stdout went to /dev/null had
+        # no envelope to settle from, whatever the agent actually did.
+        fixture = cli.SMOKE_MANIFEST.parent / "repo"
+        roots = artifact.create(Path(tempfile.mkdtemp(prefix="bench1-spawn-")), "t1", fixture)
+        launch = executor.Launch(
+            argv=[sys.executable, "-c", 'print(\'{"type":"result","subtype":"success","is_error":false}\')'],
+            cwd=roots.repo,
+            root_session_id="s1",
+        )
+        runner.process_spawn(launch, roots, timeout_s=30)
+        self.assertTrue(roots.stream.is_file(), "the harness stream must be captured")
+        self.assertIn('"type": "result"', roots.stream.read_text(encoding="utf-8").replace('"type":"result"', '"type": "result"'))

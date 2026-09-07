@@ -88,6 +88,19 @@ class TrialRoots:
     stopped: bool = False
 
     @property
+    def stream(self) -> Path:
+        """The harness's own structured output, captured verbatim.
+
+        Claude Code writes its conversation to a transcript but emits the final
+        `result` envelope, the one carrying `is_error`, `num_turns` and the
+        totals a run is reconciled against, only on stdout. A live smoke found
+        that out: the work was done and every attempt still ended `interrupted`,
+        because the settlement waited for a terminal row the transcript never
+        holds. Keeping stdout is what makes the envelope readable.
+        """
+        return self.output / "stream.jsonl"
+
+    @property
     def run_dir(self) -> Path:
         """`<run>/trials/<trial_id>` is the layout `create` builds, so the run
         directory and the trial id are already on hand here. Reading them back
