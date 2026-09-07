@@ -1,8 +1,7 @@
 """The offline suite's own wall-clock budget.
 
-Bench-1 runs inside an existing required CI lane, so "under one additional
-minute" is a property of this package rather than of the machine that happens
-to run it. The case runs the whole self-test as a child process and times it;
+The budget is a property of this package rather than of the machine that
+happens to run it, so the suite times itself instead of trusting a runner. The case runs the whole self-test as a child process and times it;
 the child sets `BENCH1_SELFTEST_CHILD` so it does not run this case again.
 """
 

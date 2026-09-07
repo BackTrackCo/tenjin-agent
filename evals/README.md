@@ -18,6 +18,7 @@ python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake   # manifest to r
 python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake     # re-run the hidden verifiers
 python3 -m evals.benchmark.cli reduce --run /tmp/bench1-fake     # task-equal aggregates
 python3 -m evals.benchmark.cli report --run /tmp/bench1-fake     # the publishable projection
+python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake     # read that report as text
 python3 evals/benchmark/selftest.py                              # what .github/workflows/benchmark.yml runs
 ```
 

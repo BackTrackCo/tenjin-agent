@@ -105,7 +105,16 @@ def main(argv: list[str] | None = None) -> int:
     fake.add_argument("--out", required=True, type=Path)
     for name in ("verify", "reduce", "report"):
         commands.add_parser(name).add_argument("--run", required=True, type=Path)
+    # `summary` prints a finished report as text instead of JSON. It reads the
+    # published projection and computes nothing, so a log can show what a run
+    # did without a reader piping JSON through another tool.
+    summary = commands.add_parser("summary", help="read a finished run's report.json as text")
+    summary.add_argument("--run", required=True, type=Path)
     args = parser.parse_args(argv)
+    if args.command == "summary":
+        published = json.loads((args.run / "report.json").read_text(encoding="utf-8"))
+        sys.stdout.write(report_module.render(published) + "\n")
+        return 0
     if args.command == "fake-run":
         payload = fake_run(args.out)
     elif args.command == "verify":

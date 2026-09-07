@@ -62,6 +62,13 @@ run rather than skipping the step, because a skipped gate reads exactly like a p
 `selftest.py` enforces a 60-second wall-clock budget on itself and exits non-zero when it runs
 long, so a suite that gets slow fails in its own lane instead of quietly getting slower.
 
+The lane is built to be read, not only to go green. The suite runs one module at a time under
+`--verbosity 2 --groups`, so each module is its own collapsible section naming every case it
+ran, and `--summary` writes a per-module table of counts, times, and subjects to the run page.
+A second step then drives the fake manifest to a published report, re-runs the hidden verifiers
+over the finished run, and prints `cli.py summary`, so the log shows what the benchmark produced
+and not merely that its tests passed. Every number there is synthetic.
+
 ## The fake command
 
 From the repository root:
@@ -71,6 +78,7 @@ python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
 python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake
 python3 -m evals.benchmark.cli reduce --run /tmp/bench1-fake
 python3 -m evals.benchmark.cli report --run /tmp/bench1-fake
+python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake
 python3 evals/benchmark/selftest.py
 ```
 
@@ -83,6 +91,11 @@ hashes is skipped. No model, no network, no spend.
 
 `verify` re-runs each accepted attempt's hidden verifier over its retained worktree and lists
 the trials where a fresh verdict disagrees with the recorded one.
+
+`summary` reads a finished `report.json` as text: every arm with its pass rate and tokens, the
+token ratio against the baseline with its interval, and the attempt outcomes. It computes
+nothing. It prints every arm rather than the best one, because an arm shown alone is a claim
+rather than a result.
 
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only; `report.guard` refuses anything else.

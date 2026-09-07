@@ -156,3 +156,58 @@ def project(
     }
     guard(report)
     return report
+
+
+def plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def render(report: dict[str, Any]) -> str:
+    """A finished report as text, for a log or a step summary.
+
+    The projection is the artifact; this is only a reading of it. It adds no
+    number the reducer did not compute, and it prints every arm rather than the
+    winner, because a reader who sees one arm cannot tell a result from a claim.
+    """
+    baseline = report["baseline"]
+    labels = {arm_id: f"{arm_id} (baseline)" if arm_id == baseline else arm_id for arm_id in report["arms"]}
+    width = max([len(label) for label in labels.values()] + [len("arm")])
+    lines = [
+        f"benchmark {report['benchmark_version']}, schema {report['schema']}",
+        f"manifest {report['manifest_hash'][:12]}  schedule {report['schedule_hash'][:12]}  "
+        f"seed {report['seed']}  repeats {report['repeats']}",
+        "",
+        f"{'arm'.ljust(width)} {'attempts':>8s} {'passes':>7s} {'pass rate':>9s} {'tokens':>10s} "
+        f"{'per attempt':>12s} {'accounting':>12s}",
+    ]
+    for arm_id, arm in sorted(report["arms"].items()):
+        lines.append(
+            f"{labels[arm_id].ljust(width)} {arm['attempts']:8d} {arm['outcomes']['pass']:7d} "
+            f"{arm['pass_rate']:9.3f} {arm['tokens']:10d} {arm['tokens_per_attempt']:12.1f} "
+            f"{arm['accounting']:>12s}"
+        )
+    lines.append("")
+    if report["comparisons"]:
+        lines.append(f"token ratio versus {baseline}, 1.0 means no change, lower means fewer tokens:")
+        for arm_id, comparison in sorted(report["comparisons"].items()):
+            ratio = comparison["token_ratio"]
+            if ratio is None:
+                lines.append(f"  {arm_id}: none ({comparison['token_ratio_reason']})")
+                continue
+            interval = comparison["interval"]
+            eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
+            lines.append(
+                f"  {arm_id}: {ratio:.3f}  interval [{interval['low']:.3f}, {interval['high']:.3f}] "
+                f"at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}, {eligible}"
+            )
+    else:
+        lines.append(f"no comparison: {baseline} is the only arm with a result")
+    outcomes: dict[str, int] = {}
+    for trial in report["trials"]:
+        outcomes[trial["outcome"]] = outcomes.get(trial["outcome"], 0) + 1
+    lines += [
+        "",
+        f"{len(report['trials'])} attempts: " + ", ".join(f"{count} {name}" for name, count in sorted(outcomes.items())),
+        f"{len(report['invalid'])} invalid, {plural(len(report['excluded']), 'record file')} excluded",
+    ]
+    return "\n".join(lines)
