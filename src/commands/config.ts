@@ -26,30 +26,21 @@ import {
   parseLoopValue,
   parsePublicFallbackFlag,
   parseAckServerWarnings,
-  parseAgentDispatchHookModeFlag,
-  parseCaptureModeFlag,
-  parsePushModeFlag,
-  parseSessionPrimerFlag,
   parseUpdateModeFlag,
-  parseWebSearchHookModeFlag,
   resolveSettings,
 } from '../lib/config';
 import type {
-  AgentDispatchMode,
-  CaptureMode,
   EffectiveSettings,
+  HookArm,
   HooksConfigKey,
   PartialConfig,
   Provenance,
   PublishConfigKey,
   PublishMode,
-  PushMode,
   ScalarConfigKey,
-  SessionPrimerMode,
   UpdateConfigKey,
   LoopConfigKey,
   TeamConfigKey,
-  WebSearchMode,
 } from '../lib/config';
 import {
   detectHarnesses,
@@ -140,16 +131,15 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
   'publish.defaultPrice': 'price used when none is given',
   'publish.ackServerWarnings':
     "whether a yes covers the MARKETPLACE scan's warn findings: mode=only the ones an earlier render already showed you (full-auto still acks), on=any of them, off=never",
-  'hooks.webSearch':
-    'harness WebSearch hook (before WebSearch): auto=ask Tenjin first, remind=static reminder, off=inert',
-  'hooks.agentDispatch':
-    'harness subagent-dispatch hook (before Agent/Task — most sensitive payload): auto=ask Tenjin first, remind=static reminder, off=inert',
-  'hooks.sessionPrimer':
-    'one-paragraph search-first primer at session start: on=print it, off=print nothing',
-  'hooks.push':
-    'the loop arms that answer a prompt, a failure, a subagent dispatch or a tool call with what this machine and the shelves already know: on=they run, off=they are inert',
-  'hooks.capture':
-    'the turn-end ask to publish what this turn settled, spoken to you and to each subagent at its own end: on=asked once each, off=silent',
+  'hooks.prompt': 'answer the prompt you just typed with what the shelves already know',
+  'hooks.web-search': 'ask Tenjin before the agent runs a WebSearch',
+  'hooks.web-fetch': 'ask Tenjin before the agent fetches a page',
+  'hooks.subagent':
+    'ask Tenjin with a subagent work order (the most sensitive payload any hook sees) and hand the answer to the child at its start',
+  'hooks.failure': 'answer a failing command with the fix this machine or a shelf already has',
+  'hooks.publish':
+    'the turn-end ask to publish what this turn settled, spoken to you and to each subagent at its own end',
+  'hooks.primer': 'one-paragraph search-first primer at session start',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
   'loop.human_wait_ms':
@@ -571,47 +561,26 @@ function allowlistLines(sync: AllowlistSync): string[] {
 }
 
 /**
- * `config set hooks.webSearch` / `hooks.agentDispatch`. Merged into the nested hooks
- * block through the same locked read-modify-write every other set uses, so a subkey a
- * newer CLI wrote survives. The daemon re-stats this file per fire, so every value
- * takes effect on the next prompt with no re-install and no process to restart.
+ * `config set hooks.<arm>`. Merged into the nested hooks block through the same
+ * locked read-modify-write every other set uses, so a subkey a newer CLI wrote
+ * survives. The daemon re-stats this file per fire, so every value takes effect
+ * on the next prompt with no re-install and no process to restart.
  */
 async function setHooksKey(
   key: HooksConfigKey,
   value: string,
   ctx: CommandContext,
 ): Promise<CommandResult> {
-  const subkey =
-    key === 'hooks.webSearch'
-      ? 'webSearch'
-      : key === 'hooks.agentDispatch'
-        ? 'agentDispatch'
-        : key === 'hooks.sessionPrimer'
-          ? 'sessionPrimer'
-          : key === 'hooks.push'
-            ? 'push'
-            : 'capture';
-  const parsed: WebSearchMode | AgentDispatchMode | SessionPrimerMode | PushMode | CaptureMode =
-    key === 'hooks.webSearch'
-      ? parseWebSearchHookModeFlag(value, key)
-      : key === 'hooks.agentDispatch'
-        ? parseAgentDispatchHookModeFlag(value, key)
-        : key === 'hooks.sessionPrimer'
-          ? parseSessionPrimerFlag(value, key)
-          : key === 'hooks.push'
-            ? parsePushModeFlag(value, key)
-            : parseCaptureModeFlag(value, key);
+  const arm = key.slice('hooks.'.length) as HookArm;
+  const parsed = parseBoolean(value);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
-    hooks: { ...existing.hooks, [subkey]: parsed },
+    hooks: { ...existing.hooks, [arm]: parsed },
   }));
   const entry: RenderedSetting = { value: parsed, source: 'file' };
   // NO STALENESS WARNING, and there is nothing left to warn about: every hooks
   // key is read out of `config.json` by the daemon on each fire, so a value set
-  // here takes effect on the next prompt with nothing to re-install. The old
-  // notes here (an installed Stop hook too old to honour `hooks.capture`, a
-  // `hooks.push` that needed seven settings entries before it did anything)
-  // described generated scripts that no longer exist.
+  // here takes effect on the next prompt with nothing to re-install.
   return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
 }
 
@@ -698,34 +667,6 @@ export async function persistBazaarPay(dir: string, enabled: boolean): Promise<v
   await persist(dir, (existing) => ({ ...existing, bazaarPay: enabled }));
 }
 
-export async function persistWebSearchHookMode(dir: string, mode: WebSearchMode): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    hooks: { ...existing.hooks, webSearch: mode },
-  }));
-}
-
-export async function persistAgentDispatchHookMode(
-  dir: string,
-  mode: AgentDispatchMode,
-): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    hooks: { ...existing.hooks, agentDispatch: mode },
-  }));
-}
-
-/**
- * Persist `hooks.push` through the same locked read-modify-write every `config
- * set` uses. Used by `tenjin push on|off`, mirroring `persistPublishMode`.
- */
-export async function persistPushMode(dir: string, mode: PushMode): Promise<void> {
-  await persist(dir, (existing) => ({
-    ...existing,
-    hooks: { ...existing.hooks, push: mode },
-  }));
-}
-
 /**
  * Record the explicit `--harness` set `install` was given, through the same locked
  * merge-write. It REPLACES the previous record rather than unioning with it: the last
@@ -808,19 +749,10 @@ function renderPublishSetting(key: PublishConfigKey, settings: EffectiveSettings
   };
 }
 
-/** The list/get shape for a hooks key: a plain enum string whichever it is. */
+/** The list/get shape for a hooks key: the arm's boolean and where it came from. */
 function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): RenderedSetting {
-  const resolved =
-    key === 'hooks.webSearch'
-      ? settings.hooksWebSearch
-      : key === 'hooks.agentDispatch'
-        ? settings.hooksAgentDispatch
-        : key === 'hooks.sessionPrimer'
-          ? settings.hooksSessionPrimer
-          : key === 'hooks.push'
-            ? settings.hooksPush
-            : settings.hooksCapture;
-  return { value: resolved.value, source: resolved.source };
+  const { value, source } = settings.hooks[key.slice('hooks.'.length) as HookArm];
+  return { value, source };
 }
 
 function renderValue(key: ScalarConfigKey, stored: string | string[] | boolean): RenderedValue {
@@ -884,9 +816,8 @@ function parseRegistryList(value: string): string[] {
 }
 
 // on/off ride along with true/false because that is how the CLI's own refusal
-// texts coach these keys (`tenjin config set bazaarPay on`), and the hooks keys
-// already speak on/off; a coached command that exits USAGE teaches an agent the
-// remediation is broken.
+// texts coach these keys (`tenjin config set bazaarPay on`); a coached command
+// that exits USAGE teaches an agent the remediation is broken.
 function parseBoolean(value: string): boolean {
   if (value === 'true' || value === 'on') return true;
   if (value === 'false' || value === 'off') return false;

@@ -11,7 +11,7 @@ import {
   persistPublishMode,
   persistFreeVerbsDeclined,
 } from './config';
-import { LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
+import { HOOK_ARMS, LOOP_CONFIG_KEYS, RawConfigSchema } from '../lib/config';
 import { CliError } from '../lib/errors';
 import { fileURLToPath } from 'node:url';
 import { resolveSkillsSource } from '../lib/skills-source';
@@ -94,11 +94,9 @@ describe('runConfigList', () => {
       value: { atomic: '100000', usd: '0.1' },
       source: 'default',
     });
-    expect(d['hooks.webSearch']).toEqual({ value: 'auto', source: 'default' });
-    expect(d['hooks.agentDispatch']).toEqual({ value: 'auto', source: 'default' });
-    expect(d['hooks.sessionPrimer']).toEqual({ value: 'on', source: 'default' });
-    expect(d['hooks.push']).toEqual({ value: 'on', source: 'default' });
-    expect(d['hooks.capture']).toEqual({ value: 'on', source: 'default' });
+    for (const arm of HOOK_ARMS) {
+      expect(d[`hooks.${arm}`]).toEqual({ value: true, source: 'default' });
+    }
     expect(d['update.mode']).toEqual({ value: 'nudge', source: 'default' });
     expect(d.publicShelfUrl).toEqual({ value: 'https://tenjin.blog', source: 'default' });
     // REDACTED even here, on a fresh dir where the value is empty: the rendered
@@ -106,10 +104,9 @@ describe('runConfigList', () => {
     expect(d.shelfBypassSecret).toEqual({ value: 'unset', source: 'default' });
     expect(d['publish.ackServerWarnings']).toEqual({ value: 'mode', source: 'default' });
     // 12 scalar keys (incl. bazaarPay/bazaarRegistries and the two shelf keys)
-    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 5 hooks.*
-    // (webSearch, agentDispatch, sessionPrimer, push, capture)
-    // + 1 update.mode + 4 loop.* + 1 team.publicFallback.
-    expect(humanLines).toHaveLength(26);
+    // + 3 publish.* (mode, defaultPrice, ackServerWarnings) + 7 hooks.* (one
+    // per arm) + 1 update.mode + 4 loop.* + 1 team.publicFallback.
+    expect(humanLines).toHaveLength(28);
   });
 
   it('sendMaxAmount round-trips: unset until set, decimal USD in, Money out, 0 and none valid', async () => {
@@ -659,7 +656,7 @@ describe('update.mode', () => {
   it('survives a write to another block', async () => {
     const ctx = makeCtx();
     await runConfigSet({ key: 'update.mode', value: 'off' }, ctx);
-    await runConfigSet({ key: 'hooks.sessionPrimer', value: 'off' }, ctx);
+    await runConfigSet({ key: 'hooks.primer', value: 'off' }, ctx);
     expect(await runConfigGet({ key: 'update.mode' }, ctx)).toMatchObject({
       data: { value: 'off', source: 'file' },
     });
@@ -1016,48 +1013,33 @@ describe('publish.mode keeps the harness allowlist in step', () => {
 });
 
 describe('the hooks block is set through config, which stays human-gated', () => {
-  it('round-trips every hook key and rejects a value outside the enum', async () => {
+  it('round-trips every arm and rejects a value that is not a boolean', async () => {
     const ctx = makeCtx();
-    for (const [key, value] of [
-      ['hooks.webSearch', 'remind'],
-      ['hooks.agentDispatch', 'off'],
-      ['hooks.sessionPrimer', 'off'],
-      ['hooks.push', 'off'],
-      ['hooks.capture', 'off'],
-    ] as const) {
-      const set = await runConfigSet({ key, value }, ctx);
-      expect(set.data).toMatchObject({ key, value, source: 'file' });
+    for (const arm of HOOK_ARMS) {
+      const key = `hooks.${arm}` as const;
+      const set = await runConfigSet({ key, value: 'off' }, ctx);
+      expect(set.data).toMatchObject({ key, value: false, source: 'file' });
       expect(await runConfigGet({ key }, ctx)).toMatchObject({
-        data: { key, value, source: 'file' },
+        data: { key, value: false, source: 'file' },
       });
     }
-    // Every subkey survives the others' writes, so silencing one hook cannot
+    // Every arm survives the others' writes, so silencing one hook cannot
     // silently reset another.
-    expect(await runConfigGet({ key: 'hooks.webSearch' }, ctx)).toMatchObject({
-      data: { value: 'remind' },
-    });
-    expect(await runConfigGet({ key: 'hooks.push' }, ctx)).toMatchObject({
-      data: { value: 'off' },
-    });
-    expect(await runConfigGet({ key: 'hooks.capture' }, ctx)).toMatchObject({
-      data: { value: 'off' },
-    });
-
-    expect(await runConfigGet({ key: 'hooks.agentDispatch' }, ctx)).toMatchObject({
-      data: { value: 'off' },
+    for (const arm of HOOK_ARMS) {
+      expect(await runConfigGet({ key: `hooks.${arm}` }, ctx)).toMatchObject({
+        data: { value: false },
+      });
+    }
+    // `true`/`false` and `on`/`off` are one parse rule, the same one every
+    // boolean key in this table uses.
+    expect(await runConfigSet({ key: 'hooks.prompt', value: 'true' }, ctx)).toMatchObject({
+      data: { value: true },
     });
 
-    const dispatch = await caught(() =>
-      runConfigSet({ key: 'hooks.agentDispatch', value: 'sometimes' }, ctx),
-    );
-    expect(dispatch.code).toBe('USAGE');
-    expect(dispatch.fix).toContain('"off"');
-
-    const primer = await caught(() =>
-      runConfigSet({ key: 'hooks.sessionPrimer', value: 'sometimes' }, ctx),
-    );
-    expect(primer.code).toBe('USAGE');
-    expect(primer.fix).toContain('"off"');
+    const bad = await caught(() => runConfigSet({ key: 'hooks.publish', value: 'sometimes' }, ctx));
+    expect(bad.code).toBe('USAGE');
+    expect(bad.fix).toContain('"on"');
+    expect(bad.fix).toContain('"off"');
 
     // A key this table does not know is a usage error on both verbs, never a
     // silently accepted alias — the raw hooks block passes unknown fields
@@ -1067,43 +1049,26 @@ describe('the hooks block is set through config, which stays human-gated', () =>
       'USAGE',
     );
     expect((await caught(() => runConfigGet({ key: unknown }, ctx))).code).toBe('USAGE');
-
-    const badPush = await caught(() =>
-      runConfigSet({ key: 'hooks.push', value: 'sometimes' }, ctx),
-    );
-    expect(badPush.code).toBe('USAGE');
-    expect(badPush.fix).toContain('"on"');
-    expect(badPush.fix).toContain('"off"');
-
-    const badCapture = await caught(() =>
-      runConfigSet({ key: 'hooks.capture', value: 'sometimes' }, ctx),
-    );
-    expect(badCapture.code).toBe('USAGE');
-    expect(badCapture.fix).toContain('"on"');
-    expect(badCapture.fix).toContain('"off"');
   });
 
   /**
    * NO STALENESS OR WIRING LINE ON ANY HOOKS KEY, and that is the change: every
    * one of them is read out of config.json by the daemon on each fire, so a set
    * takes effect on the next prompt. The old notes here described generated
-   * scripts (a Stop hook too old to read `hooks.capture`) and a `push on` that
+   * scripts (a Stop hook too old to read the ask's key) and a `push on` that
    * had to write settings entries of its own. Neither exists.
    */
   it('stores a hooks key and says one thing about it, whatever the key', async () => {
     const ctx = makeCtx();
-    for (const [key, value] of [
-      ['hooks.push', 'off'],
-      ['hooks.capture', 'off'],
-      ['hooks.sessionPrimer', 'off'],
-    ] as const) {
-      const set = await runConfigSet({ key, value }, ctx);
-      expect(set.data, key).toMatchObject({ key, value, source: 'file' });
+    for (const arm of HOOK_ARMS) {
+      const key = `hooks.${arm}` as const;
+      const set = await runConfigSet({ key, value: 'off' }, ctx);
+      expect(set.data, key).toMatchObject({ key, value: false, source: 'file' });
       expect(set.data, key).not.toHaveProperty('hookScriptStale');
       expect(set.data, key).not.toHaveProperty('hookEntriesNotWired');
       expect(set.humanLines, key).toHaveLength(1);
       expect(await runConfigGet({ key }, ctx), key).toMatchObject({
-        data: { value, source: 'file' },
+        data: { value: false, source: 'file' },
       });
     }
   });

@@ -286,7 +286,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const cfg = ctx.deps.config();
   const { db, clock } = ctx.deps;
   const { actor, input } = ctx;
-  if (cfg.hooks.capture === 'off') return null;
+  if (!cfg.hooks.publish) return null;
   const askedAt = markAt(db, actor, ASKED);
   const queued = audience === 'lead' ? childFindings(db, actor.session) : [];
   if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt)) return null;

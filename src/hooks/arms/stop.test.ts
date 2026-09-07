@@ -35,7 +35,7 @@ describe('the stop arm', () => {
       db,
       arm: stopArm,
       input: stop(),
-      config: kernelConfig({ push: 'on', capture: 'off' }),
+      config: kernelConfig({ publish: false }),
     });
     expect(await stopArm.after?.(ctx, { reason: 'no-question' }, null)).toBeNull();
     expect(getMark(db, LEAD, 'capture:asked')).toBeNull();
@@ -47,7 +47,7 @@ describe('the stop arm', () => {
       db,
       arm: stopArm,
       input: stop({ stopFuse: true, lastMessage: '```' + FINDING_TAG + '\nunasked\n```' }),
-      config: kernelConfig({ push: 'on', capture: 'on' }),
+      config: kernelConfig(),
     });
     expect(await stopArm.after?.(ctx, { reason: 'no-question' }, null)).toBeNull();
     expect(factsWithPrefix(db, 'finding:')).toEqual([]);

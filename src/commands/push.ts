@@ -1,7 +1,5 @@
 import { homedir } from 'node:os';
 import { readFile } from 'node:fs/promises';
-import { loadRawConfig, resolveSettings } from '../lib/config';
-import { persistPushMode } from './config';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { CliError } from '../lib/errors';
 import { hasClaudeHooks, hookBundlesPresent } from '../lib/harness-hooks';
@@ -30,21 +28,15 @@ import type { ShelfBypass } from '../lib/http';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin push on|off|status` (docs/command-reference.md#push-experimental): the runtime toggle for the push
- * experiment, the sidecar half of the marketplace that surfaces a finding beside
- * a failing command, a stuck edit loop, or a subagent dispatch, without being
+ * `tenjin push status|grade` (docs/command-reference.md#push-experimental): the
+ * report on the sidecar half of the marketplace, which surfaces a finding beside
+ * a failing command, a stuck edit loop, or a subagent dispatch without being
  * asked for it first.
  *
- * BOTH ARE A CONFIG WRITE AND NOTHING ELSE. They set the same `hooks.push` key
- * `tenjin config set` does, through the same locked read-modify-write
- * (`persistPushMode` in commands/config.ts). There is no wiring step any more:
- * `tenjin install` registers the whole entry set once, and the daemon re-stats
- * `config.json` per fire, so either value takes effect on the next prompt with
- * nothing to install and no process to restart.
- *
- * `status` and `grade` read `loop.db` directly (`lib/loop-db.ts`): the daemon
- * writes one `fires` row per fire and one `legs` row per shelf it asked, and
- * those two tables are the whole record.
+ * Both read `loop.db` directly (`lib/loop-db.ts`): the daemon writes one `fires`
+ * row per fire and one `legs` row per shelf it asked, and those two tables are
+ * the whole record. Each arm is turned on and off by its own `hooks.<arm>` key,
+ * which the daemon re-reads per fire (`tenjin config set hooks.<arm> false`).
  */
 
 const LEDGER_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -53,41 +45,6 @@ const LEDGER_WINDOW_DAYS = 7;
 /** The prefix `fires.delivered` carries when the fire actually showed a piece;
  *  the rest of the value is the resource id, empty for a local pairing. */
 const INJECTED = 'inject:';
-
-/**
- * Turn the push arms on: persist `hooks.push=on` and stop.
- *
- * Typing this IS the operator's consent to the arms, but not to hook entries:
- * those were written by `tenjin install`, disclosed there, and are the same
- * eleven whatever this key says. An arm reads the key per fire, so a machine
- * that has never run `tenjin install` stores the preference and fires nothing —
- * which is what `tenjin doctor` reports.
- */
-export async function runPushOn(ctx: CommandContext): Promise<CommandResult> {
-  await persistPushMode(ctx.dataDir, 'on');
-  return {
-    data: { mode: 'on' },
-    humanLines: [
-      'hooks.push is on. The daemon re-reads this on its next fire, so it takes effect on your next prompt.',
-      'Undo anytime: tenjin push off',
-    ],
-  };
-}
-
-/**
- * Turn the push arms off: persist `hooks.push=off` and stop. Nothing is
- * unwired — the arms read this key per fire and plan nothing when it is not
- * `on` — so this touches neither settings.json nor the daemon.
- */
-export async function runPushOff(ctx: CommandContext): Promise<CommandResult> {
-  await persistPushMode(ctx.dataDir, 'off');
-  return {
-    data: { mode: 'off' },
-    humanLines: [
-      'hooks.push is off. The hook entries stay registered and the arms plan nothing from your next prompt on — no re-install, no unwiring step.',
-    ],
-  };
-}
 
 export interface PushStatusDeps {
   /** Seam for "is the loop daemon installed"; defaults to a real stat of hooksDir. */
@@ -268,11 +225,6 @@ export async function runPushStatus(
   ctx: CommandContext,
   deps: PushStatusDeps = {},
 ): Promise<CommandResult> {
-  const settings = resolveSettings({
-    config: await loadRawConfig(ctx.dataDir),
-    flags: { baseUrl: ctx.flags.baseUrl },
-    env: process.env,
-  });
   // TWO HALVES, and either alone reports an armed sidecar that does nothing: a
   // daemon bundle nobody registered entries for, or entries pointing at a hooks
   // dir with no bundle in it (a half-finished uninstall).
@@ -280,8 +232,6 @@ export async function runPushStatus(
   const registered = await hasClaudeHooks(deps.homeDir ?? homedir(), ctx.dataDir);
   const ledger = (deps.ledgerTallies ?? readLedgerTallies)(ctx.dataDir, (deps.now ?? Date.now)());
   const data = {
-    mode: settings.hooksPush.value,
-    captureMode: settings.hooksCapture.value,
     daemonInstalled: bundles,
     hooksRegistered: registered,
     ledger,
@@ -341,20 +291,13 @@ function configuredShelves(settings: ResolvedSettings): Shelf[] {
 }
 
 function renderStatusLines(data: {
-  mode: string;
-  captureMode: string;
   daemonInstalled: boolean;
   hooksRegistered: boolean;
   ledger: PushLedgerTallies;
   server: Record<string, LookupStats | null>;
 }): string[] {
-  const { mode, captureMode, daemonInstalled, hooksRegistered, ledger, server } = data;
-  const armed = daemonInstalled && hooksRegistered;
+  const { daemonInstalled, hooksRegistered, ledger, server } = data;
   const lines = [
-    // `tenjin install` is the verb that registers the entries and materializes
-    // the daemon; `tenjin push on` only sets the key the arms read.
-    `push: ${mode}${mode === 'on' && !armed ? ' (nothing is wired yet; run `tenjin install`)' : ''}`,
-    `capture: ${captureMode}`,
     `daemon installed: ${daemonInstalled ? 'yes' : 'no'}`,
     `hook entries registered: ${hooksRegistered ? 'yes' : 'no'}`,
     `ledger, last ${ledger.windowDays}d: ${ledger.rows} fire(s), ${ledger.delivered} delivered, ${ledger.candidates} finding(s)`,

@@ -31,17 +31,14 @@ import {
   loadRawConfig,
   PublishModeSchema,
   parsePublishModeFlag,
-  parseWebSearchHookModeFlag,
   resolveFreeVerbsDeclined,
 } from '../lib/config';
-import type { PublishMode, WebSearchMode } from '../lib/config';
+import type { PublishMode } from '../lib/config';
 import {
-  persistAgentDispatchHookMode,
   persistBazaarPay,
   persistFreeVerbsDeclined,
   persistInstallHarness,
   persistPublishMode,
-  persistWebSearchHookMode,
 } from './config';
 import { runWalletCreate } from './wallet';
 import { collectDoctorChecks } from './doctor';
@@ -86,8 +83,6 @@ const InstallInputSchema = z.object({
    * it (the publish-mode select says what an auto mode adds).
    */
   noAllowFreeVerbs: z.boolean().optional(),
-  /** The harness search-hook behavior to install (`--search-hooks auto|remind|off`). */
-  searchHooks: z.string().optional(),
   /**
    * `--bazaar-pay`: let `tenjin pay` pay Bazaar-listed non-Tenjin endpoints under
    * the spend policy, and place the skill that teaches the lane. Off unless asked
@@ -96,9 +91,8 @@ const InstallInputSchema = z.object({
   bazaarPay: z.boolean().optional(),
   /**
    * `--no-hooks`: register no hooks THIS RUN, changing nothing persistent. It is
-   * deliberately not the same as `--search-hooks off`, which is a durable
-   * statement about behavior and writes `hooks.webSearch: off` (and
-   * `hooks.agentDispatch: off`) to config.
+   * deliberately not the same as `tenjin config set hooks.<arm> false`, which is
+   * a durable statement about one arm's behavior.
    */
   noHooks: z.boolean().optional(),
   /**
@@ -364,7 +358,6 @@ async function runInstallRefresh(
   // set a real install would want, and whether that set was already declined.
   const rawConfig = await loadRawConfig(ctx.dataDir);
   const publishMode = rawConfig.publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
-  const mode = rawConfig.hooks?.webSearch ?? CONFIG_DEFAULTS.hooks.webSearch;
 
   // The skills pass IS the existing heal writer, not a second one. It already
   // rewrites only the CLI adapters a harness carries, shapes them by the
@@ -391,10 +384,9 @@ async function runInstallRefresh(
     ? await writeClaudeHooks({
         homeDir: home,
         dataDir: ctx.dataDir,
-        mode,
         ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
       })
-    : hooksSkipped('claude', home, ctx.dataDir, mode, 'declined');
+    : hooksSkipped('claude', home, ctx.dataDir, 'declined');
 
   // `pending` is exactly the set a real install WOULD add, which is exactly the
   // set this run must not. Reported so the operator can see what an explicit
@@ -557,10 +549,6 @@ async function installBody(
   // Validate the enum flags UP FRONT so a bad value fails before any wiring.
   const publishModeFlag =
     parsed.data.publishMode !== undefined ? parseModeFlag(parsed.data.publishMode) : undefined;
-  const searchHooksFlag =
-    parsed.data.searchHooks !== undefined
-      ? parseWebSearchHookModeFlag(parsed.data.searchHooks, '--search-hooks')
-      : undefined;
   const env = deps.env ?? process.env;
   const home = deps.homeDir ?? homedir();
   // An empty or relative HOME (sudo/docker env_reset, systemd units) would make
@@ -640,7 +628,7 @@ async function installBody(
     }),
   );
   const hooks = await underDataDir(ctx.dataDir, () =>
-    resolveHooks({ plans, home, ctx, deps, flag: searchHooksFlag, noHooks, dryRun }),
+    resolveHooks({ plans, home, ctx, deps, noHooks, dryRun }),
   );
 
   // On BOTH paths: the loop this command sets up needs a key, so a headless run
@@ -1333,57 +1321,37 @@ async function resolvePermissions(args: {
 // --- Search hooks -----------------------------------------------------------------
 
 /**
- * Settle the harness hooks. A flag settles the mode; every other run installs
- * `auto`, which is the shipped default and what the arms would read anyway.
- *
- * The mode is PERSISTED as BOTH `hooks.webSearch` and `hooks.agentDispatch`
- * (disjoint keys, both `auto` by default). One flag sets both for the one-step
- * install; `tenjin config set hooks.webSearch` or `hooks.agentDispatch` splits
- * them later without re-installing. A `--dry-run` persists nothing, like the
- * publish mode.
+ * Settle the harness hooks: every run installs the whole entry set, and writes
+ * no hook key. The seven `hooks.*` arms are on by default and each is one
+ * `tenjin config set hooks.<arm> false` away, read out of config.json per fire,
+ * so there is nothing for install to ask or persist here.
  */
 async function resolveHooks(args: {
   plans: HarnessPlan[];
   home: string;
   ctx: CommandContext;
   deps: InstallDeps;
-  flag: WebSearchMode | undefined;
   noHooks: boolean;
   dryRun: boolean;
 }): Promise<HooksResult> {
-  const { plans, home, ctx, deps, flag, noHooks, dryRun } = args;
+  const { plans, home, ctx, deps, noHooks, dryRun } = args;
   const dataDir = ctx.dataDir;
-  const mode = flag ?? DEFAULT_HOOK_MODE;
 
   if (!plans.some((p) => p.harness === 'claude')) {
     const harness = plans[0]?.harness ?? 'shared';
-    return hooksSkipped(harness, home, dataDir, mode, 'harness-not-claude');
+    return hooksSkipped(harness, home, dataDir, 'harness-not-claude');
   }
   // `--no-hooks` is a decision about THIS RUN and writes no config, so a later
-  // bare re-run wires them. That is the difference from `--search-hooks off`,
-  // which is a durable statement about behavior.
-  if (noHooks) return hooksSkipped('claude', home, dataDir, mode, 'declined');
-  if (dryRun) return hooksSkipped('claude', home, dataDir, mode, 'dry-run');
+  // bare re-run wires them.
+  if (noHooks) return hooksSkipped('claude', home, dataDir, 'declined');
+  if (dryRun) return hooksSkipped('claude', home, dataDir, 'dry-run');
 
-  await persistWebSearchHookMode(dataDir, mode);
-  await persistAgentDispatchHookMode(dataDir, mode);
-  // `off` is not a decision about the ENTRY SET. The eleven entries are permanent
-  // after the daemon cutover and every gate is in an arm, read out of config.json
-  // per fire: `hooks.webSearch off` silences the research arm on the next tool
-  // call, and the prompt, fetch and context arms — which answer to `hooks.push`,
-  // not to this key — keep firing. Registering nothing here left those three dead
-  // on a machine that had only ever said "no" to web search, and made turning it
-  // back on cost a re-install.
   return writeClaudeHooks({
     homeDir: home,
     dataDir,
-    mode,
     ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
   });
 }
-
-/** What an install without `--search-hooks` writes: the shipped default. */
-const DEFAULT_HOOK_MODE: WebSearchMode = CONFIG_DEFAULTS.hooks.webSearch;
 
 // --- Detection + planning --------------------------------------------------------
 

@@ -1,10 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runPushGrade, runPushOff, runPushOn, runPushStatus } from './push';
-import { loadRawConfig } from '../lib/config';
+import { runPushGrade, runPushStatus } from './push';
 import { claudeSettingsPath } from '../lib/harness-permissions';
 import { hooksDir, shimBundlePath } from '../lib/paths';
 import { openLoopDb, type LoopDb } from '../hooks/store';
@@ -139,43 +137,10 @@ function seedPairing(
   });
 }
 
-describe('runPushOn / runPushOff', () => {
-  /**
-   * A CONFIG WRITE AND NOTHING ELSE, which is the whole change. There is no
-   * wiring step: `tenjin install` registers the eleven entries once, and the
-   * daemon re-stats config.json per fire, so this key takes effect on the next
-   * prompt with nothing installed and no process restarted.
-   */
-  it('persists hooks.push and touches nothing else', async () => {
-    const on = await runPushOn(makeCtx());
-    expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
-    expect(on.data).toEqual({ mode: 'on' });
-    expect(on.humanLines?.join('\n')).toContain('next prompt');
-    // No settings file, no hooks dir: this verb writes neither.
-    expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
-    expect(existsSync(hooksDir(dir))).toBe(false);
-
-    const off = await runPushOff(makeCtx());
-    expect((await loadRawConfig(dir)).hooks?.push).toBe('off');
-    expect(off.data).toEqual({ mode: 'off' });
-    expect(off.humanLines?.join('\n')).toContain('no unwiring step');
-    expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
-  });
-
-  it('does not care what hooks.webSearch says: that key is the arms’ own', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'off' } }));
-    await runPushOn(makeCtx());
-    expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
-    expect((await loadRawConfig(dir)).hooks?.webSearch).toBe('off');
-  });
-});
-
 describe('runPushStatus', () => {
-  it('reports the on/on defaults, nothing-wired and an empty ledger on a fresh dir', async () => {
+  it('reports nothing-wired and an empty ledger on a fresh dir', async () => {
     const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(result.data).toEqual({
-      mode: 'on',
-      captureMode: 'on',
       daemonInstalled: false,
       hooksRegistered: false,
       ledger: {
@@ -203,25 +168,14 @@ describe('runPushStatus', () => {
    * writes both.
    */
   it('is only armed when the daemon is installed AND the entries are registered', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ hooks: { push: 'on', capture: 'on' } }),
-    );
     const bare = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
-    expect(bare.data).toMatchObject({
-      mode: 'on',
-      captureMode: 'on',
-      daemonInstalled: false,
-      hooksRegistered: false,
-    });
-    expect(bare.humanLines?.join('\n')).toContain('nothing is wired yet; run `tenjin install`');
+    expect(bare.data).toMatchObject({ daemonInstalled: false, hooksRegistered: false });
 
     // Bundle on disk, nothing registered: the half that would read healthy.
     await mkdir(hooksDir(dir), { recursive: true });
     await writeFile(shimBundlePath(dir), '// shim');
     const halfWired = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(halfWired.data).toMatchObject({ daemonInstalled: true, hooksRegistered: false });
-    expect(halfWired.humanLines?.join('\n')).toContain('nothing is wired yet');
 
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(
@@ -235,7 +189,6 @@ describe('runPushStatus', () => {
     const lines = wired.humanLines?.join('\n') ?? '';
     expect(lines).toContain('daemon installed: yes');
     expect(lines).toContain('hook entries registered: yes');
-    expect(lines).not.toContain('nothing is wired yet');
   });
 
   /**

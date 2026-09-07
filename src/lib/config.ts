@@ -68,106 +68,40 @@ const PublishConfigSchema = z.object({
 });
 
 /**
- * What the WebSearch arm does when the agent is about to search the web. `auto`
- * asks Tenjin first and mentions a tested answer when one exists, `remind` says
- * the marketplace is there without sending the query anywhere, `off` leaves the
- * arm inert.
+ * The seven hook arms, one boolean each. Named by what the arm does, with the
+ * harness event it answers beside it: `prompt` (UserPromptSubmit), `web-search`
+ * (WebSearch), `web-fetch` (WebFetch), `subagent` (the dispatch and the child's
+ * own start), `failure` (a failing command), `publish` (the turn-end ask on
+ * Stop and SubagentStop), `primer` (SessionStart). The context arm is
+ * bookkeeping for `failure` and `publish` and runs when either is on.
  */
-export const WebSearchModeSchema = z.enum(['auto', 'remind', 'off']);
-export type WebSearchMode = z.infer<typeof WebSearchModeSchema>;
-
-/**
- * What the subagent-dispatch hook does, on its own switch. Disjoint from
- * `hooks.webSearch`: both default `auto`, no `inherit`. The split exists because
- * a dispatch prompt is the most sensitive payload any hook sees: a fleet can keep
- * `webSearch auto` and still run dispatch as `remind` (a local nudge, nothing
- * sent) or `off`.
- */
-export const AgentDispatchModeSchema = z.enum(['auto', 'remind', 'off']);
-export type AgentDispatchMode = z.infer<typeof AgentDispatchModeSchema>;
-
-/** Validate a dispatch-hook mode at a command edge for the new disjoint key. */
-export function parseAgentDispatchHookModeFlag(value: string, flagName: string): AgentDispatchMode {
-  const parsed = AgentDispatchModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** Validate a web-search hook mode at a command edge. */
-export function parseWebSearchHookModeFlag(value: string, flagName: string): WebSearchMode {
-  const parsed = WebSearchModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** Whether the SessionStart hook prints its primer. Two values and no middle
- *  one: one paragraph either belongs at the top of a session or does not. */
-export const SessionPrimerModeSchema = z.enum(['on', 'off']);
-export type SessionPrimerMode = z.infer<typeof SessionPrimerModeSchema>;
-
-export function parseSessionPrimerFlag(value: string, flagName: string): SessionPrimerMode {
-  const parsed = SessionPrimerModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
-  });
-}
-
-/**
- * Whether the push arms speak (docs/command-reference.md#push-experimental).
- * `on` is what `tenjin push on` writes; `off` leaves the arms registered and
- * inert — every push arm reads this at run time before it spends a request, so
- * turning the experiment off never needs a re-install.
- */
-export const PushModeSchema = z.enum(['on', 'off']);
-export type PushMode = z.infer<typeof PushModeSchema>;
-
-export function parsePushModeFlag(value: string, flagName: string): PushMode {
-  const parsed = PushModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
-  });
-}
-
-/**
- * Whether the turn-end ask is spoken at all. `on` asks the agent and each of
- * its children once, as context beside the turn; `off` is silent everywhere.
- *
- * Two values and no middle one: the ask travels as `additionalContext` on both
- * stops, so there is no blocking variant left to choose between and nothing a
- * third setting could name.
- */
-export const CaptureModeSchema = z.enum(['on', 'off']);
-export type CaptureMode = z.infer<typeof CaptureModeSchema>;
-
-export function parseCaptureModeFlag(value: string, flagName: string): CaptureMode {
-  const parsed = CaptureModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on" or "off".',
-  });
-}
+export const HOOK_ARMS = [
+  'prompt',
+  'web-search',
+  'web-fetch',
+  'subagent',
+  'failure',
+  'publish',
+  'primer',
+] as const;
+export type HookArm = (typeof HOOK_ARMS)[number];
 
 /**
  * The harness-hook block. EVERY key is read by the daemon at run time, which is
  * what makes them runtime toggles rather than install-time choices:
- * `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
- * `hooks.capture off` or `hooks.sessionPrimer off` silences an arm immediately,
+ * `tenjin config set hooks.web-search false` silences that arm immediately,
  * with no re-install and nothing to unwire. The entries stay registered and the
  * arm no-ops, which is also what lets turning one back on be a single
  * `config set`.
  */
 const HooksConfigSchema = z.object({
-  webSearch: WebSearchModeSchema,
-  agentDispatch: AgentDispatchModeSchema,
-  sessionPrimer: SessionPrimerModeSchema,
-  push: PushModeSchema,
-  capture: CaptureModeSchema,
+  prompt: z.boolean(),
+  'web-search': z.boolean(),
+  'web-fetch': z.boolean(),
+  subagent: z.boolean(),
+  failure: z.boolean(),
+  publish: z.boolean(),
+  primer: z.boolean(),
 });
 
 /**
@@ -385,14 +319,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: RawInstallConfigSchema.optional(),
-    // A `capture` value this build does not know reads as the default instead of
-    // failing the parse: one unreadable hooks value must not turn every verb into
-    // CONFIG_INVALID, least of all `config set`, which reads this file before it
-    // can write the value that would repair it. The next set drops the stray value.
-    hooks: HooksConfigSchema.partial()
-      .extend({ capture: CaptureModeSchema.catch(() => CONFIG_DEFAULTS.hooks.capture).optional() })
-      .passthrough()
-      .optional(),
+    hooks: HooksConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
@@ -462,16 +389,17 @@ export const CONFIG_DEFAULTS: Config = {
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
   install: { harness: [], freeVerbsDeclined: [] },
   // Every hook is on out of the box: a vanilla install turns the whole loop on,
-  // and the disclosure and the undo ride the install output. `off` leaves the
+  // and the disclosure and the undo ride the install output. `false` leaves the
   // registered entries inert without touching settings.json, so any of these is
-  // one `config set` away in either direction. The two web hooks are disjoint —
-  // no `inherit`.
+  // one `config set` away in either direction.
   hooks: {
-    webSearch: 'auto',
-    agentDispatch: 'auto',
-    sessionPrimer: 'on',
-    push: 'on',
-    capture: 'on',
+    prompt: true,
+    'web-search': true,
+    'web-fetch': true,
+    subagent: true,
+    failure: true,
+    publish: true,
+    primer: true,
   },
   update: { mode: 'nudge' },
   loop: {
@@ -515,14 +443,10 @@ export const PUBLISH_CONFIG_KEYS = [
 export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 
 /** The dotted keys `config get/set` accept for the nested hooks block. */
-export const HOOKS_CONFIG_KEYS = [
-  'hooks.webSearch',
-  'hooks.agentDispatch',
-  'hooks.sessionPrimer',
-  'hooks.push',
-  'hooks.capture',
-] as const;
-export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
+export type HooksConfigKey = `hooks.${HookArm}`;
+export const HOOKS_CONFIG_KEYS: readonly HooksConfigKey[] = HOOK_ARMS.map(
+  (arm) => `hooks.${arm}` as const,
+);
 
 /** The dotted key `config get/set` accepts for the nested update block. */
 export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
@@ -597,13 +521,7 @@ export async function loadConfig(dir: string): Promise<Config> {
       harness: raw.install?.harness ?? CONFIG_DEFAULTS.install.harness,
       freeVerbsDeclined: resolveFreeVerbsDeclined(raw.install?.freeVerbsDeclined),
     },
-    hooks: {
-      webSearch: raw.hooks?.webSearch ?? CONFIG_DEFAULTS.hooks.webSearch,
-      agentDispatch: raw.hooks?.agentDispatch ?? CONFIG_DEFAULTS.hooks.agentDispatch,
-      sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
-      push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
-      capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
-    },
+    hooks: resolveHooksConfig(raw),
     update: { mode: raw.update?.mode ?? CONFIG_DEFAULTS.update.mode },
     loop: resolveLoopConfig(raw),
     team: { publicFallback: raw.team?.publicFallback ?? CONFIG_DEFAULTS.team.publicFallback },
@@ -666,11 +584,7 @@ export interface EffectiveSettings {
   publishMode: PublishModeResolution;
   publishDefaultPrice: ResolvedSetting<string>;
   publishAckServerWarnings: ResolvedSetting<AckServerWarnings>;
-  hooksWebSearch: ResolvedSetting<WebSearchMode>;
-  hooksAgentDispatch: ResolvedSetting<AgentDispatchMode>;
-  hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
-  hooksPush: ResolvedSetting<PushMode>;
-  hooksCapture: ResolvedSetting<CaptureMode>;
+  hooks: { [K in HookArm]: ResolvedSetting<boolean> };
   updateMode: ResolvedSetting<UpdateMode>;
   loop: { [K in keyof LoopConfig]: ResolvedSetting<LoopConfig[K]> };
   teamPublicFallback: ResolvedSetting<PublicFallback>;
@@ -714,11 +628,7 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     publishAckServerWarnings: resolveAckServerWarnings(config),
-    hooksWebSearch: resolveHooksWebSearch(config),
-    hooksAgentDispatch: resolveHooksAgentDispatch(config),
-    hooksSessionPrimer: resolveHooksSessionPrimer(config),
-    hooksPush: resolveHooksPush(config),
-    hooksCapture: resolveHooksCapture(config),
+    hooks: resolveHookSettings(config),
     updateMode: resolveUpdateMode(config),
     loop: resolveLoopSettings(config),
     teamPublicFallback: resolveTeamPublicFallback(config),
@@ -776,43 +686,25 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
 }
 
-/** hooks.webSearch: file or default. */
-export function resolveHooksWebSearch(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  const fromFile = config.hooks?.webSearch;
+/** One hook arm: file or default. Read per fire by the daemon, so a `config
+ *  set` takes effect on the next prompt with no re-install. */
+export function resolveHook(config: PartialConfig, arm: HookArm): ResolvedSetting<boolean> {
+  const fromFile = config.hooks?.[arm];
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.webSearch, source: 'default' };
+  return { value: CONFIG_DEFAULTS.hooks[arm], source: 'default' };
 }
 
-/** hooks.agentDispatch: file or default, disjoint from webSearch. */
-export function resolveHooksAgentDispatch(
-  config: PartialConfig,
-): ResolvedSetting<AgentDispatchMode> {
-  const fromFile = config.hooks?.agentDispatch;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.agentDispatch, source: 'default' };
+function resolveHookSettings(config: PartialConfig): EffectiveSettings['hooks'] {
+  return Object.fromEntries(
+    HOOK_ARMS.map((arm) => [arm, resolveHook(config, arm)]),
+  ) as EffectiveSettings['hooks'];
 }
 
-/** hooks.sessionPrimer: file or default, same shape as hooks.webSearch. */
-function resolveHooksSessionPrimer(config: PartialConfig): ResolvedSetting<SessionPrimerMode> {
-  const fromFile = (config.hooks as { sessionPrimer?: SessionPrimerMode } | undefined)
-    ?.sessionPrimer;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.sessionPrimer, source: 'default' };
-}
-
-/** hooks.push: file or default, same shape as hooks.webSearch — read at run time
- *  by every push arm, so a set takes effect with no re-install. */
-function resolveHooksPush(config: PartialConfig): ResolvedSetting<PushMode> {
-  const fromFile = config.hooks?.push;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.push, source: 'default' };
-}
-
-/** hooks.capture: file or default, same shape as hooks.webSearch. */
-function resolveHooksCapture(config: PartialConfig): ResolvedSetting<CaptureMode> {
-  const fromFile = config.hooks?.capture;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.capture, source: 'default' };
+/** Per-arm merge over the defaults, for the effective Config object. */
+function resolveHooksConfig(raw: PartialConfig): Config['hooks'] {
+  return Object.fromEntries(
+    HOOK_ARMS.map((arm) => [arm, raw.hooks?.[arm] ?? CONFIG_DEFAULTS.hooks[arm]]),
+  ) as Config['hooks'];
 }
 
 /**

@@ -1,4 +1,3 @@
-import { REMIND_LINE } from '../prose';
 import { lookupArm } from './lookup';
 import type { Arm } from '../types';
 
@@ -6,8 +5,8 @@ import type { Arm } from '../types';
  * The two web arms, over one spec shape (09-pr-c-lookup-arms.md).
  *
  * TWO ARMS, NOT ONE, because they answer to different switches and read
- * different words: `research` is what `hooks.webSearch` speaks for and asks the
- * query as typed, `fetch` rides the push experiment and asks a url. Two arms
+ * different words: `research` is what `hooks.web-search` speaks for and asks
+ * the query as typed, `fetch` answers `hooks.web-fetch` and asks a url. Two arms
  * also means two `fires.arm` values, so the ledger can tell a page fetch from a
  * real search. They are the same pipeline everywhere else. (The once-per-question
  * claim is keyed on the QUESTION, per actor, not per arm: identical text asked
@@ -62,26 +61,19 @@ export function fetchQuestion(toolInput: Record<string, unknown>): string {
   return `${addressOnly(raw)} ${prompt}`.trim();
 }
 
-/** WebSearch. The one arm `hooks.webSearch` speaks for. */
+/** WebSearch. The one arm `hooks.web-search` speaks for. */
 export const researchArm: Arm = lookupArm({
   id: 'research',
   wait: 'tool',
   on: [{ event: 'tool.before', kind: 'web' }],
   trigger: 'research',
-  // `off` is the kill switch and silences `after` too. `remind` leaves the arm
-  // ON — it has a line to say — and declines to ask, below.
-  enabled: (cfg) => cfg.hooks.webSearch !== 'off',
-  text: (input, ctx) => {
-    // `remind` is the standing nudge for an agent that has to ask for itself:
-    // nothing is sent anywhere, so there is no question and `after` speaks.
-    if (ctx.deps.config().hooks.webSearch === 'remind') return null;
+  enabled: (cfg) => cfg.hooks['web-search'],
+  text: (input) => {
     const query = input.tool?.input.query;
     return typeof query === 'string' ? query.trim() : null;
   },
   shelves: ['team', 'public'],
   deliver: 'inject',
-  after: (ctx) =>
-    ctx.deps.config().hooks.webSearch === 'remind' ? { context: REMIND_LINE } : null,
 });
 
 /** WebFetch. Its own arm, its own switch, its own row in the ledger. */
@@ -92,9 +84,7 @@ export const fetchArm: Arm = lookupArm({
   // The wire trigger is `research` for both: the server's telemetry asks which
   // KIND of moment produced the question, and both of these are a web lookup.
   trigger: 'research',
-  // A page fetch is the push experiment's, not `hooks.webSearch`'s: today's
-  // matcher widening, now a condition.
-  enabled: (cfg) => cfg.hooks.push === 'on',
+  enabled: (cfg) => cfg.hooks['web-fetch'],
   text: (input) => fetchQuestion(input.tool?.input ?? {}),
   shelves: ['team', 'public'],
   deliver: 'inject',

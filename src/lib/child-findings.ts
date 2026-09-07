@@ -102,7 +102,7 @@ export async function readChildFinding(
   throw new CliError('RESOURCE_NOT_FOUND', `No stored finding with id ${JSON.stringify(id)}`, {
     fix:
       known.length === 0
-        ? 'No findings are held for this project. They are harvested from a subagent at its own end and need `hooks.capture` on (`tenjin push status`).'
+        ? 'No findings are held for this project. They are harvested from a subagent at its own end and need `hooks.publish` on (`tenjin config get hooks.publish`).'
         : `Captured in this project: ${known.join(', ')}. A finding is never rewritten and stays publishable by its own id, so an id that does not resolve is one this project never captured.`,
     details: { id, known },
   });

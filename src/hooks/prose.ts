@@ -64,10 +64,6 @@ export const INSPECT_POINTER = 'Inspect it free: tenjin inspect ';
  *  fetch the rest. The resource id follows, then `]`. */
 export const TRUNCATED_POINTER = '[truncated; the full piece: tenjin read ';
 
-/** The one-liner `remind` mode says instead of sending the query anywhere. */
-export const REMIND_LINE =
-  'Tenjin (a marketplace of tested, paid answers) may already have this: `tenjin search "<question>" --json` is free and anonymous.';
-
 /**
  * What the primer arm puts in front of the model, once, at the top of a
  * session (lead-only: `SessionStart` never fires for a child). NOTHING MAY

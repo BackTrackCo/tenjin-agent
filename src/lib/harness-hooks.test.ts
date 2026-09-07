@@ -109,7 +109,6 @@ function write(overrides: { start?: (d: string) => Promise<DaemonStart> } = {}) 
   return writeClaudeHooks({
     homeDir: home,
     dataDir: data,
-    mode: 'auto',
     start: overrides.start ?? ((d) => fakeStart(d)),
   });
 }

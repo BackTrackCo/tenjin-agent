@@ -42,7 +42,7 @@ export interface LookupSpec {
    * each answer one moment and pass a constant.
    */
   trigger: Trigger | ((input: HookInput) => Trigger);
-  /** `hooks.push`, `hooks.webSearch`. A disabled arm does nothing at all. */
+  /** The arm's own `hooks.*` boolean. A disabled arm does nothing at all. */
   enabled(cfg: KernelConfig): boolean;
   /**
    * Where the words come from, as the agent wrote them: `question()` masks them
@@ -64,8 +64,7 @@ export interface LookupSpec {
   /** Local writes, before anything is asked. */
   before?(ctx: FireContext): void;
   /**
-   * A local line with no lookup behind it (research's `remind`), and any local
-   * write a fire has to have EARNED. `question` is the one this fire built and
+   * Any local write a fire has to have EARNED. `question` is the one this fire built and
    * null when it built none, so a spec marks what was asked rather than
    * re-deriving it: two parallel fires by one actor would otherwise each mark
    * the other's question.

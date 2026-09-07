@@ -36,6 +36,6 @@ describe('the primer arm', () => {
   });
 
   it('`off` is silent', async () => {
-    expect(await spoken(kernelConfig({ sessionPrimer: 'off' }))).toBeNull();
+    expect(await spoken(kernelConfig({ primer: false }))).toBeNull();
   });
 });

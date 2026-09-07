@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { KernelConfig, Plan } from '../types';
-import { REMIND_LINE } from '../prose';
 import { fetchArm, fetchQuestion, researchArm } from './research';
 import { cleanup, fireContext, freshDb, hookInput, kernelConfig, toolInput } from './test-support';
 
@@ -16,7 +15,7 @@ afterEach(() => {
   cleanup();
 });
 
-const PUSH_ON = kernelConfig({ push: 'on' });
+const ON = kernelConfig();
 
 function searchInput(query: string) {
   return hookInput({
@@ -37,7 +36,7 @@ function fetchInput(input: Record<string, unknown>) {
 function planOf(
   arm: typeof researchArm,
   input: ReturnType<typeof hookInput>,
-  config: KernelConfig = PUSH_ON,
+  config: KernelConfig = ON,
 ) {
   const db = freshDb();
   const ctx = fireContext({ db, arm, input, config });
@@ -91,25 +90,16 @@ describe('the research arm', () => {
     expect(plan.question.text).toBe('pgvector testcontainer collation');
   });
 
-  it('`off` is the kill switch: no question and no line', () => {
-    const config = kernelConfig({ push: 'on', webSearch: 'off' });
-    const { plan, ctx } = planOf(researchArm, searchInput('anything at all'), config);
+  it('`hooks.web-search` off is the kill switch: no question, and no line ever', () => {
+    const { plan } = planOf(
+      researchArm,
+      searchInput('anything at all'),
+      kernelConfig({ 'web-search': false }),
+    );
     expect(plan).toBeNull();
-    expect(researchArm.after?.(ctx, { reason: 'no-question' }, null)).toBeNull();
-  });
-
-  it('`remind` says the line and sends nothing anywhere: no plan, no leg', () => {
-    const config = kernelConfig({ push: 'on', webSearch: 'remind' });
-    const { plan, ctx } = planOf(researchArm, searchInput('pgvector collation'), config);
-    expect(plan).toBeNull();
-    expect(researchArm.after?.(ctx, { reason: 'no-question' }, null)).toEqual({
-      context: REMIND_LINE,
-    });
-  });
-
-  it('`auto` says no line of its own', () => {
-    const { ctx } = planOf(researchArm, searchInput('pgvector collation'));
-    expect(researchArm.after?.(ctx, { reason: 'no-hit' }, null)).toBeNull();
+    // The arm has no words of its own left to say, on or off: what it delivers
+    // is a shelf answer or nothing.
+    expect(researchArm.after).toBeUndefined();
   });
 
   it('an empty or absent query is no-question', () => {
@@ -132,11 +122,11 @@ describe('the research arm', () => {
 });
 
 describe('the fetch arm', () => {
-  it('is gated on the push experiment, not on hooks.webSearch', () => {
+  it('is gated on `hooks.web-fetch`, not on `hooks.web-search`', () => {
     const url = { url: 'https://example.com/docs/collation', prompt: 'what changed' };
-    expect(planOf(fetchArm, fetchInput(url), kernelConfig({ push: 'off' })).plan).toBeNull();
+    expect(planOf(fetchArm, fetchInput(url), kernelConfig({ 'web-fetch': false })).plan).toBeNull();
     expect(
-      planOf(fetchArm, fetchInput(url), kernelConfig({ push: 'on', webSearch: 'off' })).plan,
+      planOf(fetchArm, fetchInput(url), kernelConfig({ 'web-search': false })).plan,
     ).not.toBeNull();
   });
 

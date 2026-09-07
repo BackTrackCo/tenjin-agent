@@ -29,7 +29,7 @@ import {
  * the pass that closes it.
  */
 
-const TEAM = kernelConfig({ push: 'on' });
+const TEAM = kernelConfig();
 const PUBLIC_ONLY: KernelConfig = { ...TEAM, baseUrl: PRODUCTION_ORIGIN };
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 const POST_ID = '22222222-2222-4222-8222-222222222222';
@@ -172,7 +172,7 @@ describe('the failure arm registration', () => {
 
 describe('the plan', () => {
   it('asks nothing when push is off, behind a head that is not a toolchain, or on a pass', async () => {
-    const off = kernelConfig({ push: 'off' });
+    const off = kernelConfig({ failure: false });
     expect(
       await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }), off),
     ).toBeNull();

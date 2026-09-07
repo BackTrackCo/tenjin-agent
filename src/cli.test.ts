@@ -125,14 +125,16 @@ describe('main', () => {
     expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
   });
 
-  // The Bazaar lane and the search-hook mode are flags now, not prompts, so they
-  // have to be discoverable where every other flag is.
-  it('offers the lanes install no longer asks about as flags', async () => {
+  // The Bazaar lane is a flag now, not a prompt, so it has to be discoverable
+  // where every other flag is.
+  it('offers the lane install no longer asks about as a flag', async () => {
     const cap = captureIo();
     expect(await main(['install', '--help'], cap.io)).toBe(0);
     const help = cap.stdout();
     expect(help).toContain('--bazaar-pay');
-    expect(help).toContain('--search-hooks <mode>');
+    // The hooks are not a flag or a prompt any more: all seven arms are on and
+    // `tenjin config set hooks.<arm> false` is the one place to change that.
+    expect(help).not.toContain('--search-hooks');
   });
 
   // The compat no-ops are gone rather than hidden: `install` writes no CLAUDE.md

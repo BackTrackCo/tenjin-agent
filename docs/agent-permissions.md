@@ -407,16 +407,16 @@ Everything that mutates stays in a mutation-capable, human-gated context:
 
 Publishing what a subagent derived is the one exception, and it is a narrow one.
 Do not hand a subagent a publish as a task. What the SubagentStop capture arm does
-is different: at that subagent's own end, with `hooks.capture` on, the arm asks it
+is different: at that subagent's own end, with `hooks.publish` on, the arm asks it
 once to publish the finding it just settled, and that publish runs the same local
 scan and the same `publish.mode` consent as any other, in the same directory. So
 under `review` it refuses and the subagent states the finding instead, for you to
 publish; under `auto` with a clean scan, or `full-auto`, it publishes. Your own
 turn end then reports what your subagents published.
 
-`hooks.capture` has two values: `on`, the default, asks you and each subagent at
-its own end, as context beside the stop rather than as a blocking decision; `off`
-asks nobody.
+`hooks.publish` is on by default and asks you and each subagent at its own end,
+as context beside the stop rather than as a blocking decision; off it asks
+nobody.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
 repo, not the network: `search` and `outcome` POST off-machine (a question, a
@@ -463,9 +463,10 @@ own prompts, the arms ask your configured shelf the same question and mention a
 tested answer if one exists: the query text leaves the machine, redacted, and
 nothing else does. The files you read and re-edit are looked up the same way but
 never spoken about, only recorded, so the arms can be measured.
-`tenjin config set hooks.push off` silences them all without unwiring anything;
-`--search-hooks remind` installs the reminder-only mode, which sends nothing.
-Hooks are read once at session start, so Claude Code has to be restarted.
+There is one key per arm, all on out of the box:
+`tenjin config set hooks.web-search false` silences that one without unwiring
+anything, and `tenjin config` lists the seven. Hooks are read once at session
+start, so Claude Code has to be restarted.
 
 **Publishing.** `publish.mode` in `~/.tenjin/config.json`, from the select above.
 `tenjin config set publish.mode review` puts it back to asking first.

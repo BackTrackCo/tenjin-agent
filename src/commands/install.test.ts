@@ -3212,15 +3212,14 @@ describe('runInstall: the skill-directory write', () => {
   });
 });
 
-// --- Decision 3: the harness search hooks ------------------------------------------
+// --- The harness hook entries -------------------------------------------------------
 
-describe('runInstall: search hooks', () => {
+describe('runInstall: harness hooks', () => {
   type HooksData = {
     hooks: {
       harness: string;
       path?: string;
       hooksDir: string;
-      mode: string;
       entries: number;
       wrote: boolean;
       url?: string;
@@ -3236,16 +3235,10 @@ describe('runInstall: search hooks', () => {
     const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
     return raw === null ? {} : (JSON.parse(raw) as Record<string, unknown>);
   }
-  async function persistedHooks(): Promise<Record<string, string> | undefined> {
+  async function persistedHooks(): Promise<Record<string, boolean> | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    return (JSON.parse(raw) as { hooks?: Record<string, string> }).hooks;
-  }
-  async function persistedMode(): Promise<string | undefined> {
-    return (await persistedHooks())?.webSearch;
-  }
-  async function persistedAgentMode(): Promise<string | undefined> {
-    return (await persistedHooks())?.agentDispatch;
+    return (JSON.parse(raw) as { hooks?: Record<string, boolean> }).hooks;
   }
 
   // A bare headless install is the one that most needs the hooks, and it is the
@@ -3255,7 +3248,6 @@ describe('runInstall: search hooks', () => {
     const h = hooksOf(res.data);
 
     expect(h.skipped).toBeUndefined();
-    expect(h.mode).toBe('auto');
     expect(h.entries).toBe(11);
     expect(h.wrote).toBe(true);
     expect(h.hooksDir).toBe(join(data, 'hooks'));
@@ -3268,7 +3260,9 @@ describe('runInstall: search hooks', () => {
     expect(entries).toHaveLength(11);
     expect(entries.filter(([, e]) => e.hooks[0]?.type === 'http')).toHaveLength(9);
     expect(entries.filter(([, e]) => e.hooks[0]?.type === 'command')).toHaveLength(2);
-    expect(await persistedMode()).toBe('auto');
+    // Install writes no hook key: the seven arms are on by default and each is
+    // one `tenjin config set hooks.<arm> false` away.
+    expect(await persistedHooks()).toBeUndefined();
   });
 
   // settings.json hooks load at session start, so an operator who does not
@@ -3277,63 +3271,23 @@ describe('runInstall: search hooks', () => {
     const human = (res: { humanLines?: string[] }): string =>
       (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
-    // The flag settles the hooks without a prompt; isInteractive is only what
-    // makes install return the walkthrough as humanLines at all.
+    // isInteractive is only what makes install return the walkthrough as
+    // humanLines at all; nothing about the hooks is asked.
     const wired = await runInstall(
-      { harness: ['claude'], searchHooks: 'auto' },
+      { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true }),
     );
     expect(human(wired)).toContain('Restart Claude Code to load the hooks.');
 
-    // `--no-hooks`, not `--search-hooks off`: the entry set is permanent now and
-    // `off` is a per-fire gate the arms read, so the only run that wires nothing
-    // is the one that declined to wire.
+    // `--no-hooks` is the only run that wires nothing: the entry set is permanent
+    // now and every other switch is a per-fire gate the arms read.
     const declined = await runInstall(
       { harness: ['claude'], noHooks: true },
       makeCtx(),
       deps({ isInteractive: true }),
     );
     expect(human(declined)).not.toContain('Restart Claude Code');
-  });
-
-  it('--search-hooks off still registers the eleven entries and persists the choice', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], searchHooks: 'off' },
-      makeCtx({ json: true }),
-      deps(),
-    );
-    // The entry set is permanent and every gate is in an arm: `off` silences the
-    // research arm per fire, and the prompt, fetch and context arms answer to
-    // `hooks.push`, so registering nothing here would have left them dead.
-    expect(hooksOf(res.data)).toMatchObject({ mode: 'off', entries: 11 });
-    expect(hooksOf(res.data).skipped).toBeUndefined();
-    expect(Object.keys((await settings()).hooks as object).length).toBeGreaterThan(0);
-    expect(await persistedMode()).toBe('off');
-    expect(await persistedAgentMode()).toBe('off');
-  });
-
-  it('--search-hooks remind wires the hooks in remind mode', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], searchHooks: 'remind' },
-      makeCtx({ json: true }),
-      deps(),
-    );
-    expect(hooksOf(res.data).mode).toBe('remind');
-    expect(hooksOf(res.data).entries).toBe(11);
-    expect(await persistedMode()).toBe('remind');
-  });
-
-  it('rejects an unknown --search-hooks value as USAGE, before anything is written', async () => {
-    const err = await caught(() =>
-      runInstall(
-        { harness: ['claude'], searchHooks: 'sometimes' },
-        makeCtx({ json: true }),
-        deps(),
-      ),
-    );
-    expect(err.code).toBe('USAGE');
-    expect(err.fix).toContain('auto');
   });
 
   it('is idempotent: a second run writes a byte-identical file', async () => {
@@ -3346,28 +3300,12 @@ describe('runInstall: search hooks', () => {
     expect(await readFile(claudeSettingsPath(home), 'utf8')).toBe(first);
   });
 
-  // No prompt: an interactive run installs the same `auto` a machine run does,
-  // and the flag is the only way to ask for anything else.
-  it('installs auto at a TTY, with nothing asked', async () => {
+  // No prompt and no key: an interactive run wires the same entries a machine
+  // run does, and says nothing about the arms.
+  it('wires the entries at a TTY, with nothing asked and no hook key written', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(hooksOf(res.data).mode).toBe('auto');
-    expect(await persistedMode()).toBe('auto');
-    expect(await persistedAgentMode()).toBe('auto');
-  });
-
-  // The flag is a statement about this machine, so it OVERWRITES: an install is
-  // how an operator says what the arms should do, and a stored mode that outlived
-  // the flag would make `--search-hooks` a no-op on every machine but a new one.
-  it('the flag overwrites a stored mode, and a bare run resets it to auto', async () => {
-    await runInstall(
-      { harness: ['claude'], searchHooks: 'remind' },
-      makeCtx({ json: true }),
-      deps(),
-    );
-    expect(await persistedMode()).toBe('remind');
-    await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
-    expect(await persistedMode()).toBe('auto');
-    expect(await persistedAgentMode()).toBe('auto');
+    expect(hooksOf(res.data).entries).toBe(11);
+    expect(await persistedHooks()).toBeUndefined();
   });
 
   it('writes nothing under --dry-run and says why', async () => {
@@ -3379,7 +3317,7 @@ describe('runInstall: search hooks', () => {
     expect(hooksOf(res.data).skipped).toBe('dry-run');
     expect(existsSync(join(data, 'hooks'))).toBe(false);
     expect((await settings()).hooks).toBeUndefined();
-    expect(await persistedMode()).toBeUndefined();
+    expect(await persistedHooks()).toBeUndefined();
   });
 
   it('is not wired for a Codex-only install, and names no Claude settings file', async () => {
@@ -3656,7 +3594,8 @@ describe('runInstall: --no-hooks', () => {
     expect((JSON.parse(raw) as { hooks?: unknown }).hooks).toBeUndefined();
   });
 
-  // The difference from `--search-hooks off`, which IS a durable statement.
+  // The difference from `tenjin config set hooks.<arm> false`, which IS a
+  // durable statement.
   it('leaves a later bare re-run free to wire them', async () => {
     await runInstall({ harness: ['claude'], noHooks: true }, makeCtx({ json: true }), deps());
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
@@ -3684,7 +3623,7 @@ describe('runInstall --refresh', () => {
   /** A machine that ran a real install: skills, hooks, rules and config. */
   async function installed(): Promise<void> {
     await runInstall(
-      { harness: ['claude'], searchHooks: 'auto', publishMode: 'auto' },
+      { harness: ['claude'], publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -3715,7 +3654,7 @@ describe('runInstall --refresh', () => {
     const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
     expect((result.data as { refresh: boolean }).refresh).toBe(true);
     expect(existsSync(join(data, 'wallet.json'))).toBe(false);
-    // Config is READ (for hooks.push and publish.mode) and never written.
+    // Config is READ (for publish.mode) and never written.
     expect(await readFile(join(data, 'config.json'), 'utf8')).toBe(configBefore);
   });
 
@@ -3825,7 +3764,7 @@ describe('runInstall --refresh', () => {
    */
   it('does not re-report a declined allowlist as pending', async () => {
     await runInstall(
-      { harness: ['claude'], searchHooks: 'auto', noAllowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );

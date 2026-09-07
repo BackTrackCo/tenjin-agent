@@ -182,10 +182,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       `write no harness permission rules at all; the default allowlist is the free tier only: none can spend USDC or move your keys, doctor may check your wallet still opens, full caveats: ${PERMISSIONS_DOC_URL}`,
     )
     .option(
-      '--search-hooks <mode>',
-      'harness search hooks: auto (check Tenjin before a WebSearch) | remind (static reminder) | off; persisted to hooks.webSearch and hooks.agentDispatch (both auto by default, disjoint)',
-    )
-    .option(
       '--bazaar-pay',
       'let `tenjin pay` pay Bazaar-listed non-Tenjin endpoints under your spend policy, and install the skill that teaches the lane',
     )
@@ -207,7 +203,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(typeof o.publishMode === 'string' ? { publishMode: o.publishMode } : {}),
             ...(o.wallet === false ? { noWallet: true } : {}),
             ...(o.allowFreeVerbs === false ? { noAllowFreeVerbs: true } : {}),
-            ...(typeof o.searchHooks === 'string' ? { searchHooks: o.searchHooks } : {}),
             ...(o.bazaarPay === true ? { bazaarPay: true } : {}),
             ...(o.hooks === false ? { noHooks: true } : {}),
             ...(o.refresh === true ? { refresh: true } : {}),
@@ -882,40 +877,20 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
 
   // ---- push (sidecar) ----
-  // `tenjin push on|off|status` (docs/command-reference.md#push-experimental): the runtime toggle for the push
-  // experiment, which surfaces a Tenjin finding beside a failing command, a
-  // stuck edit loop, or a subagent dispatch, without being asked. See
-  // commands/push.ts for the mechanism; this block only wires the three verbs.
+  // `tenjin push status|grade` (docs/command-reference.md#push-experimental): the
+  // report on the sidecar, which surfaces a Tenjin finding beside a failing
+  // command, a stuck edit loop, or a subagent dispatch, without being asked. See
+  // commands/push.ts for the mechanism; this block only wires the two verbs.
   const push = addGlobalFlags(
     program
       .command('push')
       .description(
-        'The push experiment (docs/command-reference.md, "Push (experimental)"): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push on|off|status`',
+        'The push experiment (docs/command-reference.md, "Push (experimental)"): a sidecar that surfaces a Tenjin finding beside a failing command, a stuck edit loop, or a subagent dispatch — see `tenjin push status`',
       ),
   );
-  addGlobalFlags(push.command('on'))
-    .description(
-      'Turn the push experiment on: persist hooks.push=on, then wire its four hook scripts (idempotent; safe to re-run)',
-    )
-    .action(async function (this: Command) {
-      await runCommand('push.on', this, async (ctx) => {
-        const { runPushOn } = await import('./commands/push');
-        return runPushOn(ctx);
-      });
-    });
-  addGlobalFlags(push.command('off'))
-    .description(
-      'Turn the push experiment off: persists hooks.push=off and exits instantly; any wired scripts stay on disk but go inert on their next run',
-    )
-    .action(async function (this: Command) {
-      await runCommand('push.off', this, async (ctx) => {
-        const { runPushOff } = await import('./commands/push');
-        return runPushOff(ctx);
-      });
-    });
   addGlobalFlags(push.command('status'))
     .description(
-      "Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
+      "Show whether the daemon bundles are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
     )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {

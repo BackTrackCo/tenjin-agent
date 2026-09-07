@@ -6,7 +6,6 @@ import { startDaemon, type DaemonDeps, type DaemonStart } from '../daemon/contro
 import { HARNESS_MS } from '../hooks/constants';
 import { readPid, readToken } from '../hooks/shim';
 import { writeFileAtomic } from './atomic-json';
-import type { WebSearchMode } from './config';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir, shimBundlePath } from './paths';
 
@@ -65,8 +64,6 @@ export interface HooksResult {
   path?: string;
   /** Where the daemon bundles live (or would). */
   hooksDir: string;
-  /** The behavior the arms will follow (config `hooks.webSearch`). */
-  mode: WebSearchMode;
   /** Hook entries of ours registered after this run. Eleven, or 0 on a skip. */
   entries: number;
   /** True when this run changed settings.json; false when it already matched. */
@@ -88,7 +85,6 @@ function skip(
     harness: string;
     path?: string;
     hooksDir: string;
-    mode: WebSearchMode;
     warning?: string;
     fix?: string;
   },
@@ -97,7 +93,6 @@ function skip(
     harness: args.harness,
     ...(args.path !== undefined ? { path: args.path } : {}),
     hooksDir: args.hooksDir,
-    mode: args.mode,
     entries: 0,
     wrote: false,
     skipped: reason,
@@ -111,14 +106,12 @@ export function hooksSkipped(
   harness: string,
   homeDir: string,
   dataDir: string,
-  mode: WebSearchMode,
   reason: HooksSkipReason,
 ): HooksResult {
   return skip(reason, {
     harness,
     ...(harness === 'claude' ? { path: claudeSettingsPath(homeDir) } : {}),
     hooksDir: hooksDir(dataDir),
-    mode,
     fix: fixFor(reason),
   });
 }
@@ -134,7 +127,7 @@ function fixFor(reason: HooksSkipReason): string {
       return 'Hooks are wired for Claude Code only. Re-run `tenjin install --harness claude` on a machine with Claude Code.';
     case 'declined':
     case 'dry-run':
-      return 'Wire them with `tenjin install --search-hooks auto`.';
+      return 'Wire them with `tenjin install`.';
     case 'daemon-down':
       return 'Run `tenjin daemon start`, then re-run `tenjin install`.';
     case 'changed-since-read':
@@ -386,7 +379,6 @@ export async function registeredHooks(
 export interface WriteClaudeHooksOptions {
   homeDir: string;
   dataDir: string;
-  mode: WebSearchMode;
   /** Where the built bundles are copied from; the CLI's own dist by default. */
   bundleDir?: string;
   /** Seam for step 1-3: bundles, token, a healthy daemon. Tests inject it. */
@@ -408,7 +400,7 @@ export interface WriteClaudeHooksOptions {
  * writes nothing at all.
  */
 export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<HooksResult> {
-  const { homeDir, dataDir, mode } = opts;
+  const { homeDir, dataDir } = opts;
   const dir = hooksDir(dataDir);
 
   // Steps 1-3. A daemon that will not come up is reported as a skip rather than
@@ -424,7 +416,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path: claudeSettingsPath(homeDir),
       hooksDir: dir,
-      mode,
       warning: `${err instanceof Error ? err.message : String(err)}; no hook entry was written, so nothing points at a daemon that is not there.`,
       fix: fixFor('daemon-down'),
     });
@@ -440,7 +431,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path: claudeSettingsPath(homeDir),
       hooksDir: dir,
-      mode,
       warning: `The daemon answered but left no ${pid === null ? 'daemon.pid' : 'daemon.token'} under ${dataDir}, so no hook entry could name it.`,
       fix: fixFor('daemon-down'),
     });
@@ -453,7 +443,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path: found.refusal.path,
       hooksDir: dir,
-      mode,
       warning: found.refusal.message,
       fix: fixFor(found.refusal.reason),
     });
@@ -496,7 +485,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
     harness: 'claude',
     path,
     hooksDir: dir,
-    mode,
     entries: plan.length,
     wrote: next !== raw,
     daemon: { pid: started.health.pid, port: pid.port, version: started.health.version },
@@ -521,7 +509,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path,
       hooksDir: dir,
-      mode,
       warning: `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
       fix: fixFor('changed-since-read'),
     });
@@ -536,7 +523,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path,
       hooksDir: dir,
-      mode,
       warning: `${path} could not be written (${err instanceof Error ? err.message : String(err)}); no hook entry was registered.`,
       fix: fixFor('unwritable'),
     });

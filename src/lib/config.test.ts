@@ -10,6 +10,7 @@ import {
   CONFIG_DEFAULTS,
   CONFIG_KEYS,
   DEFAULT_BAZAAR_REGISTRIES,
+  HOOK_ARMS,
   LOOP_CONFIG_KEYS,
   TEAM_CONFIG_KEYS,
   parseLoopValue,
@@ -197,58 +198,36 @@ describe('publish block', () => {
   });
 });
 
-describe('hooks block: push and capture', () => {
-  // A vanilla install turns the whole loop on. Six of the nine arms used to
-  // refuse to run after a default install because nothing set `hooks.push`.
-  it('default on for both, read at run time by the daemon', async () => {
-    expect(CONFIG_DEFAULTS.hooks.push).toBe('on');
-    expect(CONFIG_DEFAULTS.hooks.capture).toBe('on');
-    expect((await loadConfig(dir)).hooks.push).toBe('on');
-    expect((await loadConfig(dir)).hooks.capture).toBe('on');
-  });
-
-  it('merges a partial hooks block per-subkey (keeps the defaults it omits)', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'off' } }));
+describe('hooks block: seven booleans, one per arm', () => {
+  // A vanilla install turns the whole loop on: every arm is on until someone
+  // says otherwise, and each is one `config set` from inert.
+  it('defaults every arm on, read at run time by the daemon', async () => {
     const cfg = await loadConfig(dir);
-    expect(cfg.hooks.push).toBe('off');
-    expect(cfg.hooks.capture).toBe('on');
-    expect(cfg.hooks.webSearch).toBe(CONFIG_DEFAULTS.hooks.webSearch);
+    for (const arm of HOOK_ARMS) {
+      expect(CONFIG_DEFAULTS.hooks[arm]).toBe(true);
+      expect(cfg.hooks[arm]).toBe(true);
+    }
   });
 
-  it('resolveSettings exposes hooksPush and hooksCapture, file over default', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'off', capture: 'off' } }));
+  it('merges a partial hooks block per-arm (keeps the defaults it omits)', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { 'web-search': false } }));
+    const cfg = await loadConfig(dir);
+    expect(cfg.hooks['web-search']).toBe(false);
+    expect(cfg.hooks.prompt).toBe(true);
+    expect(cfg.hooks.publish).toBe(true);
+  });
+
+  it('resolveSettings exposes every arm, file over default', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { publish: false } }));
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooksPush).toEqual({ value: 'off', source: 'file' });
-    expect(s.hooksCapture).toEqual({ value: 'off', source: 'file' });
+    expect(s.hooks.publish).toEqual({ value: false, source: 'file' });
+    expect(s.hooks.prompt).toEqual({ value: true, source: 'default' });
   });
 
-  it('resolveSettings reports default provenance when unset', async () => {
-    const config = await loadRawConfig(dir);
-    const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooksPush).toEqual({ value: 'on', source: 'default' });
-    expect(s.hooksCapture).toEqual({ value: 'on', source: 'default' });
-  });
-
-  it('rejects a push value outside the enum', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'sometimes' } }));
+  it('rejects a hook value that is not a boolean', async () => {
+    await writeFile(configFile(), JSON.stringify({ hooks: { publish: 'sometimes' } }));
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
-  });
-
-  // The ask has one channel now, so a file written against a wider set of capture
-  // values still has to load: every verb reads this file, `config set` before it can
-  // write the value that would repair it, so an unreadable capture is the default,
-  // not a dead CLI. The rest of the file — baseUrl, publish.mode, the wallet
-  // pointers — keeps working while the stray value sits there.
-  it('reads a capture value it does not know as the default, keeping the rest of the file', async () => {
-    await writeFile(
-      configFile(),
-      JSON.stringify({ baseUrl: 'https://example.test', hooks: { push: 'off', capture: 'block' } }),
-    );
-    const cfg = await loadConfig(dir);
-    expect(cfg.hooks.capture).toBe(CONFIG_DEFAULTS.hooks.capture);
-    expect(cfg.hooks.push).toBe('off');
-    expect(cfg.baseUrl).toBe('https://example.test');
   });
 });
 

@@ -67,7 +67,7 @@ It asks two things:
 - `When your agent has something worth publishing:` — `Auto (recommended)`: your agent publishes and updates pieces on its own, under your identity; it also allows `tenjin publish` and `tenjin edit` in the harness. The other answers are `Ask me in chat first` and `Fully unattended`, where only a hard block stops it.
 - `Create a wallet now?`
 
-Everything else is a flag: `--search-hooks auto|remind|off`, `--bazaar-pay`, `--no-allow-free-verbs`, `--no-hooks`, `--no-wallet`, `--publish-mode <mode>`. See the [command reference](docs/command-reference.md#tenjin-install).
+Everything else is a flag: `--bazaar-pay`, `--no-allow-free-verbs`, `--no-hooks`, `--no-wallet`, `--publish-mode <mode>`. See the [command reference](docs/command-reference.md#tenjin-install).
 
 Then it prints what it wired:
 
@@ -314,7 +314,7 @@ tenjin config set maxAutoSpend 0.25
 tenjin config set sessionBudget 2.00
 tenjin config set publish.mode review
 tenjin config set publish.defaultPrice 0.10
-tenjin config set hooks.webSearch off
+tenjin config set hooks.web-search false
 ```
 
 Important defaults:
