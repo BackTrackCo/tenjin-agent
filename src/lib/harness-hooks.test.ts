@@ -5,21 +5,11 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
  * writer landing between this module's settings read and its commit. Inert unless
  * a test sets it, so production carries no test-only branch.
  */
-const fsHooks = vi.hoisted(() => ({ settingsInterleave: '', rmDenied: '' }));
+const fsHooks = vi.hoisted(() => ({ settingsInterleave: '' }));
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
-    // The other interleave the filesystem will not produce on demand: a delete
-    // the OS refuses (EPERM on a locked-down dir, EBUSY on Windows).
-    rm: async (...args: Parameters<typeof actual.rm>) => {
-      if (fsHooks.rmDenied !== '' && String(args[0]).endsWith(fsHooks.rmDenied)) {
-        throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${args[0]}'`), {
-          code: 'EPERM',
-        });
-      }
-      return actual.rm(...args);
-    },
     readFile: async (...args: Parameters<typeof actual.readFile>) => {
       const out = await actual.readFile(...args);
       if (fsHooks.settingsInterleave !== '' && String(args[0]).endsWith('settings.json')) {
@@ -44,7 +34,6 @@ import {
   ownsHookEntry,
   pruneOurHandlers,
   registeredHookPort,
-  RETIRED_HOOK_FILES,
   writeClaudeHooks,
 } from './harness-hooks';
 import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from './paths';
@@ -64,7 +53,6 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   fsHooks.settingsInterleave = '';
-  fsHooks.rmDenied = '';
   // A test that made ~/.claude read-only has to hand it back before the rm.
   await chmod(dirname(settingsPath()), 0o700).catch(() => undefined);
   await rm(home, { recursive: true, force: true });
@@ -282,40 +270,8 @@ describe('writeClaudeHooks: the cutover', () => {
     const stop = (await readSettings()).hooks as Record<string, Entry[]>;
     expect(stop.Stop).toHaveLength(1);
     expect(stop.Stop?.[0]?.hooks[0]?.type).toBe('http');
-  });
-
-  it('deletes the eight retired scripts from the hooks dir by name', async () => {
-    await mkdir(hooksDir(data), { recursive: true });
-    for (const file of RETIRED_HOOK_FILES) await writeFile(join(hooksDir(data), file), '// old');
-    await writeFile(join(hooksDir(data), 'someone-elses.mjs'), '// theirs');
-    const result = await write();
-    expect(result.removed).toHaveLength(RETIRED_HOOK_FILES.length);
-    expect(result.kept).toBeUndefined();
-    for (const file of RETIRED_HOOK_FILES) {
-      expect(existsSync(join(hooksDir(data), file))).toBe(false);
-    }
-    // Only ours, by name: a file someone else parked there stays.
-    expect(existsSync(join(hooksDir(data), 'someone-elses.mjs'))).toBe(true);
+    // The other half of "installed": the entries point at bundles that are there.
     expect(await hookBundlesPresent(data)).toBe(true);
-  });
-
-  it('names a retired script it could not delete, and finishes the run anyway', async () => {
-    // Settings.json is written by the time the sweep runs, so an EPERM on one
-    // leftover is a line in the receipt, not an exception for the CLI to render
-    // as an internal error over everything that did land.
-    await mkdir(hooksDir(data), { recursive: true });
-    for (const file of RETIRED_HOOK_FILES) await writeFile(join(hooksDir(data), file), '// old');
-    fsHooks.rmDenied = RETIRED_HOOK_FILES[0] as string;
-    const result = await write();
-    expect(result.entries).toBe(11);
-    expect(result.skipped).toBeUndefined();
-    expect(result.removed).toHaveLength(RETIRED_HOOK_FILES.length - 1);
-    expect(result.kept).toHaveLength(1);
-    expect(result.kept?.[0]).toContain(RETIRED_HOOK_FILES[0] as string);
-    expect(result.kept?.[0]).toContain('EPERM');
-    // The one that would not go is still there; every other one is gone.
-    expect(existsSync(join(hooksDir(data), RETIRED_HOOK_FILES[0] as string))).toBe(true);
-    expect(allEntries(await readSettings())).toHaveLength(11);
   });
 
   it('drops an entry of ours whose port has moved, and re-adds it on the new one', async () => {
@@ -351,20 +307,6 @@ describe('writeClaudeHooks: refusals', () => {
     const result = await write();
     expect(result.skipped).toBe('unparsable');
     expect(await readFile(settingsPath(), 'utf8')).toBe('{ not json');
-  });
-
-  it('keeps the retired scripts when the settings write is refused', async () => {
-    // They are deleted LAST for this: a refusal leaves settings.json naming
-    // them, and a live session would then point at files that are gone.
-    await writeSettings('{ not json');
-    await mkdir(hooksDir(data), { recursive: true });
-    for (const file of RETIRED_HOOK_FILES) await writeFile(join(hooksDir(data), file), '// old');
-    const result = await write();
-    expect(result.skipped).toBe('unparsable');
-    expect(result.removed).toEqual([]);
-    for (const file of RETIRED_HOOK_FILES) {
-      expect(existsSync(join(hooksDir(data), file))).toBe(true);
-    }
   });
 
   it('refuses an event whose entries are not a list, and names it', async () => {
@@ -409,7 +351,7 @@ describe('ownership', () => {
     const cmd = (c: string): unknown => ({ hooks: [{ type: 'command', command: c }] });
     expect(ownsHookEntry(cmd(`node '${shimBundlePath(data)}' --harness claude`), data)).toBe(true);
     // A data dir that MOVED: the filename still says it is ours.
-    expect(ownsHookEntry(cmd(`node /old/place/hooks/tenjin-stop-hook.mjs`), data)).toBe(true);
+    expect(ownsHookEntry(cmd(`node /old/place/hooks/tenjin-daemon.mjs`), data)).toBe(true);
     // A file under our hooks dir we no longer have a name for.
     expect(ownsHookEntry(cmd(`node ${join(hooksDir(data), 'whatever.mjs')}`), data)).toBe(true);
     expect(ownsHookEntry(cmd('node /elsewhere/theirs.mjs'), data)).toBe(false);

@@ -47,7 +47,7 @@ describe('the stop arm', () => {
       db,
       arm: stopArm,
       input: stop({ stopFuse: true, lastMessage: '```' + FINDING_TAG + '\nunasked\n```' }),
-      config: kernelConfig({ push: 'on', capture: 'block' }),
+      config: kernelConfig({ push: 'on', capture: 'on' }),
     });
     expect(await stopArm.after?.(ctx, { reason: 'no-question' }, null)).toBeNull();
     expect(factsWithPrefix(db, 'finding:')).toEqual([]);

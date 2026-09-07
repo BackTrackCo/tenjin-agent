@@ -141,26 +141,26 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
 }
 
 /**
- * The host the generated hooks actually ask, for the install-time disclosure and
+ * The host the daemon's arms actually ask, for the install-time disclosure and
  * the consent prompt.
  *
- * NOT the `tenjin.blog` literal. `askTenjin` resolves its target to
+ * NOT the `tenjin.blog` literal. A lookup leg resolves its target to
  * `config.baseUrl` with no flag or env layer, so on a machine with a configured
  * shelf the base WebSearch arm asks THAT host — with the door key attached — and
  * the marketplace is not asked at all. The dispatch arm asks it first too, and
  * only falls through to the public shelf on a team miss. A disclosure naming the
  * wrong recipient is the one part of an install an operator cannot check later
- * without reading the scripts.
+ * without reading the daemon.
  *
  * Reads the raw config rather than resolved settings, because that is what the
- * scripts read: a `--base-url` on the install run reaches neither.
+ * daemon reads: a `--base-url` on the install run reaches neither.
  *
- * Derived from what the scripts ASK, deliberately not from {@link isTeamShelfOrigin}
+ * Derived from what the arms ASK, deliberately not from {@link isTeamShelfOrigin}
  * (review r6 nit 1). That predicate answers "is this a shelf of the team's own",
  * which is a different question and returns false whenever `baseUrl` and
  * `publicShelfUrl` are the same custom origin — a real config, since `publicShelfUrl`
  * is operator-settable and nothing writes it. Reusing it there disclosed
- * `tenjin.blog` on a machine whose hooks ask `shelf.internal.example` and never
+ * `tenjin.blog` on a machine whose arms ask `shelf.internal.example` and never
  * touch the marketplace at all, which is the exact claim this function exists to
  * stop making. Only two things send the disclosure back to the production literal:
  * a `baseUrl` that does not parse, and a `baseUrl` that IS production (its aliases
@@ -179,13 +179,13 @@ export function hookRecipientHost(config: PartialConfig): string {
 }
 
 /**
- * Do the generated hooks actually MAKE the fallthrough ask — the second, public
+ * Do the daemon's arms actually MAKE the fallthrough ask — the second, public
  * leg of the dispatch arm — on this machine?
  *
  * Not the same question as "is {@link hookFallthroughHost} different from
- * {@link hookRecipientHost}". The scripts gate that leg on team mode, and their
- * `teamShelfOrigin` returns null on an empty `shelfBypassSecret` (hook-scripts.ts),
- * so a custom `baseUrl` with no secret runs as ordinary public mode and never
+ * {@link hookRecipientHost}". The arms gate that leg on team mode, and
+ * `teamOrigin` returns null on an empty `shelfBypassSecret`, so a custom
+ * `baseUrl` with no secret runs as ordinary public mode and never
  * falls through to anything. Gating the disclosure sentence on host difference
  * instead promised a recipient that is never asked, in the half-set state that
  * docs/command-reference.md documents as both the two-command setup's
@@ -193,7 +193,7 @@ export function hookRecipientHost(config: PartialConfig): string {
  * Protection.
  *
  * Reads the raw config for the same reason its two siblings do: a `--base-url` on
- * the install run reaches neither the scripts nor this. That IS team mode, so this
+ * the install run reaches neither the daemon nor this. That IS team mode, so this
  * is a named alias for {@link isTeamModeConfig} rather than a second copy of the
  * rule — the disclosure and the installed skill text have to agree about which
  * mode the machine is in.
@@ -209,9 +209,9 @@ export function hookFallthroughAsked(config: PartialConfig): boolean {
  * settings, and the difference is deliberate: a `--base-url` or `TENJIN_BASE_URL`
  * on one invocation must not answer this question.
  *
- * Two callers need the raw-config form, for the same reason. The generated hook
- * scripts read `config.baseUrl` with no flag layer, so the install-time disclosure
- * of what they ask has to gate on what they will read
+ * Two callers need the raw-config form, for the same reason. The daemon reads
+ * `config.baseUrl` with no flag layer, so the install-time disclosure of what its
+ * arms ask has to gate on what they will read
  * ({@link hookFallthroughAsked}). And the installed skill text
  * (lib/skill-materialize) outlives the command that wrote it and is read by every
  * later session on this machine, so shaping it by a one-off flag would leave a

@@ -4,7 +4,6 @@ import {
   REMOVED_FROM_DATA_DIR,
   removeFromSettings,
   removeHookScripts,
-  removeMarkerLines,
   removeSkills,
   type UninstallReport,
 } from '../lib/uninstall';
@@ -17,19 +16,15 @@ import type { CommandContext, CommandResult } from '../context';
  * `tenjin uninstall`: undo exactly what `tenjin install` wrote, and nothing else.
  *
  * The shape of this command is the promise it makes. It removes the skills, the
- * loop daemon and its files, our hook entries and permission rules in the
- * harness's settings.json, and the legacy pointer line older versions wrote into
- * CLAUDE.md/AGENTS.md. "Its files" INCLUDES the generated scripts of the
- * pre-daemon era, whatever `hooks.push` currently says, so a machine that
- * upgraded without re-installing is cleaned out too.
- * It does NOT remove the wallet, the config (the team shelf's shared
- * `shelfBypassSecret` included, which the receipt names on its own line, with the
- * command that clears it, on the machines that actually hold one), the library,
- * the push ledger, the search ledger, or
- * parked candidates: `install` did not create those, a wallet holds funds, and
- * the ledger is the experiment's only record. `~/.tenjin/hooks` is
- * the one thing under `~/.tenjin` it does remove, because `install` wrote it. The receipt names both halves on every run, so the operator learns the
- * boundary from the command rather than from the docs.
+ * loop daemon and its files, and our hook entries and permission rules in the
+ * harness's settings.json. It does NOT remove the wallet, the config (the team
+ * shelf's shared `shelfBypassSecret` included, which the receipt names on its
+ * own line, with the command that clears it, on the machines that actually hold
+ * one), the library, or `loop.db`: `install` did not create those, a wallet
+ * holds funds, and the loop database is the machine's only record.
+ * `~/.tenjin/hooks` is the one thing under `~/.tenjin` it does remove, because
+ * `install` wrote it. The receipt names both halves on every run, so the
+ * operator learns the boundary from the command rather than from the docs.
  *
  * IDEMPOTENT BY CONSTRUCTION. Every step is "remove it if it is ours and there",
  * so a half-installed machine, an already-uninstalled one, and a machine that
@@ -62,7 +57,6 @@ export async function runUninstall(
   const daemon = await (deps.stop ?? stopDaemon)(ctx.dataDir);
   const scripts = await removeHookScripts(ctx.dataDir);
   const skills = await removeSkills(home);
-  const markers = await removeMarkerLines(home);
 
   const report: UninstallReport = {
     settings,
@@ -70,7 +64,6 @@ export async function runUninstall(
     skills,
     scripts: scripts.scripts,
     ...(scripts.removedDir !== undefined ? { hooksDir: scripts.removedDir } : {}),
-    markers,
     // Read rather than assumed: the shelf-key item is an imperative to clear a
     // shared credential, and on the machines that do not have one it is a false
     // line in a receipt whose only job is to be checked.
@@ -108,9 +101,6 @@ function humanLines(report: UninstallReport): string[] {
     removed.push(
       `${settings.rules.length} tenjin permission rule(s) in ${sanitizeForTerminal(settings.path)}`,
     );
-  }
-  for (const path of report.markers) {
-    removed.push(`legacy pointer line in ${sanitizeForTerminal(path)}`);
   }
 
   const lines =

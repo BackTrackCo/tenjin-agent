@@ -249,8 +249,16 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('doctor'))
     .description('Check the local environment and Tenjin API reachability')
+    .option(
+      '--prune',
+      'Run the loop ledger through its retention rule and delete the retired state store, instead of the checks',
+    )
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
+        if (this.opts().prune === true) {
+          const { runDoctorPrune } = await import('./commands/doctor');
+          return runDoctorPrune(ctx);
+        }
         const { runDoctor } = await import('./commands/doctor');
         return runDoctor(ctx);
       });
@@ -842,14 +850,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       'Report how a search ended, honestly (used, partially_used, rejected, regenerated, purchase_declined). Use after acting on a search; this closes the loop the marketplace learns from',
     )
     .option('--search-id <id>', 'the search to report against (repeatable)', collect, [])
-    .option(
-      '--last',
-      'target the most recent tenjin search (entries the WebSearch hook recorded are skipped; use --search-id for those)',
-    )
-    .option(
-      '--all-open',
-      "close this session's open WebSearch-hook MISSes (requires --status regenerated; deliberate and answered searches are left open)",
-    )
     .requiredOption(
       '--status <status>',
       'used | partially_used | rejected | regenerated | purchase_declined',
@@ -866,8 +866,6 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
             ...(Array.isArray(o.searchId) && o.searchId.length > 0
               ? { searchId: o.searchId as string[] }
               : {}),
-            ...(o.last === true ? { last: true } : {}),
-            ...(o.allOpen === true ? { allOpen: true } : {}),
             ...(typeof o.resource === 'string' ? { resource: o.resource } : {}),
             ...(typeof o.contentHash === 'string' ? { contentHash: o.contentHash } : {}),
           },
@@ -876,49 +874,13 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       });
     });
 
-  // `tenjin sync` (docs/command-reference.md, "Team shelf"): push this checkout's
-  // closed, code-scoped error→fix pairings to the team shelf. Normally spawned
-  // detached by the Stop hook; exposed as a command so the operator can run it by
-  // hand (the fallback the Stop ask prints when a spawned run could not sign).
-  addGlobalFlags(program.command('sync'))
-    .description(
-      'Publish this checkout’s fixed failures (closed code-scoped pairings) to your team shelf so a teammate hitting the same error sees the fix. Team mode only.',
-    )
-    // The checkout to sync, and NOT a convenience (tenjin-agent#249). A pairing
-    // row is scoped by `projectId(cwd)` over the cwd STRING the hook payload
-    // carried, and `process.cwd()` is what `getcwd` resolves that string to —
-    // so in a session whose path runs through a symlink the two hash
-    // differently, and the Stop hook counted rows the sync it spawned could not
-    // see. The hook passes the payload's cwd here verbatim.
-    .option('--cwd <path>', 'the checkout whose pairings to sync (default: the working directory)')
-    .action(async function (this: Command) {
-      await runCommand('sync', this, async (ctx) => {
-        const o = this.opts();
-        // AN EMPTY VALUE IS A USAGE ERROR, not a fallback to the process's own
-        // directory. `tenjin sync --cwd "$REPO"` with `REPO` unset reaches
-        // commander as `--cwd ''`, and silently syncing whatever directory the
-        // shell happens to be in is the one wrong outcome an operator cannot
-        // tell from a right one: both end in "Nothing to sync." Exit 2, the
-        // same as omitting the value altogether.
-        if (typeof o.cwd === 'string' && o.cwd.length === 0) {
-          throw new CliError('USAGE', "option '--cwd <path>' argument must not be empty", {
-            fix: 'Pass the checkout to sync, or omit --cwd to use the working directory.',
-          });
-        }
-        const { runSync } = await import('./commands/sync');
-        return runSync(ctx, typeof o.cwd === 'string' && o.cwd.length > 0 ? { cwd: o.cwd } : {});
-      });
-    });
-
   // `tenjin state query "<sql>"` (docs/command-reference.md, "State store"):
-  // read-only ad hoc SQL against ~/.tenjin/state.db, for an operator debugging a
-  // pairing, a search, or a hook's own bookkeeping by hand. See
-  // commands/state.ts for why this exists instead of `sqlite3 -readonly`.
-  const state = addGlobalFlags(
-    program.command('state').description('Inspect the local state database'),
-  );
+  // read-only ad hoc SQL against ~/.tenjin/loop.db, for an operator debugging a
+  // fire, a pairing, a search, or a fact by hand. See commands/state.ts for why
+  // this exists instead of `sqlite3 -readonly`.
+  const state = addGlobalFlags(program.command('state').description('Inspect the loop database'));
   addGlobalFlags(state.command('query <sql>'))
-    .description('Run one read-only SELECT against the state database and print the rows as JSON')
+    .description('Run one read-only SELECT against the loop database and print the rows as JSON')
     .action(async function (this: Command, sql: string) {
       await runCommand('state.query', this, async (ctx) => {
         const { runStateQuery } = await import('./commands/state');
@@ -974,14 +936,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       "Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
     )
-    .option(
-      '--sessions',
-      'append the importance-score report: one line per session in the window, score vs capture_asked vs published (report only; no hook reads it)',
-    )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {
         const { runPushStatus } = await import('./commands/push');
-        return runPushStatus(ctx, {}, { sessions: this.opts().sessions === true });
+        return runPushStatus(ctx);
       });
     });
   addGlobalFlags(push.command('grade'))

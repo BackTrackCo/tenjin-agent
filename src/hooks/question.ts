@@ -42,9 +42,9 @@ function wordCount(text: string): number {
 }
 
 /**
- * The claim key: sha256 over the same normalization `state-store.ts` has always
- * fingerprinted a search question with (lower-cased, whitespace collapsed,
- * trimmed, 512 characters), hex, first 16 bytes. A fan-out re-asks
+ * The claim key: sha256 over the normalization a search question is
+ * fingerprinted with (lower-cased, whitespace collapsed, trimmed, 512
+ * characters), hex, first 16 bytes. A fan-out re-asks
  * near-identical questions, and case and spacing carry no meaning between them.
  *
  * NEVER A WIRE VALUE. A plain hash of text this machine already holds, with no

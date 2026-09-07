@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
-import { latestSearch, loadSearches } from '../lib/state-store';
+import { loadSearches, type StoredSearch } from '../lib/searches';
 import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
@@ -24,6 +24,12 @@ function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
     dataDir: dir,
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };
+}
+
+/** The row this search just wrote: the record is newest-first, and each of these
+ *  tests runs one search. */
+async function latest(): Promise<StoredSearch | undefined> {
+  return (await loadSearches(dir))[0];
 }
 
 function stub(body: unknown, status = 200): { fetch: typeof fetch; bodies: unknown[] } {
@@ -100,23 +106,23 @@ describe('runSearch', () => {
     });
   });
 
-  it('records the search so outcome --last and buy <id> can use it', async () => {
+  it('records the search so outcome --search-id and buy <id> can use it', async () => {
     const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    const latest = await latestSearch(dir);
-    expect(latest?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
-    expect(latest?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
+    const stored = await latest();
+    expect(stored?.searchId).toBe('0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee');
+    expect(stored?.candidates[0]?.url).toBe('https://preview.example/api/read/iris/slug');
   });
 
-  // The Stop hook scopes its nag on this, so a session that set the variable
-  // stops hearing about a sibling session's open loops.
+  // The turn-end ask scopes on this, so a session that set the variable stops
+  // hearing about a sibling session's open loops.
   it('stamps the session from TENJIN_SESSION_ID when it is set', async () => {
     const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: 'session-a' },
     });
-    expect((await latestSearch(dir))?.sessionId).toBe('session-a');
+    expect((await latest())?.sessionId).toBe('session-a');
   });
 
   // A harness that exports neither variable. Unstamped means the reminder is
@@ -124,7 +130,7 @@ describe('runSearch', () => {
   it('records no session when the environment names none', async () => {
     const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch, env: {} });
-    expect((await latestSearch(dir))?.sessionId).toBeUndefined();
+    expect((await latest())?.sessionId).toBeUndefined();
   });
 
   it('ignores a blank TENJIN_SESSION_ID rather than stamping an empty session', async () => {
@@ -133,7 +139,7 @@ describe('runSearch', () => {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: '   ' },
     });
-    expect((await latestSearch(dir))?.sessionId).toBeUndefined();
+    expect((await latest())?.sessionId).toBeUndefined();
   });
 
   // The ambient harness variable: the same value the hook scripts are handed on
@@ -144,7 +150,7 @@ describe('runSearch', () => {
       fetchImpl: fetch,
       env: { CLAUDE_CODE_SESSION_ID: 'harness-session' },
     });
-    expect((await latestSearch(dir))?.sessionId).toBe('harness-session');
+    expect((await latest())?.sessionId).toBe('harness-session');
   });
 
   // Explicit operator override beats the ambient one.
@@ -154,7 +160,7 @@ describe('runSearch', () => {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: 'operator', CLAUDE_CODE_SESSION_ID: 'harness-session' },
     });
-    expect((await latestSearch(dir))?.sessionId).toBe('operator');
+    expect((await latest())?.sessionId).toBe('operator');
   });
 
   // A blank override falls THROUGH to the harness value rather than blanking it.
@@ -164,7 +170,7 @@ describe('runSearch', () => {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: '  ', CLAUDE_CODE_SESSION_ID: 'harness-session' },
     });
-    expect((await latestSearch(dir))?.sessionId).toBe('harness-session');
+    expect((await latest())?.sessionId).toBe('harness-session');
   });
 
   // The candidate line prices in dollars, like the browse hint below it: a human
@@ -192,7 +198,7 @@ describe('runSearch', () => {
     expect(data).not.toHaveProperty('decision');
     // A miss offered nothing to buy, and the store has to say so rather than
     // leave it unknown: that is what lets `outcome` refuse purchase_declined here.
-    expect(await latestSearch(dir)).toMatchObject({ candidates: [], paidBrowseCount: 0 });
+    expect(await latest()).toMatchObject({ candidates: [], paidBrowseCount: 0 });
   });
 
   // The store's CANDIDATES/MISS vocabulary predates v3 and `outcome` still
@@ -201,11 +207,11 @@ describe('runSearch', () => {
   it('derives the stored decision from whether anything matched', async () => {
     const { fetch } = stub(MISS);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    expect((await latestSearch(dir))?.decision).toBe('MISS');
+    expect((await latest())?.decision).toBe('MISS');
 
     const hit = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: hit.fetch });
-    expect((await latestSearch(dir))?.decision).toBe('CANDIDATES');
+    expect((await latest())?.decision).toBe('CANDIDATES');
   });
 
   // The v2 MISS browse tail is gone: the decision view draws no fallback shelf,
@@ -215,7 +221,7 @@ describe('runSearch', () => {
   it('records a zero paid-browse count, because v3 draws no browse tail', async () => {
     const { fetch } = stub(MISS);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
-    expect((await latestSearch(dir))?.paidBrowseCount).toBe(0);
+    expect((await latest())?.paidBrowseCount).toBe(0);
   });
 
   // One line, and it is the SERVER's sentence rather than a local paraphrase, so
@@ -478,7 +484,7 @@ describe('item URL origin ingest boundary', () => {
     };
     const { fetch } = stub(flipped);
     await runSearch({ question: 'q' }, makeCtx({ baseUrl: base }), { fetchImpl: fetch });
-    const stored = await latestSearch(dir);
+    const stored = await latest();
     expect(stored?.candidates[0]?.url).toBe(`${sibling}/api/read/iris/slug`);
   });
 

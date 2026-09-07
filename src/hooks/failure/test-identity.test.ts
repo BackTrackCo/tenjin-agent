@@ -95,11 +95,11 @@ describe('testIdentityOf', () => {
 });
 
 describe('sigV1Test', () => {
-  it('keys the test and the file+suite separately, both 16 hex', () => {
+  it('keys file, suite and test together, 16 hex', () => {
     const a = sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 'one' });
     const b = sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 'two' });
     expect(a.key).toMatch(/^[0-9a-f]{16}$/);
     expect(a.key).not.toBe(b.key);
-    expect(a.coarseKey).toBe(b.coarseKey);
+    expect(a.file).toBe('src/a.test.ts');
   });
 });

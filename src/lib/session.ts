@@ -1,7 +1,7 @@
 /**
- * The harness session a command belongs to: `search` stamps entries with it and
- * `outcome --all-open` sweeps only this session's. ONE COPY, because a sweep and
- * the nag that named it must agree on what "this session" means.
+ * The harness session a command belongs to: `search` stamps its record with it,
+ * and the turn-end ask names only this session's open loops. ONE COPY, because
+ * the writer and the reader must agree on what "this session" means.
  *
  * TENJIN_SESSION_ID is the operator override; CLAUDE_CODE_SESSION_ID is what
  * Claude Code exports to the Bash subprocess a `tenjin search` runs as, to the

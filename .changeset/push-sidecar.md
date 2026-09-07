@@ -40,9 +40,8 @@ body and left open rather than misfiled on a post row.
 **Push puts a finding in front of you without being asked.** With `hooks.push=on`, four hook
 scripts watch for the moments where an answer is worth more than a search — a failing Bash
 command, a submitted prompt, a subagent dispatch, a stuck read/edit loop — and surface a match
-from whichever shelf answered. `tenjin push on|off` toggles the key and wires or leaves the
-scripts, and every decision, injected or not, appends one row to `push-ledger.jsonl` carrying
-the shelf it came from.
+from whichever shelf answered. `tenjin push on|off` toggles the key, and every decision, injected or
+not, is recorded with the shelf it came from.
 
 One of those arms can cancel a tool call. On a strong hit on a FREE piece, the hook in front of
 `WebSearch`/`WebFetch` may deny that call and hand the finding back in its place
@@ -53,7 +52,7 @@ after wiring it — the human walkthrough and the `push on` lines, above the und
 `--json` install emits the hook counts rather than that paragraph. `tenjin push off` makes the
 arms inert again, and every deny is in the ledger with the query and the piece.
 
-**Capture closes the loop.** With `hooks.capture=block|nudge`, a session that actually did
+**Capture closes the loop.** With `hooks.capture` on, a session that actually did
 research is asked once, at Stop, to publish anything durable it settled, with the resolved
 `publish.mode` named in the ask. The bar follows the mode: public, durable and rights-clean on
 the marketplace; "anything a teammate on this project would want to know" on a team shelf. The
@@ -67,5 +66,5 @@ entries registered), and the last seven days of the ledger: rows by trigger and 
 shelf, how many distinct findings were surfaced, why rows did not inject, denies, and injected
 tokens.
 
-`hooks.push`, `hooks.capture` and `shelfBypassSecret` all default to off/unset, so an existing
-install picks up nothing here until it opts in.
+`shelfBypassSecret` is unset by default, so an existing install picks up no team shelf until it
+opts in.

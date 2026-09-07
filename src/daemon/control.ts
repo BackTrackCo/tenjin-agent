@@ -19,6 +19,7 @@ import {
   daemonTokenPath,
   hooksDir,
   shimBundlePath,
+  vitestReporterPath,
 } from '../lib/paths';
 
 /**
@@ -40,25 +41,35 @@ export interface DaemonDeps {
   now?: () => number;
 }
 
-const BUNDLES = ['tenjin-daemon.mjs', 'tenjin-shim.mjs'] as const;
+/**
+ * Every built file that belongs in the hooks dir, and where each one goes. The
+ * reporter rides with the two bundles because it is materialized the same way
+ * and by the same command; it is the one of the three that is never spawned —
+ * a repo's own vitest config imports it (`lib/paths.ts`).
+ */
+const BUNDLES: Readonly<Record<string, (dir: string) => string>> = {
+  'tenjin-daemon.mjs': daemonBundlePath,
+  'tenjin-shim.mjs': shimBundlePath,
+  'tenjin-vitest-reporter.mjs': vitestReporterPath,
+};
 
 /** In the built CLI this file's chunk sits in `dist/` beside the two bundles. */
 export function defaultBundleDir(): string {
   return dirname(fileURLToPath(import.meta.url));
 }
 
-/** Copy the two bundles from `dist` into the hooks dir; mint the token if absent. */
+/** Copy the built files from `dist` into the hooks dir; mint the token if absent. */
 export function installDaemonFiles(dataDir: string, bundleDir: string): { written: string[] } {
   const written: string[] = [];
   mkdirSync(hooksDir(dataDir), { recursive: true, mode: 0o700 });
-  for (const name of BUNDLES) {
+  for (const [name, target] of Object.entries(BUNDLES)) {
     const src = join(bundleDir, name);
     if (!existsSync(src)) {
       throw new CliError('INTERNAL', `Daemon bundle missing: ${src}`, {
-        fix: 'Reinstall tenjin-cli; the package ships dist/tenjin-daemon.mjs and dist/tenjin-shim.mjs.',
+        fix: `Reinstall tenjin-cli; the package ships dist/${Object.keys(BUNDLES).join(', dist/')}.`,
       });
     }
-    const dest = name === 'tenjin-daemon.mjs' ? daemonBundlePath(dataDir) : shimBundlePath(dataDir);
+    const dest = target(dataDir);
     copyFileSync(src, dest);
     written.push(dest);
   }

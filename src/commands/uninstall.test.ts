@@ -4,11 +4,17 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
-import { STATE_DB_FILE, openStore } from '../lib/state-store';
+import { openLoopDb } from '../hooks/store';
 import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
-import { RETIRED_HOOK_FILES, writeClaudeHooks } from '../lib/harness-hooks';
+import { writeClaudeHooks } from '../lib/harness-hooks';
 import type { DaemonStart } from '../daemon/control';
-import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
+import {
+  daemonPidPath,
+  daemonTokenPath,
+  hooksDir,
+  shimBundlePath,
+  VITEST_REPORTER_FILE,
+} from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
 import type { CommandContext } from '../context';
 
@@ -32,8 +38,6 @@ function makeCtx(): CommandContext {
     io: { stdout: sink(), stderr: sink(), isTTY: false },
   };
 }
-
-const MARKER = '<!-- tenjin-cli:skills -->';
 
 const run = async (): Promise<{ report: UninstallReport; text: string }> => {
   // Never the real one: uninstall must not signal a process this suite did not
@@ -85,21 +89,21 @@ async function seedSettings(extra: Record<string, unknown> = {}): Promise<string
       PreToolUse: [
         {
           matcher: 'WebSearch',
-          hooks: [{ type: 'command', command: `node 'tenjin-websearch-hook.mjs'` }],
+          hooks: [{ type: 'command', command: `node '${shimBundlePath(data)}'` }],
         },
         { matcher: 'Bash', hooks: [{ type: 'command', command: 'node /someone/else.mjs' }] },
         {
           matcher: 'Agent|Task',
-          hooks: [{ type: 'command', command: `node 'tenjin-dispatch-hook.mjs'` }],
+          hooks: [{ type: 'http', url: 'http://127.0.0.1:34567/hook/claude' }],
         },
       ],
       SessionStart: [
         {
           matcher: 'startup|clear|compact',
-          hooks: [{ type: 'command', command: `node 'tenjin-sessionstart-hook.mjs'` }],
+          hooks: [{ type: 'http', url: 'http://127.0.0.1:34567/hook/claude' }],
         },
       ],
-      Stop: [{ hooks: [{ type: 'command', command: `node 'tenjin-stop-hook.mjs'` }] }],
+      Stop: [{ hooks: [{ type: 'http', url: 'http://127.0.0.1:34567/hook/claude' }] }],
     },
     permissions: { allow: [...FREE_VERB_RULES, 'Bash(ls:*)'] },
     ...extra,
@@ -118,10 +122,13 @@ async function seedSkill(dir: string, name: string, frontmatterName = name): Pro
   return skillDir;
 }
 
-/** What a machine that upgraded but never re-installed still carries. */
+/** Every file `install` puts in the hooks dir: the two bundles and the vitest
+ *  reporter. Ownership is by filename in both directions. */
+const OUR_HOOK_FILES = ['tenjin-daemon.mjs', 'tenjin-shim.mjs', VITEST_REPORTER_FILE];
+
 async function seedHookScripts(): Promise<void> {
   await mkdir(hooksDir(data), { recursive: true });
-  for (const f of RETIRED_HOOK_FILES) await writeFile(join(hooksDir(data), f), '// generated\n');
+  for (const f of OUR_HOOK_FILES) await writeFile(join(hooksDir(data), f), '// generated\n');
 }
 
 describe('runUninstall — a fully installed machine', () => {
@@ -135,8 +142,8 @@ describe('runUninstall — a fully installed machine', () => {
 
     expect(report.skills).toHaveLength(2);
     expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search'))).toBe(false);
-    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
-    for (const f of RETIRED_HOOK_FILES) {
+    expect(report.scripts).toHaveLength(OUR_HOOK_FILES.length);
+    for (const f of OUR_HOOK_FILES) {
       expect(existsSync(join(hooksDir(data), f)), f).toBe(false);
     }
     expect(report.settings.hooks.sort()).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
@@ -394,7 +401,7 @@ describe('runUninstall — ownership gates', () => {
     await seedHookScripts();
     await writeFile(join(hooksDir(data), 'theirs.mjs'), '// not ours\n');
     const { report } = await run();
-    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
+    expect(report.scripts).toHaveLength(OUR_HOOK_FILES.length);
     expect(report.hooksDir).toBeUndefined();
     expect(existsSync(join(hooksDir(data), 'theirs.mjs'))).toBe(true);
   });
@@ -433,53 +440,6 @@ describe('runUninstall — operator files in our directories', () => {
   });
 });
 
-describe('runUninstall — legacy pointer line', () => {
-  it('removes the marker line and preserves the operator’s own text', async () => {
-    const path = join(home, '.claude', 'CLAUDE.md');
-    await mkdir(join(home, '.claude'), { recursive: true });
-    await writeFile(path, `# Notes\n${MARKER} Tenjin: search first\nkeep me\n`);
-    const { report } = await run();
-    expect(report.markers).toEqual([path]);
-    const after = await readFile(path, 'utf8');
-    expect(after).not.toContain(MARKER);
-    expect(after).toContain('# Notes');
-    expect(after).toContain('keep me');
-  });
-
-  // The marker only ever began a line. A user quoting it inside their own
-  // sentence keeps that sentence.
-  it('keeps a line that merely mentions the marker mid-sentence', async () => {
-    const path = join(home, '.claude', 'CLAUDE.md');
-    await mkdir(join(home, '.claude'), { recursive: true });
-    const prose = `I removed the ${MARKER} line by hand last week.`;
-    await writeFile(path, `${prose}\n`);
-    const { report } = await run();
-    expect(report.markers).toEqual([]);
-    expect(await readFile(path, 'utf8')).toBe(`${prose}\n`);
-  });
-
-  it('removes a line that starts with the marker, keeping the rest', async () => {
-    const path = join(home, '.claude', 'CLAUDE.md');
-    await mkdir(join(home, '.claude'), { recursive: true });
-    const prose = `Note: the ${MARKER} token is what install used to write.`;
-    await writeFile(path, `# Notes\n${MARKER} Tenjin: search first\n${prose}\n`);
-    const { report } = await run();
-    expect(report.markers).toEqual([path]);
-    const after = await readFile(path, 'utf8');
-    expect(after).toContain('# Notes');
-    expect(after).toContain(prose);
-    expect(after).not.toContain(`${MARKER} Tenjin: search first`);
-  });
-
-  it('finds a drifted line by its marker, not by exact text', async () => {
-    const path = join(home, '.agents', 'AGENTS.md');
-    await mkdir(join(home, '.agents'), { recursive: true });
-    await writeFile(path, `${MARKER} some much older wording nobody ships any more\n`);
-    await run();
-    expect(await readFile(path, 'utf8')).not.toContain(MARKER);
-  });
-});
-
 describe('runUninstall — partial and repeat states', () => {
   it('reports nothing to remove on a machine that never installed', async () => {
     const { report, text } = await run();
@@ -509,7 +469,7 @@ describe('runUninstall — partial and repeat states', () => {
     await seedHookScripts();
     await seedSkill('.claude/skills', 'tenjin-publish');
     const { report } = await run();
-    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
+    expect(report.scripts).toHaveLength(OUR_HOOK_FILES.length);
     expect(report.skills).toHaveLength(1);
     expect(report.settings.skipped).toBe('absent');
   });
@@ -521,7 +481,7 @@ describe('runUninstall — partial and repeat states', () => {
     await seedHookScripts();
     const { report, text } = await run();
     expect(report.settings.skipped).toBe('unparsable');
-    expect(report.scripts).toHaveLength(RETIRED_HOOK_FILES.length);
+    expect(report.scripts).toHaveLength(OUR_HOOK_FILES.length);
     expect(text).toContain('not valid JSON');
   });
 });
@@ -562,39 +522,28 @@ describe('runUninstall — the loop daemon', () => {
     expect(JSON.parse(await readFile(claudeSettingsPath(home), 'utf8'))).toEqual({});
   });
 
-  it('KEEPS both state stores, whatever hooks.push says', async () => {
+  it('KEEPS the loop database, whatever hooks.push says', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
     await wire();
     await writeFile(join(data, 'config.json'), JSON.stringify({ hooks: { push: 'off' } }));
-    // A real store, with its WAL sidecars, as a machine that has run the hooks
-    // would have.
-    const store = await openStore(data);
-    store?.run('INSERT INTO session_state (session, key, value, at) VALUES (?, ?, ?, ?)', [
-      's',
-      'k',
-      '"v"',
-      Date.now(),
-    ]);
-    store?.close();
-    await writeFile(join(data, 'loop.db'), 'not really sqlite, but it is the operator’s');
+    // A real database, with its WAL sidecars, as a machine that has run the
+    // daemon would have.
+    openLoopDb(data).close();
 
     const { report, text } = await run();
 
     expect(report.settings.hooks).toContain('UserPromptSubmit');
-    // The stores hold the operator's own record — the pairings this machine
-    // worked out, the outcome history, the open loops — so they are kept for the
-    // same reason the wallet and the config are, and a later install picks them
-    // up as they are.
-    expect(existsSync(join(data, STATE_DB_FILE))).toBe(true);
+    // It holds the operator's own record — the pairings this machine worked out,
+    // its search record, its outcome history — so it is kept for the same reason
+    // the wallet and the config are, and a later install picks it up as it is.
     expect(existsSync(join(data, 'loop.db'))).toBe(true);
     expect(existsSync(join(data, 'config.json'))).toBe(true);
-    // And SAID so: the receipt names them under Kept, never under Removed.
+    // And SAID so: the receipt names it under Kept, never under Removed.
     const kept = text.slice(text.indexOf('Kept:'));
-    expect(kept).toContain('~/.tenjin/state.db');
     expect(kept).toContain('~/.tenjin/loop.db');
     const removed = text.slice(0, text.indexOf('Kept:'));
-    expect(removed).not.toContain('state.db');
+    expect(removed).not.toContain('loop.db');
   });
 
   it('leaves a stranger’s entry on one of our events alone', async () => {

@@ -132,7 +132,7 @@ tenjin search "<question>"
 tenjin inspect <url-or-resource-id>
 tenjin read <url-or-resource-id>
 tenjin buy <url-or-resource-id>
-tenjin outcome --last --status used
+tenjin outcome --search-id <id> --status used
 tenjin publish ./finding.md --price 0.10
 tenjin edit <post-id>
 tenjin profile set --handle <handle>
@@ -298,7 +298,7 @@ tenjin config set maxAutoSpend 0.25
 tenjin config set sessionBudget 2.00
 tenjin config set publish.mode review
 tenjin config set publish.defaultPrice 0.10
-tenjin config set hooks.searchMode off
+tenjin config set hooks.webSearch off
 ```
 
 Important defaults:

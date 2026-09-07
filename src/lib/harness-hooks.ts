@@ -1,5 +1,5 @@
-import { chmod, lstat, readFile, realpath, rm, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { chmod, lstat, readFile, realpath, stat } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { claudeAdapter } from '../adapters/claude';
 import { HARNESSES } from '../adapters/types';
 import { startDaemon, type DaemonDeps, type DaemonStart } from '../daemon/control';
@@ -9,7 +9,6 @@ import { writeFileAtomic } from './atomic-json';
 import type { WebSearchMode } from './config';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir, shimBundlePath } from './paths';
-import { PUSH_VITEST_REPORTER_FILE, pushVitestReporterScript } from './push-scripts';
 
 /**
  * Where `tenjin install` writes Claude Code's hook entries, and the only place
@@ -38,32 +37,8 @@ import { PUSH_VITEST_REPORTER_FILE, pushVitestReporterScript } from './push-scri
  * rather than duplicating it; there is no migration beyond that.
  */
 
-/**
- * The generated hook scripts install USED to write, kept only so the cutover can
- * delete them by name. Nothing writes these files any more; the template sources
- * they came from are dead until PR E removes them with their tests.
- *
- * A literal list rather than an import of those templates' constants: this is the
- * one place that still has to know the old names, and it must outlive the modules
- * that produced them.
- */
-export const RETIRED_HOOK_FILES = [
-  'tenjin-websearch-hook.mjs',
-  'tenjin-dispatch-hook.mjs',
-  'tenjin-sessionstart-hook.mjs',
-  'tenjin-stop-hook.mjs',
-  'tenjin-push-prompt.mjs',
-  'tenjin-push-failure.mjs',
-  'tenjin-push-subagent.mjs',
-  'tenjin-push-context.mjs',
-] as const;
-
-/** Every basename this CLI has ever put in the hooks dir, retired or current. */
-const OUR_HOOK_FILES: readonly string[] = [
-  ...RETIRED_HOOK_FILES,
-  'tenjin-daemon.mjs',
-  'tenjin-shim.mjs',
-];
+/** Every basename this CLI puts in the hooks dir. */
+const OUR_HOOK_FILES: readonly string[] = ['tenjin-daemon.mjs', 'tenjin-shim.mjs'];
 
 /** `http://127.0.0.1:<port>/hook/<harness>`, the only URL we ever register. */
 const LOOP_URL_RE = new RegExp(`^http://127\\.0\\.0\\.1:\\d+/hook/(?:${HARNESSES.join('|')})$`);
@@ -100,14 +75,6 @@ export interface HooksResult {
   daemon?: { pid: number; port: number; version: string };
   /** The loopback URL the nine `http` entries carry. */
   url?: string;
-  /** Retired generated scripts this run deleted from the hooks dir. */
-  removed: string[];
-  /**
-   * Retired scripts this run could NOT delete, each with why. Absent when they
-   * all went. A leftover of ours that will not unlink is a warning and never a
-   * failure: the entries are written and no session points at it any more.
-   */
-  kept?: string[];
   skipped?: HooksSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
@@ -138,7 +105,6 @@ function skip(
     mode: args.mode,
     entries: 0,
     wrote: false,
-    removed: [],
     skipped: reason,
     ...(args.warning !== undefined ? { warning: args.warning } : {}),
     ...(args.fix !== undefined ? { fix: args.fix } : {}),
@@ -425,22 +391,16 @@ export interface WriteClaudeHooksOptions {
 /**
  * Write Claude Code's eleven hook entries, whole.
  *
- * The five steps are the order §4a fixes and nothing here may reorder:
+ * The four steps are the order §4a fixes and nothing here may reorder:
  *
- *  1. copy the two bundles into `<dataDir>/hooks`;
+ *  1. copy the built files into `<dataDir>/hooks`;
  *  2. mint `daemon.token` (0600) if absent — both inside {@link startDaemon};
  *  3. stop a daemon from an older build, then ensure a healthy one;
  *  4. only then rewrite `~/.claude/settings.json`, mode 0600, with the port read
- *     back out of `daemon.pid` and the token as a literal;
- *  5. and only once that file no longer names them, delete the retired scripts.
+ *     back out of `daemon.pid` and the token as a literal.
  *
- * Step 5 is last because a refused settings write leaves the old entries in
- * place: deleting the scripts first would strand a live session pointing at
- * files that are gone.
- *
- * Every entry of ours is dropped before the plan is appended, so a machine
- * carrying the pre-daemon `command` entries is converged rather than doubled and
- * a second run writes nothing at all.
+ * Every entry of ours is dropped before the plan is appended, so a second run
+ * writes nothing at all.
  */
 export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<HooksResult> {
   const { homeDir, dataDir, mode } = opts;
@@ -464,7 +424,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       fix: fixFor('daemon-down'),
     });
   }
-  await writeVitestReporter(dir);
 
   // Step 4's inputs, read back rather than remembered: the pid file is what the
   // daemon itself wrote after its bind, and the token file is what every
@@ -537,7 +496,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
     wrote: next !== raw,
     daemon: { pid: started.health.pid, port: pid.port, version: started.health.version },
     url,
-    removed: [],
   };
   // Byte-identical means untouched: a re-install that would write the same file
   // does not write it at all, so nothing downstream sees an mtime move. The MODE
@@ -546,7 +504,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
   // long after the bytes settled.
   if (next === raw) {
     await tightenSettings(path);
-    reportSweep(result, await removeRetiredScripts(dir));
     return result;
   }
 
@@ -579,7 +536,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       fix: fixFor('unwritable'),
     });
   }
-  reportSweep(result, await removeRetiredScripts(dir));
   return result;
 }
 
@@ -588,59 +544,6 @@ async function tightenSettings(path: string): Promise<void> {
   const found = await stat(path).catch(() => null);
   if (found === null || (found.mode & 0o077) === 0) return;
   await chmod(path, 0o600).catch(() => undefined);
-}
-
-interface Sweep {
-  removed: string[];
-  kept: string[];
-}
-
-/** The sweep, onto the receipt: what went, and what would not go. */
-function reportSweep(result: HooksResult, sweep: Sweep): void {
-  result.removed = sweep.removed;
-  if (sweep.kept.length > 0) result.kept = sweep.kept;
-}
-
-/**
- * Delete the generated scripts of the pre-daemon era, by name.
- *
- * By NAME and only ours: a file someone else parked in the hooks dir is left
- * alone, and so is the directory, which now holds the two bundles.
- */
-async function removeRetiredScripts(dir: string): Promise<Sweep> {
-  const sweep: Sweep = { removed: [], kept: [] };
-  for (const file of RETIRED_HOOK_FILES) {
-    const path = join(dir, file);
-    const entry = await lstat(path).catch(() => null);
-    if (entry === null || !entry.isFile()) continue;
-    // `force` covers the file that is already gone; it does not cover an EPERM
-    // on a locked-down hooks dir or an EBUSY on Windows. By here settings.json
-    // is written, so throwing would render a finished install as an internal
-    // error over a leftover nobody reads.
-    try {
-      await rm(path, { force: true });
-      sweep.removed.push(path);
-    } catch (err) {
-      sweep.kept.push(`${path} (${err instanceof Error ? err.message : String(err)})`);
-    }
-  }
-  return sweep;
-}
-
-/**
- * The vitest reporter asset, brought up to date beside the bundles.
- *
- * NOT A HOOK ENTRY and never was: vitest imports it directly from a repo's own
- * config by the absolute path this write gives it, which is why `doctor` can
- * hint at that path. READ-ONLY, NOT EXECUTABLE (`0o644`): unlike the bundles it
- * is never spawned as a process.
- */
-async function writeVitestReporter(dir: string): Promise<void> {
-  const target = join(dir, PUSH_VITEST_REPORTER_FILE);
-  const script = pushVitestReporterScript();
-  const onDisk = await readFile(target, 'utf8').catch(() => null);
-  if (onDisk === script) return;
-  await writeFileAtomic(target, script, { mode: 0o644, dirMode: 0o700 });
 }
 
 /** Is the shim bundle on disk? Half of "installed"; the entries are the other. */

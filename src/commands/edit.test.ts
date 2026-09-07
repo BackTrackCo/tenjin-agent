@@ -6,7 +6,7 @@ import { Readable } from 'node:stream';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
 import { runPublish } from './publish';
 import { publishedUrlFor } from '../lib/publish-dedup';
-import { loadSearches, markSearchResolved, recordSearch } from '../lib/state-store';
+import { loadSearches, markSearchResolved, recordSearch } from '../lib/searches';
 import { testSigner } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
