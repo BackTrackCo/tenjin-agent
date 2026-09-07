@@ -32,7 +32,9 @@ evals/benchmark/
   claude_usage.py  Claude JSONL usage adapter (group by requestId, select one row, reconcile)
   loop_join.py     read-only projection of a stopped trial's loop.db onto exact actor keys
   runner.py        executes a schedule: fresh roots, settlement, caps, sentinels, resume
-  executor.py      executor registry (code-owned argv, shell=False) and the fake executors
+  executor.py      executor registry (code-owned argv, shell=False) and the fake executors;
+                   `write_transcripts` emits a root, an optional child, and an optional
+                   grandchild in the frozen Claude shapes
   verifier.py      hidden verifier registry, hidden layer, and the fixed fake verifiers
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
@@ -126,7 +128,8 @@ exits while a child is live is not a complete attempt.
 neither 0 nor 1 means the measurement broke, so the attempt is `invalid`. An executor exit
 code, a usage or delivery rejection, a symlink escape, and a sentinel hit are all `invalid`
 with a machine-readable reason (`executor:exit_N`, `usage:<code>`, `delivery:<code>`,
-`isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`).
+`isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`,
+`auxiliary:<code>`).
 
 The verifier runs after shutdown, never before: `artifact.TrialRoots.hidden_copy` refuses
 until the roots are marked stopped, copies the worktree with links kept as links, mounts the
@@ -170,8 +173,8 @@ rather than the task, so the attempt is `invalid`. The five outcomes stay distin
 
 `invalid` is never a miss, never a failure, and never a zero-token run. Its machine-readable
 reason names the gate that refused it: `executor:exit_N`, `usage:<code>`, `delivery:<code>`,
-`harness:<subtype>`, `verifier:<id>`, `isolation:symlink_escape`, `sentinel:public_request`,
-`sentinel:credential_exposure`. A malformed or incomplete record fails toward `invalid`, never
+`harness:<subtype>`, `verifier:<id>`, `auxiliary:<code>`, `isolation:symlink_escape`,
+`sentinel:public_request`, `sentinel:credential_exposure`. A malformed or incomplete record fails toward `invalid`, never
 toward fewer tokens or a pass. An infrastructure-invalid attempt may be retried under the
 preregistered rule; every paid retry stays in attempt history and in the cost appendix, and a
 task failure gets no free retry unless the same rule applies to every arm.
@@ -184,13 +187,20 @@ task failure gets no free retry unless the same rule applies to every arm.
 `model`, `harness_version`, `effort`, `image`, `dependency_lock_hash`, `permission_mode`,
 `wall_clock_s`, `turn_budget`. A task is `id`, `family`, `transfer_distance`, `fixture`,
 `fixture_hash`, `verifier`; an arm is `id`, `executor`, `product_version`, `settings_hash`,
-`memory_snapshot_hash`.
+`memory_snapshot_hash`, `auxiliary_usage`.
+
+`auxiliary_usage` is the arm's declaration about model spend outside the harness session:
+`none` (it spends none), `exposed` (its memory product emits auxiliary receipts), or
+`unexposed` (it spends tokens the benchmark cannot see). There is no default, because silence
+about auxiliary spend is exactly the failure the field names, and the reducer keeps an
+`unexposed` arm out of the headline.
 
 Validation happens before any spend and rejects unknown keys, duplicate ids, ids that are not
 opaque tokens, a fixture path that is absolute, escapes the manifest directory, or is missing,
 a `fixture_hash` that does not equal `manifest.fixture_hash(dir)` (sorted relative paths plus
 file digests), any version that is empty or a range (`latest`, `^`, `~`, `*`, `>`, `<`), hash
-fields without a `sha256:` prefix, and arms that do not share one executor. Manifest values are
+fields without a `sha256:` prefix, an `auxiliary_usage` outside those three values, and arms
+that do not share one executor. Manifest values are
 data: executor and verifier names select code-owned argv and nothing is shell-evaluated. The
 manifest hash is the SHA-256 of the canonical JSON; `trial_id` derives from it plus task, arm,
 repeat, and schedule position, so a rewrite changes every trial id.
@@ -283,7 +293,11 @@ paths.
 `records.validate` refuses unknown keys, a `trial_id` that does not derive from the record's
 own fields, a scored attempt without the lead actor, usage or fires naming an actor outside
 the attempt, undeduplicated or conflicting usage, receipts duplicating native ids, and a pass
-or fail without a verifier verdict. `records.publish` writes a unique partial file, flushes
+or fail without a verifier verdict. It also carries the accounting invariant rather than
+leaving it to the runner that wrote the file: a non-`invalid` outcome needs a
+`usage_reconciliation` of `matched`, `matched_with_descendants`, or `explained_by_side_models`,
+and only a `capped` or `interrupted` outcome may add `no_envelope`, because the cap itself
+names the gap. `records.publish` writes a unique partial file, flushes
 and fsyncs it, then hard-links the final path; a second writer for the same `trial_id` loses
 and keeps its partial file as evidence. `records.select` returns final records matching the
 current manifest and schedule hashes and excludes everything else with a reason: `partial`,
@@ -332,6 +346,11 @@ token; `question`, `cwd`, `emit`, `error`, `title`, and `url` stay private.
   `matched_with_descendants`, or an actor that never settled outside a declared cap) is
   `accounting_incomplete` and `headline_eligible: false`. A declared cap is `partial_by_cap`,
   which stays eligible: the gap is named by the outcome itself.
+- `reduce.reduce` takes the manifest's arm list as `declared_arms`. Records say what was
+  observed; only the manifest can say what an arm was able to expose, so an arm declaring
+  `auxiliary_usage: unexposed` is `incomplete` with reason `auxiliary_unexposed` and cannot
+  enter the headline even when all of its records reconcile. The ratio is still computed and
+  shown; it is the headline flag, not the arithmetic, that refuses to trust it.
 
 ## Private and publishable boundaries
 
@@ -388,8 +407,13 @@ Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
   provider does not expose. Add the harness id to `usage.HARNESSES`. Claude's JSONL reader is
   the first implementation of that contract, not the architecture.
 - A memory product that spends model tokens of its own emits `usage.AuxiliaryReceipt` values
-  keyed by trial, component, phase, and native request id. An arm that cannot expose them is
-  `accounting_incomplete` and cannot enter a headline; do not estimate them from text length.
+  keyed by trial, component, phase, and native request id. `runner.Runtime.receipts` is that
+  seam: a `(trial_id, roots) -> list[AuxiliaryReceipt]` callable the operator supplies, whose
+  result is checked against the consumer set and written into the record. A receipt naming
+  another trial, or a native request id already claimed by another receipt or a consumer
+  request, makes the attempt `invalid` with reason `auxiliary:<code>` and publishes no receipt
+  at all. An arm that cannot expose its spend declares `auxiliary_usage: unexposed` and cannot
+  enter a headline; do not estimate it from text length.
 - Bench-3's team cases run with `team.publicFallback` on. The delivery projection records the
   origin and leg sequence; Bench-1 does not treat a public result as team transfer, and Bench-3
   reports any public fallback separately.

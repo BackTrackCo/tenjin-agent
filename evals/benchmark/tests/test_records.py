@@ -33,6 +33,31 @@ class RecordShapeTest(unittest.TestCase):
         with self.assertRaises(RecordError):
             records.validate(attempt_record(self.root_only, invalid_reason="oops"))
 
+    def test_a_scored_outcome_cannot_carry_unreconciled_usage(self) -> None:
+        # The invariant lives in the record, not only in the runner that built
+        # it: a file the reducer reads from disk cannot claim a pass over usage
+        # that never reconciled with the harness envelope.
+        for status in ("mismatch", "envelope_without_usage", "unparsed", "no_envelope"):
+            with self.subTest(f"pass/{status}"), self.assertRaises(RecordError):
+                records.validate(attempt_record(self.family, usage_reconciliation={"status": status}))
+        for status in ("matched", "matched_with_descendants", "explained_by_side_models"):
+            with self.subTest(f"pass/{status}"):
+                records.validate(attempt_record(self.family, usage_reconciliation={"status": status}))
+        # A declared cap is the one case a scored attempt may have no envelope:
+        # the outcome names the gap itself.
+        capped = attempt_record(
+            self.family,
+            outcome="capped",
+            stop_reason="timeout",
+            verifier=None,
+            usage_reconciliation={"status": "no_envelope"},
+        )
+        records.validate(capped)
+        with self.assertRaises(RecordError):
+            records.validate({**capped, "usage_reconciliation": {"status": "mismatch"}})
+        # An invalid attempt is where an unreconciled status belongs.
+        records.validate({**capped, "outcome": "invalid", "invalid_reason": "usage:mismatch", "usage_reconciliation": {"status": "mismatch"}})
+
     def test_record_rejects_contradictions(self) -> None:
         base = attempt_record(self.family)
         actor = base["actors"][1]

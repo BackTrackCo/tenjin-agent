@@ -1,7 +1,7 @@
 {
   "actors": [
     {
-      "key": ["claude", "fake-385604c7203c941ffdb88ad1", ""],
+      "key": ["claude", "fake-7f0055ed9a4b63b4a142b6cc", ""],
       "parent_actor_key": null,
       "parent_provenance": "unavailable"
     }
@@ -25,8 +25,8 @@
     "live": false,
     "publishable": true
   },
-  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
-  "native_root_id": "fake-385604c7203c941ffdb88ad1",
+  "manifest_hash": "00314dceaa21a1e3e5c44b5ce14f550c65b6cfe0d1abb1958c63589e3a50cd91",
+  "native_root_id": "fake-7f0055ed9a4b63b4a142b6cc",
   "outcome": "interrupted",
   "parent_edges": [],
   "patch_hash": null,
@@ -36,7 +36,7 @@
     "root_transcript": "sha256:34422bb7361d19bbc1be175534295620a7adb64b02a2766de81edfca1f892f2f"
   },
   "repeat": 1,
-  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "schedule_hash": "db893d331f384e3e4acfc6fdced06bc8537185e17978950c3e3ca350ad7494e6",
   "schema": "bench1.attempt.v1",
   "sentinel": {
     "credential_exposures": 0,
@@ -50,12 +50,12 @@
       "Task": 1
     }
   },
-  "trial_id": "385604c7203c941ffdb88ad1",
+  "trial_id": "7f0055ed9a4b63b4a142b6cc",
   "turns": null,
   "unresolved_actors": ["child-30a14"],
   "usage": [
     {
-      "actor_key": ["claude", "fake-385604c7203c941ffdb88ad1", ""],
+      "actor_key": ["claude", "fake-7f0055ed9a4b63b4a142b6cc", ""],
       "adapter": "claude",
       "adapter_version": "1",
       "cache_read": 1120,
@@ -68,7 +68,7 @@
       "provider_total": null,
       "reasoning_output_subset": null,
       "source_hash": "sha256:796b2660cf2d1ef76f761e7cd3b50889e0af99cbf5d2255fa0720d7886fd3d0d",
-      "trial_id": "385604c7203c941ffdb88ad1",
+      "trial_id": "7f0055ed9a4b63b4a142b6cc",
       "uncached_input": 1400
     }
   ],

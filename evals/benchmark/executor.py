@@ -1,9 +1,10 @@
 """Executor registry: a manifest executor name -> code-owned argv, shell=False.
 
 The fake executors are this module run as a script. They write synthetic
-Claude-shaped JSONL for one root and one child into the trial output root and
-never spawn a real tool, so CI exercises the whole chain with zero spend. The
-rows follow the shapes `claude_usage.py` freezes.
+Claude-shaped JSONL for one root, an optional child, and an optional
+grandchild into the trial output root and never spawn a real tool, so CI
+exercises the whole chain, recursion included, with zero spend. The rows
+follow the shapes `claude_usage.py` freezes.
 
 `live` marks a spec that would start a real agent. No entry in this registry
 sets it, which is what keeps CI off the live path; `artifact.require_isolation`
@@ -129,34 +130,65 @@ def _row(
 
 
 def write_transcripts(
-    output: Path, session: str, seed: str, arm: str, *, child: bool = True, settled: bool = True
+    output: Path,
+    session: str,
+    seed: str,
+    arm: str,
+    *,
+    child: bool = True,
+    grandchild: bool = False,
+    settled: bool = True,
 ) -> None:
-    """Write one root (and optionally one child) transcript in the frozen shapes.
+    """Write one root (and optionally a child and a grandchild) transcript.
 
-    `settled=False` leaves the root without its result envelope and the child
-    without a terminal row, which is what an interrupted or still-running
-    attempt looks like on disk.
+    `grandchild=True` makes the child dispatch a Task of its own, so the trial
+    is a three-level actor tree whose edges are both structured native ones:
+    the grandchild names the child's tool call, the child names the root's.
+
+    `settled=False` leaves the root without its result envelope and every
+    descendant without a terminal row, which is what an interrupted or
+    still-running attempt looks like on disk.
     """
     rng = random.Random(seed)
     sessions = Path(output) / "sessions"
     child_dir = sessions / session / "subagents"
     child_dir.mkdir(parents=True, exist_ok=True)
     child_id = f"child-{rng.randrange(1 << 20):05x}"
+    # Its own generator: drawing the grandchild id from `rng` would move every
+    # later draw and change the token totals of runs that have no grandchild.
+    grand_id = f"grand-{random.Random(f'{seed}:grand').randrange(1 << 20):05x}"
+    grandchild = grandchild and child
     # A treatment arm reads slightly less: an arm-shaped difference the reducer
     # must show, not a claim about any product.
     scale = 800 if arm == "off" else 600
     text = [{"type": "text", "text": "[redacted]"}]
     dispatch = [{"type": "tool_use", "id": "toolu_dispatch", "name": "Task", "input": {}}]
+    dispatch_grand = [{"type": "tool_use", "id": "toolu_grand", "name": "Task", "input": {}}]
 
     first, second = _usage(rng, scale), _usage(rng, scale)
-    child_usage = _usage(rng, scale // 2)
+    child_usage, child_second, grand_usage = _usage(rng, scale // 2), _usage(rng, scale // 2), _usage(rng, scale // 4)
     root_lines = [json.dumps({"type": "system", "subtype": "init", "session_id": session, "model": "fake-model-0"})]
     root_lines.append(_row(session, "req_1", "msg_1", {**first, "output_tokens": 1}, text, None))
     if not settled:
         (sessions / f"{session}.jsonl").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
         if child:
             (child_dir / f"agent-{child_id}.jsonl").write_text(
-                _row(session, "req_c1", "msg_c1", child_usage, text, None, agentId=child_id, parent_tool_use_id="toolu_dispatch")
+                _row(
+                    session,
+                    "req_c1",
+                    "msg_c1",
+                    child_usage,
+                    dispatch_grand if grandchild else text,
+                    None,
+                    agentId=child_id,
+                    parent_tool_use_id="toolu_dispatch",
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        if grandchild:
+            (child_dir / f"agent-{grand_id}.jsonl").write_text(
+                _row(session, "req_g1", "msg_g1", grand_usage, text, None, agentId=grand_id, parent_tool_use_id="toolu_grand")
                 + "\n",
                 encoding="utf-8",
             )
@@ -192,11 +224,49 @@ def write_transcripts(
     (sessions / f"{session}.jsonl").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
     if not child:
         return
-    child_lines = [
-        _row(session, "req_c1", "msg_c1", child_usage, text, "end_turn", agentId=child_id, parent_tool_use_id="toolu_dispatch"),
-        json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "agentId": child_id}),
-    ]
+    child_lines: list[str] = []
+    if grandchild:
+        child_lines.append(
+            _row(
+                session,
+                "req_c1",
+                "msg_c1",
+                child_usage,
+                dispatch_grand,
+                "tool_use",
+                agentId=child_id,
+                parent_tool_use_id="toolu_dispatch",
+            )
+        )
+        child_lines.append(
+            json.dumps(
+                {
+                    "type": "user",
+                    "session_id": session,
+                    "agentId": child_id,
+                    "message": {
+                        "role": "user",
+                        "content": [{"type": "tool_result", "tool_use_id": "toolu_grand", "content": "[redacted]"}],
+                    },
+                }
+            )
+        )
+        child_lines.append(
+            _row(session, "req_c2", "msg_c2", child_second, text, "end_turn", agentId=child_id, parent_tool_use_id="toolu_dispatch")
+        )
+    else:
+        child_lines.append(
+            _row(session, "req_c1", "msg_c1", child_usage, text, "end_turn", agentId=child_id, parent_tool_use_id="toolu_dispatch")
+        )
+    child_lines.append(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "agentId": child_id}))
     (child_dir / f"agent-{child_id}.jsonl").write_text("\n".join(child_lines) + "\n", encoding="utf-8")
+    if not grandchild:
+        return
+    grand_lines = [
+        _row(session, "req_g1", "msg_g1", grand_usage, text, "end_turn", agentId=grand_id, parent_tool_use_id="toolu_grand"),
+        json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "agentId": grand_id}),
+    ]
+    (child_dir / f"agent-{grand_id}.jsonl").write_text("\n".join(grand_lines) + "\n", encoding="utf-8")
 
 
 def settle_child(output: Path, session: str) -> None:

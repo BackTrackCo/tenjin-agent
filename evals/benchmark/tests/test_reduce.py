@@ -181,6 +181,26 @@ class AccountingTest(unittest.TestCase):
         self.assertEqual(reduction["comparisons"]["on"]["token_ratio"], 0.8)
         self.assertFalse(reduction["comparisons"]["on"]["headline_eligible"])
 
+    def test_an_arm_that_cannot_expose_auxiliary_spend_cannot_enter_the_headline(self) -> None:
+        accepted = support.accept(
+            support.reduction_record("t1", "off", 0, 0, 10000, "pass"),
+            support.reduction_record("t1", "on", 0, 1, 8000, "pass"),
+        )
+        # Same records either way: only the manifest can say whether the arm's
+        # memory product is able to show what it spent.
+        exposed = reduce_module.reduce(accepted, [], "off", 0, support.arm_entries(off="none", on="exposed"))
+        self.assertEqual(exposed["arms"]["on"]["accounting"], "complete")
+        self.assertTrue(exposed["comparisons"]["on"]["headline_eligible"])
+
+        hidden = reduce_module.reduce(accepted, [], "off", 0, support.arm_entries(off="none", on="unexposed"))
+        self.assertEqual(hidden["arms"]["on"]["accounting"], "incomplete")
+        self.assertEqual(hidden["arms"]["on"]["accounting_reasons"], ["auxiliary_unexposed"])
+        self.assertFalse(hidden["arms"]["on"]["headline_eligible"])
+        self.assertFalse(hidden["comparisons"]["on"]["headline_eligible"])
+        # The control arm is untouched, and the ratio is still reported.
+        self.assertTrue(hidden["arms"]["off"]["headline_eligible"])
+        self.assertEqual(hidden["comparisons"]["on"]["token_ratio"], 0.8)
+
     def test_a_declared_cap_is_a_named_gap_rather_than_an_incomplete_one(self) -> None:
         accepted = support.accept(
             support.reduction_record("t1", "on", 0, 0, 8000, "pass"),
@@ -223,7 +243,7 @@ class CorpusTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.manifest, cls.digest, cls.accepted, cls.excluded = corpus()
-        cls.reduction = reduce_module.reduce(cls.accepted, cls.excluded, "off", cls.manifest.data["seed"])
+        cls.reduction = reduce_module.reduce(cls.accepted, cls.excluded, "off", cls.manifest.data["seed"], cls.manifest.arms)
 
     def test_the_corpus_matches_the_manifest_and_the_frozen_schedule(self) -> None:
         trials = schedule.expand(self.manifest)
@@ -238,6 +258,11 @@ class CorpusTest(unittest.TestCase):
 
     def test_the_corpus_reduces_to_frozen_task_equal_aggregates(self) -> None:
         off, on = self.reduction["arms"]["off"], self.reduction["arms"]["on"]
+        # The treatment arm declares `auxiliary_usage: exposed` and backs it
+        # with receipts, so its only named gap is the declared cap.
+        self.assertEqual([off["accounting"], on["accounting"]], ["partial_by_cap", "partial_by_cap"])
+        self.assertEqual(on["accounting_reasons"], [])
+        self.assertTrue(self.reduction["comparisons"]["on"]["headline_eligible"])
         self.assertEqual({task: cell["tokens"] for task, cell in off["tasks"].items()}, {"answer-file": 20000, "budget-guard": 24000, "slug-rename": 12000})
         self.assertEqual({task: cell["tokens"] for task, cell in on["tasks"].items()}, {"answer-file": 17000, "budget-guard": 9500, "slug-rename": 10000})
         self.assertEqual(off["tokens_per_verified_resolution"], 15333.333333333334)

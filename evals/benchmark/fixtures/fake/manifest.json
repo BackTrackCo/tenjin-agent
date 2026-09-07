@@ -33,6 +33,7 @@
   "arms": [
     {
       "id": "off",
+      "auxiliary_usage": "none",
       "executor": "fake",
       "product_version": "none",
       "settings_hash": "sha256:off",
@@ -40,6 +41,7 @@
     },
     {
       "id": "on",
+      "auxiliary_usage": "none",
       "executor": "fake",
       "product_version": "none",
       "settings_hash": "sha256:on",

@@ -24,6 +24,13 @@ RECORD_SCHEMA = "bench1.attempt.v1"
 OUTCOMES = frozenset({"pass", "fail", "capped", "interrupted", "invalid"})
 STOP_REASONS = frozenset({"exit", "timeout", "interrupted"})
 PROVENANCE = frozenset({"native", "observed", "unavailable"})
+# A scored attempt has to have accounted for its own spend. These are the
+# reconciliation statuses that did: the root envelope agrees with the selected
+# records, or its remainder is attributed to models that wrote no root row.
+RECONCILED = frozenset({"matched", "matched_with_descendants", "explained_by_side_models"})
+# A cap is the one declared reason a scored attempt may have no envelope at
+# all: the outcome itself names the gap.
+CAPPED_OUTCOMES = frozenset({"capped", "interrupted"})
 REQUIRED = frozenset(
     {
         "schema",
@@ -212,6 +219,15 @@ def validate(record: dict[str, Any]) -> None:
     reconciliation = record["usage_reconciliation"]
     if not isinstance(reconciliation, dict) or not isinstance(reconciliation.get("status"), str):
         raise RecordError("usage_reconciliation must carry a status")
+    # The accounting invariant belongs to the record, not only to the runner
+    # that built it: a file the reducer reads from disk must not be able to
+    # claim a scored outcome over usage that never reconciled.
+    if record["outcome"] != "invalid":
+        allowed = RECONCILED | ({"no_envelope"} if record["outcome"] in CAPPED_OUTCOMES else frozenset())
+        if reconciliation["status"] not in allowed:
+            raise RecordError(
+                f"outcome {record['outcome']!r} cannot carry usage_reconciliation {reconciliation['status']!r}"
+            )
     delivery = record["delivery"]
     if not isinstance(delivery, dict) or delivery.get("status") not in loop_join.STATUSES:
         raise RecordError("delivery must carry a known status")

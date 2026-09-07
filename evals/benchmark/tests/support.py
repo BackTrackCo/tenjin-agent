@@ -3,14 +3,28 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
-from evals.benchmark import FIXTURES, artifact, claude_usage, executor, manifest as manifest_module, records, runner, schedule, sha256_json
+from evals.benchmark import (
+    FIXTURES,
+    REPO_ROOT,
+    artifact,
+    claude_usage,
+    executor,
+    manifest as manifest_module,
+    records,
+    runner,
+    schedule,
+    sha256_json,
+)
 
 SESSIONS = FIXTURES / "claude" / "sessions"
 TRIAL = "trial-fixture"
+STORE = REPO_ROOT / "src" / "hooks" / "store.ts"
 
 Edit = Callable[[list[Any]], list[Any]]
 Before = Callable[[executor.Launch, artifact.TrialRoots], None]
@@ -51,6 +65,7 @@ def synthetic_manifest(
     executor_name: str = "fake",
     verifier_name: str = "fake_answer_file",
     wall_clock_s: int = 30,
+    auxiliary_usage: str = "none",
 ) -> manifest_module.Manifest:
     """A manifest object for runner and schedule cases, with a disposable fixture.
 
@@ -95,6 +110,7 @@ def synthetic_manifest(
                 "product_version": "none",
                 "settings_hash": f"sha256:{arm}",
                 "memory_snapshot_hash": "sha256:empty",
+                "auxiliary_usage": auxiliary_usage,
             }
             for arm in arms
         ],
@@ -105,23 +121,82 @@ def synthetic_manifest(
 
 
 def fake_spawn(
-    *, answer: str = "42\n", child: bool = True, settled: bool = True, returncode: int = 0, before: Before | None = None
+    *,
+    answer: str = "42\n",
+    child: bool = True,
+    grandchild: bool = False,
+    settled: bool = True,
+    returncode: int = 0,
+    before: Before | None = None,
+    after: Before | None = None,
 ) -> runner.Spawn:
     """An in-process stand-in for the executor: writes what an agent would leave.
 
     Only the process-group case needs a real process; every other execution
-    case injects this so the suite spends no real time.
+    case injects this so the suite spends no real time. `after` runs once the
+    transcripts exist, which is where a case rewrites them into the shape a
+    broken harness would leave behind.
     """
 
     def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
         if before is not None:
             before(launch, roots)
-        executor.write_transcripts(roots.output, launch.root_session_id, launch.root_session_id, "off", child=child, settled=settled)
+        executor.write_transcripts(
+            roots.output,
+            launch.root_session_id,
+            launch.root_session_id,
+            "off",
+            child=child,
+            grandchild=grandchild,
+            settled=settled,
+        )
         if answer:
             (roots.repo / "answer.txt").write_text(answer, encoding="utf-8")
+        if after is not None:
+            after(launch, roots)
         return runner.Completed(returncode=returncode, stderr="", timed_out=False)
 
     return spawn
+
+
+def loop_ddl() -> str:
+    """The product's own DDL, so the fixture cannot drift from src/hooks/store.ts."""
+    match = re.search(r"export const LOOP_DDL = `([\s\S]*?)`;", STORE.read_text(encoding="utf-8"))
+    assert match is not None, "LOOP_DDL not found in store.ts"
+    return match.group(1)
+
+
+def write_loop_db(path: Path, fires: list[tuple[str, str, str]]) -> None:
+    """A settled loop.db carrying one prompt fire per (id, session, agent)."""
+    db = sqlite3.connect(path)
+    try:
+        db.executescript(loop_ddl())
+        for index, (fire_id, session, agent) in enumerate(fires, start=1):
+            db.execute(
+                "INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, reason, delivered,"
+                " cwd, wait, deadline_ms, elapsed_ms, question)"
+                " VALUES (?, ?, ?, ?, 'prompt', 'claude', 'prompt', ?, 'hit', 'team:piece-1',"
+                " '/private/host/path', 'sync', 1000, 12, 'private question text')",
+                (fire_id, index, session, agent, f"p{index}"),
+            )
+        db.commit()
+    finally:
+        db.close()
+
+
+def arm_entries(**exposure: str) -> list[dict[str, Any]]:
+    """Manifest arm entries keyed by id, one per declared auxiliary exposure."""
+    return [
+        {
+            "id": arm_id,
+            "executor": "fake",
+            "product_version": "none",
+            "settings_hash": f"sha256:{arm_id}",
+            "memory_snapshot_hash": "sha256:empty",
+            "auxiliary_usage": value,
+        }
+        for arm_id, value in exposure.items()
+    ]
 
 
 REDUCE_MANIFEST_HASH = "sha256:reduce"

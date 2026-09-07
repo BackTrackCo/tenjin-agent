@@ -1,13 +1,13 @@
 {
   "actors": [
     {
-      "key": ["claude", "fake-df69afce65b14dbaefab8a3e", ""],
+      "key": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", ""],
       "parent_actor_key": null,
       "parent_provenance": "unavailable"
     },
     {
-      "key": ["claude", "fake-df69afce65b14dbaefab8a3e", "child-67242"],
-      "parent_actor_key": ["claude", "fake-df69afce65b14dbaefab8a3e", ""],
+      "key": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", "child-67242"],
+      "parent_actor_key": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", ""],
       "parent_provenance": "native"
     }
   ],
@@ -30,13 +30,13 @@
     "live": false,
     "publishable": true
   },
-  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
-  "native_root_id": "fake-df69afce65b14dbaefab8a3e",
+  "manifest_hash": "00314dceaa21a1e3e5c44b5ce14f550c65b6cfe0d1abb1958c63589e3a50cd91",
+  "native_root_id": "fake-73c74fdfbb73ed0fa38d23cc",
   "outcome": "pass",
   "parent_edges": [
     {
-      "child": ["claude", "fake-df69afce65b14dbaefab8a3e", "child-67242"],
-      "parent": ["claude", "fake-df69afce65b14dbaefab8a3e", ""],
+      "child": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", "child-67242"],
+      "parent": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", ""],
       "provenance": "native"
     }
   ],
@@ -47,7 +47,7 @@
     "root_transcript": "sha256:5351bd9564054ae7c90e9254eb4b541c39e447509a5b8fbad52ff99cda9b66a4"
   },
   "repeat": 0,
-  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "schedule_hash": "db893d331f384e3e4acfc6fdced06bc8537185e17978950c3e3ca350ad7494e6",
   "schema": "bench1.attempt.v1",
   "sentinel": {
     "credential_exposures": 0,
@@ -61,12 +61,12 @@
       "Task": 1
     }
   },
-  "trial_id": "df69afce65b14dbaefab8a3e",
+  "trial_id": "73c74fdfbb73ed0fa38d23cc",
   "turns": 3,
   "unresolved_actors": [],
   "usage": [
     {
-      "actor_key": ["claude", "fake-df69afce65b14dbaefab8a3e", ""],
+      "actor_key": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", ""],
       "adapter": "claude",
       "adapter_version": "1",
       "cache_read": 2400,
@@ -79,11 +79,11 @@
       "provider_total": null,
       "reasoning_output_subset": 240,
       "source_hash": "sha256:11de84ff7ded2277188ff9120617f0ba04ba7c10b3adc5dcfa415a0fcb89455c",
-      "trial_id": "df69afce65b14dbaefab8a3e",
+      "trial_id": "73c74fdfbb73ed0fa38d23cc",
       "uncached_input": 3000
     },
     {
-      "actor_key": ["claude", "fake-df69afce65b14dbaefab8a3e", "child-67242"],
+      "actor_key": ["claude", "fake-73c74fdfbb73ed0fa38d23cc", "child-67242"],
       "adapter": "claude",
       "adapter_version": "1",
       "cache_read": 1680,
@@ -96,7 +96,7 @@
       "provider_total": null,
       "reasoning_output_subset": null,
       "source_hash": "sha256:8a42af61d594b0f36cacbabfa1218ebbea6839eca39a71afce49ac95fb81db34",
-      "trial_id": "df69afce65b14dbaefab8a3e",
+      "trial_id": "73c74fdfbb73ed0fa38d23cc",
       "uncached_input": 2100
     }
   ],

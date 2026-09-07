@@ -1,13 +1,13 @@
 {
   "actors": [
     {
-      "key": ["claude", "fake-10aead4151382022efcd71b9", ""],
+      "key": ["claude", "fake-728e7c0d324205a7c4ebc36c", ""],
       "parent_actor_key": null,
       "parent_provenance": "unavailable"
     },
     {
-      "key": ["claude", "fake-10aead4151382022efcd71b9", "child-ff3a5"],
-      "parent_actor_key": ["claude", "fake-10aead4151382022efcd71b9", ""],
+      "key": ["claude", "fake-728e7c0d324205a7c4ebc36c", "child-ff3a5"],
+      "parent_actor_key": ["claude", "fake-728e7c0d324205a7c4ebc36c", ""],
       "parent_provenance": "native"
     }
   ],
@@ -20,14 +20,14 @@
       "output_total": 100,
       "phase": "consumer",
       "source_hash": "sha256:698650ff46d5beba3cd33d4e7625cb5c3da6af88d0de8e6acb0d1472635770fa",
-      "trial_id": "10aead4151382022efcd71b9"
+      "trial_id": "728e7c0d324205a7c4ebc36c"
     }
   ],
   "cost_usd": 0.0,
   "delivery": {
     "fires": [
       {
-        "actor": ["claude", "fake-10aead4151382022efcd71b9", ""],
+        "actor": ["claude", "fake-728e7c0d324205a7c4ebc36c", ""],
         "at": 1757000011,
         "delivered": "piece_a1b2c3",
         "event": "prompt",
@@ -39,7 +39,7 @@
     ],
     "legs": [
       {
-        "actor": ["claude", "fake-10aead4151382022efcd71b9", ""],
+        "actor": ["claude", "fake-728e7c0d324205a7c4ebc36c", ""],
         "calibration": "high",
         "fire_id": "fire-10aead41",
         "form": "piece",
@@ -63,13 +63,13 @@
     "live": false,
     "publishable": true
   },
-  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
-  "native_root_id": "fake-10aead4151382022efcd71b9",
+  "manifest_hash": "00314dceaa21a1e3e5c44b5ce14f550c65b6cfe0d1abb1958c63589e3a50cd91",
+  "native_root_id": "fake-728e7c0d324205a7c4ebc36c",
   "outcome": "pass",
   "parent_edges": [
     {
-      "child": ["claude", "fake-10aead4151382022efcd71b9", "child-ff3a5"],
-      "parent": ["claude", "fake-10aead4151382022efcd71b9", ""],
+      "child": ["claude", "fake-728e7c0d324205a7c4ebc36c", "child-ff3a5"],
+      "parent": ["claude", "fake-728e7c0d324205a7c4ebc36c", ""],
       "provenance": "native"
     }
   ],
@@ -80,7 +80,7 @@
     "root_transcript": "sha256:18158ab3c1fdffd4746080715c9092772f7cad005c37bf4952cda9d98dfefcbb"
   },
   "repeat": 1,
-  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "schedule_hash": "db893d331f384e3e4acfc6fdced06bc8537185e17978950c3e3ca350ad7494e6",
   "schema": "bench1.attempt.v1",
   "sentinel": {
     "credential_exposures": 0,
@@ -94,12 +94,12 @@
       "Task": 1
     }
   },
-  "trial_id": "10aead4151382022efcd71b9",
+  "trial_id": "728e7c0d324205a7c4ebc36c",
   "turns": 3,
   "unresolved_actors": [],
   "usage": [
     {
-      "actor_key": ["claude", "fake-10aead4151382022efcd71b9", ""],
+      "actor_key": ["claude", "fake-728e7c0d324205a7c4ebc36c", ""],
       "adapter": "claude",
       "adapter_version": "1",
       "cache_read": 1600,
@@ -112,11 +112,11 @@
       "provider_total": null,
       "reasoning_output_subset": 160,
       "source_hash": "sha256:bc9ebb00b832c67cfae08ebf1e7e1dd8a8d01471f7c777b7c1610b67d6229598",
-      "trial_id": "10aead4151382022efcd71b9",
+      "trial_id": "728e7c0d324205a7c4ebc36c",
       "uncached_input": 2000
     },
     {
-      "actor_key": ["claude", "fake-10aead4151382022efcd71b9", "child-ff3a5"],
+      "actor_key": ["claude", "fake-728e7c0d324205a7c4ebc36c", "child-ff3a5"],
       "adapter": "claude",
       "adapter_version": "1",
       "cache_read": 1120,
@@ -129,7 +129,7 @@
       "provider_total": null,
       "reasoning_output_subset": null,
       "source_hash": "sha256:07db8b4066affe09650fd9f0ed9298644c46f585e767912a41369e200bc7bcbf",
-      "trial_id": "10aead4151382022efcd71b9",
+      "trial_id": "728e7c0d324205a7c4ebc36c",
       "uncached_input": 1400
     }
   ],

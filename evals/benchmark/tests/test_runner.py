@@ -16,12 +16,13 @@ import unittest
 import urllib.request
 from pathlib import Path
 
-from evals.benchmark import artifact, executor, records, reduce as reduce_module, runner, schedule
+from evals.benchmark import artifact, executor, loop_join, records, reduce as reduce_module, runner, schedule
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec
 from evals.benchmark.manifest import Manifest
 from evals.benchmark.tests import support
 from evals.benchmark.tests.support import ATTESTED
+from evals.benchmark.usage import AuxiliaryReceipt
 from evals.benchmark.verifier import VerifierError
 from evals.harness.sentinel import start_sentinel
 
@@ -266,6 +267,60 @@ class ResumeTest(TrialCase):
         self.assertEqual(len(accepted), 4)
         self.assertEqual(excluded, [])
 
+    def test_a_three_level_actor_tree_survives_interruption_and_resume(self) -> None:
+        manifest = self.manifest(tasks=2)
+        trials = schedule.expand(manifest)
+        calls: list[int] = []
+        working = support.fake_spawn(grandchild=True)
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            calls.append(1)
+            if len(calls) == 3:
+                raise KeyboardInterrupt
+            return working(launch, roots, timeout_s)
+
+        with self.assertRaises(KeyboardInterrupt):
+            runner.run(manifest, trials, self.run_dir, "sha256:schedule", self.runtime(spawn=spawn))
+        records_dir = self.run_dir / "records"
+        published = sorted(path.name for path in records_dir.glob("*.json"))
+        self.assertEqual(published, sorted(f"{trial.trial_id}.json" for trial in trials[:2]))
+        before = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
+
+        # Expand the schedule again rather than reusing the list: resume has to
+        # re-derive the same ids from the manifest, not remember them.
+        resumed_trials = schedule.expand(manifest)
+        self.assertEqual([trial.trial_id for trial in resumed_trials], [trial.trial_id for trial in trials])
+        results = runner.run(manifest, resumed_trials, self.run_dir, "sha256:schedule", self.runtime(spawn=working))
+        self.assertEqual([result.resumed for result in results], [True, True, False, False])
+        self.assertEqual(sorted(f"{result.trial_id}.json" for result in results[:2]), published)
+        after = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
+        self.assertEqual(len(after), 4)
+        for name, value in before.items():
+            self.assertEqual(after[name], value, f"{name} was rewritten on resume")
+        self.assertEqual(list(records_dir.glob("*.partial.*")), [])
+
+        accepted, excluded = records.select(records_dir, manifest.hash, "sha256:schedule")
+        self.assertEqual(len(accepted), 4)
+        self.assertEqual(excluded, [])
+        for trial_id, record in sorted(accepted.items()):
+            with self.subTest(trial=trial_id):
+                root, child, grand = (entry["key"][2] for entry in record["actors"])
+                self.assertEqual(root, "")
+                self.assertTrue(child.startswith("child-") and grand.startswith("grand-"))
+                edges = {
+                    entry["key"][2]: (entry["parent_actor_key"], entry["parent_provenance"]) for entry in record["actors"]
+                }
+                self.assertEqual(edges[grand], (record["actors"][1]["key"], "native"))
+                self.assertEqual(edges[child], (record["actors"][0]["key"], "native"))
+                self.assertEqual(edges[""], (None, "unavailable"))
+                self.assertEqual({edge["provenance"] for edge in record["parent_edges"]}, {"native"})
+                # The grandchild's own request is counted once, under the
+                # grandchild, and the resume did not re-emit or drop it.
+                grand_requests = [item for item in record["usage"] if item["actor_key"][2] == grand]
+                self.assertEqual([item["native_request_id"] for item in grand_requests], ["req_g1"])
+                self.assertEqual([item["native_request_id"] for item in record["usage"]].count("req_g1"), 1)
+                self.assertEqual(record["outcome"], "pass")
+
     def test_a_stale_manifest_cannot_reuse_an_old_result(self) -> None:
         first = self.manifest()
         trials = schedule.expand(first)
@@ -289,6 +344,126 @@ class ResumeTest(TrialCase):
         accepted, excluded = records.select(records_dir, second.hash, "sha256:schedule")
         self.assertEqual(len(accepted), 2)
         self.assertTrue(any(item.reason.startswith("invalid: trial_id does not derive") for item in excluded))
+
+
+class UsageInvalidationTest(TrialCase):
+    """An attempt whose spend cannot be counted once is invalid, not cheap."""
+
+    def rewrite(self, edit: support.Before) -> dict:
+        return self.one_trial(self.manifest(), self.runtime(spawn=support.fake_spawn(after=edit)))
+
+    def test_an_envelope_that_disagrees_with_the_records_fails_the_attempt_closed(self) -> None:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            path = roots.output / "sessions" / f"{launch.root_session_id}.jsonl"
+            rows = support.read_rows(path)
+            rows[-1]["usage"] = {name: value + 1000 for name, value in rows[-1]["usage"].items()}
+            support.write_rows(path, rows)
+
+        record = self.rewrite(edit)
+        self.assertEqual(record["outcome"], "invalid")
+        self.assertEqual(record["invalid_reason"], "usage:mismatch")
+        self.assertEqual(record["usage_reconciliation"]["status"], "mismatch")
+        self.assertIsNone(record["verifier"])
+
+    def test_one_request_id_under_two_actors_fails_the_attempt(self) -> None:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            child = next((roots.output / "sessions" / launch.root_session_id / "subagents").glob("agent-*.jsonl"))
+            rows = support.read_rows(child)
+            rows[0]["requestId"] = "req_2"
+            support.write_rows(child, rows)
+
+        record = self.rewrite(edit)
+        self.assertEqual(record["outcome"], "invalid")
+        self.assertEqual(record["invalid_reason"], "usage:duplicate_request")
+        # Nothing was parsed, so nothing is presented as observed usage.
+        self.assertEqual(record["usage"], [])
+        self.assertEqual(record["usage_reconciliation"], {"status": "unparsed"})
+
+    def test_a_forwarded_child_row_that_disagrees_with_the_child_fails_the_attempt(self) -> None:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            sessions = roots.output / "sessions"
+            child = next((sessions / launch.root_session_id / "subagents").glob("agent-*.jsonl"))
+            echo = dict(support.read_rows(child)[0])
+            echo["message"] = {**echo["message"], "usage": {**echo["message"]["usage"], "output_tokens": 99999}}
+            root = sessions / f"{launch.root_session_id}.jsonl"
+            rows = support.read_rows(root)
+            support.write_rows(root, rows[:-1] + [echo] + rows[-1:])
+
+        record = self.rewrite(edit)
+        self.assertEqual(record["outcome"], "invalid")
+        self.assertEqual(record["invalid_reason"], "usage:conflicting_records")
+
+    def test_a_live_loop_db_wal_means_settlement_is_incomplete(self) -> None:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            support.write_loop_db(roots.data_dir / "loop.db", [("fire-root", launch.root_session_id, "")])
+            (roots.data_dir / "loop.db-wal").write_bytes(b"")
+
+        record = self.rewrite(edit)
+        self.assertEqual(record["outcome"], "invalid")
+        self.assertEqual(record["invalid_reason"], "delivery:wal_live")
+        self.assertEqual(record["delivery"], loop_join.unavailable())
+
+    def test_a_fire_for_an_actor_with_no_usage_is_an_attribution_error(self) -> None:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            session = launch.root_session_id
+            support.write_loop_db(
+                roots.data_dir / "loop.db",
+                [("fire-root", session, ""), ("fire-ghost", session, "ghost01")],
+            )
+
+        record = self.rewrite(edit)
+        self.assertEqual(record["outcome"], "invalid")
+        self.assertEqual(record["invalid_reason"], "delivery:fire_without_usage")
+        self.assertEqual([fire["fire_id"] for fire in record["delivery"]["fires"]], ["fire-root"])
+        self.assertEqual([fire["fire_id"] for fire in record["delivery"]["unmatched_fires"]], ["fire-ghost"])
+
+
+class AuxiliaryReceiptTest(TrialCase):
+    """The auxiliary seam: benchmark-owned receipts for memory-product spend."""
+
+    def collector(self, *ids: str, trial: str | None = None) -> runner.Receipts:
+        def collect(trial_id: str, roots: artifact.TrialRoots) -> list[AuxiliaryReceipt]:
+            return [
+                AuxiliaryReceipt(
+                    trial_id=trial or trial_id,
+                    component="observer",
+                    phase="consumer",
+                    native_request_id=request_id,
+                    input_total=400,
+                    output_total=100,
+                    source_hash="sha256:receipt",
+                )
+                for request_id in ids
+            ]
+
+        return collect
+
+    def test_collected_receipts_enter_the_record_and_the_numerator(self) -> None:
+        record = self.one_trial(self.manifest(), self.runtime(receipts=self.collector("aux_1", "aux_2")))
+        self.assertEqual(record["outcome"], "pass")
+        self.assertEqual([item["native_request_id"] for item in record["auxiliary"]], ["aux_1", "aux_2"])
+        reduction = reduce_module.reduce({record["trial_id"]: record}, [])
+        cell = reduction["arms"][record["arm_id"]]["tasks"][record["task_id"]]
+        self.assertEqual(cell["diagnostics"]["auxiliary_consumer_tokens"], 1000)
+        self.assertEqual(cell["tokens"], sum(item["input_total"] + item["output_total"] for item in record["usage"]) + 1000)
+
+    def test_a_receipt_that_cannot_be_counted_once_makes_the_attempt_invalid(self) -> None:
+        cases = {
+            "duplicate_request": self.collector("aux_1", "aux_1"),
+            "foreign_trial": self.collector("aux_1", trial="another-trial"),
+        }
+        for code, collector in cases.items():
+            with self.subTest(code):
+                record = self.one_trial(self.manifest(), self.runtime(receipts=collector))
+                self.assertEqual(record["outcome"], "invalid")
+                self.assertEqual(record["invalid_reason"], f"auxiliary:{code}")
+                # A contradictory receipt set is never published as observed spend.
+                self.assertEqual(record["auxiliary"], [])
+
+    def test_a_receipt_reusing_a_consumer_request_id_makes_the_attempt_invalid(self) -> None:
+        record = self.one_trial(self.manifest(), self.runtime(receipts=self.collector("req_1")))
+        self.assertEqual(record["outcome"], "invalid")
+        self.assertEqual(record["invalid_reason"], "auxiliary:duplicate_request")
 
 
 class LiveRefusalTest(TrialCase):

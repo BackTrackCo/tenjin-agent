@@ -1,7 +1,7 @@
 {
   "actors": [
     {
-      "key": ["claude", "fake-a9f97a213beff1468ae0b147", ""],
+      "key": ["claude", "fake-e98e819ecb6117b936d507bd", ""],
       "parent_actor_key": null,
       "parent_provenance": "unavailable"
     }
@@ -15,14 +15,14 @@
       "output_total": 100,
       "phase": "consumer",
       "source_hash": "sha256:deb475990fcd7cc91ec1bfafc79695613f5542a159f87f2f1cf584dab94ceea4",
-      "trial_id": "a9f97a213beff1468ae0b147"
+      "trial_id": "e98e819ecb6117b936d507bd"
     }
   ],
   "cost_usd": null,
   "delivery": {
     "fires": [
       {
-        "actor": ["claude", "fake-a9f97a213beff1468ae0b147", ""],
+        "actor": ["claude", "fake-e98e819ecb6117b936d507bd", ""],
         "at": 1757000000,
         "delivered": "piece_a1b2c3",
         "event": "prompt",
@@ -34,7 +34,7 @@
     ],
     "legs": [
       {
-        "actor": ["claude", "fake-a9f97a213beff1468ae0b147", ""],
+        "actor": ["claude", "fake-e98e819ecb6117b936d507bd", ""],
         "calibration": "high",
         "fire_id": "fire-a9f97a21",
         "form": "piece",
@@ -58,8 +58,8 @@
     "live": false,
     "publishable": true
   },
-  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
-  "native_root_id": "fake-a9f97a213beff1468ae0b147",
+  "manifest_hash": "00314dceaa21a1e3e5c44b5ce14f550c65b6cfe0d1abb1958c63589e3a50cd91",
+  "native_root_id": "fake-e98e819ecb6117b936d507bd",
   "outcome": "capped",
   "parent_edges": [],
   "patch_hash": null,
@@ -69,7 +69,7 @@
     "root_transcript": "sha256:f3ab5340d3eece7494398a8c3d3714f4b2bb99f145bf6c3d3b834338127452c9"
   },
   "repeat": 0,
-  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "schedule_hash": "db893d331f384e3e4acfc6fdced06bc8537185e17978950c3e3ca350ad7494e6",
   "schema": "bench1.attempt.v1",
   "sentinel": {
     "credential_exposures": 0,
@@ -83,12 +83,12 @@
       "Task": 1
     }
   },
-  "trial_id": "a9f97a213beff1468ae0b147",
+  "trial_id": "e98e819ecb6117b936d507bd",
   "turns": null,
   "unresolved_actors": [""],
   "usage": [
     {
-      "actor_key": ["claude", "fake-a9f97a213beff1468ae0b147", ""],
+      "actor_key": ["claude", "fake-e98e819ecb6117b936d507bd", ""],
       "adapter": "claude",
       "adapter_version": "1",
       "cache_read": 840,
@@ -101,7 +101,7 @@
       "provider_total": null,
       "reasoning_output_subset": null,
       "source_hash": "sha256:cb89bc456711672d607fd1dac13667e669f6574567adb263ab12270da84d9d7a",
-      "trial_id": "a9f97a213beff1468ae0b147",
+      "trial_id": "e98e819ecb6117b936d507bd",
       "uncached_input": 1050
     }
   ],

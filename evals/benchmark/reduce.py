@@ -220,8 +220,16 @@ def reduce(
     excluded: list[Excluded],
     baseline: str | None = None,
     seed: int = 0,
+    declared_arms: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Task-equal aggregates per arm, plus comparisons against one baseline arm."""
+    """Task-equal aggregates per arm, plus comparisons against one baseline arm.
+
+    `declared_arms` is the manifest's arm list. The records say what was
+    observed; only the manifest can say what an arm was able to expose, so an
+    arm declaring `auxiliary_usage: unexposed` is accounting-incomplete even
+    when every one of its records reconciles.
+    """
+    declared = {arm["id"]: arm.get("auxiliary_usage") for arm in declared_arms or []}
     arms: dict[str, dict[str, Any]] = {}
     invalid: list[dict[str, str]] = []
     cells: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -252,10 +260,14 @@ def reduce(
     for arm_id, arm in arms.items():
         scored = scored_by_arm.get(arm_id, [])
         states = {_accounting(record) for record in scored}
+        reasons = {
+            record["usage_reconciliation"].get("status", "unparsed") for record in scored if _accounting(record) == "incomplete"
+        }
+        if declared.get(arm_id) == "unexposed":
+            states.add("incomplete")
+            reasons.add("auxiliary_unexposed")
         arm["accounting"] = "incomplete" if "incomplete" in states else ("partial_by_cap" if "partial_by_cap" in states else "complete")
-        arm["accounting_reasons"] = sorted(
-            {record["usage_reconciliation"].get("status", "unparsed") for record in scored if _accounting(record) == "incomplete"}
-        )
+        arm["accounting_reasons"] = sorted(reasons)
         arm["headline_eligible"] = arm["accounting"] != "incomplete" and bool(arm["tasks"])
         arm["capture_tokens"] = capture_tokens(scored)
         tasks = list(arm["tasks"].values())

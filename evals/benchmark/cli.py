@@ -86,13 +86,13 @@ def do_verify(run_dir: Path) -> dict[str, Any]:
 def do_reduce(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
-    return reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"])
+    return reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
 
 
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
-    reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"])
+    reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
     report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted)
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report

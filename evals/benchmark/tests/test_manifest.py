@@ -56,6 +56,11 @@ class ManifestTest(unittest.TestCase):
             "unpinned product": {**base, "arms": [{**arm, "product_version": "latest"}, base["arms"][1]]},
             "settings hash": {**base, "arms": [{**arm, "settings_hash": "off"}, base["arms"][1]]},
             "mixed executors": {**base, "arms": [arm, {**base["arms"][1], "executor": "real"}]},
+            "unknown auxiliary exposure": {**base, "arms": [{**arm, "auxiliary_usage": "maybe"}, base["arms"][1]]},
+            "undeclared auxiliary exposure": {
+                **base,
+                "arms": [{key: value for key, value in arm.items() if key != "auxiliary_usage"}, base["arms"][1]],
+            },
             "phase keys": {**base, "phases": {"producer": "x"}},
             "empty phase": {**base, "phases": {**base["phases"], "capture": ""}},
         }

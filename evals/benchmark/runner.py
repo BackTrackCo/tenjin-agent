@@ -25,12 +25,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, verifier
+from . import artifact, claude_usage, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from .schedule import Trial
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], None]
+# The auxiliary seam: a runtime that knows how a memory product logs its own
+# model calls returns them as receipts for one trial. The benchmark owns the
+# receipts; nothing in the manifest or the agent's output can mint one.
+Receipts = Callable[[str, artifact.TrialRoots], list[usage.AuxiliaryReceipt]]
 
 
 @dataclass(frozen=True)
@@ -89,6 +93,7 @@ class Runtime:
     settle_cap_s: float = 30.0
     settle_interval_s: float = 0.25
     sentinel: artifact.SentinelLike | None = None
+    receipts: Receipts | None = None
     attestation: artifact.Attestation | None = None
     publishable: bool = True
     ci: bool = field(default_factory=lambda: bool(os.environ.get("CI")))
@@ -203,6 +208,21 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if delivery["unmatched_fires"]:
         usage_reason = usage_reason or "delivery:fire_without_usage"
 
+    auxiliary: list[dict[str, Any]] = []
+    if runtime.receipts is not None:
+        collected = runtime.receipts(trial.trial_id, roots)
+        try:
+            if any(receipt.trial_id != trial.trial_id for receipt in collected):
+                raise usage.UsageError("foreign_trial", "an auxiliary receipt names another trial")
+            usage.check_receipts(collected, [] if session is None else session.records)
+        except usage.UsageError as error:
+            # A contradictory receipt set is not a fact a record can carry, so
+            # the attempt is invalid and names the code instead of publishing
+            # spend it cannot attribute.
+            usage_reason = usage_reason or f"auxiliary:{error.code}"
+        else:
+            auxiliary = [receipt.to_json() for receipt in collected]
+
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
@@ -265,7 +285,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "environment_hash": "sha256:" + sha256_json(manifest.pins),
         "harness": spec.harness,
         **usage_fields,
-        "auxiliary": [],
+        "auxiliary": auxiliary,
         "outcome": outcome,
         "invalid_reason": invalid_reason,
         "verifier": None if verdict is None else {"id": verdict.verifier_id, "exit_code": verdict.exit_code},

@@ -46,9 +46,15 @@ PIN_KEYS = frozenset(
     }
 )
 TASK_KEYS = frozenset({"id", "family", "transfer_distance", "fixture", "fixture_hash", "verifier"})
-ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "memory_snapshot_hash"})
+ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "memory_snapshot_hash", "auxiliary_usage"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
 TRANSFER_DISTANCES = frozenset({"none", "same_task", "same_family", "cross_family"})
+# What an arm's memory product can prove about its own model spend. `none` is a
+# claim that it spends no model tokens outside the harness session; `exposed`
+# means it emits auxiliary receipts; `unexposed` is an arm whose spend the
+# benchmark cannot see, which the reducer keeps out of the headline. There is
+# no default: silence about auxiliary spend is the failure this field names.
+AUXILIARY_EXPOSURE = frozenset({"none", "exposed", "unexposed"})
 
 # Ids appear in publishable output, so they are opaque tokens by construction.
 ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -181,6 +187,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
         for key in ("settings_hash", "memory_snapshot_hash"):
             if not _hash_token(arm[key]):
                 raise ManifestError(f"arm {arm_id!r} {key} must be a sha256 token")
+        if arm["auxiliary_usage"] not in AUXILIARY_EXPOSURE:
+            raise ManifestError(f"arm {arm_id!r} auxiliary_usage must be one of {', '.join(sorted(AUXILIARY_EXPOSURE))}")
         executors.add(arm["executor"])
     # Arms that run different executors measure different harnesses, so their
     # token totals would not be comparable under one manifest.

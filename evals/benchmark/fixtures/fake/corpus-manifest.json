@@ -1,6 +1,7 @@
 {
   "arms": [
     {
+      "auxiliary_usage": "none",
       "executor": "fake",
       "id": "off",
       "memory_snapshot_hash": "sha256:empty",
@@ -8,6 +9,7 @@
       "settings_hash": "sha256:off"
     },
     {
+      "auxiliary_usage": "exposed",
       "executor": "fake",
       "id": "on",
       "memory_snapshot_hash": "sha256:empty",

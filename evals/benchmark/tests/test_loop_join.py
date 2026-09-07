@@ -3,27 +3,19 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from evals.benchmark import REPO_ROOT, loop_join
+from evals.benchmark import loop_join
 from evals.benchmark.loop_join import LoopJoinError
+from evals.benchmark.tests.support import loop_ddl
 
-STORE = REPO_ROOT / "src" / "hooks" / "store.ts"
 SESSION = "sess-family"
 ROOT = ("claude", SESSION, "")
 CHILD = ("claude", SESSION, "child01")
 SIBLING = ("claude", SESSION, "sib0a")
-
-
-def loop_ddl() -> str:
-    """The product's own DDL, so the fixture cannot drift from src/hooks/store.ts."""
-    match = re.search(r"export const LOOP_DDL = `([\s\S]*?)`;", STORE.read_text(encoding="utf-8"))
-    assert match is not None, "LOOP_DDL not found in store.ts"
-    return match.group(1)
 
 
 def build(path: Path) -> None:

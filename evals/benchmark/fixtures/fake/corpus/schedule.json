@@ -1,90 +1,90 @@
 {
-  "manifest_hash": "67fc0da972370111e92aff554d09dcdecd991d37ef359e7db250976d3d282915",
-  "schedule_hash": "687636d0f649c5635af7e565574aee4ad80c87ec9f99a4254370a98273b9f97f",
+  "manifest_hash": "00314dceaa21a1e3e5c44b5ce14f550c65b6cfe0d1abb1958c63589e3a50cd91",
+  "schedule_hash": "db893d331f384e3e4acfc6fdced06bc8537185e17978950c3e3ca350ad7494e6",
   "trials": [
     {
-      "arm_id": "on",
-      "position": 0,
-      "repeat": 0,
+      "trial_id": "e98e819ecb6117b936d507bd",
       "task_id": "slug-rename",
-      "trial_id": "a9f97a213beff1468ae0b147"
+      "arm_id": "on",
+      "repeat": 0,
+      "position": 0
     },
     {
-      "arm_id": "off",
-      "position": 1,
-      "repeat": 0,
+      "trial_id": "bc4ad1235613241054404799",
       "task_id": "slug-rename",
-      "trial_id": "cd6c954477cf8e86847c9f89"
-    },
-    {
       "arm_id": "off",
-      "position": 2,
       "repeat": 0,
-      "task_id": "budget-guard",
-      "trial_id": "df69afce65b14dbaefab8a3e"
+      "position": 1
     },
     {
-      "arm_id": "on",
-      "position": 3,
-      "repeat": 0,
+      "trial_id": "73c74fdfbb73ed0fa38d23cc",
       "task_id": "budget-guard",
-      "trial_id": "3a257280891cfb93e2edb21b"
+      "arm_id": "off",
+      "repeat": 0,
+      "position": 2
     },
     {
+      "trial_id": "d78ba0911efc6c9893bea85a",
+      "task_id": "budget-guard",
       "arm_id": "on",
-      "position": 4,
       "repeat": 0,
+      "position": 3
+    },
+    {
+      "trial_id": "4eff8b010ccb50dfdedb4ff1",
       "task_id": "answer-file",
-      "trial_id": "2cdc7db434721babdb0f8467"
-    },
-    {
-      "arm_id": "off",
-      "position": 5,
-      "repeat": 0,
-      "task_id": "answer-file",
-      "trial_id": "bd8fee0717055529eb1c5de1"
-    },
-    {
       "arm_id": "on",
-      "position": 6,
-      "repeat": 1,
-      "task_id": "budget-guard",
-      "trial_id": "a1df23025d4f3e560b7a5af0"
+      "repeat": 0,
+      "position": 4
     },
     {
+      "trial_id": "4b1f6eb71a8753c19292b514",
+      "task_id": "answer-file",
       "arm_id": "off",
-      "position": 7,
-      "repeat": 1,
-      "task_id": "budget-guard",
-      "trial_id": "047de44bb24581e5acbbfd85"
+      "repeat": 0,
+      "position": 5
     },
     {
-      "arm_id": "off",
-      "position": 8,
+      "trial_id": "750e0ab780bf4a0b89be58aa",
+      "task_id": "budget-guard",
+      "arm_id": "on",
       "repeat": 1,
+      "position": 6
+    },
+    {
+      "trial_id": "96fe7dddd0f330e796832687",
+      "task_id": "budget-guard",
+      "arm_id": "off",
+      "repeat": 1,
+      "position": 7
+    },
+    {
+      "trial_id": "7f0055ed9a4b63b4a142b6cc",
       "task_id": "slug-rename",
-      "trial_id": "385604c7203c941ffdb88ad1"
-    },
-    {
-      "arm_id": "on",
-      "position": 9,
-      "repeat": 1,
-      "task_id": "slug-rename",
-      "trial_id": "3d2b42fa0e2286197c28ff76"
-    },
-    {
       "arm_id": "off",
-      "position": 10,
       "repeat": 1,
-      "task_id": "answer-file",
-      "trial_id": "f01f551024e08febb652ffde"
+      "position": 8
     },
     {
+      "trial_id": "de713b83f5f23eccccfe71af",
+      "task_id": "slug-rename",
       "arm_id": "on",
-      "position": 11,
       "repeat": 1,
+      "position": 9
+    },
+    {
+      "trial_id": "829af6e40d69db75b4a94ca5",
       "task_id": "answer-file",
-      "trial_id": "10aead4151382022efcd71b9"
+      "arm_id": "off",
+      "repeat": 1,
+      "position": 10
+    },
+    {
+      "trial_id": "728e7c0d324205a7c4ebc36c",
+      "task_id": "answer-file",
+      "arm_id": "on",
+      "repeat": 1,
+      "position": 11
     }
   ]
 }
