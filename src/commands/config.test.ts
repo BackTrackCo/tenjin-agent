@@ -1059,14 +1059,14 @@ describe('the hooks block is set through config, which stays human-gated', () =>
     expect(primer.code).toBe('USAGE');
     expect(primer.fix).toContain('"off"');
 
-    // A key that never existed is a usage error, not a silently accepted alias:
-    // `hooks.searchMode`, `hooks.dispatchMode` and `hooks.stopNag` are gone.
-    for (const key of ['hooks.searchMode', 'hooks.dispatchMode', 'hooks.stopNag'] as const) {
-      const gone = await caught(() => runConfigSet({ key, value: 'off' }, ctx));
-      expect(gone.code, key).toBe('USAGE');
-      const goneGet = await caught(() => runConfigGet({ key }, ctx));
-      expect(goneGet.code, key).toBe('USAGE');
-    }
+    // A key this table does not know is a usage error on both verbs, never a
+    // silently accepted alias — the raw hooks block passes unknown fields
+    // through, so nothing else refuses one.
+    const unknown = 'hooks.notAKey';
+    expect((await caught(() => runConfigSet({ key: unknown, value: 'off' }, ctx))).code).toBe(
+      'USAGE',
+    );
+    expect((await caught(() => runConfigGet({ key: unknown }, ctx))).code).toBe('USAGE');
 
     const badPush = await caught(() =>
       runConfigSet({ key: 'hooks.push', value: 'sometimes' }, ctx),

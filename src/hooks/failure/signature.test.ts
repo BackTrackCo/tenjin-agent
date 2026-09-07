@@ -11,10 +11,9 @@ import {
 } from './signature';
 
 /**
- * The failure arm's pure half, on the generated arm's own fixtures
- * (`push-scripts.test.ts`, #292's corpus). What matters: which commands the
- * arm fires behind, which line of a runner's output is the failure, and that
- * the keys stay the bytes the team shelf already holds.
+ * The failure arm's pure half. What matters: which commands the arm fires
+ * behind, which line of a runner's output is the failure, and that the keys stay
+ * the bytes the team shelf already holds.
  */
 
 const HEX16 = /^[0-9a-f]{16}$/;

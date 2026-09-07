@@ -5,10 +5,9 @@ import { shortHash } from './keys';
 /**
  * The failure arm's pure half (13-pr-d-local-arms.md, "failure"): which
  * commands the arm fires behind, which line of the output is the failure, and
- * the `sig_v1` keys built from it. Lifted from the generated arm
- * (`push-scripts.ts`) and the #292 branch (the totals-row rule), formulas
- * unchanged: the team shelf's `--key` publishes are `sig_v1` today, and a
- * changed byte would strand every one of them.
+ * the `sig_v1` keys built from it. The formulas are frozen: the team shelf's
+ * `--key` publishes are `sig_v1` today, and a changed byte would strand every
+ * one of them.
  */
 
 // ---- which commands ----

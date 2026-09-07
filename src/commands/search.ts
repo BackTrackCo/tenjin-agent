@@ -74,10 +74,9 @@ export async function runSearch(
   // that origin IS the team shelf, in public mode it is the marketplace.
   const legs: ShelfLeg[] = [];
   /**
-   * A TEAM SHELF THAT ERRORS IS A MISS, NOT A STOP — the rule the push hooks
-   * already state in so many words (lib/push-scripts.ts shelfDecide: "silencing
-   * the public shelf ... would turn one misconfigured secret into a sidecar that
-   * never speaks again"). `postSearch` throws on any non-200, and Deployment
+   * A TEAM SHELF THAT ERRORS IS A MISS, NOT A STOP — the rule the daemon's legs
+   * hold too (hooks/legs/shelf.ts never throws; a failed leg is one row and the
+   * fire still hears from the others). `postSearch` throws on any non-200, and Deployment
    * Protection answers a rotated or mistyped bypass secret with a 401 HTML page,
    * so an unguarded first leg meant that a typo, a redeploy, or ten minutes of
    * 500s took down every `tenjin search` on the machine while tenjin.blog sat
@@ -225,10 +224,10 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
   // Ingest trust boundary: a candidate url that points off the shelf that served
   // it would later route a wallet-signed SIWX header and payment to that host via
   // `buy <resourceId>`. Refuse the whole response as a contract violation.
-  // This deliberately diverges from the hook path (lib/hook-scripts.ts
-  // askTenjin), which DROPS the one off-origin candidate and keeps the rest: a
-  // hook hint is advisory and never pays, so one bad row should not blank the
-  // hint, whereas a `search` result feeds `buy` and must fail closed as a whole.
+  // This deliberately diverges from the hook path (hooks/legs/shelf.ts), which
+  // DROPS the one off-origin candidate and keeps the rest: a hook hint is
+  // advisory and never pays, so one bad row should not blank the hint, whereas a
+  // `search` result feeds `buy` and must fail closed as a whole.
   for (const c of response.items) {
     try {
       assertOnBaseOrigin(c.url, q.baseUrl, 'search candidate URL');

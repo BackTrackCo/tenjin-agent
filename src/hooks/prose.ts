@@ -10,11 +10,6 @@ import type { Shelf } from './types';
  * A PARENT RELAY LINE, IF EVER, LIVES HERE and renders through `deliver()`:
  * one sentence, never a third string builder (decision D). There is none now;
  * the child gets the piece whole and the parent is not told.
- *
- * The strings are verbatim from the generated arms they replace
- * (`hook-scripts.ts`, `push-scripts.ts`), which E deletes; they are copied
- * rather than imported because those modules pull the whole legacy script set
- * into a daemon bundle that starts in front of every tool call.
  */
 
 export const PUBLIC_OPENER =
@@ -66,8 +61,7 @@ export const READ_POINTER = 'Read it free: tenjin read ';
 export const INSPECT_POINTER = 'Inspect it free: tenjin inspect ';
 
 /** The line under a cut body: the only thing that says it was cut, and how to
- *  fetch the rest (`push-scripts.ts:563`, unchanged). The resource id follows,
- *  then `]`. */
+ *  fetch the rest. The resource id follows, then `]`. */
 export const TRUNCATED_POINTER = '[truncated; the full piece: tenjin read ';
 
 /** The one-liner `remind` mode says instead of sending the query anywhere. */

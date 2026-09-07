@@ -151,7 +151,7 @@ describe('runDoctor — passing outcomes', () => {
       env: {},
       which: () => false,
       fetchImpl: healthyFetch,
-      openStore: () => {
+      openLoopDb: () => {
         throw new Error('loop.db is from another build; run tenjin daemon stop and retry');
       },
     }).then(
@@ -184,9 +184,6 @@ describe('runDoctor — passing outcomes', () => {
     expect(store.status).toBe('ok');
     expect(store.detail).toBe(`${join(dir, 'loop.db')} open`);
     expect(existsSync(join(dir, 'loop.db'))).toBe(true);
-    // The retired store's own checks are gone with the file they described.
-    expect(checks.map((c) => c.name)).not.toContain('state-store');
-    expect(checks.map((c) => c.name)).not.toContain('state-store-journal');
   });
 
   /**

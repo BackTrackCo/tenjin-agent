@@ -83,7 +83,7 @@ function toolResult(v: unknown): HookTool['result'] | undefined {
  * Pure. Returns null for an unknown event, a missing session, or an `agent_id`
  * that is present but fails `AGENT_ID_RE`: the harness named a worker this build
  * cannot use, and recording the fire anyway would file a child's work under the
- * lead (`hook-scripts.ts` `identityOf` rule, kept verbatim).
+ * lead.
  */
 export function decode(raw: unknown): HookInput | null {
   if (!isRecord(raw)) return null;

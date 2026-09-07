@@ -226,8 +226,8 @@ function evidence(ctx: FireContext): Evidence | null {
 
 /**
  * The project's own `publish.mode`, walking up from `start` to the first
- * `.tenjin.json`, the checkout root or home (ported from `hook-scripts.ts`,
- * minimal). A project file may narrow, never widen, so `full-auto` reads as
+ * `.tenjin.json`, the checkout root or home. A project file may narrow, never
+ * widen, so `full-auto` reads as
  * `auto`. A file owned by someone else is skipped, as the CLI skips it. Every
  * failure is null and the global mode answers.
  */

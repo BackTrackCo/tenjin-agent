@@ -84,7 +84,7 @@ describe('resolveResourceRef', () => {
    * turned a months-old search into "No local search knows resource …" purely
    * by the calendar — a piece an agent had deliberately parked became unbuyable
    * with no way to tell why. The bound is a row count now (see
-   * `STORE_SQL.searchForResource`), so age alone never costs a resolution.
+   * `findSearchForResource`), so age alone never costs a resolution.
    */
   it('resolves a search far older than the month a date floor used to allow', async () => {
     await recordSearch(dir, {

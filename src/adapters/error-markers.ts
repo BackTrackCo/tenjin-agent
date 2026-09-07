@@ -5,8 +5,7 @@
  * or a runner that prints its verdict and exits zero, arrives as a plain
  * `PostToolUse`. So the adapter scans stdout and stderr for a marker a real
  * toolchain emits, and `decode` sets `tool.ok` from it — the arm never reads
- * text to decide. Ported as data from the generated failure arm
- * (`push-scripts.ts` `ERROR_MARKERS`), unchanged.
+ * text to decide.
  *
  * Case-sensitive where the case IS the signal: `FAIL` is a vitest/jest/pytest
  * verdict, `fail` and `failed` are prose. The anchored patterns carry `m` so

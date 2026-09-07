@@ -165,7 +165,7 @@ export interface DoctorDeps {
   env?: NodeJS.ProcessEnv;
   /** The loop-database open; tests inject a failing one to exercise the
    * damaged-install diagnosis without a damaged install. */
-  openStore?: typeof openLoopDbForCli;
+  openLoopDb?: typeof openLoopDbForCli;
   /** Injected fetch for the reachability checks; tests pass a canned stub. */
   fetchImpl?: typeof fetch;
   /** Inject the active wallet provider. When set, NO local fs/env is consulted —
@@ -251,7 +251,7 @@ export async function collectDoctorChecks(
   const requested = config.install?.harness ?? [];
   const built: BuiltCheck[] = [
     checkNode(),
-    checkStore(ctx.dataDir, deps.openStore ?? openLoopDbForCli),
+    checkStore(ctx.dataDir, deps.openLoopDb ?? openLoopDbForCli),
   ];
   // Only when there is something to say: a machine on the default data dir is
   // the ordinary case and gets no line about it.
@@ -1265,9 +1265,9 @@ interface TestReporterFramework {
 const TEST_REPORTER_FRAMEWORKS: readonly TestReporterFramework[] = [
   {
     name: 'vitest',
-    // Kept in step with push-scripts.ts's own TEST_CONFIG_FILES (tenjin-agent#278
-    // nit 2): a repo on `vitest.config.cts`/`.cjs` cleared the failure arm's own
-    // read but never got this hint, since this list was a strict subset.
+    // Kept in step with the failure arm's own TEST_CONFIG_FILES
+    // (hooks/failure/test-identity.ts): a repo on `vitest.config.cts`/`.cjs` that
+    // clears the arm's read must not be told it is missing the reporter.
     configFiles: [
       'vitest.config.ts',
       'vitest.config.mts',

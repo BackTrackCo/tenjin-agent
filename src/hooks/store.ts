@@ -9,10 +9,9 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  * ONE WRITER ON THE HOOK PATH. The daemon is the only process that writes
  * `fires`, `legs` and `marks`; the CLI opens the file directly (`lib/loop-db.ts`)
  * to read them and to write its own tables — `searches` is the CLI's, one row per
- * `tenjin search` — rarely and briefly. That is why
- * there is no bootstrap lock, no busy-wait tier and no WAL retry here (compare
- * `state-store.ts` `openStore`, written for eight processes racing one file):
- * `busy_timeout` alone covers the CLI's occasional write.
+ * `tenjin search` — rarely and briefly. That is why there is no bootstrap lock,
+ * no busy-wait tier and no WAL retry here: `busy_timeout` alone covers the CLI's
+ * occasional write.
  *
  * NO `user_version` LADDER AND NO MIGRATION. Nothing before launch has readers
  * to migrate; `CREATE TABLE IF NOT EXISTS` per table, and a shape change means

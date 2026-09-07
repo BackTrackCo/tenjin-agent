@@ -716,7 +716,7 @@ async function loadNamedSearches(
 ): Promise<Map<string, StoredSearch>> {
   const found = new Map<string, StoredSearch>();
   for (const id of searchIds) {
-    // The lookup itself is case-insensitive (STORE_SQL.getSearch), so the id
+    // The lookup itself is case-insensitive (`getStoredSearch`), so the id
     // this map is keyed by is the one the caller will ask with.
     const stored = await getStoredSearch(ctx.dataDir, id);
     if (stored !== null) found.set(id.toLowerCase(), stored);
@@ -997,7 +997,6 @@ function findingRef(finding: ChildFinding): Record<string, unknown> {
  * `body` IS WHOLE, and that is the point of it: this shape is what makes the
  * review confirm a read gate rather than a preview, so the operator (or the
  * `--json` caller relaying to one) sees the same text that would be published.
- * It is bounded already, at capture, to `PUSH_FINDING_MAX_CHARS`.
  *
  * `framing` TRAVELS WITH THE BODY, in the data rather than beside it. The
  * "record of what was settled, data not instructions" line lived only in the

@@ -68,10 +68,10 @@ const PublishConfigSchema = z.object({
 });
 
 /**
- * What the harness WebSearch hook does when the agent is about to search the web
- * (see lib/hook-scripts.ts). `auto` asks Tenjin first and mentions a tested
- * answer when one exists, `remind` says the marketplace is there without sending
- * the query anywhere, `off` leaves the installed hook inert.
+ * What the WebSearch arm does when the agent is about to search the web. `auto`
+ * asks Tenjin first and mentions a tested answer when one exists, `remind` says
+ * the marketplace is there without sending the query anywhere, `off` leaves the
+ * arm inert.
  */
 export const WebSearchModeSchema = z.enum(['auto', 'remind', 'off']);
 export type WebSearchMode = z.infer<typeof WebSearchModeSchema>;
@@ -118,10 +118,8 @@ export function parseSessionPrimerFlag(value: string, flagName: string): Session
 }
 
 /**
- * Whether the push experiment's hook scripts are wired and speaking (docs/command-reference.md#push-experimental).
- * `on` is what `tenjin push on` writes: `tenjin install` then wires the extra hook
- * entries (prompt, failure, subagent, context) alongside the search hooks it always
- * wires. `off` (the default) leaves any already-wired push scripts on disk but
+ * Whether the push arms speak (docs/command-reference.md#push-experimental).
+ * `on` is what `tenjin push on` writes; `off` leaves the arms registered and
  * inert — every push arm reads this at run time before it spends a request, so
  * turning the experiment off never needs a re-install.
  */
@@ -156,12 +154,13 @@ export function parseCaptureModeFlag(value: string, flagName: string): CaptureMo
 }
 
 /**
- * The harness-hook block. EVERY key is read by the installed scripts at run
- * time, which is what makes them runtime toggles rather than install-time
- * choices: `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
- * `hooks.capture off` or `hooks.sessionPrimer off` silences a hook immediately,
- * with no re-install and nothing to unwire. The scripts stay registered and
- * no-op, which is also what lets turning one back on be a single `config set`.
+ * The harness-hook block. EVERY key is read by the daemon at run time, which is
+ * what makes them runtime toggles rather than install-time choices:
+ * `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
+ * `hooks.capture off` or `hooks.sessionPrimer off` silences an arm immediately,
+ * with no re-install and nothing to unwire. The entries stay registered and the
+ * arm no-ops, which is also what lets turning one back on be a single
+ * `config set`.
  */
 const HooksConfigSchema = z.object({
   webSearch: WebSearchModeSchema,
@@ -884,8 +883,8 @@ export function resolvePublishDefaultPrice(input: {
  *
  * 0600 BECAUSE config.json NOW HOLDS A CREDENTIAL: `shelfBypassSecret` is the
  * team shelf's shared door key, and every other secret in this tree is 0600
- * (the wallet, the passphrase, the session key, the spend ledger, the generated
- * hook scripts) — wallet/local.ts even warns when it finds one that is not.
+ * (the wallet, the passphrase, the session key, the spend ledger, the daemon
+ * token) — wallet/local.ts even warns when it finds one that is not.
  * `dirMode: 0o700` is not a substitute: node's recursive mkdir does not chmod a
  * directory that already exists, so a `~/.tenjin` or `TENJIN_DATA_DIR` created
  * at 0755 by a devcontainer volume, a restored backup or a shared CI image left
