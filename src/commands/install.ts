@@ -613,7 +613,9 @@ async function installBody(
     );
   }
   // The two questions, in order, with everything a flag settles between them.
-  if (canPrompt) await (deps.intro ?? clackIntro)('tenjin install');
+  // The frame opens the questions, so a dry run — which settles both without
+  // asking — never opens one and leaves it hanging over the walkthrough.
+  if (canPrompt && !dryRun) await (deps.intro ?? clackIntro)('tenjin install');
   const publishMode = await underDataDir(ctx.dataDir, () =>
     resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt),
   );

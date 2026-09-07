@@ -976,14 +976,22 @@ describe('runInstall: publish-mode selection', () => {
     expect(await persistedMode()).toBeUndefined(); // dry run wrote nothing
   });
 
-  it('--dry-run does not prompt', async () => {
+  it('--dry-run does not prompt, and opens no frame for the questions it skips', async () => {
     const spy = promptSpy(['review']);
+    let frames = 0;
     const { data: d } = await runInstall(
       { harness: ['claude'], dryRun: true },
       makeCtx(),
-      deps({ isInteractive: true, promptPublishMode: spy.fn }),
+      deps({
+        isInteractive: true,
+        promptPublishMode: spy.fn,
+        intro: async () => {
+          frames += 1;
+        },
+      }),
     );
     expect(spy.calls()).toBe(0);
+    expect(frames).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
