@@ -94,17 +94,16 @@ echo "pack-smoke: --version -> $GOT_VERSION (ok)"
 
 # 1b) The bundle must keep `node:sqlite` under its `node:` name. tsup's default
 # `removeNodeProtocol` once shipped it as `import("sqlite")`, which resolves to
-# nothing, so every CLI-side state-store open failed open while the generated
-# hooks kept working (tenjin-agent#225). Asserted on BEHAVIOUR, not bundle text:
-# a grep for the bare form also matched a source comment that merely described
-# the bug. The packed CLI proves the specifier survived by doing the thing it is
-# for — `doctor --json` reports the `state-store` check `ok` iff the import
-# resolved. Doctor's other checks may fail here (no network, no wallet); the
-# check list rides on both the success envelope and the failure envelope's
-# `details`, so only the one check is read. The positive grep stays as a cheap
-# early signal that names the bundler when the behaviour check trips.
-if ! grep -rq 'import("node:sqlite")' ./node_modules/tenjin-cli/dist/; then
-  echo "pack-smoke: FAIL — dist has no import(\"node:sqlite\") at all; tsup must keep the node: prefix (removeNodeProtocol: false)" >&2
+# nothing, so every CLI-side store open failed open while the daemon kept working
+# (tenjin-agent#225). Asserted on BEHAVIOUR, not bundle text: the packed CLI
+# proves the specifier survived by doing the thing it is for — `doctor --json`
+# reports the `store` check `ok` iff `loop.db` opened through node:sqlite.
+# Doctor's other checks may fail here (no network, no wallet); the check list
+# rides on both the success envelope and the failure envelope's `details`, so
+# only the one check is read. The positive grep stays as a cheap early signal
+# that names the bundler when the behaviour check trips.
+if ! grep -rq '"node:sqlite"' ./node_modules/tenjin-cli/dist/; then
+  echo "pack-smoke: FAIL — dist has no \"node:sqlite\" specifier at all; tsup must keep the node: prefix (removeNodeProtocol: false)" >&2
   exit 1
 fi
 set +e
@@ -116,8 +115,8 @@ printf '%s' "$DOCTOR_OUT" | node -e '
     let o;
     try { o = JSON.parse(s); } catch { console.error("pack-smoke: FAIL — doctor --json did not print JSON"); process.exit(1); }
     const checks = (o.data && o.data.checks) || (o.error && o.error.details && o.error.details.checks) || [];
-    const c = checks.find((x) => x && x.name === "state-store");
-    if (!c) { console.error("pack-smoke: FAIL — doctor reported no state-store check"); process.exit(1); }
+    const c = checks.find((x) => x && x.name === "store");
+    if (!c) { console.error("pack-smoke: FAIL — doctor reported no store check"); process.exit(1); }
     if (c.status !== "ok") { console.error("pack-smoke: FAIL — packed CLI cannot load node:sqlite: " + c.detail); process.exit(1); }
     console.log("pack-smoke: packed doctor loads node:sqlite (" + c.detail + ") (ok)");
   });
