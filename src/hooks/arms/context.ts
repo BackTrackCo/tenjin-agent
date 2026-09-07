@@ -61,8 +61,11 @@ export const contextArm: Arm = {
    */
   before(ctx) {
     const { db, clock } = ctx.deps;
-    // An arm that is off is off, marks included.
-    if (ctx.deps.config().hooks.push !== 'on') return;
+    // Bookkeeping for the failure and publish arms — the marks are read by
+    // their close rule and their evidence test — so it runs while either is on
+    // and stops when both are off.
+    const { hooks } = ctx.deps.config();
+    if (!hooks.failure && !hooks.publish) return;
     const kind = ctx.input.tool?.kind;
     if (kind === 'shell') {
       // One stamp per Bash call, per agent, so parallel subagents cannot

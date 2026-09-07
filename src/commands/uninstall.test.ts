@@ -77,7 +77,7 @@ async function fakeStart(dataDir: string): Promise<DaemonStart> {
 }
 
 const wire = (): Promise<unknown> =>
-  writeClaudeHooks({ homeDir: home, dataDir: data, mode: 'auto', start: fakeStart });
+  writeClaudeHooks({ homeDir: home, dataDir: data, start: fakeStart });
 
 /** A settings.json holding every hook entry we write and our rules, plus a
  *  stranger's on two of the same events. */
@@ -522,7 +522,7 @@ describe('runUninstall — the loop daemon', () => {
     expect(JSON.parse(await readFile(claudeSettingsPath(home), 'utf8'))).toEqual({});
   });
 
-  it('KEEPS the loop database, whatever hooks.push says', async () => {
+  it('KEEPS the loop database, whatever the hooks keys say', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{}\n');
     await wire();

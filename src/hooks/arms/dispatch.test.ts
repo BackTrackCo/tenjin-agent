@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../../adapters/types';
 import { runFire } from '../fire';
 import { getMark } from '../gates';
-import { REMIND_LINE } from '../prose';
 import type { Deps, KernelConfig, Plan } from '../types';
 import { dispatchArm } from './dispatch';
 import {
@@ -29,7 +28,7 @@ afterEach(() => {
 
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 const POST_ID = '22222222-2222-4222-8222-222222222222';
-const ON = kernelConfig({ push: 'on' });
+const ON = kernelConfig();
 
 function dispatch(prompt: string, over: Partial<HookInput> = {}): HookInput {
   return hookInput({
@@ -139,21 +138,15 @@ describe('the dispatch arm', () => {
     expect(JSON.stringify(body)).not.toContain('Explore');
   });
 
-  it('`remind` speaks the line and asks nothing; `off` is silent', async () => {
-    const remind = kernelConfig({ push: 'on', agentDispatch: 'remind' });
+  it('`hooks.subagent` off is silent: nothing asked, nothing parked', async () => {
+    const off = kernelConfig({ subagent: false });
     const { bodies } = shelf([candidate()]);
     const db = freshDb();
-    const spoken = await fire(db, dispatch('anything durable'), remind);
-    expect(spoken.emit).toEqual({ context: REMIND_LINE });
-    expect(spoken.row.reason).toBe('no-question');
-    expect(bodies).toHaveLength(0);
-    expect(handoffRows(db)).toHaveLength(0);
-
-    const off = kernelConfig({ push: 'on', agentDispatch: 'off' });
     const silent = await fire(db, dispatch('anything durable'), off);
     expect(silent.emit).toBeNull();
     expect(silent.row.reason).toBe('no-question');
     expect(bodies).toHaveLength(0);
+    expect(handoffRows(db)).toHaveLength(0);
   });
 
   it('a hit parks the answer with its search id, logs it, and burns no seen: on the parent', async () => {

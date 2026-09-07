@@ -36,7 +36,7 @@ function start(over: Partial<HookInput> = {}): HookInput {
 function deps(db: LoopDb): Deps {
   return {
     db,
-    config: () => kernelConfig({ push: 'on' }),
+    config: () => kernelConfig(),
     clock: () => NOW,
     log: () => undefined,
     arms: [subagentStartArm],

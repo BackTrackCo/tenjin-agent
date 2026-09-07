@@ -2,7 +2,7 @@
 'tenjin-cli': minor
 ---
 
-The push sidecar: a team shelf, two-shelf search, and a capture loop — all off by default.
+The hook sidecar: a team shelf, two-shelf search, and a capture loop.
 
 **A team shelf is a second Tenjin deployment, not a new thing to learn.** Point `baseUrl` at
 it and set `shelfBypassSecret` to its Vercel protection-bypass secret; that one key is what
@@ -13,7 +13,7 @@ one place, so it cannot follow a call site's mistaken belief about which shelf i
 to. `config get shelfBypassSecret` prints `set` or `unset`, in `--json` too.
 
 **Search asks two shelves, team first.** `publicShelfUrl` (the public marketplace,
-consume-only) is the fallback: `tenjin search` and every push hook query `baseUrl` first, and
+consume-only) is the fallback: `tenjin search` and every hook arm query `baseUrl` first, and
 only on a miss do they ask the public shelf. Human output labels each block by shelf; `--json`
 carries the answering shelf's response plus a `shelves` array naming both legs. `read`,
 `inspect` and `buy` accept candidates from either origin, and a `buy` signs its SIWX header for
@@ -37,34 +37,18 @@ the leg that minted its searchId, so `tenjin outcome` posts there rather than to
 `baseUrl` currently is, and a `--search-id` the other shelf answered is dropped from the publish
 body and left open rather than misfiled on a post row.
 
-**Push puts a finding in front of you without being asked.** With `hooks.push=on`, four hook
-scripts watch for the moments where an answer is worth more than a search — a failing Bash
-command, a submitted prompt, a subagent dispatch, a stuck read/edit loop — and surface a match
-from whichever shelf answered. `tenjin push on|off` toggles the key, and every decision, injected or
-not, is recorded with the shelf it came from.
+**The arms put a finding in front of you without being asked.** Hooks watch for the moments
+where an answer is worth more than a search — a failing Bash command, a submitted prompt, a
+subagent dispatch, a stuck read/edit loop — and surface a match from whichever shelf answered.
+Every decision, delivered or not, is recorded with the shelf it came from. No arm ever cancels
+or changes a tool call: each one only adds context beside a call the harness makes anyway.
 
-One of those arms can cancel a tool call. On a strong hit on a FREE piece, the hook in front of
-`WebSearch`/`WebFetch` may deny that call and hand the finding back in its place
-(abort-and-answer) instead of letting the search run — the only hook this CLI writes that ever
-changes what the harness does. Every other arm only adds context beside a call that has already
-run. `tenjin install` and `tenjin push on` both say so in the receipt they print
-after wiring it — the human walkthrough and the `push on` lines, above the undo command; a
-`--json` install emits the hook counts rather than that paragraph. `tenjin push off` makes the
-arms inert again, and every deny is in the ledger with the query and the piece.
-
-**Capture closes the loop.** With `hooks.capture` on, a session that actually did
-research is asked once, at Stop, to publish anything durable it settled, with the resolved
-`publish.mode` named in the ask. The bar follows the mode: public, durable and rights-clean on
-the marketplace; "anything a teammate on this project would want to know" on a team shelf. The
-ask fires once per session whatever the agent does with it, and while capture is on it replaces
-the open-loop MISS reminder rather than stacking a third publish prompt onto one turn end.
-Sessions that only read and edited code are never asked, and the sidecar's own lookups do not
-count as research.
-
-**`tenjin push status`** reports the mode, both halves of "wired" (scripts on disk and settings
-entries registered), and the last seven days of the ledger: rows by trigger and action, by
-shelf, how many distinct findings were surfaced, why rows did not inject, denies, and injected
-tokens.
+**Capture closes the loop.** A session that actually did research is asked once, at Stop, to
+publish anything durable it settled, with the resolved `publish.mode` named in the ask. The bar
+follows the mode: public, durable and rights-clean on the marketplace; "anything a teammate on
+this project would want to know" on a team shelf. The ask fires once per session whatever the
+agent does with it. Sessions that only read and edited code are never asked, and the arms' own
+lookups do not count as research.
 
 `shelfBypassSecret` is unset by default, so an existing install picks up no team shelf until it
 opts in.

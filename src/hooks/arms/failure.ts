@@ -69,7 +69,7 @@ export const failureArm: Arm = {
 
   /** A pass: close what this agent had open on the same head. */
   before(ctx) {
-    if (ctx.deps.config().hooks.push !== 'on') return;
+    if (!ctx.deps.config().hooks.failure) return;
     const tool = ctx.input.tool;
     if (tool?.ok !== true) return;
     const command = commandOf(tool);
@@ -80,7 +80,7 @@ export const failureArm: Arm = {
 
   async plan(ctx) {
     const cfg = ctx.deps.config();
-    if (cfg.hooks.push !== 'on') return null;
+    if (!cfg.hooks.failure) return null;
     const tool = ctx.input.tool;
     if (tool?.ok !== false) return null;
     const command = commandOf(tool);

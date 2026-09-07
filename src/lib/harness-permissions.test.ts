@@ -718,7 +718,7 @@ describe('permissionsSkipped', () => {
       skipped: 'declined',
       // Every skipped state names the command that changes it, so a machine
       // consumer reads the remedy as a field rather than parsing prose.
-      fix: 'Add them with `tenjin install --allow-free-verbs`.',
+      fix: 'Add them with `tenjin install`.',
     });
     expect(result.modeGrant).toBeUndefined();
     expect(existsSync(settingsPath())).toBe(false);

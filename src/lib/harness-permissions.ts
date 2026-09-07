@@ -7,19 +7,17 @@ import type { PublishMode } from './config';
  * The one place the CLI WRITES a permission grant into a harness's own settings
  * file, so the invariants live here rather than at the call site:
  *
- *  - OPT-OUT, AND DISCLOSED. An interactive install asks; a non-interactive one
- *    writes the free tier by default, because an unattended agent that gets
- *    denied is the failure this whole file exists to prevent, and a machine run
- *    has no one to ask. `--no-allow-free-verbs` refuses it outright, and every
- *    run that writes says which rules landed, in which file, and how to remove
- *    them. What keeps that defensible is the next two invariants: the grant is a
+ *  - OPT-OUT, AND DISCLOSED. Every install writes the free tier, because an
+ *    unattended agent that gets denied is the failure this whole file exists to
+ *    prevent. `--no-allow-free-verbs` refuses it outright, and every run that
+ *    writes says how many rules landed and in which file. What keeps that defensible is the next two invariants: the grant is a
  *    fixed free tier, and it can never widen.
  *  - TWO FIXED SETS, AND NOT PARAMETERIZED. The writer takes no rule argument.
  *    It takes a {@link PublishMode}, and that selects between exactly two
  *    hardcoded constants: {@link FREE_VERB_RULES}, and those plus
  *    {@link MODE_GATED_RULES}. So there is no call path — no flag, no config
- *    key, no future caller — that can make it write `buy`, `session start`,
- *    `send`, `config set`, `wallet create`, `mcp`, `install`, or a broad
+ *    key, no future caller — that can make it write `buy`, `wallet send`,
+ *    `config set`, `wallet create`, `mcp`, `install`, or a broad
  *    `Bash(tenjin:*)`. A CLI that could widen its own permission grant is exactly
  *    what this shape rules out.
  *
@@ -68,9 +66,10 @@ export function claudeSettingsPath(homeDir: string): string {
 }
 
 /**
- * The exact rules install may add. Free verbs only: none of them can spend USDC
- * or move your keys. See lib/permissions.ts for the per-verb notes and for
- * the flag caveat that qualifies every prefix rule.
+ * The exact rules install may add. Free verbs only: none of them can spend
+ * USDC, though `read` and `doctor` do open the keystore. See lib/permissions.ts
+ * for the per-verb notes and for the flag caveat that qualifies every prefix
+ * rule.
  */
 export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin search:*)',
@@ -123,8 +122,7 @@ export const MODE_GATED_RULES: readonly string[] = [PUBLISH_MODE_RULE, EDIT_MODE
  */
 export const MODE_GATED_FORBIDDEN_FRAGMENTS: readonly string[] = [
   'tenjin buy',
-  'tenjin session',
-  'tenjin send',
+  'tenjin wallet send',
   // The mode carries publish and edit and stops there. `delete` destroys what
   // those two put up, and consent to publish is not consent to destroy.
   'tenjin delete',
@@ -196,8 +194,7 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
   'tenjin publish',
   'tenjin edit',
   'tenjin delete',
-  'tenjin session',
-  'tenjin send',
+  'tenjin wallet send',
   'tenjin config set',
   'tenjin wallet create',
   'tenjin mcp',
@@ -353,11 +350,11 @@ function fixFor(reason: PermissionsSkipReason): string {
     case 'not-requested':
     case 'declined':
     case 'dry-run':
-      return 'Add them with `tenjin install --allow-free-verbs`.';
+      return 'Add them with `tenjin install`.';
     case 'changed-since-read':
       return 'Another process changed the file mid-run; re-run `tenjin install`.';
     default:
-      return 'Fix the reported file, then run `tenjin install --allow-free-verbs`.';
+      return 'Fix the reported file, then run `tenjin install`.';
   }
 }
 

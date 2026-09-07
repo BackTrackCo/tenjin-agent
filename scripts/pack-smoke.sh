@@ -410,7 +410,7 @@ for attempt in 1 2 3 4 5; do
   LOCK_DATA="$(mktemp -d)"
   mkdir -p "$LOCK_DATA/config.json.lock"
   HOME="$LOCK_HOME" TENJIN_DATA_DIR="$LOCK_DATA" "$BIN" install --harness claude \
-    --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
+    --publish-mode review --no-wallet --json >/dev/null 2>"$LOCK_HOME/err" &
   WAITER_PID=$!
   sleep 1
   if kill -0 "$WAITER_PID" 2>/dev/null; then
@@ -463,7 +463,7 @@ for attempt in 1 2 3 4 5; do
     fs.writeFileSync(process.argv[1] + "/config.json", JSON.stringify(pad));
   ' "$HOLD_DATA"
   HOME="$HOLD_HOME" TENJIN_DATA_DIR="$HOLD_DATA" "$BIN" install --harness claude \
-    --publish-mode review --allow-free-verbs --no-wallet --json >/dev/null 2>"$HOLD_HOME/err" &
+    --publish-mode review --no-wallet --json >/dev/null 2>"$HOLD_HOME/err" &
   HOLDER_PID=$!
   for _ in $(seq 1 600); do
     [ -d "$HOLD_DATA/config.json.lock" ] && break

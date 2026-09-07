@@ -24,7 +24,7 @@ import type {
 } from './config';
 import type { ShelfBypass } from './http';
 import { parseUsdToAtomic } from './money';
-import { PRODUCTION_HOST, PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
+import { PRODUCTION_ORIGIN, isSameDeployment } from './production-origin';
 import { parseConfirmPolicy, type SpendPolicy } from './policy';
 import type { CommandContext } from '../context';
 
@@ -35,6 +35,13 @@ import type { CommandContext } from '../context';
  */
 export interface ResolvedSettings {
   baseUrl: string;
+  /**
+   * `baseUrl` AS THE CONFIG FILE NAMES IT, before `--base-url`/`TENJIN_BASE_URL`.
+   * Anything that wallet-signs pins to this rather than to {@link baseUrl}: a
+   * flag can point a run at another host, and an agent that names one must not
+   * thereby move the pin. Same rule, same reason, as {@link resolveShelfBypass}.
+   */
+  configuredBaseUrl: string;
   /** The public marketplace: the second shelf a team-mode search falls through
    *  to, and the one other origin `read`/`buy`/`inspect` will resolve against. */
   publicShelfUrl: string;
@@ -58,7 +65,7 @@ export interface ResolvedSettings {
   /** x402 discovery registries `discover` queries and the pay lane verifies against. */
   bazaarRegistries: string[];
   /**
-   * Hard per-send cap for `tenjin send`: SEND_MAX_UNSET = never configured
+   * Hard per-send cap for `tenjin wallet send`: SEND_MAX_UNSET = never configured
    * (send refuses until `config set sendMaxAmount`), null = explicit "none"
    * (uncapped opt-in), 0n = disabled, otherwise the atomic cap.
    */
@@ -141,85 +148,20 @@ export function isTeamShelfOrigin(origin: string, publicShelfUrl: string): boole
 }
 
 /**
- * The host the daemon's arms actually ask, for the install-time disclosure and
- * the consent prompt.
- *
- * NOT the `tenjin.blog` literal. A lookup leg resolves its target to
- * `config.baseUrl` with no flag or env layer, so on a machine with a configured
- * shelf the base WebSearch arm asks THAT host — with the door key attached — and
- * the marketplace is not asked at all. The dispatch arm asks it first too, and
- * only falls through to the public shelf on a team miss. A disclosure naming the
- * wrong recipient is the one part of an install an operator cannot check later
- * without reading the daemon.
- *
- * Reads the raw config rather than resolved settings, because that is what the
- * daemon reads: a `--base-url` on the install run reaches neither.
- *
- * Derived from what the arms ASK, deliberately not from {@link isTeamShelfOrigin}
- * (review r6 nit 1). That predicate answers "is this a shelf of the team's own",
- * which is a different question and returns false whenever `baseUrl` and
- * `publicShelfUrl` are the same custom origin — a real config, since `publicShelfUrl`
- * is operator-settable and nothing writes it. Reusing it there disclosed
- * `tenjin.blog` on a machine whose arms ask `shelf.internal.example` and never
- * touch the marketplace at all, which is the exact claim this function exists to
- * stop making. Only two things send the disclosure back to the production literal:
- * a `baseUrl` that does not parse, and a `baseUrl` that IS production (its aliases
- * included, so an alias is not a way to make the marketplace read as private).
- */
-export function hookRecipientHost(config: PartialConfig): string {
-  const baseUrl = config.baseUrl ?? CONFIG_DEFAULTS.baseUrl;
-  const origin = tryOrigin(baseUrl);
-  if (origin === undefined) return PRODUCTION_HOST;
-  if (isSameDeployment(origin, PRODUCTION_ORIGIN)) return PRODUCTION_HOST;
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return PRODUCTION_HOST;
-  }
-}
-
-/**
- * Do the daemon's arms actually MAKE the fallthrough ask — the second, public
- * leg of the dispatch arm — on this machine?
- *
- * Not the same question as "is {@link hookFallthroughHost} different from
- * {@link hookRecipientHost}". The arms gate that leg on team mode, and
- * `teamOrigin` returns null on an empty `shelfBypassSecret`, so a custom
- * `baseUrl` with no secret runs as ordinary public mode and never
- * falls through to anything. Gating the disclosure sentence on host difference
- * instead promised a recipient that is never asked, in the half-set state that
- * docs/command-reference.md documents as both the two-command setup's
- * intermediate step AND the terminal state for a shelf with no Deployment
- * Protection.
- *
- * Reads the raw config for the same reason its two siblings do: a `--base-url` on
- * the install run reaches neither the daemon nor this. That IS team mode, so this
- * is a named alias for {@link isTeamModeConfig} rather than a second copy of the
- * rule — the disclosure and the installed skill text have to agree about which
- * mode the machine is in.
- */
-export function hookFallthroughAsked(config: PartialConfig): boolean {
-  return isTeamModeConfig(config);
-}
-
-/**
  * Is this MACHINE in team mode — a shelf of the team's own plus the door key that
  * opens it? The same two-part rule `resolveContextSettings` applies
  * (`ResolvedSettings.teamMode`), read off the raw config instead of resolved
  * settings, and the difference is deliberate: a `--base-url` or `TENJIN_BASE_URL`
  * on one invocation must not answer this question.
  *
- * Two callers need the raw-config form, for the same reason. The daemon reads
- * `config.baseUrl` with no flag layer, so the install-time disclosure of what its
- * arms ask has to gate on what they will read
- * ({@link hookFallthroughAsked}). And the installed skill text
- * (lib/skill-materialize) outlives the command that wrote it and is read by every
- * later session on this machine, so shaping it by a one-off flag would leave a
- * team machine reading public guidance until the next install.
+ * The installed skill text (lib/skill-materialize) needs the raw-config form: it
+ * outlives the command that wrote it and is read by every later session on this
+ * machine, so shaping it by a one-off flag would leave a team machine reading
+ * public guidance until the next install.
  *
  * A secret with `baseUrl` still on the marketplace is NOT team mode, per
- * docs/command-reference.md#team-shelf: that half-set state runs as ordinary
- * public mode rather than treating tenjin.blog as a private shelf.
+ * {@link isTeamShelfOrigin}: that half-set state runs as ordinary public mode
+ * rather than treating tenjin.blog as a private shelf.
  */
 export function isTeamModeConfig(config: PartialConfig): boolean {
   const secret = config.shelfBypassSecret ?? CONFIG_DEFAULTS.shelfBypassSecret;
@@ -227,27 +169,6 @@ export function isTeamModeConfig(config: PartialConfig): boolean {
   const origin = tryOrigin(config.baseUrl ?? CONFIG_DEFAULTS.baseUrl);
   if (origin === undefined) return false;
   return isTeamShelfOrigin(origin, config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl);
-}
-
-/**
- * The host the generated hooks fall through TO, for the same disclosure.
- *
- * Also not the `tenjin.blog` literal. `publicShelfUrl` is operator-settable
- * (`config set publicShelfUrl <url>` is accepted, warned only on a `baseUrl`
- * collision), and it is what the scripts actually read for the second leg. On a
- * machine that has repointed it, naming the production host in the disclosure
- * omits the one recipient that receives the query text on that leg — the same
- * shape {@link hookRecipientHost} closed on the first leg.
- *
- * Reads the raw config for the same reason: a `--base-url` reaches neither.
- */
-export function hookFallthroughHost(config: PartialConfig): string {
-  const url = config.publicShelfUrl ?? CONFIG_DEFAULTS.publicShelfUrl;
-  try {
-    return new URL(url).host;
-  } catch {
-    return PRODUCTION_HOST;
-  }
 }
 
 /** Where a close for one stored search has to go, and whether it carries the key. */
@@ -340,6 +261,7 @@ export async function resolveContextSettings(ctx: CommandContext): Promise<Resol
   const bypass = resolveShelfBypass(config, s);
   return {
     baseUrl: s.baseUrl.value,
+    configuredBaseUrl: config.baseUrl ?? CONFIG_DEFAULTS.baseUrl,
     publicShelfUrl: s.publicShelfUrl.value,
     ...(bypass !== undefined ? { bypass } : {}),
     teamMode: bypass !== undefined,

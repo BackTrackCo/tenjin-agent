@@ -6,9 +6,8 @@ denies the free verbs too, which breaks the whole marketplace loop: the skills
 forbid working around a denial, so a denied `tenjin search` just stops.
 
 Pre-clearing the free verbs once fixes that. This page is the full reasoning
-behind which verbs are on that list, which three are separate opt-ins, and which are
-never recommended at all, and it is where `tenjin install` and `tenjin doctor`
-send you. The [README](../README.md#permissions) carries the paste block and the
+behind which verbs are on that list, which two are separate opt-ins, and which are
+never recommended at all, and it is where `tenjin install` sends you. The [README](../README.md#permissions) carries the paste block and the
 three-tier summary.
 
 ## The free tier
@@ -29,12 +28,12 @@ Bash(tenjin wallet balance:*)
 Bash(tenjin config get:*)
 ```
 
-None of those can spend, and none can move your keys; `tenjin doctor` decrypts
-locally to check your wallet still opens. That is the definition of
-this tier, and it is deliberately narrower than "signs nothing": `tenjin read` can
-present a session key that already exists, which is a signature — a P-256
-delegation, the wrong curve to authorize a USDC transfer. It cannot mint one; that
-needs the wallet.
+None of those can spend; `tenjin doctor` decrypts locally to check your wallet
+still opens. That is the definition of this tier, and it is deliberately narrower
+than "signs nothing" and narrower than "never opens the keystore": `tenjin read`
+signs with a P-256 session delegation, and mints one with a wallet signature when
+an owned piece is not on this machine and no delegation is live. The delegated key
+is the wrong curve to authorize a USDC transfer, so no amount of it moves money.
 
 ### What each verb actually does
 
@@ -43,7 +42,7 @@ needs the wallet.
 | `Bash(tenjin search:*)`         | Free anonymous marketplace search. No wallet, no signing, no payment. POSTs the generalized question off-machine.                  |
 | `Bash(tenjin wallet fund:*)`    | Owner call (2026-08-12): mints a card-funding checkout link for THIS wallet only; moves no money, origin-pinned (no `--base-url`). |
 | `Bash(tenjin inspect:*)`        | Free pre-purchase card and preview. Never signs, never pays, never saves.                                                          |
-| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend and cannot open the keystore, but transmits a cached session key when one exists (see below).     |
+| `Bash(tenjin read:*)`           | Free-only delivery. Cannot spend, but opens the keystore to mint a read-scoped session key, and transmits it (see below).          |
 | `Bash(tenjin outcome:*)`        | Free honest outcome report on a past search. No wallet, no payment. POSTs a report that moves the marketplace's reuse signal.      |
 | `Bash(tenjin doctor:*)`         | Local environment and API reachability diagnostics; decrypts the wallet locally to check it still opens.                           |
 | `Bash(tenjin wallet show:*)`    | Prints the wallet address and key source. Never prints the key.                                                                    |
@@ -61,53 +60,69 @@ marketplace's reuse signal — both unauthenticated and free, neither carrying a
 credential — while `tenjin read` writes locally, saving a delivered piece to your
 library.
 
-### `read` transmits a credential once a session key exists
+### `read` mints and transmits a credential
 
-Worth knowing before you paste the `read` line: once a session key exists, `read`
-**transmits that wallet-derived credential** to the origin it was minted for. That
-origin binding is what keeps a stray `--base-url` from redirecting it, and it is
-the reason the binding exists rather than a nicety.
+Worth knowing before you paste the `read` line. A paid piece this wallet already
+owns but has never been read on this machine takes one wallet signature: `read`
+mints the same ≤24h read-scoped P-256 delegation `publish` and `edit` mint, stores
+it 0600 in `~/.tenjin/session.json`, and transmits that
+**wallet-derived credential** to the origin of the piece. Every later owned read
+reuses it and asks for nothing.
 
-`read` itself can never mint one: it imports no wallet, payment, or
-session-minting module, and its import graph is test-pinned to stay clear of all
-three. It cannot unlock a keystore and never consults the spend policy.
+It mints and presents only for the origin of the URL being read, and never for a
+second origin while a delegation for another is cached, which is what keeps a
+stray `--base-url` from turning an allowlisted read into a wallet signature
+against a host an agent picked.
+
+`read` still **cannot pay**: the payment module is absent from its import graph,
+test-pinned, and the delegated key is the wrong curve for an EIP-3009
+authorization. It never consults the spend policy.
+
+### The `read` scope is not a containment boundary
+
+Do not read the `read` scope as more than a scope. It is enforced only on the
+request shape that carries a session signature alongside the delegation header; a
+copy of the same delegation presented differently is not scope-checked, so treat
+the file as a credential carrying your wallet's authority. Its real bounds are the
+24h expiry, the 0600 mode, and the origin binding.
 
 ## Getting the rules onto your machine
 
 `tenjin install` writes the nine rules into `~/.claude/settings.json` for you,
-plus the two rules your publish mode carries (below). It is one of the four setup
-decisions, and at a terminal it asks:
+plus the two rules your publish mode carries (below). It does not ask a question
+of its own about them. Installing tenjin is the consent for the free nine, and
+the publish-mode select is the consent for the pair, because that is the answer
+that adds them:
 
-> Let your agent use tenjin without permission popups? Adds 9 command rules to
-> `~/.claude/settings.json`. None of them can spend your money. Details:
-> https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md
+> Auto (recommended) — your agent publishes and updates pieces on its own, under
+> your identity; it also allows `tenjin publish` and `tenjin edit` in the
+> harness.
 
-On an `auto` or `full-auto` publish mode the same question says 11 rules, and adds
-that your agent will publish under your identity on its own. The question is two
-sentences and a link on purpose: this page is where the detail lives, and an
-operator answering a yes/no cannot act on a rule string they have not met yet.
+One prompt, one consent: a second yes/no naming the same grant would ask twice
+for one thing, and put a rule string in front of an operator with no way to act on
+it mid-install. This page is where the detail lives.
 
-Answer yes and it merges them in. The write appends the rules that are missing and
+It merges the rules in. The write appends the rules that are missing and
 never reorders or rewrites an existing entry or any other key in the file. It
 removes exactly two things: a rule an older version of this CLI wrote and this one
 no longer does, and, when your `publish.mode` is back to `review`, the two rules
 that mode carries. A settings file it cannot parse is reported and left exactly as
 it is, never repaired. The rules it may write are fixed constants selected by your
-publish mode, so no flag or config value can widen it to `buy`, `session start`,
-`send`, `config set`, or a blanket `Bash(tenjin:*)`.
+publish mode, so no flag or config value can widen it to `buy`, `wallet send`,
+`config set`, or a blanket `Bash(tenjin:*)`.
 
-A non-interactive install (piped, or under `--json`) does the same write BY
-DEFAULT, with no flag: the machine most likely to be denied mid-task is the
-headless one, and there is nobody there to answer. `--no-allow-free-verbs` opts
-out; `--allow-free-verbs` states the default explicitly. Every run that writes
-reports how many rules landed, in which file, and that deleting those lines undoes
-it.
+A non-interactive install (piped, or under `--json`) does the same write, for the
+same reason: the machine most likely to be denied mid-task is the headless one.
+`--no-allow-free-verbs` is the only opt-out. Every run reports how many rules
+landed and in which file, on its `permissions` row.
 
 `tenjin doctor --json` carries this whole recommendation as data under
 `permissions` (every rule, every per-verb note, both caveats, on the failure
 envelope as well as the success one) so an agent that just got denied can point
-you at the exact line. Its human render is the check list plus one link back
-here.
+you at the exact line. Its human render is the check list and nothing else,
+except on a machine whose own publish mode is missing a rule: that one line names
+the rule, because it is a finding about the machine rather than a standing
+recommendation.
 
 ## A prefix rule pins the verb, not the flags
 
@@ -171,52 +186,21 @@ there is no library dedupe: `pay` has no owned-content re-read, so a looping
 agent pays on every call, bounded only by `maxAutoSpend`, `sessionBudget`, and
 `--max-price`. Leave `bazaarPay` off unless you mean it.
 
-## Opt-in: minting a session key
-
-Minting a session key is the **third** explicit opt-in. It spends nothing and
-cannot spend, but it opens the keystore:
-
-```
-Bash(tenjin session start:*)
-```
-
-`tenjin session start --scope read` takes one wallet signature and leaves a ≤24h
-P-256 delegation in `~/.tenjin/session.json` (0600), which `tenjin read` then
-presents to recover pieces you already own. The key is the wrong curve to sign an
-EIP-3009 payment authorization, so the line can never become a spend grant.
-
-### The `read` scope is not a containment boundary
-
-Do not read the `read` scope as more than a scope. It is enforced only on the
-request shape that carries a session signature alongside the delegation header; a
-copy of the same delegation presented differently is not scope-checked, so treat
-the file as a credential carrying your wallet's authority. Its real bounds are the
-24h expiry, the 0600 mode, and the origin binding.
-
-### What you are actually clearing
-
-**Unattended keystore access.** On an encrypted wallet the passphrase comes from
-the environment rather than from you, and the `--base-url` caveat above bites
-hardest here, because a mint against a host an agent chose is a wallet signature
-you did not intend to make. `tenjin doctor` reports whether a session exists, for
-which origin, at what scope, and when it expires.
-
 ## Never recommended
 
 Deliberately **never** recommended, because each is a human decision:
 
-| Verb                   | Why it stays a human decision                                                              |
-| ---------------------- | ------------------------------------------------------------------------------------------ |
-| `tenjin send`          | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below.       |
-| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.         |
-| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.                    |
-| `tenjin delete`        | Destroys a published piece. No mode clears it; see below.                                  |
-| `tenjin wallet create` | Creates the payment credential.                                                            |
-| `tenjin config set`    | It can widen the agent's own spend policy.                                                 |
-| `tenjin install`       | Writes into harness config and skills directories.                                         |
-| `tenjin push`          | Arms the sidecar arms already wired by `install`; they add context and never block a call. |
-| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                        |
-| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                              |
+| Verb                   | Why it stays a human decision                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------ |
+| `tenjin wallet send`   | Moves USDC out of the wallet, and is not bounded by the buy spend policy. See below. |
+| `tenjin publish`       | Publishes publicly under your identity. Cleared only by `publish.mode`; see below.   |
+| `tenjin edit`          | Edits live posts and prices. Cleared only by `publish.mode`; see below.              |
+| `tenjin delete`        | Destroys a published piece. No mode clears it; see below.                            |
+| `tenjin wallet create` | Creates the payment credential.                                                      |
+| `tenjin config set`    | It can widen the agent's own spend policy.                                           |
+| `tenjin install`       | Writes into harness config and skills directories.                                   |
+| `tenjin mcp`           | It re-exposes every command core, so clearing it clears everything.                  |
+| `tenjin update`        | It replaces the tenjin binary the agent then runs. See below.                        |
 
 For the same reason, prefer the narrow rules above over a broad `Bash(tenjin:*)`,
 `Bash(tenjin wallet:*)`, or `Bash(tenjin config:*)`, which would swallow them.
@@ -237,7 +221,7 @@ the mode you chose does nothing. That is why two rules track the mode:
   different prefix in front and therefore fall outside this rule. Publishing also
   opens your wallet keystore unattended and mints a `read+write` session credential
   to disk when no usable one exists, which is a strictly broader credential than
-  the read-only one `tenjin session start` asks for as an explicit opt-in.
+  the read-only one `tenjin read` mints.
 - `Bash(tenjin edit:*)` updates posts your wallet already owns: reprices, refreshes
   an as-of date, repairs an answer card, and flips status both ways, so it can
   promote a draft to published under the same mode gate (a promotion re-runs the
@@ -339,18 +323,19 @@ mints can only ever fund your own wallet, the CLI refuses any checkout host but
 gate. The `--base-url` caveat that qualifies every other prefix rule does not
 apply here: `fund` is pinned to the production origin and takes no override from
 the flag, the environment, or config, so an allowlisted invocation cannot steer
-where the wallet's SIWX proof goes. That pin is what separates `fund` from
-`session start` (unattended keystore access, override surface intact), which
-stays opt-in.
+where the wallet's SIWX proof goes. `read` is pinned the same way, one step
+wider: it presents and mints only against `baseUrl` or `publicShelfUrl` as the
+config file names them, so `read --base-url <host>` still fetches a free piece
+from that host but signs nothing for it.
 
-### `tenjin send`, the escape hatch
+### `tenjin wallet send`, the escape hatch
 
 `send` is human-invoked only: it is deliberately absent from the MCP toolset and
 the harness skills, and nothing is signed until the previewed (checksummed)
 recipient, amount, and network fee are confirmed, interactively at a TTY or
 explicitly with `--yes` when headless. It refuses when the active wallet's
 passphrase entry is missing. The `sendMaxAmount` hard per-send cap has no
-default: `tenjin send` refuses until you run `tenjin config set sendMaxAmount
+default: `tenjin wallet send` refuses until you run `tenjin config set sendMaxAmount
 <usd|0|none>` (`0` disables the verb, `none` opts in to uncapped), and `--yes`
 can never bypass the cap or the unset refusal. For routing FUTURE revenue away
 from the agent wallet entirely, connect the agent to your own Tenjin account
@@ -397,26 +382,26 @@ Both are denied, never wrongly allowed:
 The free tier is the answer to "what may a read-only subagent run", with nothing
 subtracted. All nine are safe to hand over: `search`, `wallet fund`, `inspect`, `read`,
 `outcome`, `doctor`, `config get`, `wallet show`, `wallet balance`.
-None can spend and none can move your keys; `wallet fund` mints a checkout link only a
-human can pay.
+None can spend; `wallet fund` mints a checkout link only a human can pay, and
+`read` mints and presents a read-scoped session key (above).
 
 Everything that mutates stays in a mutation-capable, human-gated context:
-`publish`, `edit`, `delete`, `buy`, `send`,
-`session start`, `wallet create`, `config set`, `install`. Never delegate
+`publish`, `edit`, `delete`, `buy`, `wallet send`,
+`wallet create`, `config set`, `install`. Never delegate
 `delete` at all: it is irreversible, and a subagent has no one to ask.
 
 Publishing what a subagent derived is the one exception, and it is a narrow one.
 Do not hand a subagent a publish as a task. What the SubagentStop capture arm does
-is different: at that subagent's own end, with `hooks.capture` on, the arm asks it
+is different: at that subagent's own end, with `hooks.publish` on, the arm asks it
 once to publish the finding it just settled, and that publish runs the same local
 scan and the same `publish.mode` consent as any other, in the same directory. So
 under `review` it refuses and the subagent states the finding instead, for you to
 publish; under `auto` with a clean scan, or `full-auto`, it publishes. Your own
 turn end then reports what your subagents published.
 
-`hooks.capture` has two values: `on`, the default, asks you and each subagent at
-its own end, as context beside the stop rather than as a blocking decision; `off`
-asks nobody.
+`hooks.publish` is on by default and asks you and each subagent at its own end,
+as context beside the stop rather than as a blocking decision; off it asks
+nobody.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
 repo, not the network: `search` and `outcome` POST off-machine (a question, a
@@ -439,3 +424,70 @@ clear it: it never reads `publish.mode`, so an ungated call comes back as
 
 This harness allowlist is unrelated to the `allowlistCreators` spend-policy key:
 that one gates **who you may pay**, this one gates **which commands may run**.
+
+## What install writes
+
+`tenjin install` prints five rows and this page carries the rest. What is behind
+each row:
+
+**Skills.** The packaged skills, copied into every harness directory it detected
+(`~/.claude/skills`, `~/.agents/skills`). A skill already there is replaced by
+this package's copy; your own files beside it are left alone.
+
+**Permissions.** The rules above, in `~/.claude/settings.json`. Nine on `review`,
+eleven on `auto` and `full-auto`. Deleting those lines undoes it, and so does
+`tenjin uninstall`.
+
+**Hooks.** Eleven Claude Code entries in the same file, written as one set. Nine
+POST the harness's own hook payload to a Tenjin daemon on `127.0.0.1` — your
+machine only, authorized by a token in that file, which is why it is written mode
+0600 — and two run `~/.tenjin/hooks/tenjin-shim.mjs` so that daemon is up before
+the turn's first tool call. No arm can block or change a tool call; every one of
+them only adds context beside it. The arms ask your configured shelf a question
+and mention a tested answer if one exists. Five things leave the machine, each
+with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
+WebSearch query, a WebFetch address and the prompt beside it, the work order a
+subagent is dispatched with, and — to the team shelf only — the fingerprint of a
+failed command. Nothing else does. The files you read and edit are recorded
+locally and asked about nowhere, so the failure and publish arms can tell your
+last command from the one before it.
+
+The seven arms, in the order `tenjin hooks` prints them:
+
+- **prompt** — you press enter. Your prompt goes to the team shelf and the
+  public one, and a piece that answers it is named beside what you typed.
+- **web-search** — before a WebSearch runs. The query goes to both shelves as
+  typed, and an answer already paid for is named beside the search.
+- **web-fetch** — before a WebFetch runs. The address goes to both shelves, cut
+  at the first `?` or `#` so a token in the query string or the fragment stays
+  here, along with the prompt attached to the fetch.
+- **subagent** — you dispatch a subagent, and that subagent starts. The work
+  order goes to both shelves at dispatch; you are told nothing, and whatever it
+  found opens the subagent's first turn instead. The start itself sends nothing.
+- **failure** — a shell command fails. The failure's fingerprint, a hash rather
+  than your error text, goes to the team shelf only, and this machine's own
+  record of errors it has already fixed is read beside it. A later passing run
+  closes the pair. With no team shelf configured, nothing leaves at all.
+- **publish** — your turn ends, and each subagent's turn ends. If there is
+  something worth writing up, you are asked once whether to publish it, and the
+  answer is kept here. It sends nothing: publishing is `tenjin publish`, which
+  you run.
+- **primer** — a session starts, including a clear and a compact. Two paragraphs
+  about the shelf go in front of the model. It sends nothing.
+
+There is one key per arm, all on out of the box: `tenjin hooks` lists the seven
+with what each has fired and hit this week, and `tenjin hooks disable web-fetch`
+silences that one without unwiring anything. Hooks are read once at session
+start, so Claude Code has to be restarted.
+
+**Publishing.** `publish.mode` in `~/.tenjin/config.json`, from the select above.
+`tenjin config set publish.mode review` puts it back to asking first.
+
+**Wallet.** A local Base wallet at `~/.tenjin/wallet.json`, unless `--no-wallet`.
+The key is encrypted at rest (keystore v3, scrypt, mode 0600) and never leaves
+this machine; the passphrase goes to your OS credential store, or to
+`TENJIN_WALLET_PASSPHRASE` if you set one. With neither, nothing is created and
+the run says so. It holds $0: funding is a human step, `tenjin wallet fund`.
+
+`tenjin uninstall` removes all of it except the wallet, the config, the library
+and the loop database, which are yours rather than something install created.

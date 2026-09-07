@@ -14,7 +14,7 @@ export const primerArm: Arm = {
   on: [{ event: 'session.start' }],
   after(ctx) {
     const cfg = ctx.deps.config();
-    if (cfg.hooks.sessionPrimer !== 'on') return null;
+    if (!cfg.hooks.primer) return null;
     return { context: teamOrigin(cfg) !== null ? PRIMER_TEXT_TEAM : PRIMER_TEXT };
   },
 };

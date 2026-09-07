@@ -305,7 +305,7 @@ function findingLines(io: Io, details: unknown): string[] {
  * The stored child finding a refusal is about, printed WHOLE.
  *
  * WHY WHOLE. `publish --finding <id>` publishes a body that exists only in this
- * machine's state store, so the review confirm is the one place a human ever
+ * machine's `loop.db`, so the review confirm is the one place a human ever
  * sees it before it becomes public. A count, a preview or a machine-only
  * `details` blob would each make the confirm a rubber stamp over unread text.
  * The child's id and the search it closed are printed with it, because a finding

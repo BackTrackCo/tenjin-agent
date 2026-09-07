@@ -40,6 +40,6 @@ string`, `env-dump-block` and `embedded-instruction` are public-only. `private-r
 and `scan-context.ts` are deleted: a public-only nicety about the author's own repo slug, and the
 only rule that needed caller context.
 
-Docs, the `tenjin-publish` skill and `docs/safety-model.md`/`docs/command-reference.md` are
+Docs, the `tenjin-publish` skill and `docs/safety-model.md` are
 updated to match: no more local "hard block", the team-shelf survivor list, and the hook
 template's masked-not-deleted behavior.
