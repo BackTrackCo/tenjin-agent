@@ -8,31 +8,16 @@ import {
   LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
 } from './harness-permissions';
-import { pruneOurHandlers, RETIRED_HOOK_FILES } from './harness-hooks';
-import { PUSH_VITEST_REPORTER_FILE } from './push-scripts';
+import { pruneOurHandlers } from './harness-hooks';
+import {
+  daemonPidPath,
+  daemonSpawnPath,
+  daemonTokenPath,
+  hooksDir,
+  VITEST_REPORTER_FILE,
+} from './paths';
 
-/**
- * Every file `install` puts in the hooks dir, which is exactly what uninstall
- * claims and removes: ownership is by filename in both directions.
- *
- * THE RETIRED SCRIPTS ARE IN THIS LIST for as long as a machine can still be
- * carrying them. Install deletes them on its way past (lib/harness-hooks.ts), so
- * on a converged machine they are simply not found; a machine that upgraded and
- * never re-installed still has eight of them, and uninstall is the command an
- * operator reaches for to get their machine back.
- *
- * `loop.db` IS NOT HERE. It sits beside `state.db` under the data dir and holds
- * the same class of thing: this machine's own record. Both are kept.
- */
-const HOOK_FILES = [
-  ...RETIRED_HOOK_FILES,
-  PUSH_VITEST_REPORTER_FILE,
-  'tenjin-daemon.mjs',
-  'tenjin-shim.mjs',
-] as const;
-import { daemonPidPath, daemonSpawnPath, daemonTokenPath, hooksDir } from './paths';
 import { SHIPPED_SKILL_FILES } from './skills-source';
-import { resolveThroughLink } from './skill-writer';
 import {
   CLI_SKILL_NAMES,
   HOSTED_SKILL_NAME,
@@ -41,6 +26,15 @@ import {
   skillsDirsFor,
 } from './skill-wiring';
 import { OPTIONAL_SKILL_NAMES } from './skills-source';
+
+/**
+ * Every file `install` puts in the hooks dir, which is exactly what uninstall
+ * claims and removes: ownership is by filename in both directions.
+ *
+ * `loop.db` IS NOT HERE. It sits under the data dir and holds this machine's
+ * own record, the same class of thing as the wallet and the library.
+ */
+const HOOK_FILES = ['tenjin-daemon.mjs', 'tenjin-shim.mjs', VITEST_REPORTER_FILE] as const;
 
 /**
  * The reverse of `install`, and ONLY of `install`.
@@ -62,15 +56,12 @@ import { OPTIONAL_SKILL_NAMES } from './skills-source';
  * THE ONE EXCEPTION IS GENERATED, and it is listed in the receipt:
  * `~/.tenjin/hooks/*.mjs`, which `install` writes and rewrites.
  *
- * `~/.tenjin/state.db` IS KEPT, and that is a reversal of an earlier call in
- * this branch. It reads like hook state and is written by the hooks, but what
- * it HOLDS is the operator's: the error/fix pairings this machine worked out
- * for itself, the outcome history, and the open search loops the turn-end ask
- * is raised from. That is the same class as the wallet,
- * the config and the library — their own record, unrecoverable if deleted, and
- * `install` did not create it. A reinstall picks the store back up untouched,
- * because the schema gate only ever moves forward. The `-wal`/`-shm` sidecars
- * stay with it; they are meaningless apart from it.
+ * `~/.tenjin/loop.db` IS KEPT. It reads like hook state and is written by the
+ * daemon, but what it HOLDS is the operator's: the error→fix pairings this
+ * machine worked out for itself, its search record and its outcome history.
+ * That is the same class as the wallet, the config and the library — their own
+ * record, unrecoverable if deleted, and `install` did not create it. The
+ * `-wal`/`-shm` sidecars stay with it; they are meaningless apart from it.
  *
  * SETTINGS.JSON IS EDITED IN ONE PASS. Hooks and permission rules live in the
  * same file, so removing them separately would mean two whole-file
@@ -86,7 +77,6 @@ export interface UninstallReport {
   skills: string[];
   scripts: string[];
   hooksDir?: string;
-  markers: string[];
   kept: string[];
 }
 
@@ -146,7 +136,7 @@ export type SettingsSkipReason =
 export function keptItems(hasShelfSecret: boolean): string[] {
   return [
     'your wallet, config (publish.mode included, so a later install resumes it), and library under ~/.tenjin',
-    'the hook state stores ~/.tenjin/state.db and ~/.tenjin/loop.db — the error→fix pairings this machine worked out, your outcome history and open search loops; a later install picks them up as they are',
+    'the loop database ~/.tenjin/loop.db — the error→fix pairings this machine worked out, your search record and your outcome history; a later install picks it up as it is',
     ...(hasShelfSecret
       ? [
           'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',
@@ -160,16 +150,13 @@ export function keptItems(hasShelfSecret: boolean): string[] {
  * keptItems} so the boundary reads as a boundary. It is generated, and it comes
  * back on the next `install`.
  *
- * A LIST OF ONE, deliberately kept as a list: `state.db` was in it for part of
- * this branch's life, and the shape is what made the contradiction with
+ * A LIST OF ONE, deliberately kept as a list: the database was in it for part
+ * of this epic's life, and the shape is what made the contradiction with
  * {@link keptItems} obvious enough to catch.
  */
 export const REMOVED_FROM_DATA_DIR = [
-  'the loop daemon and its token in ~/.tenjin/hooks (install writes them back)',
+  'the loop daemon, its shim, the vitest reporter and the daemon token in ~/.tenjin/hooks (install writes them back)',
 ];
-
-/** The legacy pointer line `install` used to write into CLAUDE.md / AGENTS.md. */
-export const SKILLS_MARKER = '<!-- tenjin-cli:skills -->';
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -429,45 +416,4 @@ export async function removeSkills(homeDir: string): Promise<string[]> {
     }
   }
   return removed;
-}
-
-/**
- * Drop the legacy pointer line from the files an older `install` wrote it into.
- * The line is found by its marker, never by exact text, so a drifted copy from
- * any earlier version is recognized; everything around it is preserved byte for
- * byte, because these files are the operator's own notes.
- *
- * Written through the link for the same reason the writers were: `writeFileAtomic`
- * commits with a rename, so committing at a declared path would replace a
- * dotfiles-managed symlink with a regular file and strand its target. A file we
- * cannot read, or one that is not a regular file, is skipped rather than fixed.
- */
-export async function removeMarkerLines(homeDir: string): Promise<string[]> {
-  const cleaned: string[] = [];
-  for (const path of markerFiles(homeDir)) {
-    const read = await readSkillFile(path);
-    if (read.kind !== 'ok') continue;
-    const text = read.bytes.toString('utf8');
-    if (!text.split('\n').some((l) => l.startsWith(SKILLS_MARKER))) continue;
-    // ANCHORED to the start of the line, which is the only way install ever
-    // wrote it. `includes` would take a whole line of the operator's own prose
-    // for quoting the marker inside a sentence or a code fence.
-    const kept = text.split('\n').filter((l) => !l.startsWith(SKILLS_MARKER));
-    const writeTo = await resolveThroughLink(path, 'the Tenjin pointer');
-    // A file that held nothing but our line is emptied rather than deleted:
-    // install created it in that case, but the operator may have pointed a
-    // dotfiles link at it since, and an empty file is inert either way.
-    await writeFileAtomic(writeTo, kept.join('\n'));
-    cleaned.push(path);
-  }
-  return cleaned;
-}
-
-/** Every file `install` has ever written the pointer line into. */
-export function markerFiles(homeDir: string): string[] {
-  return [
-    join(homeDir, '.claude', 'CLAUDE.md'),
-    join(homeDir, '.agents', 'AGENTS.md'),
-    join(homeDir, '.codex', 'AGENTS.md'),
-  ];
 }

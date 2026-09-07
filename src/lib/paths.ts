@@ -174,3 +174,12 @@ export function daemonBundlePath(dir: string = dataDir()): string {
 export function shimBundlePath(dir: string = dataDir()): string {
   return join(hooksDir(dir), 'tenjin-shim.mjs');
 }
+
+/** Tenjin's own vitest reporter, copied beside the bundles. NOT A HOOK ENTRY
+ *  and never spawned: a repo's own `vitest.config.ts` imports it by this
+ *  absolute path, which is why `doctor` can hint at it verbatim. */
+export const VITEST_REPORTER_FILE = 'tenjin-vitest-reporter.mjs';
+
+export function vitestReporterPath(dir: string = dataDir()): string {
+  return join(hooksDir(dir), VITEST_REPORTER_FILE);
+}

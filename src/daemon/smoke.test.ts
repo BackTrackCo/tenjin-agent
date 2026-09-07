@@ -6,7 +6,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
@@ -19,6 +19,7 @@ import {
   daemonPidPath,
   loopDbPath,
   shimBundlePath,
+  vitestReporterPath,
 } from '../lib/paths';
 
 /**
@@ -203,6 +204,13 @@ function runNode(args: string[], env: NodeJS.ProcessEnv, stdin?: string): Promis
   });
 }
 
+/** Does this tsup config still name exactly the entries this suite builds? */
+function hasEntries(config: Options | undefined, names: string[]): boolean {
+  const entry = config?.entry;
+  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+  return names.every((name) => name in entry);
+}
+
 function hookUrl(): string {
   return `http://127.0.0.1:${port}/hook/claude`;
 }
@@ -218,19 +226,19 @@ beforeAll(async () => {
   tmpOutDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-bundle-'));
   const configs = tsupConfigs as unknown as Options[];
   const daemonConfig = configs[1];
-  const entry = daemonConfig?.entry;
+  const reporterConfig = configs[2];
   if (
-    typeof entry !== 'object' ||
-    entry === null ||
-    Array.isArray(entry) ||
-    !('tenjin-daemon' in entry) ||
-    !('tenjin-shim' in entry)
+    !hasEntries(daemonConfig, ['tenjin-daemon', 'tenjin-shim']) ||
+    !hasEntries(reporterConfig, ['tenjin-vitest-reporter'])
   ) {
     throw new Error(
-      'tsup.config.ts[1] no longer has the tenjin-daemon/tenjin-shim entry; smoke test assumption broke',
+      'tsup.config.ts no longer has the tenjin-daemon/tenjin-shim/tenjin-vitest-reporter entries; smoke test assumption broke',
     );
   }
+  // Both single-file configs: `installDaemonFiles` copies all three, so a
+  // missing one would fail the fixture before a single case ran.
   await build({ ...daemonConfig, outDir: tmpOutDir, silent: true });
+  await build({ ...reporterConfig, outDir: tmpOutDir, silent: true });
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
   // `hooks.push: off` is pinned rather than defaulted: the arms are on out of
@@ -696,5 +704,61 @@ describe('the daemon, cold-started from the real bundle', () => {
     expect(bundleBytes).toBeGreaterThan(0);
     expect(coldStartMs).toBeGreaterThan(0);
     console.warn(`daemon cold start: ${coldStartMs} ms, bundle ${bundleBytes} bytes`);
+  });
+});
+
+/**
+ * The vitest reporter, as the BUILT bundle rather than as source (E11). It is
+ * the one file `installDaemonFiles` copies that is never spawned: a repo's own
+ * `vitest.config.ts` imports it into the user's vitest process by the absolute
+ * path install gave it. So what has to hold is that the built module loads on
+ * its own — importing nothing but `node:fs` — and writes the artifact in the
+ * exact shape `hooks/failure/test-identity.ts` reads back.
+ */
+describe('the built vitest reporter bundle', () => {
+  it('writes .vitest-report.json in the shape test-identity.ts reads', async () => {
+    const path = vitestReporterPath(dataDir);
+    expect(existsSync(path)).toBe(true);
+    // No node_modules beside it and no bundler: a bare dynamic import is the
+    // same thing vitest does with the path in a repo's own config.
+    const mod = (await import(pathToFileURL(path).href)) as {
+      default: new (options?: { outputFile?: string }) => {
+        onInit(): void;
+        onTestRunEnd(modules: unknown[], unhandled: unknown[]): void;
+      };
+    };
+    const outputFile = join(dataDir, 'smoke-report.json');
+    const reporter = new mod.default({ outputFile });
+    reporter.onInit();
+    reporter.onTestRunEnd(
+      [
+        {
+          moduleId: join(dataDir, 'src/lib/http.test.ts'),
+          children: {
+            allTests: () => [
+              { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
+            ],
+          },
+        },
+      ],
+      [],
+    );
+
+    const report = JSON.parse(await readFile(outputFile, 'utf8')) as {
+      startTime: number;
+      endTime: number;
+      success: boolean;
+      failed: { file: string; suite: string; test: string }[];
+    };
+    expect(report.success).toBe(false);
+    expect(report.startTime).toBeGreaterThan(0);
+    expect(report.endTime).toBeGreaterThanOrEqual(report.startTime);
+    expect(report.failed).toEqual([
+      {
+        file: join(dataDir, 'src/lib/http.test.ts'),
+        suite: 'retries',
+        test: 'gives up after three',
+      },
+    ]);
   });
 });

@@ -21,8 +21,10 @@ import { CliError } from './errors';
  */
 
 /** Short enough that a command never blocks a turn on the daemon's write lock,
- *  long enough to cover one (02-redesign.md §10). */
-const CLI_BUSY_TIMEOUT_MS = 250;
+ *  long enough to cover one (02-redesign.md §10). Exported because the
+ *  read-only handle `tenjin state query` opens wants the same wait: a reader
+ *  can still hit BUSY racing the daemon's checkpoint. */
+export const CLI_BUSY_TIMEOUT_MS = 250;
 
 /** Open `loop.db` as a command: no rebuild, and any failure is a `CliError`. */
 export function openLoopDbForCli(dataDir: string): LoopDb {

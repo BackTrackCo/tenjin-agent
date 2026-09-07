@@ -249,8 +249,16 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   addGlobalFlags(program.command('doctor'))
     .description('Check the local environment and Tenjin API reachability')
+    .option(
+      '--prune',
+      'Run the loop ledger through its retention rule and delete the retired state store, instead of the checks',
+    )
     .action(async function (this: Command) {
       await runCommand('doctor', this, async (ctx) => {
+        if (this.opts().prune === true) {
+          const { runDoctorPrune } = await import('./commands/doctor');
+          return runDoctorPrune(ctx);
+        }
         const { runDoctor } = await import('./commands/doctor');
         return runDoctor(ctx);
       });
@@ -867,14 +875,12 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     });
 
   // `tenjin state query "<sql>"` (docs/command-reference.md, "State store"):
-  // read-only ad hoc SQL against ~/.tenjin/state.db, for an operator debugging a
-  // pairing, a search, or a hook's own bookkeeping by hand. See
-  // commands/state.ts for why this exists instead of `sqlite3 -readonly`.
-  const state = addGlobalFlags(
-    program.command('state').description('Inspect the local state database'),
-  );
+  // read-only ad hoc SQL against ~/.tenjin/loop.db, for an operator debugging a
+  // fire, a pairing, a search, or a fact by hand. See commands/state.ts for why
+  // this exists instead of `sqlite3 -readonly`.
+  const state = addGlobalFlags(program.command('state').description('Inspect the loop database'));
   addGlobalFlags(state.command('query <sql>'))
-    .description('Run one read-only SELECT against the state database and print the rows as JSON')
+    .description('Run one read-only SELECT against the loop database and print the rows as JSON')
     .action(async function (this: Command, sql: string) {
       await runCommand('state.query', this, async (ctx) => {
         const { runStateQuery } = await import('./commands/state');
@@ -930,14 +936,10 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
     .description(
       "Show push mode, capture mode, whether the scripts are on disk AND registered in settings.json, the last 7 days of ledger tallies with the graded verdicts per arm and shelf, and each configured shelf's own per-trigger use rates",
     )
-    .option(
-      '--sessions',
-      'append the importance-score report: one line per session in the window, score vs capture_asked vs published (report only; no hook reads it)',
-    )
     .action(async function (this: Command) {
       await runCommand('push.status', this, async (ctx) => {
         const { runPushStatus } = await import('./commands/push');
-        return runPushStatus(ctx, {}, { sessions: this.opts().sessions === true });
+        return runPushStatus(ctx);
       });
     });
   addGlobalFlags(push.command('grade'))

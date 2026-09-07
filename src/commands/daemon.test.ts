@@ -9,7 +9,14 @@ import type { CommandContext } from '../context';
 import { STOP_GRACE_MS } from '../hooks/constants';
 import { ensureDaemon, readPid, readToken, type Health } from '../hooks/shim';
 import { CliError } from '../lib/errors';
-import { daemonBundlePath, daemonPidPath, daemonTokenPath, shimBundlePath } from '../lib/paths';
+import {
+  daemonBundlePath,
+  daemonPidPath,
+  daemonTokenPath,
+  shimBundlePath,
+  VITEST_REPORTER_FILE,
+  vitestReporterPath,
+} from '../lib/paths';
 import { installDaemonFiles, stopDaemon } from '../daemon/control';
 import { runDaemonStart, runDaemonStatus, runDaemonStop } from './daemon';
 
@@ -99,6 +106,7 @@ async function writeBundles(dir: string, version: string = pkg.version): Promise
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, 'tenjin-daemon.mjs'), fakeDaemonSource(version));
   await writeFile(join(dir, 'tenjin-shim.mjs'), '// shim stand-in\n');
+  await writeFile(join(dir, VITEST_REPORTER_FILE), '// reporter stand-in\n');
 }
 
 /** A `/health` stub on port 0 standing in for a live daemon; returns its port. */
@@ -135,16 +143,20 @@ async function caught<T>(fn: () => Promise<T>): Promise<CliError> {
 }
 
 describe('installDaemonFiles', () => {
-  it('copies both bundles into the hooks dir and mints a 0600 token', async () => {
+  it('copies the three built files into the hooks dir and mints a 0600 token', async () => {
     await writeBundles(bundleDir);
     const { written } = installDaemonFiles(dataDir, bundleDir);
     expect(written).toEqual([
       daemonBundlePath(dataDir),
       shimBundlePath(dataDir),
+      vitestReporterPath(dataDir),
       daemonTokenPath(dataDir),
     ]);
     expect(await readFile(daemonBundlePath(dataDir), 'utf8')).toBe(fakeDaemonSource(pkg.version));
     expect(await readFile(shimBundlePath(dataDir), 'utf8')).toBe('// shim stand-in\n');
+    // NOT a hook entry and never spawned: a repo's own vitest config imports it
+    // by this absolute path, which is why `doctor` can hint at it verbatim.
+    expect(await readFile(vitestReporterPath(dataDir), 'utf8')).toBe('// reporter stand-in\n');
     const token = readToken(dataDir);
     expect(token).toMatch(/^[0-9a-f]{64}$/);
     expect((await stat(daemonTokenPath(dataDir))).mode & 0o777).toBe(0o600);
@@ -155,7 +167,11 @@ describe('installDaemonFiles', () => {
     installDaemonFiles(dataDir, bundleDir);
     const token = readToken(dataDir);
     const { written } = installDaemonFiles(dataDir, bundleDir);
-    expect(written).toEqual([daemonBundlePath(dataDir), shimBundlePath(dataDir)]);
+    expect(written).toEqual([
+      daemonBundlePath(dataDir),
+      shimBundlePath(dataDir),
+      vitestReporterPath(dataDir),
+    ]);
     expect(readToken(dataDir)).toBe(token);
   });
 
@@ -397,7 +413,7 @@ describe('runDaemonStart', () => {
         dataDir,
         replaced: null,
       });
-      expect(data.written).toHaveLength(3);
+      expect(data.written).toHaveLength(4);
       expect(readPid(dataDir)).toMatchObject({ pid: data.pid, port: data.port, data_dir: dataDir });
       expect(readToken(dataDir)).toMatch(/^[0-9a-f]{64}$/);
       expect(first.humanLines?.[0]).toBe(
@@ -411,7 +427,7 @@ describe('runDaemonStart', () => {
         port: data.port,
         replaced: null,
       });
-      expect((second.data as { written: string[] }).written).toHaveLength(2);
+      expect((second.data as { written: string[] }).written).toHaveLength(3);
       expect(second.humanLines?.[0]).toBe(
         `already running: pid ${data.pid}, port ${data.port}, v${pkg.version}`,
       );

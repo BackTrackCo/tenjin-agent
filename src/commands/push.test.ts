@@ -3,20 +3,11 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import {
-  runPushGrade,
-  runPushOff,
-  runPushOn,
-  runPushStatus,
-  scoreSession,
-  SCORE_RECENCY_MS,
-  type ScoreEvent,
-  type PushSessionScore,
-} from './push';
+import { runPushGrade, runPushOff, runPushOn, runPushStatus } from './push';
 import { loadRawConfig } from '../lib/config';
 import { claudeSettingsPath } from '../lib/harness-permissions';
 import { hooksDir, shimBundlePath } from '../lib/paths';
-import { openStore, recordSearch, STORE_SQL } from '../lib/state-store';
+import { openLoopDb, type LoopDb } from '../hooks/store';
 import type { TranscriptLookup } from '../lib/grade';
 import type { CommandContext } from '../context';
 
@@ -47,87 +38,105 @@ function makeCtx(): CommandContext {
   };
 }
 
-/** One decision row, as an arm would have written it. */
-interface SeedRow {
-  at: number;
-  trigger: string;
+/** One `legs` row, as a leg's verdict left it. */
+interface SeedLeg {
+  stage?: number;
   shelf: string;
-  action: string;
-  reason?: string;
-  resourceId?: string;
-  tokens?: number;
-  uid?: string;
-  session?: string;
-  /** The subagent the arm wrote the row inside; absent is the main session. */
-  agentId?: string | null;
+  /** `hit` is the winning leg — the only one `status` and `grade` count. */
+  outcome?: 'hit' | 'miss' | 'shadowed' | 'no-answer';
   searchId?: string | null;
   title?: string;
   url?: string;
+  /** `<outcome>:<by>`, as `push grade` writes it. */
+  graded?: string;
+  postedAt?: number;
 }
 
-/** Write `rows` into the store's `injections` table. */
-async function seedRows(dir: string, rows: SeedRow[]): Promise<void> {
-  const store = await openStore(dir);
-  if (store === null) throw new Error('no store');
+/** One `fires` row, as the kernel commits it after a fire. */
+interface SeedFire {
+  id: string;
+  at: number;
+  arm: string;
+  reason: string;
+  session?: string;
+  agent?: string;
+  /** `inject:<resourceId>` when the agent was shown the piece, `log:<id>` when
+   *  the arm only recorded it, null when the fire reached no answer. */
+  delivered?: string | null;
+  legs?: SeedLeg[];
+}
+
+function withDb<T>(fn: (db: LoopDb) => T): T {
+  const db = openLoopDb(dir);
   try {
-    rows.forEach((row, i) => {
-      store.run(STORE_SQL.insertInjection, [
-        row.uid ?? `seed-${i}`,
-        null,
-        row.at,
-        row.session ?? 'sess',
-        null,
-        'machine',
-        row.trigger,
-        row.shelf,
-        row.resourceId ?? null,
-        row.title ?? null,
-        row.url ?? null,
-        null,
-        row.searchId === undefined ? 'search-id' : row.searchId,
-        null,
-        null,
-        null,
-        null,
-        null,
-        row.action,
-        row.reason ?? null,
-        null,
-        0,
-        row.tokens ?? null,
-        row.agentId ?? null,
-      ]);
-    });
+    return fn(db);
   } finally {
-    store.close();
+    db.close();
   }
 }
 
-/** The `searches` row an arm writes beside its injection, carrying the base URL
- *  it asked — the only record of which shelf minted the search id. */
-async function seedSearch(dir: string, searchId: string, shelfBaseUrl: string): Promise<void> {
-  await recordSearch(dir, {
-    searchId,
-    at: new Date().toISOString(),
-    question: 'q',
-    decision: 'CANDIDATES',
-    candidates: [],
-    source: 'push-hook',
-    shelfBaseUrl,
+function seedFires(fires: SeedFire[]): void {
+  withDb((db) => {
+    for (const fire of fires) {
+      db.prepare(
+        `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+           deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+         VALUES (?, ?, ?, ?, ?, 'claude', 'prompt', NULL, '/repo', 'tool', 100, 1, ?, NULL, NULL, ?, NULL, NULL)`,
+      ).run(
+        fire.id,
+        fire.at,
+        fire.session ?? 'sess',
+        fire.agent ?? '',
+        fire.arm,
+        fire.reason,
+        fire.delivered ?? null,
+      );
+      for (const leg of fire.legs ?? []) {
+        db.prepare(
+          `INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms, search_id, title,
+             url, form, calibration, graded, posted_at)
+           VALUES (?, ?, ?, 'ok', ?, 1, ?, ?, ?, NULL, NULL, ?, ?)`,
+        ).run(
+          fire.id,
+          leg.stage ?? 0,
+          leg.shelf,
+          leg.outcome ?? 'hit',
+          leg.searchId ?? null,
+          leg.title ?? null,
+          leg.url ?? null,
+          leg.graded ?? null,
+          leg.postedAt ?? null,
+        );
+      }
+    }
   });
 }
 
-/** A `sessions` row, so `grade` can tell a session that ended from one that is
- *  still running without touching the transcript's mtime. */
-async function seedSession(dir: string, session: string, ended: boolean): Promise<void> {
-  const store = await openStore(dir);
-  if (store === null) throw new Error('no store');
-  try {
-    store.run(STORE_SQL.touchSession, [session, null, '/repo', 0, 'machine']);
-    if (ended) store.run(STORE_SQL.endSession, [session, 0, 1, 'machine']);
-  } finally {
-    store.close();
-  }
+/** One pairing row, as the failure arm opens it, then closed as asked. */
+function seedPairing(
+  at: number,
+  head: string,
+  close?: { status: 'unverified' | 'verified'; scope: string; postId?: string },
+): void {
+  withDb((db) => {
+    const uid = `pair-${at}-${head}-${Math.random().toString(36).slice(2)}`;
+    db.prepare(
+      `INSERT INTO pairings (uid, at, session, project, machine, kind, key, cmd_head, cmd,
+         error_line, error_files, pkg_versions, scope, status, closed_at, post_id)
+       VALUES (?, ?, 'sess', 'proj', 'machine', 'sig_v1', ?, ?, ?, 'Error: ENOENT', '["a.ts"]', '{}',
+         ?, ?, ?, ?)`,
+    ).run(
+      uid,
+      at,
+      `key-${uid}`,
+      head,
+      `${head} test`,
+      close?.scope ?? 'ambiguous',
+      close?.status ?? 'open',
+      close === undefined ? null : at + 1,
+      close?.postId ?? null,
+    );
+  });
 }
 
 describe('runPushOn / runPushOff', () => {
@@ -153,7 +162,7 @@ describe('runPushOn / runPushOff', () => {
     expect(await readFile(claudeSettingsPath(home), 'utf8').catch(() => null)).toBeNull();
   });
 
-  it('does not care what hooks.webSearch says: that key is the arms\u2019 own', async () => {
+  it('does not care what hooks.webSearch says: that key is the arms’ own', async () => {
     await writeFile(join(dir, 'config.json'), JSON.stringify({ hooks: { webSearch: 'off' } }));
     await runPushOn(makeCtx());
     expect((await loadRawConfig(dir)).hooks?.push).toBe('on');
@@ -172,19 +181,18 @@ describe('runPushStatus', () => {
       ledger: {
         windowDays: 7,
         rows: 0,
-        byTriggerAction: {},
+        byArmReason: {},
         byShelf: {},
-        byReason: {},
+        delivered: 0,
         candidates: 0,
-        injectedTokens: 0,
-        pairings: { opened: 0, closed: 0, verified: 0, scope: {}, byHead: {} },
+        pairings: { opened: 0, closed: 0, verified: 0, scope: {}, byHead: {}, published: 0 },
         graded: {},
       },
       // Public mode is one shelf, and it is unreachable in this test.
       server: { public: null },
     });
     expect(result.humanLines?.join('\n')).toContain(
-      'pairings, last 7d: 0 opened, 0 closed, 0 verified',
+      'pairings, last 7d: 0 opened, 0 closed, 0 verified, 0 published',
     );
   });
 
@@ -230,124 +238,44 @@ describe('runPushStatus', () => {
     expect(lines).not.toContain('nothing is wired yet');
   });
 
-  /** One pairing row, as the failure arm opens it, then closed as asked. */
-  async function seedPairing(
-    dir: string,
-    at: number,
-    head: string,
-    close?: { sessions: string[]; scope: string },
-  ): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      const uid = `pair-${at}-${head}-${Math.random().toString(36).slice(2)}`;
-      store.run(STORE_SQL.insertPairing, [
-        uid,
-        at,
-        'sess',
-        'proj',
-        'machine',
-        'sig_v1',
-        `key-${uid}`,
-        null,
-        head,
-        `${head} test`,
-        'Error: ENOENT',
-        '["a.ts"]',
-        '{}',
-        'ambiguous',
-      ]);
-      if (close === undefined) return;
-      const id = (store.get('SELECT id FROM pairings WHERE uid = ?', [uid]) as { id: number }).id;
-      for (const session of close.sessions) {
-        store.run(STORE_SQL.claimClose, [
-          id,
-          session,
-          null,
-          at + 1,
-          `${head} test`,
-          '["a.ts"]',
-          close.scope,
-        ]);
-      }
-      store.run(STORE_SQL.syncPairing, [
-        close.sessions.length,
-        close.sessions.length,
-        at + 1,
-        `${head} test`,
-        '["a.ts"]',
-        close.scope,
-        id,
-      ]);
-    } finally {
-      store.close();
-    }
-  }
-
   /**
-   * Plan 05 rows 9 and 11 (tenjin-agent#212): how many pairings the machine
-   * opened, how many a later pass closed and verified, what scope the closed
-   * ones landed in, and which heads opened them.
+   * A week of `fires` and their `legs`: how many fired, what closed them, which
+   * shelves were asked, how many actually put a piece in front of the agent and
+   * how many distinct pieces that was. The vocabulary is read off the rows, so
+   * a reason this build has never heard of still counts.
    */
-  it('reports the pairings opened in the window: closed, verified, scope, heads', async () => {
+  it('tallies the last 7 days of fires by arm x reason, legs by shelf, and the delivered rows', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
     const recent = now - 60_000;
     const stale = now - 8 * 24 * 60 * 60 * 1000;
-    await seedPairing(dir, recent, 'pnpm');
-    await seedPairing(dir, recent, 'pnpm', { sessions: ['s1'], scope: 'code' });
-    await seedPairing(dir, recent, 'pytest', { sessions: ['s1', 's2'], scope: 'code' });
-    await seedPairing(dir, recent, 'tsc', { sessions: ['s1'], scope: 'user' });
-    await seedPairing(dir, stale, 'cargo', { sessions: ['s1'], scope: 'code' });
-
-    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
-    expect(result.data).toMatchObject({
-      ledger: {
-        pairings: {
-          opened: 4,
-          closed: 3,
-          verified: 1,
-          scope: { code: 2, user: 1 },
-          byHead: { pnpm: 2, pytest: 1, tsc: 1 },
-        },
-      },
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain(
-      'pairings, last 7d: 4 opened, 3 closed, 1 verified; scope: code=2, user=1; heads: pnpm=2, pytest=1, tsc=1',
-    );
-  });
-
-  it('tallies the last 7 days of ledger rows by trigger x action, shelf, and tokens', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const recent = now - 60_000;
-    const stale = now - 8 * 24 * 60 * 60 * 1000;
-    await seedRows(dir, [
+    seedFires([
       {
+        id: 'f-1',
         at: recent,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-1',
-        tokens: 120,
+        arm: 'failure',
+        reason: 'hit',
+        delivered: 'inject:res-1',
+        legs: [{ shelf: 'keys' }, { stage: 1, shelf: 'public', outcome: 'shadowed' }],
       },
       {
+        id: 'f-2',
         at: recent,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'skipped',
-        resourceId: 'res-1',
-        reason: 'weak',
+        arm: 'failure',
+        reason: 'seen',
+        delivered: null,
+        legs: [{ shelf: 'keys', outcome: 'miss' }],
       },
-      { at: recent, trigger: 'read', shelf: 'team', action: 'logged' },
-      // Outside the 7-day window: must not be counted.
+      // Delivered but only recorded: never shown, so it is not a candidate.
+      { id: 'f-3', at: recent, arm: 'context', reason: 'hit', delivered: 'log:res-9' },
+      { id: 'f-4', at: recent, arm: 'prompt', reason: 'no-question', delivered: null },
+      // Outside the 7-day window: must not be counted at all.
       {
+        id: 'f-stale',
         at: stale,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-stale',
-        reason: 'weak',
-        tokens: 999,
+        arm: 'failure',
+        reason: 'hit',
+        delivered: 'inject:res-stale',
+        legs: [{ shelf: 'team' }],
       },
     ]);
 
@@ -359,97 +287,85 @@ describe('runPushStatus', () => {
     expect(result.data).toMatchObject({
       ledger: {
         windowDays: 7,
-        rows: 3,
-        byTriggerAction: {
-          failure: { injected: 1, skipped: 1 },
-          read: { logged: 1 },
+        rows: 4,
+        byArmReason: {
+          failure: { hit: 1, seen: 1 },
+          context: { hit: 1 },
+          prompt: { 'no-question': 1 },
         },
-        byShelf: { public: 2, team: 1 },
-        byReason: { weak: 1 },
-        // Two rows about the same piece are one finding; the third row reached
-        // no candidate at all; the stale row is outside the window.
+        byShelf: { keys: 2, public: 1 },
+        delivered: 1,
         candidates: 1,
-        injectedTokens: 120,
       },
     });
     const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('3 row(s)');
-    expect(human).toContain('1 finding(s)');
-    expect(human).toContain('failure: injected=1, skipped=1');
-    expect(human).toContain('shelf: public=2, team=1');
-    expect(human).toContain('reasons: weak=1');
+    expect(human).toContain('4 fire(s), 1 delivered, 1 finding(s)');
+    expect(human).toContain('failure: hit=1, seen=1');
+    expect(human).toContain('shelf: keys=2, public=1');
   });
 
-  it('counts a note and a marketplace piece as separate findings, and sorts reasons by count', async () => {
+  /** Two rows about the same piece are one finding, and a `local` delivery
+   *  carries no resource id at all. */
+  it('counts distinct pieces, not deliveries', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
-    const recent = now - 60_000;
-    await seedRows(dir, [
-      // A note is keyed by `candidate.id` and a marketplace piece by
-      // `candidate.resourceId`; both land in the same column.
-      {
-        at: recent,
-        trigger: 'failure',
-        shelf: 'team',
-        action: 'injected',
-        resourceId: '20260822-k3x9q2',
-        tokens: 40,
-      },
-      {
-        at: recent,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-9',
-        tokens: 60,
-      },
-      { at: recent, trigger: 'prompt', shelf: 'public', action: 'skipped', reason: 'lookup-cap' },
-      { at: recent, trigger: 'read', shelf: 'public', action: 'skipped', reason: 'lookup-cap' },
-      // A row that reached no candidate at all.
-      { at: recent, trigger: 'churn', shelf: 'public', action: 'skipped', reason: 'miss' },
-      // An empty reason is not a reason.
-      { at: recent, trigger: 'read', shelf: 'team', action: 'logged', reason: '' },
+    seedFires([
+      { id: 'f-1', at: now - 1000, arm: 'prompt', reason: 'hit', delivered: 'inject:res-a' },
+      { id: 'f-2', at: now - 900, arm: 'context', reason: 'hit', delivered: 'inject:res-a' },
+      { id: 'f-3', at: now - 800, arm: 'failure', reason: 'hit', delivered: 'inject:res-b' },
+      // A local pairing: shown, but there is no marketplace piece behind it.
+      { id: 'f-4', at: now - 700, arm: 'failure', reason: 'hit', delivered: 'inject:' },
     ]);
-
     const result = await runPushStatus(makeCtx(), {
       homeDir: home,
       now: () => now,
       lookupStats: shelfDown,
     });
-    expect(result.data).toMatchObject({
-      ledger: {
-        rows: 6,
-        byReason: { 'lookup-cap': 2, miss: 1 },
-        candidates: 2,
-        injectedTokens: 100,
-      },
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('2 finding(s)');
-    // Sorted by count, so the dominant brake reads first.
-    expect(human).toContain('reasons: lookup-cap=2, miss=1');
-    // Complete, so nothing is a floor and the line does not say otherwise.
-    expect(human).not.toContain('retained tail');
+    expect(result.data).toMatchObject({ ledger: { delivered: 4, candidates: 2 } });
   });
 
   /**
-   * The tail is gone with the file.
-   *
-   * `push-ledger.jsonl` was append-only and never rotated, so `status` read its
-   * last 256 KB and reported `tail: true` with a human line saying the counts an
-   * operator was reading as totals were floors. The rows are indexed now, so a
-   * large store answers the same window completely — which is what this asserts
-   * with more rows than the old tail could hold.
+   * The mechanical lane's own line: how many pairings the machine opened, how
+   * many a later pass closed and verified, what scope they landed in, which
+   * heads opened them, and how many an agent has since published a fix note for
+   * (`publish --key` stamps `post_id`).
    */
-  it('counts the whole window on a large store, with no floor and no caveat', async () => {
+  it('reports the pairings opened in the window: closed, verified, scope, heads, published', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
-    await seedRows(
-      dir,
+    const recent = now - 60_000;
+    const stale = now - 8 * 24 * 60 * 60 * 1000;
+    seedPairing(recent, 'pnpm');
+    seedPairing(recent, 'pnpm', { status: 'unverified', scope: 'code' });
+    seedPairing(recent, 'pytest', { status: 'verified', scope: 'code', postId: 'post-1' });
+    seedPairing(recent, 'tsc', { status: 'unverified', scope: 'user' });
+    seedPairing(stale, 'cargo', { status: 'unverified', scope: 'code' });
+
+    const result = await runPushStatus(makeCtx(), { homeDir: home, now: () => now });
+    expect(result.data).toMatchObject({
+      ledger: {
+        pairings: {
+          opened: 4,
+          closed: 3,
+          verified: 1,
+          published: 1,
+          scope: { code: 2, user: 1 },
+          byHead: { pnpm: 2, pytest: 1, tsc: 1 },
+        },
+      },
+    });
+    expect(result.humanLines?.join('\n')).toContain(
+      'pairings, last 7d: 4 opened, 3 closed, 1 verified, 1 published; scope: code=2, user=1; heads: pnpm=2, pytest=1, tsc=1',
+    );
+  });
+
+  /** Complete, not a floor: the rows are indexed, so the window is the window. */
+  it('counts the whole window on a large ledger', async () => {
+    const now = Date.parse('2026-08-22T00:00:00Z');
+    seedFires(
       Array.from({ length: 2000 }, (_, i) => ({
+        id: `f-${i}`,
         at: now - 60_000 - i,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'skipped',
-        reason: 'miss',
+        arm: 'prompt',
+        reason: 'no-answer',
       })),
     );
     const result = await runPushStatus(makeCtx(), {
@@ -458,634 +374,6 @@ describe('runPushStatus', () => {
       lookupStats: shelfDown,
     });
     expect((result.data as { ledger: { rows: number } }).ledger.rows).toBe(2000);
-    expect(result.humanLines?.join('\n')).not.toContain('retained tail');
-  });
-});
-
-/**
- * The importance score (tenjin-agent#212, CommonTrace `detection.py` /
- * `scoring.py`), as a report. Pure fixtures per pattern first, then the store
- * read that puts capture_asked and published beside it.
- */
-describe('scoreSession', () => {
-  const T0 = Date.parse('2026-08-22T00:00:00Z');
-  const ev = (offsetS: number, hook: string, over: Partial<ScoreEvent> = {}): ScoreEvent => ({
-    at: T0 + offsetS * 1000,
-    hook,
-    tool: null,
-    // The lead's own turn unless a fixture says otherwise: these are pure
-    // fixtures for ONE worker, which is the unit scoreSession scores.
-    agentId: null,
-    files: [],
-    command: null,
-    head: null,
-    ...over,
-  });
-  const edit = (offsetS: number, file: string, tool = 'Edit'): ScoreEvent =>
-    ev(offsetS, 'edit', { tool, files: [file] });
-  const score = (events: ScoreEvent[], over: Partial<Parameters<typeof scoreSession>[0]> = {}) =>
-    scoreSession({ events, closes: [], searches: [], endedAt: null, ...over });
-
-  it('scores nothing for a session of prompts and reads', () => {
-    expect(score([ev(0, 'prompt'), ev(10, 'read'), ev(20, 'prompt')])).toEqual({
-      score: 0,
-      patterns: [],
-      bonus: 1,
-    });
-  });
-
-  it('error → edit → pass is 3.0', () => {
-    const s = score(
-      [
-        ev(0, 'failure', { command: 'pnpm test' }),
-        edit(10, 'a.test.ts'),
-        ev(20, 'pass', { head: 'pnpm' }),
-      ],
-      {
-        endedAt: T0 + 3600_000,
-      },
-    );
-    // The pass closes a test-file edit: error-edit-resolved fires, fail-edit-pass
-    // (which wants a non-test edit) does not.
-    expect(s).toEqual({ score: 3, patterns: ['error-edit-resolved'], bonus: 1 });
-  });
-
-  it('a pass with no edit between resolves nothing', () => {
-    expect(
-      score([ev(0, 'failure', { command: 'pnpm test' }), ev(20, 'pass', { head: 'pnpm' })]).score,
-    ).toBe(0);
-  });
-
-  it('a pairing close by this session counts as the resolution', () => {
-    const s = score([ev(0, 'failure', { command: 'pnpm test' }), edit(10, 'a.ts')], {
-      closes: [T0 + 15_000],
-      endedAt: T0 + 3600_000,
-    });
-    expect(s.patterns).toEqual(['error-edit-resolved']);
-  });
-
-  it('the same file edited before and after a prompt is 2.5, markdown excluded', () => {
-    expect(score([edit(0, 'a.ts'), ev(10, 'prompt'), edit(20, 'a.ts')])).toEqual({
-      score: 2.5,
-      patterns: ['edit-across-prompt'],
-      bonus: 1,
-    });
-    expect(score([edit(0, 'notes.md'), ev(10, 'prompt'), edit(20, 'notes.md')]).score).toBe(0);
-    expect(score([edit(0, 'a.ts'), ev(10, 'prompt'), edit(20, 'b.ts')]).score).toBe(0);
-  });
-
-  it('a Write over a file with three prior edits is 2.5; two is not', () => {
-    const three = [edit(0, 'a.ts'), edit(1, 'a.ts'), edit(2, 'a.ts'), edit(3, 'a.ts', 'Write')];
-    expect(score(three, { endedAt: T0 + 3600_000 })).toEqual({
-      score: 2.5,
-      patterns: ['write-over-edited'],
-      bonus: 1,
-    });
-    expect(score(three.slice(1), { endedAt: T0 + 3600_000 }).score).toBe(0);
-    // A fourth Edit is not a reversal.
-    expect(score([...three.slice(0, 3), edit(3, 'a.ts')], { endedAt: T0 + 3600_000 }).score).toBe(
-      0,
-    );
-  });
-
-  it('fail → non-test edit → the same head passes is 2.0 on top of the resolution', () => {
-    const s = score(
-      [
-        ev(0, 'failure', { command: 'pnpm vitest run x' }),
-        edit(10, 'src/x.ts'),
-        ev(20, 'pass', { head: 'pnpm' }),
-      ],
-      { endedAt: T0 + 3600_000 },
-    );
-    expect(s).toEqual({ score: 5, patterns: ['error-edit-resolved', 'fail-edit-pass'], bonus: 1 });
-    // A different head passing is a different story.
-    expect(
-      score(
-        [
-          ev(0, 'failure', { command: 'pnpm test' }),
-          edit(10, 'x.ts'),
-          ev(20, 'pass', { head: 'cargo' }),
-        ],
-        {
-          endedAt: T0 + 3600_000,
-        },
-      ).patterns,
-    ).toEqual(['error-edit-resolved']);
-  });
-
-  it('research then edit with no error between is 2.0; an error between breaks it', () => {
-    expect(score([ev(0, 'research'), edit(10, 'a.ts')])).toEqual({
-      score: 2,
-      patterns: ['research-then-edit'],
-      bonus: 1,
-    });
-    expect(
-      score([ev(0, 'research'), ev(5, 'failure', { command: 'pnpm test' }), edit(10, 'a.ts')])
-        .score,
-    ).toBe(0);
-    // A search on record is the same signal (the research event is written on a hit only).
-    expect(score([edit(10, 'a.ts')], { searches: [T0] }).patterns).toEqual(['research-then-edit']);
-  });
-
-  it('counts each pattern once per session', () => {
-    const twice = [
-      ev(0, 'failure', { command: 'pnpm test' }),
-      edit(1, 'a.ts'),
-      ev(2, 'pass', { head: 'pnpm' }),
-      ev(10, 'failure', { command: 'pnpm test' }),
-      edit(11, 'b.ts'),
-      ev(12, 'pass', { head: 'pnpm' }),
-    ];
-    expect(score(twice, { endedAt: T0 + 3600_000 }).score).toBe(5);
-  });
-
-  it('adds up to 30% when the last resolution was within 300 s of the end', () => {
-    const events = [
-      ev(0, 'failure', { command: 'pnpm test' }),
-      edit(10, 'a.ts'),
-      ev(20, 'pass', { head: 'pnpm' }),
-    ];
-    // Resolved at t=20s, session ended at t=20s: the full bonus.
-    expect(score(events, { endedAt: T0 + 20_000 })).toEqual({
-      score: 6.5,
-      patterns: ['error-edit-resolved', 'fail-edit-pass'],
-      bonus: 1.3,
-    });
-    // Halfway through the window: half of it.
-    expect(score(events, { endedAt: T0 + 20_000 + SCORE_RECENCY_MS / 2 }).bonus).toBe(1.15);
-    // At the edge: none.
-    expect(score(events, { endedAt: T0 + 20_000 + SCORE_RECENCY_MS }).bonus).toBe(1);
-    // No end on record: the last event is the end, which here IS the resolution.
-    expect(score(events).bonus).toBe(1.3);
-  });
-
-  it('a reversal earns the bonus too', () => {
-    const events = [edit(0, 'a.ts'), edit(1, 'a.ts'), edit(2, 'a.ts'), edit(3, 'a.ts', 'Write')];
-    expect(score(events, { endedAt: T0 + 3_000 }).bonus).toBe(1.3);
-  });
-});
-
-describe('runPushStatus --sessions', () => {
-  /** Rows as the hooks write them, for one session. */
-  async function seedSession(
-    dir: string,
-    session: string,
-    startedAt: number,
-    events: Array<{
-      at: number;
-      hook: string;
-      tool?: string;
-      agentId?: string;
-      files?: string[];
-      data?: unknown;
-    }>,
-    extra: {
-      endedAt?: number;
-      captureAskedAt?: number;
-      /** A close per entry. `agentId` absent is the lead's own close. */
-      closesAt?: Array<number | { at: number; agentId?: string }>;
-      /** A `searches` row per entry, same shape. */
-      searchesAt?: Array<number | { at: number; agentId?: string }>;
-    } = {},
-  ): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.touchSession, [session, 'proj', '/w', startedAt, 'machine']);
-      if (extra.endedAt !== undefined) {
-        store.run(STORE_SQL.endSession, [session, extra.endedAt, extra.endedAt, 'machine']);
-      }
-      events.forEach((e, i) => {
-        store.run(STORE_SQL.insertEvent, [
-          `${session}-ev-${i}`,
-          e.at,
-          session,
-          e.agentId ?? null,
-          'proj',
-          'machine',
-          e.hook,
-          e.tool ?? null,
-          null,
-          e.files === undefined ? null : JSON.stringify(e.files),
-          e.data === undefined ? null : JSON.stringify(e.data),
-        ]);
-      });
-      if (extra.captureAskedAt !== undefined) {
-        store.run(STORE_SQL.setState, [
-          session,
-          'capture_asked',
-          JSON.stringify(new Date(extra.captureAskedAt).toISOString()),
-          extra.captureAskedAt,
-        ]);
-      }
-      const stamps = (
-        rows: Array<number | { at: number; agentId?: string }>,
-      ): Array<{ at: number; agentId: string | null }> =>
-        rows.map((r) =>
-          typeof r === 'number'
-            ? { at: r, agentId: null }
-            : { at: r.at, agentId: r.agentId ?? null },
-        );
-      let closeId = 0;
-      for (const { at, agentId } of stamps(extra.closesAt ?? [])) {
-        // A distinct `pairing_id` per row: the claim is OR IGNORE on
-        // (pairing_id, session), so two agents in one session closing "the same"
-        // pairing would collapse into one row and hide the partition.
-        closeId += 1;
-        store.run(STORE_SQL.claimClose, [
-          closeId,
-          session,
-          agentId,
-          at,
-          'pnpm test',
-          '["a.ts"]',
-          'code',
-        ]);
-      }
-      let searchId = 0;
-      for (const { at, agentId } of stamps(extra.searchesAt ?? [])) {
-        searchId += 1;
-        store.run(STORE_SQL.recordSearch, [
-          `${session}-search-${searchId}`,
-          at,
-          session,
-          agentId,
-          'q',
-          'fp',
-          'CANDIDATES',
-          '[]',
-          'push-hook',
-          null,
-          null,
-        ]);
-      }
-    } finally {
-      store.close();
-    }
-  }
-
-  async function seedPublished(dir: string, at: number, hash: string): Promise<void> {
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.setState, ['', `published:${hash}`, JSON.stringify('https://x/p'), at]);
-    } finally {
-      store.close();
-    }
-  }
-
-  it('is absent without the flag', async () => {
-    const result = await runPushStatus(makeCtx(), { homeDir: home });
-    expect(result.data).not.toHaveProperty('sessions');
-    expect(result.humanLines?.join('\n')).not.toContain('sessions, last');
-  });
-
-  it('scores each session in the window beside capture_asked and published', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    // s1: fail → edit → same head passes, capture asked, a publish while open.
-    await seedSession(
-      dir,
-      'sess-fixed',
-      s1,
-      [
-        { at: s1 + 1000, hook: 'prompt', data: { event: 'UserPromptSubmit', query: 'q' } },
-        { at: s1 + 2000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
-        { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
-        { at: s1 + 4000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
-      ],
-      { endedAt: s1 + 600_000, captureAskedAt: s1 + 600_000 },
-    );
-    await seedPublished(dir, s1 + 500_000, 'abc');
-    // s2: prompts only, capture asked, nothing published.
-    const s2 = now - 1800_000;
-    await seedSession(
-      dir,
-      'sess-chat',
-      s2,
-      [
-        { at: s2 + 1000, hook: 'prompt' },
-        { at: s2 + 2000, hook: 'prompt' },
-      ],
-      { captureAskedAt: s2 + 3000 },
-    );
-    // s3: out of the window.
-    const s3 = now - 8 * 24 * 3600_000;
-    await seedSession(dir, 'sess-old', s3, [{ at: s3 + 1000, hook: 'prompt' }]);
-    // The machine bucket is never a session.
-    await seedSession(dir, '', s2, [{ at: s2 + 1000, hook: 'prompt' }]);
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    expect(result.data).toMatchObject({
-      sessions: [
-        {
-          session: 'sess-fixed',
-          agent: null,
-          score: 5,
-          patterns: ['error-edit-resolved', 'fail-edit-pass'],
-          bonus: 1,
-          events: 4,
-          captureAsked: true,
-          published: 1,
-        },
-        {
-          session: 'sess-chat',
-          agent: null,
-          score: 0,
-          patterns: [],
-          events: 2,
-          captureAsked: true,
-          published: 0,
-        },
-      ],
-    });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('sessions, last 7d: 2 scored');
-    expect(human).toContain(
-      "sess-fixed   agent=''           score=5.0 events=4 capture_asked=yes published=1 [error-edit-resolved, fail-edit-pass]",
-    );
-    expect(human).toContain(
-      "sess-chat    agent=''           score=0.0 events=2 capture_asked=yes published=0",
-    );
-  });
-
-  /**
-   * THE PARTITION, against the store (audit fix 2). Parallel subagents share
-   * their parent's session id and are told apart only by `events.agent_id`, so
-   * a session-wide scan stitched a failure, an edit and a pass that belonged to
-   * three different workers into one "fix". Both halves are asserted here: the
-   * spliced sequence must not fire, and the identical sequence within one
-   * worker must.
-   */
-  it('never spans agents: parent failure + child edit + parent pass is not a fix', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    await seedSession(dir, 'sess-split', s1, [
-      // The parent fails and later passes; the only edit between them belongs
-      // to a child that was working on something else.
-      { at: s1 + 1000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
-      { at: s1 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
-      { at: s1 + 3000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
-    ]);
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
-
-    // Two workers, two lines, and NEITHER has a fix: the parent never edited,
-    // the child never failed or passed.
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.agent).sort()).toEqual(['a1', null]);
-    for (const row of rows) {
-      expect(row.patterns, `agent ${String(row.agent)}`).toEqual([]);
-      expect(row.score, `agent ${String(row.agent)}`).toBe(0);
-    }
-    // The events are split, not dropped: 2 for the parent, 1 for the child.
-    expect(rows.find((r) => r.agent === null)?.events).toBe(2);
-    expect(rows.find((r) => r.agent === 'a1')?.events).toBe(1);
-  });
-
-  it('scores the same sequence when one worker did all three', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    // Byte for byte the rows above, minus the agent stamp on the edit.
-    await seedSession(dir, 'sess-whole', s1, [
-      { at: s1 + 1000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
-      { at: s1 + 2000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
-      { at: s1 + 3000, hook: 'pass', tool: 'Bash', data: { command: 'pnpm test', head: 'pnpm' } },
-    ]);
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      session: 'sess-whole',
-      agent: null,
-      patterns: ['error-edit-resolved', 'fail-edit-pass'],
-      events: 3,
-    });
-  });
-
-  /**
-   * THE OTHER TWO INPUTS. `events` was partitioned first; `pairing_closes` and
-   * `searches` were still read per session, so a sibling's close completed a
-   * worker's `error-edit-resolved` and a sibling's search completed its
-   * `research-then-edit` — the same "a session is not a worker" defect, one
-   * table over. Both tables carry `agent_id`, so both are now keyed by
-   * (session, agent) like the events are.
-   */
-  it("never spans agents: a sibling's close or search completes nothing", async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    // a1 fails and edits; the only close in the window is a SIBLING's.
-    await seedSession(
-      dir,
-      'sess-close-split',
-      s1,
-      [
-        {
-          at: s1 + 1000,
-          hook: 'failure',
-          tool: 'Bash',
-          agentId: 'a1',
-          data: { command: 'pnpm test' },
-        },
-        { at: s1 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
-        { at: s1 + 2500, hook: 'edit', tool: 'Edit', agentId: 'a2', files: ['y.ts'] },
-      ],
-      { closesAt: [{ at: s1 + 3000, agentId: 'a2' }] },
-    );
-    // a2 searches; the only edit after it is a SIBLING's.
-    const s2 = now - 1800_000;
-    await seedSession(
-      dir,
-      'sess-search-split',
-      s2,
-      [
-        { at: s2 + 1500, hook: 'prompt', agentId: 'a2' },
-        { at: s2 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
-      ],
-      { searchesAt: [{ at: s2 + 1000, agentId: 'a2' }] },
-    );
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
-
-    // Four workers, and not one pattern between them.
-    expect(rows).toHaveLength(4);
-    expect(rows.map((r) => `${r.session}/${String(r.agent)}`).sort()).toEqual([
-      'sess-close-split/a1',
-      'sess-close-split/a2',
-      'sess-search-split/a1',
-      'sess-search-split/a2',
-    ]);
-    for (const row of rows) {
-      expect(row.patterns, `${row.session} agent ${String(row.agent)}`).toEqual([]);
-      expect(row.score, `${row.session} agent ${String(row.agent)}`).toBe(0);
-    }
-  });
-
-  it("scores a worker's own close and own search", async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    // Byte for byte the rows above, with the close and the search stamped with
-    // the same agent that did the work.
-    await seedSession(
-      dir,
-      'sess-own',
-      s1,
-      [
-        {
-          at: s1 + 1000,
-          hook: 'failure',
-          tool: 'Bash',
-          agentId: 'a1',
-          data: { command: 'pnpm test' },
-        },
-        { at: s1 + 2000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
-      ],
-      {
-        endedAt: s1 + 600_000,
-        closesAt: [{ at: s1 + 3000, agentId: 'a1' }],
-        searchesAt: [{ at: s1 + 1500, agentId: 'a1' }],
-      },
-    );
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
-
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({
-      session: 'sess-own',
-      agent: 'a1',
-      patterns: ['error-edit-resolved', 'research-then-edit'],
-      score: 5,
-      events: 2,
-    });
-  });
-
-  it('scores a child on its own rows, and keeps capture_asked on the parent', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    await seedSession(
-      dir,
-      'sess-child',
-      s1,
-      [
-        { at: s1 + 1000, hook: 'prompt', data: { event: 'UserPromptSubmit', query: 'q' } },
-        {
-          at: s1 + 2000,
-          hook: 'failure',
-          tool: 'Bash',
-          agentId: 'a1',
-          data: { command: 'pnpm test' },
-        },
-        { at: s1 + 3000, hook: 'edit', tool: 'Edit', agentId: 'a1', files: ['x.ts'] },
-        {
-          at: s1 + 4000,
-          hook: 'pass',
-          tool: 'Bash',
-          agentId: 'a1',
-          data: { command: 'pnpm test', head: 'pnpm' },
-        },
-      ],
-      { endedAt: s1 + 600_000, captureAskedAt: s1 + 600_000 },
-    );
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
-
-    const child = rows.find((r) => r.agent === 'a1');
-    const parent = rows.find((r) => r.agent === null);
-    expect(child).toMatchObject({
-      session: 'sess-child',
-      patterns: ['error-edit-resolved', 'fail-edit-pass'],
-      events: 3,
-      // The ask is the SESSION's, and it is reported once, on the parent.
-      captureAsked: false,
-    });
-    expect(parent).toMatchObject({ session: 'sess-child', events: 1, captureAsked: true });
-    // The child is the one that did the work, so it sorts above its parent.
-    expect(rows[0]!.agent).toBe('a1');
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('agent=a1');
-  });
-
-  it("counts a child's own agent_published mark as a publish (#237)", async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    await seedSession(dir, 'sess-pub', s1, [{ at: s1 + 1000, hook: 'prompt' }], {
-      endedAt: s1 + 600_000,
-    });
-    // What a child's own `tenjin publish` leaves behind. `LIKE 'published:%'`
-    // is anchored, so this row was invisible to the report until it was named.
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    store.run(STORE_SQL.setState, [
-      '',
-      'agent_published:a1@ffff',
-      JSON.stringify({ url: 'https://x/p' }),
-      s1 + 500_000,
-    ]);
-    store.close();
-
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    const rows = (result.data as { sessions: PushSessionScore[] }).sessions;
-    expect(rows.find((r) => r.session === 'sess-pub')?.published).toBe(1);
-  });
-
-  it('reads closes and searches into the score, and the recency bonus from ended_at', async () => {
-    const now = Date.parse('2026-08-22T00:00:00Z');
-    const s1 = now - 3600_000;
-    await seedSession(
-      dir,
-      'sess-closed',
-      s1,
-      [
-        { at: s1 + 2000, hook: 'failure', tool: 'Bash', data: { command: 'pnpm test' } },
-        { at: s1 + 3000, hook: 'edit', tool: 'Edit', files: ['x.ts'] },
-      ],
-      { endedAt: s1 + 4000, closesAt: [s1 + 4000] },
-    );
-    const result = await runPushStatus(
-      makeCtx(),
-      { homeDir: home, now: () => now },
-      { sessions: true },
-    );
-    expect(result.data).toMatchObject({
-      sessions: [
-        { session: 'sess-closed', score: 3.9, patterns: ['error-edit-resolved'], bonus: 1.3 },
-      ],
-    });
-    expect(result.humanLines?.join('\n')).toContain('score=3.9 (x1.30 recency)');
   });
 });
 
@@ -1094,7 +382,7 @@ describe('runPushGrade', () => {
   const RES = '0197aaaa-bbbb-cccc-dddd-ffffffffffff';
   const URL = 'https://tenjin.blog/p/the-collation-trap';
   const NOW = Date.parse('2026-08-22T00:00:00Z');
-  const INJECTED = `Tenjin found "The collation trap". Read it free: tenjin read ${RES}. The fix is \`pnpm db:generate --force\`.`;
+  const SHOWN = `Tenjin found "The collation trap". Read it free: tenjin read ${RES}. The fix is \`pnpm db:generate --force\`.`;
 
   function contextRow(text: string): string {
     return JSON.stringify({
@@ -1127,12 +415,16 @@ describe('runPushGrade', () => {
     return { fetchImpl, calls };
   }
 
-  /** Transcripts keyed by session, or by `<session>/<agentId>` for a child's own
+  /** Transcripts keyed by session, or by `<session>/<agent>` for a child's own
    *  file; `findTranscript` hands the key back as the path, so no home directory
    *  is involved. A key in `unreadable` is the projects directory this run could
    *  not read — which is not the same answer as a session that simply has no
-   *  transcript. */
-  function transcriptDeps(byKey: Record<string, string>, unreadable: string[] = []) {
+   *  transcript. `idle` is what says a session is over: `loop.db` keeps no
+   *  session table, so the file going quiet is the whole signal. */
+  function transcriptDeps(
+    byKey: Record<string, string>,
+    opts: { unreadable?: string[]; idle?: boolean } = {},
+  ) {
     return {
       findTranscript: async (
         _home: string,
@@ -1140,72 +432,73 @@ describe('runPushGrade', () => {
         agentId: string | null = null,
       ): Promise<TranscriptLookup> => {
         const key = agentId === null ? session : `${session}/${agentId}`;
-        if (unreadable.includes(key)) return { kind: 'unreadable', reason: 'EACCES' };
+        if ((opts.unreadable ?? []).includes(key)) return { kind: 'unreadable', reason: 'EACCES' };
         return key in byKey ? { kind: 'found', path: key } : { kind: 'absent' };
       },
       transcriptText: async (path: string): Promise<string> => byKey[path] ?? '',
-      transcriptIdle: async (): Promise<boolean> => false,
+      transcriptIdle: async (): Promise<boolean> => opts.idle ?? true,
     };
   }
 
-  it('marks used by read, rejects an ended session, and leaves a live one open', async () => {
-    await seedRows(dir, [
+  function gradedLegs(): Record<string, unknown>[] {
+    return withDb(
+      (db) =>
+        db.prepare('SELECT fire_id, graded, posted_at FROM legs ORDER BY fire_id').all() as Record<
+          string,
+          unknown
+        >[],
+    );
+  }
+
+  it('marks used by read, rejects a quiet session, and leaves a live one open', async () => {
+    seedFires([
       {
-        uid: 'u-used',
+        id: 'f-used',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
-        session: 'ended',
-        searchId: SEARCH,
+        arm: 'failure',
+        reason: 'hit',
+        session: 'quiet',
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
       {
-        uid: 'u-rejected',
+        id: 'f-rejected',
         at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-b',
-        session: 'ended',
-        searchId: null,
+        arm: 'prompt',
+        reason: 'hit',
+        session: 'quiet',
+        delivered: 'inject:res-b',
+        legs: [{ shelf: 'public', title: 'res-b' }],
       },
       {
-        uid: 'u-open',
+        id: 'f-open',
         at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-c',
+        arm: 'prompt',
+        reason: 'hit',
         session: 'live',
-        searchId: null,
+        delivered: 'inject:res-c',
+        legs: [{ shelf: 'public', title: 'res-c' }],
       },
       {
-        uid: 'u-notranscript',
-        at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-e',
+        id: 'f-notranscript',
+        at: NOW - 10 * 60 * 60 * 1000,
+        arm: 'prompt',
+        reason: 'hit',
         session: 'gone',
-        searchId: null,
+        delivered: 'inject:res-e',
+        legs: [{ shelf: 'public' }],
       },
-      // Not injected, so there is nothing to have used.
+      // Never shown, so there is nothing to have used.
       {
-        uid: 'u-skipped',
+        id: 'f-logonly',
         at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'skipped',
-        resourceId: 'res-f',
-        session: 'ended',
+        arm: 'prompt',
+        reason: 'hit',
+        session: 'quiet',
+        delivered: 'log:res-f',
+        legs: [{ shelf: 'public' }],
       },
     ]);
-    await seedSession(dir, 'ended', true);
-    await seedSession(dir, 'live', false);
-    // Ended, so "no transcript" is settled rather than "not written yet".
-    await seedSession(dir, 'gone', true);
     const { fetchImpl } = acceptingShelf();
 
     const result = await runPushGrade(
@@ -1214,15 +507,20 @@ describe('runPushGrade', () => {
       {
         now: () => NOW,
         fetchImpl,
-        ...transcriptDeps({
-          ended: [
-            contextRow(INJECTED),
-            toolUse({ command: `tenjin read ${RES}` }),
-            contextRow('Tenjin found res-b here.'),
-            toolUse({ command: 'ls' }),
-          ].join('\n'),
-          live: [contextRow('Tenjin found res-c here.'), toolUse({ command: 'ls' })].join('\n'),
-        }),
+        ...transcriptDeps(
+          {
+            quiet: [
+              contextRow(SHOWN),
+              toolUse({ command: `tenjin read ${RES}` }),
+              contextRow('Tenjin found res-b here.'),
+              toolUse({ command: 'ls' }),
+            ].join('\n'),
+            live: [contextRow('Tenjin found res-c here.'), toolUse({ command: 'ls' })].join('\n'),
+          },
+          { idle: false },
+        ),
+        // Only the quiet session's file has stopped moving.
+        transcriptIdle: async (path: string): Promise<boolean> => path === 'quiet',
       },
     );
 
@@ -1236,254 +534,113 @@ describe('runPushGrade', () => {
         byTier: { read: 1, span: 0, likely: 0 },
       },
     });
-    // tenjin-agent#276 review (A1igator, minor 3): the tier behind `used` rides
-    // in the default line, not only under `--explain`.
     expect(result.humanLines?.join('\n')).toContain(
       'used=1 (read=1 span=0 likely=0) rejected=1 unobserved=1 open=1',
     );
-    const byUid = new Map(
-      (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
-        r.uid,
+    const byFire = new Map(
+      (result.data as { rows: { fire: string; outcome: string; by: string }[] }).rows.map((r) => [
+        r.fire,
         r,
       ]),
     );
-    expect(byUid.get('u-used')).toMatchObject({ outcome: 'used', by: 'read' });
-    expect(byUid.get('u-rejected')).toMatchObject({ outcome: 'rejected', by: 'none' });
-    expect(byUid.get('u-open')).toMatchObject({ outcome: 'open' });
-    expect(byUid.get('u-notranscript')).toMatchObject({ outcome: 'unobserved' });
-    expect(byUid.has('u-skipped')).toBe(false);
+    expect(byFire.get('f-used')).toMatchObject({ outcome: 'used', by: 'read' });
+    expect(byFire.get('f-rejected')).toMatchObject({ outcome: 'rejected', by: 'none' });
+    expect(byFire.get('f-open')).toMatchObject({ outcome: 'open' });
+    expect(byFire.get('f-notranscript')).toMatchObject({ outcome: 'unobserved' });
+    // A log-only fire is not in the population at all.
+    expect(byFire.has('f-logonly')).toBe(false);
 
-    // The open row stays NULL, so the next run can still answer it.
-    const store = await openStore(dir);
-    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-open'])).toEqual({
-      outcome: null,
-    });
-    store?.close();
+    // The open leg stays NULL, so the next run can still answer it.
+    expect(gradedLegs()).toEqual([
+      { fire_id: 'f-logonly', graded: null, posted_at: null },
+      { fire_id: 'f-notranscript', graded: 'unobserved:none', posted_at: null },
+      { fire_id: 'f-open', graded: null, posted_at: null },
+      { fire_id: 'f-rejected', graded: 'rejected:none', posted_at: null },
+      { fire_id: 'f-used', graded: 'used:read', posted_at: NOW },
+    ]);
   });
 
   /**
-   * A subagent's tool calls appear in NO parent file, so a row an arm wrote
-   * inside a child is answered by that child's own transcript or by nothing. A
-   * relayed row (`subagent`) has no anchor in either file — the finding is the
-   * child's opening context — so it is judged from the child's first tool call.
+   * A subagent's tool calls appear in NO parent file, so a fire that ran inside
+   * a child is answered by that child's own transcript or by nothing. A
+   * `subagent-start` fire is a finding RELAYED to the child — the child's
+   * opening context — so it has no anchor in either file and is judged from the
+   * child's first tool call.
    */
-  it('grades a relayed row against the child transcript: read, title span, rejected when ended, open while it runs', async () => {
-    await seedRows(dir, [
+  it('grades a relayed child fire from its first tool call, and the child file never the parent', async () => {
+    seedFires([
       {
-        uid: 'u-child-read',
+        id: 'f-relayed',
         at: NOW - 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
-        session: 'ended',
-        agentId: 'a1',
-        searchId: null,
+        arm: 'subagent-start',
+        reason: 'hit',
+        session: 's1',
+        agent: 'a1',
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'team', url: URL }],
       },
       {
-        uid: 'u-child-span',
+        id: 'f-relayed-span',
         at: NOW - 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-span',
-        title: 'Run `pnpm db:generate --force` first',
-        session: 'ended',
-        agentId: 'a2',
-        searchId: null,
+        arm: 'subagent-start',
+        reason: 'hit',
+        session: 's1',
+        agent: 'a2',
+        delivered: 'inject:res-span',
+        legs: [{ shelf: 'team', title: 'Run `pnpm db:generate --force` first' }],
       },
+      // A prompt fire stamped with an agent id: the PARENT's file holds the very
+      // evidence that would have flipped the verdict, and is never consulted.
       {
-        uid: 'u-child-none',
+        id: 'f-child-prompt',
         at: NOW - 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-none',
-        session: 'ended',
-        agentId: 'a3',
-        searchId: null,
+        arm: 'prompt',
+        reason: 'hit',
+        session: 's1',
+        agent: 'a3',
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL }],
       },
+      // Relayed with no agent recorded: nothing names a file, and nothing ever will.
       {
-        uid: 'u-child-live',
+        id: 'f-relayed-nochild',
         at: NOW - 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-live',
-        session: 'live',
-        agentId: 'a4',
-        searchId: null,
+        arm: 'subagent-start',
+        reason: 'hit',
+        session: 's1',
+        delivered: 'inject:res-old',
+        legs: [{ shelf: 'team' }],
       },
     ]);
-    await seedSession(dir, 'ended', true);
-    await seedSession(dir, 'live', false);
 
     const result = await runPushGrade(
       makeCtx(),
-      {},
+      { explain: true },
       {
         now: () => NOW,
         ...transcriptDeps({
           // The very first call, with no context row before it: a relayed
           // finding preceded everything the child did.
-          'ended/a1': toolUse({ command: `tenjin read ${RES}` }),
-          'ended/a2': toolUse({ command: 'pnpm db:generate --force' }),
-          'ended/a3': toolUse({ command: 'ls' }),
-          'live/a4': toolUse({ command: 'ls' }),
+          's1/a1': toolUse({ command: `tenjin read ${RES}` }),
+          's1/a2': toolUse({ command: 'pnpm db:generate --force' }),
+          's1/a3': [contextRow(SHOWN), toolUse({ command: 'ls' })].join('\n'),
+          s1: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
         }),
       },
     );
 
-    expect(result.data).toMatchObject({ graded: { used: 2, rejected: 1, unobserved: 0, open: 1 } });
-    const byUid = new Map(
-      (result.data as { rows: { uid: string; outcome: string; by: string }[] }).rows.map((r) => [
-        r.uid,
+    const byFire = new Map(
+      (result.data as { rows: { fire: string; outcome: string; by: string }[] }).rows.map((r) => [
+        r.fire,
         r,
       ]),
     );
-    expect(byUid.get('u-child-read')).toMatchObject({ outcome: 'used', by: 'read' });
-    expect(byUid.get('u-child-span')).toMatchObject({ outcome: 'used', by: 'span' });
-    expect(byUid.get('u-child-none')).toMatchObject({ outcome: 'rejected' });
-    expect(byUid.get('u-child-live')).toMatchObject({ outcome: 'open' });
-  });
-
-  /** The parent's file is never consulted for a row stamped with an agent id —
-   *  here it holds the very evidence that would have flipped the verdict. */
-  it('reads the child file, not the parent, for a prompt row stamped with an agent id', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-child',
-        at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
-        session: 's1',
-        agentId: 'a1',
-        searchId: null,
-      },
-    ]);
-    await seedSession(dir, 's1', true);
-
-    const result = await runPushGrade(
-      makeCtx(),
-      {},
-      {
-        now: () => NOW,
-        ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-          's1/a1': [contextRow(INJECTED), toolUse({ command: 'ls' })].join('\n'),
-        }),
-      },
-    );
-
-    expect(result.data).toMatchObject({ graded: { used: 0, rejected: 1 } });
-  });
-
-  it('leaves a relayed row unobserved when the child file is absent, and untouched when it is unreadable', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-gone',
-        at: NOW - 10 * 60 * 60 * 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-gone',
-        session: 'ended',
-        agentId: 'a1',
-        searchId: null,
-      },
-      {
-        uid: 'u-blocked',
-        at: NOW - 10 * 60 * 60 * 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-blocked',
-        session: 'ended',
-        agentId: 'a2',
-        searchId: null,
-      },
-    ]);
-    await seedSession(dir, 'ended', true);
-
-    const result = await runPushGrade(
-      makeCtx(),
-      { explain: true },
-      { now: () => NOW, ...transcriptDeps({}, ['ended/a2']) },
-    );
-
-    expect(result.data).toMatchObject({ graded: { unobserved: 1, open: 1 } });
-    expect(result.humanLines?.join('\n')).toContain('transcript unreadable (EACCES)');
-    const store = await openStore(dir);
-    expect(store?.all('SELECT uid, outcome FROM injections ORDER BY uid', [])).toEqual([
-      { uid: 'u-blocked', outcome: null },
-      { uid: 'u-gone', outcome: 'unobserved' },
-    ]);
-    store?.close();
-  });
-
-  /** Rows written before `agent_id` existed name no child, so there is no file
-   *  to open and never will be — the one case that keeps the old blanket
-   *  `unobserved` for a relayed finding. */
-  it('keeps a relayed row without an agent id unobserved', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-premigration',
-        at: NOW - 1000,
-        trigger: 'subagent',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-old',
-        session: 'ended',
-        searchId: null,
-      },
-    ]);
-    await seedSession(dir, 'ended', true);
-
-    const result = await runPushGrade(
-      makeCtx(),
-      { explain: true },
-      { now: () => NOW, ...transcriptDeps({ ended: toolUse({ command: 'ls' }) }) },
-    );
-
-    expect(result.data).toMatchObject({ graded: { unobserved: 1 } });
-    expect(result.humanLines?.join('\n')).toContain(
-      'relayed to a subagent whose id was not recorded',
-    );
-  });
-
-  it('--explain prints the agent id and the file that was read', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-1',
-        at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
-        session: 's1',
-        agentId: 'a1',
-        searchId: null,
-      },
-    ]);
-    await seedSession(dir, 's1', true);
-
-    const result = await runPushGrade(
-      makeCtx(),
-      { explain: true },
-      {
-        now: () => NOW,
-        ...transcriptDeps({
-          's1/a1': [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-        }),
-      },
-    );
-
+    expect(byFire.get('f-relayed')).toMatchObject({ outcome: 'used', by: 'read' });
+    expect(byFire.get('f-relayed-span')).toMatchObject({ outcome: 'used', by: 'span' });
+    expect(byFire.get('f-child-prompt')).toMatchObject({ outcome: 'rejected' });
+    expect(byFire.get('f-relayed-nochild')).toMatchObject({ outcome: 'unobserved' });
     const text = result.humanLines?.join('\n') ?? '';
+    expect(text).toContain('relayed to a subagent whose id was not recorded');
     expect(text).toContain('    agent a1');
     expect(text).toContain('    read s1/a1');
   });
@@ -1492,70 +649,60 @@ describe('runPushGrade', () => {
    * `unobserved` IS A VERDICT, and a verdict is never re-graded. So it may only
    * be written from a fact about the SESSION — the projects directory was read
    * and holds no file for it — never from a fact about this run. One sweep on a
-   * machine whose home was not mounted, or mid-permissions-change, would
-   * otherwise close every open row as never-seen with no way back.
+   * machine whose home was not mounted would otherwise close every open row as
+   * never-seen with no way back.
    */
-  it('leaves a row ungraded when the transcript could not be looked for at all', async () => {
-    await seedRows(dir, [
+  it('leaves a fire ungraded when the transcript could not be looked for at all', async () => {
+    seedFires([
       {
-        uid: 'u-unreadable',
+        id: 'f-unreadable',
         at: NOW - 10 * 60 * 60 * 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
+        arm: 'prompt',
+        reason: 'hit',
         session: 'blocked',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
     ]);
-    // Ended AND old: everything except the read itself says "settle this row".
-    await seedSession(dir, 'blocked', true);
     const { fetchImpl, calls } = acceptingShelf();
 
     const result = await runPushGrade(
       makeCtx(),
       { explain: true },
-      { now: () => NOW, fetchImpl, ...transcriptDeps({}, ['blocked']) },
+      { now: () => NOW, fetchImpl, ...transcriptDeps({}, { unreadable: ['blocked'] }) },
     );
 
     expect(result.data).toMatchObject({ graded: { unobserved: 0, open: 1 } });
     expect(result.humanLines?.join('\n')).toContain('transcript unreadable (EACCES)');
     expect(calls).toEqual([]);
-    const store = await openStore(dir);
-    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-unreadable'])).toEqual({
-      outcome: null,
-    });
-    store?.close();
+    expect(gradedLegs()).toEqual([{ fire_id: 'f-unreadable', graded: null, posted_at: null }]);
   });
 
   /**
-   * The harness writes the transcript as the session runs, so a row minted
+   * The harness writes the transcript as the session runs, so a fire minted
    * seconds ago on a session that is still starting has no file YET. Only once
-   * a transcript would have appeared — the session ended, or the row is older
-   * than the idle window — is its absence the answer.
+   * a transcript would have appeared — the fire is older than the idle window —
+   * is its absence the answer.
    */
-  it('waits for a young row before calling an absent transcript unobserved', async () => {
-    await seedRows(dir, [
+  it('waits for a young fire before calling an absent transcript unobserved', async () => {
+    seedFires([
       {
-        uid: 'u-young',
+        id: 'f-young',
         at: NOW - 60_000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-young',
+        arm: 'prompt',
+        reason: 'hit',
         session: 'starting',
-        searchId: null,
+        delivered: 'inject:res-young',
+        legs: [{ shelf: 'public' }],
       },
       {
-        uid: 'u-old',
+        id: 'f-old',
         at: NOW - 2 * 60 * 60 * 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-old',
+        arm: 'prompt',
+        reason: 'hit',
         session: 'long-gone',
-        searchId: null,
+        delivered: 'inject:res-old',
+        legs: [{ shelf: 'public' }],
       },
     ]);
 
@@ -1565,79 +712,58 @@ describe('runPushGrade', () => {
       { now: () => NOW, ...transcriptDeps({}) },
     );
 
-    const byUid = new Map(
-      (result.data as { rows: { uid: string; outcome: string }[] }).rows.map((r) => [r.uid, r]),
+    const byFire = new Map(
+      (result.data as { rows: { fire: string; outcome: string }[] }).rows.map((r) => [r.fire, r]),
     );
-    expect(byUid.get('u-young')).toMatchObject({ outcome: 'open' });
-    expect(byUid.get('u-old')).toMatchObject({ outcome: 'unobserved' });
+    expect(byFire.get('f-young')).toMatchObject({ outcome: 'open' });
+    expect(byFire.get('f-old')).toMatchObject({ outcome: 'unobserved' });
     expect(result.humanLines?.join('\n')).toContain('no transcript for this session yet');
-    const store = await openStore(dir);
-    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-young'])).toEqual({
-      outcome: null,
-    });
-    store?.close();
-  });
-
-  /** A session the store has stamped ended settles immediately: there is no
-   *  later transcript coming for it. */
-  it('settles an absent transcript as soon as the session has ended', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-ended',
-        at: NOW - 60_000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-ended',
-        session: 'stopped',
-        searchId: null,
-      },
-    ]);
-    await seedSession(dir, 'stopped', true);
-
-    const result = await runPushGrade(makeCtx(), {}, { now: () => NOW, ...transcriptDeps({}) });
-    expect(result.data).toMatchObject({ graded: { unobserved: 1, open: 0 } });
   });
 
   it('posts used as used, a copied span as partially_used, and rejected as rejected', async () => {
-    await seedRows(dir, [
+    seedFires([
       {
-        uid: 'u-read',
+        id: 'f-read',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
+        arm: 'failure',
+        reason: 'hit',
         session: 's1',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
       {
-        uid: 'u-span',
+        id: 'f-span',
         at: NOW - 900,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-span',
-        title: 'span piece',
-        url: 'https://tenjin.blog/p/span-piece',
+        arm: 'prompt',
+        reason: 'hit',
         session: 's2',
-        searchId: SEARCH,
+        delivered: 'inject:res-span',
+        legs: [
+          {
+            shelf: 'public',
+            title: 'span piece',
+            url: 'https://tenjin.blog/p/span-piece',
+            searchId: SEARCH,
+          },
+        ],
       },
       {
-        uid: 'u-no',
+        id: 'f-no',
         at: NOW - 800,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-no',
-        title: 'no piece',
-        url: 'https://tenjin.blog/p/no-piece',
+        arm: 'prompt',
+        reason: 'hit',
         session: 's3',
-        searchId: SEARCH,
+        delivered: 'inject:res-no',
+        legs: [
+          {
+            shelf: 'public',
+            title: 'no piece',
+            url: 'https://tenjin.blog/p/no-piece',
+            searchId: SEARCH,
+          },
+        ],
       },
     ]);
-    for (const s of ['s1', 's2', 's3']) await seedSession(dir, s, true);
     const { fetchImpl, calls } = acceptingShelf();
 
     const result = await runPushGrade(
@@ -1647,7 +773,7 @@ describe('runPushGrade', () => {
         now: () => NOW,
         fetchImpl,
         ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s1: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
           s2: [
             contextRow('Tenjin found "span piece": try `pnpm db:generate --force`.'),
             toolUse({ command: 'pnpm db:generate --force' }),
@@ -1667,261 +793,62 @@ describe('runPushGrade', () => {
     expect(bodies[0]?.resourceId).toBe(RES);
     expect(bodies[1]?.resourceId).toBeUndefined();
     expect(result.humanLines?.join('\n')).toContain('posted 3 outcome(s)');
+    // Every posted leg carries the stamp that keeps it from being sent twice.
+    expect(gradedLegs().every((r) => r.posted_at === NOW)).toBe(true);
   });
 
   /**
    * A search id is minted by ONE shelf and means nothing on another, and the
-   * row's url is the only record of which one served it. The key rides the
-   * row's LABEL: a public-shelf verdict must not carry the team's bypass
-   * secret, whatever origin it is bound for.
+   * leg's url is the only record of which one served it. The key rides the
+   * leg's LABEL: a public-shelf verdict must not carry the team's bypass
+   * secret, whatever origin it is bound for — and a team verdict must not hand
+   * the key to an origin the shelf's own answer named.
    */
-  it('posts each verdict to the origin that served it, with the bypass only on the team shelf', async () => {
+  it('posts to the origin that served it, with the bypass only on a team leg', async () => {
     await writeFile(
       join(dir, 'config.json'),
       JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
     );
-    await seedRows(dir, [
+    seedFires([
       {
-        uid: 'u-team',
+        id: 'f-team',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'team',
-        action: 'injected',
-        resourceId: RES,
-        url: 'https://team.example/p/the-collation-trap',
+        arm: 'failure',
+        reason: 'hit',
         session: 's1',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        legs: [
+          {
+            shelf: 'team',
+            url: 'https://team.example/p/the-collation-trap',
+            searchId: SEARCH,
+          },
+        ],
       },
       {
-        uid: 'u-public',
+        id: 'f-public',
         at: NOW - 900,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
+        arm: 'failure',
+        reason: 'hit',
         session: 's2',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        // A PUBLIC leg whose url happens to sit on the configured team origin:
+        // the label is what decides, so the team's secret stays home.
+        legs: [
+          { shelf: 'public', url: 'https://team.example/p/the-collation-trap', searchId: SEARCH },
+        ],
       },
-      // A replayed local pairing has no shelf to tell.
+      // A local pairing has no shelf to tell, and no url to tell it at.
       {
-        uid: 'u-local',
+        id: 'f-local',
         at: NOW - 800,
-        trigger: 'failure',
-        shelf: 'local',
-        action: 'injected',
-        resourceId: 'pairing:7',
-        title: 'local pairing',
+        arm: 'failure',
+        reason: 'hit',
         session: 's3',
-        searchId: SEARCH,
+        delivered: 'inject:',
+        legs: [{ shelf: 'local', title: 'local pairing', searchId: SEARCH }],
       },
     ]);
-    for (const s of ['s1', 's2', 's3']) await seedSession(dir, s, true);
-    const { fetchImpl, calls } = acceptingShelf();
-
-    await runPushGrade(
-      makeCtx(),
-      {},
-      {
-        now: () => NOW,
-        fetchImpl,
-        ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-          s2: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-          s3: [contextRow('Tenjin replayed "local pairing".'), toolUse({ command: 'ls' })].join(
-            '\n',
-          ),
-        }),
-      },
-    );
-
-    expect(calls.map((c) => c.url)).toEqual([
-      `https://team.example/api/searches/${SEARCH}/outcomes`,
-      `https://tenjin.blog/api/searches/${SEARCH}/outcomes`,
-    ]);
-    const team = calls[0]?.init.headers as Record<string, string>;
-    const pub = calls[1]?.init.headers as Record<string, string>;
-    expect(Object.keys(team).some((k) => k.includes('bypass'))).toBe(true);
-    expect(Object.keys(pub).some((k) => k.includes('bypass'))).toBe(false);
-  });
-
-  /**
-   * The label on the row means whatever the config meant WHEN THE ARM RAN. A
-   * team base URL that has moved since then would send the verdict to a shelf
-   * that never minted the search id, where it lands as a 202 (no existence
-   * oracle, by design) and the row is stamped posted with nothing recorded
-   * anywhere. So the ADDRESS comes from the row.
-   *
-   * The SECRET does not: it belongs to the team, not to an address. Gating it
-   * on the row's origin matching the configured team base URL meant a moved
-   * team shelf retried every unposted team verdict unauthenticated — forever,
-   * since a 401 halts the batch and only a success stamps the row.
-   */
-  it('sends a moved team shelf its own url and still its own secret', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: 'https://new-team.example', shelfBypassSecret: 'shh' }),
-    );
-    await seedRows(dir, [
-      {
-        uid: 'u-team',
-        at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'team',
-        action: 'injected',
-        resourceId: RES,
-        url: 'https://old-team.example/p/the-collation-trap',
-        session: 's1',
-        searchId: SEARCH,
-      },
-    ]);
-    await seedSearch(dir, SEARCH, 'https://old-team.example');
-    await seedSession(dir, 's1', true);
-    const { fetchImpl, calls } = acceptingShelf();
-
-    await runPushGrade(
-      makeCtx(),
-      {},
-      {
-        now: () => NOW,
-        fetchImpl,
-        ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-        }),
-      },
-    );
-
-    expect(calls.map((c) => c.url)).toEqual([
-      `https://old-team.example/api/searches/${SEARCH}/outcomes`,
-    ]);
-    // A team row, so the team's secret, authorized at the base the arm asked.
-    const headers = calls[0]?.init.headers as Record<string, string>;
-    expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(true);
-  });
-
-  /**
-   * The key is authorized at the shelf the arm ASKED, never at the candidate
-   * url the shelf answered with. That url is server text, so a shelf that named
-   * a candidate on another origin would otherwise be handed the team's shelf
-   * key — which opens the whole private shelf — just by being answered.
-   */
-  it('never sends the key to an origin the answer named rather than the config', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
-    );
-    await seedRows(dir, [
-      {
-        uid: 'u-team',
-        at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'team',
-        action: 'injected',
-        resourceId: RES,
-        url: 'https://evil.example/p/the-collation-trap',
-        session: 's1',
-        searchId: SEARCH,
-      },
-    ]);
-    await seedSearch(dir, SEARCH, 'https://team.example');
-    await seedSession(dir, 's1', true);
-    const { fetchImpl, calls } = acceptingShelf();
-
-    await runPushGrade(
-      makeCtx(),
-      {},
-      {
-        now: () => NOW,
-        fetchImpl,
-        ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-        }),
-      },
-    );
-
-    expect(calls.map((c) => c.url)).toEqual([
-      `https://evil.example/api/searches/${SEARCH}/outcomes`,
-    ]);
-    const headers = calls[0]?.init.headers as Record<string, string>;
-    expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(false);
-  });
-
-  /**
-   * The mirror of the case above, and the one an origin rule got right by
-   * accident: a PUBLIC row whose url happens to sit on the configured team
-   * origin — a team shelf re-pointed at the marketplace, or a public piece
-   * surfaced before team mode was switched on. The label is what decides, so
-   * the team's secret stays home.
-   */
-  it('withholds the secret from a public row even on the configured team origin', async () => {
-    await writeFile(
-      join(dir, 'config.json'),
-      JSON.stringify({ baseUrl: 'https://team.example', shelfBypassSecret: 'shh' }),
-    );
-    await seedRows(dir, [
-      {
-        uid: 'u-public',
-        at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: 'https://team.example/p/the-collation-trap',
-        session: 's1',
-        searchId: SEARCH,
-      },
-    ]);
-    await seedSearch(dir, SEARCH, 'https://team.example');
-    await seedSession(dir, 's1', true);
-    const { fetchImpl, calls } = acceptingShelf();
-
-    await runPushGrade(
-      makeCtx(),
-      {},
-      {
-        now: () => NOW,
-        fetchImpl,
-        ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-        }),
-      },
-    );
-
-    expect(calls.map((c) => c.url)).toEqual([
-      `https://team.example/api/searches/${SEARCH}/outcomes`,
-    ]);
-    const headers = calls[0]?.init.headers as Record<string, string>;
-    expect(Object.keys(headers).some((k) => k.includes('bypass'))).toBe(false);
-  });
-
-  /** With no url there is no shelf to name, and a verdict sent to a guess is
-   *  worse than one still owed: the row keeps its NULL stamp. */
-  it('skips a row whose url cannot say which shelf served it, and leaves it unposted', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-nourl',
-        at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        session: 's1',
-        searchId: SEARCH,
-      },
-      {
-        uid: 'u-badurl',
-        at: NOW - 900,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: 'not a url',
-        title: 'bad url piece',
-        session: 's2',
-        searchId: SEARCH,
-      },
-    ]);
-    for (const s of ['s1', 's2']) await seedSession(dir, s, true);
     const { fetchImpl, calls } = acceptingShelf();
 
     const result = await runPushGrade(
@@ -1931,48 +858,48 @@ describe('runPushGrade', () => {
         now: () => NOW,
         fetchImpl,
         ...transcriptDeps({
-          s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-          s2: [contextRow('Tenjin found "bad url piece".'), toolUse({ command: 'ls' })].join('\n'),
+          s1: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s2: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+          s3: [contextRow('Tenjin replayed "local pairing".'), toolUse({ command: 'ls' })].join(
+            '\n',
+          ),
         }),
       },
     );
 
-    expect(calls).toEqual([]);
-    expect(result.data).toMatchObject({ posted: 0, postFailed: 0, postSkipped: 2 });
-    expect(result.humanLines?.join('\n')).toContain('not posted: u-nourl');
-
-    // The verdicts stand locally; only the posted stamp is withheld.
-    const store = await openStore(dir);
-    expect(store?.all('SELECT uid, outcome, outcome_at FROM injections ORDER BY uid', [])).toEqual([
-      { uid: 'u-badurl', outcome: 'rejected', outcome_at: null },
-      { uid: 'u-nourl', outcome: 'used', outcome_at: null },
+    expect(calls.map((c) => c.url)).toEqual([
+      `https://team.example/api/searches/${SEARCH}/outcomes`,
+      `https://team.example/api/searches/${SEARCH}/outcomes`,
     ]);
-    store?.close();
+    const team = calls[0]?.init.headers as Record<string, string>;
+    const pub = calls[1]?.init.headers as Record<string, string>;
+    expect(Object.keys(team).some((k) => k.includes('bypass'))).toBe(true);
+    expect(Object.keys(pub).some((k) => k.includes('bypass'))).toBe(false);
+    // The verdict on the local leg stands; only the posted stamp is withheld.
+    expect(result.data).toMatchObject({ posted: 2, postSkipped: 1 });
+    expect(result.humanLines?.join('\n')).toContain('not posted: f-local');
   });
 
   /**
-   * `outcome_at` is the POSTED stamp, so it is both the idempotence and the
+   * `posted_at` is the POSTED stamp, so it is both the idempotence and the
    * retry queue: a landed post is never repeated (the server keeps the first
    * verdict per lookup and post, so a second would be dropped rather than
    * corrected), and a failed one is still owed.
    */
   it('never re-posts a landed verdict, and retries a failed one on the next run', async () => {
-    await seedRows(dir, [
+    seedFires([
       {
-        uid: 'u-1',
+        id: 'f-1',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
+        arm: 'failure',
+        reason: 'hit',
         session: 's1',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
     ]);
-    await seedSession(dir, 's1', true);
     const transcripts = transcriptDeps({
-      s1: [contextRow(INJECTED), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
+      s1: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
     });
 
     const down = acceptingShelf(500);
@@ -2007,84 +934,74 @@ describe('runPushGrade', () => {
   });
 
   it('--label sets a verdict by hand and posts it', async () => {
-    await seedRows(dir, [
+    seedFires([
       {
-        uid: 'u-1',
+        id: 'f-1',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
+        arm: 'failure',
+        reason: 'hit',
         session: 's1',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
       // An arm's decision NOT to show a piece. Nobody saw it, so nobody used it.
       {
-        uid: 'u-skipped',
+        id: 'f-logonly',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'skipped',
-        resourceId: RES,
-        url: URL,
+        arm: 'failure',
+        reason: 'hit',
         session: 's1',
-        searchId: SEARCH,
+        delivered: `log:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
     ]);
     const { fetchImpl, calls } = acceptingShelf();
 
     const result = await runPushGrade(
       makeCtx(),
-      { label: ['u-1', 'used'] },
+      { label: ['f-1', 'used'] },
       { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
     );
     expect(result.data).toMatchObject({
       graded: { used: 1, byTier: { read: 0, span: 0, likely: 0, hand: 1 } },
       posted: 1,
     });
-    // tenjin-agent#276 review round 2, minor: a hand verdict (`--label`) is a
-    // tier too — without it here the printed breakdown didn't sum to `used`.
     expect(result.humanLines?.join('\n')).toContain('used=1 (read=0 span=0 likely=0 hand=1)');
     expect((JSON.parse(String(calls[0]?.init.body)) as { status: string }).status).toBe('used');
 
     await expect(
-      runPushGrade(makeCtx(), { label: ['u-1', 'regenerated'] }, { now: () => NOW, fetchImpl }),
+      runPushGrade(makeCtx(), { label: ['f-1', 'regenerated'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
     await expect(
-      runPushGrade(makeCtx(), { label: ['u-missing', 'used'] }, { now: () => NOW, fetchImpl }),
+      runPushGrade(makeCtx(), { label: ['f-missing', 'used'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
-    // A row the arm never injected is not labellable: an outcome is a report
-    // about a piece the agent was SHOWN, and posting one for a skipped decision
-    // would tell the shelf a story about a piece it never served.
+    // A fire that showed nothing is not labellable: a verdict is a report about
+    // a piece the agent was SHOWN, and posting one for a log-only decision would
+    // tell the shelf a story about a piece it never served.
     await expect(
-      runPushGrade(makeCtx(), { label: ['u-skipped', 'used'] }, { now: () => NOW, fetchImpl }),
+      runPushGrade(makeCtx(), { label: ['f-logonly', 'used'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
-    const store = await openStore(dir);
-    expect(store?.get('SELECT outcome FROM injections WHERE uid = ?', ['u-skipped'])).toEqual({
-      outcome: null,
-    });
-    store?.close();
     await expect(
-      runPushGrade(makeCtx(), { label: ['u-1'] }, { now: () => NOW, fetchImpl }),
+      runPushGrade(makeCtx(), { label: ['f-1'] }, { now: () => NOW, fetchImpl }),
     ).rejects.toMatchObject({ code: 'USAGE' });
+    expect(gradedLegs()).toEqual([
+      { fire_id: 'f-1', graded: 'used:hand', posted_at: NOW },
+      { fire_id: 'f-logonly', graded: null, posted_at: null },
+    ]);
   });
 
   it('--explain names the anchor line and the evidence behind each verdict', async () => {
-    await seedRows(dir, [
+    seedFires([
       {
-        uid: 'u-1',
+        id: 'f-1',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: RES,
-        url: URL,
+        arm: 'failure',
+        reason: 'hit',
         session: 's1',
-        searchId: SEARCH,
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
       },
     ]);
-    await seedSession(dir, 's1', true);
     const { fetchImpl } = acceptingShelf();
 
     const result = await runPushGrade(
@@ -2096,76 +1013,60 @@ describe('runPushGrade', () => {
         ...transcriptDeps({
           s1: [
             toolUse({ command: 'pnpm test' }),
-            contextRow(INJECTED),
+            contextRow(SHOWN),
             toolUse({ command: `tenjin read ${RES}` }),
           ].join('\n'),
         }),
       },
     );
     const text = result.humanLines?.join('\n') ?? '';
-    expect(text).toContain('u-1 failure/public');
+    expect(text).toContain('f-1 failure/public');
     expect(text).toContain('used (read) anchor line 2');
     expect(text).toContain(`tenjin read ${RES}`);
   });
 
-  it('refuses a --since window it cannot read, before touching the store', async () => {
+  it('refuses a --since window it cannot read, before touching the ledger', async () => {
     await expect(runPushGrade(makeCtx(), { since: 'a while' })).rejects.toMatchObject({
       code: 'USAGE',
     });
   });
 
-  it('grades one session only when asked', async () => {
-    await seedRows(dir, [
+  it('grades one session only when asked, and leaves a fire older than the window alone', async () => {
+    seedFires([
       {
-        uid: 'u-1',
+        id: 'f-1',
         at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-a',
+        arm: 'prompt',
+        reason: 'hit',
         session: 's1',
-        searchId: null,
+        delivered: 'inject:res-a',
+        legs: [{ shelf: 'public' }],
       },
       {
-        uid: 'u-2',
+        id: 'f-2',
         at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-b',
+        arm: 'prompt',
+        reason: 'hit',
         session: 's2',
-        searchId: null,
+        delivered: 'inject:res-b',
+        legs: [{ shelf: 'public' }],
+      },
+      {
+        id: 'f-old',
+        at: NOW - 8 * 24 * 60 * 60 * 1000,
+        arm: 'prompt',
+        reason: 'hit',
+        session: 's2',
+        delivered: 'inject:res-c',
+        legs: [{ shelf: 'public' }],
       },
     ]);
     const result = await runPushGrade(
       makeCtx(),
       { session: 's2' },
-      {
-        now: () => NOW,
-        ...transcriptDeps({}),
-      },
+      { now: () => NOW, ...transcriptDeps({}) },
     );
-    const rows = (result.data as { rows: { uid: string }[] }).rows;
-    expect(rows.map((r) => r.uid)).toEqual(['u-2']);
-  });
-
-  /** A window is a window: a verdict older than `--since` is not this run's to
-   *  reach, however long it has been sitting there. */
-  it('leaves a row older than the window alone', async () => {
-    await seedRows(dir, [
-      {
-        uid: 'u-old',
-        at: NOW - 8 * 24 * 60 * 60 * 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-a',
-        session: 's1',
-        searchId: null,
-      },
-    ]);
-    const result = await runPushGrade(makeCtx(), {}, { now: () => NOW, ...transcriptDeps({}) });
-    expect((result.data as { rows: unknown[] }).rows).toEqual([]);
+    expect((result.data as { rows: { fire: string }[] }).rows.map((r) => r.fire)).toEqual(['f-2']);
   });
 });
 
@@ -2187,46 +1088,42 @@ describe('runPushStatus: the graded rollup and the shelf stats', () => {
     ],
   };
 
-  it('rolls the verdicts per hook x shelf and renders each shelf under it', async () => {
-    await seedRows(dir, [
+  it('rolls the verdicts per arm x shelf and renders each shelf under it', async () => {
+    seedFires([
       {
-        uid: 'g-1',
+        id: 'g-1',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-a',
+        arm: 'failure',
+        reason: 'hit',
+        delivered: 'inject:res-a',
+        legs: [{ shelf: 'public', graded: 'used:read', postedAt: NOW }],
       },
       {
-        uid: 'g-2',
+        id: 'g-2',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-b',
+        arm: 'failure',
+        reason: 'hit',
+        delivered: 'inject:res-b',
+        legs: [{ shelf: 'public', graded: 'rejected:none' }],
       },
       {
-        uid: 'g-3',
+        id: 'g-3',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'team',
-        action: 'injected',
-        resourceId: 'res-c',
+        arm: 'failure',
+        reason: 'hit',
+        delivered: 'inject:res-c',
+        legs: [{ shelf: 'team' }],
       },
+      // Never shown, so it is not a verdict anybody owes.
       {
-        uid: 'g-4',
+        id: 'g-4',
         at: NOW - 1000,
-        trigger: 'prompt',
-        shelf: 'public',
-        action: 'skipped',
-        reason: 'weak',
+        arm: 'prompt',
+        reason: 'seen',
+        delivered: null,
+        legs: [{ shelf: 'public', outcome: 'miss' }],
       },
     ]);
-    const store = await openStore(dir);
-    store?.run(STORE_SQL.setOutcome, ['used', 'read', 'g-1']);
-    store?.run(STORE_SQL.markPosted, [NOW, 'g-1']);
-    store?.run(STORE_SQL.setOutcome, ['rejected', 'none', 'g-2']);
-    store?.close();
 
     const result = await runPushStatus(makeCtx(), {
       homeDir: home,
@@ -2245,7 +1142,6 @@ describe('runPushStatus: the graded rollup and the shelf stats', () => {
       server: { public: STATS },
     });
     const human = result.humanLines?.join('\n') ?? '';
-    // A skipped row was never shown, so it is not a verdict anybody owes.
     expect(human).not.toContain('prompt: public used=');
     expect(human).toContain('failure: public used=1 rejected=1 unobserved=0 ungraded=0 posted=1');
     expect(human).toContain('server public (7d):');
@@ -2254,14 +1150,14 @@ describe('runPushStatus: the graded rollup and the shelf stats', () => {
 
   /** An unreachable shelf and a shelf with no demand are different facts. */
   it('prints server: unavailable and still shows the local counts', async () => {
-    await seedRows(dir, [
+    seedFires([
       {
-        uid: 'g-1',
+        id: 'g-1',
         at: NOW - 1000,
-        trigger: 'failure',
-        shelf: 'public',
-        action: 'injected',
-        resourceId: 'res-a',
+        arm: 'failure',
+        reason: 'hit',
+        delivered: 'inject:res-a',
+        legs: [{ shelf: 'public' }],
       },
     ]);
     const result = await runPushStatus(makeCtx(), {
@@ -2287,8 +1183,9 @@ describe('runPushStatus: the graded rollup and the shelf stats', () => {
       now: () => NOW,
       lookupStats: async () => ({ ...STATS, ageSeconds: 137 }),
     });
-    const human = result.humanLines?.join('\n') ?? '';
-    expect(human).toContain('server public (7d) — shelf stats as of ~137s ago:');
+    expect(result.humanLines?.join('\n')).toContain(
+      'server public (7d) — shelf stats as of ~137s ago:',
+    );
   });
 
   /** No `Age` header, no claim about freshness — the header line reads exactly

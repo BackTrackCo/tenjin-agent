@@ -3,7 +3,7 @@ import { Stream } from 'node:stream';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readFile, stat } from 'node:fs/promises';
+import { lstat, readFile, rm, stat } from 'node:fs/promises';
 import {
   OPTIONAL_PAY_SKILL,
   OPTIONAL_SKILL_NAMES,
@@ -42,7 +42,13 @@ import {
   resolveShelfBypass,
 } from '../lib/settings';
 import { tryOriginOf, trimSlash } from '../lib/url';
-import { configPath, hooksDir, sessionPath } from '../lib/paths';
+import {
+  configPath,
+  dataDir as resolveDataDir,
+  loopDbPath,
+  sessionPath,
+  vitestReporterPath,
+} from '../lib/paths';
 import { toMoney } from '../lib/money';
 import { walletFileExists } from '../lib/wallet/store';
 import { isSessionPresentable, readSessionFile, scopeSatisfies } from '../lib/session-present';
@@ -55,7 +61,6 @@ import {
 } from '../lib/harness-permissions';
 import { hookBundlesPresent, registeredHookPort } from '../lib/harness-hooks';
 import { health, readPid } from '../hooks/shim';
-import { PUSH_VITEST_REPORTER_FILE } from '../lib/push-scripts';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -66,7 +71,8 @@ import type {
   WalletVerification,
 } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
-import { readStoreJournal, stateDbPath, probeSqlite } from '../lib/state-store';
+import { openLoopDbForCli } from '../lib/loop-db';
+import { runRetention } from '../daemon/retention';
 
 /**
  * One environment/reachability check. The doctor agent builds the check list
@@ -157,12 +163,9 @@ interface BuiltCheck {
 export interface DoctorDeps {
   /** Environment for wallet-key detection and settings precedence. */
   env?: NodeJS.ProcessEnv;
-  /** The `node:sqlite` probe; tests inject a failing one to exercise the
+  /** The loop-database open; tests inject a failing one to exercise the
    * damaged-install diagnosis without a damaged install. */
-  probeSqlite?: typeof probeSqlite;
-  /** The degraded-store marker reader; tests inject one so the rollback-journal
-   * line can be exercised without a filesystem that cannot do WAL. */
-  readStoreJournal?: typeof readStoreJournal;
+  openStore?: typeof openLoopDbForCli;
   /** Injected fetch for the reachability checks; tests pass a canned stub. */
   fetchImpl?: typeof fetch;
   /** Inject the active wallet provider. When set, NO local fs/env is consulted —
@@ -246,10 +249,14 @@ export async function collectDoctorChecks(
   const home = deps.homeDir ?? homedir();
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
-  const built: BuiltCheck[] = [checkNode(), await checkStateStore(deps.probeSqlite ?? probeSqlite)];
-  // Beside the probe it belongs to, and only when there is something to say.
-  const journal = await checkStoreJournal(ctx.dataDir, deps.readStoreJournal ?? readStoreJournal);
-  if (journal !== null) built.push(journal);
+  const built: BuiltCheck[] = [
+    checkNode(),
+    checkStore(ctx.dataDir, deps.openStore ?? openLoopDbForCli),
+  ];
+  // Only when there is something to say: a machine on the default data dir is
+  // the ordinary case and gets no line about it.
+  const redirected = checkDataDirOverride(env);
+  if (redirected !== null) built.push(redirected);
   built.push(
     configCheck,
     // The three baseUrl probes carry the team shelf's bypass. Without it every
@@ -382,6 +389,73 @@ export async function runDoctor(
   };
 }
 
+/**
+ * The five files and directories the loop database replaced. Deleted by
+ * `doctor --prune`, never imported: the pairings and the outcome history in
+ * `state.db` are a record of a system that no longer exists, and a one-time
+ * importer is code that lives forever to serve a week (plan 03, owner
+ * decision 3).
+ *
+ * `searches.json.lock` is in the list because the file version took an mkdir
+ * mutex: a lock directory left behind by a crashed writer is never
+ * stale-stolen (that is the protocol's whole safety property), so nothing
+ * would ever remove it once its owner is gone.
+ */
+const RETIRED_STATE_ENTRIES = [
+  'push-ledger.jsonl',
+  'searches.json',
+  'searches.json.lock',
+  'push',
+  'candidates',
+] as const;
+
+/** The retired database and the two WAL sidecars that are meaningless without it. */
+const RETIRED_STORE_FILES = ['state.db', 'state.db-wal', 'state.db-shm'] as const;
+
+/**
+ * `tenjin doctor --prune`: run the loop ledger through its retention rule, then
+ * delete what the loop database replaced.
+ *
+ * NAMED ENTRIES ONLY, and never a sweep. The data dir also holds the wallet,
+ * the config and the library: those are the operator's, `install` did not
+ * create them, and their loss is unrecoverable. So this removes exactly the
+ * names below and reports each one, rather than deleting anything on a pattern.
+ *
+ * The retention pass is the same {@link runRetention} the daemon runs at its
+ * idle exit — a bounded, batched delete of `fires` past `RETENTION_DAYS` or
+ * `FIRES_ROW_CAP` with their `legs` by cascade, then a checkpoint and an
+ * incremental vacuum. Running it here is what gives an operator whose daemon
+ * never goes idle a way to reclaim the file by hand.
+ */
+export async function runDoctorPrune(ctx: CommandContext): Promise<CommandResult> {
+  const db = openLoopDbForCli(ctx.dataDir);
+  let retention;
+  try {
+    retention = runRetention(db, Date.now());
+  } finally {
+    db.close();
+  }
+  const removed: string[] = [];
+  for (const name of [...RETIRED_STORE_FILES, ...RETIRED_STATE_ENTRIES]) {
+    const path = join(ctx.dataDir, name);
+    // A symlink parked at one of these names is not ours to follow, and a
+    // socket or device is not ours to delete.
+    const found = await lstat(path).catch(() => null);
+    if (found === null || (!found.isFile() && !found.isDirectory())) continue;
+    await rm(path, { recursive: found.isDirectory(), force: true });
+    removed.push(path);
+  }
+  const lines = [
+    `${loopDbPath(ctx.dataDir)}: removed ${retention.fires} fire(s), ${retention.marks} mark(s), ${retention.handoff} parked handoff(s)` +
+      (retention.truncated ? ' (time-bounded; run it again to finish)' : ''),
+    ...(removed.length === 0
+      ? ['Nothing retired left to remove.']
+      : ['Removed:', ...removed.map((path) => `  - ${path}`)]),
+    'Kept: your wallet, config and library under the data dir.',
+  ];
+  return { data: { retention, removed }, humanLines: lines };
+}
+
 function checkNode(): BuiltCheck {
   const version = process.versions.node;
   const major = Number.parseInt(version.split('.')[0] ?? '0', 10);
@@ -401,76 +475,66 @@ function checkNode(): BuiltCheck {
 }
 
 /**
- * Is `node:sqlite` there and answering?
+ * Does this machine's loop database open?
  *
- * The hook sidecar's whole state — the already-shown set, the lookup buckets,
- * the per-session working state, the local error/fix pairings — lives in one
- * SQLite file opened through Node's built-in module (tenjin-agent#209). The
- * hooks fail OPEN without it, which is the right posture for a tool call and
- * the wrong one for a diagnosis: a machine whose sidecar has quietly stopped
- * remembering anything looks identical from the outside to one that simply had
- * nothing to say. So doctor asks directly.
+ * The whole of the loop's state — every fire and leg, the gate marks, the
+ * error→fix pairings, the search record, the finding queue — is one SQLite
+ * file opened through Node's built-in module. The daemon fails OPEN without
+ * it, which is the right posture for a tool call and the wrong one for a
+ * diagnosis: a machine whose loop has quietly stopped remembering anything
+ * looks identical from the outside to one that simply had nothing to say. So
+ * doctor opens it, which proves the module, the file and its shape in one go.
+ *
+ * THE OPEN IS THE PROBE. There used to be a separate `node:sqlite` import
+ * check beside this; it answered a strict subset of what opening the real file
+ * answers.
  */
-async function checkStateStore(probe_: typeof probeSqlite): Promise<BuiltCheck> {
-  const probe = await probe_();
-  if (probe.ok) {
+function checkStore(dir: string, open: typeof openLoopDbForCli): BuiltCheck {
+  const path = loopDbPath(dir);
+  try {
+    open(dir).close();
+    return {
+      result: { name: 'store', status: 'ok', required: true, detail: `${path} open` },
+    };
+  } catch (err) {
     return {
       result: {
-        name: 'state-store',
-        status: 'ok',
+        name: 'store',
+        status: 'fail',
         required: true,
-        detail: `node:sqlite OK (SQLite ${probe.version ?? 'unknown'})`,
+        // Anyone reading this already cleared the >=24 preflight in src/index.ts,
+        // so "upgrade Node" cannot be the remedy: the runtime is supported and
+        // the open still failed, which points at the install — a damaged or
+        // re-bundled dist (tsup once shipped `import("sqlite")`,
+        // tenjin-agent#225), a patched runtime — or at a file another build's
+        // daemon is holding open.
+        detail: `${path} could not be opened, so the loop keeps no state at all: ${err instanceof Error ? err.message : String(err)}`,
+        fix: 'Run `tenjin daemon stop` and retry; if it persists, reinstall tenjin-cli (npm i -g tenjin-cli@latest).',
       },
+      failCode: 'INTERNAL',
     };
   }
-  return {
-    result: {
-      name: 'state-store',
-      status: 'fail',
-      required: true,
-      // Anyone reading this already cleared the >=24 preflight in src/index.ts,
-      // so "upgrade Node" cannot be the remedy: the runtime is supported and the
-      // import still failed, which points at the install — a damaged or
-      // re-bundled dist (tsup once shipped `import("sqlite")`, tenjin-agent#225),
-      // a patched runtime. Distinct code from the preflight so `--json` readers
-      // can tell the two apart.
-      detail: `node:sqlite failed to load on Node ${process.versions.node}, so the hooks keep no state at all`,
-      fix: 'Reinstall tenjin-cli (npm i -g tenjin-cli@latest); if it persists, report the output of node -e "import(\'node:sqlite\')"',
-    },
-    failCode: 'INTERNAL',
-  };
 }
 
 /**
- * Is the store stuck on a rollback journal?
+ * Is this invocation pointed at a data dir that is not the machine's own?
  *
- * The sibling of the probe above, at lower stakes. `PRAGMA journal_mode = wal`
- * is the one statement in the store the busy timeout cannot protect, so an open
- * that loses it twice runs on against a rollback journal — every statement still
- * correct, but the eight hooks a single turn can fire now serialise instead of
- * overlapping. `openStore` records that in one row; without a line here it stays
- * a fact no one can reach, which is the state the `node:sqlite` check exists to
- * refuse.
- *
- * NEVER REQUIRED, NEVER A FAIL. Degradation is not absence: the store answers
- * real counts, so the caps and the dedup all still work (tenjin-agent#246). And
- * silent when healthy — a permanently-present line about a pragma that has never
- * failed is the noise that teaches an operator to skim the page.
+ * `TENJIN_DATA_DIR` is the documented way to run a second profile, a CI job or
+ * an ephemeral agent (tenjin-agent#227), and it is silent about one
+ * consequence: `lib/skill-heal.ts` stands its self-healing down under an
+ * override, because the skills it would converge are machine-wide while the
+ * mode that shapes them is read per invocation. Nothing else says so, so
+ * doctor does — as a note, never a warning: this is what the operator asked
+ * for.
  */
-async function checkStoreJournal(
-  dataDir: string,
-  read: typeof readStoreJournal,
-): Promise<BuiltCheck | null> {
-  const journal = await read(dataDir);
-  if (journal === null || journal.mode !== 'rollback') return null;
+function checkDataDirOverride(env: NodeJS.ProcessEnv): BuiltCheck | null {
+  if (resolveDataDir(env) === resolveDataDir({})) return null;
   return {
     result: {
-      name: 'state-store-journal',
-      status: 'warn',
+      name: 'data-dir',
+      status: 'ok',
       required: false,
-      detail: `The state store at ${stateDbPath(dataDir)} is on a rollback journal (WAL unavailable) as of ${new Date(journal.at).toISOString()}, so concurrent hooks serialise on it instead of overlapping`,
-      fix: 'Usually the data directory sits on a filesystem that cannot do WAL — a network mount, a container overlay. Point TENJIN_DATA_DIR at local disk; the flag clears itself the next time a WAL switch succeeds. Safe to ignore otherwise: the store stays correct either way, only slower under concurrent hooks.',
-      data: { mode: journal.mode, at: journal.at },
+      detail: `TENJIN_DATA_DIR=${resolveDataDir(env)} — this profile has its own config, wallet and loop database, and skill self-healing stands down while it is set`,
     },
   };
 }
@@ -1287,13 +1351,13 @@ async function detectFrameworkConfig(
  * say: a project with no vitest, or one whose config already wires the
  * tenjin reporter the `sig_v1_test` lane (tenjin-agent#267, redesigned round
  * 3) prefers, gets no line at all — the same "nothing to report" posture as
- * {@link checkStoreJournal}. Detection is a plain-text scan of config source,
+ * {@link checkDataDirOverride}. Detection is a plain-text scan of config source,
  * described as heuristic in every doc that mentions it: never a config
  * evaluation, so it can both miss a reporter wired through a shared helper
  * and mistake a commented-out one for live.
  */
 async function checkTestReporterHints(cwd: string, dataDir: string): Promise<BuiltCheck | null> {
-  const reporterPath = join(hooksDir(dataDir), PUSH_VITEST_REPORTER_FILE);
+  const reporterPath = vitestReporterPath(dataDir);
   for (const fw of TEST_REPORTER_FRAMEWORKS) {
     const found = await detectFrameworkConfig(cwd, fw);
     if (found === null) continue;
