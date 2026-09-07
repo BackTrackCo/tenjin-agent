@@ -5,6 +5,14 @@ and is its output right when it does. These are the skill half of the eval loop.
 half (does the server return the right piece for a question) lives in the tenjin repo as
 `scripts/eval-lookup-recall.ts`.
 
+## Benchmark (Bench-1)
+
+`evals/benchmark/` is a separate package: the trial-level token benchmark foundation, not a
+skill eval. It has its own README at [`benchmark/README.md`](./benchmark/README.md), its own
+offline self-test (`python3 evals/benchmark/selftest.py`, run in CI by
+`src/evals-benchmark.test.ts`), and a fake end-to-end command
+(`python3 -m evals.benchmark.cli fake-run --out DIR`). Nothing below this section applies to it.
+
 ## Layout
 
 ```
