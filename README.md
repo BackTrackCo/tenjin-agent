@@ -76,7 +76,7 @@ tenjin is wired for Claude Code.
 
   skills       3 in ~/.claude/skills
   permissions  11 tenjin commands in ~/.claude/settings.json
-  hooks        11 entries -> loop daemon on 127.0.0.1:30412 (loopback only)
+  hooks        7 enabled; change: tenjin hooks disable <arm>
   publishing   auto - your agent publishes under your identity
   wallet       0x1234…abcd, $0 - fund with: tenjin wallet fund
 

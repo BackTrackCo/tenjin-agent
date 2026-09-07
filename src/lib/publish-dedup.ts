@@ -14,11 +14,9 @@ import { withLoopDb } from './loop-db';
  * with one id. What the two duplicates share is the text.
  *
  * So the key is the content hash, and the record is machine-wide: every session
- * on the machine reads the same rows. It used to be a marker file in the push
- * directory, aged out by two separate pruners that each had to be told not to
- * sweep it early — a swept marker is a duplicate post, the exact thing it exists
- * to prevent. There is no pruner here and no expiry: a publish is a few rows a
- * week, and a dedup that forgets is not a dedup.
+ * on the machine reads the same rows. Nothing prunes them and nothing expires:
+ * a swept row is a duplicate post, the exact thing this exists to prevent, and
+ * a publish is a few rows a week either way.
  *
  * WHAT THIS IS NOT: a guarantee. It is a local optimisation, so it cannot cover
  * two machines publishing the same finding — that needs an idempotency key the

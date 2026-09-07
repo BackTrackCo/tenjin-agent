@@ -1,14 +1,14 @@
 import { CliError } from './errors';
 
 /**
- * Did the agent USE what a push arm showed it? The transcript is the only place
+ * Did the agent USE what a hook arm showed it? The transcript is the only place
  * that answer exists.
  *
- * The arms record what they injected (`injections`), and the shelf records what
- * it served, but neither can see what happened next: the finding lands as
+ * The arms record what they delivered (`fires`/`legs`), and the shelf records
+ * what it served, but neither can see what happened next: the finding lands as
  * additional context in the agent's turn, and from there it is either acted on
- * or it is not. Nobody reports that, so nothing has ever closed the loop on the
- * push experiment's own precision.
+ * or it is not. Nobody reports that, so without this the loop has no measure of
+ * its own precision.
  *
  * WHAT COUNTS AS EVIDENCE, and why it is only ever a TOOL INPUT. An agent that
  * says "as the Tenjin note suggests" in prose has said nothing checkable — the

@@ -109,7 +109,7 @@ export async function runSearch(
     teamError = sanitizeForTerminal(err instanceof Error ? err.message : String(err));
   }
   // SHELF TWO, TEAM MODE ONLY, AND ONLY WHEN THE FIRST HAD NOTHING TO GIVE —
-  // no candidates, or no answer at all. Same order the push hooks use, for the
+  // no candidates, or no answer at all. Same order the hook arms use, for the
   // same reason: the team's own shelf covers the working day and the public
   // marketplace is the fallback, so a team hit is never buried under a page of
   // marketplace results. No bypass here — the transport would drop it anyway,
