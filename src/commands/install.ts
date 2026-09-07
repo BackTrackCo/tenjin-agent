@@ -949,7 +949,7 @@ export function hooksDisclosure(
   const local = `Wired ${h.entries} hook entries in ${h.path ?? 'your settings'}: nine POST to a Tenjin daemon on ${h.url ?? 'loopback'} (your machine only, authorized by a token in that file, which is why it is now mode 0600), and two run ${h.hooksDir}/tenjin-shim.mjs to make sure that daemon is up. Nothing here can block or change a tool call; every arm only adds context beside it.`;
   const asks =
     h.mode === 'remind'
-      ? `On a web search the arms print a one-line reminder that ${shelfHost} may have an answer rather than looking one up.`
+      ? `On a web search and on a subagent dispatch the arms print a one-line reminder that ${shelfHost} may have an answer rather than looking one up. That answer covers those two moments only: your own prompts and the pages you fetch are still asked of ${shelfHost} under \`hooks.push\`, which is on.`
       : `Before a web search, a page fetch, or on your own prompts, the arms ask ${shelfHost} the same question (free, ~2.5s budget, 5s harness kill) and mention a tested answer if one exists; the query text leaves the machine, redacted, and nothing else does.${
           fallthroughAsked
             ? ` A question ${shelfHost} has nothing for is then asked of ${fallthroughHost} as well.`
@@ -1677,9 +1677,13 @@ export function searchHooksChoices(
     {
       value: 'remind',
       label: 'Just remind me',
-      hint: 'a one-line reminder, nothing sent off-machine',
+      hint: 'a one-line reminder instead of the lookup, on those two moments only; the prompt and page-fetch arms follow `hooks.push`',
     },
-    { value: 'off', label: 'No hooks', hint: 'nothing is registered' },
+    {
+      value: 'off',
+      label: 'No hooks',
+      hint: 'no web-search or subagent lookup at all; the prompt and page-fetch arms follow `hooks.push`',
+    },
   ];
 }
 

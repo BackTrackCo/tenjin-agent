@@ -2,8 +2,9 @@ import type { LoopDb } from './store';
 
 /**
  * `facts`: the machine's key-value table on `loop.db` (13-pr-d-local-arms.md).
- * D writes `finding:<uid>` (the child finding queue) and `pairing_post:<id>`;
- * E moves the CLI's `published:` and `agent_published:` writers here.
+ * D writes `finding:<uid>`, the child finding queue; E moves the CLI's
+ * `published:` and `agent_published:` writers here. A published fix note is not
+ * a fact — the piece behind a pairing is the `pairings.post_id` column.
  */
 
 export interface Fact {

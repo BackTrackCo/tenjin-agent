@@ -304,23 +304,24 @@ describe('runPushStatus', () => {
     expect(human).toContain('shelf: keys=2, public=1');
   });
 
-  /** Two rows about the same piece are one finding, and a `local` delivery
-   *  carries no resource id at all. */
+  /** Two rows about the same piece are one finding, and a local pairing is a
+   *  piece like any other: it is delivered under `pairing:<id>`, so it counts. */
   it('counts distinct pieces, not deliveries', async () => {
     const now = Date.parse('2026-08-22T00:00:00Z');
     seedFires([
       { id: 'f-1', at: now - 1000, arm: 'prompt', reason: 'hit', delivered: 'inject:res-a' },
       { id: 'f-2', at: now - 900, arm: 'context', reason: 'hit', delivered: 'inject:res-a' },
       { id: 'f-3', at: now - 800, arm: 'failure', reason: 'hit', delivered: 'inject:res-b' },
-      // A local pairing: shown, but there is no marketplace piece behind it.
-      { id: 'f-4', at: now - 700, arm: 'failure', reason: 'hit', delivered: 'inject:' },
+      // A local pairing: no marketplace piece behind it, but it was shown, and
+      // `pairingAnswer` gives it a resource id of its own.
+      { id: 'f-4', at: now - 700, arm: 'failure', reason: 'hit', delivered: 'inject:pairing:9' },
     ]);
     const result = await runPushStatus(makeCtx(), {
       homeDir: home,
       now: () => now,
       lookupStats: shelfDown,
     });
-    expect(result.data).toMatchObject({ ledger: { delivered: 4, candidates: 2 } });
+    expect(result.data).toMatchObject({ ledger: { delivered: 4, candidates: 3 } });
   });
 
   /**
@@ -988,6 +989,37 @@ describe('runPushGrade', () => {
       { fire_id: 'f-1', graded: 'used:hand', posted_at: NOW },
       { fire_id: 'f-logonly', graded: null, posted_at: null },
     ]);
+  });
+
+  /**
+   * `--since` chooses what this run GRADES, and nothing else. A hand verdict is
+   * a report the shelf is owed whenever the fire happened, so the post step
+   * takes no window: a `--label` on a month-old fire reaches the shelf on the
+   * same run rather than sitting at `posted_at NULL` forever.
+   */
+  it('posts a --label verdict on a fire older than --since', async () => {
+    const old = NOW - 30 * 24 * 60 * 60 * 1000;
+    seedFires([
+      {
+        id: 'f-old',
+        at: old,
+        arm: 'failure',
+        reason: 'hit',
+        session: 's1',
+        delivered: `inject:${RES}`,
+        legs: [{ shelf: 'public', url: URL, searchId: SEARCH }],
+      },
+    ]);
+    const { fetchImpl, calls } = acceptingShelf();
+
+    const result = await runPushGrade(
+      makeCtx(),
+      { label: ['f-old', 'used'], since: '1d' },
+      { now: () => NOW, fetchImpl, ...transcriptDeps({}) },
+    );
+    expect(result.data).toMatchObject({ posted: 1 });
+    expect(calls).toHaveLength(1);
+    expect(gradedLegs()).toEqual([{ fire_id: 'f-old', graded: 'used:hand', posted_at: NOW }]);
   });
 
   it('--explain names the anchor line and the evidence behind each verdict', async () => {

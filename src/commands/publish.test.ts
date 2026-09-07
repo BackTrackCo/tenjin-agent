@@ -1120,6 +1120,23 @@ describe('runPublish — publish <file> --key', () => {
     expect(postIdOf(elsewhere)).toBeNull();
   });
 
+  // A draft answered nobody: the pairing is still owed the write-up the turn-end
+  // ask will offer again, and the promotion is what claims the row.
+  it('stamps nothing on a --draft publish', async () => {
+    const unstamped = seedPairing('u1', FIX_KEY, null);
+    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
+    await runPublish(
+      baseArgs(await writeDoc(CLEAN), {
+        mode: 'auto',
+        draft: true,
+        key: [`fingerprint=sig_v1:${FIX_KEY}`],
+      }),
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    expect(postIdOf(unstamped)).toBeNull();
+  });
+
   it('stamps nothing on --dry-run', async () => {
     const unstamped = seedPairing('u1', FIX_KEY, null);
     const { fetch, calls } = stubServer();
