@@ -1,0 +1,49 @@
+name: benchmark
+
+# Bench-1 (evals/benchmark/) is stdlib Python with no model, no network and no
+# spend, and it is eval-only: nothing it covers ships in the CLI. It therefore
+# gets its own lane instead of riding the required CI check, so a benchmark
+# change can never red a release PR and a CLI change never waits on it. The
+# paths filter means this workflow is the only thing a benchmark-only PR runs.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'evals/benchmark/**'
+      - '.github/workflows/benchmark.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default-deny; the job opts into only what it needs.
+permissions: {}
+
+jobs:
+  benchmark:
+    name: benchmark (Bench-1 offline self-test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # No setup-python and no pnpm install: the suite is standard library only
+      # and the runner's python3 is the interpreter an operator runs locally.
+      # The floor is 3.11; a runner older than that is a red run, not a skip,
+      # because a skipped gate reads the same as a passing one.
+      - name: Check the interpreter floor
+        run: |
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
+            echo "::error title=python::evals/benchmark needs Python 3.11 or later"
+            exit 1
+          }
+      # selftest.py enforces its own 60-second wall-clock budget and exits
+      # non-zero when it runs long, so slow is a failure here, not a warning.
+      - name: Bench-1 offline self-test
+        run: python3 evals/benchmark/selftest.py

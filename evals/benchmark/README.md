@@ -40,11 +40,27 @@ evals/benchmark/
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection and its redaction guard
   cli.py           fake-run | verify | reduce | report
-  selftest.py      offline unittest entry (what src/evals-benchmark.test.ts runs)
+  selftest.py      offline unittest entry (what .github/workflows/benchmark.yml runs)
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
+
+## Its own CI lane
+
+`.github/workflows/benchmark.yml` runs `python3 evals/benchmark/selftest.py` on a pull request
+that touches `evals/benchmark/**` or that workflow file, and on manual dispatch. It is not the
+required check on `main`, and the required check does not run this suite.
+
+The split is deliberate in both directions. This package is eval-only and ships in no artifact,
+so a benchmark change must never red a release pull request. The required lane is what gates the
+published CLI, so a CLI change must never wait on a benchmark suite that will grow with every
+later Bench. The lane needs no dependency install and no interpreter setup: standard library
+only, on the runner's own `python3`, with 3.11 as the floor. A runner below the floor fails the
+run rather than skipping the step, because a skipped gate reads exactly like a passing one.
+
+`selftest.py` enforces a 60-second wall-clock budget on itself and exits non-zero when it runs
+long, so a suite that gets slow fails in its own lane instead of quietly getting slower.
 
 ## The fake command
 

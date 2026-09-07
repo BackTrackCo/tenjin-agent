@@ -2,11 +2,11 @@
 """Offline self-test entry: runs every case under evals/benchmark/tests/.
 
 No model, no network, no spend. Run directly or through
-`src/evals-benchmark.test.ts`, which is what puts it in CI.
+`.github/workflows/benchmark.yml`, its own lane, separate from the required
+CLI check.
 
-The suite owns a wall-clock budget as well as a result. Bench-1 rides an
-existing required lane, so a suite that grows past `BUDGET_S` fails here
-rather than quietly taxing every push.
+The suite owns a wall-clock budget as well as a result: a suite that grows
+past `BUDGET_S` fails here rather than turning its own lane into a slow one.
 """
 
 from __future__ import annotations
