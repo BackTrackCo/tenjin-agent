@@ -1,9 +1,13 @@
 """Hidden verifier registry: code-owned argv, shell=False, bounded output.
 
 A verifier runs only after every model process has stopped, on a copy of the
-final worktree the agent never saw. The expected answer lives in this module,
-not in the agent-visible fixture. Exit 0 is pass, 1 is fail, anything else is
-invalid: the measurement, not the task, is what broke.
+final worktree the agent never saw. The expected answer lives in this module
+or in a code-owned hidden layer that `artifact.hidden_copy` mounts into that
+copy after shutdown, never in the agent-visible fixture. Exit 0 is pass, 1 is
+fail, anything else is invalid: the measurement, not the task, is what broke.
+
+A manifest names a verifier; it never supplies one. An unknown name, a target
+outside the run directory, and a shell-shaped value all fail closed here.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ class VerifierSpec:
     name: str
     argv: Callable[[Path], list[str]]
     timeout_s: int
+    hidden_layer: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -43,8 +48,13 @@ def _fake_answer_file(repo: Path) -> list[str]:
     return [sys.executable, "-m", "evals.benchmark.verifier", "fake-answer-file", "--repo", str(repo)]
 
 
+def _fake_crash(repo: Path) -> list[str]:
+    return [sys.executable, "-m", "evals.benchmark.verifier", "fake-crash", "--repo", str(repo)]
+
+
 REGISTRY: dict[str, VerifierSpec] = {
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),
+    "fake_crash": VerifierSpec(name="fake_crash", argv=_fake_crash, timeout_s=30),
 }
 
 
@@ -56,12 +66,17 @@ def lookup(name: str) -> VerifierSpec:
 
 
 def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path) -> Verdict:
-    repo_copy = repo_copy.resolve()
-    if not repo_copy.is_relative_to(allowed_root.resolve()):
+    resolved = repo_copy.resolve()
+    if not resolved.is_relative_to(allowed_root.resolve()):
         raise VerifierError("verifier target escapes the run directory")
+    if not resolved.is_dir():
+        raise VerifierError("verifier target is not a directory")
+    argv = spec.argv(resolved)
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+        raise VerifierError(f"verifier {spec.name!r} did not produce an argv list")
     try:
         completed = subprocess.run(
-            spec.argv(repo_copy),
+            argv,
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
@@ -90,9 +105,13 @@ def fake_answer_file(repo: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evals.benchmark.verifier")
     commands = parser.add_subparsers(dest="command", required=True)
-    fake = commands.add_parser("fake-answer-file")
-    fake.add_argument("--repo", required=True)
+    for name in ("fake-answer-file", "fake-crash"):
+        commands.add_parser(name).add_argument("--repo", required=True)
     args = parser.parse_args(argv)
+    if args.command == "fake-crash":
+        # A verifier that cannot decide. The attempt is invalid, not failed.
+        print("fake verifier crashed")
+        return 3
     return fake_answer_file(Path(args.repo))
 
 

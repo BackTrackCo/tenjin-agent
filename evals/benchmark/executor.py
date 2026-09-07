@@ -1,24 +1,34 @@
 """Executor registry: a manifest executor name -> code-owned argv, shell=False.
 
-The fake executor is this module run as a script. It writes synthetic
+The fake executors are this module run as a script. They write synthetic
 Claude-shaped JSONL for one root and one child into the trial output root and
-never spawns a real tool, so CI exercises the whole chain with zero spend.
-The rows follow the shapes `claude_usage.py` freezes.
+never spawn a real tool, so CI exercises the whole chain with zero spend. The
+rows follow the shapes `claude_usage.py` freezes.
+
+`live` marks a spec that would start a real agent. No entry in this registry
+sets it, which is what keeps CI off the live path; `artifact.require_isolation`
+is what refuses a publishable live run without an isolation attestation.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import random
+import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from . import REPO_ROOT
 
 NATIVE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+BEHAVIORS = ("pass", "wrong-answer", "hang")
+# Long enough that only the runner's own cap ends the hang behavior.
+HANG_S = 300
 
 
 @dataclass(frozen=True)
@@ -33,35 +43,43 @@ class ExecutorSpec:
     name: str
     harness: str
     launch: Callable[[str, Path, Path, dict], Launch]
+    live: bool = False
+    required_origins: tuple[str, ...] = field(default_factory=tuple)
 
 
 class ExecutorError(ValueError):
     pass
 
 
-def _fake_launch(trial_id: str, repo: Path, output: Path, arm: dict) -> Launch:
-    session = f"fake-{trial_id}"
-    argv = [
-        sys.executable,
-        "-m",
-        "evals.benchmark.executor",
-        "fake-agent",
-        "--repo",
-        str(repo),
-        "--output",
-        str(output),
-        "--session",
-        session,
-        "--seed",
-        trial_id,
-        "--arm",
-        str(arm["id"]),
-    ]
-    return Launch(argv=argv, cwd=REPO_ROOT, root_session_id=session)
+def _fake_launch(behavior: str) -> Callable[[str, Path, Path, dict], Launch]:
+    def launch(trial_id: str, repo: Path, output: Path, arm: dict) -> Launch:
+        session = f"fake-{trial_id}"
+        argv = [
+            sys.executable,
+            "-m",
+            "evals.benchmark.executor",
+            "fake-agent",
+            "--behavior",
+            behavior,
+            "--repo",
+            str(repo),
+            "--output",
+            str(output),
+            "--session",
+            session,
+            "--seed",
+            trial_id,
+            "--arm",
+            str(arm["id"]),
+        ]
+        return Launch(argv=argv, cwd=REPO_ROOT, root_session_id=session)
+
+    return launch
 
 
 REGISTRY: dict[str, ExecutorSpec] = {
-    "fake": ExecutorSpec(name="fake", harness="claude", launch=_fake_launch),
+    "fake": ExecutorSpec(name="fake", harness="claude", launch=_fake_launch("pass")),
+    "fake_hang": ExecutorSpec(name="fake_hang", harness="claude", launch=_fake_launch("hang")),
 }
 
 
@@ -110,33 +128,53 @@ def _row(
     )
 
 
-def fake_agent(args: argparse.Namespace) -> int:
-    rng = random.Random(args.seed)
-    sessions = Path(args.output) / "sessions"
-    child_dir = sessions / args.session / "subagents"
+def write_transcripts(
+    output: Path, session: str, seed: str, arm: str, *, child: bool = True, settled: bool = True
+) -> None:
+    """Write one root (and optionally one child) transcript in the frozen shapes.
+
+    `settled=False` leaves the root without its result envelope and the child
+    without a terminal row, which is what an interrupted or still-running
+    attempt looks like on disk.
+    """
+    rng = random.Random(seed)
+    sessions = Path(output) / "sessions"
+    child_dir = sessions / session / "subagents"
     child_dir.mkdir(parents=True, exist_ok=True)
     child_id = f"child-{rng.randrange(1 << 20):05x}"
     # A treatment arm reads slightly less: an arm-shaped difference the reducer
     # must show, not a claim about any product.
-    scale = 800 if args.arm == "off" else 600
+    scale = 800 if arm == "off" else 600
     text = [{"type": "text", "text": "[redacted]"}]
     dispatch = [{"type": "tool_use", "id": "toolu_dispatch", "name": "Task", "input": {}}]
 
     first, second = _usage(rng, scale), _usage(rng, scale)
     child_usage = _usage(rng, scale // 2)
-    root_lines = [json.dumps({"type": "system", "subtype": "init", "session_id": args.session, "model": "fake-model-0"})]
-    root_lines.append(_row(args.session, "req_1", "msg_1", {**first, "output_tokens": 1}, text, None))
-    root_lines.append(_row(args.session, "req_1", "msg_1", first, dispatch, "tool_use"))
+    root_lines = [json.dumps({"type": "system", "subtype": "init", "session_id": session, "model": "fake-model-0"})]
+    root_lines.append(_row(session, "req_1", "msg_1", {**first, "output_tokens": 1}, text, None))
+    if not settled:
+        (sessions / f"{session}.jsonl").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
+        if child:
+            (child_dir / f"agent-{child_id}.jsonl").write_text(
+                _row(session, "req_c1", "msg_c1", child_usage, text, None, agentId=child_id, parent_tool_use_id="toolu_dispatch")
+                + "\n",
+                encoding="utf-8",
+            )
+        return
+    root_lines.append(_row(session, "req_1", "msg_1", first, dispatch, "tool_use"))
     root_lines.append(
         json.dumps(
             {
                 "type": "user",
-                "session_id": args.session,
-                "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_dispatch", "content": "[redacted]"}]},
+                "session_id": session,
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "toolu_dispatch", "content": "[redacted]"}],
+                },
             }
         )
     )
-    root_lines.append(_row(args.session, "req_2", "msg_2", second, text, "end_turn"))
+    root_lines.append(_row(session, "req_2", "msg_2", second, text, "end_turn"))
     root_lines.append(
         json.dumps(
             {
@@ -145,21 +183,43 @@ def fake_agent(args: argparse.Namespace) -> int:
                 "is_error": False,
                 "num_turns": 2,
                 "total_cost_usd": 0.0,
-                "session_id": args.session,
+                "session_id": session,
                 "usage": {name: first[name] + second[name] for name in NATIVE},
                 "modelUsage": {"fake-model-0": {"inputTokens": first["input_tokens"] + second["input_tokens"]}},
             }
         )
     )
-    (sessions / f"{args.session}.jsonl").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
-
+    (sessions / f"{session}.jsonl").write_text("\n".join(root_lines) + "\n", encoding="utf-8")
+    if not child:
+        return
     child_lines = [
-        _row(args.session, "req_c1", "msg_c1", child_usage, text, "end_turn", agentId=child_id, parent_tool_use_id="toolu_dispatch"),
+        _row(session, "req_c1", "msg_c1", child_usage, text, "end_turn", agentId=child_id, parent_tool_use_id="toolu_dispatch"),
         json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "agentId": child_id}),
     ]
     (child_dir / f"agent-{child_id}.jsonl").write_text("\n".join(child_lines) + "\n", encoding="utf-8")
 
-    (Path(args.repo) / "answer.txt").write_text("42\n", encoding="utf-8")
+
+def settle_child(output: Path, session: str) -> None:
+    """Append the terminal row a child transcript is still missing."""
+    for child in sorted((Path(output) / "sessions" / session / "subagents").glob("agent-*.jsonl")):
+        agent_id = child.stem.removeprefix("agent-")
+        with child.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "result", "subtype": "success", "is_error": False, "num_turns": 1, "agentId": agent_id}))
+            handle.write("\n")
+
+
+def fake_agent(args: argparse.Namespace) -> int:
+    output, repo = Path(args.output), Path(args.repo)
+    if args.behavior == "hang":
+        # A grandchild in the same process group: the timeout case is only
+        # proven if killing the group reaches it too.
+        grandchild = subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({HANG_S})"], shell=False)
+        write_transcripts(output, args.session, args.seed, args.arm, child=False, settled=False)
+        (output / "pids.json").write_text(json.dumps({"root": os.getpid(), "grandchild": grandchild.pid}), encoding="utf-8")
+        time.sleep(HANG_S)
+        return 0
+    write_transcripts(output, args.session, args.seed, args.arm)
+    (repo / "answer.txt").write_text("42\n" if args.behavior == "pass" else "41\n", encoding="utf-8")
     return 0
 
 
@@ -169,6 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     fake = commands.add_parser("fake-agent")
     for flag in ("--repo", "--output", "--session", "--seed", "--arm"):
         fake.add_argument(flag, required=True)
+    fake.add_argument("--behavior", choices=BEHAVIORS, default="pass")
     args = parser.parse_args(argv)
     return fake_agent(args)
 

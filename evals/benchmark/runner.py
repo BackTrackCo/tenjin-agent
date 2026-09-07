@@ -1,9 +1,17 @@
 """Execute a schedule: one fresh root per trial, settle, verify, record.
 
-Attempt closes only when the root has exited and every discovered child has
-a terminal row, or the declared wall-clock cap interrupts the whole process
-group. Partial usage is retained either way. A trial with a valid final
-record for the current manifest and schedule hashes is skipped on resume.
+An attempt closes only when the root has exited and every discovered child has
+a terminal row, or when a declared cap ends the wait. Two caps, two outcomes:
+the wall-clock budget kills the whole process group and the attempt is
+`capped`; the settlement cap ends a wait for descendants that never stopped
+and the attempt is `interrupted`. Both retain the usage observed so far and
+name the actors that never settled.
+
+The process boundary, the clock, and the settlement barrier are injected, so
+every case except the process-group kill runs without real time or a real
+agent. A trial with a valid final record for the current manifest and schedule
+hashes is skipped on resume, and an interrupted run publishes nothing for the
+trial it was inside.
 """
 
 from __future__ import annotations
@@ -13,7 +21,7 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,6 +30,17 @@ from .manifest import Manifest
 from .schedule import Trial
 
 Clock = Callable[[], float]
+Sleep = Callable[[float], None]
+
+
+@dataclass(frozen=True)
+class Completed:
+    returncode: int
+    stderr: str
+    timed_out: bool
+
+
+Spawn = Callable[[executor.Launch, artifact.TrialRoots, float], Completed]
 
 
 @dataclass(frozen=True)
@@ -30,6 +49,61 @@ class TrialResult:
     outcome: str
     resumed: bool
     path: Path
+
+
+def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
+    """The only place this package starts a process. Own session, no shell."""
+    process = subprocess.Popen(
+        launch.argv,
+        cwd=launch.cwd,
+        env=roots.environment(os.environ.get("PATH", "")),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        shell=False,
+    )
+    timed_out = False
+    try:
+        _, stderr = process.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_group(process)
+        _, stderr = process.communicate()
+    return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
+
+
+def _kill_group(process: subprocess.Popen[str]) -> None:
+    """Kill the trial's whole process group: a live grandchild still spends."""
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
+
+
+@dataclass(frozen=True)
+class Runtime:
+    clock: Clock = time.monotonic
+    sleep: Sleep = time.sleep
+    spawn: Spawn = process_spawn
+    settle_cap_s: float = 30.0
+    settle_interval_s: float = 0.25
+    sentinel: artifact.SentinelLike | None = None
+    attestation: artifact.Attestation | None = None
+    publishable: bool = True
+    ci: bool = field(default_factory=lambda: bool(os.environ.get("CI")))
+
+
+@dataclass(frozen=True)
+class Settlement:
+    result_row: dict[str, Any] | None
+    unresolved: list[str]
+    waited_s: float
+    capped: bool
+
+    @property
+    def settled(self) -> bool:
+        return self.result_row is not None and not self.unresolved
 
 
 def _terminal(path: Path) -> dict[str, Any] | None:
@@ -42,88 +116,124 @@ def _terminal(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def settle(sessions: Path, root_session_id: str) -> tuple[dict[str, Any] | None, list[str]]:
-    """The root's result row, plus every child transcript still without one."""
+def scan(sessions: Path, root_session_id: str) -> tuple[dict[str, Any] | None, list[str]]:
+    """The root's result row, plus every actor still without a terminal row."""
     root = sessions / f"{root_session_id}.jsonl"
     if not root.is_file():
-        return None, ["root"]
+        return None, [""]
     unresolved = [
-        child.stem
+        child.stem.removeprefix("agent-")
         for child in sorted((sessions / root_session_id / "subagents").glob("agent-*.jsonl"))
         if _terminal(child) is None
     ]
-    return _terminal(root), unresolved
+    result_row = _terminal(root)
+    return result_row, ([""] if result_row is None else []) + unresolved
 
 
-def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str, clock: Clock) -> dict[str, Any]:
+def settle(sessions: Path, root_session_id: str, runtime: Runtime) -> Settlement:
+    """Wait for descendants to stop, up to the declared settlement cap.
+
+    A root that exits while a child is live is not a complete attempt, so the
+    wait is the default and the cap is the exception.
+    """
+    started = runtime.clock()
+    while True:
+        result_row, unresolved = scan(sessions, root_session_id)
+        waited = runtime.clock() - started
+        if result_row is not None and not unresolved:
+            return Settlement(result_row, [], waited, False)
+        if waited >= runtime.settle_cap_s:
+            return Settlement(result_row, unresolved, waited, True)
+        runtime.sleep(min(runtime.settle_interval_s, runtime.settle_cap_s - waited))
+
+
+def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str, runtime: Runtime = Runtime()) -> dict[str, Any]:
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
     spec = executor.lookup(arm["executor"])
     if spec.harness != manifest.harness:
         raise executor.ExecutorError(f"executor {spec.name!r} runs {spec.harness!r}, manifest pins {manifest.harness!r}")
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task))
-    launch = spec.launch(trial.trial_id, roots.repo, roots.output, arm)
-    started = clock()
-    stop_reason = "exit"
-    process = subprocess.Popen(
-        launch.argv,
-        cwd=launch.cwd,
-        env=roots.environment(os.environ.get("PATH", "")),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        shell=False,
+    verifier_spec = verifier.lookup(task["verifier"])
+    isolation = artifact.require_isolation(
+        live=spec.live,
+        publishable=runtime.publishable,
+        attestation=runtime.attestation,
+        required_origins=spec.required_origins,
+        ci=runtime.ci,
     )
-    try:
-        _, stderr = process.communicate(timeout=manifest.pins["wall_clock_s"])
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        _, stderr = process.communicate()
-        stop_reason = "timeout"
-    wall_time_s = clock() - started
+    origin = None if runtime.sentinel is None else runtime.sentinel.origin
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)
+    launch = spec.launch(trial.trial_id, roots.repo, roots.output, arm)
+    hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
 
+    started = runtime.clock()
+    completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
     sessions = roots.output / "sessions"
-    result_row, unresolved = settle(sessions, launch.root_session_id)
-    outcome = "invalid"
-    invalid_reason: str | None = None
+    if completed.timed_out:
+        result_row, unresolved = scan(sessions, launch.root_session_id)
+        settlement = Settlement(result_row, unresolved, 0.0, False)
+        stop_reason = "timeout"
+    else:
+        settlement = settle(sessions, launch.root_session_id, runtime)
+        stop_reason = "interrupted" if settlement.capped else "exit"
+    roots.mark_stopped()
+    wall_time_s = runtime.clock() - started
+
+    isolation_reason: str | None = None
+    try:
+        roots.audit()
+    except artifact.ArtifactError as error:
+        isolation_reason = f"isolation:{error.code}"
+    hits = 0 if runtime.sentinel is None else len(runtime.sentinel.hits) - hits_before
+    sentinel = artifact.scan_sentinels(roots, hits)
+
     session: claude_usage.SessionUsage | None = None
+    usage_reason: str | None = None
     try:
         session = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id)
-        invalid_reason = session.invalid_reason
+        usage_reason = session.invalid_reason
     except claude_usage.ClaudeUsageError as error:
-        invalid_reason = f"usage:{error.code}"
-
+        usage_reason = f"usage:{error.code}"
     actors = [] if session is None else session.actors
     try:
         delivery = loop_join.project(roots.data_dir / "loop.db", actors)
     except loop_join.LoopJoinError:
         delivery = loop_join.unavailable()
-        invalid_reason = invalid_reason or "delivery:wal_live"
+        usage_reason = usage_reason or "delivery:wal_live"
     if delivery["unmatched_fires"]:
-        invalid_reason = invalid_reason or "delivery:fire_without_usage"
+        usage_reason = usage_reason or "delivery:fire_without_usage"
 
+    # Isolation first: an attempt that reached outside its roots is invalid
+    # whatever else it did. A sentinel hit outranks an accounting gap for the
+    # same reason.
+    invalid_reason = isolation_reason or sentinel.reason or usage_reason
+    outcome = "invalid"
     verdict: verifier.Verdict | None = None
     patch_hash: str | None = None
     if invalid_reason is not None:
         pass
-    elif stop_reason == "timeout":
+    elif completed.timed_out:
         outcome = "capped"
-    elif process.returncode != 0:
-        invalid_reason = f"executor exited {process.returncode}"
-    elif result_row is None or unresolved:
-        invalid_reason = "unsettled: " + ", ".join(["root"] if result_row is None else unresolved)
+    elif completed.returncode != 0:
+        invalid_reason = f"executor:exit_{completed.returncode}"
+    elif settlement.capped:
+        outcome = "interrupted"
     elif session is not None and session.envelope is not None and session.envelope.capped:
         outcome = "capped"
     elif session is not None and session.envelope is not None and session.envelope.is_error:
-        invalid_reason = f"harness: {session.envelope.subtype}"
+        invalid_reason = f"harness:{session.envelope.subtype}"
     else:
-        copy = roots.hidden_copy()
-        patch_hash = "sha256:" + sha256_dir(copy)
-        verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir)
-        outcome = verdict.outcome
-        if outcome == "invalid":
-            invalid_reason = f"verifier: {verdict.detail}"
+        try:
+            copy = roots.hidden_copy(verifier_spec.hidden_layer)
+        except artifact.ArtifactError as error:
+            copy = None
+            invalid_reason = f"isolation:{error.code}"
+        if copy is not None:
+            patch_hash = "sha256:" + sha256_dir(copy)
+            verdict = verifier.run(verifier_spec, copy, run_dir)
+            outcome = verdict.outcome
+            if outcome == "invalid":
+                invalid_reason = f"verifier:{verdict.verifier_id}"
     if invalid_reason is not None:
         outcome = "invalid"
 
@@ -162,18 +272,19 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "patch_hash": patch_hash,
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
+        "unresolved_actors": settlement.unresolved,
         "delivery": delivery,
-        "sentinel": {"public_requests": 0},
-        "isolation": {"fresh_roots": True, "attested_container": False},
+        "sentinel": sentinel.counts(),
+        "isolation": isolation,
         "private_hashes": {
             "root_transcript": sha256_file(root_transcript) if root_transcript.is_file() else None,
-            "executor_stderr": sha256_text(stderr) if stderr else None,
+            "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None,
         },
     }
 
 
 def run(
-    manifest: Manifest, trials: list[Trial], run_dir: Path, schedule_hash: str, clock: Clock = time.time
+    manifest: Manifest, trials: list[Trial], run_dir: Path, schedule_hash: str, runtime: Runtime = Runtime()
 ) -> list[TrialResult]:
     records_dir = run_dir / "records"
     accepted, _ = records.select(records_dir, manifest.hash, schedule_hash)
@@ -181,10 +292,14 @@ def run(
     for trial in trials:
         if trial.trial_id in accepted:
             results.append(
-                TrialResult(trial.trial_id, accepted[trial.trial_id]["outcome"], True, records.final_path(records_dir, trial.trial_id))
+                TrialResult(
+                    trial.trial_id, accepted[trial.trial_id]["outcome"], True, records.final_path(records_dir, trial.trial_id)
+                )
             )
             continue
-        record = run_trial(manifest, trial, run_dir, schedule_hash, clock)
+        # An interruption inside a trial publishes nothing: the next run finds
+        # no final record for it and executes it once, from the top.
+        record = run_trial(manifest, trial, run_dir, schedule_hash, runtime)
         path, won = records.publish(records_dir, record)
         if not won:
             raise records.RecordError(f"another writer published trial {trial.trial_id} first")

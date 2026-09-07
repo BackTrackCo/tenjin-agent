@@ -6,8 +6,8 @@ model tokens did the complete agent run consume with and without a knowledge sys
 not itself produce a savings number, and nothing here touches the product runtime.
 
 Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. The contract sections below are
-frozen by the accounting commit group; the operator sections (live command, isolation
-attestation, reducer intervals) land with the execution and reduction groups.
+frozen by the accounting and execution commit groups; the remaining operator sections (the
+live command and reducer intervals) land with the reduction group.
 
 ## Layout
 
@@ -19,13 +19,13 @@ evals/benchmark/
   usage.py         UsageRecord and AuxiliaryReceipt contracts, arithmetic, null-vs-zero, dedupe, totals
   claude_usage.py  Claude JSONL usage adapter (group by requestId, select one row, reconcile)
   loop_join.py     read-only projection of a stopped trial's loop.db onto exact actor keys
-  runner.py        executes a schedule: fresh roots, settlement, timeout, resume
-  executor.py      executor registry (code-owned argv, shell=False) and the fake executor
-  verifier.py      hidden verifier registry and the fake verifier
-  artifact.py      disposable trial roots and the post-shutdown verifier copy
+  runner.py        executes a schedule: fresh roots, settlement, caps, sentinels, resume
+  executor.py      executor registry (code-owned argv, shell=False) and the fake executors
+  verifier.py      hidden verifier registry, hidden layer, and the fixed fake verifiers
+  artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   reduce.py        failure-inclusive task-equal reducer
   report.py        publishable projection and its redaction guard
-  cli.py           fake-run | reduce | report
+  cli.py           fake-run | verify | reduce | report
   selftest.py      offline unittest entry (what src/evals-benchmark.test.ts runs)
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and fake repo
@@ -38,6 +38,7 @@ From the repository root:
 
 ```bash
 python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
+python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake
 python3 evals/benchmark/selftest.py
 ```
 
@@ -48,11 +49,56 @@ attempt, reduces them, and writes `report.json`. Running it again against the sa
 resumes: every published record that validates against the current manifest and schedule
 hashes is skipped. No model, no network, no spend.
 
+`verify` re-runs each accepted attempt's hidden verifier over its retained worktree and lists
+the trials where a fresh verdict disagrees with the recorded one.
+
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only; `report.guard` refuses anything else.
 
-There is no live command yet. A live run is operator-only and refuses to publish without the
-disposable container or VM attestation the plan requires.
+There is no live command yet, and no registry executor sets `live`, so CI cannot reach a live
+path. A live run is operator-only and is refused when it would be publishable without the
+isolation attestation below.
+
+## Execution and isolation contract
+
+Each trial gets fresh `home`, `profile`, `TENJIN_DATA_DIR`, repository, and output roots under
+`<run>/trials/<trial_id>/`, and the process sees an allowlisted environment rather than the
+operator's. `runner.process_spawn` is the only place this package starts a process:
+`shell=False`, its own session, and on the wall-clock pin it kills the whole process group so
+a grandchild cannot outlive the trial. The clock, the settlement barrier, and the process
+boundary are injected, so every offline case except the process-group one runs without real
+time.
+
+Two caps, two outcomes. The wall-clock pin ends the attempt as `capped` with `stop_reason`
+`timeout`; the settlement cap (`Runtime.settle_cap_s`) ends a wait for descendants that never
+produced a terminal row as `interrupted`. Both retain the usage observed so far and list the
+native actor ids that never settled in `unresolved_actors` (`''` is the lead). A root that
+exits while a child is live is not a complete attempt.
+
+`pass` and `fail` come from the hidden verifier and nothing else; a verifier exit that is
+neither 0 nor 1 means the measurement broke, so the attempt is `invalid`. An executor exit
+code, a usage or delivery rejection, a symlink escape, and a sentinel hit are all `invalid`
+with a machine-readable reason (`executor:exit_N`, `usage:<code>`, `delivery:<code>`,
+`isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`).
+
+The verifier runs after shutdown, never before: `artifact.TrialRoots.hidden_copy` refuses
+until the roots are marked stopped, copies the worktree with links kept as links, mounts the
+registry's code-owned hidden layer into that copy, and refuses a worktree holding a symlink
+that resolves outside itself. `verifier.run` refuses a target outside the run directory and a
+spec that does not produce an argv list, and truncates verifier output.
+
+Sentinels make isolation observable rather than assumed. `artifact.create` plants a canary
+credential in the disposable home and, when the runner is given a loopback sentinel, exports
+its origin as `BENCHMARK_PUBLIC_ORIGIN`. Per attempt the runner counts new sentinel hits and
+scans the roots the agent writes to for the canary; either count invalidates the attempt. The
+credential scan proves the secret travelled, not that it was read.
+
+`artifact.require_isolation` is the live-run gate. A live executor in CI is refused outright.
+A publishable live run needs an `Attestation`: `container` or `vm` kind, a non-empty instance
+id and image, fresh roots, no wallet, a named credential seam, and a network allowlist that is
+neither empty, nor a wildcard, nor missing an origin the executor requires. Its hash goes into
+the record's `isolation` field. A temp directory is not a sandbox and this package never
+claims otherwise.
 
 ## Manifest contract
 
@@ -154,8 +200,9 @@ settings, and environment hashes; task, arm, repeat, position; harness and nativ
 actors and parent edges; deduplicated usage, the reconciliation, and auxiliary receipts;
 outcome (`pass` | `fail` | `capped` | `interrupted` | `invalid`) with `invalid_reason` set
 exactly for `invalid`; verifier verdict and patch hash; stop reason (`exit` | `timeout` |
-`interrupted`), wall time, turns, tool counts, cost; delivery projection; sentinel and isolation
-checks; and hashes of private inputs, never their bodies or host paths.
+`interrupted`), wall time, unresolved actors, turns, tool counts, cost; delivery projection;
+sentinel counts and isolation checks; and hashes of private inputs, never their bodies or host
+paths.
 
 `records.validate` refuses unknown keys, a `trial_id` that does not derive from the record's
 own fields, a scored attempt without the lead actor, usage or fires naming an actor outside

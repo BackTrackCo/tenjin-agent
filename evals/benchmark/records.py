@@ -49,6 +49,7 @@ REQUIRED = frozenset(
         "patch_hash",
         "stop_reason",
         "wall_time_s",
+        "unresolved_actors",
         "turns",
         "tool_counts",
         "cost_usd",
@@ -241,8 +242,17 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("verifier must be null or carry an id")
     if record["outcome"] in ("pass", "fail") and verifier is None:
         raise RecordError("a pass or fail outcome needs a verifier verdict")
-    if not _count(record["sentinel"].get("public_requests")):
-        raise RecordError("sentinel.public_requests must be a count")
+    if "public_requests" not in record["sentinel"]:
+        raise RecordError("sentinel must carry public_requests")
+    for name, value in record["sentinel"].items():
+        if not _count(value):
+            raise RecordError(f"sentinel.{name} must be a count")
+    if not isinstance(record["unresolved_actors"], list) or any(
+        not isinstance(item, str) or not usage.ACTOR_ID.match(item) for item in record["unresolved_actors"]
+    ):
+        raise RecordError("unresolved_actors must be a list of native actor ids")
+    if record["outcome"] == "pass" and record["unresolved_actors"]:
+        raise RecordError("a passing attempt cannot leave an actor unsettled")
 
 
 def select(

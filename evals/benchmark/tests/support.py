@@ -7,12 +7,121 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable
 
-from evals.benchmark import FIXTURES, claude_usage, records, schedule
+from evals.benchmark import FIXTURES, artifact, claude_usage, executor, manifest as manifest_module, records, runner, schedule, sha256_json
 
 SESSIONS = FIXTURES / "claude" / "sessions"
 TRIAL = "trial-fixture"
 
 Edit = Callable[[list[Any]], list[Any]]
+Before = Callable[[executor.Launch, artifact.TrialRoots], None]
+
+ATTESTED = artifact.Attestation(
+    kind="container",
+    instance_id="bench1-abc123",
+    image="ghcr.io/example/bench1@sha256:0000",
+    fresh_roots=True,
+    wallet_present=False,
+    credential_seam="env_injection",
+    network_allowlist=("api.provider.example", "shelf.example"),
+)
+
+
+class FakeClock:
+    """An injected clock and barrier: tests advance time, never wait for it."""
+
+    def __init__(self, start: float = 0.0) -> None:
+        self.now = start
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def synthetic_manifest(
+    tmp: Path,
+    *,
+    tasks: int = 1,
+    arms: tuple[str, ...] = ("off", "on"),
+    repeats: int = 1,
+    seed: int = 1,
+    executor_name: str = "fake",
+    verifier_name: str = "fake_answer_file",
+    wall_clock_s: int = 30,
+) -> manifest_module.Manifest:
+    """A manifest object for runner and schedule cases, with a disposable fixture.
+
+    `manifest.load` and its validation have their own cases; building the
+    object here keeps an execution case from also being a manifest case.
+    """
+    fixture = tmp / "fixture"
+    fixture.mkdir(parents=True, exist_ok=True)
+    (fixture / "TASK.md").write_text("Write 42 into answer.txt.\n", encoding="utf-8")
+    data: dict[str, Any] = {
+        "benchmark_version": "bench1-test-0",
+        "schema_version": manifest_module.SCHEMA_VERSION,
+        "harness": "claude",
+        "seed": seed,
+        "repeats": repeats,
+        "pins": {
+            "model": "fake-model-0",
+            "harness_version": "0.0.0",
+            "effort": "default",
+            "image": "none",
+            "dependency_lock_hash": "sha256:none",
+            "permission_mode": "default",
+            "wall_clock_s": wall_clock_s,
+            "turn_budget": 4,
+        },
+        "price_sheet_version": "fake-2026-09",
+        "tasks": [
+            {
+                "id": f"task-{index}",
+                "family": "fake",
+                "transfer_distance": "none",
+                "fixture": "fixture",
+                "fixture_hash": manifest_module.fixture_hash(fixture),
+                "verifier": verifier_name,
+            }
+            for index in range(tasks)
+        ],
+        "arms": [
+            {
+                "id": arm,
+                "executor": executor_name,
+                "product_version": "none",
+                "settings_hash": f"sha256:{arm}",
+                "memory_snapshot_hash": "sha256:empty",
+            }
+            for arm in arms
+        ],
+    }
+    path = tmp / "manifest.json"
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return manifest_module.Manifest(data=data, path=path, hash=sha256_json(data))
+
+
+def fake_spawn(
+    *, answer: str = "42\n", child: bool = True, settled: bool = True, returncode: int = 0, before: Before | None = None
+) -> runner.Spawn:
+    """An in-process stand-in for the executor: writes what an agent would leave.
+
+    Only the process-group case needs a real process; every other execution
+    case injects this so the suite spends no real time.
+    """
+
+    def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+        if before is not None:
+            before(launch, roots)
+        executor.write_transcripts(roots.output, launch.root_session_id, launch.root_session_id, "off", child=child, settled=settled)
+        if answer:
+            (roots.repo / "answer.txt").write_text(answer, encoding="utf-8")
+        return runner.Completed(returncode=returncode, stderr="", timed_out=False)
+
+    return spawn
 
 
 def read_rows(path: Path) -> list[Any]:
@@ -76,9 +185,10 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
         "patch_hash": "sha256:patch",
         "stop_reason": "exit",
         "wall_time_s": 1.5,
+        "unresolved_actors": [],
         "delivery": {"status": "unavailable", "fires": [], "legs": [], "unmatched_fires": []},
-        "sentinel": {"public_requests": 0},
-        "isolation": {"fresh_roots": True, "attested_container": False},
+        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None},
         "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
     }
     record.update(overrides)

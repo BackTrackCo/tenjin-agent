@@ -69,6 +69,21 @@ class FakeRunTest(unittest.TestCase):
             self.assertFalse((trial / "repo" / "verifier.py").exists())
             self.assertTrue((trial / "verify" / "answer.txt").is_file())
 
+    def test_verify_reruns_each_hidden_verifier_and_reports_disagreement(self) -> None:
+        payload = cli.do_verify(self.out)
+        self.assertEqual(payload["disagreements"], [])
+        self.assertTrue(all(item["agrees"] for item in payload["trials"].values()))
+        trial_id = sorted(payload["trials"])[0]
+        answer = self.out / "trials" / trial_id / "verify" / "answer.txt"
+        original = answer.read_text(encoding="utf-8")
+        answer.write_text("41\n", encoding="utf-8")
+        try:
+            second = cli.do_verify(self.out)
+        finally:
+            answer.write_text(original, encoding="utf-8")
+        self.assertEqual(second["disagreements"], [trial_id])
+        self.assertEqual(second["trials"][trial_id], {"status": "fail", "recorded": "pass", "agrees": False})
+
 
 class ContractTest(unittest.TestCase):
     def test_same_seed_reproduces_the_schedule(self) -> None:

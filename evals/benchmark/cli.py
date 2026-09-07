@@ -1,7 +1,10 @@
-"""`python3 -m evals.benchmark.cli fake-run --out DIR` and the reduce/report steps.
+"""`python3 -m evals.benchmark.cli fake-run|verify|reduce|report`.
 
-The fake path is the CI path: no model, no network, no spend. Later steps
-add the operator-only live command behind the isolation attestation.
+The fake path is the CI path: no model, no network, no spend. `verify` re-runs
+the hidden verifiers over a finished run's retained worktrees and reports where
+a fresh verdict disagrees with the recorded one, which is the check an operator
+runs before trusting a run they did not watch. Later steps add the operator-only
+live command behind the isolation attestation in `artifact.py`.
 """
 
 from __future__ import annotations
@@ -12,7 +15,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import FIXTURES, manifest as manifest_module, records, reduce as reduce_module, report as report_module, runner, schedule
+from . import (
+    FIXTURES,
+    manifest as manifest_module,
+    records,
+    reduce as reduce_module,
+    report as report_module,
+    runner,
+    schedule,
+    verifier,
+)
 
 FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
 
@@ -42,6 +54,26 @@ def fake_run(out: Path, manifest_path: Path = FAKE_MANIFEST) -> dict[str, Any]:
     }
 
 
+def do_verify(run_dir: Path) -> dict[str, Any]:
+    """Re-run each accepted attempt's hidden verifier on its retained worktree."""
+    manifest, digest = load_run(run_dir)
+    verdicts: dict[str, Any] = {}
+    disagreements: list[str] = []
+    accepted, _ = records.select(run_dir / "records", manifest.hash, digest)
+    for trial_id, record in sorted(accepted.items()):
+        copy = run_dir / "trials" / trial_id / "verify"
+        if not copy.is_dir():
+            verdicts[trial_id] = {"status": "worktree_absent", "recorded": record["outcome"]}
+            continue
+        task = next(item for item in manifest.tasks if item["id"] == record["task_id"])
+        verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir)
+        agrees = verdict.outcome == record["outcome"]
+        verdicts[trial_id] = {"status": verdict.outcome, "recorded": record["outcome"], "agrees": agrees}
+        if not agrees:
+            disagreements.append(trial_id)
+    return {"trials": verdicts, "disagreements": disagreements}
+
+
 def do_reduce(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
@@ -62,11 +94,13 @@ def main(argv: list[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     fake = commands.add_parser("fake-run", help="run the fake manifest end to end, offline")
     fake.add_argument("--out", required=True, type=Path)
-    for name in ("reduce", "report"):
+    for name in ("verify", "reduce", "report"):
         commands.add_parser(name).add_argument("--run", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.command == "fake-run":
         payload = fake_run(args.out)
+    elif args.command == "verify":
+        payload = do_verify(args.run)
     elif args.command == "reduce":
         payload = do_reduce(args.run)
     else:
