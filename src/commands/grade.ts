@@ -531,12 +531,14 @@ async function postGraded(
   // already recorded is owed to the shelf whenever it was made, and the NULL
   // stamp is the whole debt. So a hand `--label` on a fire older than `--since`
   // is posted here, and a leg whose post failed last run is retried forever.
+  // A leg with no search id (a local pairing, this machine's own record) has no
+  // shelf to owe and is never selected, so it cannot pile up as "not routed".
   const rows = all(
     db,
     `SELECT f.id AS id, f.delivered AS delivered, l.stage AS stage, l.shelf AS shelf,
             l.search_id AS search_id, l.url AS url, l.graded AS graded
        FROM fires f JOIN legs l ON l.fire_id = f.id
-      WHERE l.graded IS NOT NULL AND l.posted_at IS NULL`,
+      WHERE l.graded IS NOT NULL AND l.posted_at IS NULL AND l.search_id IS NOT NULL`,
     [],
   );
   if (rows.length === 0) return tally;

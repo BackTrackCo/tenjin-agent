@@ -120,48 +120,48 @@ FIRST settled sale (no register call), and by x402scan once CDP-settled payments
 
 Mid-task, ask a QUESTION instead of browsing: it matches what pieces actually say (body, title
 and excerpt), with freshness/price/applicability as HARD gates. This endpoint only searches:
-`matched: 0` means nothing matched CONFIDENTLY (every decision-view item is semantically
-close, or corroborated by an identifier, its title, its excerpt or a tag; a shared word is
-not a match): an empty result plus a `hint` pointing at GET `/api/articles`, which is
-where the catalog is browsed. A differently phrased question is still worth
-one retry on this same endpoint. Anonymous,
-no wallet. Matching
-runs on wording and meaning, so send the whole question as one natural-language sentence
-rather than keywords, generalized first (no private identifiers, internal names, or
-secrets; generalize the NAMES, keep the technical specifics).
+`matched: 0` means nothing matched CONFIDENTLY under `hybrid-v1` (every decision-view item is
+semantically close, or corroborated by an identifier, its title, its excerpt or a tag; a shared
+word is not a match): an empty result plus a `hint` pointing at GET `/api/articles`, where
+the catalog is browsed. A small early catalog makes that honest often; a rephrased question is
+still worth one retry. Anonymous, no wallet. Matching runs on wording and meaning, so send the
+whole question as one natural-language sentence, not keywords, generalized first (no private
+identifiers, internal names, or secrets: generalize the NAMES, keep the specifics).
 
 - `POST https://tenjin.sh/api/search` with `{ "schemaVersion": 3, "view": "decision",
   "query": "<task question>", "identifiers"?: ["PR 751", "migrate.yml"], "limit"?: 5,
-  "filters"?: { "maxPrice": "<atomic USDC>", "freshWithin": "P30D" } }` → `{ schemaVersion: 3,
-  searchId, calibration, items, matched, hint?, inspect?, truncated? }`. You get up to
-  `limit` (1-10, default 5) lean items: id, payable `url`, slug, title, artifactType,
-  `excerpt`, `temporalMode`, price, asOf, validUntil, matchReasons, estimatedTokens, creator
-  handle (slug + creator handle feed any handle/slug call directly, so you never parse the
-  url), plus optional `confidence` (`high` | `medium` | `low`) and `corroborated`
-  (boolean), both absent on `lexical-v1`: on `hybrid-v1` `confidence` buckets the DENSE
-  leg's own match strength and `corroborated` says whether public-weight text ALSO matched
-  (identifier originals/parts, title, excerpt, or tags). Neither is a verdict: a `high`
-  uncorroborated match and a `medium` corroborated one are different evidence, not ranked,
-  and neither is preview-visible, since identifiers and the cosine both read the whole paid
-  body. Inspect public evidence before paying. Coarse, meaningful only within this
-  calibration. Supplied `identifiers` form a hard AND lane: every normalized public token
-  must occur. At most 3 come from any one creator while others fill the page.
-  `matched: 0` means nothing matched CONFIDENTLY under `hybrid-v1`, and `hint` points at
-  GET /api/articles for browsing; a small early catalog makes that honest often.
+  "budget_ms"?: 2350, "filters"?: { "maxPrice": "<atomic USDC>", "freshWithin": "P30D" } }` →
+  `{ schemaVersion: 3, searchId, calibration, items, matched, hint?, inspect?, truncated? }`.
+  `budget_ms`: milliseconds you can still wait. The server shortens its OWN work to fit it — the query
+  embed and the free-body load, nothing else. Up to `limit` (1-10, default 5) lean items: id, payable `url`,
+  slug, title, artifactType, `excerpt`, `temporalMode`, price, asOf, validUntil, matchReasons,
+  estimatedTokens, creator handle (slug + handle feed any handle/slug call; never parse the url), plus `body`
+  `{ text }` on most FREE items (`price` `"0"`): the WHOLE piece, uncut, and you decide how much of
+  it to keep. Check for the key: omitted when `budget_ms` left no room or the
+  load failed, and never on a paid item. Optional `confidence` (`high` | `medium` | `low`) and
+  `corroborated` (boolean), absent on `lexical-v1`: on `hybrid-v1` `confidence` buckets
+  the DENSE leg's match strength and `corroborated` says whether public-weight text ALSO
+  matched (identifier originals/parts, title, excerpt, or tags). Neither is a verdict (coarse,
+  within this calibration only): a `high` uncorroborated match and a `medium` corroborated
+  one are different evidence, not ranked. `strong` (same presence rule) is the shelf's own bar
+  for showing a hit unasked, `corroborated` and `confidence` not `low`: a delivery bar, not
+  a buying verdict, and as paywall-blind as they are (identifiers and the cosine read the whole
+  paid body): inspect public evidence before paying. `identifiers` is a hard AND lane: every
+  normalized token must occur. At most 3 per creator while others fill the page.
   Data handling for this endpoint is stated once, at https://tenjin.sh/privacy.
   `X-Tenjin-Eval-Cohort: 1` marks the evaluation cohort.
-- The rank-1 card is usually already inline: a result with matches carries `inspect`
-  `{ resourceId, url, free, price, temporalMode, asOf, validUntil, questionsAnswered, scope,
-  exclusions }` for `items[0]`, a bounded subset of the same public card. Read it
-  instead of fetching the top candidate again, and read `exclusions` before you buy: it is
-  the one field that can rule the piece OUT. Check for the key rather than assuming it —
-  it is omitted when that card could not be loaded or is too large to fit.
-- Inspect ANOTHER candidate for FREE before buying: fetch its `url` without paying. A PAID
-  piece answers `402` whose body carries a `card` object (`questionsAnswered`,
-  `tasksSupported`, `appliesTo`, `scope`, `exclusions`, `temporalMode`) plus the preview,
-  present only when the card has public content; a FREE piece (`price` `"0"`) answers `200`
-  with the whole piece in `bodyMd` and no `card`. Shortlist wide, read `inspect`, then fetch
-  only the one or two it did not settle: a maximal card is roughly 25kB.
+- The rank-1 card is usually inline: a result with matches carries `inspect` `{ resourceId,
+  url, free, price, temporalMode, asOf, validUntil, questionsAnswered, scope, exclusions }` for
+  `items[0]`, a bounded subset of the same public card. Read it instead of fetching the top
+  candidate again, and read `exclusions` before you buy: it is the one field that can rule the
+  piece OUT. Check for the key: omitted when the card did not load or fit.
+- Inspect ANOTHER candidate for FREE before buying: fetch its `url` without paying. A PAID piece
+  answers `402` whose body carries a `card` object (`questionsAnswered`, `tasksSupported`,
+  `appliesTo`, `scope`, `exclusions`, `temporalMode`) plus the preview, present only when
+  the card has public content; a FREE piece (`price` `"0"`) answers `200` with the whole
+  piece in `bodyMd` and no `card`, but a free item's body is usually already on its row, so
+  this GET is for paid candidates and for a free row that came back without
+  `body`. Fetch only the one or two `inspect` did not settle: a maximal card is roughly 25kB.
 - `truncated: true` means the size backstop dropped trailing candidates. The ceiling grows
   with the number returned, so retry with a LARGER `limit` (up to 10) to get more; at
   `limit` 10 the tail is unrecoverable and narrowing the question is the remedy.
