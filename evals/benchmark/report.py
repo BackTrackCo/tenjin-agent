@@ -22,6 +22,9 @@ from typing import Any
 from .artifact import CANARY_PREFIX
 
 REPORT_SCHEMA = "bench1.report.v1"
+# How a run was isolated, weakest first. A report takes the weakest kind any
+# accepted record carries, so one plumbing record marks the whole run.
+ISOLATION_KINDS = ("automated_plumbing", "operator_plumbing", "attested", "fake")
 MAX_TOKEN = 64
 OPAQUE = re.compile(r"^[A-Za-z0-9_.:+-]{0,%d}$" % MAX_TOKEN)
 HASH = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
@@ -112,6 +115,23 @@ def _guard_string(value: str, trail: str) -> None:
         raise ReportError("not_opaque", trail, f"only {MAX_TOKEN} characters of [A-Za-z0-9_.:+-] are publishable")
 
 
+def isolation_kind(record: dict[str, Any]) -> str:
+    isolation = record["isolation"]
+    if not isolation["live"]:
+        return "fake"
+    if isolation["attested_container"]:
+        return "attested"
+    return "automated_plumbing" if isolation.get("automated", False) else "operator_plumbing"
+
+
+def stamp(accepted: dict[str, dict[str, Any]]) -> tuple[bool, str]:
+    """`(publishable, isolation kind)` for the run: one non-publishable record decides."""
+    publishable = bool(accepted) and all(record["isolation"]["publishable"] for record in accepted.values())
+    kinds = {isolation_kind(record) for record in accepted.values()}
+    kind = next((name for name in ISOLATION_KINDS if name in kinds), "fake")
+    return publishable, kind
+
+
 def project(
     manifest_data: dict[str, Any],
     manifest_hash: str,
@@ -124,6 +144,7 @@ def project(
     for item in reduction["excluded"]:
         reason = item["reason"].split(":", 1)[0]
         excluded[reason] = excluded.get(reason, 0) + 1
+    publishable, kind = stamp(accepted)
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
@@ -132,9 +153,16 @@ def project(
         "schedule_hash": schedule_hash,
         "seed": manifest_data["seed"],
         "repeats": manifest_data["repeats"],
+        "publishable": publishable,
+        "isolation": kind,
         "baseline": reduction["baseline"],
         "arms": reduction["arms"],
-        "comparisons": reduction["comparisons"],
+        # A headline needs complete accounting and a publishable run; the
+        # reducer knows the first and only the records know the second.
+        "comparisons": {
+            arm_id: {**comparison, "headline_eligible": comparison["headline_eligible"] and publishable}
+            for arm_id, comparison in reduction["comparisons"].items()
+        },
         "invalid": reduction["invalid"],
         "excluded": excluded,
         "trials": [
@@ -172,10 +200,16 @@ def render(report: dict[str, Any]) -> str:
     baseline = report["baseline"]
     labels = {arm_id: f"{arm_id} (baseline)" if arm_id == baseline else arm_id for arm_id in report["arms"]}
     width = max([len(label) for label in labels.values()] + [len("arm")])
+    stamp_line = (
+        f"isolation {report['isolation']}, publishable"
+        if report["publishable"]
+        else f"isolation {report['isolation']}: NOT PUBLISHABLE, plumbing evidence only, no number here is a result"
+    )
     lines = [
         f"benchmark {report['benchmark_version']}, schema {report['schema']}",
         f"manifest {report['manifest_hash'][:12]}  schedule {report['schedule_hash'][:12]}  "
         f"seed {report['seed']}  repeats {report['repeats']}",
+        stamp_line,
         "",
         f"{'arm'.ljust(width)} {'attempts':>8s} {'passes':>7s} {'pass rate':>9s} {'tokens':>10s} "
         f"{'per attempt':>12s} {'accounting':>12s}",

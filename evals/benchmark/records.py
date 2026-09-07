@@ -240,6 +240,9 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("tool_counts", "sentinel", "isolation", "private_hashes"):
         if not isinstance(record[name], dict):
             raise RecordError(f"{name} must be an object")
+    for name in ("live", "publishable", "attested_container"):
+        if not isinstance(record["isolation"].get(name), bool):
+            raise RecordError(f"isolation.{name} must be true or false")
     if record["wall_time_s"] is not None and (
         isinstance(record["wall_time_s"], bool) or not isinstance(record["wall_time_s"], (int, float)) or record["wall_time_s"] < 0
     ):

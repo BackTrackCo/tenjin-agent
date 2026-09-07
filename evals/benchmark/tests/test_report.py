@@ -106,6 +106,57 @@ class ProjectionTest(unittest.TestCase):
         # Nothing in the projection is a body, a path, or a transcript.
         report.guard(published)
 
+    def stamped(self, **isolation: object) -> dict:
+        """The corpus with every accepted record's isolation slice overridden."""
+        return {
+            trial_id: {**record, "isolation": {**record["isolation"], **isolation}}
+            for trial_id, record in self.accepted.items()
+        }
+
+    def test_a_fake_corpus_is_publishable_and_says_so(self) -> None:
+        published = self.project()
+        self.assertEqual(published["publishable"], True)
+        self.assertEqual(published["isolation"], "fake")
+        self.assertEqual(published["comparisons"]["on"]["headline_eligible"], self.reduction["comparisons"]["on"]["headline_eligible"])
+
+    def test_an_attested_live_run_stays_publishable_and_headline_eligible(self) -> None:
+        accepted = self.stamped(live=True, attested_container=True, attestation_hash="sha256:" + "d" * 64)
+        published = self.project(accepted=accepted)
+        self.assertEqual(published["publishable"], True)
+        self.assertEqual(published["isolation"], "attested")
+        self.assertEqual(published["comparisons"]["on"]["headline_eligible"], True)
+        report.guard(published)
+
+    def test_a_plumbing_run_projects_as_non_publishable_and_never_headline_eligible(self) -> None:
+        cases = {"operator_plumbing": {}, "automated_plumbing": {"automated": True}}
+        for kind, extra in cases.items():
+            with self.subTest(kind):
+                accepted = self.stamped(live=True, publishable=False, **extra)
+                published = self.project(accepted=accepted)
+                self.assertEqual(published["publishable"], False)
+                self.assertEqual(published["isolation"], kind)
+                self.assertEqual(published["comparisons"]["on"]["headline_eligible"], False)
+                # The numbers are unchanged: the stamp is a label, not a reduction.
+                self.assertEqual(published["comparisons"]["on"]["token_ratio"], 0.825)
+                self.assertEqual(published["arms"], self.reduction["arms"])
+                report.guard(published)
+
+    def test_one_non_publishable_record_stamps_the_whole_report(self) -> None:
+        trial_id, record = sorted(self.accepted.items())[0]
+        accepted = self.stamped(live=True, attested_container=True, attestation_hash="sha256:" + "d" * 64)
+        accepted[trial_id] = {**record, "isolation": {**record["isolation"], "live": True, "publishable": False}}
+        published = self.project(accepted=accepted)
+        self.assertEqual(published["publishable"], False)
+        self.assertEqual(published["isolation"], "operator_plumbing")
+        self.assertEqual(published["comparisons"]["on"]["headline_eligible"], False)
+
+    def test_a_record_without_the_isolation_booleans_is_excluded_not_projected(self) -> None:
+        record = support.reduction_record("t1", "off", 0, 0, 6000, "pass")
+        record["isolation"] = {"live": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None}
+        with self.assertRaises(records.RecordError) as caught:
+            records.validate(record)
+        self.assertIn("isolation.publishable", str(caught.exception))
+
     def test_a_planted_host_path_in_a_record_refuses_the_whole_report(self) -> None:
         trial_id, record = sorted(self.accepted.items())[0]
         planted = {**self.accepted, trial_id: {**record, "invalid_reason": f"usage:{HOST_PATH}"}}

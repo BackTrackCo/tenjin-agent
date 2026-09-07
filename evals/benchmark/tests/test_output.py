@@ -105,6 +105,8 @@ class ReportRenderTest(unittest.TestCase):
             "schedule_hash": "b" * 64,
             "seed": 7,
             "repeats": 2,
+            "publishable": True,
+            "isolation": "fake",
             "baseline": "off",
             "arms": {
                 "off": {
@@ -165,6 +167,21 @@ class ReportRenderTest(unittest.TestCase):
         self.assertIn("[0.700, 0.900]", text)
         self.assertIn("95%", text)
         self.assertIn("NOT headline eligible", text)
+
+    def test_the_header_names_the_isolation_kind_and_the_publishable_stamp(self) -> None:
+        text = report_module.render(self.report(isolation="attested"))
+        self.assertIn("isolation attested, publishable", text)
+        self.assertNotIn("NOT PUBLISHABLE", text)
+
+    def test_a_non_publishable_run_says_so_in_the_header_and_on_the_comparison(self) -> None:
+        payload = self.report(publishable=False, isolation="automated_plumbing")
+        payload["comparisons"]["on"]["headline_eligible"] = False
+        text = report_module.render(payload)
+        self.assertIn("isolation automated_plumbing: NOT PUBLISHABLE", text)
+        self.assertIn("plumbing evidence only", text)
+        self.assertIn("NOT headline eligible", text)
+        # The numbers are still printed; the stamp changes what they may be called.
+        self.assertIn("0.800", text)
 
     def test_a_refused_ratio_prints_its_reason_instead_of_a_number(self) -> None:
         payload = self.report()
