@@ -240,8 +240,10 @@ Examples:
   $ tenjin install --harness claude --publish-mode review
 
 Learn more:
-  The rules install writes are the free tier only: none can spend USDC or move
-  your keys, though doctor may check your wallet still opens. Full caveats:
+  The rules install writes are the free tier only: none can spend USDC.
+  \`tenjin read\` opens the keystore to mint a read-scoped session key, and
+  \`tenjin doctor\` decrypts locally to check your wallet still opens. Full
+  caveats:
   ${PERMISSIONS_DOC_URL}
 `,
     )

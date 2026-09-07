@@ -66,9 +66,10 @@ export function claudeSettingsPath(homeDir: string): string {
 }
 
 /**
- * The exact rules install may add. Free verbs only: none of them can spend USDC
- * or move your keys. See lib/permissions.ts for the per-verb notes and for
- * the flag caveat that qualifies every prefix rule.
+ * The exact rules install may add. Free verbs only: none of them can spend
+ * USDC, though `read` and `doctor` do open the keystore. See lib/permissions.ts
+ * for the per-verb notes and for the flag caveat that qualifies every prefix
+ * rule.
  */
 export const FREE_VERB_RULES: readonly string[] = [
   'Bash(tenjin search:*)',

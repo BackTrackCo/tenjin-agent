@@ -163,9 +163,15 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain(PERMISSIONS_DOC_URL);
     expect(help).not.toMatch(/(?<!\/)docs\/agent-permissions\.md/);
-    // Same tier claim as every other surface, doctor's local check included.
-    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC or move your keys');
-    expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
+    // Same tier claim as every other surface: no spending, and the keystore
+    // access `read` and `doctor` do have.
+    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC');
+    expect(help.replace(/\s+/g, ' ')).toContain(
+      '`tenjin read` opens the keystore to mint a read-scoped session key',
+    );
+    expect(help.replace(/\s+/g, ' ')).toContain(
+      '`tenjin doctor` decrypts locally to check your wallet still opens',
+    );
   });
 
   // The Bazaar lane is a flag now, not a prompt, so it has to be discoverable
