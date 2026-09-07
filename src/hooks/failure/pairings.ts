@@ -2,18 +2,16 @@ import { randomUUID } from 'node:crypto';
 import { hostname, userInfo } from 'node:os';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
 import { mask } from '../../lib/redact';
-import { projectId, shortHash } from '../../lib/state-store';
 import { EDITED_PREFIX } from '../arms/context';
-import { getFact, setFact } from '../facts';
 import { getMark, setMark } from '../gates';
-import { PAIRING_FIXED, PAIRING_ONCE, PAIRING_PASSED, PAIRING_SIMILAR } from '../prose';
+import { PAIRING_FIXED, PAIRING_ONCE, PAIRING_PASSED } from '../prose';
 import type { LoopDb } from '../store';
 import type { Actor, Answer } from '../types';
+import { projectId, shortHash } from './keys';
 
 /**
  * This machine's error-to-fix record (13-pr-d-local-arms.md, "failure"):
- * `pairings` and `pairing_closes` on `loop.db`, in `state-store.ts`'s shape
- * verbatim so E moves readers and not rows. A failure OPENS a row keyed on
+ * `pairings` and `pairing_closes` on `loop.db`. A failure OPENS a row keyed on
  * its signature; the same agent's later pass CLOSES it under the #269 rule;
  * a second, independent session's close promotes it to `verified`; a later
  * failure with the same key is answered by the row, rendered as an `Answer`
@@ -27,7 +25,6 @@ export interface Pairing {
   project: string | null;
   kind: string;
   key: string;
-  coarseKey: string | null;
   cmdHead: string | null;
   cmd: string | null;
   errorLine: string | null;
@@ -44,15 +41,14 @@ export interface OpenPairing {
   cwd: string;
   kind: 'sig_v1' | 'sig_v1_test';
   key: string;
-  coarseKey: string | null;
   cmdHead: string | null;
   cmd: string;
   errorLine: string;
   errorFiles: string[];
 }
 
-/** The `machine` column, as `state-store.ts` stamped it: host and user, so
- *  two containers sharing a hostname stay apart. */
+/** The `machine` column: host and user, so two containers sharing a hostname
+ *  stay apart. */
 function machineId(): string {
   let host = '';
   let user: string;
@@ -89,7 +85,6 @@ function pairingRow(row: Record<string, unknown>): Pairing {
     project: str(row.project),
     kind: str(row.kind) ?? 'sig_v1',
     key: str(row.key) ?? '',
-    coarseKey: str(row.coarse_key),
     cmdHead: str(row.cmd_head),
     cmd: str(row.cmd),
     errorLine: str(row.error_line),
@@ -102,15 +97,14 @@ function pairingRow(row: Record<string, unknown>): Pairing {
   };
 }
 
-/** Returns the row id, which the `replayed:` mark and the `pairing_post:`
- *  fact key on. */
+/** Returns the row id, which the `replayed:` mark keys on. */
 export function openPairing(db: LoopDb, row: OpenPairing, now: number): number {
   const result = db
     .prepare(
       `INSERT INTO pairings (
-         uid, at, session, project, machine, kind, key, coarse_key,
+         uid, at, session, project, machine, kind, key,
          cmd_head, cmd, error_line, error_files, pkg_versions, scope, status
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ambiguous', 'open')`,
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ambiguous', 'open')`,
     )
     .run(
       randomUUID(),
@@ -120,7 +114,6 @@ export function openPairing(db: LoopDb, row: OpenPairing, now: number): number {
       machineId(),
       row.kind,
       row.key,
-      row.coarseKey,
       row.cmdHead,
       row.cmd,
       row.errorLine,
@@ -130,30 +123,19 @@ export function openPairing(db: LoopDb, row: OpenPairing, now: number): number {
 }
 
 /**
- * The best closed match for a signature, scoped to the project: an EXACT key
- * match outranks a coarse-only one (a verified fix for a different test is
- * not stronger evidence about this one), then verified over unverified, then
- * most closed, then most recent. `IS` on the project so a payload with no cwd
- * matches the rows written without one and nothing else.
+ * The best closed match for a key, scoped to the project: verified over
+ * unverified, then most closed, then most recent. `IS` on the project so a
+ * payload with no cwd matches the rows written without one and nothing else.
  */
-export function findPairing(
-  db: LoopDb,
-  project: string | null,
-  key: string,
-  coarseKey: string | null,
-): Pairing | null {
+export function findPairing(db: LoopDb, project: string | null, key: string): Pairing | null {
   const row = db
     .prepare(
       `SELECT * FROM pairings
-       WHERE project IS ?
-         AND (key = ? OR (coarse_key IS NOT NULL AND coarse_key = ?))
-         AND status IN ('unverified', 'verified')
-       ORDER BY CASE WHEN key = ? THEN 0 ELSE 1 END,
-                CASE status WHEN 'verified' THEN 0 ELSE 1 END,
-                closes DESC, at DESC
+       WHERE project IS ? AND key = ? AND status IN ('unverified', 'verified')
+       ORDER BY CASE status WHEN 'verified' THEN 0 ELSE 1 END, closes DESC, at DESC
        LIMIT 1`,
     )
-    .get(project, key, coarseKey ?? '', key) as Record<string, unknown> | undefined;
+    .get(project, key) as Record<string, unknown> | undefined;
   return row === undefined ? null : pairingRow(row);
 }
 
@@ -190,8 +172,9 @@ function pairingById(db: LoopDb, project: string | null, id: number): Pairing | 
 const USER_SCOPE_RE =
   /\b(?:EADDRINUSE|EACCES|EPERM)\b|address already in use|command not found|not recognized as|permission denied|\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b[^\n]{0,24}\b(?:is not set|not set|is required|is undefined|is missing)\b/;
 
-/** `user`: replays locally, never syncs. `code`: a tracked file changed, the
- *  team shelf can hold it. `ambiguous`: it passed and nothing tracked changed. */
+/** `user`: this laptop's problem, so it stays here. `code`: a tracked file
+ *  changed, so the fix is worth writing up. `ambiguous`: it passed and nothing
+ *  tracked changed. */
 function pairingScope(errorLine: string | null, fixFiles: string[]): string {
   if (USER_SCOPE_RE.test(errorLine ?? '')) return 'user';
   return fixFiles.length === 0 ? 'ambiguous' : 'code';
@@ -214,7 +197,7 @@ function closePairing(
   fixFiles: string[],
   scope: string,
   now: number,
-): string {
+): void {
   db.prepare(
     `INSERT OR IGNORE INTO pairing_closes (pairing_id, session, agent_id, at, fix_cmd, fix_files, scope)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -239,7 +222,7 @@ function closePairing(
     scope: typeof row.scope === 'string' ? row.scope : 'ambiguous',
   }));
   const first = closers[0];
-  if (first === undefined) return 'open';
+  if (first === undefined) return;
   const agreeing = [
     first,
     ...closers.slice(1).filter((c) => c.fixFiles.some((f) => first.fixFiles.includes(f))),
@@ -258,7 +241,6 @@ function closePairing(
     first.scope,
     id,
   );
-  return status;
 }
 
 /**
@@ -343,45 +325,6 @@ export function rememberReplay(
   setMark(db, actor, REPLAYED_PREFIX + head, JSON.stringify([...prior, id]), now);
 }
 
-const PAIRING_POST_PREFIX = 'pairing_post:';
-
-/** The team-shelf post a pairing was opened beside, so this machine's later
- *  close can be carried back as the second, independent confirmation (the
- *  shelf has no close endpoint). `tenjin sync` reads it in E. */
-export function linkPost(
-  db: LoopDb,
-  id: number,
-  postId: string,
-  origin: string,
-  now: number,
-): void {
-  setFact(db, PAIRING_POST_PREFIX + id, JSON.stringify({ postId, origin, at: now }), now);
-}
-
-function markLinkClosed(
-  db: LoopDb,
-  id: number,
-  status: string,
-  fixFiles: string[],
-  now: number,
-): void {
-  const raw = getFact(db, PAIRING_POST_PREFIX + id);
-  if (raw === null) return;
-  let link: unknown;
-  try {
-    link = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof link !== 'object' || link === null) return;
-  setFact(
-    db,
-    PAIRING_POST_PREFIX + id,
-    JSON.stringify({ ...link, closedAt: now, status, fixFiles }),
-    now,
-  );
-}
-
 /**
  * A pass closes whatever this machine had open on the same command head, and
  * whatever this agent was SHOWN behind it (without that, the second close
@@ -416,7 +359,7 @@ export function closeOpenPairings(
     const sameCommand = pairing.cmd !== null && pairing.cmd === passed;
     if (named.length === 0 && !sameCommand) return;
     const fixFiles = named.length > 0 ? named : changed;
-    const status = closePairing(
+    closePairing(
       db,
       pairing.id,
       actor,
@@ -425,7 +368,6 @@ export function closeOpenPairings(
       pairingScope(pairing.errorLine, fixFiles),
       now,
     );
-    markLinkClosed(db, pairing.id, status, fixFiles, now);
   };
   for (const head of heads) {
     for (const pairing of openPairingsForHead(db, project, head, now)) closeIf(pairing);
@@ -447,19 +389,14 @@ export function pairingIdOf(resourceId: string): number | null {
  * like any other: the error line is the title, the sentences (`prose.ts`)
  * are the text. No url and no price: it is this machine's own row, and
  * `tenjin read` takes a post id, so a pointer under it would name a command
- * that does not exist. `fine` is whether the match was on the row's own key;
- * a coarse test-identity match says "this file/suite has been fixed before",
- * not "this exact test", which is a claim too weak for the fix body.
+ * that does not exist.
  */
-export function pairingAnswer(pairing: Pairing, fine: boolean): Answer {
+export function pairingAnswer(pairing: Pairing): Answer {
   const answer: Answer = {
     shelf: 'local',
     resourceId: RESOURCE_PREFIX + pairing.id,
     title: pairing.errorLine ?? '',
   };
-  if (!fine) {
-    return { ...answer, text: PAIRING_SIMILAR(pairing.errorFiles[0] ?? 'this file') };
-  }
   const files = pairing.fixFiles.join(', ');
   const lines = [
     pairing.status === 'verified' ? PAIRING_FIXED(pairing.closes, files) : PAIRING_ONCE(files),

@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { hasErrorMarker } from '../../adapters/error-markers';
-import { shortHash } from '../../lib/state-store';
+import { shortHash } from './keys';
 
 /**
  * The failure arm's pure half (13-pr-d-local-arms.md, "failure"): which
@@ -480,29 +480,20 @@ export function normalizeForSig(text: string): string {
 
 export interface Signature {
   key: string;
-  /** Null when the frame alone cleared the floor: without an errno the coarse
-   *  key would be a hash of the message and nothing else, which is exactly
-   *  the frameless, errno-less key the floor rejects. */
-  coarseKey: string | null;
 }
 
 /**
- * The `sig_v1` keys for one failure, or null below the SPECIFICITY FLOOR: no
- * errno and no top frame means "N tests failed" normalizes to the same bytes
- * in every repo on earth, and a pairing keyed on it would replay somebody
- * else's fix at everybody. The fine key is message + errno + frame; the
- * coarse one drops the frame, so a fix recorded against one file still
- * matches the same error raised from a sibling.
+ * The `sig_v1` key for one failure — message + errno + frame — or null below
+ * the SPECIFICITY FLOOR: no errno and no top frame means "N tests failed"
+ * normalizes to the same bytes in every repo on earth, and a pairing keyed on
+ * it would replay somebody else's fix at everybody.
  */
 export function sigV1(line: string, block: string): Signature | null {
   const message = normalizeForSig(line);
   const errno = errnoOf(line);
   const frame = topFrameFile(block);
   if (errno === '' && frame === '') return null;
-  return {
-    key: shortHash('sig_v1|' + message + '|' + errno + '|' + frame),
-    coarseKey: errno === '' ? null : shortHash('sig_v1c|' + message + '|' + errno),
-  };
+  return { key: shortHash('sig_v1|' + message + '|' + errno + '|' + frame) };
 }
 
 /** Traceback locations that are not files: an evaluated string or a piped

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import type { Emit } from '../adapters/types';
 import { AGENT_ID_RE } from '../lib/grade';
 import { mask } from '../lib/redact';
-import { projectId } from '../lib/state-store';
+import { projectId } from './failure/keys';
 import { STARTED_MARK } from './actor';
 import { EDITED_PREFIX } from './arms/context';
 import { factsWithPrefix, setFact } from './facts';

@@ -97,7 +97,6 @@ describe('openLoopDb', () => {
       'fires_actor',
       'fires_at',
       'handoff_claim',
-      'pairings_coarse_status',
       'pairings_key_status',
       'pairings_open_head',
       'searches_at',

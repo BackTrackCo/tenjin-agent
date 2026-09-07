@@ -173,15 +173,13 @@ describe('sig_v1', () => {
   const ENOENT = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
   const ENOENT_BLOCK = ENOENT + '\n    at run (src/migrate.ts:12:3)\n';
 
-  it('is two 16-hex keys, the coarse one dropping the frame', () => {
+  it('is one 16-hex key, and the frame is part of it', () => {
     const sig = sigV1(ENOENT, ENOENT_BLOCK);
     expect(sig?.key).toMatch(HEX16);
-    expect(sig?.coarseKey).toMatch(HEX16);
-    expect(sig?.key).not.toBe(sig?.coarseKey);
-    // The same errno raised from a sibling file shares the coarse key only.
+    // The same errno raised from a sibling file is a different key: there is no
+    // lane that drops the frame any more.
     const sibling = sigV1(ENOENT, ENOENT + '\n    at run (src/seed.ts:4:1)\n');
     expect(sibling?.key).not.toBe(sig?.key);
-    expect(sibling?.coarseKey).toBe(sig?.coarseKey);
   });
 
   it('keys the same bytes on two machines: paths, digits, hosts and hex normalized', () => {
@@ -202,13 +200,12 @@ describe('sig_v1', () => {
     expect(sigV1('ERROR: 2 tests failed', 'ERROR: 2 tests failed')).toBeNull();
   });
 
-  it('has no coarse key when the frame alone cleared the floor', () => {
+  it('clears the floor on the frame alone, with no errno', () => {
     const sig = sigV1(
       'AssertionError: expected 1 to be 2',
       'AssertionError: expected 1 to be 2\n    at src/a.test.ts:3:1',
     );
     expect(sig?.key).toMatch(HEX16);
-    expect(sig?.coarseKey).toBeNull();
   });
 
   it.each([

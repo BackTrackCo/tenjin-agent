@@ -18,9 +18,9 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  * to migrate; `CREATE TABLE IF NOT EXISTS` per table, and a shape change means
  * DELETE `loop.db`, which is what a column added or dropped here (PR C's
  * `legs.calibration`, PR C's dropped `actors`) costs. Each PR creates only the
- * tables it writes: PR D's `handoff`, `facts`, `pairings` and `pairing_closes`
- * (the last two in `state-store.ts`'s shape, verbatim, so E moves readers and
- * not rows).
+ * tables it writes: PR D's `handoff`, `facts`, `pairings` and `pairing_closes`.
+ * A pairing's `post_id` is the piece the agent published about that fix, and it
+ * is what `publish --key` stamps.
  *
  * AND THE DELETE HAPPENS HERE, because nothing else does it: `CREATE TABLE IF
  * NOT EXISTS` is silent about a table whose columns have changed, and the row
@@ -123,7 +123,6 @@ CREATE TABLE IF NOT EXISTS pairings (
   machine TEXT NOT NULL,
   kind TEXT NOT NULL,
   key TEXT NOT NULL,
-  coarse_key TEXT,
   cmd_head TEXT,
   cmd TEXT,
   error_line TEXT,
@@ -135,7 +134,7 @@ CREATE TABLE IF NOT EXISTS pairings (
   status TEXT NOT NULL,
   closes INTEGER NOT NULL DEFAULT 0,
   closed_at INTEGER,
-  synced_at INTEGER
+  post_id TEXT
 );
 CREATE TABLE IF NOT EXISTS pairing_closes (
   pairing_id INTEGER NOT NULL,
@@ -148,7 +147,6 @@ CREATE TABLE IF NOT EXISTS pairing_closes (
   PRIMARY KEY (pairing_id, session)
 );
 CREATE INDEX IF NOT EXISTS pairings_key_status ON pairings(key, status);
-CREATE INDEX IF NOT EXISTS pairings_coarse_status ON pairings(coarse_key, status);
 CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';
 `;
 
@@ -220,7 +218,6 @@ const LOOP_SHAPE: Record<string, readonly string[]> = {
     'machine',
     'kind',
     'key',
-    'coarse_key',
     'cmd_head',
     'cmd',
     'error_line',
@@ -232,7 +229,7 @@ const LOOP_SHAPE: Record<string, readonly string[]> = {
     'status',
     'closes',
     'closed_at',
-    'synced_at',
+    'post_id',
   ],
   pairing_closes: ['pairing_id', 'session', 'agent_id', 'at', 'fix_cmd', 'fix_files', 'scope'],
 };

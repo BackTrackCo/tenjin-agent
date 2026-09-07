@@ -37,8 +37,6 @@ export const LOCAL_OPENER =
 
 /** This machine's error-to-fix record as the agent reads it, under the local
  *  opener: what was touched, how many times it held, and what passed after. */
-export const PAIRING_SIMILAR = (file: string): string =>
-  'A similar failure in ' + file + ' has been fixed here before.';
 export const PAIRING_FIXED = (closes: number, files: string): string =>
   'Fixed here ' + closes + ' time(s) by changing: ' + files + '.';
 export const PAIRING_ONCE = (files: string): string =>

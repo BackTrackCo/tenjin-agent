@@ -1,15 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { projectId } from '../../lib/state-store';
 import { CHILD, LEAD, NOW, cleanup, freshDb } from '../arms/test-support';
-import { getFact } from '../facts';
 import { setMark } from '../gates';
 import type { LoopDb } from '../store';
 import type { Actor } from '../types';
+import { projectId } from './keys';
 import {
   closeOpenPairings,
   findPairing,
   isTrackedPath,
-  linkPost,
   openPairing,
   pairingAnswer,
   rememberReplay,
@@ -43,7 +41,6 @@ function open(over: Partial<Parameters<typeof openPairing>[1]> = {}, at = NOW): 
       cwd: REPO,
       kind: 'sig_v1',
       key: 'k-fine',
-      coarseKey: 'k-coarse',
       cmdHead: 'pnpm',
       cmd: 'pnpm db:migrate',
       errorLine: "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
@@ -163,48 +160,44 @@ describe('the #269 close rule', () => {
     pass();
     expect(row(id)).toMatchObject({ status: 'open' });
   });
-
-  it('updates the linked post fact on close, for sync to attest', () => {
-    const id = open();
-    linkPost(db, id, 'post-1', 'https://shelf.acme.internal', NOW);
-    edited(LEAD, `${REPO}/src/migrate.ts`, NOW + 10);
-    pass();
-    expect(JSON.parse(getFact(db, `pairing_post:${id}`) ?? '')).toEqual({
-      postId: 'post-1',
-      origin: 'https://shelf.acme.internal',
-      at: NOW,
-      closedAt: NOW + 100,
-      status: 'unverified',
-      fixFiles: ['src/migrate.ts'],
-    });
-  });
 });
 
 describe('the lookup', () => {
   it('answers nothing until a row is closed', () => {
     open();
-    expect(findPairing(db, PROJECT, 'k-fine', 'k-coarse')).toBeNull();
+    expect(findPairing(db, PROJECT, 'k-fine')).toBeNull();
   });
 
-  it('ranks an exact key over a verified coarse-only match', () => {
-    const coarseOnly = open({ key: 'k-other', session: 'a' });
+  it('matches the key exactly, and nothing else', () => {
+    const other = open({ key: 'k-other', session: 'a' });
     const fine = open({ session: 'b' });
     edited(LEAD, `${REPO}/src/migrate.ts`, NOW + 10);
     pass();
-    rememberReplay(db, OTHER_SESSION, 'pnpm', coarseOnly, NOW + 200);
+    rememberReplay(db, OTHER_SESSION, 'pnpm', other, NOW + 200);
     edited(OTHER_SESSION, `${REPO}/src/migrate.ts`, NOW + 210);
     pass(OTHER_SESSION, 'pnpm db:migrate', NOW + 220);
-    expect(row(coarseOnly).status).toBe('verified');
-    expect(findPairing(db, PROJECT, 'k-fine', 'k-coarse')?.id).toBe(fine);
-    // Coarse alone still answers when the fine key is unknown.
-    expect(findPairing(db, PROJECT, 'k-unknown', 'k-coarse')?.id).toBe(coarseOnly);
+    expect(row(other).status).toBe('verified');
+    expect(findPairing(db, PROJECT, 'k-fine')?.id).toBe(fine);
+    expect(findPairing(db, PROJECT, 'k-unknown')).toBeNull();
+  });
+
+  it('ranks a verified row over an unverified one under the same key', () => {
+    const once = open({ session: 'a' });
+    const twice = open({ session: 'b' });
+    edited(LEAD, `${REPO}/src/migrate.ts`, NOW + 10);
+    pass();
+    rememberReplay(db, OTHER_SESSION, 'pnpm', twice, NOW + 200);
+    edited(OTHER_SESSION, `${REPO}/src/migrate.ts`, NOW + 210);
+    pass(OTHER_SESSION, 'pnpm db:migrate', NOW + 220);
+    expect(row(once).status).toBe('unverified');
+    expect(findPairing(db, PROJECT, 'k-fine')?.id).toBe(twice);
   });
 
   it('is scoped to the checkout', () => {
     open();
     edited(LEAD, `${REPO}/src/migrate.ts`, NOW + 10);
     pass();
-    expect(findPairing(db, projectId('/repo/two'), 'k-fine', 'k-coarse')).toBeNull();
+    expect(findPairing(db, projectId('/repo/two'), 'k-fine')).toBeNull();
   });
 });
 
@@ -222,8 +215,8 @@ describe('the record as an Answer', () => {
     const id = open();
     edited(LEAD, `${REPO}/src/migrate.ts`, NOW + 10);
     pass(LEAD, 'DATABASE_URL=postgres://app:hunter2@db/x pnpm db:migrate');
-    const match = findPairing(db, PROJECT, 'k-fine', 'k-coarse');
-    const answer = pairingAnswer(match!, true);
+    const match = findPairing(db, PROJECT, 'k-fine');
+    const answer = pairingAnswer(match!);
     // No url and no price: nothing under it can point at a `tenjin read`.
     expect(answer).toEqual({
       shelf: 'local',
@@ -245,17 +238,8 @@ describe('the record as an Answer', () => {
     rememberReplay(db, OTHER_SESSION, 'pnpm', id, NOW + 200);
     edited(OTHER_SESSION, `${REPO}/src/migrate.ts`, NOW + 210);
     pass(OTHER_SESSION, 'pnpm db:migrate', NOW + 220);
-    const answer = pairingAnswer(findPairing(db, PROJECT, 'k-fine', null)!, true);
+    const answer = pairingAnswer(findPairing(db, PROJECT, 'k-fine')!);
     expect(answer.text).toContain('Fixed here 2 time(s) by changing: src/migrate.ts.');
-  });
-
-  it('says only that the file was fixed before on a coarse test-identity match, never the fix', () => {
-    open({ kind: 'sig_v1_test', errorFiles: ['a.test.ts'] });
-    edited(LEAD, `${REPO}/src/a.test.ts`, NOW + 10);
-    pass();
-    const answer = pairingAnswer(findPairing(db, PROJECT, 'k-fine', null)!, false);
-    expect(answer.text).toBe('A similar failure in a.test.ts has been fixed here before.');
-    expect(answer.text).not.toContain('src/a.test.ts');
   });
 });
 

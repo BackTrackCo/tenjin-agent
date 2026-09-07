@@ -1031,10 +1031,15 @@ describe('the public render did not move', () => {
   // are deleted — the CLI knows the harness session but never the agent inside
   // it, so in a fan-out `--last` could rate a sibling's search — and the outcome
   // paragraph names `--search-id <id>` alone. tenjin-publish is untouched.
+  //
+  // Re-pinned again for the same PR's fix lane: the turn-end ask names a fix
+  // this session closed and the key it was recorded under, so tenjin-publish
+  // says to pass that key as `--key fingerprint=<key>`. tenjin-search is
+  // untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '3f48712445088ec79d48efba47da0b63',
-      'tenjin-publish': 'e7c516189259f5498c7f0067813a801e',
+      'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });
 

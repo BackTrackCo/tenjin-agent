@@ -48,7 +48,8 @@ import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
 import { AGENT_ID_RE } from '../lib/grade';
-import { projectIdOf } from '../lib/state-store';
+import { projectId } from '../hooks/failure/keys';
+import { withLoopDb } from '../lib/loop-db';
 import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
 import { readRegularUtf8File } from '../lib/regular-file';
 import type { CommandContext, CommandResult } from '../context';
@@ -199,7 +200,7 @@ export async function runPublish(
         fix: 'Pass the id the capture ask printed, on its own: `tenjin publish --finding <id> --discard`. Reading it is a separate command, `tenjin publish --finding <id> --dry-run`, which writes nothing and so never discards. A file is discarded by deleting it.',
       });
     }
-    const target = await readChildFinding(ctx.dataDir, args.finding, Date.now, projectIdOf(cwd));
+    const target = await readChildFinding(ctx.dataDir, args.finding, Date.now, projectId(cwd));
     // THE SAME CROSS-PROJECT GATE `--finding` TAKES (round-3 item 5), and for a
     // stronger reason. Publishing another checkout's finding is recoverable —
     // the piece is up and can be taken down. Discarding it is not: the row is
@@ -210,7 +211,7 @@ export async function runPublish(
     // rather than the consent cascade, because `full-auto` clears the cascade
     // and this is a gate that has to survive it.
     if (args.yes !== true) {
-      const here = projectIdOf(cwd);
+      const here = projectId(cwd);
       if (isElsewhere(target.project, here)) {
         throw new CliError(
           'NEEDS_CONFIRMATION',
@@ -249,7 +250,7 @@ export async function runPublish(
   // Resolved FIRST because team mode changes what the rest of this function
   // does, not just where the POST goes.
   const runtime = await resolveContextSettings(ctx);
-  const { raw, finding } = await resolveSource(args, ctx, projectIdOf(cwd), deps.stdin);
+  const { raw, finding } = await resolveSource(args, ctx, projectId(cwd), deps.stdin);
 
   // The consent cascade + resolved price (global < project < env < flag), with the
   // full-auto loosening gate. Pure config reads: no writes, no network, no wallet,
@@ -304,7 +305,7 @@ export async function runPublish(
    * one outcome on this command that cannot be undone.
    */
   if (finding !== undefined && args.yes !== true && args.dryRun !== true) {
-    const here = projectIdOf(cwd);
+    const here = projectId(cwd);
     if (isElsewhere(finding.project, here)) {
       throw new CliError(
         'NEEDS_CONFIRMATION',
@@ -583,6 +584,7 @@ export async function runPublish(
       ...(finding === undefined ? {} : { findingId: finding.id }),
     });
   }
+  stampPairings(ctx.dataDir, keys, result.resourceId);
   // Park the named claims on the draft (record's own spelling: the store matches
   // ids by exact string), so the promotion can send what this create withheld.
   if (parksPrivately) {
@@ -639,6 +641,30 @@ export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
     parsed.push({ kind: flag.slice(0, eq) as PostKeyKind, key: flag.slice(eq + 1) });
   }
   return normalizePostKeys(parsed, '--key');
+}
+
+/**
+ * The fix this piece explains, named once. The turn-end ask hands the agent
+ * `--key fingerprint=sig_v1:<hash>`; a `pairings` row stores the hash alone, so
+ * the stamp matches on the part after the prefix, and only where nothing has
+ * claimed the row yet — a second piece under the same key does not displace the
+ * first, and re-running the same publish is not a second stamp.
+ *
+ * BEST EFFORT, BECAUSE THE PUBLISH HAS ALREADY LANDED. A `loop.db` that cannot
+ * be opened or written costs one repeat of the ask at the next turn end;
+ * failing the command here would report a piece that is up as a failure.
+ */
+function stampPairings(dataDir: string, keys: PostKeyInput[], postId: string): void {
+  const fingerprints = keys.filter((k) => k.kind === 'fingerprint');
+  if (fingerprints.length === 0) return;
+  try {
+    withLoopDb(dataDir, (db) => {
+      const stamp = db.prepare('UPDATE pairings SET post_id = ? WHERE key = ? AND post_id IS NULL');
+      for (const { key } of fingerprints) stamp.run(postId, key.slice(key.indexOf(':') + 1));
+    });
+  } catch {
+    // See above: the ask names the fix again next turn.
+  }
 }
 
 function warnUnrecorded(
@@ -857,7 +883,7 @@ interface PublishSource {
  * finding with no project is one an older build wrote and nobody can place, and
  * a cwd that yields no project id is a caller with no place to speak for; both
  * are "not this project", and a bare `!==` made the two nulls agree and cleared
- * the gate. It holds today only because `projectIdOf('')` is unreachable from
+ * the gate. It holds today only because `projectId('')` is unreachable from
  * the CLI, which is not a property this gate should depend on.
  */
 function isElsewhere(finding: string | null, here: string | null): boolean {

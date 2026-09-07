@@ -347,6 +347,10 @@ loop an `outcome` already closed, so a premature close is recoverable. Repeat it
 answers, rather than closing the siblings as `regenerated`. `--draft` saves a
 private draft, leaves the loop open, and sends no attribution.
 
+When the turn-end ask names a fix you made and gives its key, pass that key as
+`--key fingerprint=<key>` so the next run that hits the same error finds your
+explanation beside it.
+
 <!-- tenjin:when teamMode -->
 **On any exit 3, render THAT payload's findings as one yes/no, then re-run with
 `--yes` on an explicit yes.** Never ask a generic "shall I publish?" before
