@@ -1758,25 +1758,10 @@ async function resolveHooks(args: {
   const { plans, home, ctx, deps, flag, noHooks, dryRun, canPrompt } = args;
   const dataDir = ctx.dataDir;
   const rawConfig = await loadRawConfig(dataDir);
-  const rawHooks = rawConfig.hooks as
-    | {
-        webSearch?: WebSearchMode;
-        searchMode?: WebSearchMode;
-        agentDispatch?: WebSearchMode;
-        dispatchMode?: string;
-      }
-    | undefined;
-  const stored = rawHooks?.webSearch ?? rawHooks?.searchMode;
-  const storedWebSearch = rawHooks?.webSearch ?? rawHooks?.searchMode;
-  const storedAgentDispatchRaw =
-    rawHooks?.agentDispatch ??
-    (rawHooks?.dispatchMode === 'inherit'
-      ? storedWebSearch
-      : (rawHooks?.dispatchMode as WebSearchMode | undefined));
-  const storedAgentDispatch =
-    storedAgentDispatchRaw ?? (rawHooks?.searchMode !== undefined ? storedWebSearch : undefined);
-  const storedWebSearchEff = storedWebSearch ?? DEFAULT_HOOK_MODE;
-  const storedAgentDispatchEff = storedAgentDispatch ?? storedWebSearch ?? DEFAULT_HOOK_MODE;
+  const rawHooks = rawConfig.hooks;
+  const stored = rawHooks?.webSearch;
+  const storedWebSearchEff = stored ?? DEFAULT_HOOK_MODE;
+  const storedAgentDispatchEff = rawHooks?.agentDispatch ?? stored ?? DEFAULT_HOOK_MODE;
   // Whether a past `tenjin push on` armed the push experiment (docs/command-reference.md#push-experimental): a
   // durable config key, read here rather than passed in, so this run's hooks
   // stay in step with it with no separate flag to remember.
@@ -1813,11 +1798,7 @@ async function resolveHooks(args: {
   // and must never clobber a diverged agentDispatch (e.g. webSearch auto + agentDispatch off
   // -> flagless reinstall would otherwise silently re-enable dispatch). See A1igator R2 review.
   const isExplicitChoice = flag !== undefined || (canPrompt && !dryRun);
-  const hasAnyHookKey =
-    rawHooks?.webSearch !== undefined ||
-    rawHooks?.agentDispatch !== undefined ||
-    rawHooks?.searchMode !== undefined ||
-    rawHooks?.dispatchMode !== undefined;
+  const hasAnyHookKey = rawHooks?.webSearch !== undefined || rawHooks?.agentDispatch !== undefined;
   const needsSync = isExplicitChoice
     ? rawHooks?.webSearch === undefined ||
       rawHooks?.agentDispatch === undefined ||

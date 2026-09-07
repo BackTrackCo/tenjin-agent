@@ -197,35 +197,37 @@ describe('publish block', () => {
   });
 });
 
-describe('hooks block: push and capture (docs/command-reference.md#push-experimental)', () => {
-  it('default off for both, read at run time by the installed scripts', async () => {
-    expect(CONFIG_DEFAULTS.hooks.push).toBe('off');
-    expect(CONFIG_DEFAULTS.hooks.capture).toBe('off');
-    expect((await loadConfig(dir)).hooks.push).toBe('off');
-    expect((await loadConfig(dir)).hooks.capture).toBe('off');
+describe('hooks block: push and capture', () => {
+  // A vanilla install turns the whole loop on. Six of the nine arms used to
+  // refuse to run after a default install because nothing set `hooks.push`.
+  it('default on for both, read at run time by the daemon', async () => {
+    expect(CONFIG_DEFAULTS.hooks.push).toBe('on');
+    expect(CONFIG_DEFAULTS.hooks.capture).toBe('on');
+    expect((await loadConfig(dir)).hooks.push).toBe('on');
+    expect((await loadConfig(dir)).hooks.capture).toBe('on');
   });
 
   it('merges a partial hooks block per-subkey (keeps the defaults it omits)', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on' } }));
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'off' } }));
     const cfg = await loadConfig(dir);
-    expect(cfg.hooks.push).toBe('on');
-    expect(cfg.hooks.capture).toBe('off');
+    expect(cfg.hooks.push).toBe('off');
+    expect(cfg.hooks.capture).toBe('on');
     expect(cfg.hooks.webSearch).toBe(CONFIG_DEFAULTS.hooks.webSearch);
   });
 
   it('resolveSettings exposes hooksPush and hooksCapture, file over default', async () => {
-    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'on', capture: 'nudge' } }));
+    await writeFile(configFile(), JSON.stringify({ hooks: { push: 'off', capture: 'off' } }));
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooksPush).toEqual({ value: 'on', source: 'file' });
-    expect(s.hooksCapture).toEqual({ value: 'nudge', source: 'file' });
+    expect(s.hooksPush).toEqual({ value: 'off', source: 'file' });
+    expect(s.hooksCapture).toEqual({ value: 'off', source: 'file' });
   });
 
   it('resolveSettings reports default provenance when unset', async () => {
     const config = await loadRawConfig(dir);
     const s = resolveSettings({ config, flags: {}, env: {} });
-    expect(s.hooksPush).toEqual({ value: 'off', source: 'default' });
-    expect(s.hooksCapture).toEqual({ value: 'off', source: 'default' });
+    expect(s.hooksPush).toEqual({ value: 'on', source: 'default' });
+    expect(s.hooksCapture).toEqual({ value: 'on', source: 'default' });
   });
 
   it('rejects a value outside either enum', async () => {

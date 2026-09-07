@@ -162,11 +162,11 @@ describe('runPushOn / runPushOff', () => {
 });
 
 describe('runPushStatus', () => {
-  it('reports off/off/nothing-wired/empty-ledger on a fresh dir', async () => {
+  it('reports the on/on defaults, nothing-wired and an empty ledger on a fresh dir', async () => {
     const result = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(result.data).toEqual({
-      mode: 'off',
-      captureMode: 'off',
+      mode: 'on',
+      captureMode: 'on',
       daemonInstalled: false,
       hooksRegistered: false,
       ledger: {
@@ -197,12 +197,12 @@ describe('runPushStatus', () => {
   it('is only armed when the daemon is installed AND the entries are registered', async () => {
     await writeFile(
       join(dir, 'config.json'),
-      JSON.stringify({ hooks: { push: 'on', capture: 'block' } }),
+      JSON.stringify({ hooks: { push: 'on', capture: 'on' } }),
     );
     const bare = await runPushStatus(makeCtx(), { homeDir: home, lookupStats: shelfDown });
     expect(bare.data).toMatchObject({
       mode: 'on',
-      captureMode: 'block',
+      captureMode: 'on',
       daemonInstalled: false,
       hooksRegistered: false,
     });

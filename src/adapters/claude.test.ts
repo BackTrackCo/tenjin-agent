@@ -380,31 +380,16 @@ describe('encode', () => {
     expect(exact.hookSpecificOutput.additionalContext).toHaveLength(CLAUDE_CONTEXT_MAX);
   });
 
-  it('blocks only when the fuse is present and false', () => {
-    const block = { block: { reason: 'answer the parked question first' } };
-    expect(encode(block, stop)).toEqual({
-      decision: 'block',
-      reason: 'answer the parked question first',
-    });
-    expect(encode(block, { ...stop, stopFuse: true })).toBeNull();
-    expect(encode(block, { ...stop, stopFuse: undefined })).toBeNull();
-    expect(encode(block, decoded('UserPromptSubmit'))).toBeNull();
-  });
-
-  it('block and context travel together', () => {
-    expect(encode({ context: 'ctx', block: { reason: 'r' } }, stop)).toEqual({
+  it('speaks the same field with the fuse tripped: the ask is feedback, not an error', () => {
+    // additionalContext on Stop keeps the conversation going through the same
+    // loop protections a blocking decision would, with no red banner, so the
+    // fuse changes nothing about what this encoder says.
+    expect(encode({ context: 'ctx' }, { ...stop, stopFuse: true })).toEqual({
       hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'ctx' },
-      decision: 'block',
-      reason: 'r',
     });
-  });
-
-  it('a tripped fuse keeps the context and drops only the block', () => {
-    expect(encode({ context: 'ctx', block: { reason: 'r' } }, { ...stop, stopFuse: true })).toEqual(
-      {
-        hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'ctx' },
-      },
-    );
+    expect(encode({ context: 'ctx' }, { ...stop, stopFuse: undefined })).toEqual({
+      hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'ctx' },
+    });
   });
 });
 
@@ -468,17 +453,13 @@ describe('registrar', () => {
   it('events map covers all seven canonical events under their native names', () => {
     expect(Object.keys(registrar.events).sort()).toEqual([...EVENTS].sort());
     expect(registrar.events).toEqual({
-      'session.start': {
-        native: 'SessionStart',
-        matcher: 'startup|clear|compact',
-        canBlock: false,
-      },
-      prompt: { native: 'UserPromptSubmit', canBlock: false },
-      'tool.before': { native: 'PreToolUse', canBlock: false },
-      'tool.after': { native: 'PostToolUse', canBlock: false },
-      'agent.start': { native: 'SubagentStart', canBlock: false },
-      'agent.stop': { native: 'SubagentStop', canBlock: true },
-      'turn.end': { native: 'Stop', canBlock: true },
+      'session.start': { native: 'SessionStart', matcher: 'startup|clear|compact' },
+      prompt: { native: 'UserPromptSubmit' },
+      'tool.before': { native: 'PreToolUse' },
+      'tool.after': { native: 'PostToolUse' },
+      'agent.start': { native: 'SubagentStart' },
+      'agent.stop': { native: 'SubagentStop' },
+      'turn.end': { native: 'Stop' },
     });
   });
 

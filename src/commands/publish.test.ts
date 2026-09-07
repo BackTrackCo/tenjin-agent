@@ -2819,85 +2819,49 @@ describe('runPublish — the undo line', () => {
  * only place a human ever reads it before it is public.
  */
 describe('runPublish — publish --finding', () => {
-  /** One queue row, in the shape the SubagentStop harvest writes. */
+  /** One `finding:<uid>` fact, in the shape the SubagentStop harvest writes. */
   async function seedFinding(over: {
     uid: string;
     body?: string;
+    title?: string;
     agentId?: string;
     agentType?: string;
     searchId?: string | null;
-    hook?: string;
     /** The checkout the child ran in. Defaults to the one the tests publish
      *  from, which is the ordinary case; pass another to reach the
      *  cross-project gate. */
     project?: string | null;
   }): Promise<string> {
-    const { openStore, projectIdOf, STORE_FINDING_HOOK, STORE_QUEUED_FINDING_PREFIX, STORE_SQL } =
-      await import('../lib/state-store');
-    const project = over.project === undefined ? projectIdOf(dir) : over.project;
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      store.run(STORE_SQL.insertEvent, [
-        over.uid,
-        Date.now(),
-        'parent',
-        // The child's identity is a COLUMN since tenjin-agent#247's store v2.
-        over.agentId === null ? null : (over.agentId ?? 'child-1'),
-        project,
-        'machine',
-        over.hook ?? STORE_FINDING_HOOK,
-        'SubagentStop',
-        null,
-        null,
+    const { projectId } = await import('../hooks/failure/keys');
+    const { setFact } = await import('../hooks/facts');
+    const { withLoopDb } = await import('../lib/loop-db');
+    const project = over.project === undefined ? projectId(dir) : over.project;
+    withLoopDb(dir, (db) =>
+      setFact(
+        db,
+        'finding:' + over.uid,
         JSON.stringify({
-          kind: 'finding',
-          agentType: over.agentType ?? 'fork',
-          searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
+          title: over.title ?? '',
           body: over.body ?? FINDING_BODY,
-        }),
-      ]);
-      // The queue row beside the log row, exactly as the harvest writes both:
-      // the log says a child once wrote this, the queue says nobody has
-      // published it yet, and publishing is what removes it.
-      store.run(STORE_SQL.setState, [
-        '',
-        STORE_QUEUED_FINDING_PREFIX + over.uid,
-        JSON.stringify({
           session: 'parent',
-          project,
-          agentId: over.agentId ?? 'child-1',
+          agent: over.agentId ?? 'child-1',
           agentType: over.agentType ?? 'fork',
-          searchId: over.searchId === undefined ? SEEDED_SEARCH : over.searchId,
-          body: over.body ?? FINDING_BODY,
+          project,
+          searchId: over.searchId === undefined ? SEEDED_SEARCH : (over.searchId ?? ''),
+          at: Date.now(),
         }),
         Date.now(),
-      ]);
-    } finally {
-      store.close();
-    }
+      ),
+    );
     return over.uid;
   }
 
-  /** The queue rows this machine still holds, by id. */
   async function queuedIds(): Promise<string[]> {
-    const { openStore, STORE_QUEUED_FINDING_PREFIX, STORE_SQL } =
-      await import('../lib/state-store');
-    const store = await openStore(dir);
-    if (store === null) throw new Error('no store');
-    try {
-      return store
-        .all(STORE_SQL.statePrefixSince, [
-          '',
-          STORE_QUEUED_FINDING_PREFIX,
-          STORE_QUEUED_FINDING_PREFIX + '\uffff',
-          0,
-          50,
-        ])
-        .map((row) => String(row.key).slice(STORE_QUEUED_FINDING_PREFIX.length));
-    } finally {
-      store.close();
-    }
+    const { factsWithPrefix } = await import('../hooks/facts');
+    const { withLoopDb } = await import('../lib/loop-db');
+    return withLoopDb(dir, (db) =>
+      factsWithPrefix(db, 'finding:').map((f) => f.key.slice('finding:'.length)),
+    );
   }
 
   const SEEDED_SEARCH = '0197aaaa-1111-4222-8333-444444444444';
@@ -3021,6 +2985,40 @@ describe('runPublish — publish --finding', () => {
     expect(calls).toHaveLength(1);
   });
 
+  /**
+   * THE STORED TITLE IS THE FALLBACK, NOT THE OVERRIDE. `splitFinding` pulls the
+   * child's `# ` heading off the body and stores the two apart, so a finding
+   * that had a title arrives here as a body with no heading at all and the
+   * server would otherwise derive one from the prose.
+   */
+  it('uses the stored title when the body carries no `# ` heading, and never over one', async () => {
+    const titled = await seedFinding({
+      uid: 'FND-TITLE',
+      title: 'ox 0.14 keeps Bytes.from',
+      body: 'Pinning the resolver to 4.1 stops the parse throw.',
+    });
+    const first = bodyServer();
+    await runPublish(
+      { finding: titled, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: first.fetch, provider: spyProvider().provider }),
+    );
+    expect(first.body()?.title).toBe('ox 0.14 keeps Bytes.from');
+
+    const headed = await seedFinding({
+      uid: 'FND-TITLE-BODY',
+      title: 'the stored one',
+      body: '# the body heading\n\nPinning the resolver to 4.1 stops the parse throw.',
+    });
+    const second = bodyServer();
+    await runPublish(
+      { finding: headed, mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: second.fetch, provider: spyProvider().provider }),
+    );
+    expect(second.body()?.title).toBe('the body heading');
+  });
+
   it('an unknown id is the standard not-found, naming the ids held here', async () => {
     await seedFinding({ uid: 'FND-HELD' });
     const err = (await runPublish(
@@ -3032,11 +3030,13 @@ describe('runPublish — publish --finding', () => {
     expect(err.fix).toContain('FND-HELD');
   });
 
-  it('a uid minted by another arm does not resolve as a finding', async () => {
-    await seedFinding({ uid: 'FND-OTHER-ARM', hook: 'subagent' });
+  it('a fact under another prefix does not resolve as a finding', async () => {
+    const { setFact } = await import('../hooks/facts');
+    const { withLoopDb } = await import('../lib/loop-db');
+    withLoopDb(dir, (db) => setFact(db, 'pairing:FND-OTHER', '{}', Date.now()));
     await expect(
       runPublish(
-        { finding: 'FND-OTHER-ARM' },
+        { finding: 'FND-OTHER' },
         makeCtx(),
         hermetic({ provider: spyProvider().provider }),
       ),
@@ -3254,14 +3254,15 @@ describe('runPublish — publish --finding', () => {
     // No shelf, no wallet, no scan: it takes one row off a local queue.
     expect(calls).toHaveLength(0);
     expect(getSignerCount()).toBe(0);
-    // The log row is untouched: it answers "did a child ever say this".
+    // And it is gone for good: the fact IS the finding now, so a read after a
+    // discard is the ordinary not-found rather than a second chance at it.
     await expect(
       runPublish(
         { finding: id, dryRun: true },
         makeCtx(),
         hermetic({ fetchImpl: fetch, provider }),
       ),
-    ).resolves.toMatchObject({ data: { dryRun: true } });
+    ).rejects.toMatchObject({ code: 'RESOURCE_NOT_FOUND' });
   });
 
   /**
@@ -3332,19 +3333,13 @@ describe('runPublish — publish --finding', () => {
      *  publish, keyed `agent_published:<id>@<at>`, so this is a prefix read
      *  rather than a point read: an upsert here would hide all but the last. */
     async function publishedByAgent(agentId: string): Promise<string[]> {
-      const { openStore, STORE_PUBLISHED_AGENT_PREFIX, STORE_SQL } =
-        await import('../lib/state-store');
-      const store = await openStore(dir);
-      if (store === null) throw new Error('no store');
-      const prefix = STORE_PUBLISHED_AGENT_PREFIX + agentId + '@';
-      try {
-        return store
-          .all(STORE_SQL.statePrefixSince, ['', prefix, prefix + '\uffff', 0, 50])
-          .map((row) => (JSON.parse(String(row.value)) as { url?: string }).url ?? '')
-          .reverse();
-      } finally {
-        store.close();
-      }
+      const { factsWithPrefix } = await import('../hooks/facts');
+      const { withLoopDb } = await import('../lib/loop-db');
+      return withLoopDb(dir, (db) =>
+        factsWithPrefix(db, `agent_published:${agentId}@`).map(
+          (f) => (JSON.parse(f.value) as { url?: string }).url ?? '',
+        ),
+      );
     }
 
     it("records the publish under the child's own agent id", async () => {

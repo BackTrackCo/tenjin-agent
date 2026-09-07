@@ -165,24 +165,21 @@ export function decode(raw: unknown): HookInput | null {
 
 /**
  * Pure. `null` when there is nothing to say (the daemon answers 204).
- * `decision: 'block'` only when the fuse is present AND false: `stop_hook_active`
- * true means this Stop was already raised by a hook's block, and blocking again
- * loops the turn (today's rule, `push-scripts.ts` `emitBlock`).
+ *
+ * ONE FIELD FOR EVERY EVENT. On Stop and SubagentStop `additionalContext` keeps
+ * the conversation going through the same loop protections `decision: 'block'`
+ * would, and reads in the transcript as hook feedback rather than a hook error
+ * (https://code.claude.com/docs/en/hooks, checked 2026-09-06), so the turn-end
+ * ask travels the same way a lookup's context does.
  */
 export function encode(emit: Emit | null, input: HookInput): unknown {
-  if (emit === null) return null;
-  const out: Record<string, unknown> = {};
-  if (emit.context !== undefined && emit.context.length > 0) {
-    out.hookSpecificOutput = {
+  if (emit === null || emit.context === undefined || emit.context.length === 0) return null;
+  return {
+    hookSpecificOutput: {
       hookEventName: input.native.event,
       additionalContext: emit.context.slice(0, CLAUDE_CONTEXT_MAX),
-    };
-  }
-  if (emit.block !== undefined && input.stopFuse === false) {
-    out.decision = 'block';
-    out.reason = emit.block.reason;
-  }
-  return Object.keys(out).length === 0 ? null : out;
+    },
+  };
 }
 
 /** One settings.json handler, as `install` writes it (PR C). */
@@ -243,17 +240,13 @@ export const registrar: Registrar = {
     ];
   },
   events: {
-    'session.start': { native: 'SessionStart', matcher: SESSION_START_MATCHER, canBlock: false },
-    // `canBlock` is where `stop_hook_active` exists: Claude sends the fuse on
-    // Stop and SubagentStop only, and `encode` gates `block` on it, so a block
-    // on a prompt or tool event could never be emitted (today's loop blocks
-    // only at those two events too).
-    prompt: { native: 'UserPromptSubmit', canBlock: false },
-    'tool.before': { native: 'PreToolUse', canBlock: false },
-    'tool.after': { native: 'PostToolUse', canBlock: false },
-    'agent.start': { native: 'SubagentStart', canBlock: false },
-    'agent.stop': { native: 'SubagentStop', canBlock: true },
-    'turn.end': { native: 'Stop', canBlock: true },
+    'session.start': { native: 'SessionStart', matcher: SESSION_START_MATCHER },
+    prompt: { native: 'UserPromptSubmit' },
+    'tool.before': { native: 'PreToolUse' },
+    'tool.after': { native: 'PostToolUse' },
+    'agent.start': { native: 'SubagentStart' },
+    'agent.stop': { native: 'SubagentStop' },
+    'turn.end': { native: 'Stop' },
   },
   tools: TOOLS,
   childrenTagged: true,

@@ -13,18 +13,19 @@ import { findingBlock } from './capture';
 import { factsWithPrefix, setFact } from './facts';
 import { runFire } from './fire';
 import { getMark, setMark } from './gates';
-import { CAPTURE_OPENING, FENCE_FALLBACK, FINDING_TAG, QUEUED_FINDINGS_TAIL } from './prose';
+import { CAPTURE_ASK, FINDING_TAG, QUEUED_FINDINGS_TAIL } from './prose';
 import type { LoopDb } from './store';
 import type { Actor, Deps, KernelConfig } from './types';
 
 /**
  * Capture through the two arms that call it (from #298's suite, re-keyed
- * onto the kernel). A child is asked once, with evidence, under `block`; the
- * lead is asked once and re-armed only by what its children queue; the stop
- * after an ask harvests the fence whole.
+ * onto the kernel). Both audiences are asked once, with evidence, as context;
+ * the lead is re-armed only by what its children queue; the stop after an ask
+ * harvests the fence whole. The ask also names what this session left open: its
+ * unanswered searches, the errors it fixed, what its children published.
  */
 
-const TEAM = kernelConfig({ push: 'on', capture: 'block' });
+const TEAM = kernelConfig({ push: 'on', capture: 'on' });
 const PUBLIC_ONLY: KernelConfig = { ...TEAM, baseUrl: PRODUCTION_ORIGIN };
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -71,6 +72,51 @@ function seedFire(db: LoopDb, actor: Actor, arm: string, reason: string, event =
     `INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms,
        elapsed_ms, reason) VALUES (?, ?, ?, ?, ?, 'claude', ?, '', 'tool', 1, 1, ?)`,
   ).run(randomUUID(), NOW - 50, actor.session, actor.agent, arm, event, reason);
+}
+
+/** One `searches` row, as `tenjin search` would have left it. */
+function seedSearch(
+  db: LoopDb,
+  over: { id: string; decision?: string; source?: string | null; resolvedAt?: string | null },
+): void {
+  db.prepare(
+    `INSERT INTO searches (search_id, at, session, question, fingerprint, decision, candidates,
+       source, resolved_at) VALUES (?, ?, 's1', ?, 'fp', ?, '[]', ?, ?)`,
+  ).run(
+    over.id,
+    NOW - 20,
+    'does ox 0.14 still export Bytes.from?',
+    over.decision ?? 'MISS',
+    over.source === undefined ? 'cli' : over.source,
+    over.resolvedAt ?? null,
+  );
+}
+
+/** One pairing this session opened and closed, as the failure arm leaves it. */
+function seedPairing(
+  db: LoopDb,
+  over: { key: string; kind?: string; scope?: string; postId?: string | null },
+): void {
+  const id = db
+    .prepare(
+      `INSERT INTO pairings (uid, at, session, project, machine, kind, key, error_line,
+         error_files, scope, status, closes, closed_at, post_id)
+       VALUES (?, ?, 's1', NULL, 'm', ?, ?, ?, '[]', ?, 'unverified', 1, ?, ?) RETURNING id`,
+    )
+    .get(
+      randomUUID(),
+      NOW - 30,
+      over.kind ?? 'sig_v1_test',
+      over.key,
+      'AssertionError: expected 3 to be 4',
+      over.scope ?? 'code',
+      NOW - 20,
+      over.postId ?? null,
+    ) as { id: number };
+  db.prepare(
+    `INSERT INTO pairing_closes (pairing_id, session, at, fix_cmd, fix_files, scope)
+     VALUES (?, 's1', ?, 'vitest', '["src/http.ts"]', ?)`,
+  ).run(id.id, NOW - 20, over.scope ?? 'code');
 }
 
 function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW - 10): string {
@@ -154,20 +200,19 @@ describe('the child ask', () => {
       started(db);
       seed(db);
       const emit = await fire(db, childStop());
-      const reason = emit?.block?.reason ?? '';
-      expect(reason.startsWith(CAPTURE_OPENING), kind).toBe(true);
+      const reason = emit?.context ?? '';
+      expect(reason.startsWith('Tenjin: this turn did work worth a second look.'), kind).toBe(true);
       expect(reason, kind).toContain(`tenjin publish <file> --agent ${CHILD.agent}`);
       expect(reason, kind).toContain('publish.mode is review');
-      expect(reason, kind).toContain(FENCE_FALLBACK);
+      expect(reason, kind).toContain('```' + FINDING_TAG + ' fence');
       expect(reason, kind).not.toContain(QUEUED_FINDINGS_TAIL);
-      expect(emit?.context, kind).toBeUndefined();
       expect(getMark(db, CHILD, 'capture:asked'), kind).toBe(kind);
       if (kind === 'handoff-miss') expect(reason).toContain(` --search-id ${SEARCH_ID}`);
       else expect(reason).not.toContain('--search-id');
     }
   });
 
-  it('a child with no evidence, a Bash-only child, a nudge machine, and a workflow child are not asked', async () => {
+  it('a child with no evidence, a Bash-only child, a capture-off machine, and a workflow child are not asked', async () => {
     const bare = freshDb();
     started(bare);
     expect(await fire(bare, childStop())).toBeNull();
@@ -181,13 +226,13 @@ describe('the child ask', () => {
     expect(await fire(bashOnly, childStop())).toBeNull();
     expect(getMark(bashOnly, CHILD, 'capture:asked')).toBeNull();
 
-    const nudge = freshDb();
-    started(nudge);
-    setMark(nudge, CHILD, 'edited:abc', 'src/a.ts', NOW);
+    const silent = freshDb();
+    started(silent);
+    setMark(silent, CHILD, 'edited:abc', 'src/a.ts', NOW);
     expect(
-      await fire(nudge, childStop(), kernelConfig({ push: 'on', capture: 'nudge' })),
+      await fire(silent, childStop(), kernelConfig({ push: 'on', capture: 'off' })),
     ).toBeNull();
-    expect(getMark(nudge, CHILD, 'capture:asked')).toBeNull();
+    expect(getMark(silent, CHILD, 'capture:asked')).toBeNull();
 
     const workflow = freshDb();
     started(workflow, 'workflow-subagent');
@@ -257,7 +302,7 @@ describe('the child ask', () => {
     const db = freshDb();
     started(db);
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
-    expect(await fire(db, childStop(), kernelConfig({ push: 'off', capture: 'block' }))).toBeNull();
+    expect(await fire(db, childStop(), kernelConfig({ push: 'off', capture: 'on' }))).toBeNull();
     expect(getMark(db, CHILD, 'capture:asked')).toBeNull();
   });
 });
@@ -267,8 +312,8 @@ describe('the lead ask', () => {
     const db = freshDb();
     seedFire(db, LEAD, 'prompt', 'no-hit');
     const first = await fire(db, leadStop());
-    expect(first?.block?.reason.startsWith(CAPTURE_OPENING)).toBe(true);
-    expect(first?.block?.reason).not.toContain('--agent');
+    expect(first?.context?.startsWith('Tenjin: this turn did work')).toBe(true);
+    expect(first?.context).not.toContain('--agent');
     expect(getMark(db, LEAD, 'capture:asked')).toBe('lookup');
     await fire(
       db,
@@ -278,16 +323,15 @@ describe('the lead ask', () => {
     );
     expect(await fire(db, leadStop())).toBeNull();
 
-    setFact(db, 'published:abc', '{}', NOW + 10);
-    setFact(db, 'agent_published:abc', '{}', NOW + 10);
+    setFact(db, 'published:abc', 'https://tenjin.blog/p/abc', NOW + 10);
     expect(await fire(db, leadStop(), TEAM, () => NOW + 20)).toBeNull();
 
     const id = queueFinding(db, {}, NOW + 30);
     const again = await fire(db, leadStop(), TEAM, () => NOW + 40);
-    expect(again?.block?.reason).toContain(
+    expect(again?.context).toContain(
       `- ${id} general-purpose subagent ${CHILD.agent}, search ${SEARCH_ID}: "ox 0.14 keeps Bytes.from"`,
     );
-    expect(again?.block?.reason).toContain(QUEUED_FINDINGS_TAIL);
+    expect(again?.context).toContain(QUEUED_FINDINGS_TAIL);
     // The second answer turn is harvested too: once per ask, not once per lead.
     await fire(
       db,
@@ -308,7 +352,7 @@ describe('the lead ask', () => {
     const theirs = queueFinding(db, { session: 's-other' });
     const own = queueFinding(db, { agent: '' });
     const emit = await fire(db, leadStop());
-    const reason = emit?.block?.reason ?? '';
+    const reason = emit?.context ?? '';
     expect(getMark(db, LEAD, 'capture:asked')).toBe('finding');
     expect(reason).toContain("1 finding(s) this session's subagents");
     expect(reason).toContain(`- ${mine} `);
@@ -321,7 +365,7 @@ describe('the lead ask', () => {
   it('team-mode repo activity is evidence; public-mode activity is not', async () => {
     const team = freshDb();
     setMark(team, LEAD, 'activity:mutation', String(NOW), NOW);
-    expect((await fire(team, leadStop()))?.block).toBeDefined();
+    expect((await fire(team, leadStop()))?.context).toBeDefined();
     expect(getMark(team, LEAD, 'capture:asked')).toBe('activity');
 
     const pub = freshDb();
@@ -329,20 +373,94 @@ describe('the lead ask', () => {
     expect(await fire(pub, leadStop(), PUBLIC_ONLY)).toBeNull();
   });
 
-  it('blocks only with the fuse false; nudge and a fuse-less harness get context', async () => {
+  it('is context whatever the fuse says, and the whole E13 block is the text', async () => {
+    const db = freshDb();
+    seedFire(db, LEAD, 'research', 'hit');
+    const emit = await fire(db, leadStop());
+    expect(emit).toEqual({
+      context: CAPTURE_ASK.replace('<mode>', 'review').replace('<flags>', ''),
+    });
+
+    // A harness that sends no fuse at all says the same thing: the ask is not a
+    // decision, so there is nothing for the fuse to gate.
     const fuseless = freshDb();
     seedFire(fuseless, LEAD, 'research', 'hit');
     const { stopFuse, ...noFuse } = leadStop();
     void stopFuse;
-    const emit = await fire(fuseless, noFuse);
-    expect(emit?.block).toBeUndefined();
-    expect(emit?.context?.startsWith(CAPTURE_OPENING)).toBe(true);
+    expect((await fire(fuseless, noFuse))?.context).toBe(emit?.context);
 
-    const nudge = freshDb();
-    seedFire(nudge, LEAD, 'research', 'hit');
-    const nudged = await fire(nudge, leadStop(), kernelConfig({ push: 'on', capture: 'nudge' }));
-    expect(nudged?.block).toBeUndefined();
-    expect(nudged?.context).toContain('tenjin publish <file>');
+    const off = freshDb();
+    seedFire(off, LEAD, 'research', 'hit');
+    expect(await fire(off, leadStop(), kernelConfig({ push: 'on', capture: 'off' }))).toBeNull();
+    expect(getMark(off, LEAD, 'capture:asked')).toBeNull();
+  });
+
+  it("names this session's unclosed deliberate misses, and no closed or hook one", async () => {
+    const db = freshDb();
+    seedFire(db, LEAD, 'research', 'hit');
+    seedSearch(db, { id: 'open-1' });
+    seedSearch(db, { id: 'legacy-1', source: null });
+    seedSearch(db, { id: 'closed-1', resolvedAt: '2026-09-06T00:00:00.000Z' });
+    seedSearch(db, { id: 'hit-1', decision: 'HIT' });
+    const reason = (await fire(db, leadStop()))?.context ?? '';
+    expect(reason).toContain(
+      "- Your search 'does ox 0.14 still export Bytes.from?' (open-1) had no answer: " +
+        '`--search-id open-1` on the publish, or `tenjin outcome --search-id open-1 --status regenerated`',
+    );
+    expect(reason).toContain('(legacy-1)');
+    expect(reason).not.toContain('closed-1');
+    expect(reason).not.toContain('hit-1');
+  });
+
+  it('names a closed code-scope fix with its key, but not a user-scope or an already-published one', async () => {
+    const db = freshDb();
+    seedFire(db, LEAD, 'research', 'hit');
+    seedPairing(db, { key: 'ab12' });
+    seedPairing(db, { key: 'usr9', scope: 'user' });
+    seedPairing(db, { key: 'done7', postId: 'post_1' });
+    seedPairing(db, { key: 'cd34', kind: 'sig_v1' });
+    const reason = (await fire(db, leadStop()))?.context ?? '';
+    expect(reason).toContain(
+      '- You fixed `AssertionError: expected 3 to be 4` (key `sig_v1_test:ab12`): ' +
+        'publish the explanation with `--key fingerprint=sig_v1_test:ab12`',
+    );
+    expect(reason).toContain('`--key fingerprint=sig_v1:cd34`');
+    expect(reason).not.toContain('usr9');
+    expect(reason).not.toContain('done7');
+  });
+
+  it("names what this session's children published, and not another session's child", async () => {
+    const db = freshDb();
+    started(db);
+    seedFire(db, LEAD, 'research', 'hit');
+    setFact(
+      db,
+      `agent_published:${CHILD.agent}@${NOW - 5}`,
+      JSON.stringify({ url: 'https://tenjin.blog/p/one', at: NOW - 5 }),
+      NOW - 5,
+    );
+    setFact(
+      db,
+      `agent_published:${CHILD.agent}@${NOW - 4}`,
+      JSON.stringify({ url: 'https://tenjin.blog/p/two', at: NOW - 4 }),
+      NOW - 4,
+    );
+    setFact(
+      db,
+      `agent_published:stranger@${NOW - 3}`,
+      JSON.stringify({ url: 'https://tenjin.blog/p/three', at: NOW - 3 }),
+      NOW - 3,
+    );
+    const reason = (await fire(db, leadStop()))?.context ?? '';
+    // One line per publish, not per agent: a child's second publish must not
+    // hide its first.
+    expect(reason).toContain(
+      `- subagent general-purpose ${CHILD.agent} published https://tenjin.blog/p/one`,
+    );
+    expect(reason).toContain(
+      `- subagent general-purpose ${CHILD.agent} published https://tenjin.blog/p/two`,
+    );
+    expect(reason).not.toContain('p/three');
   });
 
   it('the public wording, and the project publish.mode, when the checkout has one', async () => {
@@ -354,8 +472,9 @@ describe('the lead ask', () => {
     seedFire(db, LEAD, 'fetch', 'seen');
     const emit = await fire(db, leadStop({ cwd: repo }), PUBLIC_ONLY);
     // A project file narrows, never widens: full-auto reads as auto.
-    expect(emit?.block?.reason).toContain('publish.mode is auto');
-    expect(emit?.block?.reason).toContain('rights-clean');
+    expect(emit?.context).toContain('publish.mode is auto');
+    // One wording for both shelves: the team's extra kinds ride the same sentence.
+    expect(emit?.context).toContain('on the team shelf also a decision and why');
   });
 
   it('the second stop harvests the lead own fence; a skipped lookup is not evidence', async () => {

@@ -32,3 +32,9 @@ export function factsWithPrefix(db: LoopDb, prefix: string): Fact[] {
     .prepare('SELECT key, value, at FROM facts WHERE substr(key, 1, ?) = ? ORDER BY at, key')
     .all(prefix.length, prefix) as unknown as Fact[];
 }
+
+/** Take one fact away. Deleting a row that was never there is the same answer
+ *  as deleting one that was: the fact is not held. */
+export function deleteFact(db: LoopDb, key: string): void {
+  db.prepare('DELETE FROM facts WHERE key = ?').run(key);
+}

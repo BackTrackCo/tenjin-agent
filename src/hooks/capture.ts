@@ -11,7 +11,14 @@ import { EDITED_PREFIX } from './arms/context';
 import { factsWithPrefix, setFact } from './facts';
 import { getMark, setMark } from './gates';
 import { teamOrigin } from './legs/shelf';
-import { captureAsk, FINDING_TAG, type QueuedLine } from './prose';
+import {
+  captureAsk,
+  CHILD_PUBLISHED_LINE,
+  FINDING_TAG,
+  FIX_LINE,
+  MISS_LINE,
+  type QueuedLine,
+} from './prose';
 import type { LoopDb } from './store';
 import { clean } from './text';
 import type { Actor, FireContext } from './types';
@@ -37,6 +44,9 @@ const HARVESTED = 'capture:harvested';
 export const HANDOFF_MISS = 'handoff:miss';
 const ACTIVITY_PREFIX = 'activity:';
 const FINDING_PREFIX = 'finding:';
+/** One row per child publish, keyed `agent_published:<agent>@<at>`
+ *  (`lib/publish-dedup.ts`, the CLI's writer). */
+const PUBLISHED_AGENT_PREFIX = 'agent_published:';
 
 /** The harness's type for a child stopped once its structured output is
  *  written: it has no turn left to answer an ask in (pr298, probed). */
@@ -102,6 +112,97 @@ function childFindings(db: LoopDb, session: string): Array<{ id: string; finding
     }
     if (finding.session !== session || finding.agent === '') continue;
     out.push({ id: fact.key.slice(FINDING_PREFIX.length), finding });
+  }
+  return out;
+}
+
+/**
+ * This session's deliberate `tenjin search` misses that nothing has closed,
+ * oldest first, one line each.
+ *
+ * THE CLI'S ROWS ONLY. `searches` is written by `tenjin search`, so every row is
+ * a question the agent decided was worth asking; a null `source` is a row an
+ * older CLI wrote before the column existed and is the same kind of question.
+ * The hooks' own lookups live in `fires`/`legs` and are nobody's open loop.
+ */
+function missLines(db: LoopDb, session: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT search_id, question FROM searches
+       WHERE session = ? AND decision = 'MISS' AND resolved_at IS NULL
+         AND (source = 'cli' OR source IS NULL)
+       ORDER BY at, rowid`,
+    )
+    .all(session) as unknown as Array<{ search_id?: unknown; question?: unknown }>;
+  const out: string[] = [];
+  for (const row of rows) {
+    const id = typeof row.search_id === 'string' ? row.search_id : '';
+    const question = clean(typeof row.question === 'string' ? row.question : '', 200);
+    if (id !== '' && question !== '') out.push(MISS_LINE(question, id));
+  }
+  return out;
+}
+
+/**
+ * The errors this session closed that no piece explains yet, oldest first.
+ *
+ * CODE SCOPE ONLY: a `user`-scope pairing is a typo in a command, and its fix
+ * teaches nobody. A row with a `post_id` has already been written up, so it is
+ * named once and never again — that stamp is what `publish --key` writes.
+ */
+function fixLines(db: LoopDb, session: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT p.kind, p.key, p.error_line FROM pairings p
+       JOIN pairing_closes c ON c.pairing_id = p.id
+       WHERE c.session = ? AND p.post_id IS NULL AND p.scope = 'code'
+         AND p.closed_at IS NOT NULL AND p.error_line IS NOT NULL
+       ORDER BY p.closed_at, p.id`,
+    )
+    .all(session) as unknown as Array<{ kind?: unknown; key?: unknown; error_line?: unknown }>;
+  const out: string[] = [];
+  for (const row of rows) {
+    const kind = typeof row.kind === 'string' ? row.kind : '';
+    const key = typeof row.key === 'string' ? row.key : '';
+    const line = clean(typeof row.error_line === 'string' ? row.error_line : '', 200);
+    if (kind !== '' && key !== '' && line !== '') out.push(FIX_LINE(line, kind, key));
+  }
+  return out;
+}
+
+/**
+ * What this session's children published, oldest first (principle 5).
+ *
+ * The queue is machine-wide, so the `started` marks are the filter: an agent
+ * with no start in this session is another session's child, and its publish is
+ * not this lead's to be told about. One line per PUBLISH, not per agent — the
+ * `@<at>` suffix is what keeps a child's second publish from hiding its first.
+ */
+function publishedLines(db: LoopDb, session: string): string[] {
+  const types = new Map<string, string>();
+  const marks = db
+    .prepare('SELECT agent, value FROM marks WHERE session = ? AND key = ?')
+    .all(session, STARTED_MARK) as unknown as Array<{ agent?: unknown; value?: unknown }>;
+  for (const mark of marks) {
+    if (typeof mark.agent === 'string' && mark.agent !== '') {
+      types.set(mark.agent, typeof mark.value === 'string' ? mark.value : '');
+    }
+  }
+  const out: string[] = [];
+  for (const fact of factsWithPrefix(db, PUBLISHED_AGENT_PREFIX)) {
+    const rest = fact.key.slice(PUBLISHED_AGENT_PREFIX.length);
+    const agent = rest.slice(0, rest.lastIndexOf('@'));
+    const agentType = types.get(agent);
+    if (agentType === undefined) continue;
+    let url: unknown;
+    try {
+      url = (JSON.parse(fact.value) as { url?: unknown }).url;
+    } catch {
+      continue;
+    }
+    if (typeof url === 'string' && url !== '') {
+      out.push(CHILD_PUBLISHED_LINE(clean(agentType, 64), agent, clean(url, 300)));
+    }
   }
   return out;
 }
@@ -174,9 +275,9 @@ function agentTypeOf(ctx: FireContext): string {
 /**
  * The ask, or null. Once per actor (`capture:asked`, valued with the kind);
  * the lead is re-armed only by a child's finding newer than its ask, never by
- * a publish (#294). A child is asked only under `block` — a `SubagentStop`
- * hook has no non-blocking channel to the child, so asking IS blocking — and
- * never when it is a workflow child with no turn left.
+ * a publish (#294). A child is asked too — the ask is context beside its stop,
+ * not a decision it has to answer — but never when it is a workflow child with
+ * no turn left to answer in.
  */
 function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const cfg = ctx.deps.config();
@@ -186,11 +287,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const askedAt = markAt(db, actor, ASKED);
   const queued = audience === 'lead' ? childFindings(db, actor.session) : [];
   if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt)) return null;
-  if (
-    audience === 'child' &&
-    (cfg.hooks.capture !== 'block' || agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE)
-  )
-    return null;
+  if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
   const kind = evidence(ctx);
   if (kind === null) return null;
   setMark(db, actor, ASKED, kind, clock());
@@ -200,9 +297,11 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     (audience === 'child' && AGENT_ID_RE.test(actor.agent) ? ` --agent ${actor.agent}` : '') +
     (searchId.length > 0 ? ` --search-id ${searchId}` : '');
   const text = captureAsk({
-    team: teamOrigin(cfg) !== null,
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
+    misses: missLines(db, actor.session),
+    fixes: fixLines(db, actor.session),
+    published: audience === 'lead' ? publishedLines(db, actor.session) : [],
     queued: queued.map((q): QueuedLine => ({
       id: q.id,
       agentType: clean(q.finding.agentType, 64),
@@ -213,9 +312,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
       title: clean(q.finding.title, 160),
     })),
   });
-  return cfg.hooks.capture === 'block' && input.stopFuse === false
-    ? { block: { reason: text } }
-    : { context: text };
+  return { context: text };
 }
 
 const FINDING_OPEN = '```' + FINDING_TAG;

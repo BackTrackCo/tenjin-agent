@@ -89,11 +89,9 @@ export interface HookInput {
   prompt?: string;
   agentType?: string;
   lastMessage?: string;
-  /**
-   * Claude/Codex `stop_hook_active`. The kernel's loop guard: `block` is
-   * emitted only when this is `=== false`, so a harness with no fuse cannot
-   * block at all.
-   */
+  /** Claude/Codex `stop_hook_active`: this stop was raised by a hook's own
+   *  feedback rather than by the agent finishing. The capture arm reads it to
+   *  tell an ask turn from the answer turn after one. */
   stopFuse?: boolean;
   transcript?: { path?: string; agentPath?: string };
   /** `session.start` source (`startup`, `clear`, `compact`, `resume`). */
@@ -102,10 +100,17 @@ export interface HookInput {
   raw: unknown;
 }
 
-/** What the kernel hands back to the harness. `null` is "nothing to say" (204). */
+/**
+ * What the kernel hands back to the harness. `null` is "nothing to say" (204).
+ *
+ * ONE CHANNEL. Everything an arm says is context beside the turn, including the
+ * turn-end ask: on Stop and SubagentStop `additionalContext` keeps the
+ * conversation going through the same loop protections a blocking decision
+ * would, and shows in the transcript as hook feedback rather than a hook error.
+ * A second channel with a red banner said the same words for a worse price.
+ */
 export interface Emit {
   context?: string;
-  block?: { reason: string };
 }
 
 /** What the installer needs to register a harness. */
@@ -116,10 +121,10 @@ export interface Registrar {
   plan(target: { url: string; token: string; shimPath: string; timeoutSeconds: number }): unknown[];
   /**
    * Which canonical events this harness raises, under which native name and
-   * matcher, and whether a `block` there means anything. An arm whose `on`
-   * names an event absent here is not registered for this harness.
+   * matcher. An arm whose `on` names an event absent here is not registered for
+   * this harness.
    */
-  events: Partial<Record<Event, { native: string; matcher?: string; canBlock: boolean }>>;
+  events: Partial<Record<Event, { native: string; matcher?: string }>>;
   /** Native tool names per kind. Missing kinds decode as `'other'`. */
   tools: Partial<Record<ToolKind, RegExp>>;
   /**

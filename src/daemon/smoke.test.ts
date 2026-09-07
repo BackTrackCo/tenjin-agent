@@ -233,7 +233,13 @@ beforeAll(async () => {
   await build({ ...daemonConfig, outDir: tmpOutDir, silent: true });
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
-  await writeFile(configPath(dataDir), JSON.stringify({ loop: { port: 0 } }));
+  // `hooks.push: off` is pinned rather than defaulted: the arms are on out of
+  // the box now, and the fixture cases below are about routing and rows, not
+  // about lookups. Without it every fixture would ask the production shelf.
+  await writeFile(
+    configPath(dataDir),
+    JSON.stringify({ loop: { port: 0 }, hooks: { push: 'off' } }),
+  );
   installDaemonFiles(dataDir, tmpOutDir);
 
   const t0 = Date.now();
@@ -307,7 +313,7 @@ describe('the daemon, cold-started from the real bundle', () => {
         reason: string;
       }>;
       expect(rows).toHaveLength(fixtures.length - stops);
-      // The default config is `hooks.push: off`, so every lookup arm declines
+      // This file pins `hooks.push: off`, so every lookup arm declines
       // and nothing is asked of any shelf. `arm` still names the arm that
       // declined — the WebFetch fixture reaches `fetch`, the Bash result
       // reaches `failure`, the Bash call and the Read reach `context` — and
@@ -562,7 +568,7 @@ describe('the daemon, cold-started from the real bundle', () => {
         loop: { port: 0 },
         baseUrl: shelfUrl,
         publicShelfUrl: shelfUrl,
-        hooks: { push: 'on', capture: 'block' },
+        hooks: { push: 'on', capture: 'on' },
       }),
     );
     const session = 's-loop-dispatch';
@@ -581,8 +587,6 @@ describe('the daemon, cold-started from the real bundle', () => {
     };
     const contextOf = (r: { body: Record<string, unknown> | null }) =>
       (r.body?.hookSpecificOutput as { additionalContext?: string } | undefined)?.additionalContext;
-    const reasonOf = (r: { body: Record<string, unknown> | null }) =>
-      r.body?.decision === 'block' ? String(r.body.reason) : undefined;
     const handoffCount = () => {
       const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
       try {
@@ -627,7 +631,7 @@ describe('the daemon, cold-started from the real bundle', () => {
       expect(read.status).toBe(204);
       await waitForFires(countFires());
 
-      // 4. The child stops: asked, with a block, under its own id.
+      // 4. The child stops: asked as context, under its own id.
       const stopRes = await post({
         hook_event_name: 'SubagentStop',
         agent_id: agent,
@@ -636,9 +640,11 @@ describe('the daemon, cold-started from the real bundle', () => {
         last_assistant_message: 'The collation flipped with the image tag.',
       });
       expect(stopRes.status).toBe(200);
-      const childAsk = reasonOf(stopRes) ?? '';
-      expect(childAsk).toContain('Before you finish');
+      const childAsk = contextOf(stopRes) ?? '';
+      expect(childAsk).toContain('Tenjin: this turn did work worth a second look.');
       expect(childAsk).toContain(`--agent ${agent}`);
+      // Never a blocking decision: `additionalContext` is the one channel.
+      expect(stopRes.body?.decision).toBeUndefined();
 
       // 5. The child answers with the fence: harvested, silently.
       const answered = await post({
@@ -658,8 +664,9 @@ describe('the daemon, cold-started from the real bundle', () => {
         last_assistant_message: 'done',
       });
       expect(leadRes.status).toBe(200);
-      const leadAsk = reasonOf(leadRes) ?? '';
-      expect(leadAsk).toContain('Before you finish');
+      const leadAsk = contextOf(leadRes) ?? '';
+      expect(leadAsk).toContain('Tenjin: this turn did work worth a second look.');
+      expect(leadRes.body?.decision).toBeUndefined();
       expect(leadAsk).toContain(`Explore subagent ${agent}`);
       expect(leadAsk).toContain('"The image tag flips the collation"');
     } finally {

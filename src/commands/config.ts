@@ -15,7 +15,6 @@ import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
-  LEGACY_HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
   PublishModeSchema,
   RawConfigSchema,
@@ -31,7 +30,6 @@ import {
   parseCaptureModeFlag,
   parsePushModeFlag,
   parseSessionPrimerFlag,
-  parseStopNagFlag,
   parseUpdateModeFlag,
   parseWebSearchHookModeFlag,
   resolveSettings,
@@ -41,7 +39,6 @@ import type {
   CaptureMode,
   EffectiveSettings,
   HooksConfigKey,
-  LegacyHooksConfigKey,
   PartialConfig,
   Provenance,
   PublishConfigKey,
@@ -49,7 +46,6 @@ import type {
   PushMode,
   ScalarConfigKey,
   SessionPrimerMode,
-  StopNagMode,
   UpdateConfigKey,
   LoopConfigKey,
   TeamConfigKey,
@@ -148,14 +144,12 @@ const KEY_DESCRIPTIONS: Record<string, string> = {
     'harness WebSearch hook (before WebSearch): auto=ask Tenjin first, remind=static reminder, off=inert',
   'hooks.agentDispatch':
     'harness subagent-dispatch hook (before Agent/Task — most sensitive payload): auto=ask Tenjin first, remind=static reminder, off=inert',
-  'hooks.stopNag':
-    'end-of-turn reminder about searches nothing answered yet: on=both arms, deliberate-only=drop the batched web-search arm, off=neither',
   'hooks.sessionPrimer':
     'one-paragraph search-first primer at session start: on=print it, off=print nothing',
   'hooks.push':
-    'the push experiment (docs/command-reference.md, "Push (experimental)"): on=wire the prompt/failure/subagent/context hooks (`tenjin install`), off=any wired scripts stay but are inert',
+    'the loop arms that answer a prompt, a failure, a subagent dispatch or a tool call with what this machine and the shelves already know: on=they run, off=they are inert',
   'hooks.capture':
-    'publish prompt for durable findings: block=your Stop blocks once per session AND a subagent is asked once at its own end, nudge=the same text at your turn end with no block and no subagent asked (nothing is ever blocked), off=silent',
+    'the turn-end ask to publish what this turn settled, spoken to you and to each subagent at its own end: on=asked once each, off=silent',
   'update.mode':
     'nudge=report a newer version (stderr line, JSON envelope, hook output), off=neither report nor ask npm',
   'loop.human_wait_ms':
@@ -188,17 +182,6 @@ function isPublishKey(key: string): key is PublishConfigKey {
 
 function isHooksKey(key: string): key is HooksConfigKey {
   return (HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
-}
-
-function isLegacyHooksKey(key: string): key is LegacyHooksConfigKey {
-  return (LEGACY_HOOKS_CONFIG_KEYS as readonly string[]).includes(key);
-}
-
-function normalizeHooksKey(key: string): HooksConfigKey | null {
-  if ((HOOKS_CONFIG_KEYS as readonly string[]).includes(key)) return key as HooksConfigKey;
-  if (key === 'hooks.searchMode') return 'hooks.webSearch';
-  if (key === 'hooks.dispatchMode') return 'hooks.agentDispatch';
-  return null;
 }
 
 function isUpdateKey(key: string): key is UpdateConfigKey {
@@ -267,10 +250,8 @@ export async function runConfigGet(
       humanLines: [withNote(formatLine(key, entry), downgradeNote(key, settings))],
     };
   }
-  const normalized = normalizeHooksKey(key);
-  if (normalized !== null) {
-    const entry = renderHooksSetting(normalized, await resolveFromContext(ctx));
-    // Echo the key the caller asked for (legacy or new) but value is from the normalized new key.
+  if (isHooksKey(key)) {
+    const entry = renderHooksSetting(key, await resolveFromContext(ctx));
     return { data: { key, ...entry }, humanLines: [formatLine(key, entry)] };
   }
   if (isUpdateKey(key)) {
@@ -312,10 +293,7 @@ export async function runConfigSet(
   deps: ConfigSetDeps = {},
 ): Promise<CommandResult> {
   if (isPublishKey(key)) return setPublishKey(key, value, ctx, deps);
-  if (isHooksKey(key) || isLegacyHooksKey(key)) {
-    const normalized = normalizeHooksKey(key)!;
-    return setHooksKey(normalized, value, ctx);
-  }
+  if (isHooksKey(key)) return setHooksKey(key, value, ctx);
   if (isUpdateKey(key)) return setUpdateKey(key, value, ctx);
   if (isLoopKey(key)) return setLoopKey(key, value, ctx);
   if (isTeamKey(key)) return setTeamKey(key, value, ctx);
@@ -597,8 +575,6 @@ function allowlistLines(sync: AllowlistSync): string[] {
  * block through the same locked read-modify-write every other set uses, so a subkey a
  * newer CLI wrote survives. The daemon re-stats this file per fire, so every value
  * takes effect on the next prompt with no re-install and no process to restart.
- * Legacy `hooks.searchMode`/`hooks.dispatchMode` still work as aliases (mapped via
- * normalizeHooksKey).
  */
 async function setHooksKey(
   key: HooksConfigKey,
@@ -610,26 +586,21 @@ async function setHooksKey(
       ? 'webSearch'
       : key === 'hooks.agentDispatch'
         ? 'agentDispatch'
-        : key === 'hooks.stopNag'
-          ? 'stopNag'
-          : key === 'hooks.sessionPrimer'
-            ? 'sessionPrimer'
-            : key === 'hooks.push'
-              ? 'push'
-              : 'capture';
-  const parsed:
-    WebSearchMode | AgentDispatchMode | StopNagMode | SessionPrimerMode | PushMode | CaptureMode =
+        : key === 'hooks.sessionPrimer'
+          ? 'sessionPrimer'
+          : key === 'hooks.push'
+            ? 'push'
+            : 'capture';
+  const parsed: WebSearchMode | AgentDispatchMode | SessionPrimerMode | PushMode | CaptureMode =
     key === 'hooks.webSearch'
       ? parseWebSearchHookModeFlag(value, key)
       : key === 'hooks.agentDispatch'
         ? parseAgentDispatchHookModeFlag(value, key)
-        : key === 'hooks.stopNag'
-          ? parseStopNagFlag(value, key)
-          : key === 'hooks.sessionPrimer'
-            ? parseSessionPrimerFlag(value, key)
-            : key === 'hooks.push'
-              ? parsePushModeFlag(value, key)
-              : parseCaptureModeFlag(value, key);
+        : key === 'hooks.sessionPrimer'
+          ? parseSessionPrimerFlag(value, key)
+          : key === 'hooks.push'
+            ? parsePushModeFlag(value, key)
+            : parseCaptureModeFlag(value, key);
   await persist(ctx.dataDir, (existing) => ({
     ...existing,
     hooks: { ...existing.hooks, [subkey]: parsed },
@@ -745,13 +716,6 @@ export async function persistAgentDispatchHookMode(
 }
 
 /**
- * @deprecated use persistWebSearchHookMode — kept for backward compat
- */
-export async function persistSearchHookMode(dir: string, mode: WebSearchMode): Promise<void> {
-  return persistWebSearchHookMode(dir, mode);
-}
-
-/**
  * Persist `hooks.push` through the same locked read-modify-write every `config
  * set` uses. Used by `tenjin push on|off`, mirroring `persistPublishMode`.
  */
@@ -851,13 +815,11 @@ function renderHooksSetting(key: HooksConfigKey, settings: EffectiveSettings): R
       ? settings.hooksWebSearch
       : key === 'hooks.agentDispatch'
         ? settings.hooksAgentDispatch
-        : key === 'hooks.stopNag'
-          ? settings.hooksStopNag
-          : key === 'hooks.sessionPrimer'
-            ? settings.hooksSessionPrimer
-            : key === 'hooks.push'
-              ? settings.hooksPush
-              : settings.hooksCapture;
+        : key === 'hooks.sessionPrimer'
+          ? settings.hooksSessionPrimer
+          : key === 'hooks.push'
+            ? settings.hooksPush
+            : settings.hooksCapture;
   return { value: resolved.value, source: resolved.source };
 }
 

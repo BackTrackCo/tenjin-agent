@@ -86,13 +86,6 @@ export type WebSearchMode = z.infer<typeof WebSearchModeSchema>;
 export const AgentDispatchModeSchema = z.enum(['auto', 'remind', 'off']);
 export type AgentDispatchMode = z.infer<typeof AgentDispatchModeSchema>;
 
-// Backward compat aliases — old keys still parse, new code uses the WebSearch/AgentDispatch names.
-export const SearchHookModeSchema = WebSearchModeSchema;
-export type SearchHookMode = WebSearchMode;
-/** Legacy: accepted on read for old config files that stored `inherit`. */
-export const DispatchHookModeSchema = z.enum(['inherit', 'auto', 'remind', 'off']);
-export type DispatchHookMode = z.infer<typeof DispatchHookModeSchema>;
-
 /** Validate a dispatch-hook mode at a command edge for the new disjoint key. */
 export function parseAgentDispatchHookModeFlag(value: string, flagName: string): AgentDispatchMode {
   const parsed = AgentDispatchModeSchema.safeParse(value);
@@ -108,44 +101,6 @@ export function parseWebSearchHookModeFlag(value: string, flagName: string): Web
   if (parsed.success) return parsed.data;
   throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
     fix: 'Use "auto", "remind", or "off".',
-  });
-}
-
-/** @deprecated use parseAgentDispatchHookModeFlag — kept for `hooks.dispatchMode` alias */
-export function parseDispatchHookModeFlag(value: string, flagName: string): DispatchHookMode {
-  const parsed = DispatchHookModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "inherit", "auto", "remind", or "off".',
-  });
-}
-
-/**
- * @deprecated use parseWebSearchHookModeFlag — kept for `hooks.searchMode` alias
- */
-export function parseSearchHookModeFlag(value: string, flagName: string): SearchHookMode {
-  return parseWebSearchHookModeFlag(value, flagName);
-}
-
-/**
- * Which open loops the Stop hook may raise at the end of a turn.
- *
- * `deliberate-only` is the middle setting the two-value toggle was missing. The
- * hook has two arms, and they are not equally welcome: a deliberate `tenjin
- * search` MISS is a question the agent chose to ask, while the batched
- * ride-along web searches are a firehose in a research session. With only `on`
- * and `off`, silencing the noisy arm meant silencing both, and nothing ever
- * prompts turning them back on (tenjin-agent #162). This keeps the high-signal
- * arm and drops the batch.
- */
-export const StopNagModeSchema = z.enum(['on', 'deliberate-only', 'off']);
-export type StopNagMode = z.infer<typeof StopNagModeSchema>;
-
-export function parseStopNagFlag(value: string, flagName: string): StopNagMode {
-  const parsed = StopNagModeSchema.safeParse(value);
-  if (parsed.success) return parsed.data;
-  throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "on", "deliberate-only", or "off".',
   });
 }
 
@@ -182,25 +137,21 @@ export function parsePushModeFlag(value: string, flagName: string): PushMode {
 }
 
 /**
- * What the Stop hook does with an end-of-session capture prompt (docs/command-reference.md#push-experimental's
- * notes half): `block` raises a blocking reason when the
- * session carried a research signal (a search it asked for, a row showing an
- * arm actually surfaced something, or a subagent finding on the queue) and
- * nothing has captured it yet, and it is also the one mode in which a subagent
- * is asked at its own end; `nudge` says the same thing to the parent as
- * additionalContext, blocks nobody, and never spends a child a turn, which
- * makes it the "parent asks, child never blocked" switch; `off` is silent
- * everywhere. Default `off`. The parent's ask fires once per session plus once
- * for anything that arrives afterwards and has not been named.
+ * Whether the turn-end ask is spoken at all. `on` asks the agent and each of
+ * its children once, as context beside the turn; `off` is silent everywhere.
+ *
+ * Two values and no middle one: the ask travels as `additionalContext` on both
+ * stops, so there is no blocking variant left to choose between and nothing a
+ * third setting could name.
  */
-export const CaptureModeSchema = z.enum(['block', 'nudge', 'off']);
+export const CaptureModeSchema = z.enum(['on', 'off']);
 export type CaptureMode = z.infer<typeof CaptureModeSchema>;
 
 export function parseCaptureModeFlag(value: string, flagName: string): CaptureMode {
   const parsed = CaptureModeSchema.safeParse(value);
   if (parsed.success) return parsed.data;
   throw new CliError('USAGE', `Invalid ${flagName} ${JSON.stringify(value)}`, {
-    fix: 'Use "block", "nudge", or "off".',
+    fix: 'Use "on" or "off".',
   });
 }
 
@@ -208,27 +159,16 @@ export function parseCaptureModeFlag(value: string, flagName: string): CaptureMo
  * The harness-hook block. EVERY key is read by the installed scripts at run
  * time, which is what makes them runtime toggles rather than install-time
  * choices: `tenjin config set hooks.webSearch off`, `hooks.agentDispatch off`,
- * `hooks.stopNag off` or `hooks.sessionPrimer off` silences a hook immediately,
+ * `hooks.capture off` or `hooks.sessionPrimer off` silences a hook immediately,
  * with no re-install and nothing to unwire. The scripts stay registered and
  * no-op, which is also what lets turning one back on be a single `config set`.
  */
 const HooksConfigSchema = z.object({
   webSearch: WebSearchModeSchema,
   agentDispatch: AgentDispatchModeSchema,
-  stopNag: StopNagModeSchema,
   sessionPrimer: SessionPrimerModeSchema,
   push: PushModeSchema,
   capture: CaptureModeSchema,
-});
-
-/**
- * Legacy hook fields kept for one release so an old config.json still parses.
- * `searchMode` maps to `webSearch`; `dispatchMode` (including `inherit`) maps
- * to `agentDispatch` per the migration in loadConfig / resolve* below.
- */
-const LegacyHooksFields = z.object({
-  searchMode: SearchHookModeSchema.optional(),
-  dispatchMode: DispatchHookModeSchema.optional(),
 });
 
 /**
@@ -446,7 +386,7 @@ export const RawConfigSchema = ConfigSchema.partial()
   .extend({
     publish: PublishConfigSchema.partial().passthrough().optional(),
     install: RawInstallConfigSchema.optional(),
-    hooks: HooksConfigSchema.partial().merge(LegacyHooksFields).passthrough().optional(),
+    hooks: HooksConfigSchema.partial().passthrough().optional(),
     update: UpdateConfigSchema.partial().passthrough().optional(),
     loop: LoopConfigSchema.partial().passthrough().optional(),
     team: TeamConfigSchema.partial().passthrough().optional(),
@@ -515,19 +455,17 @@ export const CONFIG_DEFAULTS: Config = {
   bazaarRegistries: DEFAULT_BAZAAR_REGISTRIES,
   publish: { mode: 'review', defaultPrice: '100000', ackServerWarnings: 'mode' },
   install: { harness: [], freeVerbsDeclined: [] },
-  // `auto` is the default because the hook exists to be useful without being
-  // asked for; the disclosure and the undo ride the install output, and `off`
-  // leaves the installed script inert without touching settings.json. Both hooks
-  // are `auto` by default and disjoint — no `inherit`. `push` and `capture`
-  // default `off`: the push experiment (docs/command-reference.md#push-experimental) is opt-in only,
-  // through `tenjin push on`.
+  // Every hook is on out of the box: a vanilla install turns the whole loop on,
+  // and the disclosure and the undo ride the install output. `off` leaves the
+  // registered entries inert without touching settings.json, so any of these is
+  // one `config set` away in either direction. The two web hooks are disjoint —
+  // no `inherit`.
   hooks: {
     webSearch: 'auto',
     agentDispatch: 'auto',
-    stopNag: 'on',
     sessionPrimer: 'on',
-    push: 'off',
-    capture: 'off',
+    push: 'on',
+    capture: 'on',
   },
   update: { mode: 'nudge' },
   loop: {
@@ -574,16 +512,11 @@ export type PublishConfigKey = (typeof PUBLISH_CONFIG_KEYS)[number];
 export const HOOKS_CONFIG_KEYS = [
   'hooks.webSearch',
   'hooks.agentDispatch',
-  'hooks.stopNag',
   'hooks.sessionPrimer',
   'hooks.push',
   'hooks.capture',
 ] as const;
 export type HooksConfigKey = (typeof HOOKS_CONFIG_KEYS)[number];
-
-/** Legacy aliases still accepted on `config set/get` for one release. */
-export const LEGACY_HOOKS_CONFIG_KEYS = ['hooks.searchMode', 'hooks.dispatchMode'] as const;
-export type LegacyHooksConfigKey = (typeof LEGACY_HOOKS_CONFIG_KEYS)[number];
 
 /** The dotted key `config get/set` accepts for the nested update block. */
 export const UPDATE_CONFIG_KEYS = ['update.mode'] as const;
@@ -643,47 +576,8 @@ export async function loadRawConfig(dir: string): Promise<PartialConfig> {
  *  the default defaultPrice (a shallow spread would drop it). */
 export async function loadConfig(dir: string): Promise<Config> {
   const raw = await loadRawConfig(dir);
-  const rawHooks = raw.hooks as
-    | {
-        webSearch?: WebSearchMode;
-        agentDispatch?: AgentDispatchMode;
-        searchMode?: WebSearchMode;
-        dispatchMode?: DispatchHookMode;
-        stopNag?: StopNagMode;
-        sessionPrimer?: SessionPrimerMode;
-      }
-    | undefined;
-  // Backward compat: new webSearch wins, else legacy searchMode, else default.
-  const resolvedWebSearch =
-    rawHooks?.webSearch ?? rawHooks?.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-  // Migration for agentDispatch: new key wins; else legacy dispatchMode (if not inherit) wins;
-  // else if legacy is inherit or missing but webSearch resolved, copy webSearch; else default.
-  // Since dispatch never shipped to npm (only searchMode did), the elaborate branch is only
-  // for the unreleased `inherit` branch; the important legacy is searchMode -> webSearch.
-  let resolvedAgentDispatch: AgentDispatchMode;
-  if (rawHooks?.agentDispatch !== undefined) {
-    resolvedAgentDispatch = rawHooks.agentDispatch;
-  } else if (rawHooks?.dispatchMode !== undefined && rawHooks.dispatchMode !== 'inherit') {
-    resolvedAgentDispatch = rawHooks.dispatchMode as AgentDispatchMode;
-  } else if (rawHooks?.dispatchMode === 'inherit') {
-    resolvedAgentDispatch = resolvedWebSearch;
-  } else if (rawHooks?.dispatchMode === undefined && rawHooks?.searchMode !== undefined) {
-    // Old file had only searchMode (dispatch inherited): preserve previous behavior for one release.
-    resolvedAgentDispatch = resolvedWebSearch;
-  } else if (
-    rawHooks?.dispatchMode === undefined &&
-    rawHooks?.webSearch !== undefined &&
-    rawHooks?.agentDispatch === undefined
-  ) {
-    // New file with only webSearch set after the rename — keep disjoint: do NOT copy.
-    resolvedAgentDispatch = CONFIG_DEFAULTS.hooks.agentDispatch;
-  } else {
-    resolvedAgentDispatch = CONFIG_DEFAULTS.hooks.agentDispatch;
-  }
-  // If the file had neither new nor legacy hooks at all, loadSettings' file-or-default
-  // semantics would say `default` rather than `file` — but loadConfig's job is to produce
-  // the effective Config object, so defaults are correct here regardless. The provenance
-  // question lives in resolve* below.
+  // loadConfig's job is the effective Config object, so an absent key is its
+  // default here; the provenance question lives in resolve* below.
   return {
     ...CONFIG_DEFAULTS,
     ...raw,
@@ -698,10 +592,9 @@ export async function loadConfig(dir: string): Promise<Config> {
       freeVerbsDeclined: resolveFreeVerbsDeclined(raw.install?.freeVerbsDeclined),
     },
     hooks: {
-      webSearch: resolvedWebSearch,
-      agentDispatch: resolvedAgentDispatch,
-      stopNag: rawHooks?.stopNag ?? CONFIG_DEFAULTS.hooks.stopNag,
-      sessionPrimer: rawHooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
+      webSearch: raw.hooks?.webSearch ?? CONFIG_DEFAULTS.hooks.webSearch,
+      agentDispatch: raw.hooks?.agentDispatch ?? CONFIG_DEFAULTS.hooks.agentDispatch,
+      sessionPrimer: raw.hooks?.sessionPrimer ?? CONFIG_DEFAULTS.hooks.sessionPrimer,
       push: raw.hooks?.push ?? CONFIG_DEFAULTS.hooks.push,
       capture: raw.hooks?.capture ?? CONFIG_DEFAULTS.hooks.capture,
     },
@@ -769,17 +662,12 @@ export interface EffectiveSettings {
   publishAckServerWarnings: ResolvedSetting<AckServerWarnings>;
   hooksWebSearch: ResolvedSetting<WebSearchMode>;
   hooksAgentDispatch: ResolvedSetting<AgentDispatchMode>;
-  hooksStopNag: ResolvedSetting<StopNagMode>;
   hooksSessionPrimer: ResolvedSetting<SessionPrimerMode>;
   hooksPush: ResolvedSetting<PushMode>;
   hooksCapture: ResolvedSetting<CaptureMode>;
   updateMode: ResolvedSetting<UpdateMode>;
   loop: { [K in keyof LoopConfig]: ResolvedSetting<LoopConfig[K]> };
   teamPublicFallback: ResolvedSetting<PublicFallback>;
-  /** @deprecated use hooksWebSearch — kept for backward compat */
-  hooksSearchMode: ResolvedSetting<WebSearchMode>;
-  /** @deprecated use hooksAgentDispatch — kept for backward compat (never `inherit`) */
-  hooksDispatchMode: ResolvedSetting<AgentDispatchMode>;
 }
 
 /** CLI flags that participate in settings precedence (`--base-url`). */
@@ -804,8 +692,6 @@ export interface ResolveSettingsInput {
  */
 export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings {
   const { config, flags, env, project } = input;
-  const webSearch = resolveHooksWebSearch(config);
-  const agentDispatch = resolveHooksAgentDispatch(config);
   return {
     maxAutoSpend: fileOrDefault('maxAutoSpend', config),
     sessionBudget: fileOrDefault('sessionBudget', config),
@@ -822,11 +708,8 @@ export function resolveSettings(input: ResolveSettingsInput): EffectiveSettings 
     publishMode: resolvePublishMode({ config, project, env }),
     publishDefaultPrice: resolvePublishDefaultPrice({ config, project }),
     publishAckServerWarnings: resolveAckServerWarnings(config),
-    hooksWebSearch: webSearch,
-    hooksAgentDispatch: agentDispatch,
-    hooksSearchMode: webSearch,
-    hooksDispatchMode: agentDispatch,
-    hooksStopNag: resolveHooksStopNag(config),
+    hooksWebSearch: resolveHooksWebSearch(config),
+    hooksAgentDispatch: resolveHooksAgentDispatch(config),
     hooksSessionPrimer: resolveHooksSessionPrimer(config),
     hooksPush: resolveHooksPush(config),
     hooksCapture: resolveHooksCapture(config),
@@ -887,58 +770,20 @@ function resolveUpdateMode(config: PartialConfig): ResolvedSetting<UpdateMode> {
   return { value: CONFIG_DEFAULTS.update.mode, source: 'default' };
 }
 
-/** hooks.webSearch: file or default. Legacy `hooks.searchMode` counts as `file`. */
+/** hooks.webSearch: file or default. */
 export function resolveHooksWebSearch(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  const hooks = config.hooks as
-    { webSearch?: WebSearchMode; searchMode?: WebSearchMode } | undefined;
-  if (hooks?.webSearch !== undefined) return { value: hooks.webSearch, source: 'file' };
-  if (hooks?.searchMode !== undefined) return { value: hooks.searchMode, source: 'file' };
+  const fromFile = config.hooks?.webSearch;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.hooks.webSearch, source: 'default' };
 }
 
-/** @deprecated use resolveHooksWebSearch */
-export function resolveHooksSearchMode(config: PartialConfig): ResolvedSetting<WebSearchMode> {
-  return resolveHooksWebSearch(config);
-}
-
-/** hooks.agentDispatch: file or default, disjoint from webSearch. Legacy `dispatchMode` (including `inherit`) honoured on read. */
+/** hooks.agentDispatch: file or default, disjoint from webSearch. */
 export function resolveHooksAgentDispatch(
   config: PartialConfig,
 ): ResolvedSetting<AgentDispatchMode> {
-  const hooks = config.hooks as
-    | {
-        agentDispatch?: AgentDispatchMode;
-        dispatchMode?: DispatchHookMode;
-        webSearch?: WebSearchMode;
-        searchMode?: WebSearchMode;
-      }
-    | undefined;
-  if (hooks?.agentDispatch !== undefined) return { value: hooks.agentDispatch, source: 'file' };
-  const legacy = hooks?.dispatchMode;
-  if (legacy !== undefined && legacy !== 'inherit') {
-    return { value: legacy as AgentDispatchMode, source: 'file' };
-  }
-  if (legacy === 'inherit') {
-    const webSearch = hooks?.webSearch ?? hooks?.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-    return { value: webSearch as AgentDispatchMode, source: 'file' };
-  }
-  // File had only legacy searchMode (dispatch inherited implicitly) — preserve prior behaviour for one release.
-  if (
-    hooks?.searchMode !== undefined &&
-    hooks?.dispatchMode === undefined &&
-    hooks?.agentDispatch === undefined
-  ) {
-    const webSearch = hooks.webSearch ?? hooks.searchMode ?? CONFIG_DEFAULTS.hooks.webSearch;
-    return { value: webSearch as AgentDispatchMode, source: 'file' };
-  }
+  const fromFile = config.hooks?.agentDispatch;
+  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.hooks.agentDispatch, source: 'default' };
-}
-
-/** @deprecated use resolveHooksAgentDispatch — `inherit` never surfaces; value is already resolved */
-export function resolveHooksDispatchMode(
-  config: PartialConfig,
-): ResolvedSetting<AgentDispatchMode> {
-  return resolveHooksAgentDispatch(config);
 }
 
 /** hooks.sessionPrimer: file or default, same shape as hooks.webSearch. */
@@ -947,13 +792,6 @@ function resolveHooksSessionPrimer(config: PartialConfig): ResolvedSetting<Sessi
     ?.sessionPrimer;
   if (fromFile !== undefined) return { value: fromFile, source: 'file' };
   return { value: CONFIG_DEFAULTS.hooks.sessionPrimer, source: 'default' };
-}
-
-/** hooks.stopNag: file or default, same shape as hooks.webSearch. */
-function resolveHooksStopNag(config: PartialConfig): ResolvedSetting<StopNagMode> {
-  const fromFile = (config.hooks as { stopNag?: StopNagMode } | undefined)?.stopNag;
-  if (fromFile !== undefined) return { value: fromFile, source: 'file' };
-  return { value: CONFIG_DEFAULTS.hooks.stopNag, source: 'default' };
 }
 
 /** hooks.push: file or default, same shape as hooks.webSearch — read at run time

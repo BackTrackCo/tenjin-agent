@@ -703,17 +703,17 @@ describe('runFire: before() throws', () => {
 });
 
 describe('runFire: after()', () => {
-  it('a block from after() passes through as emit.block', async () => {
+  it("after()'s context is the emit when there was no delivery", async () => {
     const db = await freshDb();
     const arm: Arm = {
-      id: 'block-arm',
+      id: 'after-only-arm',
       wait: 'tool',
       on: [{ event: 'prompt' }],
       plan: () => null,
-      after: () => ({ block: { reason: 'stop-looping' } }),
+      after: () => ({ context: 'publish what you settled' }),
     };
     const { emit } = await runFire(input(), deps(db, [arm]));
-    expect(emit).toEqual({ block: { reason: 'stop-looping' } });
+    expect(emit).toEqual({ context: 'publish what you settled' });
   });
 
   it("after()'s context is appended to the delivery's context", async () => {

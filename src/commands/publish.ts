@@ -200,7 +200,7 @@ export async function runPublish(
         fix: 'Pass the id the capture ask printed, on its own: `tenjin publish --finding <id> --discard`. Reading it is a separate command, `tenjin publish --finding <id> --dry-run`, which writes nothing and so never discards. A file is discarded by deleting it.',
       });
     }
-    const target = await readChildFinding(ctx.dataDir, args.finding, Date.now, projectId(cwd));
+    const target = await readChildFinding(ctx.dataDir, args.finding, projectId(cwd));
     // THE SAME CROSS-PROJECT GATE `--finding` TAKES (round-3 item 5), and for a
     // stronger reason. Publishing another checkout's finding is recoverable —
     // the piece is up and can be taken down. Discarding it is not: the row is
@@ -387,7 +387,7 @@ export async function runPublish(
   const foreignIds = searchIds.filter((id) => !shelfRouteFor(stored.get(id), runtime).configured);
   const claimableIds = searchIds.filter((id) => !foreignIds.includes(id));
   if (status !== 'draft') warnForeignShelf(ctx, foreignIds, stored);
-  const title = resolveTitle(frontmatter, body);
+  const title = resolveTitle(frontmatter, body, finding);
   const tags = resolveTags(frontmatter);
   const excerpt = resolveExcerpt(args, frontmatter);
   const handle = expectString(frontmatter, 'handle');
@@ -903,7 +903,7 @@ async function resolveSource(
     });
   }
   if (args.finding !== undefined) {
-    const finding = await readChildFinding(ctx.dataDir, args.finding, Date.now, project);
+    const finding = await readChildFinding(ctx.dataDir, args.finding, project);
     if (finding.body.trim() === '') {
       throw new CliError('USAGE', `Finding ${JSON.stringify(finding.id)} has an empty body.`, {
         fix: 'Nothing was stored for that child, so there is nothing to publish. Write the finding to a file and publish that.',
@@ -1227,7 +1227,21 @@ function resolveStatus(args: PublishArgs, frontmatter: Frontmatter): PublishStat
   return fm as PublishStatus;
 }
 
-function resolveTitle(frontmatter: Frontmatter, body: string): string | undefined {
+/**
+ * Frontmatter, then the body's own first heading, then — for a queued finding —
+ * the title the child gave it.
+ *
+ * THE STORED TITLE IS LAST because the body is what is published: a child that
+ * wrote a heading into its fence meant that heading, and the harvest split the
+ * two apart. It only answers when the body carries no heading at all, which is
+ * exactly the shape `splitFinding` stores when a child gave a title and nothing
+ * under it that starts with `# `.
+ */
+function resolveTitle(
+  frontmatter: Frontmatter,
+  body: string,
+  finding: ChildFinding | undefined,
+): string | undefined {
   const fm = frontmatter.title;
   if (fm !== undefined) {
     if (typeof fm !== 'string') {
@@ -1235,11 +1249,11 @@ function resolveTitle(frontmatter: Frontmatter, body: string): string | undefine
     }
     return fm.trim();
   }
-  // Fall back to the first heading (level 1 preferred) so a plain `# Title` post
-  // needs no frontmatter.
   const headings = headingOutline(body);
   const h1 = headings.find((h) => h.level === 1) ?? headings[0];
-  return h1?.text;
+  if (h1 !== undefined) return h1.text;
+  const stored = finding?.title.trim() ?? '';
+  return stored === '' ? undefined : stored;
 }
 
 /** The server's per-item bound on `questionsAnswered` (mirrored by deriveCard). */

@@ -414,9 +414,9 @@ under `review` it refuses and the subagent states the finding instead, for you t
 publish; under `auto` with a clean scan, or `full-auto`, it publishes. Your own
 turn end then reports what your subagents published.
 
-That arm runs only under `hooks.capture block`. `nudge` asks you at your own turn
-end and blocks nothing, subagents included, which is the setting to pick if you
-want the prompt without a subagent ever losing a turn; `off` asks nobody.
+`hooks.capture` has two values: `on`, the default, asks you and each subagent at
+its own end, as context beside the stop rather than as a blocking decision; `off`
+asks nobody.
 
 Two caveats travel with the safe set. "Read-only" describes your wallet and your
 repo, not the network: `search` and `outcome` POST off-machine (a question, a
