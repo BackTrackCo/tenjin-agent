@@ -384,7 +384,10 @@ class HooksArmTest(LiveCase):
             self.assertTrue((layer / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs").is_file())
             self.assertFalse((fixture / verifier.HIDDEN_TESTS).exists())
             self.assertEqual(task["family"], "test-harness-convention")
-            support.assert_vitest_fixture(self, fixture, task["id"])
+            vendored = manifest.vendor_for(task)
+            assert vendored is not None
+            self.assertEqual(vendored.id, "vitest-3.2.4-node24-darwin-arm64")
+            support.assert_vitest_fixture(self, fixture, task["id"], vendored)
             # The prompt states the task and not the lesson: none of the shelf
             # piece's phrases, and no mention of the wrong command.
             for phrase in ("pnpm test --", "pnpm exec", "vitest", "repository-specific", "truly targets", "wrong set"):
