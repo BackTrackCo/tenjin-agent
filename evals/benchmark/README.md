@@ -411,8 +411,11 @@ attempts ran the test before the fix and how many read the setup file. Leak hist
 in the keys smoke three of four keyed attempts decoded it with `node -e` and fixed the source
 before any run, so no failure fire keyed anything; the blob is gone from `actor` at
 `bench1-hooks-smoke-7` / `bench1-keys-smoke-1`, and `assert_vitest_fixture` refuses any
-base64 run or expected value in a fixture tree. The `budget`, `candidate`, and `slug` fixtures
-on the layer follow the same pattern when the Bench-2 node rebases.
+base64 run or expected value in a fixture tree (outside the source under test, and for values
+of three characters or more). Every Bench-2 fixture follows the same pattern: the eight
+`hidden/<task>/cases.json` files hold the values, and `core`'s setup file lands under
+`packages/core/`, the package whose config names it; `discovery` reads edits against the file
+the task's fix touches (`verifier.TASK_SOURCES`).
 
 **The seeded arm may read the shelf by hand.** `tenjin_seeded` carries arm-level
 `settings.permissions.allow` for `Bash(tenjin search:*)`, `Bash(tenjin read:*)`, and
@@ -535,7 +538,7 @@ test file" is the whole instruction, and no phrase from the shelf piece appears 
 the fixture, or the test name.
 
 **Discovery.** The fix has to be learned from a run. `tests/actor.test.mjs` takes its cases
-from `tests/support/cases.mjs`, where they are a gzip-and-base64 blob decoded at import, so
+from the runner's setup file (`hidden/actor/cases.json`, see **Discovery**), so
 reading the source and the test does not reveal the expected value; the failing run prints it
 (`expected 's1:undefined' to be 's1:root'`). The hidden layer (`hidden/actor/`, verifier
 `node_test_actor`) is a plain Node assert file over different literals of the same rule, mounted
@@ -716,23 +719,25 @@ becoming a local lesson, and of a stale lesson gated by `valid_until`. The produ
   is the consumer's alone.
 
 **The eight tasks**, each a frozen Vitest project on the shared vendored archive with a hidden
-Node verifier (`hidden/<task>/`), a goal-shaped prompt with no lesson vocabulary, and a
+Node verifier and hidden test cases (`hidden/<task>/`, see **Discovery** above; nothing
+committed under a fixture holds an expected value), a goal-shaped prompt with no lesson vocabulary, and a
 family lesson plus a fix lesson in this benchmark's words, keyed by the product formula and
 re-probed every trial (drift is a refusal). Discovery cost is what the `off` arm pays without
 the lesson, stated from the command matrix run by hand on trial copies:
 
-| Task                                   | Family                    | Real failure, reproduced on a trial copy                                                                                                                                                                                                                                                                       | Fix                                                                                                                                             | Discovery without the lesson                                                                                                                 |
-| -------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `actor`, `budget`, `candidate`, `slug` | `test-harness-convention` | the package `test` script runs every project, the runner refuses any non-pnpm entry, plain `node` cannot run a vitest file; the assertion prints the value                                                                                                                                                     | one line in `src/<task>.mjs`                                                                                                                    | three to five commands, each failing for a repository reason, then one green run                                                             |
-| `alias`                                | `vitest-path-alias`       | `tsconfig.json` maps `@/*`; Vitest resolves through Vite and never reads `paths`: `Error: Cannot find package '@/window.mjs' imported from 'tests/alias.test.ts'`; once resolved, `lastWindow(values, 0)` returns the whole list (`slice(-0)`)                                                                 | `resolve.alias` in `vitest.config.mjs`, then one line in `src/window.mjs`                                                                       | one run, a read of the config and the tsconfig, the Vite alias fact, then a second run that prints the case                                  |
-| `level`                                | `node-type-stripping`     | the test spawns `node src/cli.ts`; Node 24 strips types and refuses `enum`: `SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported in strip-only mode`                                                                                                                             | a `const` object and a derived type, same `Level` name                                                                                          | one run (the child's stderr is in the assertion), the erasable-syntax rule                                                                   |
-| `money`                                | `esm-cjs-interop`         | the test spawns `node src/cli.mjs`; a CommonJS module written the way TypeScript emits it (`exports.__esModule`, `exports.default`) arrives in ESM as the exports object: `TypeError: formatMoney is not a function`, no interop named                                                                         | read `.default` in `src/cli.mjs`                                                                                                                | one run, then the CJS default-import rule, which the message does not state; Vitest itself unwraps it, so the in-runner import path misleads |
-| `core`                                 | `pnpm-workspace`          | a pnpm workspace whose tests live in `packages/core`: `pnpm test` at the root has no script, `pnpm -r test` runs every package's whole suite, a root-scoped `vitest run packages/core/...` finds no config so the package's reporters never run and the marker is never written; the assertion prints the rule | one line in `packages/core/src/core.mjs`, run from the package (`pnpm --filter core exec vitest run tests/core.test.mjs` or `-C packages/core`) | three or four commands, the workspace and config-discovery facts                                                                             |
+| Task                                   | Family                    | Real failure, reproduced on a trial copy                                                                                                                                                                                                                                                                                                                       | Fix                                                                                                                                             | Discovery without the lesson                                                                                                                 |
+| -------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `actor`, `budget`, `candidate`, `slug` | `test-harness-convention` | the package `test` script runs every project, the runner refuses any non-pnpm entry, plain `node` cannot run a vitest file; the assertion prints the value                                                                                                                                                                                                     | one line in `src/<task>.mjs`                                                                                                                    | three to five commands, each failing for a repository reason, then one green run                                                             |
+| `alias`                                | `vitest-path-alias`       | `tsconfig.json` maps `@/*`; Vitest resolves through Vite and never reads `paths`: `Error: Cannot find package '@/window.mjs' imported from 'tests/alias.test.ts'`; once resolved, `lastWindow(values, 0)` returns the whole list (`slice(-0)`)                                                                                                                 | `resolve.alias` in `vitest.config.mjs`, then one line in `src/window.mjs`                                                                       | one run, a read of the config and the tsconfig, the Vite alias fact, then a second run that prints the case                                  |
+| `level`                                | `node-type-stripping`     | the test spawns `node src/cli.ts`; Node 24 strips types and refuses `enum`: `SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported in strip-only mode`                                                                                                                                                                             | a `const` object and a derived type, same `Level` name                                                                                          | one run (the child's stderr is in the assertion), the erasable-syntax rule                                                                   |
+| `money`                                | `esm-cjs-interop`         | the test spawns `node src/cli.mjs`; a CommonJS module written the way TypeScript emits it (`exports.__esModule`, `exports.default`) arrives in ESM as the exports object: `TypeError: formatMoney is not a function`, no interop named                                                                                                                         | read `.default` in `src/cli.mjs`                                                                                                                | one run, then the CJS default-import rule, which the message does not state; Vitest itself unwraps it, so the in-runner import path misleads |
+| `core`                                 | `pnpm-workspace`          | a pnpm workspace whose tests live in `packages/core`: `pnpm test` at the root has no script, `pnpm -r test` runs every package's whole suite, a root-scoped `vitest run packages/core/...` finds no config so the package's setup file and reporters never run (`No test suite found`, the marker never written); the package-scoped assertion prints the rule | one line in `packages/core/src/core.mjs`, run from the package (`pnpm --filter core exec vitest run tests/core.test.mjs` or `-C packages/core`) | three or four commands, the workspace and config-discovery facts                                                                             |
 
 Keys the product derives, verified twice on fresh trial copies: `level` keys on both lanes
 (`sig_v1` off Node's error line in the assertion message, `sig_v1_test` off the FAIL header);
 `money` keys on both, and `node src/cli.mjs` alone keys the same `sig_v1`; `core` keys on
-`sig_v1_test` under the root-relative and the package-relative file paths, apart; `alias`
+`sig_v1_test` from the package-scoped run only (the root-scoped run collects no suite and keys
+nothing under either lane); `alias`
 keys on nothing under either lane (a suite-level import failure: no errno, the frame line ends
 the block, no test ran), so the product cannot capture or answer it locally, which is a
 hook-stage miss the funnel is meant to show, and `alias-fix` keys only once the alias is
@@ -1179,8 +1184,8 @@ frozen Vitest project per task (`actor/`): a pinned `vitest`, a committed `pnpm-
 hand-written `node_modules/.bin/vitest` shim and nothing else under `node_modules` (the tree is
 derived; see below), a `pnpm-workspace.yaml` that turns pnpm's pre-run install off, the
 `scripts/all-tests.mjs` trap, the pnpm-agent guard in `vitest.config.mjs`, the
-`scripts/ran-marker.mjs` reporter, `unrelated/` failing shards, and the cases blob under
-`tests/support/`. Frozen means no run artefacts: `.bench1/`, `node_modules/.vite*`, and pnpm's
+`scripts/ran-marker.mjs` reporter, `unrelated/` failing shards, and a `setupFiles` line for the
+runner's `.bench1/cases.setup.mjs`; the cases live in `hidden/<task>/cases.json`. Frozen means no run artefacts: `.bench1/`, `node_modules/.vite*`, and pnpm's
 state files never enter the tree, and `manifest.fixture_hash` covers every committed file plus
 the vendor archive's digest. Hidden layers live in `hidden/<task>/hidden-tests/` as plain Node
 assert files.
@@ -1270,7 +1275,7 @@ and calls nothing. Nothing here changes a record.
 Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
 
 - A new task is a manifest entry plus a fixture directory and a verifier id. The fixture is a
-  copy of an existing one with its `src/`, `tests/`, cases blob, and the reporter's `task`
+  copy of an existing one with its `src/`, `tests/`, `hidden/<task>/cases.json`, and the reporter's `task`
   renamed, the pnpm-agent guard and `pnpm-workspace.yaml` kept as they are; its `vendor` is
   the shared archive id and its hash `manifest.fixture_hash(dir, vendor)`; the verifier is `node_test_spec(task)` in
   `verifier.REGISTRY` with a hidden layer under `hidden/<task>/`. No reducer or record change.

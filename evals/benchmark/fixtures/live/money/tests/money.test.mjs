@@ -1,6 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { expect, test } from 'vitest';
-import { cases } from './support/cases.mjs';
+
+// The cases arrive through the runner's setup file; a run is the only way to learn them.
+const cases = globalThis.__bench1Cases?.money ?? [];
 
 function cli(atomic) {
   const run = spawnSync(process.execPath, ['src/cli.mjs', String(atomic)], { encoding: 'utf8' });

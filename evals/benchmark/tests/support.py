@@ -505,8 +505,9 @@ def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.
     case.assertFalse((project / "tests" / "support").exists())
     hidden = REPO_ROOT / "evals" / "benchmark" / "hidden" / task / "cases.json"
     case.assertTrue(hidden.is_file(), f"hidden/{task}/cases.json holds the expected values")
-    # Values of three characters or more, so a bare digit is not "revealed" by a version string;
-    # the source under test is skipped, since the fix's own tokens (an enum member, a unit) live there.
+    # Values of three characters or more, matched as whole tokens, so a bare digit or a word inside
+    # an identifier is not "revealed"; the source under test is skipped, since the fix's own tokens
+    # (an enum member, a unit) live there.
     expected = {str(entry["expected"]) for entry in json.loads(hidden.read_text(encoding="utf-8")) if len(str(entry["expected"])) >= 3}
     for path in fixture.rglob("*"):
         if path.is_file() and "node_modules" not in path.parts:
@@ -517,7 +518,7 @@ def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.
             if "src" in path.relative_to(fixture).parts:
                 continue
             for value in expected:
-                case.assertNotIn(value, text, f"{path.relative_to(fixture)} reveals an expected value")
+                case.assertIsNone(re.search(r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])", text), f"{path.relative_to(fixture)} reveals an expected value")
     for artefact in RUN_ARTEFACTS:
         case.assertFalse((fixture / artefact).exists(), artefact)
         case.assertFalse((project / artefact).exists(), artefact)

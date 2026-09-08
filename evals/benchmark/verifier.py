@@ -103,6 +103,8 @@ def node_test_spec(task: str, package: str = "") -> VerifierSpec:
 # The Bench-0 family, one project each, and the Bench-2 families: `core` is a
 # pnpm workspace whose tests and marker live in `packages/core`.
 TASK_PACKAGES = {"actor": "", "budget": "", "candidate": "", "slug": "", "alias": "", "level": "", "money": "", "core": "packages/core"}
+# The file the task's fix touches, which the discovery facts read edits against.
+TASK_SOURCES = {"actor": "src/actor.mjs", "budget": "src/budget.mjs", "candidate": "src/candidate.mjs", "slug": "src/slug.mjs", "alias": "src/window.mjs", "level": "src/level.ts", "money": "src/cli.mjs", "core": "packages/core/src/core.mjs"}
 
 REGISTRY: dict[str, VerifierSpec] = {
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),

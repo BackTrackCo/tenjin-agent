@@ -518,7 +518,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "wall_time_s": wall_time_s,
         "unresolved_actors": settlement.unresolved,
         "delivery": delivery,
-        "discovery": discovery.derive(sessions, trial.task_id) if spec.live else None,
+        "discovery": discovery.derive(sessions, trial.task_id, verifier.TASK_SOURCES.get(trial.task_id)) if spec.live else None,
         "sentinel": sentinel.counts(),
         "isolation": isolation_of(isolation, provision, provision_stop),
         "private_hashes": {

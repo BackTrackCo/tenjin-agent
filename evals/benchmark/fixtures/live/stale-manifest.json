@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-stale-0",
+  "benchmark_version": "bench2-stale-1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -46,7 +46,7 @@
       "transfer_distance": "same_family",
       "fixture": "actor",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:ce92d076c680388ae6566d8a9c932ffc8554d471cc3c13369c8004fd1db04a88",
+      "fixture_hash": "sha256:d19a2b57fa7f2ffa1bf3da4629a5d1835cdcbcf3d209404e4c121dd242a94118",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -56,7 +56,7 @@
       "transfer_distance": "same_family",
       "fixture": "budget",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:33e3fc95065c051b7a8158df520a3f8b4d0f6da368ff5acad526c25d4d530f88",
+      "fixture_hash": "sha256:b0a7713ae0e0e84fed93c4488178b8da7a4fe0b103b4d9c2e3f25718e2c3b9e2",
       "verifier": "node_test_budget",
       "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -66,7 +66,7 @@
       "transfer_distance": "same_family",
       "fixture": "candidate",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:6cf5115ead17c1a84b38110a7e16ed7d6ce7c5580f9dab815b407d26e24b1a5d",
+      "fixture_hash": "sha256:6dab61f156676abdad797bb1ce64d3a0fc4b16d5691ebde83da29f5c91977d40",
       "verifier": "node_test_candidate",
       "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -76,7 +76,7 @@
       "transfer_distance": "same_family",
       "fixture": "slug",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:215daff0e5ccde272a119d7d724d76a4ecf8bc674171d69308dae5d2e94426f6",
+      "fixture_hash": "sha256:9a27d3f2086498804a57ed075d9295bd2ebad86277adf290430af3fc83754ae5",
       "verifier": "node_test_slug",
       "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -86,7 +86,7 @@
       "transfer_distance": "same_task",
       "fixture": "alias",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:af7a7973a161cc8fea0c472f385acf2f1453a8ba843464ed7a1d1598861e0923",
+      "fixture_hash": "sha256:430ddad9357b79c01fffc5f6d451ec3f886a736fbbedc70cd2dd8dce7e0dc28f",
       "verifier": "node_test_alias",
       "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -96,7 +96,7 @@
       "transfer_distance": "same_task",
       "fixture": "level",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:3402809d1d5fd0baf91ac6e192f1b2d8d0d158b3dc2af387c4ee89b535cf2e8c",
+      "fixture_hash": "sha256:0f98522f8166bdfb5e02e6fb73dc4a0a4a6da6cd9000f08fc874c2a4f1a39c56",
       "verifier": "node_test_level",
       "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -106,7 +106,7 @@
       "transfer_distance": "same_task",
       "fixture": "money",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:dc68188bffb0516eecbab4a0ed1c0464b66404467048cd784a7ba23837026ef7",
+      "fixture_hash": "sha256:4e1f14fd8bb90ffb23f70291c3e5e30c7f0e335c101ba501cea82a662c8b198c",
       "verifier": "node_test_money",
       "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -116,7 +116,7 @@
       "transfer_distance": "same_task",
       "fixture": "core",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:8f6c7e2e6d49d4b1a6c68c8904fac106bc7ba79d7eaff7ce82c6ef6ef961a4de",
+      "fixture_hash": "sha256:523096b3737e847c05018197f346703cd91123873ddc01a91c512809f8cbbd76",
       "verifier": "node_test_core",
       "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }

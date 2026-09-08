@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-recursive-0",
+  "benchmark_version": "bench2-recursive-1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -45,7 +45,7 @@
       "transfer_distance": "same_family",
       "fixture": "actor",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:ce92d076c680388ae6566d8a9c932ffc8554d471cc3c13369c8004fd1db04a88",
+      "fixture_hash": "sha256:d19a2b57fa7f2ffa1bf3da4629a5d1835cdcbcf3d209404e4c121dd242a94118",
       "verifier": "node_test_actor",
       "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
       "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],

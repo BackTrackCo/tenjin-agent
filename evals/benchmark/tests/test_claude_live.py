@@ -407,7 +407,7 @@ class HooksArmTest(LiveCase):
     def test_the_real_manifest_is_the_phase_one_local_pilot(self) -> None:
         manifest = manifest_module.load(cli.REAL_MANIFEST)
         trials = schedule.expand(manifest)
-        self.assertEqual((len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]), (48, 3, "bench2-local-pilot-0"))
+        self.assertEqual((len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]), (48, 3, "bench2-local-pilot-1"))
         schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
         self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_natural"])
         off, natural = manifest.arms

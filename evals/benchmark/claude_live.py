@@ -429,7 +429,8 @@ def inject_cases(roots: artifact.TrialRoots, task: Mapping[str, Any]) -> Path | 
     cases = verifier.HIDDEN / str(task.get("id", "")) / "cases.json"
     if not cases.is_file():
         return None
-    target = roots.repo / SETUP_PATH
+    package = verifier.TASK_PACKAGES.get(str(task.get("id", "")), "")
+    target = (roots.repo / package if package else roots.repo) / SETUP_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {str(task["id"]): json.loads(cases.read_text(encoding="utf-8"))}
     target.write_text("// Written by the benchmark runner at launch; the test reads it through globalThis.\n" f"globalThis.__bench1Cases = {json.dumps(payload)};\n", encoding="utf-8")

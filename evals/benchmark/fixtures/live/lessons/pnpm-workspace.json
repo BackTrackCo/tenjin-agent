@@ -12,9 +12,9 @@
     {
       "command": "pnpm exec vitest run packages/core/tests/core.test.mjs",
       "kind": "sig_v1_test",
-      "key": "6652999d3bca393f",
+      "key": null,
       "check": true,
-      "reason": "a root-scoped run reaches the assertion under the root-relative file path, which the test-identity lane keys apart from the package-scoped run"
+      "reason": "from the root no config loads, so the package's setup file never runs and the file holds no test suite: a suite-level failure with no errno, no frame, and no test name, so neither lane keys it"
     }
   ]
 }
