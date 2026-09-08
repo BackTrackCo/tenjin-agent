@@ -31,6 +31,8 @@ evals/benchmark/
   usage.py         UsageRecord and AuxiliaryReceipt contracts, arithmetic, null-vs-zero, dedupe, totals
   claude_usage.py  Claude JSONL usage adapter (group by requestId, select one row, reconcile)
   loop_join.py     read-only projection of a stopped trial's loop.db onto exact actor keys
+  local_seed.py    Bench-2: seed the trial's own store through the daemon, the way a producer session writes it
+  producer.py      Bench-2: the natural arm's producer phase, verified, its usage as producer/capture receipts
   runner.py        executes a schedule: fresh roots, settlement, caps, sentinels, resume
   executor.py      executor registry (code-owned argv, shell=False) and the fake executors;
                    `write_transcripts` emits a root, an optional child, and an optional
@@ -290,8 +292,9 @@ there is no default, and nothing here ever reads a home path on its own.
 **Provisioning.** An arm that declares `provision: "tenjin"` is prepared after its roots exist
 and before its launch: the two bundles are copied from the source, exactly `COPIED_KEYS`
 (`baseUrl`, `publicShelfUrl`, `shelfBypassSecret`) are copied from the source config, the
-constants in `SEEDED` are forced (`publish.mode` review, `hooks.capture` off,
-`team.publicFallback` on, `loop.idle_exit_min` 2), a fresh `daemon.token` is minted, a free
+constants in `SEEDED` are forced (`publish.mode` review, the seven hook arms on, which is
+the product as shipped (`hooks.capture` is not a product key; the turn-end capture ask is the
+`publish` arm), `team.publicFallback` on, `loop.idle_exit_min` 2), a fresh `daemon.token` is minted, a free
 loopback port goes into `loop.port`, and one daemon is started with `runner.process_start`: its
 own session, an allowlisted environment, its group in the pids ledger under `<trial>.daemon`, so
 `cli.py cleanup` reaches it. `prepare` waits for `/health` to answer with this data dir and this
@@ -558,20 +561,9 @@ compares against the plumbing smoke's baseline and does not apply to this manife
 manifest never runs in CI: the live lane and `--ci-live` stay on the plumbing smoke, and the
 refusal is in code rather than in the workflow.
 
-**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-6`) is the same two
-arms and the same pins over all four Bench-0 tasks, `actor`, `budget`, `candidate`, and `slug`,
-two repeats, sixteen attempts. Each task is its own frozen Vitest project built the same way as
-`actor` (pinned `vitest`, committed lockfile, the one vendored `node_modules` archive all four
-name under `vendor`, extracted per trial and platform-pinned, the trap script, the pnpm-agent
-guard and `pnpm-workspace.yaml`, the marker reporter, `unrelated/` shards, a cases blob) with its own hidden layer (`hidden/<task>/`,
-verifier `node_test_<task>`), and each prompt is the same sentence with the file names changed.
-The discovery step per task is what the failing run prints: `budget` shows
-`expected 3200 to be 2500` (a ceiling), `candidate` shows the received `{ id: 'a', strong: false }`
-against the expected `{ id: 'b', strong: true }` (the first strong item, `null` for none), and
-`slug` shows `'BackTrackCo/Tenjin.git'` against `'backtrackco/tenjin'` (lower-case, drop
-`.git`). It is still one lesson family, and it is still the operator's plumbing run only: the
-same `live-run --plumbing --tenjin-source` command with this manifest, then `verify` and
-`summary`, and never in CI. Bench-2 owns the corpus that replaces it.
+**The real manifest** is now the Bench-2 local pilot; see **Bench-2: local reuse** below. The
+sixteen-attempt `bench1-real-6` shape (the four Bench-0 tasks under `off` and `tenjin_seeded`)
+was its groundwork and is superseded; `bench1-real-2` through `-6` never ran.
 
 **What the number would mean.** The shelf search leg sends the question, a limit, the trigger,
 and a budget, so a per-run namespace on an existing shelf cannot isolate retrieval, and the
@@ -647,6 +639,175 @@ it, and the hook injected it before the first command. It is the easiest possibl
 oracle-shaped lesson, n = 2, one task, non-publishable. It proves the funnel end to end and
 says nothing yet about developer token savings on real corpora; the 0.647 ratio is plumbing
 evidence only. The failure path (the keys leg) remains unexercised on this fixture.
+
+## Bench-2: local reuse
+
+Bench-2 measures the product's LOCAL reuse path with no shelf deployment: a lesson one session
+learned on this machine, delivered to a later session on the same data dir. Plan:
+`tenjin-notes/plans/2026-09-04-developer-token-savings-benchmark.md`, Bench-2 row and Phase 1.
+Nothing in this section runs in CI; every manifest here is an operator command.
+
+**Where the plan's wording and the product differ.** The plan and the directive that shaped
+this section speak of a Stop-hook capture with `hooks.capture` on and `publish.mode` auto
+becoming a local lesson, and of a stale lesson gated by `valid_until`. The product on `main`
+(`21ce314`) is not built that way, and this package measures the product as built:
+
+- Local reuse is the failure arm's `pairings` table (`src/hooks/failure/pairings.ts`). A
+  failing command opens a row keyed on the signature lanes (`sig_v1`, `sig_v1_test`); the same
+  agent's later pass on the SAME command, after editing a tracked file, closes it
+  (`unverified`; a second independent session's agreeing close makes it `verified`); a later
+  failure under the same key in the same project (`projectId`, a hash of the cwd string) is
+  answered by the row on the `local` leg as "Someone once fixed this by touching: <files>. It
+  passed afterwards on: <command>". Nothing else writes those rows: no CLI verb, no daemon
+  route, no config.
+- The Stop-hook capture (`src/hooks/capture.ts`) harvests a `finding:` fact and feeds the
+  publish ask (`tenjin publish --finding`); it never feeds the `local` leg. Its gate is
+  `hooks.publish`; `hooks.capture` does not exist, and `publish.mode` changes only the words of
+  the ask (`auto` tells the lead to publish rather than asking). A trial's data dir carries no
+  wallet, so a producer cannot publish to any shelf from a trial; nothing is left to delete.
+- Nothing local expires: `pairings` has no `valid_until`, `findPairing` has no time term, and
+  retention (`src/daemon/retention.ts`) prunes `fires`, `marks`, and unclaimed `handoff` only.
+- A lesson whose fix is a DIFFERENT command (the test-harness convention: `node tests/x`
+  fails, `pnpm exec vitest run` passes) has no local record in the product, because a pairing
+  closes only on a pass with the same command head. The seed says so (`cross_command`,
+  `no_fix_file`) instead of faking one.
+
+**The four arms** (`local-arms-manifest.json`):
+
+- `off`: empty settings, as before.
+- `flat`: the same approved lessons as static Markdown in the repository, through the
+  foundation's `settings.overlay`: one `LESSONS.md` holding every lesson below (all thirteen
+  bodies from `fixtures/live/lessons/`, verbatim, in a fixed order; a test holds the overlay
+  to the lesson files) and a `CLAUDE.md` that tells the agent to read it. The overlay is
+  hashed into `settings_hash`, written into the repository copy at launch, and never enters
+  the child's settings file. No hooks, no daemon.
+- `tenjin_seeded` with `seed: local`: the trial's own store pre-populated through the product's
+  write path. `prepare` starts the daemon on the `seed` config (`baseUrl` set to the public
+  shelf, so the product sees no team origin and the failure arm runs its local leg alone: the
+  replay is offline), replays each seedable lesson as the five hook events a fix looks like
+  (`PreToolUse` Bash, `PostToolUseFailure` Bash with the probe's real output under `error`,
+  `PreToolUse` Edit of the lesson's `fix.file`, `PreToolUse` and `PostToolUse` Bash passing on
+  the same command), under a session id derived from the trial, at the consumer's own cwd, so
+  the daemon's own code opens and closes the pairing under the key the probe re-derived.
+  Then it stops that daemon, requires the WAL gone, reads `pairings` read-only (the record's
+  `isolation.local_seed`: per lesson which commands were replayed or why not, the status
+  counts, key hashes, event count, distractor count), refuses when the closed count is not
+  the replayed count, and starts the consumer's daemon on the consumer config. A lesson's
+  `.json` names its `fix` (`file`, `command`) to be seedable; the seven fix lessons do, the
+  convention lesson and `alias-fix` cannot (see above). The shelf path (`seed: shelf`, the
+  hooks smoke) is unchanged.
+- `tenjin_natural`: `producer: true`. A producer session runs first (`producer.py`): its own
+  home, profile, output, transcripts, and canary, the same pins, the same repository path
+  (the product scopes local records by cwd hash), the same data dir, the daemon on the
+  `producer` config (`publish.mode` auto). When it exits the daemon is stopped and its WAL has
+  to be gone (`producer:wal_live` otherwise); the settled store is read once (closed
+  pairings, harvested findings, the producer's fires, its first `turn.end`); the producer's
+  worktree goes through the task's hidden verifier, and a producer that did not pass makes
+  the attempt invalid `producer:failed` with no consumer started; then the repository is
+  re-copied fresh at the same path, the daemon restarts on the consumer config with the same
+  token on a fresh port (`isolation.producer.daemon: restarted`), and the consumer runs. The
+  producer's usage is written as auxiliary receipts (`component: producer`): phase `producer`
+  for requests before its first turn-end fire (the work the task would have cost anyway) and
+  phase `capture` from that fire on (what the capture ask added). The consumer's own usage is
+  never mixed with either. `isolation.producer` carries the producer's outcome, verifier,
+  stop reason, wall time, turns, cost, token totals, actor count, reconciliation status, the
+  phase split, the store facts, and its sentinel counts; `delivery.phase_fires` counts the
+  producer's (and the seed replay's) fires apart from the consumer's, and `delivery.failure_key`
+  is the consumer's alone.
+
+**The eight tasks**, each a frozen Vitest project on the shared vendored archive with a hidden
+Node verifier (`hidden/<task>/`), a goal-shaped prompt with no lesson vocabulary, and a
+family lesson plus a fix lesson in this benchmark's words, keyed by the product formula and
+re-probed every trial (drift is a refusal). Discovery cost is what the `off` arm pays without
+the lesson, stated from the command matrix run by hand on trial copies:
+
+| Task                                   | Family                    | Real failure, reproduced on a trial copy                                                                                                                                                                                                                                                                       | Fix                                                                                                                                             | Discovery without the lesson                                                                                                                 |
+| -------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `actor`, `budget`, `candidate`, `slug` | `test-harness-convention` | the package `test` script runs every project, the runner refuses any non-pnpm entry, plain `node` cannot run a vitest file; the assertion prints the value                                                                                                                                                     | one line in `src/<task>.mjs`                                                                                                                    | three to five commands, each failing for a repository reason, then one green run                                                             |
+| `alias`                                | `vitest-path-alias`       | `tsconfig.json` maps `@/*`; Vitest resolves through Vite and never reads `paths`: `Error: Cannot find package '@/window.mjs' imported from 'tests/alias.test.ts'`; once resolved, `lastWindow(values, 0)` returns the whole list (`slice(-0)`)                                                                 | `resolve.alias` in `vitest.config.mjs`, then one line in `src/window.mjs`                                                                       | one run, a read of the config and the tsconfig, the Vite alias fact, then a second run that prints the case                                  |
+| `level`                                | `node-type-stripping`     | the test spawns `node src/cli.ts`; Node 24 strips types and refuses `enum`: `SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported in strip-only mode`                                                                                                                             | a `const` object and a derived type, same `Level` name                                                                                          | one run (the child's stderr is in the assertion), the erasable-syntax rule                                                                   |
+| `money`                                | `esm-cjs-interop`         | the test spawns `node src/cli.mjs`; a CommonJS module written the way TypeScript emits it (`exports.__esModule`, `exports.default`) arrives in ESM as the exports object: `TypeError: formatMoney is not a function`, no interop named                                                                         | read `.default` in `src/cli.mjs`                                                                                                                | one run, then the CJS default-import rule, which the message does not state; Vitest itself unwraps it, so the in-runner import path misleads |
+| `core`                                 | `pnpm-workspace`          | a pnpm workspace whose tests live in `packages/core`: `pnpm test` at the root has no script, `pnpm -r test` runs every package's whole suite, a root-scoped `vitest run packages/core/...` finds no config so the package's reporters never run and the marker is never written; the assertion prints the rule | one line in `packages/core/src/core.mjs`, run from the package (`pnpm --filter core exec vitest run tests/core.test.mjs` or `-C packages/core`) | three or four commands, the workspace and config-discovery facts                                                                             |
+
+Keys the product derives, verified twice on fresh trial copies: `level` keys on both lanes
+(`sig_v1` off Node's error line in the assertion message, `sig_v1_test` off the FAIL header);
+`money` keys on both, and `node src/cli.mjs` alone keys the same `sig_v1`; `core` keys on
+`sig_v1_test` under the root-relative and the package-relative file paths, apart; `alias`
+keys on nothing under either lane (a suite-level import failure: no errno, the frame line ends
+the block, no test ran), so the product cannot capture or answer it locally, which is a
+hook-stage miss the funnel is meant to show, and `alias-fix` keys only once the alias is
+resolved (`check: false`, derived on a fixed copy). `transfer_distance` is `same_family` for the
+Bench-0 family (its convention lesson is shared by four consumers) and `same_task` for the four
+new families, each of which has one consumer; no family here has a near and a far consumer, so
+the plan's near/far split waits for Bench-3's history-derived pairs. `lessons/` also holds
+`actor-fix-keyonly` for the foundation's keys smoke. The new fixtures carry no trap, guard, or
+shards: their one real failure is the family's.
+
+**The slices**, one manifest each so the operator runs one at a time:
+
+- `scale-50-manifest.json`, `scale-200-manifest.json`: `slice: {kind: scale, distractors: N}`.
+  The local seed replays N unrelated failure-then-fix records from `fixtures/live/distractors.json`
+  (200 committed neutral entries, keyed apart from every lesson, a test holds that) beside the
+  real one, in the same project; the record and the report carry N. N = 0 is the
+  `tenjin_seeded` arm of `local-arms-manifest.json`.
+- `stale-manifest.json`: `slice: {kind: stale, age_days: 400}`. Refused, with the reason, by
+  `live-run` before any root and by `prepare` on every trial, and stated on a dry run: the
+  product has no local expiry (above), and aging a row would mean writing `loop.db` by hand,
+  which the seed never does. The manifest stays so the refusal is what the operator sees; it
+  runs once the product carries an expiry it can gate on.
+- `recursive-manifest.json`: `slice: {kind: recursive}`. One task (`actor`) whose prompt
+  delegates the diagnosis to a subagent, with `Agent` in that task's own `tools` and
+  `allowed_tools` (a task-level override the manifest allows only under this slice), under
+  `off`, `tenjin_seeded`, and `tenjin_natural`, three repeats, nine attempts; the child's own
+  `agent_id` delivery and its `seen:` mark are exercised, per-actor usage is recorded as the
+  foundation already does, and the report's `child_tokens` and `actors` read the descendants
+  apart.
+
+**The reducer and the report.** Per arm: `phase_tokens` (`producer`, `capture`, once per native
+request id), `amortization` (the foundation's, charging producer and capture together) and
+`amortization_capture_only` (the plan's, charging the capture's incremental cost alone),
+`producer` (phases run, passed, captured a closed record, findings harvested, invalid, WAL
+live) and `local_seed` (stores seeded, closed records, empty stores, distractors). Per
+comparison: `token_ratio` (consumer-only), `amortized_token_ratio`, and
+`amortized_capture_only_token_ratio` at reuse 1, 2, 5, 10. Per cell diagnostics: `local_legs`,
+`local_hits`, `child_tokens`, `child_requests`, `actors`. The report carries `slice`, and each
+trial row `producer_outcome`, `producer_tokens`, `local_hits`, `child_tokens`; `summary` prints
+the slice, one producer line and one local-seed line per arm, the local legs and descendant
+tokens, and both amortized ratios at reuse 1 and 10. The regress baseline is untouched: nothing
+here has run, so nothing here has a baseline.
+
+**Manifests and cost.** `real-manifest.json` (`bench2-local-pilot-0`) is the plan's Phase 1
+local pilot: 8 tasks x (`off`, `tenjin_natural`) x 3 repeats = 48 consumer attempts plus 24
+producer attempts. `local-arms-manifest.json` (`bench2-local-arms-0`) is 8 x (`off`, `flat`,
+`tenjin_seeded`, `tenjin_natural`) x 3 = 96 consumer attempts plus 24 producer attempts. The
+scale and stale manifests are 8 x (`off`, `tenjin_seeded`) x 3 = 48; the recursive one is 9
+consumer attempts plus 3 producer attempts. `max_budget_usd` stays 0.75 per attempt, producer
+attempts included, so the caps are 54 USD (pilot), 90 USD (arms), 36 USD (a scale manifest),
+and 9 USD (recursive); at the 0.14 to 0.36 USD the hooks smokes observed per attempt, expect
+roughly 10 to 26 USD for the pilot and 17 to 43 USD for the arms manifest. Every run needs
+`--plumbing --tenjin-source <tenjin data dir>` (the seeded config still names the team
+shelf, so no run here is publishable), and the source data dir has to hold the three bundles
+(`tenjin daemon start` writes them):
+
+```bash
+# the Phase 1 local pilot: off versus tenjin_natural, 48 attempts
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/real-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
+# the full local comparison: off, flat, tenjin_seeded, tenjin_natural, 96 attempts
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/local-arms-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
+# one slice at a time
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/scale-50-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/scale-200-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/recursive-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/stale-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>   # refused, by design
+# after any of them
+python3 -m evals.benchmark.cli verify --run <dir>
+python3 -m evals.benchmark.cli summary --run <dir>
+```
+
+`--dry-run` on each prints, per trial, the phases line for a producer arm, one `seed` line per
+lesson command (replayed, or why not) and the distractor count for a local seed, the
+`overlay` files for `flat`, the `slice`, and the stale refusal, and starts nothing. None of
+these manifests has run on any head; the numbers above are caps and expectations, not results.
 
 ## Cleanup
 
@@ -773,14 +934,18 @@ task failure gets no free retry unless the same rule applies to every arm.
 
 `manifest.py` accepts exactly these keys and nothing else: `benchmark_version`,
 `schema_version` (1), `harness`, `seed`, `repeats`, `pins`, `price_sheet_version`, `tasks`,
-`arms`, and optionally `phases` with `producer`, `capture`, `consumer` labels. Pins are
+`arms`, and optionally `phases` with `producer`, `capture`, `consumer` labels, and `slice`
+(`kind` `stale` with `age_days`, `scale` with `distractors`, or `recursive`). Pins are
 `model`, `harness_version`, `effort`, `image`, `dependency_lock_hash`, `permission_mode`,
 `wall_clock_s`, `turn_budget`. A task is `id`, `family`, `transfer_distance`, `fixture`,
 `fixture_hash`, `verifier`, optionally `prompt` and `vendor` (the id of an archive under
-`vendor/` beside the manifest, extracted into the trial's `node_modules`); an arm is `id`,
-`executor`, `product_version`,
-`settings_hash`, `memory_snapshot_hash`, `auxiliary_usage`, optionally `settings` and
-`provision` (the provisioner the executor prepares the arm with; only `tenjin` exists).
+`vendor/` beside the manifest, extracted into the trial's `node_modules`), and `tools` and
+`allowed_tools` (a task-level override of the pins, allowed only under a `recursive` slice
+and only that slice may name `Agent`); an arm is `id`, `executor`, `product_version`,
+`settings_hash`, `memory_snapshot_hash`, `auxiliary_usage`, optionally `settings`,
+`provision` (the provisioner the executor prepares the arm with; only `tenjin` exists),
+`lessons` (exactly which lessons it seeds), `seed` (`shelf` or `local`, provisioned arms
+only), and `producer` (a producer phase first, provisioned arms only).
 
 `auxiliary_usage` is the arm's declaration about model spend outside the harness session:
 `none` (it spends none), `exposed` (its memory product emits auxiliary receipts), or
@@ -892,8 +1057,10 @@ exactly for `invalid`; verifier verdict and patch hash; stop reason (`exit` | `t
 delivery projection with its per-shelf leg counts, its class counts, and its public summary;
 sentinel counts and the isolation block (`live`, `publishable`,
 `fresh_roots`, `attested_container`, `attestation_hash`, `automated`, `shelf_secret_present`,
-`shelf_origin`, and `daemon_respawned` for a provisioned arm); and hashes of private inputs
-(`root_transcript`, `executor_stderr`, `resolved_settings`), never their bodies or host paths.
+`shelf_origin`, and `daemon_respawned` for a provisioned arm, `slice` when the manifest names
+one, `local_seed` for a locally seeded arm, and `producer` for a natural arm, see **Bench-2:
+local reuse**); and hashes of private inputs (`root_transcript`, `executor_stderr`,
+`resolved_settings`), never their bodies or host paths.
 
 `records.validate` refuses unknown keys, a record that seeded a shelf secret and claims to be
 publishable, a `trial_id` that does not derive from the record's own fields, a scored attempt without the lead actor, usage or fires naming an actor outside
@@ -948,7 +1115,9 @@ is not counted.
   never added to the total.
 - Producer and capture phase receipts are one-time knowledge cost. They leave the per-attempt
   numerator, are counted once per native request id however many attempts record them, and come
-  back through `amortization` at reuse 1, 2, 5, and 10.
+  back through `amortization` at reuse 1, 2, 5, and 10; `phase_tokens` keeps the two phases
+  apart and `amortization_capture_only` charges the capture phase alone (the plan's rule: the
+  producer's own work would have happened anyway).
 - `comparisons[arm]` pairs each task against the baseline arm (the first arm in the manifest),
   reports the mean per-task ratio, and attaches a `task_paired_percentile` interval from
   `paired_bootstrap`: `random.Random(seed)`, 2000 resamples of the task set with replacement, a
