@@ -354,8 +354,7 @@ from `tests/support/cases.mjs`, where they are a gzip-and-base64 blob decoded at
 reading the source and the test does not reveal the expected value; the failing run prints it
 (`expected 's1:undefined' to be 's1:root'`). The hidden layer (`hidden/actor/`, verifier
 `node_test_actor`) is a plain Node assert file over different literals of the same rule, mounted
-after shutdown and run with `node` from `PATH`, so a lookup table over the visible cases fails
-it. The verifier then requires the run marker: the fixture's `scripts/ran-marker.mjs` reporter
+after shutdown and run with `node` from `PATH`, so a table of the visible cases fails it. The verifier then requires the run marker: the fixture's `scripts/ran-marker.mjs` reporter
 writes `.bench1/ran-actor.json` with the run's file list and pass count only when the run is
 green, and `verifier.check_marker` accepts only a list of exactly `tests/actor.test.mjs`. The
 marker is evidence, not proof: the agent can write any file under the fixture, so the

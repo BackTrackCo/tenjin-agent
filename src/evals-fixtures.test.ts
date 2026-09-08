@@ -30,6 +30,9 @@ const read = (path: string): string => readFileSync(`${EVALS_DIR}${path}`, 'utf8
  */
 function walkFixtures(dir = EVALS_DIR, prefix = ''): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    // The benchmark's frozen task fixtures commit their vitest tree; a vendored
+    // dependency's README is not a payload anything seeds.
+    if (entry.isDirectory() && entry.name === 'node_modules') return [];
     if (entry.isDirectory()) return walkFixtures(`${dir}${entry.name}/`, `${prefix}${entry.name}/`);
     return /\.(json|md)$/.test(entry.name) ? [`${prefix}${entry.name}`] : [];
   });
