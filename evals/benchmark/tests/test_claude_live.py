@@ -754,6 +754,18 @@ class LiveRunRefusalTest(LiveCase):
             cli.live_run(self.run_dir, cli.FAKE_MANIFEST, dry_run=True, environ={})
         self.assertIn("is fake", str(caught.exception))
 
+    def test_reading_a_run_that_never_started_is_one_sentence_and_exit_two(self) -> None:
+        empty = self.dir / "never-started"
+        empty.mkdir()
+        for command in ("summary", "verify", "reduce", "report", "regress"):
+            with self.subTest(command):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    code = cli.main([command, "--run", str(empty)])
+                self.assertEqual(code, 2)
+                self.assertIn("the run did not start", stderr.getvalue())
+                self.assertNotIn("Traceback", stderr.getvalue())
+
     def test_fake_run_refuses_a_live_executor_manifest(self) -> None:
         with NoProcess(self), self.assertRaises(cli.CliError) as caught:
             cli.fake_run(self.run_dir, cli.SMOKE_MANIFEST)

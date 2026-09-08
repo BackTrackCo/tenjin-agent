@@ -187,10 +187,18 @@ def delete_argv(piece_id: str) -> list[str]:
     return [CLI, "delete", piece_id, "--yes", "--json"]
 
 
+def search_argv(query: str) -> list[str]:
+    return [CLI, "search", query, "--json", "--limit", str(SEARCH_LIMIT)]
+
+
 # The seams a test replaces with a fake CLI. Code-owned: the manifest never
 # names a program, and the arguments above are the only ones ever passed.
 PUBLISH_ARGV: Callable[[Path, tuple[str, ...]], list[str]] = publish_argv
 DELETE_ARGV: Callable[[str], list[str]] = delete_argv
+SEARCH_ARGV: Callable[[str], list[str]] = search_argv
+SEARCH_LIMIT = 10
+ENVELOPE_KEYS = frozenset({"ok", "data", "resourceId", "postId", "deleted", "candidates"})
+SEED_NOTE = "seed.json"
 
 
 def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dict[str, str]:
@@ -219,38 +227,108 @@ def _find(value: Any, name: str) -> Any:
     return None
 
 
+def envelope_of(*streams: str) -> Any:
+    """The CLI's JSON envelope wherever it landed: the first object of envelope shape on either stream, whole or per line.
+
+    The output contract says stdout, and 0.1.0-alpha.15 writes `publish` and
+    `delete` envelopes to stderr; the fifth hooks smoke aborted on that. So
+    the parse is by shape, not by stream and not by last line.
+    """
+    for stream in streams:
+        text = (stream or "").strip()
+        if not text:
+            continue
+        candidates = [text] + [line.strip() for line in text.splitlines() if line.strip().startswith("{")]
+        for candidate in candidates:
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict) and ENVELOPE_KEYS & set(value):
+                return value
+    return None
+
+
+def piece_id_of(payload: Any) -> str | None:
+    """The published piece's id, by the shapes the receipt has had: `data.resourceId`, `resourceId`, `data.post.id`, `postId`."""
+    if not isinstance(payload, dict):
+        return None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    post = data.get("post") if isinstance(data.get("post"), dict) else {}
+    for value in (data.get("resourceId"), payload.get("resourceId"), post.get("id"), data.get("postId"), payload.get("postId")):
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _mask(text: str, secrets_: tuple[str, ...]) -> str:
+    for secret in secrets_:
+        text = text.replace(secret, "[secret]")
+    return text
+
+
 def _run_cli(argv: list[str], env: dict[str, str], secrets_: tuple[str, ...]) -> tuple[int, Any, str]:
-    """One CLI call: exit code, the parsed JSON on stdout (or None), and the tail of stderr with every secret masked."""
+    """One CLI call: exit code, the envelope parsed off either stream (or None), and the masked tail of both streams."""
     try:
         completed = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=CLI_TIMEOUT_S, shell=False, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
         return 1, None, f"{argv[0]} could not run: {error.__class__.__name__}"
-    tail = (completed.stderr or "").strip()[-OUTPUT_LIMIT:]
-    for secret in secrets_:
-        tail = tail.replace(secret, "[secret]")
-    try:
-        payload = json.loads(completed.stdout) if completed.stdout.strip() else None
-    except json.JSONDecodeError:
-        payload = None
-    return completed.returncode, payload, tail
+    tail = _mask(("stderr: " + (completed.stderr or "").strip() + " stdout: " + (completed.stdout or "").strip()).strip(), secrets_)[-OUTPUT_LIMIT:]
+    return completed.returncode, envelope_of(completed.stdout, completed.stderr), tail
 
 
 def seed_body(lesson: Lesson, roots: artifact.TrialRoots, trial_id: str) -> Path:
     """The lesson with a trial stamp, written outside the agent's roots: the CLI dedups a body it already published."""
     target = roots.base / SEED_DIR / lesson.body.name
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(lesson.body.read_text(encoding="utf-8").rstrip("\n") + f"\n\nBenchmark seed: trial {trial_id}.\n", encoding="utf-8")
+    target.write_text(lesson.body.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{stamp_of(trial_id)}\n", encoding="utf-8")
     return target
 
 
+def stamp_of(trial_id: str) -> str:
+    return f"Benchmark seed: trial {trial_id}."
+
+
+def sweep_stamped(source: Source, lesson: Lesson) -> dict[str, Any]:
+    """Find every piece on the shelf carrying the lesson's title and delete it. Owner-scoped: the CLI refuses another wallet's piece."""
+    code, payload, tail = _run_cli(SEARCH_ARGV(lesson.title), cli_environment(source), source.secrets)
+    found = _find(payload, "candidates")
+    matches = [item for item in (found if isinstance(found, list) else []) if isinstance(item, dict) and item.get("title") == lesson.title and isinstance(item.get("resourceId"), str)]
+    deleted: list[str] = []
+    failed: dict[str, str] = {}
+    for item in matches:
+        error = delete_lesson(source, item["resourceId"])
+        if error is None:
+            deleted.append(item["resourceId"])
+        else:
+            failed[item["resourceId"]] = error
+    return {"search_exit": code, "search_tail": tail if code != 0 else "", "matched": len(matches), "deleted": deleted, "failed": failed}
+
+
 def publish_lesson(source: Source, roots: artifact.TrialRoots, lesson: Lesson, trial_id: str) -> str:
-    """Publish the lesson under its keys through the CLI, the way a producer's turn end would. Returns the piece id."""
+    """Publish the lesson under its keys through the CLI, the way a producer's turn end would. Returns the piece id.
+
+    Fails closed: a publish whose id cannot be read may still have landed, so
+    every piece with the lesson's title is deleted before the refusal, and the
+    trial's output keeps a note saying the publish outcome was unknown.
+    """
     body = seed_body(lesson, roots, trial_id)
     code, payload, tail = _run_cli(PUBLISH_ARGV(body, lesson.keys), cli_environment(source), source.secrets)
-    piece_id = _find(payload, "resourceId")
-    if code != 0 or not isinstance(piece_id, str) or not piece_id:
-        raise ProvisionError(f"seeding the lesson failed: tenjin publish exited {code}: {tail or 'no output'}")
-    return piece_id
+    piece_id = piece_id_of(payload)
+    if code == 0 and piece_id is not None:
+        return piece_id
+    note: dict[str, Any] = {"title": lesson.title, "stamp": stamp_of(trial_id), "published": "unknown" if code == 0 else False, "exit": code, "tail": tail}
+    if code == 0:
+        note["sweep"] = sweep_stamped(source, lesson)
+    roots.output.mkdir(parents=True, exist_ok=True)
+    (roots.output / SEED_NOTE).write_text(json.dumps(note, indent=2) + "\n", encoding="utf-8")
+    if code == 0:
+        sweep = note["sweep"]
+        raise ProvisionError(
+            f"seeding the lesson failed: tenjin publish exited 0 but no piece id could be read ({tail or 'no output'}); "
+            f"swept the shelf by title: {sweep['matched']} matched, {len(sweep['deleted'])} deleted, {len(sweep['failed'])} failed; see {roots.output / SEED_NOTE}"
+        )
+    raise ProvisionError(f"seeding the lesson failed: tenjin publish exited {code}: {tail or 'no output'}")
 
 
 def delete_lesson(source: Source, piece_id: str) -> str | None:

@@ -497,7 +497,7 @@ class SeedCase(DaemonCase):
         assert self.key is not None
         (self.lessons / "fam.md").write_text("# The lesson\n\nRun the one file.\n", encoding="utf-8")
         self.write_lesson(self.key)
-        for name, value in (("PUBLISH_ARGV", lambda body, keys: [sys.executable, FAKE_CLI, *tenjin_arm.publish_argv(body, keys)[1:]]), ("DELETE_ARGV", lambda piece: [sys.executable, FAKE_CLI, *tenjin_arm.delete_argv(piece)[1:]]), ("LESSONS", self.lessons)):
+        for name, value in (("PUBLISH_ARGV", lambda body, keys: [sys.executable, FAKE_CLI, *tenjin_arm.publish_argv(body, keys)[1:]]), ("DELETE_ARGV", lambda piece: [sys.executable, FAKE_CLI, *tenjin_arm.delete_argv(piece)[1:]]), ("SEARCH_ARGV", lambda query: [sys.executable, FAKE_CLI, *tenjin_arm.search_argv(query)[1:]]), ("LESSONS", self.lessons)):
             patcher = mock.patch.object(tenjin_arm, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -586,6 +586,40 @@ class SeedCase(DaemonCase):
         self.assertIn("tenjin publish exited 4", str(caught.exception))
         self.assertNotIn(SECRET, str(caught.exception))
         self.assertIn("[secret]", str(caught.exception))
+        self.assertEqual(reap.read_records(roots.run_dir), [])
+
+    def test_an_envelope_on_stderr_is_read_by_shape(self) -> None:
+        roots = self.seed_roots()
+        (Path(self.source.path) / "envelope-on-stderr").write_text("", encoding="utf-8")
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        provision = tenjin_arm.prepare(request)
+        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        self.assertEqual(provision.facts["seed"]["piece_id"], "piece-1")
+        self.assertEqual(tenjin_arm.envelope_of("", '{"ok":true,"data":{"post":{"id":"p-9"}}}'), {"ok": True, "data": {"post": {"id": "p-9"}}})
+        self.assertEqual(tenjin_arm.piece_id_of({"ok": True, "data": {"post": {"id": "p-9"}}}), "p-9")
+        self.assertEqual(tenjin_arm.piece_id_of({"data": {"postId": "p-8"}}), "p-8")
+        self.assertIsNone(tenjin_arm.envelope_of("Published x\n", "not json"))
+        self.assertIsNone(tenjin_arm.piece_id_of({"ok": True, "data": {}}))
+
+    def test_a_publish_whose_id_cannot_be_read_sweeps_the_shelf_by_title_and_refuses(self) -> None:
+        roots = self.seed_roots()
+        source_dir = Path(self.source.path)
+        (source_dir / "garbage-publish").write_text("", encoding="utf-8")
+        (source_dir / "search-results.json").write_text(
+            json.dumps([{"resourceId": "stray-1", "title": "The lesson"}, {"resourceId": "theirs", "title": "Somebody else's piece"}, {"resourceId": "stray-2", "title": "The lesson"}]),
+            encoding="utf-8",
+        )
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        with self.assertRaises(ProvisionError) as caught:
+            tenjin_arm.prepare(request)
+        self.assertIn("no piece id could be read", str(caught.exception))
+        self.assertIn("2 matched, 2 deleted, 0 failed", str(caught.exception))
+        argv = [call["argv"] for call in self.calls()]
+        self.assertEqual(argv[1][:2], ["search", "The lesson"])
+        self.assertEqual(argv[2:], [["delete", "stray-1", "--yes", "--json"], ["delete", "stray-2", "--yes", "--json"]])
+        note = json.loads((roots.output / tenjin_arm.SEED_NOTE).read_text(encoding="utf-8"))
+        self.assertEqual((note["published"], note["exit"], note["sweep"]["deleted"]), ("unknown", 0, ["stray-1", "stray-2"]))
+        self.assertIn(f"trial {roots.trial_id}", note["stamp"])
         self.assertEqual(reap.read_records(roots.run_dir), [])
 
     def test_a_dry_run_states_the_seed_and_publishes_nothing(self) -> None:

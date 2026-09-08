@@ -18,7 +18,21 @@ def main(argv: list[str]) -> int:
             sys.stderr.write("shelf refused the piece: token " + json.loads((data_dir / "config.json").read_text())["shelfBypassSecret"] + "\n")
             return 4
         count = sum(1 for line in (data_dir / "cli-calls.jsonl").read_text(encoding="utf-8").splitlines() if '"publish"' in line)
-        json.dump({"ok": True, "data": {"resourceId": f"piece-{count}", "url": f"https://team-shelf.example/p/piece-{count}", "status": "published"}}, sys.stdout)
+        if (data_dir / "garbage-publish").exists():
+            # Published, but the receipt is unreadable: the fail-closed path.
+            sys.stdout.write("Published The lesson (published) for 0.00 USD\n")
+            return 0
+        envelope = {"ok": True, "data": {"resourceId": f"piece-{count}", "url": f"https://team-shelf.example/p/piece-{count}", "status": "published"}}
+        if (data_dir / "envelope-on-stderr").exists():
+            # 0.1.0-alpha.15 writes the envelope to stderr; stdout stays empty.
+            sys.stderr.write(json.dumps(envelope) + "\n")
+            return 0
+        sys.stdout.write("warning: no answer card\n" + json.dumps(envelope) + "\n")
+        return 0
+    if command == "search":
+        results = data_dir / "search-results.json"
+        candidates = json.loads(results.read_text(encoding="utf-8")) if results.exists() else []
+        sys.stderr.write(json.dumps({"ok": True, "data": {"candidates": candidates}}) + "\n")
         return 0
     if command == "delete":
         if (data_dir / "fail-delete").exists():

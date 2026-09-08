@@ -333,6 +333,20 @@ chunk of the vendored vitest dist) keys stably to `ee9fd96defcffbeb`, the same f
 tasks, and that is the key the lesson carries. The prepare probe re-derives all three every
 trial. The operator's next run is the proof; nothing here was run against a shelf.
 
+The fifth hooks smoke (`bench1-hooks-smoke-5`, head `74cbec5`) aborted at prepare on the
+receipt, not the publish: `tenjin publish` exited 0 and the piece was on the shelf, but the seam
+read no id, so `live-run` exited 2 with no attempts and the piece was deleted by hand. In
+tenjin-cli 0.1.0-alpha.15, `publish` and `delete` write their `--json` envelope to stderr with
+stdout empty, against the output contract in `src/lib/output.ts`, which says stdout; whether
+that is a CLI bug is the operator's call, nothing is filed. The seam now reads the envelope by
+shape (`ok`, `data`, `resourceId`, `post.id`, `postId`) off either stream, whole or per line,
+and fails closed: a publish that exits 0 with no readable id searches the shelf for the
+lesson's title, deletes every match (owner-scoped, so another wallet's piece is refused, never
+removed), writes `output/seed.json` with `published: "unknown"`, the masked tail of both
+streams, and the sweep, and refuses the trial. `summary`, `verify`, `reduce`, `report`, and
+`regress` on a run that never started say so in one sentence and exit 2. Fixed after
+`74cbec5`, not rerun.
+
 **Stop before the join.** As soon as the agent's process has exited, `stop` ends the daemon and
 waits for `loop.db-wal` to disappear. The shim spawns a detached daemon of its own when the one
 it expects is not healthy, and a detached process is outside the trial's group, so `stop` also

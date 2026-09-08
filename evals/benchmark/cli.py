@@ -65,9 +65,20 @@ def baseline(manifest: manifest_module.Manifest) -> str:
     return str(manifest.arms[0]["id"])
 
 
+def read_run_file(run_dir: Path, name: str) -> Any:
+    """One of a run's own files, or a refusal that names what is missing rather than a traceback."""
+    path = run_dir / name
+    if not path.is_file():
+        raise CliError(f"no {name} under {run_dir}: the run did not start or wrote no records, so there is nothing to read")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CliError(f"{path} is not readable JSON: {error.__class__.__name__}") from error
+
+
 def load_run(run_dir: Path) -> tuple[manifest_module.Manifest, str]:
-    payload = json.loads((run_dir / "schedule.json").read_text(encoding="utf-8"))
-    manifest = manifest_module.load(Path(json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["path"]))
+    payload = read_run_file(run_dir, "schedule.json")
+    manifest = manifest_module.load(Path(read_run_file(run_dir, "manifest.json")["path"]))
     if manifest.hash != payload["manifest_hash"]:
         raise manifest_module.ManifestError("manifest changed since the schedule was written")
     return manifest, payload["schedule_hash"]
@@ -378,7 +389,7 @@ def do_regress(run_dir: Path, baseline_path: Path, environ: Mapping[str, str] | 
     """Warn where the run is worse than the committed baseline. Never a failure."""
     manifest, digest = load_run(run_dir)
     accepted, _ = records.select(run_dir / "records", manifest.hash, digest)
-    published = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
+    published = read_run_file(run_dir, "report.json")
     return regress_module.check(published, accepted, baseline_path, environ, stream)
 
 
@@ -431,13 +442,12 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
-    if args.command == "summary":
-        published = json.loads((args.run / "report.json").read_text(encoding="utf-8"))
-        sys.stdout.write(report_module.render(published) + "\n")
-        return 0
-    if args.command == "regress":
-        do_regress(args.run, args.baseline)
-        return 0
+    if args.command in ("summary", "regress", "verify", "reduce", "report"):
+        try:
+            return run_reader(args)
+        except (CliError, manifest_module.ManifestError, records.RecordError) as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
     if args.command == "live-run":
         try:
             payload = live_run(
@@ -454,14 +464,22 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.dry_run:
             return 0
-    elif args.command == "fake-run":
-        payload = fake_run(args.out)
-    elif args.command == "verify":
-        payload = do_verify(args.run)
-    elif args.command == "reduce":
-        payload = do_reduce(args.run)
     else:
-        payload = do_report(args.run)
+        payload = fake_run(args.out)
+    json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
+def run_reader(args: argparse.Namespace) -> int:
+    """The commands that read a finished run. Each refuses a run with nothing to read in one sentence."""
+    if args.command == "summary":
+        sys.stdout.write(report_module.render(read_run_file(args.run, "report.json")) + "\n")
+        return 0
+    if args.command == "regress":
+        do_regress(args.run, args.baseline)
+        return 0
+    payload = {"verify": do_verify, "reduce": do_reduce, "report": do_report}[args.command](args.run)
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
