@@ -106,17 +106,23 @@ function candidate(): Record<string, unknown> {
   };
 }
 
-/** A stubbed shelf that records every keys body and answers `hits` items on
- *  each call in turn (the last entry repeats). */
-function shelf(hits: Array<Array<Record<string, unknown>>>): {
-  bodies: Array<{ keys: Array<{ key: string }> }>;
-} {
-  const bodies: Array<{ keys: Array<{ key: string }> }> = [];
+interface ShelfCall {
+  path: string;
+  body: { keys?: Array<{ key: string }>; query?: string };
+}
+
+/** A stubbed shelf that records every request's path and body and answers
+ *  `hits` items on each call in turn (the last entry repeats). BOTH ROUNDS
+ *  come through here: `/api/keys/resolve` in stage 0 and `/api/search` in
+ *  stage 1, so a test can say which round asked what. */
+function shelf(hits: Array<Array<Record<string, unknown>>>): { calls: ShelfCall[] } {
+  const calls: ShelfCall[] = [];
   vi.stubGlobal('fetch', async (input: unknown, init?: RequestInit) => {
-    bodies.push(
-      (await new Request(String(input), init).json()) as { keys: Array<{ key: string }> },
-    );
-    const items = hits[Math.min(bodies.length, hits.length) - 1] ?? [];
+    calls.push({
+      path: new URL(String(input)).pathname,
+      body: (await new Request(String(input), init).json()) as ShelfCall['body'],
+    });
+    const items = hits[Math.min(calls.length, hits.length) - 1] ?? [];
     return new Response(
       JSON.stringify({
         schemaVersion: 3,
@@ -128,7 +134,7 @@ function shelf(hits: Array<Array<Record<string, unknown>>>): {
       { status: 200, headers: { 'content-type': 'application/json' } },
     );
   });
-  return { bodies };
+  return { calls };
 }
 
 async function fire(input: HookInput, d: Deps = deps()) {
@@ -152,8 +158,8 @@ function pairings(): Array<Record<string, unknown>> {
   return db.prepare('SELECT * FROM pairings ORDER BY id').all() as Array<Record<string, unknown>>;
 }
 
-function keysOf(body: { keys: Array<{ key: string }> }): string[] {
-  return body.keys.map((k) => k.key.split(':')[0] ?? '');
+function keysOf(call: ShelfCall): string[] {
+  return (call.body.keys ?? []).map((k) => k.key.split(':')[0] ?? '');
 }
 
 async function planOf(input: HookInput, config: KernelConfig = TEAM): Promise<Plan | null> {
@@ -187,29 +193,65 @@ describe('the plan', () => {
     expect(await planOf(shell({ command: 'pnpm build', ok: false, stdout: totals }))).toBeNull();
   });
 
-  it('has only the local leg without a team origin: keys go to a team shelf alone', async () => {
+  it('has neither shelf leg without a team origin: both rounds go to a team shelf alone', async () => {
     const plan = await planOf(
       shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }),
       PUBLIC_ONLY,
     );
     expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['local']]);
-    expect(plan?.question).toEqual({
-      text: '',
-      questionKey: expect.stringMatching(/^[0-9a-f]{16}$/),
-    });
   });
 
-  it('asks two exact keys in one round, and nothing follows the miss', async () => {
-    const { bodies } = shelf([[]]);
+  it('asks the error line in words, keyed on its own text', async () => {
+    const plan = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }));
+    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['local', 'keys'], ['team']]);
+    expect(plan?.question.text).toBe(
+      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
+    );
+    expect(plan?.question.questionKey).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('asks in words with no fingerprint at all, under a key of its own', async () => {
+    const generic = 'error: linting failed for the workspace\n';
+    const plan = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: generic }));
+    // No errno and no frame, so `sigV1` refuses it and there is no test
+    // identity either: the keys leg has nothing to resolve and is not planned.
+    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['local'], ['team']]);
+    expect(plan?.question.text).toBe('error: linting failed for the workspace');
+    expect(plan?.question.questionKey).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('gives two different failures two different question keys', async () => {
+    const one = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: 'error: rule a\n' }));
+    const two = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: 'error: rule b\n' }));
+    expect(one?.question.questionKey).not.toBe(two?.question.questionKey);
+    expect(one?.question.questionKey.length).toBeGreaterThan(0);
+  });
+
+  it('asks two exact keys in one round, then the words in the next', async () => {
+    const { calls } = shelf([[]]);
     const { row, legs } = await fire(
       shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
     );
     expect(row.reason).toBe('no-hit');
-    expect(bodies.map(keysOf)).toEqual([['sig_v1', 'sig_v1_test']]);
+    expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve', '/api/search']);
+    expect(keysOf(calls[0]!)).toEqual(['sig_v1', 'sig_v1_test']);
+    expect(calls[1]!.body.query).toBe(
+      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
+    );
     expect(legs.map((l) => [l.stage, l.shelf, l.outcome])).toEqual([
       [0, 'keys', 'miss'],
       [0, 'local', 'miss'],
+      [1, 'team', 'miss'],
     ]);
+  });
+
+  it('never reaches the words when a fingerprint answered', async () => {
+    const { calls } = shelf([[candidate()]]);
+    const { row } = await fire(
+      shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }),
+    );
+    expect(row.reason).toBe('hit');
+    expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve']);
   });
 });
 
@@ -248,9 +290,24 @@ describe('what a failure leaves behind', () => {
     // header is the identity, not the stale report.
     expect(pairings()).toMatchObject([{ kind: 'sig_v1_test', error_files: '["date.test.ts"]' }]);
 
-    setMark(db, LEAD, 'bashstart', String(NOW - 2000), NOW - 2000);
-    await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL }));
+    // A DIFFERENT ACTOR runs the second one, because the stamp is per actor and
+    // so is the once-per-question claim: the same console text asked twice by
+    // one agent is one question, and the second fire would be answered from the
+    // claim instead of reading the report at all.
+    setMark(db, CHILD, 'bashstart', String(NOW - 2000), NOW - 2000);
+    await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL, actor: CHILD }));
     expect(pairings().at(-1)).toMatchObject({ kind: 'sig_v1_test', error_files: '["a.test.ts"]' });
+  });
+
+  it('opens no row for a failure it could only ask about in words', async () => {
+    shelf([[]]);
+    const generic = 'error: linting failed for the workspace\n';
+    const { row } = await fire(shell({ command: 'pnpm lint', ok: false, stderr: generic }));
+    // It asked — under a key of its own text — and there is no fingerprint to
+    // file a pairing under, so the fire's own ledger row is all it leaves.
+    expect(row.reason).toBe('no-hit');
+    expect(row.question_key).toMatch(/^[0-9a-f]{32}$/);
+    expect(pairings()).toEqual([]);
   });
 
   it('opens nothing when the error named no file and no shelf answered', async () => {
@@ -322,6 +379,31 @@ describe('the record, once closed', () => {
     expect(getMark(db, CHILD, `seen:pairing:${id}`)).not.toBeNull();
     // Being shown a record opens no second row for the same failure.
     expect(pairings()).toHaveLength(1);
+  });
+
+  it('answers on the test key before the console-text key', async () => {
+    shelf([[]]);
+    // One failure carrying both fingerprints, and both rows closed by the edit
+    // each one's error named, so the local leg has two records to choose from.
+    await fire(shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL }));
+    setMark(db, LEAD, 'edited:a', join(repo, 'src/migrate.ts'), NOW + 10);
+    setMark(db, LEAD, 'edited:b', join(repo, 'src/date.test.ts'), NOW + 11);
+    await fire(
+      shell({ command: 'pnpm test', ok: true, stdout: 'ok' }),
+      deps(TEAM, () => NOW + 20),
+    );
+    expect(pairings().map((p) => [p.kind, p.fix_files])).toEqual([
+      ['sig_v1', '["src/migrate.ts"]'],
+      ['sig_v1_test', '["src/date.test.ts"]'],
+    ]);
+    // `sig_v1` is a hash of console text and collapses failures onto one
+    // value; `sig_v1_test` names the test the runner declared. The one the
+    // runner named is what a new actor is handed.
+    const { emit } = await fire(
+      shell({ command: 'pnpm test', ok: false, stderr: ENOENT, stdout: VITEST_FAIL, actor: CHILD }),
+    );
+    expect(emit?.context).toContain('src/date.test.ts');
+    expect(emit?.context).not.toContain('src/migrate.ts');
   });
 
   it("loses to a teammate's piece in the same stage, which ranks first", async () => {
