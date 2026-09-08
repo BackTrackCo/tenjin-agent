@@ -294,6 +294,9 @@ class HooksArmTest(LiveCase):
         self.assertEqual(sum(handler["type"] == "http" for handler in handlers), 9)
         self.assertEqual(claude_live.placeholders_of(arm["settings"]), {"daemon_url", "daemon_token", "data_dir"})
         self.assertIn("PostToolUseFailure", arm["settings"]["hooks"])
+        # The seeded arm may read the shelf by hand; the pins, and so the off arm, are unchanged.
+        self.assertEqual(arm["settings"]["permissions"], {"allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]})
+        self.assertNotIn("permissions", next(other for other in manifest.arms if other["id"] == "off")["settings"])
         self.assertIn("SubagentStart", arm["settings"]["hooks"])
         # The declared hash is over the template, so it is one value for every trial.
         self.assertEqual(arm["settings_hash"], "sha256:" + sha256_json(arm["settings"]))

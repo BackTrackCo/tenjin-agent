@@ -72,7 +72,7 @@ REQUIRED = frozenset(
 
 
 PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
-SEED_KEYS = frozenset({"title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
+SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
 
 class RecordError(ValueError):
     pass
@@ -259,12 +259,14 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
-    seed = isolation.get("seed")
-    if seed is not None:
+    seeds = isolation.get("seed")
+    if seeds is not None and not isinstance(seeds, list):
+        raise RecordError("isolation.seed must be a list, one entry per seeded lesson")
+    for seed in seeds or []:
         if not isinstance(seed, dict) or set(seed) != SEED_KEYS:
-            raise RecordError("isolation.seed must carry exactly the seed fields")
-        if not isinstance(seed["title"], str) or not seed["title"] or not isinstance(seed["published"], bool):
-            raise RecordError("isolation.seed must name a title and say whether it published")
+            raise RecordError("isolation.seed entries must carry exactly the seed fields")
+        if not isinstance(seed["title"], str) or not seed["title"] or not isinstance(seed["lesson"], str) or not seed["lesson"] or not isinstance(seed["published"], bool):
+            raise RecordError("isolation.seed must name a lesson and a title and say whether it published")
         if not isinstance(seed["key_hashes"], list) or not all(isinstance(item, str) and item for item in seed["key_hashes"]) or seed["keys"] != len(seed["key_hashes"]):
             raise RecordError("isolation.seed key_hashes must be a list matching keys")
         for name in ("piece_id", "nonce", "shelf_origin", "delete_error"):
@@ -284,6 +286,12 @@ def validate(record: dict[str, Any]) -> None:
         counts = delivery.get(name, {})
         if not isinstance(counts, dict) or not all(_count(value) for value in counts.values()):
             raise RecordError(f"delivery.{name} must map names to counts")
+    searches = delivery.get("cli_searches")
+    if searches is not None:
+        if not isinstance(searches, dict) or not _count(searches.get("count")) or not isinstance(searches.get("decisions"), dict):
+            raise RecordError("delivery.cli_searches must carry a count and decisions")
+        if not all(_count(value) for value in searches["decisions"].values()) or sum(searches["decisions"].values()) != searches["count"]:
+            raise RecordError("delivery.cli_searches decisions must sum to its count")
     if record["wall_time_s"] is not None and (
         isinstance(record["wall_time_s"], bool) or not isinstance(record["wall_time_s"], (int, float)) or record["wall_time_s"] < 0
     ):

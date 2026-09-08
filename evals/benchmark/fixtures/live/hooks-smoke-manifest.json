@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-hooks-smoke-5",
+  "benchmark_version": "bench1-hooks-smoke-6",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,
@@ -63,6 +63,9 @@
       "product_version": "operator-installed",
       "provision": "tenjin",
       "settings": {
+        "permissions": {
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
+        },
         "hooks": {
           "SessionStart": [
             {
@@ -215,7 +218,7 @@
           ]
         }
       },
-      "settings_hash": "sha256:ac6da5fc8e446182bf07ec833edb2c87157a52c309b3890198fd6a8f13de8829",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
       "auxiliary_usage": "none"
     }

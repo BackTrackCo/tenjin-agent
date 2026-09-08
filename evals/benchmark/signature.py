@@ -214,12 +214,52 @@ def sig_v1(line: str, block: str) -> str | None:
     return short_hash("sig_v1|" + message + "|" + errno + "|" + frame)
 
 
+# The `sig_v1_test` lane (`src/hooks/failure/test-identity.ts`): a key on
+# what the runner itself names, read off vitest's own failure header, the
+# LAST one in the output. The artifact leg (a tenjin reporter's JSON) is not
+# ported: the fixtures carry no such reporter, so the product falls back to
+# this console read for them.
+TEST_FAIL_HEADER_RE = re.compile(rf"^ {{0,2}}FAIL {{1,4}}([^{S[1:-1]}]+) {{0,4}}>{S}*(.+)$", A)
+SUITE_SPLIT_RE = re.compile(rf"{S}*>{S}*", A)
+
+
+@dataclass(frozen=True)
+class TestIdentity:
+    file: str
+    suite: str
+    test: str
+
+
+def identity_from_console(text: str) -> TestIdentity | None:
+    lines = text.split("\n")
+    for i in range(len(lines) - 1, max(-1, len(lines) - LINE_SCAN_MAX - 1), -1):
+        match = TEST_FAIL_HEADER_RE.match(lines[i])
+        if match is None:
+            continue
+        file = match.group(1)
+        parts = [part for part in SUITE_SPLIT_RE.split(_trim(match.group(2))) if part]
+        test = parts[-1] if parts else ""
+        if not file or not test:
+            continue
+        return TestIdentity(file="/".join(re.split(r"[/\\]", file)), suite=" > ".join(parts[:-1]), test=test)
+    return None
+
+
+def sig_v1_test(identity: TestIdentity) -> str:
+    return short_hash("sig_v1_test|" + identity.file + "|" + identity.suite + "|" + identity.test)
+
+
 def key_of(text: str) -> dict[str, Any]:
-    """What one command's output yields: the line, its block, and the key, each None when absent."""
+    """What one command's output yields: the error line, its block, the `sig_v1` key, and the `sig_v1_test` key, each None when absent."""
     found = error_line(text)
-    if found is None:
-        return {"line": None, "block": None, "key": None}
-    return {"line": found.line, "block": found.block, "key": sig_v1(found.line, found.block)}
+    identity = identity_from_console(text)
+    return {
+        "line": None if found is None else found.line,
+        "block": None if found is None else found.block,
+        "key": None if found is None else sig_v1(found.line, found.block),
+        "identity": None if identity is None else {"file": identity.file, "suite": identity.suite, "test": identity.test},
+        "test_key": None if identity is None else sig_v1_test(identity),
+    }
 
 
 def main() -> int:

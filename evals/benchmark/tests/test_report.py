@@ -163,15 +163,15 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(self.project()["shelf_secret_present"], False)
 
     def test_a_seeded_piece_left_on_the_shelf_is_counted_and_the_summary_warns(self) -> None:
-        seed = {"title": "The lesson", "nonce": "20260908T000000Z-0badf00d", "key_hashes": ["abcd"], "keys": 1, "shelf_origin": "team-shelf.example", "piece_id": "piece-1", "published": True, "probe": None, "deleted": False, "delete_error": "tenjin delete exited 4: 502"}
+        seed = {"lesson": "fam", "title": "The lesson", "nonce": "20260908T000000Z-0badf00d", "key_hashes": ["abcd"], "keys": 1, "shelf_origin": "team-shelf.example", "piece_id": "piece-1", "published": True, "probe": None, "deleted": False, "delete_error": "tenjin delete exited 4: 502"}
         accepted = {trial_id: dict(record) for trial_id, record in self.accepted.items()}
         first, second = sorted(accepted)[:2]
-        accepted[first]["isolation"] = {**accepted[first]["isolation"], "seed": seed}
-        accepted[second]["isolation"] = {**accepted[second]["isolation"], "seed": {**seed, "piece_id": "piece-2", "deleted": True, "delete_error": None}}
+        accepted[first]["isolation"] = {**accepted[first]["isolation"], "seed": [seed, {**seed, "lesson": "fix", "piece_id": "piece-3", "deleted": True, "delete_error": None}]}
+        accepted[second]["isolation"] = {**accepted[second]["isolation"], "seed": [{**seed, "piece_id": "piece-2", "deleted": True, "delete_error": None}]}
         published = self.project(accepted=accepted)
-        self.assertEqual(published["seeds"], {"published": 2, "not_deleted": 1})
+        self.assertEqual(published["seeds"], {"published": 3, "not_deleted": 1})
         rendered = report.render(published)
-        self.assertIn("seeded pieces: 2 published to the team shelf, 1 deleted", rendered)
+        self.assertIn("seeded pieces: 3 published to the team shelf, 2 deleted", rendered)
         self.assertIn("WARNING: 1 seeded piece(s) still on the team shelf", rendered)
         self.assertEqual(self.project()["seeds"], {"published": 0, "not_deleted": 0})
         self.assertNotIn("seeded pieces", report.render(self.project()))

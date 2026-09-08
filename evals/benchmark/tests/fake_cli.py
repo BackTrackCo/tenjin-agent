@@ -18,6 +18,9 @@ def main(argv: list[str]) -> int:
             sys.stderr.write("shelf refused the piece: token " + json.loads((data_dir / "config.json").read_text())["shelfBypassSecret"] + "\n")
             return 4
         count = sum(1 for line in (data_dir / "cli-calls.jsonl").read_text(encoding="utf-8").splitlines() if '"publish"' in line)
+        if (data_dir / "fail-second-publish").exists() and count >= 2:
+            sys.stderr.write("shelf refused the second piece\n")
+            return 4
         if (data_dir / "already-published").exists():
             sys.stdout.write(json.dumps({"ok": True, "data": {"alreadyPublished": True, "url": "https://team-shelf.example/a/ali/the-lesson"}}) + "\n")
             return 0

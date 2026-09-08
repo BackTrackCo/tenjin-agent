@@ -1,22 +1,25 @@
 {
-  "family": "test-harness-convention",
+  "id": "test-harness-convention",
   "title": "Running one Vitest file in a repository whose test script wraps every project",
   "commands": [
     {
       "command": "node tests/{task}.test.mjs",
-      "sig_v1": "ee9fd96defcffbeb",
+      "kind": "sig_v1",
+      "key": "ee9fd96defcffbeb",
       "check": true,
       "reason": "vitest refuses to run outside its runner; the top frame is a chunk of the vendored vitest dist, so the key is stable"
     },
     {
       "command": "pnpm test -- tests/{task}.test.mjs",
-      "sig_v1": null,
+      "kind": "sig_v1",
+      "key": null,
       "check": true,
-      "reason": "the trap's tail is a totals row with nothing specific left in its block, so the product's failure arm derives no key"
+      "reason": "the trap's tail is a totals row with nothing specific left in its block, so the product's failure arm derives no sig_v1"
     },
     {
       "command": "npx vitest run tests/{task}.test.mjs",
-      "sig_v1": null,
+      "kind": "sig_v1",
+      "key": null,
       "check": false,
       "reason": "the pnpm-agent refusal's top frame is vite's temporary config bundle, named with a timestamp, so its key changes on every run and no published key can match it"
     }

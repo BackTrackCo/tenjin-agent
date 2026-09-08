@@ -78,8 +78,10 @@ DRY_TOKEN = "minted-at-launch"
 # frozen beside the body and re-derived at prepare by running those commands
 # on a scratch copy of the trial's repository, so drift is a refusal.
 LESSONS = FIXTURES / "live" / "lessons"
-LESSON_KEYS = frozenset({"family", "title", "commands"})
-COMMAND_KEYS = frozenset({"command", "sig_v1", "check", "reason"})
+LESSON_KEYS = frozenset({"id", "title", "commands"})
+COMMAND_KEYS = frozenset({"command", "kind", "key", "check", "reason"})
+KEY_KINDS = frozenset({"sig_v1", "sig_v1_test"})
+FIX_SUFFIX = "-fix"
 CLI = "tenjin"
 PROBE_DIR = "probe"
 SEED_DIR = "seed"
@@ -91,95 +93,113 @@ OUTPUT_LIMIT = 300
 @dataclass(frozen=True)
 class LessonCommand:
     command: str
-    sig_v1: str | None
+    kind: str
+    key: str | None
     check: bool
     reason: str
+
+    @property
+    def kind_key(self) -> str | None:
+        return None if self.key is None else f"{self.kind}:{self.key}"
 
 
 @dataclass(frozen=True)
 class Lesson:
-    family: str
+    id: str
     title: str
     body: Path
     commands: tuple[LessonCommand, ...]
 
     @property
     def keys(self) -> tuple[str, ...]:
-        return tuple(entry.sig_v1 for entry in self.commands if entry.sig_v1 is not None)
+        """`<kind>:<key>` for every keyed command, the exact `--key fingerprint=` values the piece is bound to."""
+        return tuple(entry.kind_key for entry in self.commands if entry.kind_key is not None)
 
     @property
     def key_hashes(self) -> list[str]:
         return [key_hash(key) for key in self.keys]
 
 
-def key_hash(key: str) -> str:
-    return sha256_text(f"sig_v1:{key}")[:16]
+def key_hash(kind_key: str) -> str:
+    return sha256_text(kind_key)[:16]
 
 
-def lesson_for(family: str, lessons: Path | None = None) -> Lesson | None:
-    """The family's lesson, or None when the benchmark holds none for it (the plumbing smoke)."""
+def lesson_named(name: str, lessons: Path | None = None) -> Lesson | None:
+    """The lesson `<name>.json` and `<name>.md` describe, or None when the benchmark holds none by that name."""
     lessons = LESSONS if lessons is None else lessons
-    record = lessons / f"{family}.json"
-    body = lessons / f"{family}.md"
+    record = lessons / f"{name}.json"
+    body = lessons / f"{name}.md"
     if not record.is_file():
         return None
     try:
         data = json.loads(record.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise ProvisionError(f"lesson {family!r} is unreadable: {error.__class__.__name__}") from error
-    if not isinstance(data, dict) or set(data) != LESSON_KEYS or data["family"] != family or not body.is_file():
-        raise ProvisionError(f"lesson {family!r} must be {record.name} with family, title, commands, and {body.name} beside it")
+        raise ProvisionError(f"lesson {name!r} is unreadable: {error.__class__.__name__}") from error
+    if not isinstance(data, dict) or set(data) != LESSON_KEYS or data["id"] != name or not body.is_file():
+        raise ProvisionError(f"lesson {name!r} must be {record.name} with id, title, commands, and {body.name} beside it")
     commands = []
     for entry in data["commands"]:
-        if not isinstance(entry, dict) or set(entry) != COMMAND_KEYS or not isinstance(entry["check"], bool):
-            raise ProvisionError(f"lesson {family!r} has a malformed command entry")
-        if entry["sig_v1"] is not None and not re.fullmatch(r"[0-9a-f]{16}", str(entry["sig_v1"])):
-            raise ProvisionError(f"lesson {family!r} names a key that is not 16 hex characters")
-        commands.append(LessonCommand(str(entry["command"]), entry["sig_v1"], entry["check"], str(entry["reason"])))
-    if not any(entry.sig_v1 is not None for entry in commands):
-        raise ProvisionError(f"lesson {family!r} has no keyed command")
-    return Lesson(family=family, title=str(data["title"]), body=body, commands=tuple(commands))
+        if not isinstance(entry, dict) or set(entry) != COMMAND_KEYS or not isinstance(entry["check"], bool) or entry["kind"] not in KEY_KINDS:
+            raise ProvisionError(f"lesson {name!r} has a malformed command entry")
+        if entry["key"] is not None and not re.fullmatch(r"[0-9a-f]{16}", str(entry["key"])):
+            raise ProvisionError(f"lesson {name!r} names a key that is not 16 hex characters")
+        commands.append(LessonCommand(str(entry["command"]), str(entry["kind"]), entry["key"], entry["check"], str(entry["reason"])))
+    if not any(entry.key is not None for entry in commands):
+        raise ProvisionError(f"lesson {name!r} has no keyed command")
+    return Lesson(id=name, title=str(data["title"]), body=body, commands=tuple(commands))
 
 
-def probe_keys(roots: artifact.TrialRoots, lesson: Lesson, task_id: str, environment: dict[str, str]) -> dict[str, str | None]:
-    """Run each of the lesson's commands on a scratch copy of the trial's repository and key its output the product's way."""
+def lessons_for(task: dict[str, Any], lessons: Path | None = None) -> list[Lesson]:
+    """The task's lessons: the family's convention lesson (the prompt path) and the task's own fix (the failure path)."""
+    found = []
+    for name in (str(task.get("family", "")), f"{task.get('id', '')}{FIX_SUFFIX}"):
+        lesson = lesson_named(name, lessons) if name else None
+        if lesson is not None:
+            found.append(lesson)
+    return found
+
+
+def probe_keys(roots: artifact.TrialRoots, commands: list[str], environment: dict[str, str]) -> dict[str, dict[str, str | None]]:
+    """Run each command on a scratch copy of the trial's repository and key its output both ways the product does."""
     probe = roots.base / PROBE_DIR
     if probe.exists():
         shutil.rmtree(probe)
     shutil.copytree(roots.repo, probe, symlinks=False)
-    probed: dict[str, str | None] = {}
+    probed: dict[str, dict[str, str | None]] = {}
     try:
-        for entry in lesson.commands:
-            command = entry.command.replace("{task}", task_id)
+        for command in commands:
+            if command in probed:
+                continue
             try:
                 completed = subprocess.run(
                     command.split(" "), cwd=probe, env=environment, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, shell=False, check=False
                 )
             except (OSError, subprocess.TimeoutExpired) as error:
                 raise ProvisionError(f"the seed probe could not run {command!r}: {error.__class__.__name__}") from error
-            probed[command] = signature.key_of((completed.stdout or "") + "\n" + (completed.stderr or ""))["key"]
+            found = signature.key_of((completed.stdout or "") + "\n" + (completed.stderr or ""))
+            probed[command] = {"sig_v1": found["key"], "sig_v1_test": found["test_key"]}
     finally:
         shutil.rmtree(probe, ignore_errors=True)
     return probed
 
 
-def check_keys(lesson: Lesson, task_id: str, probed: dict[str, str | None]) -> None:
+def check_keys(lesson: Lesson, task_id: str, probed: dict[str, dict[str, str | None]]) -> None:
     """The frozen keys must be what the trial's own commands yield today, or the seed is a lie."""
     for entry in lesson.commands:
         if not entry.check:
             continue
         command = entry.command.replace("{task}", task_id)
-        if probed.get(command) != entry.sig_v1:
+        found = probed.get(command, {}).get(entry.kind)
+        if found != entry.key:
             raise ProvisionError(
-                f"seed key drift: {command!r} keys to {probed.get(command)!r}, the lesson records {entry.sig_v1!r}; "
-                f"re-derive {lesson.family}.json before seeding"
+                f"seed key drift: {command!r} keys to {entry.kind} {found!r}, the lesson records {entry.key!r}; re-derive {lesson.id}.json before seeding"
             )
 
 
 def publish_argv(body: Path, keys: tuple[str, ...]) -> list[str]:
     argv = [CLI, "publish", str(body), "--yes", "--json"]
-    for key in keys:
-        argv += ["--key", f"fingerprint=sig_v1:{key}"]
+    for kind_key in keys:
+        argv += ["--key", f"fingerprint={kind_key}"]
     return argv
 
 
@@ -351,8 +371,17 @@ def delete_lesson(source: Source, piece_id: str) -> str | None:
     return f"tenjin delete exited {code}: {tail or 'no output'}"
 
 
-def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dict[str, str | None] | None, nonce: str | None) -> dict[str, Any]:
+def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dict[str, dict[str, str | None]] | None, nonce: str | None, task_id: str) -> dict[str, Any]:
+    probe = None
+    if probed is not None:
+        # Hashes, like `key_hashes`: the record names which command keyed under the lesson's kind and which did not, never the key.
+        probe = {}
+        for entry in lesson.commands:
+            command = entry.command.replace("{task}", task_id)
+            found = probed.get(command, {}).get(entry.kind)
+            probe[command] = None if found is None else key_hash(f"{entry.kind}:{found}")
     return {
+        "lesson": lesson.id,
         "title": lesson.title,
         "nonce": nonce,
         "key_hashes": lesson.key_hashes,
@@ -360,8 +389,7 @@ def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dic
         "shelf_origin": source.shelf_origin,
         "piece_id": piece_id,
         "published": piece_id is not None,
-        # Hashes, like `key_hashes`: the record names which command keyed and which did not, never the key itself.
-        "probe": None if probed is None else {command: None if key is None else key_hash(key) for command, key in probed.items()},
+        "probe": probe,
         "deleted": None,
         "delete_error": None,
     }
@@ -548,9 +576,9 @@ def prepare(request: ProvisionRequest) -> Provision:
     # so a publish that fails costs no daemon and no spend. A dry run states
     # the title and the key hashes and publishes nothing.
     facts: dict[str, Any] = dict(source.facts)
-    lesson = None if request.task is None else lesson_for(str(request.task.get("family", "")))
-    piece_id: str | None = None
-    if lesson is not None:
+    lessons = [] if request.task is None else lessons_for(request.task)
+    pieces: list[str] = []
+    if lessons:
         task_id = str(request.task["id"]) if request.task is not None else ""
         probed = None
         if not request.dry_run:
@@ -558,10 +586,24 @@ def prepare(request: ProvisionRequest) -> Provision:
                 raise ProvisionError("seeding needs the trial's child environment to probe the fixture's commands")
             if not request.nonce:
                 raise ProvisionError("seeding needs the run nonce (`cli.run_nonce`) so the body differs from every earlier run's")
-            probed = probe_keys(roots, lesson, task_id, request.environment)
-            check_keys(lesson, task_id, probed)
-            piece_id = publish_lesson(source, roots, lesson, request.nonce, request.trial_id)
-        facts["seed"] = seed_facts(lesson, source, piece_id, probed, request.nonce)
+            commands = [entry.command.replace("{task}", task_id) for lesson in lessons for entry in lesson.commands]
+            probed = probe_keys(roots, commands, request.environment)
+            for lesson in lessons:
+                check_keys(lesson, task_id, probed)
+        seeds = []
+        for lesson in lessons:
+            piece_id: str | None = None
+            if not request.dry_run:
+                try:
+                    piece_id = publish_lesson(source, roots, lesson, str(request.nonce), request.trial_id)
+                except ProvisionError:
+                    # A second piece that fails leaves no first piece behind.
+                    for published in pieces:
+                        delete_lesson(source, published)
+                    raise
+                pieces.append(piece_id)
+            seeds.append(seed_facts(lesson, source, piece_id, probed, request.nonce, task_id))
+        facts["seed"] = seeds
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
         started = runner.process_start(
@@ -576,11 +618,11 @@ def prepare(request: ProvisionRequest) -> Provision:
             live = wait_healthy(roots, started, HEALTH_TIMEOUT_S)
         except ProvisionError:
             runner.process_stop(started, roots.run_dir, STOP_GRACE_S)
-            if piece_id is not None:
-                delete_lesson(source, piece_id)
+            for published in pieces:
+                delete_lesson(source, published)
             raise
         port = live["port"]
-        stop_state = {"started": started, "pid": live["pid"], "port": port, "piece_id": piece_id, "source": source}
+        stop_state = {"started": started, "pid": live["pid"], "port": port, "pieces": pieces, "source": source}
     return Provision(
         values={"daemon_url": f"http://127.0.0.1:{port}{HOOK_PATH}", "daemon_token": token, "data_dir": str(roots.data_dir)},
         secrets=source.secrets,
@@ -640,10 +682,8 @@ def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
     report["wal_live"] = wal.exists()
     # The seeded piece leaves the shelf with the trial. A delete that fails is
     # a fact in the record, never a retry loop and never silence.
-    piece_id = state.get("piece_id")
+    pieces = state.get("pieces")
     source = state.get("source")
-    if isinstance(piece_id, str) and isinstance(source, Source):
-        error = delete_lesson(source, piece_id)
-        report["seed_deleted"] = error is None
-        report["seed_delete_error"] = error
+    if isinstance(pieces, list) and pieces and isinstance(source, Source):
+        report["seed_deleted"] = {piece_id: delete_lesson(source, piece_id) for piece_id in pieces}
     return report

@@ -141,6 +141,31 @@ class SigV1Test(unittest.TestCase):
         )
         self.assertIsNone(signature.key_of(trap)["key"])
 
+    def test_the_test_identity_key_reads_the_last_fail_header_and_matches_the_product(self) -> None:
+        output = "\n".join(
+            [
+                " FAIL  tests/actor.test.mjs > actorKey case 1",
+                "AssertionError: expected 's1:undefined' to be 's1:root' // Object.is equality",
+                "",
+                "Expected: \"s1:root\"",
+                "Received: \"s1:undefined\"",
+                "",
+                " ❯ tests/actor.test.mjs:5:12",
+                "",
+                " Test Files  1 failed (1)",
+                "      Tests  1 failed | 1 passed (2)",
+                "",
+            ]
+        )
+        found = signature.key_of(output)
+        self.assertIsNone(found["key"])
+        self.assertEqual(found["identity"], {"file": "tests/actor.test.mjs", "suite": "", "test": "actorKey case 1"})
+        # The key run seven's fires table recorded for this failure.
+        self.assertEqual(found["test_key"], "502b90852a1505e3")
+        nested = signature.identity_from_console(" FAIL  src/a.test.ts > outer > inner > two\n")
+        self.assertEqual((nested.file, nested.suite, nested.test), ("src/a.test.ts", "outer > inner", "two"))
+        self.assertIsNone(signature.identity_from_console("FAIL  some suite\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

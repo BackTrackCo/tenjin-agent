@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { errorLine, normalizeForSig, sigV1 } from './signature';
+import { sigV1Test, testIdentityOf } from './test-identity';
 
 /**
  * The benchmark's seeded arm publishes its lesson under the `sig_v1` key the
@@ -111,6 +112,27 @@ const OUTPUTS: Record<string, string> = {
     '[31m[ELIFECYCLE][39m Test failed. See above for more details.',
     '',
   ].join('\n'),
+  // The fixture's assertion on the unfixed source: below the sig_v1 floor, keyed
+  // by the product on the test identity vitest's FAIL header names.
+  fixtureAssertion: [
+    ' FAIL  tests/actor.test.mjs > actorKey case 1',
+    "AssertionError: expected 's1:undefined' to be 's1:root' // Object.is equality",
+    '',
+    'Expected: "s1:root"',
+    'Received: "s1:undefined"',
+    '',
+    ' ❯ tests/actor.test.mjs:5:12',
+    '',
+    ' Test Files  1 failed (1)',
+    '      Tests  1 failed | 1 passed (2)',
+    '',
+  ].join('\n'),
+  nestedSuite: [
+    ' FAIL  src/a.test.ts > outer > inner > two',
+    'AssertionError: expected 1 to be 2',
+    '',
+  ].join('\n'),
+  bareFail: 'FAIL  some suite\n',
   // The fixture's refusal: `npx vitest run` reaches the config with no pnpm agent.
   // A real run's top frame is vite's temporary config bundle, named with a
   // timestamp, so the key changes every run; the frame here is fixed so the
@@ -130,6 +152,8 @@ interface Ported {
   line: string | null;
   block: string | null;
   key: string | null;
+  identity: { file: string; suite: string; test: string } | null;
+  test_key: string | null;
 }
 
 function ported(): Ported[] {
@@ -153,6 +177,24 @@ describe('the Python port of sig_v1 agrees with this module', () => {
     expect(port?.block).toBe(found?.block ?? null);
     const key = found === null ? null : (sigV1(found.line, found.block)?.key ?? null);
     expect(port?.key).toBe(key);
+  });
+
+  it.each(names.map((name, index) => [name, index]))(
+    'on the test identity of %s',
+    async (name, index) => {
+      const text = OUTPUTS[name as string] ?? '';
+      // An empty cwd skips the artifact leg, which the fixtures never carry.
+      const identity = await testIdentityOf(text, '', null, 'pnpm exec vitest run');
+      const port = results[index as number];
+      expect(port?.identity).toEqual(identity);
+      expect(port?.test_key).toBe(identity === null ? null : sigV1Test(identity).key);
+    },
+  );
+
+  it('keys the fixture assertion on its test identity to the value the fires table recorded', () => {
+    const assertion = results[names.indexOf('fixtureAssertion')];
+    expect(assertion?.key).toBeNull();
+    expect(assertion?.test_key).toBe('502b90852a1505e3');
   });
 
   it('keys the fixture refusal and nothing on the fixture trap', () => {

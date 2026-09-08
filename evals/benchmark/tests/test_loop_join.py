@@ -145,5 +145,25 @@ class LoopJoinTest(unittest.TestCase):
             loop_join.project(other, [ROOT])
 
 
+
+class CliSearchesTest(unittest.TestCase):
+    def test_searches_the_agent_ran_through_the_cli_are_counted_apart_from_the_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "loop.db"
+            db = sqlite3.connect(path)
+            db.executescript(loop_ddl())
+            rows = [("s1", 1, "cli", "hit"), ("s2", 2, "cli", "miss"), ("s3", 3, "cli", "hit"), ("s4", 4, None, "hit"), ("s5", 5, "hook", "miss")]
+            for search_id, at, source, decision in rows:
+                db.execute(
+                    "INSERT INTO searches (search_id, at, session, question, fingerprint, decision, candidates, source) VALUES (?, ?, 'sess', 'q', 'fp', ?, '[]', ?)",
+                    (search_id, at, decision, source),
+                )
+            db.commit()
+            db.close()
+            projected = loop_join.project(path, [])
+            self.assertEqual(projected["cli_searches"], {"count": 3, "decisions": {"hit": 2, "miss": 1}})
+            self.assertEqual(loop_join.unavailable()["cli_searches"], {"count": 0, "decisions": {}})
+
+
 if __name__ == "__main__":
     unittest.main()

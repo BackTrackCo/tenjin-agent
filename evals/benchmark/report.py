@@ -161,11 +161,11 @@ def project(
     # many left it there because the delete failed, which the summary warns on.
     seeds = {"published": 0, "not_deleted": 0}
     for record in accepted.values():
-        seed = record["isolation"].get("seed")
-        if seed is not None and seed.get("published"):
-            seeds["published"] += 1
-            if seed.get("deleted") is not True:
-                seeds["not_deleted"] += 1
+        for seed in record["isolation"].get("seed") or []:
+            if seed.get("published"):
+                seeds["published"] += 1
+                if seed.get("deleted") is not True:
+                    seeds["not_deleted"] += 1
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],

@@ -44,6 +44,10 @@ SKIPPED = "skipped"
 TIMEOUT = "timeout"
 HIT = "hit"
 NO_ANSWER = "no-answer"
+# A search the agent ran by hand through the CLI (`tenjin search`), which the
+# product stores with `source = 'cli'`; the hooks' own legs are `fires` and
+# `legs`. Counted and costed apart, so a manual search is visible.
+CLI_SOURCE = "cli"
 
 
 def unavailable() -> dict[str, Any]:
@@ -55,7 +59,21 @@ def unavailable() -> dict[str, Any]:
         "shelves": count_shelves([]),
         "classes": classify([]),
         "public": public_summary([]),
+        "cli_searches": {"count": 0, "decisions": {}},
     }
+
+
+def cli_searches(connection: sqlite3.Connection) -> dict[str, Any]:
+    """How many searches the agent ran through the CLI, by the product's own decision column."""
+    decisions: dict[str, int] = {}
+    try:
+        rows = connection.execute("SELECT decision FROM searches WHERE source = ? ORDER BY at", (CLI_SOURCE,)).fetchall()
+    except sqlite3.Error:
+        return {"count": 0, "decisions": {}}
+    for row in rows:
+        decision = str(row[0])
+        decisions[decision] = decisions.get(decision, 0) + 1
+    return {"count": len(rows), "decisions": decisions}
 
 
 def _sent(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -146,6 +164,7 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
                 f"SELECT {', '.join(LEG_COLUMNS)} FROM legs WHERE fire_id = ? ORDER BY stage, shelf", (row["id"],)
             ):
                 legs.append({**dict(leg), "actor": list(actor)})
+        searches = cli_searches(connection)
     finally:
         connection.close()
     return {
@@ -156,4 +175,5 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
         "shelves": count_shelves(legs),
         "classes": classify(legs),
         "public": public_summary(legs),
+        "cli_searches": searches,
     }

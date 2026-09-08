@@ -507,22 +507,37 @@ class SeedCase(DaemonCase):
         (self.lessons / "fam.json").write_text(
             json.dumps(
                 {
-                    "family": "fam",
+                    "id": "fam",
                     "title": "The lesson",
                     "commands": [
-                        {"command": "node probe-{task}.mjs", "sig_v1": key, "check": True, "reason": "stable"},
-                        {"command": "node ok-{task}.mjs", "sig_v1": None, "check": True, "reason": "passes"},
+                        {"command": "node probe-{task}.mjs", "kind": "sig_v1", "key": key, "check": True, "reason": "stable"},
+                        {"command": "node ok-{task}.mjs", "kind": "sig_v1", "key": None, "check": True, "reason": "passes"},
                     ],
                 }
             ),
             encoding="utf-8",
         )
 
+    def write_fix_lesson(self) -> str:
+        """The task's own fix, keyed on the test identity vitest's FAIL header names."""
+        identity = signature.TestIdentity(file="tests/probe.test.mjs", suite="probeKey", test="case 1")
+        key = signature.sig_v1_test(identity)
+        (self.lessons / "probe-fix.md").write_text("# The fix\n\nDefault the agent.\n", encoding="utf-8")
+        (self.lessons / "probe-fix.json").write_text(
+            json.dumps({"id": "probe-fix", "title": "The fix", "commands": [{"command": "node assertion-{task}.mjs", "kind": "sig_v1_test", "key": key, "check": True, "reason": "header"}]}),
+            encoding="utf-8",
+        )
+        return key
+
     def seed_roots(self) -> artifact.TrialRoots:
         fixture = self.dir / "seed-fixture"
         fixture.mkdir(exist_ok=True)
         (fixture / "probe-probe.mjs").write_text(PROBE_MJS, encoding="utf-8")
         (fixture / "ok-probe.mjs").write_text("process.exit(0);\n", encoding="utf-8")
+        (fixture / "assertion-probe.mjs").write_text(
+            "console.log(' FAIL  tests/probe.test.mjs > probeKey > case 1');\nconsole.log(\"AssertionError: expected 's1:undefined' to be 's1:root' // Object.is equality\");\nprocess.exit(1);\n",
+            encoding="utf-8",
+        )
         return artifact.create(self.run_dir, "trial-seed", fixture)
 
     def environment(self, roots: artifact.TrialRoots) -> dict[str, str]:
@@ -542,10 +557,10 @@ class SeedCase(DaemonCase):
         request = self.request(roots)
         provision = tenjin_arm.prepare(request)
         self.addCleanup(lambda: provision.stop_state.get("started") and runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
-        seed = provision.facts["seed"]
-        self.assertEqual((seed["piece_id"], seed["published"], seed["keys"], seed["deleted"]), ("piece-1", True, 1, None))
-        self.assertEqual(seed["key_hashes"], [tenjin_arm.key_hash(self.key)])
-        self.assertEqual(seed["probe"], {"node probe-probe.mjs": tenjin_arm.key_hash(self.key), "node ok-probe.mjs": None})
+        (seed,) = provision.facts["seed"]
+        self.assertEqual((seed["lesson"], seed["piece_id"], seed["published"], seed["keys"], seed["deleted"]), ("fam", "piece-1", True, 1, None))
+        self.assertEqual(seed["key_hashes"], [tenjin_arm.key_hash(f"sig_v1:{self.key}")])
+        self.assertEqual(seed["probe"], {"node probe-probe.mjs": tenjin_arm.key_hash(f"sig_v1:{self.key}"), "node ok-probe.mjs": None})
         self.assertNotIn(self.key, json.dumps(seed))
         self.assertFalse((roots.base / "probe").exists())
         publish = self.calls()[0]
@@ -557,9 +572,39 @@ class SeedCase(DaemonCase):
         self.assertIn("TENJIN_DATA_DIR", publish["env"])
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", publish["env"])
         report = tenjin_arm.stop(roots, provision)
-        self.assertEqual((report["seed_deleted"], report["seed_delete_error"]), (True, None))
+        self.assertEqual(report["seed_deleted"], {"piece-1": None})
         self.assertEqual(self.calls()[1]["argv"], ["delete", "piece-1", "--yes", "--json"])
-        self.assertEqual(runner.isolation_of({"live": True}, provision, report)["seed"]["deleted"], True)
+        self.assertEqual(runner.isolation_of({"live": True}, provision, report)["seed"][0]["deleted"], True)
+
+    def test_a_task_with_a_fix_lesson_seeds_two_pieces_under_two_kinds_and_stop_deletes_both(self) -> None:
+        fix_key = self.write_fix_lesson()
+        roots = self.seed_roots()
+        provision = tenjin_arm.prepare(self.request(roots))
+        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        seeds = provision.facts["seed"]
+        self.assertEqual([(seed["lesson"], seed["piece_id"], seed["keys"]) for seed in seeds], [("fam", "piece-1", 1), ("probe-fix", "piece-2", 1)])
+        self.assertEqual(seeds[1]["key_hashes"], [tenjin_arm.key_hash(f"sig_v1_test:{fix_key}")])
+        self.assertEqual(seeds[1]["probe"], {"node assertion-probe.mjs": tenjin_arm.key_hash(f"sig_v1_test:{fix_key}")})
+        publishes = [call["argv"] for call in self.calls() if call["argv"][0] == "publish"]
+        self.assertEqual(publishes[1][2:], ["--yes", "--json", "--key", f"fingerprint=sig_v1_test:{fix_key}"])
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual(report["seed_deleted"], {"piece-1": None, "piece-2": None})
+        isolation = runner.isolation_of({"live": True}, provision, report)
+        self.assertEqual([seed["deleted"] for seed in isolation["seed"]], [True, True])
+        record = support.attempt_record(support.parse("sess-family"))
+        records.validate({**record, "isolation": {**record["isolation"], "seed": isolation["seed"]}})
+
+    def test_a_second_publish_that_fails_deletes_the_first(self) -> None:
+        self.write_fix_lesson()
+        roots = self.seed_roots()
+        source_dir = Path(self.source.path)
+        (source_dir / "fail-second-publish").write_text("", encoding="utf-8")
+        with self.assertRaises(ProvisionError):
+            tenjin_arm.prepare(self.request(roots))
+        argv = [call["argv"][:2] for call in self.calls()]
+        self.assertEqual(argv[0][0], "publish")
+        self.assertEqual(argv[1][0], "publish")
+        self.assertEqual(argv[2], ["delete", "piece-1"])
 
     def test_a_delete_that_fails_is_a_fact_in_the_record(self) -> None:
         roots = self.seed_roots()
@@ -567,15 +612,16 @@ class SeedCase(DaemonCase):
         provision = tenjin_arm.prepare(request)
         (Path(self.source.path) / "fail-delete").write_text("", encoding="utf-8")
         report = tenjin_arm.stop(roots, provision)
-        self.assertFalse(report["seed_deleted"])
-        self.assertIn("exited 4", report["seed_delete_error"])
+        self.assertIn("exited 4", report["seed_deleted"]["piece-1"])
         isolation = runner.isolation_of({"live": True}, provision, report)
-        self.assertEqual((isolation["seed"]["deleted"], isolation["seed"]["piece_id"]), (False, "piece-1"))
+        self.assertEqual((isolation["seed"][0]["deleted"], isolation["seed"][0]["piece_id"]), (False, "piece-1"))
         record = support.attempt_record(support.parse("sess-family"))
         record["isolation"] = {**record["isolation"], "seed": isolation["seed"]}
         records.validate(record)
         with self.assertRaises(records.RecordError):
-            records.validate({**record, "isolation": {**record["isolation"], "seed": {**isolation["seed"], "piece_id": None}}})
+            records.validate({**record, "isolation": {**record["isolation"], "seed": [{**isolation["seed"][0], "piece_id": None}]}})
+        with self.assertRaises(records.RecordError):
+            records.validate({**record, "isolation": {**record["isolation"], "seed": isolation["seed"][0]}})
 
     def test_key_drift_and_a_failed_publish_refuse_the_trial_before_the_daemon_and_mask_the_secret(self) -> None:
         roots = self.seed_roots()
@@ -600,7 +646,7 @@ class SeedCase(DaemonCase):
         request = self.request(roots)
         provision = tenjin_arm.prepare(request)
         self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
-        self.assertEqual(provision.facts["seed"]["piece_id"], "piece-1")
+        self.assertEqual(provision.facts["seed"][0]["piece_id"], "piece-1")
         self.assertEqual(tenjin_arm.envelope_of("", '{"ok":true,"data":{"post":{"id":"p-9"}}}'), {"ok": True, "data": {"post": {"id": "p-9"}}})
         self.assertEqual(tenjin_arm.piece_id_of({"ok": True, "data": {"post": {"id": "p-9"}}}), "p-9")
         self.assertEqual(tenjin_arm.piece_id_of({"data": {"postId": "p-8"}}), "p-8")
@@ -641,7 +687,7 @@ class SeedCase(DaemonCase):
         with self.assertRaises(ProvisionError) as missing:
             tenjin_arm.prepare(self.request(roots, nonce=None))
         self.assertIn("run nonce", str(missing.exception))
-        lesson = tenjin_arm.lesson_for("fam")
+        lesson = tenjin_arm.lesson_named("fam")
         assert lesson is not None
         first = tenjin_arm.seed_body(lesson, roots, "20260908T000000Z-0badf00d", roots.trial_id).read_text(encoding="utf-8")
         second = tenjin_arm.seed_body(lesson, roots, "20260908T000100Z-deadbeef", roots.trial_id).read_text(encoding="utf-8")
@@ -662,8 +708,8 @@ class SeedCase(DaemonCase):
         request = self.request(roots, nonce=None, dry_run=True, environment=None)
         with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
             provision = tenjin_arm.prepare(request)
-        seed = provision.facts["seed"]
-        self.assertEqual((seed["published"], seed["piece_id"], seed["probe"], seed["key_hashes"]), (False, None, None, [tenjin_arm.key_hash(self.key)]))
+        (seed,) = provision.facts["seed"]
+        self.assertEqual((seed["published"], seed["piece_id"], seed["probe"], seed["key_hashes"]), (False, None, None, [tenjin_arm.key_hash(f"sig_v1:{self.key}")]))
         self.assertEqual(self.calls(), [])
 
     def test_a_task_without_a_lesson_seeds_nothing(self) -> None:
@@ -676,12 +722,17 @@ class SeedCase(DaemonCase):
 
     def test_the_live_lesson_is_loadable_and_its_keys_are_the_fixture_failures(self) -> None:
         live = tenjin_arm.FIXTURES / "live" / "lessons"
-        lesson = tenjin_arm.lesson_for("test-harness-convention", live)
-        assert lesson is not None
-        self.assertEqual(lesson.keys, ("ee9fd96defcffbeb",))
-        self.assertEqual([entry.command for entry in lesson.commands if entry.check and entry.sig_v1 is None], ["pnpm test -- tests/{task}.test.mjs"])
-        self.assertIn("pnpm exec vitest run", lesson.body.read_text(encoding="utf-8"))
-        self.assertIsNone(tenjin_arm.lesson_for("smoke", live))
+        lessons = tenjin_arm.lessons_for({"id": "actor", "family": "test-harness-convention"}, live)
+        self.assertEqual([lesson.id for lesson in lessons], ["test-harness-convention", "actor-fix"])
+        convention, fix = lessons
+        self.assertEqual(convention.keys, ("sig_v1:ee9fd96defcffbeb",))
+        self.assertEqual([entry.command for entry in convention.commands if entry.check and entry.key is None], ["pnpm test -- tests/{task}.test.mjs"])
+        self.assertIn("pnpm exec vitest run", convention.body.read_text(encoding="utf-8"))
+        # The fix lesson carries the key run seven's fires table recorded for this failure.
+        self.assertEqual(fix.keys, ("sig_v1_test:502b90852a1505e3",))
+        self.assertEqual(tenjin_arm.key_hash("sig_v1:ee9fd96defcffbeb"), "ed094b3427f6e7e2")
+        self.assertNotIn("s9", fix.body.read_text(encoding="utf-8"))
+        self.assertEqual(tenjin_arm.lessons_for({"id": "answer-file", "family": "smoke"}, live), [])
 
 
 if __name__ == "__main__":

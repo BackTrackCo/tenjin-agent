@@ -298,25 +298,33 @@ own session, an allowlisted environment, its group in the pids ledger under `<tr
 pid, and refuses the trial if it never does. Nothing wallet-related is copied, and no key outside
 `COPIED_KEYS` is read.
 
-**The seeded lesson.** Seeding is honest only if the lesson reached the shelf the way a
-producer's would: published through the CLI, under the `sig_v1` failure key the consumer's
-failure fire resolves on the keys leg. Before the daemon starts, `prepare` loads
-`fixtures/live/lessons/<family>.md` (the lesson in this benchmark's own words) and
-`<family>.json` beside it, which freezes the keys the fixture's failing commands yield; copies
+**The seeded lessons.** Seeding is honest only if a lesson reached the shelf the way a
+producer's would: published through the CLI, under the failure key the consumer's failure fire
+resolves on the keys leg. Two lessons per task, one per path the product has. The task's
+family lesson (`fixtures/live/lessons/test-harness-convention.md`, the prompt-path case: the
+convention a primer or a prompt-fire search would surface) and the task's own fix
+(`<task>-fix.md`, the failure path's designed use: a teammate fixed exactly this failure and
+published under its key, which is the shape of the "Fix:" posts on the shelf). Before the daemon
+starts, `prepare` loads each lesson's `.md` (in this benchmark's own words) and the `.json`
+beside it, which freezes the keys the fixture's failing commands yield, each with its `kind`
+(`sig_v1` or `sig_v1_test`); copies
 the trial's repository to a scratch directory and runs those commands under the child's own
 environment (the vendored tree, the seeded corepack home); keys each output with
 `signature.py`, the product's formula ported byte for byte (`error_line`, `normalize_for_sig`,
-`errno_of`, `top_frame_file`, `sig_v1`; `src/hooks/failure/signature.parity.test.ts` runs both
-sides over the same outputs, so drift fails the product's suite); refuses the trial on
-`seed key drift`; and runs `tenjin publish <body> --yes --json --key fingerprint=sig_v1:<key>`
+`errno_of`, `top_frame_file`, `sig_v1`, and the `sig_v1_test` lane's `identity_from_console`
+and `sig_v1_test` from `test-identity.ts`; `src/hooks/failure/signature.parity.test.ts` runs
+both sides over the same outputs, so drift fails the product's suite); refuses the trial on
+`seed key drift`; and runs `tenjin publish <body> --yes --json --key fingerprint=<kind>:<key>`
 under `TENJIN_DATA_DIR` set to the operator's source data dir, whose wallet signs it. `--key`
 needs no open pairing: the CLI stamps a matching local pairing row if one exists and sends
 the key to the shelf either way. The body carries a trial stamp line, because the CLI hands
 back the last url for a body it already published. At `stop`, after the daemon, `tenjin
-delete <id> --yes --json` removes the piece; the record's `isolation.seed` carries the title,
-`key_hashes`, `keys`, `shelf_origin`, `piece_id`, `published`, `probe` (which command keyed,
-as hashes), `deleted`, and `delete_error`, and `summary` warns when a piece is still up. A
-dry run states the title and key hashes and publishes nothing. The shared team shelf still
+delete <id> --yes --json` removes every piece; the record's `isolation.seed` is a list, one
+entry per lesson, each with `lesson`, the title, `key_hashes`, `keys`, `shelf_origin`,
+`piece_id`, `published`, `probe` (which command keyed under the lesson's kind, as hashes),
+`deleted`, and `delete_error`, and `summary` warns when a piece is still up. A second publish
+that fails deletes the first before the refusal. A dry run states each title and its key
+hashes and publishes nothing. The shared team shelf still
 holds the teammate's original piece with no key, so the prompt-fire search leg sees both
 pieces during a trial; only the seeded one answers a keys resolve.
 
@@ -330,8 +338,25 @@ refusal) key to a different value on every run, because the top frame is vite's 
 config bundle, `vitest.config.mjs.timestamp-<ms>-<hash>.mjs`, so no published key can match
 them. `node tests/<task>.test.mjs` ("Vitest failed to access its internal state", top frame a
 chunk of the vendored vitest dist) keys stably to `ee9fd96defcffbeb`, the same for all four
-tasks, and that is the key the lesson carries. The prepare probe re-derives all three every
-trial. The operator's next run is the proof; nothing here was run against a shelf.
+tasks, and that is the key the convention lesson carries. The assertion on the unfixed source
+(`pnpm exec vitest run tests/<task>.test.mjs`, the failure the seeded agents in runs three,
+four and seven actually hit) is below the `sig_v1` floor too: no errno, and vitest's ` ❯` frame
+line is a runner header that ends the block. The product keys that failure on the other lane,
+`sig_v1_test` (`src/hooks/failure/test-identity.ts`): file, suite and test as vitest's own
+` FAIL  <file> > <suite> > <test>` header names them, read off the console when no reporter
+artifact exists, and stable by construction. That is the fix lesson's key, `502b90852a1505e3`
+for `actor`, the value run seven's fires table recorded as the question key; the port reproduces
+it byte for byte. The prepare probe re-derives every command every trial. The operator's next
+run is the proof; nothing here was run against a shelf.
+
+**The seeded arm may read the shelf by hand.** `tenjin_seeded` carries arm-level
+`settings.permissions.allow` for `Bash(tenjin search:*)`, `Bash(tenjin read:*)`, and
+`Bash(tenjin inspect:*)`, because a seeded agent in run seven followed the primer's instruction,
+ran `tenjin search` twice, and the Bash pin denied both. The pins, and so the `off` arm, are
+unchanged; team reads are free, and the sentinel already classes the shelf origin. A search the
+agent runs through the CLI lands in the daemon's `searches` table with `source = 'cli'`, and
+`loop_join` reports them as `delivery.cli_searches` (a count and the product's decisions), apart
+from the hooks' own fires and legs, so a manual search is visible and costed.
 
 The fifth hooks smoke (`bench1-hooks-smoke-5`, head `74cbec5`) aborted at prepare on the
 receipt, not the publish: `tenjin publish` exited 0 and the piece was on the shelf, but the seam
@@ -411,7 +436,7 @@ the sentinel's `public_requests` and invalidates. Public-origin legs are counted
 the report's `origins` block and `summary` read them apart, so the plan's canary gate is two
 counts, unknown requests zero and public hits zero, each judged on its own.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-5`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-6`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
 0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
 exact version in `package.json`, a committed `pnpm-lock.yaml`, and the hoisted `node_modules`
@@ -422,7 +447,9 @@ copy at preparation, offline, so a trial installs nothing and reaches no network
 **Vendored toolchain** below; `bench1-hooks-smoke-3` is `bench1-hooks-smoke-2` with the tree
 vendored, and a trial sees the same bytes; `bench1-hooks-smoke-4` adds the `packageManager`
 pin that makes the trial offline against corepack, see **Offline against corepack**;
-`bench1-hooks-smoke-5` seeds the lesson with its failure key, see **The seeded lesson**); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
+`bench1-hooks-smoke-5` seeds the lesson with its failure key, see **The seeded lesson**;
+`bench1-hooks-smoke-6` seeds the task's fix under its test-identity key as well and lets the
+seeded arm read the shelf by hand); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
 otherwise runs a registry install before the first `pnpm exec` or `pnpm run` in a fresh tree,
 which is what every trial of the second smoke did before its first test ran. The barrier is the
 repository, not the permission pin. Bash is `pnpm:*`, `npx:*`, `node:*`, `ls:*`, and `cat:*`,

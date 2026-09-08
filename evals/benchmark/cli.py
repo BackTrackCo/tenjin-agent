@@ -247,10 +247,9 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                 f"  {'provision':10}shelf_secret_present={str(facts['shelf_secret_present']).lower()} "
                 f"shelf_origin={facts['shelf_origin']} public_origin={facts['public_origin']}"
             )
-            seed = facts.get("seed")
-            if seed is not None:
+            for seed in facts.get("seed") or []:
                 lines.append(
-                    f"  {'seed':10}\"{seed['title']}\" keys={seed['keys']} key_hashes={','.join(seed['key_hashes'])} "
+                    f"  {'seed':10}{seed['lesson']} \"{seed['title']}\" keys={seed['keys']} key_hashes={','.join(seed['key_hashes'])} "
                     "published through tenjin publish --key at prepare, deleted at stop; a dry run publishes nothing"
                 )
         if plan["vendor"] is not None:

@@ -267,11 +267,16 @@ def isolation_of(isolation: dict[str, Any], provision: executor.Provision | None
     if provision is None:
         return isolation
     out = {**isolation, "daemon_respawned": bool((stop or {}).get("respawned", False))}
-    seed = provision.facts.get("seed")
-    if seed is not None:
-        out["seed"] = dict(seed)
-        if stop is not None and "seed_deleted" in stop:
-            out["seed"].update({"deleted": bool(stop["seed_deleted"]), "delete_error": stop.get("seed_delete_error")})
+    seeds = provision.facts.get("seed")
+    if seeds is not None:
+        deleted = (stop or {}).get("seed_deleted") or {}
+        out["seed"] = []
+        for seed in seeds:
+            entry = dict(seed)
+            piece_id = entry.get("piece_id")
+            if piece_id in deleted:
+                entry.update({"deleted": deleted[piece_id] is None, "delete_error": deleted[piece_id]})
+            out["seed"].append(entry)
     return out
 
 
