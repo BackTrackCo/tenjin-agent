@@ -293,6 +293,13 @@ class HooksArmTest(LiveCase):
         self.assertIn("SubagentStart", arm["settings"]["hooks"])
         # The declared hash is over the template, so it is one value for every trial.
         self.assertEqual(arm["settings_hash"], "sha256:" + sha256_json(arm["settings"]))
+        # The pin no longer encodes the lesson: every natural command is
+        # allowed, and the wrong ones fail inside the repository.
+        self.assertEqual(
+            [rule for rule in manifest.pins["allowed_tools"] if rule.startswith("Bash(")],
+            ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)", "Bash(ls:*)", "Bash(cat:*)"],
+        )
+        self.assertNotIn("WebFetch", manifest.pins["tools"])
         for task in manifest.tasks:
             claude_live.refuse_project_settings(manifest.fixture_path(task))
             self.assertEqual(verifier.lookup(task["verifier"]).hidden_layer, verifier.HIDDEN / task["id"])

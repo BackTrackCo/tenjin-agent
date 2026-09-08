@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-hooks-smoke-1",
+  "benchmark_version": "bench1-hooks-smoke-2",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,
@@ -17,8 +17,11 @@
     "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
     "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "allowed_tools": [
-      "Bash(pnpm test:*)",
-      "Bash(pnpm exec vitest run:*)",
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
       "Read(./**)",
       "Edit(./**)",
       "Write(./**)",
@@ -38,7 +41,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "fixture_hash": "sha256:38c625b6bcfaa02ad6bc12eddfda07fbb19d6b742032141323a69ca6dc83fb74",
+      "fixture_hash": "sha256:ab9a4181e1cf0be01df15bbfb6cfc083ca2e9da4384a57130adb00182a70ab2f",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }

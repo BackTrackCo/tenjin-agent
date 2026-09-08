@@ -180,6 +180,38 @@ class VerifierRegistryTest(unittest.TestCase):
         self.assertEqual(json.loads((trap / "argv.json").read_text(encoding="utf-8")), ["run"])
         self.assertIn("not forwarded", completed.stderr)
 
+    def test_the_vitest_config_refuses_a_runner_that_did_not_come_through_pnpm(self) -> None:
+        # The honest barrier: `npx vitest` and a bare `node node_modules/vitest/...`
+        # reach the config with no pnpm agent and stop on a repository reason;
+        # `pnpm exec vitest` and `pnpm vitest` carry `npm_config_user_agent=pnpm/...`
+        # and load it. Importing the config is the whole check, so no vitest boots.
+        fixture = verifier.HIDDEN.parent / "fixtures" / "live" / "actor"
+        config = self.dir / "config"
+        config.mkdir()
+        shutil.copy(fixture / "vitest.config.mjs", config / "vitest.config.mjs")
+        cases = {
+            "bare node": {},
+            "npx": {"npm_config_user_agent": "npm/11.0.0 node/v24.0.0 darwin arm64 workspaces/false"},
+            "pnpm": {"npm_config_user_agent": "pnpm/11.0.0 npm/? node/v24.0.0 darwin arm64"},
+        }
+        for name, extra in cases.items():
+            with self.subTest(runner=name):
+                completed = subprocess.run(
+                    ["node", "--input-type=module", "-e", "await import('./vitest.config.mjs')"],
+                    cwd=config,
+                    env={**verifier.child_environment(), **extra},
+                    capture_output=True,
+                    text=True,
+                    shell=False,
+                    check=False,
+                )
+                if name == "pnpm":
+                    self.assertEqual(completed.returncode, 0, completed.stderr)
+                else:
+                    self.assertEqual(completed.returncode, 1)
+                    self.assertIn(support.PNPM_GUARD_MESSAGE, completed.stderr)
+                    self.assertNotIn("pnpm exec", completed.stderr)
+
     def test_verifier_output_is_bounded(self) -> None:
         verdict = verifier.run(_echo(5000), self.repo, self.run_dir)
         self.assertEqual(verdict.outcome, "fail")

@@ -415,7 +415,20 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
 
 EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 # Files a run leaves behind. A frozen fixture carries none of them.
-RUN_ARTEFACTS = (".bench1", "node_modules/.vite", "node_modules/.vite-temp", "node_modules/.modules.yaml", "node_modules/.pnpm-workspace-state-v1.json")
+RUN_ARTEFACTS = (
+    ".bench1",
+    "node_modules/.vite",
+    "node_modules/.vite-temp",
+    "node_modules/.modules.yaml",
+    "node_modules/.pnpm",
+    "node_modules/.package-map.json",
+    "node_modules/.pnpm-workspace-state-v1.json",
+)
+# The guard in every fixture's vitest config: a runner that did not come
+# through pnpm is refused for a repository reason, in words that name the
+# convention and never the command that satisfies it.
+PNPM_GUARD = "process.env.npm_config_user_agent"
+PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
 
 
 def assert_vitest_fixture(case: Any, fixture: Path, task: str) -> None:
@@ -433,6 +446,15 @@ def assert_vitest_fixture(case: Any, fixture: Path, task: str) -> None:
     config = (fixture / "vitest.config.mjs").read_text(encoding="utf-8")
     case.assertIn("'unrelated/**/*.test.mjs'", config)
     case.assertIn(f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]", config)
+    case.assertIn(PNPM_GUARD, config)
+    case.assertIn(PNPM_GUARD_MESSAGE, config)
+    case.assertNotIn("pnpm exec", config)
+    # pnpm 11 reads its settings from pnpm-workspace.yaml and, without this,
+    # runs an install before the first `pnpm exec` or `pnpm run` in a fresh
+    # tree: a registry download the trial must never make.
+    workspace = (fixture / "pnpm-workspace.yaml").read_text(encoding="utf-8")
+    case.assertIn("verifyDepsBeforeRun: false", workspace)
+    case.assertIn("nodeLinker: hoisted", workspace)
     case.assertTrue(list((fixture / "unrelated").glob("*.test.mjs")))
     # The named test is a vitest test, so plain `node` cannot run it, and its cases are a blob.
     test = (fixture / "tests" / f"{task}.test.mjs").read_text(encoding="utf-8")
