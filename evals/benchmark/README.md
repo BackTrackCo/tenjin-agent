@@ -558,7 +558,7 @@ compares against the plumbing smoke's baseline and does not apply to this manife
 manifest never runs in CI: the live lane and `--ci-live` stay on the plumbing smoke, and the
 refusal is in code rather than in the workflow.
 
-**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-5`) is the same two
+**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-6`) is the same two
 arms and the same pins over all four Bench-0 tasks, `actor`, `budget`, `candidate`, and `slug`,
 two repeats, sixteen attempts. Each task is its own frozen Vitest project built the same way as
 `actor` (pinned `vitest`, committed lockfile, the one vendored `node_modules` archive all four
