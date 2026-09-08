@@ -14,7 +14,11 @@ session transcripts:
   record. Rows are never summed;
 - a `result` row is the envelope: `subtype`, `is_error`, `num_turns`,
   `total_cost_usd`, `usage`, `modelUsage`. The root's selected records must
-  reconcile with it or the attempt is invalid;
+  reconcile with it or the attempt is invalid. A budget or turn cap ends the
+  session before the envelope is complete: its totals then fall below the
+  transcript's in every category, the per-actor rows stay the authoritative
+  count, and the envelope is kept as `partial` rather than failing the
+  attempt;
 - a child transcript is `<root>/subagents/agent-<id>.jsonl`; its rows may name
   the same id in `agentId` and the dispatching tool call in
   `parent_tool_use_id`, which is the only source of a parent edge.
@@ -45,7 +49,8 @@ MODEL_USAGE = {
     "output_tokens": "outputTokens",
 }
 ITERATION_TYPES = frozenset({"message", "fallback_message"})
-CAPPED_SUBTYPES = frozenset({"error_max_turns", "error_max_budget_usd"})
+# The harness's own stops, and the stop reason each one records.
+CAPPED_SUBTYPES = {"error_max_budget_usd": "budget", "error_max_turns": "turns"}
 
 
 class ClaudeUsageError(ValueError):
@@ -169,6 +174,11 @@ class Envelope:
     @property
     def capped(self) -> bool:
         return self.subtype in CAPPED_SUBTYPES
+
+    @property
+    def cap(self) -> str | None:
+        """The stop reason a capped envelope names: `budget` or `turns`."""
+        return CAPPED_SUBTYPES.get(self.subtype)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -596,13 +606,17 @@ def reconcile(envelope: Envelope | None, records: list[UsageRecord], root_actor:
     `explained_by_side_models` (the remainder is exactly the envelope's usage
     for models that never appear in a root row, such as a summariser; that
     remainder is kept as an attempt-level value and never apportioned),
+    `envelope_partial` (a budget or turn cap ended the session and the
+    envelope counts less than the transcript in every category; the records
+    are the count and the envelope's own totals are kept beside them),
     `mismatch` (fails the attempt closed), `no_envelope` (the root did not
-    settle), `envelope_without_usage`.
+    settle), `envelope_without_usage`. `envelope` says whether the totals
+    compared against were complete, partial, or absent.
     """
     if envelope is None:
-        return {"status": "no_envelope", "categories": {}, "unattributed": None}
+        return {"status": "no_envelope", "categories": {}, "unattributed": None, "envelope": None}
     if envelope.usage is None:
-        return {"status": "envelope_without_usage", "categories": {}, "unattributed": None}
+        return {"status": "envelope_without_usage", "categories": {}, "unattributed": None, "envelope": None}
     root_sums = _sums([record for record in records if record.actor_key == root_actor])
     all_sums = _sums(records)
     side: dict[str, int] = {name: 0 for name in NATIVE}
@@ -636,6 +650,15 @@ def reconcile(envelope: Envelope | None, records: list[UsageRecord], root_actor:
         equal, detail = compare(base, extra)
         if equal and (extra is none or side_models):
             unattributed = None if extra is none else {**side, "models": side_models}
-            return {"status": status, "categories": detail, "unattributed": unattributed}
+            return {"status": status, "categories": detail, "unattributed": unattributed, "envelope": "complete"}
+    if envelope.capped:
+        # A capped session's envelope is written before the last requests
+        # are folded in, so it undercounts. That is partial, not
+        # contradictory: every category the envelope shows is at or below
+        # what the transcript shows. An envelope above the transcript is
+        # still a mismatch, cap or no cap, because then a request is missing.
+        _, detail = compare(all_sums, none)
+        if all(item["delta"] is None or item["delta"] <= 0 for item in detail.values()):
+            return {"status": "envelope_partial", "categories": detail, "unattributed": None, "envelope": "partial"}
     _, detail = compare(root_sums, none)
-    return {"status": "mismatch", "categories": detail, "unattributed": None}
+    return {"status": "mismatch", "categories": detail, "unattributed": None, "envelope": "complete"}

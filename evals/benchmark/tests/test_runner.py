@@ -16,7 +16,7 @@ import unittest
 import urllib.request
 from pathlib import Path
 
-from evals.benchmark import artifact, executor, loop_join, records, reduce as reduce_module, runner, schedule
+from evals.benchmark import artifact, cli, executor, loop_join, records, reduce as reduce_module, runner, schedule
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec
 from evals.benchmark.manifest import Manifest
@@ -215,6 +215,74 @@ class PublicRequestTest(TrialCase):
         self.assertEqual(len(self.sentinel.hits), 1)
 
 
+class HarnessCapTest(TrialCase):
+    """The CLI's own budget and turn stops: a failed attempt with its spend, never an invalid one."""
+
+    def stopped(self, subtype: str, *, scale: int = 2) -> support.Before:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            path = roots.output / "sessions" / f"{launch.root_session_id}.jsonl"
+            rows = support.read_rows(path)
+            # What a capped session leaves: the stop named, is_error set, and an
+            # envelope that has not folded the last requests in.
+            rows[-1]["subtype"] = subtype
+            rows[-1]["is_error"] = True
+            rows[-1]["usage"] = {name: value // scale for name, value in rows[-1]["usage"].items()}
+            support.write_rows(path, rows)
+
+        return edit
+
+    def test_a_budget_stop_is_capped_with_its_spend_and_its_verdict(self) -> None:
+        record = self.one_trial(self.manifest(), self.runtime(spawn=support.fake_spawn(after=self.stopped("error_max_budget_usd"))))
+        self.assertEqual((record["outcome"], record["stop_reason"], record["invalid_reason"]), ("capped", "budget", None))
+        self.assertEqual(record["usage_reconciliation"]["status"], "envelope_partial")
+        self.assertEqual(record["usage_reconciliation"]["envelope"], "partial")
+        # Every request the transcript holds is counted, and the envelope's
+        # own totals are kept beside them.
+        self.assertEqual(len(record["usage"]), 3)
+        self.assertTrue(all(item["delta"] <= 0 for item in record["usage_reconciliation"]["categories"].values()))
+        # The edit landed before the cap: the verifier says so, and the outcome
+        # is still the cap. A pass-with-cap is a diagnostic, not a pass.
+        self.assertEqual(record["verifier"], {"id": "fake_answer_file", "exit_code": 0})
+        self.assertIsNotNone(record["patch_hash"])
+        reduction = reduce_module.reduce({record["trial_id"]: record}, [])
+        arm = reduction["arms"][record["arm_id"]]
+        self.assertEqual(arm["outcomes"]["capped"], 1)
+        self.assertEqual(arm["accounting"], "partial_by_cap")
+        self.assertEqual(arm["tasks"][record["task_id"]]["passes"], 0)
+        self.assertGreater(arm["tokens"], 0)
+        self.assertEqual(reduction["invalid"], [])
+
+    def test_a_turn_stop_and_a_non_zero_exit_are_the_same_cap(self) -> None:
+        # The CLI reports its own stop as an error exit; the envelope names
+        # the cap, and the cap outranks the exit code.
+        record = self.one_trial(
+            self.manifest(), self.runtime(spawn=support.fake_spawn(after=self.stopped("error_max_turns"), returncode=1, answer="41\n"))
+        )
+        self.assertEqual((record["outcome"], record["stop_reason"], record["invalid_reason"]), ("capped", "turns", None))
+        self.assertEqual(record["verifier"], {"id": "fake_answer_file", "exit_code": 1})
+
+    def test_a_capped_envelope_that_counts_more_than_the_transcript_is_still_invalid(self) -> None:
+        def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            path = roots.output / "sessions" / f"{launch.root_session_id}.jsonl"
+            rows = support.read_rows(path)
+            rows[-1]["subtype"] = "error_max_budget_usd"
+            rows[-1]["usage"]["output_tokens"] += 1000
+            support.write_rows(path, rows)
+
+        record = self.one_trial(self.manifest(), self.runtime(spawn=support.fake_spawn(after=edit)))
+        self.assertEqual((record["outcome"], record["invalid_reason"], record["stop_reason"]), ("invalid", "usage:mismatch", "budget"))
+        self.assertIsNone(record["verifier"])
+
+    def test_verify_reads_a_capped_attempt_against_its_recorded_verdict(self) -> None:
+        manifest = self.manifest()
+        payload = cli.execute(manifest, schedule.expand(manifest), self.run_dir, self.runtime(spawn=support.fake_spawn(after=self.stopped("error_max_budget_usd"))))
+        self.assertEqual(set(payload["outcomes"].values()), {"capped"})
+        verified = cli.do_verify(self.run_dir)
+        self.assertEqual(verified["disagreements"], [])
+        self.assertEqual({entry["recorded"] for entry in verified["trials"].values()}, {"pass"})
+        self.assertTrue(all(entry["agrees"] for entry in verified["trials"].values()))
+
+
 class ProcessGroupTest(TrialCase):
     def test_a_timeout_kills_the_process_group_and_keeps_partial_usage(self) -> None:
         manifest = self.manifest(executor_name="fake_hang", wall_clock_s=1)
@@ -223,6 +291,8 @@ class ProcessGroupTest(TrialCase):
         self.assertEqual(record["outcome"], "capped")
         self.assertIsNone(record["invalid_reason"])
         self.assertEqual(record["unresolved_actors"], [""])
+        # The worktree is final once the group is dead, so the verdict is recorded beside the cap.
+        self.assertEqual(record["verifier"], {"id": "fake_answer_file", "exit_code": 1})
         # The one request the root finished before the cap is still counted.
         self.assertEqual(len(record["usage"]), 1)
         self.assertEqual(record["usage"][0]["completion_state"], "partial")

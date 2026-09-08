@@ -22,15 +22,18 @@ from .schedule import trial_id as derive_trial_id
 
 RECORD_SCHEMA = "bench1.attempt.v1"
 OUTCOMES = frozenset({"pass", "fail", "capped", "interrupted", "invalid"})
-STOP_REASONS = frozenset({"exit", "timeout", "interrupted"})
+# `timeout` is the wall-clock pin, `interrupted` the settlement cap, `budget`
+# and `turns` the harness's own stops; `exit` is an ordinary end.
+STOP_REASONS = frozenset({"exit", "timeout", "interrupted", "budget", "turns"})
 PROVENANCE = frozenset({"native", "observed", "unavailable"})
 # A scored attempt has to have accounted for its own spend. These are the
 # reconciliation statuses that did: the root envelope agrees with the selected
 # records, or its remainder is attributed to models that wrote no root row.
 RECONCILED = frozenset({"matched", "matched_with_descendants", "explained_by_side_models"})
 # A cap is the one declared reason a scored attempt may have no envelope at
-# all: the outcome itself names the gap.
+# all, or a partial one: the outcome itself names the gap.
 CAPPED_OUTCOMES = frozenset({"capped", "interrupted"})
+CAPPED_RECONCILIATION = frozenset({"no_envelope", "envelope_partial"})
 REQUIRED = frozenset(
     {
         "schema",
@@ -223,7 +226,7 @@ def validate(record: dict[str, Any]) -> None:
     # that built it: a file the reducer reads from disk must not be able to
     # claim a scored outcome over usage that never reconciled.
     if record["outcome"] != "invalid":
-        allowed = RECONCILED | ({"no_envelope"} if record["outcome"] in CAPPED_OUTCOMES else frozenset())
+        allowed = RECONCILED | (CAPPED_RECONCILIATION if record["outcome"] in CAPPED_OUTCOMES else frozenset())
         if reconciliation["status"] not in allowed:
             raise RecordError(
                 f"outcome {record['outcome']!r} cannot carry usage_reconciliation {reconciliation['status']!r}"

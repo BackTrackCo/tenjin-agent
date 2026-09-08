@@ -130,8 +130,12 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path) -> Verdict:
     except subprocess.TimeoutExpired:
         return Verdict(spec.name, "invalid", None, "verifier timed out")
     detail = (completed.stderr or completed.stdout).strip()[-OUTPUT_LIMIT:]
-    outcome = {0: "pass", 1: "fail"}.get(completed.returncode, "invalid")
-    return Verdict(spec.name, outcome, completed.returncode, detail)
+    return Verdict(spec.name, outcome_of(completed.returncode), completed.returncode, detail)
+
+
+def outcome_of(exit_code: int | None) -> str:
+    """Exit 0 is pass, 1 is fail, anything else means the verifier could not decide."""
+    return {0: "pass", 1: "fail"}.get(exit_code, "invalid")  # type: ignore[arg-type]
 
 
 def fake_answer_file(repo: Path) -> int:

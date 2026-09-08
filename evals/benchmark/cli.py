@@ -292,8 +292,11 @@ def do_verify(run_dir: Path) -> dict[str, Any]:
             continue
         task = next(item for item in manifest.tasks if item["id"] == record["task_id"])
         verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir)
-        agrees = verdict.outcome == record["outcome"]
-        verdicts[trial_id] = {"status": verdict.outcome, "recorded": record["outcome"], "agrees": agrees}
+        # A capped attempt keeps its verdict beside the outcome, so the fresh
+        # verdict is read against the recorded verdict rather than `capped`.
+        recorded = record["outcome"] if record["verifier"] is None else verifier.outcome_of(record["verifier"]["exit_code"])
+        agrees = verdict.outcome == recorded
+        verdicts[trial_id] = {"status": verdict.outcome, "recorded": recorded, "agrees": agrees}
         if not agrees:
             disagreements.append(trial_id)
     return {"trials": verdicts, "disagreements": disagreements}

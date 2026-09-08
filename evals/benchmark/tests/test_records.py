@@ -37,7 +37,7 @@ class RecordShapeTest(unittest.TestCase):
         # The invariant lives in the record, not only in the runner that built
         # it: a file the reducer reads from disk cannot claim a pass over usage
         # that never reconciled with the harness envelope.
-        for status in ("mismatch", "envelope_without_usage", "unparsed", "no_envelope"):
+        for status in ("mismatch", "envelope_without_usage", "unparsed", "no_envelope", "envelope_partial"):
             with self.subTest(f"pass/{status}"), self.assertRaises(RecordError):
                 records.validate(attempt_record(self.family, usage_reconciliation={"status": status}))
         for status in ("matched", "matched_with_descendants", "explained_by_side_models"):
@@ -53,6 +53,10 @@ class RecordShapeTest(unittest.TestCase):
             usage_reconciliation={"status": "no_envelope"},
         )
         records.validate(capped)
+        # A harness cap leaves a partial envelope; that too is named by the
+        # outcome, and a capped attempt may carry the verdict it earned first.
+        records.validate({**capped, "stop_reason": "budget", "usage_reconciliation": {"status": "envelope_partial"}})
+        records.validate({**capped, "stop_reason": "turns", "verifier": {"id": "fake_answer_file", "exit_code": 0}})
         with self.assertRaises(RecordError):
             records.validate({**capped, "usage_reconciliation": {"status": "mismatch"}})
         # An invalid attempt is where an unreconciled status belongs.

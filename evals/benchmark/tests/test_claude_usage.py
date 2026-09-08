@@ -252,7 +252,37 @@ class RejectionTest(unittest.TestCase):
         session = parse("sess-capped-turns")
         self.assertTrue(session.envelope.capped)
         self.assertTrue(session.envelope.is_error)
+        self.assertEqual(session.envelope.cap, "turns")
         self.assertEqual(session.reconciliation["status"], "matched")
+        self.assertEqual(session.reconciliation["envelope"], "complete")
+
+    def test_a_budget_stop_leaves_a_partial_envelope_that_is_not_a_mismatch(self) -> None:
+        # The CLI stops on --max-budget-usd before its envelope has folded the
+        # last requests in, so the envelope undercounts every category. The
+        # per-actor rows are the count; the envelope's own totals stay beside
+        # them as partial, and the attempt is a capped one, never invalid.
+        session = parse("sess-capped-budget")
+        self.assertEqual(session.envelope.cap, "budget")
+        self.assertEqual(session.reconciliation["status"], "envelope_partial")
+        self.assertEqual(session.reconciliation["envelope"], "partial")
+        self.assertIsNone(session.invalid_reason)
+        categories = session.reconciliation["categories"]
+        self.assertEqual(categories["output_tokens"], {"envelope": 50, "actors": 120, "delta": -70})
+        self.assertEqual(categories["cache_read_input_tokens"], {"envelope": 0, "actors": 900, "delta": -900})
+        self.assertEqual(sum(record.total for record in session.records), 903 + 50 + 904 + 70)
+        self.assertEqual(session.record_fields()["cost_usd"], 0.7512)
+
+    def test_a_capped_envelope_above_the_transcript_is_still_a_mismatch(self) -> None:
+        # Partial means the envelope shows less, never more: an envelope that
+        # counts a request the transcript lacks is a gap the cap does not name.
+        def edit(rows: list[Any]) -> list[Any]:
+            rows[-1]["usage"]["output_tokens"] = 121
+            return rows
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = parse("sess-capped-budget", copy_session(Path(tmp), "sess-capped-budget", edit))
+        self.assertEqual(session.reconciliation["status"], "mismatch")
+        self.assertEqual(session.invalid_reason, "usage:mismatch")
 
     def test_incomplete_group_is_ambiguous(self) -> None:
         with self.assertRaises(ClaudeUsageError) as caught:

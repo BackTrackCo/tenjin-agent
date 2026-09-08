@@ -1,11 +1,14 @@
 """Execute a schedule: one fresh root per trial, settle, verify, record.
 
 An attempt closes only when the root has exited and every discovered child has
-a terminal row, or when a declared cap ends the wait. Two caps, two outcomes:
+a terminal row, or when a declared cap ends the wait. Three caps, two outcomes:
 the wall-clock budget kills the whole process group and the attempt is
-`capped`; the settlement cap ends a wait for descendants that never stopped
-and the attempt is `interrupted`. Both retain the usage observed so far and
-name the actors that never settled.
+`capped` with stop reason `timeout`; the harness's own budget and turn stops
+end the session from inside and the attempt is `capped` with stop reason
+`budget` or `turns`; the settlement cap ends a wait for descendants that never
+stopped and the attempt is `interrupted`. All retain the usage observed so far,
+a capped attempt keeps its spend as a task outcome rather than an invalid one,
+and every cap names the actors that never settled.
 
 The process boundary, the clock, and the settlement barrier are injected, so
 every case except the process-group kill runs without real time or a real
@@ -355,6 +358,13 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         else:
             auxiliary = [receipt.to_json() for receipt in collected]
 
+    envelope = None if session is None else session.envelope
+    # The harness's own stop is read off the envelope it wrote: a session the
+    # CLI ended on its budget or turn cap exited on its own terms, so the
+    # record names that cap rather than the plain exit.
+    if stop_reason == "exit" and envelope is not None and envelope.cap is not None:
+        stop_reason = envelope.cap
+
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
@@ -366,15 +376,21 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         pass
     elif completed.timed_out:
         outcome = "capped"
+    elif envelope is not None and envelope.capped:
+        # The cap outranks the exit code: the CLI reports its own stop as an
+        # error, and that exit is the cap, not a broken executor.
+        outcome = "capped"
     elif completed.returncode != 0:
         invalid_reason = f"executor:exit_{completed.returncode}"
     elif settlement.capped:
         outcome = "interrupted"
-    elif session is not None and session.envelope is not None and session.envelope.capped:
-        outcome = "capped"
-    elif session is not None and session.envelope is not None and session.envelope.is_error:
-        invalid_reason = f"harness:{session.envelope.subtype}"
-    else:
+    elif envelope is not None and envelope.is_error:
+        invalid_reason = f"harness:{envelope.subtype}"
+    if invalid_reason is None and outcome != "interrupted":
+        # The verifier decides pass and fail. On a capped attempt it runs too,
+        # because the worktree is final and whether the edit landed before
+        # the cap is worth recording; the outcome stays `capped`, a failed
+        # task with its spend, and the verdict is the diagnostic beside it.
         try:
             copy = roots.hidden_copy(verifier_spec.hidden_layer)
         except artifact.ArtifactError as error:
@@ -383,9 +399,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         if copy is not None:
             patch_hash = "sha256:" + sha256_dir(copy)
             verdict = verifier.run(verifier_spec, copy, run_dir)
-            outcome = verdict.outcome
-            if outcome == "invalid":
-                invalid_reason = f"verifier:{verdict.verifier_id}"
+            if outcome != "capped":
+                outcome = verdict.outcome
+                if outcome == "invalid":
+                    invalid_reason = f"verifier:{verdict.verifier_id}"
     if invalid_reason is not None:
         outcome = "invalid"
 
