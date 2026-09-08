@@ -71,6 +71,8 @@ REQUIRED = frozenset(
 )
 
 
+# Keys a record may carry and a frozen corpus record predates: null or absent on the fake path.
+OPTIONAL = frozenset({"discovery"})
 PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
 
@@ -134,7 +136,7 @@ def validate(record: dict[str, Any]) -> None:
     if not isinstance(record, dict):
         raise RecordError("record must be an object")
     missing = sorted(REQUIRED - set(record))
-    unknown = sorted(set(record) - REQUIRED)
+    unknown = sorted(set(record) - REQUIRED - OPTIONAL)
     if missing:
         raise RecordError(f"record is missing keys: {', '.join(missing)}")
     if unknown:
@@ -286,6 +288,10 @@ def validate(record: dict[str, Any]) -> None:
         counts = delivery.get(name, {})
         if not isinstance(counts, dict) or not all(_count(value) for value in counts.values()):
             raise RecordError(f"delivery.{name} must map names to counts")
+    found = record.get("discovery")
+    if found is not None:
+        if not isinstance(found, dict) or not all(isinstance(found.get(name), bool) for name in ("setup_read", "test_run_before_fix")):
+            raise RecordError("discovery must say whether the setup file was read and whether a failing test run preceded the fix")
     key = delivery.get("failure_key")
     if key is not None:
         if not isinstance(key, dict) or key.get("lane") not in (None, "sig_v1", "sig_v1_test") or not isinstance(key.get("keys_leg_hit"), bool):

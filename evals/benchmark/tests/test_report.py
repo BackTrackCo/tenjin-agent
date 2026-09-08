@@ -162,6 +162,16 @@ class ProjectionTest(unittest.TestCase):
         self.assertIn("team shelf secret present: NOT PUBLISHABLE", report.render(published))
         self.assertEqual(self.project()["shelf_secret_present"], False)
 
+    def test_discovery_is_counted_per_arm(self) -> None:
+        accepted = {trial_id: dict(record) for trial_id, record in self.accepted.items()}
+        first = sorted(accepted)[0]
+        arm = accepted[first]["arm_id"]
+        accepted[first]["discovery"] = {"setup_read": True, "setup_reads": 1, "test_run_before_fix": False, "failing_runs_before_fix": 0, "test_runs": 1, "source_edited": True}
+        published = self.project(accepted=accepted)
+        self.assertEqual(published["discovery"][arm], {"attempts": 1, "test_run_before_fix": 0, "setup_read": 1})
+        self.assertIn(f"discovery {arm}: ran the test before the fix 0/1, read the setup file 1/1", report.render(published))
+        self.assertNotIn("discovery", report.render(self.project()))
+
     def test_the_failure_key_lane_and_keys_leg_verdict_are_summed_per_arm(self) -> None:
         accepted = {trial_id: dict(record) for trial_id, record in self.accepted.items()}
         first = sorted(accepted)[0]

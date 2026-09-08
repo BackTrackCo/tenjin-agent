@@ -35,6 +35,7 @@ SUBJECTS = {
     "test_cases": "search-intent case records: after settlement, one per fire, replayed on the fake CLI, seeded marked apart",
     "test_claude_live": "live Claude executor: argv, session id, sessions resolver, child env, live-run",
     "test_claude_usage": "Claude JSONL adapter: request grouping, retries, ambiguity",
+    "test_discovery": "discovery facts off the transcripts: the injected setup file read, a failing run before the fix",
     "test_fake_run": "the fake path end to end, manifest to report",
     "test_loop_join": "Loop 2 delivery join on the exact actor, read-only, WAL refusal",
     "test_manifest": "manifest validation, hashing, and pin rules",

@@ -49,7 +49,8 @@ from typing import Any, Mapping
 
 from urllib.parse import urlsplit
 
-from . import artifact, sha256_json, tenjin_arm, toolchain
+from . import artifact, sha256_json, tenjin_arm, toolchain, verifier
+from .discovery import SETUP_PATH
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest, Provision, ProvisionRequest
 
 NAME = "claude_live"
@@ -404,6 +405,23 @@ def overlay_of(arm: Mapping[str, Any], roots: artifact.TrialRoots) -> dict[str, 
     return {path: resolve_settings(text, {"data_dir": str(roots.data_dir)}) for path, text in overlay.items()}
 
 
+def inject_cases(roots: artifact.TrialRoots, task: Mapping[str, Any]) -> Path | None:
+    """Write the task's test cases from the hidden layer into the trial copy as a Vitest setup file.
+
+    The expected values are only observable by running the test: nothing
+    committed holds them, the fixture's config names this setup file, and the
+    runner materializes it here, after the fixture copy and before the spawn.
+    """
+    cases = verifier.HIDDEN / str(task.get("id", "")) / "cases.json"
+    if not cases.is_file():
+        return None
+    target = roots.repo / SETUP_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {str(task["id"]): json.loads(cases.read_text(encoding="utf-8"))}
+    target.write_text("// Written by the benchmark runner at launch; the test reads it through globalThis.\n" f"globalThis.__bench1Cases = {json.dumps(payload)};\n", encoding="utf-8")
+    return target
+
+
 def apply_overlay(roots: artifact.TrialRoots, overlay: Mapping[str, str]) -> list[str]:
     """Write the overlay into the trial's repository copy. Idempotent: the provisioner and the launch both call it."""
     written = []
@@ -634,6 +652,7 @@ def launch(request: LaunchRequest) -> Launch:
     path = settings_path(request.roots)
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     apply_overlay(request.roots, overlay_of(request.arm, request.roots))
+    inject_cases(request.roots, request.task)
     try:
         manager = package_manager_for(request.roots, os.environ, request.dry_run)
     except toolchain.ToolchainError as error:
@@ -655,6 +674,8 @@ def prepare(request: ProvisionRequest) -> Provision:
     # The overlay is in place before the seed probe, so the probe runs the
     # fixture as the agent will see it.
     apply_overlay(request.roots, overlay_of(request.arm, request.roots))
+    if request.task is not None:
+        inject_cases(request.roots, request.task)
     if request.dry_run:
         return tenjin_arm.prepare(request)
     try:

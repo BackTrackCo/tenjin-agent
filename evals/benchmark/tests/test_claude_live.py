@@ -345,6 +345,23 @@ class HooksArmTest(LiveCase):
         # The product's config regex (test-identity.ts) finds the reporter and its output file in the overlaid config.
         self.assertRegex(written, r"reporters\s*:[\s\S]{0,600}?['\"][^'\"]*tenjin-vitest-reporter[^'\"]*['\"][\s\S]{0,300}?outputFile\s*:\s*['\"]\.vitest-report\.json['\"]")
 
+    def test_the_launch_injects_the_hidden_cases_as_a_setup_file_the_fixture_never_holds(self) -> None:
+        manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+        index = next(index for index, trial in enumerate(schedule.expand(manifest)) if trial.arm_id == "off")
+        request = dataclasses.replace(self.request(manifest, index), dry_run=True)
+        fixture = manifest.fixture_path(request.task)
+        self.assertFalse((fixture / ".bench1").exists())
+        self.assertFalse((request.roots.repo / ".bench1").exists())
+        claude_live.launch(request)
+        setup = (request.roots.repo / ".bench1" / "cases.setup.mjs").read_text(encoding="utf-8")
+        self.assertIn("globalThis.__bench1Cases = ", setup)
+        hidden = json.loads((verifier.HIDDEN / "actor" / "cases.json").read_text(encoding="utf-8"))
+        self.assertIn(json.dumps({"actor": hidden}), setup)
+        self.assertIn("s1:root", setup)
+        # The fixture's config names the setup file, so the run reads it; nothing under the fixture names the value.
+        self.assertIn("setupFiles: ['./.bench1/cases.setup.mjs']", (fixture / "vitest.config.mjs").read_text(encoding="utf-8"))
+        self.assertIsNone(claude_live.inject_cases(request.roots, {"id": "answer-file"}))
+
     def test_an_overlay_is_bounded_to_the_repository_and_the_data_dir_placeholder(self) -> None:
         for name, overlay in (("absolute", {"/etc/x": "a"}), ("escape", {"../x": "a"}), ("empty", {}), ("foreign placeholder", {"a.mjs": "{daemon_token}"}), ("not text", {"a.mjs": 1})):
             with self.subTest(name), self.assertRaises(LiveExecutorError):

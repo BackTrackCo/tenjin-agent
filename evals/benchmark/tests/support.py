@@ -451,6 +451,8 @@ RUN_ARTEFACTS = (
 # through pnpm is refused for a repository reason, in words that name the
 # convention and never the command that satisfies it.
 PNPM_GUARD = "process.env.npm_config_user_agent"
+# A base64 run long enough to be a payload, which a frozen fixture never holds.
+BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
 
 
@@ -484,11 +486,24 @@ def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.
     case.assertIn("verifyDepsBeforeRun: false", workspace)
     case.assertIn("nodeLinker: hoisted", workspace)
     case.assertTrue(list((fixture / "unrelated").glob("*.test.mjs")))
-    # The named test is a vitest test, so plain `node` cannot run it, and its cases are a blob.
+    # The named test is a vitest test, so plain `node` cannot run it, and its cases come from the
+    # runner's setup file: nothing in the tree holds them, decodable or not.
     test = (fixture / "tests" / f"{task}.test.mjs").read_text(encoding="utf-8")
     case.assertIn("from 'vitest'", test)
-    case.assertIn("./support/cases.mjs", test)
-    case.assertIn("gunzipSync", (fixture / "tests" / "support" / "cases.mjs").read_text(encoding="utf-8"))
+    case.assertIn("globalThis.__bench1Cases", test)
+    case.assertIn("setupFiles: ['./.bench1/cases.setup.mjs']", config)
+    case.assertFalse((fixture / "tests" / "support").exists())
+    hidden = REPO_ROOT / "evals" / "benchmark" / "hidden" / task / "cases.json"
+    case.assertTrue(hidden.is_file(), f"hidden/{task}/cases.json holds the expected values")
+    expected = {str(entry["expected"]) for entry in json.loads(hidden.read_text(encoding="utf-8"))}
+    for path in fixture.rglob("*"):
+        if path.is_file() and "node_modules" not in path.parts:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            # The lockfile's integrity hashes are base64 by design and name no expected value.
+            if path.name != "pnpm-lock.yaml":
+                case.assertIsNone(BLOB.search(text), f"{path.relative_to(fixture)} holds a decodable blob")
+            for value in expected:
+                case.assertNotIn(value, text, f"{path.relative_to(fixture)} reveals an expected value")
     for artefact in RUN_ARTEFACTS:
         case.assertFalse((fixture / artefact).exists(), artefact)
     case.assertEqual([path for path in fixture.rglob("*") if path.is_symlink()], [])

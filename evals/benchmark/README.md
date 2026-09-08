@@ -349,7 +349,7 @@ for `actor`, the value run seven's fires table recorded as the question key; the
 it byte for byte. The prepare probe re-derives every command every trial. The operator's next
 run is the proof; nothing here was run against a shelf.
 
-**Keys smoke.** `fixtures/live/keys-smoke-manifest.json` (`bench1-keys-smoke-0`) is a one-hour
+**Keys smoke.** `fixtures/live/keys-smoke-manifest.json` (`bench1-keys-smoke-1`) is a one-hour
 test of the failure path's test-identity key end to end, because no ledger row anywhere has
 shown a `sig_v1_test` hit yet (tenjin-agent#324, and the teammate's finding) and run eight never
 exercised it: the fix was injected on the prompt fire before the first command. One task
@@ -390,6 +390,26 @@ resolution through the JSON path is unobserved. Three of the four keyed attempts
 the agents decoded `tests/support/cases.mjs` with `node -e` and fixed the source before running
 a test. That is a task-design leak, to fix later, not here. Reading: the key resolves from
 console text with no target-repo opt-in; plumbing evidence only, n = 2 per arm.
+
+**Discovery.** The expected value of a task's test is observable only by running the test.
+It is not in the fixture: the fixture's `vitest.config.mjs` names `setupFiles:
+['./.bench1/cases.setup.mjs']`, the values live in the hidden layer (`hidden/<task>/cases.json`,
+never on the agent-visible mount before the run), and `claude_live.launch` writes that setup file
+into the trial's repository copy at launch, after the fixture copy and its hash and before the
+spawn (and before the seed probe, so the probe runs what the agent will), as
+`globalThis.__bench1Cases = {...}`; the test reads `globalThis.__bench1Cases.<task>`. The file
+is derived, not committed, and outside every `fixture_hash`. An agent can still read it; that is
+not forced away, it is counted: `discovery.setup_read` (a Read of the setup path or a Bash
+command naming it) and `discovery.test_run_before_fix` (a vitest or `pnpm test` run whose result
+failed, before the first Edit, Write, or redirecting Bash on `src/<task>.mjs`), derived from
+every transcript of the attempt after settlement, with `summary` printing per arm how many
+attempts ran the test before the fix and how many read the setup file. Leak history: through
+`bench1-keys-smoke-0` the cases were a gzip-and-base64 blob in `tests/support/cases.mjs`, and
+in the keys smoke three of four keyed attempts decoded it with `node -e` and fixed the source
+before any run, so no failure fire keyed anything; the blob is gone from `actor` at
+`bench1-hooks-smoke-7` / `bench1-keys-smoke-1`, and `assert_vitest_fixture` refuses any
+base64 run or expected value in a fixture tree. The `budget`, `candidate`, and `slug` fixtures
+on the layer follow the same pattern when the Bench-2 node rebases.
 
 **The seeded arm may read the shelf by hand.** `tenjin_seeded` carries arm-level
 `settings.permissions.allow` for `Bash(tenjin search:*)`, `Bash(tenjin read:*)`, and
@@ -478,7 +498,7 @@ the sentinel's `public_requests` and invalidates. Public-origin legs are counted
 the report's `origins` block and `summary` read them apart, so the plan's canary gate is two
 counts, unknown requests zero and public hits zero, each judged on its own.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-6`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-7`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
 0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
 exact version in `package.json`, a committed `pnpm-lock.yaml`, and the hoisted `node_modules`

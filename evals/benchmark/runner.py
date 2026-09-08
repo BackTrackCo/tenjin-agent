@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
+from . import artifact, claude_usage, discovery, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from . import reap
 from .schedule import Trial
@@ -471,6 +471,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "wall_time_s": wall_time_s,
         "unresolved_actors": settlement.unresolved,
         "delivery": delivery,
+        "discovery": discovery.derive(sessions, trial.task_id) if spec.live else None,
         "sentinel": sentinel.counts(),
         "isolation": isolation_of(isolation, provision, provision_stop),
         "private_hashes": {

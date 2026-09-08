@@ -181,6 +181,17 @@ def project(
         row["keys_leg_hits"] += int(bool(key.get("keys_leg_hit")))
         row["report_files"] += int(key.get("report_file_present") is True)
         row["delivered"] += int(key.get("delivered_piece_id") is not None)
+    # Discovery per arm: attempts that ran the test (and saw it fail) before
+    # editing the source, and attempts that read the injected setup file.
+    found: dict[str, dict[str, int]] = {}
+    for record in accepted.values():
+        row = found.setdefault(record["arm_id"], {"attempts": 0, "test_run_before_fix": 0, "setup_read": 0})
+        facts = record.get("discovery")
+        if not isinstance(facts, dict):
+            continue
+        row["attempts"] += 1
+        row["test_run_before_fix"] += int(bool(facts.get("test_run_before_fix")))
+        row["setup_read"] += int(bool(facts.get("setup_read")))
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
@@ -205,6 +216,7 @@ def project(
         "origins": origins,
         "seeds": seeds,
         "failure_keys": failure_keys,
+        "discovery": found,
         "trials": [
             {
                 "trial_id": record["trial_id"],
@@ -278,6 +290,9 @@ def render(report: dict[str, Any]) -> str:
             f"{arm['accounting']:>12s}"
         )
     lines.append("")
+    for arm_id, row in sorted((report.get("discovery") or {}).items()):
+        if row["attempts"]:
+            lines.append(f"discovery {arm_id}: ran the test before the fix {row['test_run_before_fix']}/{row['attempts']}, read the setup file {row['setup_read']}/{row['attempts']}")
     for arm_id, row in sorted((report.get("failure_keys") or {}).items()):
         if not row["keyed"]:
             continue
