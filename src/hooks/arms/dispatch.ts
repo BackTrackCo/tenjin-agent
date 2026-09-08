@@ -1,5 +1,4 @@
 import { park } from '../handoff';
-import { REMIND_LINE } from '../prose';
 import type { Arm, LegRow } from '../types';
 import { lookupArm } from './lookup';
 
@@ -31,17 +30,14 @@ export const dispatchArm: Arm = lookupArm({
   wait: 'tool',
   on: [{ event: 'tool.before', kind: 'dispatch' }],
   trigger: 'dispatch',
-  enabled: (cfg) => cfg.hooks.agentDispatch !== 'off',
-  text: (input, ctx) => {
-    // `remind` leaves the arm on and asks nothing; `after` speaks the line.
-    if (ctx.deps.config().hooks.agentDispatch === 'remind') return null;
+  enabled: (cfg) => cfg.hooks.subagent,
+  text: (input) => {
     const prompt = input.tool?.input.prompt;
     return typeof prompt === 'string' ? prompt.trim() : null;
   },
   shelves: ['team', 'public'],
   deliver: 'log',
   after(ctx, result, question) {
-    if (ctx.deps.config().hooks.agentDispatch === 'remind') return { context: REMIND_LINE };
     if (question === null) return null;
     // A hit parks the answer; a definite miss (no-hit, or a cached miss) parks
     // the search id alone. A deadline or an error never reaches here: the child

@@ -22,6 +22,7 @@ import {
   shimBundlePath,
   vitestReporterPath,
 } from '../lib/paths';
+import { HOOK_ARMS } from '../lib/config';
 
 /**
  * The one end-to-end test in PR B: the real tsup bundles, a real spawned
@@ -31,6 +32,10 @@ import {
  * here (07-pr-b-daemon-kernel.md "B2 tests").
  */
 vi.setConfig({ hookTimeout: 60_000, testTimeout: 20_000 });
+
+/** Every arm off, the baseline this file writes; a case spreads it and names
+ *  the one arm it needs. */
+const ALL_OFF = Object.fromEntries(HOOK_ARMS.map((arm) => [arm, false]));
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = join(HERE, '..', 'adapters', 'fixtures', 'claude');
@@ -269,13 +274,11 @@ beforeAll(async () => {
   await build({ ...reporterConfig, outDir: tmpOutDir, silent: true });
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
-  // `hooks.push: off` is pinned rather than defaulted: the arms are on out of
-  // the box now, and the fixture cases below are about routing and rows, not
-  // about lookups. Without it every fixture would ask the production shelf.
-  await writeFile(
-    configPath(dataDir),
-    JSON.stringify({ loop: { port: 0 }, hooks: { push: 'off' } }),
-  );
+  // Every arm is pinned off rather than defaulted: they are on out of the box
+  // now, and the fixture cases below are about routing and rows, not about
+  // lookups. Without it every fixture would ask the production shelf. A case
+  // that needs an arm turns that one on for itself.
+  await writeFile(configPath(dataDir), JSON.stringify({ loop: { port: 0 }, hooks: ALL_OFF }));
   installDaemonFiles(dataDir, tmpOutDir);
 
   const t0 = Date.now();
@@ -319,18 +322,31 @@ describe('the daemon, cold-started from the real bundle', () => {
   });
 
   it('answers 204 to every valid Claude event fixture, and the primer to SessionStart', async () => {
-    for (const f of fixtures) {
-      const res = await fetch(hookUrl(), { method: 'POST', headers: authHeaders(), body: f.body });
-      if (f.event === 'SessionStart') {
-        // `hooks.sessionPrimer` defaults to `on`, so the one event the lead's
-        // session opens with carries the primer paragraph.
-        expect(res.status, f.name).toBe(200);
-        const out = (await res.json()) as { hookSpecificOutput?: { additionalContext?: string } };
-        expect(out.hookSpecificOutput?.additionalContext).toContain('Tenjin');
-        continue;
+    const original = await readFile(configPath(dataDir), 'utf8');
+    // The primer asks no shelf, so it is the one arm this case turns on: the
+    // event a session opens with has to carry its paragraph back.
+    await writeFile(
+      configPath(dataDir),
+      JSON.stringify({ loop: { port: 0 }, hooks: { ...ALL_OFF, primer: true } }),
+    );
+    try {
+      for (const f of fixtures) {
+        const res = await fetch(hookUrl(), {
+          method: 'POST',
+          headers: authHeaders(),
+          body: f.body,
+        });
+        if (f.event === 'SessionStart') {
+          expect(res.status, f.name).toBe(200);
+          const out = (await res.json()) as { hookSpecificOutput?: { additionalContext?: string } };
+          expect(out.hookSpecificOutput?.additionalContext).toContain('Tenjin');
+          continue;
+        }
+        expect(res.status, f.name).toBe(204);
+        expect(await res.text(), f.name).toBe('');
       }
-      expect(res.status, f.name).toBe(204);
-      expect(await res.text(), f.name).toBe('');
+    } finally {
+      await writeFile(configPath(dataDir), original);
     }
   });
 
@@ -349,7 +365,7 @@ describe('the daemon, cold-started from the real bundle', () => {
         reason: string;
       }>;
       expect(rows).toHaveLength(fixtures.length - stops);
-      // This file pins `hooks.push: off`, so every lookup arm declines
+      // This file pins every arm off, so every lookup arm declines
       // and nothing is asked of any shelf. `arm` still names the arm that
       // declined — the WebFetch fixture reaches `fetch`, the Bash result
       // reaches `failure`, the Bash call and the Read reach `context` — and
@@ -514,7 +530,7 @@ describe('the daemon, cold-started from the real bundle', () => {
         loop: { port: 0 },
         baseUrl: shelfUrl,
         publicShelfUrl: shelfUrl,
-        hooks: { push: 'on' },
+        hooks: { ...ALL_OFF, prompt: true },
       }),
     );
     let response: Record<string, unknown>;
@@ -600,7 +616,7 @@ describe('the daemon, cold-started from the real bundle', () => {
         loop: { port: 0 },
         baseUrl: shelfUrl,
         publicShelfUrl: shelfUrl,
-        hooks: { push: 'on', capture: 'on' },
+        hooks: { ...ALL_OFF, subagent: true, publish: true },
       }),
     );
     const session = 's-loop-dispatch';

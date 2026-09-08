@@ -13,8 +13,11 @@ import {
 } from '../lib/delivery';
 import { sanitizeForTerminal } from '../lib/output';
 import { isSessionPresentable, loadSessionFile, signWithSession } from '../lib/session-present';
-import type { SessionFile } from '../lib/session-present';
-import { originOf } from '../lib/url';
+import type { SignableRequest } from '../lib/session-present';
+import { resolveWriteAuth } from '../lib/consent';
+import { resolveWalletProvider, type WalletProvider } from '../lib/wallet';
+import { isSameDeployment } from '../lib/production-origin';
+import { originOf, tryOriginOf } from '../lib/url';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -26,25 +29,31 @@ import type { CommandContext, CommandResult } from '../context';
  * `read` is the half of `buy` that never spends:
  *   1. local library (already delivered → re-deliver from disk, no network)
  *   2. first GET, unauthenticated → a FREE resource delivers immediately
- *   3. a PAID resource, with a read-scoped session key on disk for THIS origin →
- *      present it on ONE bodyless signed GET; a 200 means this wallet owns the
- *      piece and it delivers, free
+ *   3. a PAID resource → establish or reuse a read-scoped session key for THIS
+ *      origin and present it on ONE bodyless signed GET; a 200 means this wallet
+ *      owns the piece and it delivers, free
  *   4. anything else → REFUSED (exit 3), naming the price, and pointing at
  *      `tenjin buy` only when the server actually answered "you do not own this".
  *      Nothing is charged, and the refusal lands before any payment could be
  *      constructed, because none can be.
  *
  * The hard invariant, test-pinned rather than merely intended (read.test.ts): this
- * module and its whole transitive import graph never reach `lib/x402-pay`,
- * `lib/wallet`, or `lib/session-key`. Step 3 uses the present-only half, so read
- * can load a delegation and sign with it but cannot mint one and cannot pay.
- * Those two are the whole of what the pin guarantees; what a minted delegation is
- * worth to a holder is answered in `lib/permissions.ts`.
+ * module and its whole transitive import graph never reach `lib/x402-pay`. read
+ * CANNOT PAY, and no refactor inside its graph can make it: the delegated key is
+ * P-256, the wrong curve for the EIP-712 authorization a payment needs.
  *
- * Step 3 therefore presents ONLY to the origin the session was minted against.
- * `--base-url` rides this verb like every other and `read` is always-safe, so
- * without that check one auto-allowed command line would hand a wallet-derived
- * credential to a host an agent picked.
+ * Step 3's mint is the SAME establish-or-reuse `publish` and `edit` run
+ * (`resolveWriteAuth`, at `read` scope): one keystore unlock, a ≤24h delegation
+ * cached 0600, and every later owned read free and unattended. There is no
+ * second SIWX path here and no separate verb to remember — an owned piece that is
+ * not on this machine simply comes back.
+ *
+ * It presents and mints ONLY against a deployment the CONFIG FILE names — the
+ * pin `fund` has (owner decision, 2026-09-06). `--base-url` still points a free
+ * read anywhere, but the wallet signs for `baseUrl` or `publicShelfUrl` as
+ * configured or for nothing at all, so an allowlisted `read --base-url <host>`
+ * cannot steer a credential to a host an agent named. Nor is a cached
+ * delegation for another origin offered, or clobbered by one minted here.
  */
 
 export interface ReadArgs {
@@ -56,10 +65,13 @@ export interface ReadArgs {
 }
 
 export interface ReadDeps {
-  /** No `provider`/`authorizer` seam, unlike BuyDeps: there is no wallet to inject. */
   fetchImpl?: typeof fetch;
   /** Clock seam (ms since epoch) for the session-expiry decision. */
   now?: () => number;
+  /** Wallet seam for step 3's mint; no `authorizer`, unlike BuyDeps, because
+   *  there is no payment for one to authorize. */
+  provider?: WalletProvider;
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runRead(
@@ -129,17 +141,15 @@ export async function runRead(
     });
   }
 
-  // 3. Paid and not on disk. A live session key minted for THIS origin means the
-  //    wallet may already own the piece. Exactly one attempt: re-establishing
-  //    would need the wallet this module cannot reach.
-  const cached = await loadSessionFile(ctx.dataDir);
+  // 3. Paid and not on disk. A read-scoped session key says whether this wallet
+  //    already owns the piece; it is reused if one is live and minted if not.
   const now = deps.now ?? Date.now;
   // Against the origin of the URL actually being signed, not the configured base
   // URL. They are equal only because `resolveResourceRef` asserted it in another
   // module; checking the request target makes this guard locally sound instead of
   // dependent on a pin someone could move.
   const origin = originOf(ref.url);
-  const outcome = await presentIfUsable(cached, origin, now, ref.url, fetchOpts);
+  const outcome = await presentOrMint(ctx, origin, settings, now, ref.url, fetchOpts, deps);
   if (outcome.kind === 'entitled') {
     return await deliverFresh(
       ctx.dataDir,
@@ -158,11 +168,16 @@ export async function runRead(
 
 /** What the entitlement question got, which is not the same as what was asked. */
 type EntitlementCheck =
-  | 'not_performed'
   | 'session'
   | 'session_rejected'
   | 'session_inconclusive'
-  | 'session_origin_mismatch';
+  | 'session_origin_mismatch'
+  | 'origin_not_configured'
+  | 'no_wallet';
+
+/** How the one signed GET gets its headers: from the cached delegation, or from
+ *  the write auth that mints one. */
+type SignHeaders = (req: SignableRequest) => Promise<Record<string, string>>;
 
 type PresentOutcome =
   { kind: 'entitled'; body: ReadBody } | { kind: 'refuse'; check: EntitlementCheck };
@@ -171,30 +186,84 @@ type PresentOutcome =
 const LOUD_CODES = new Set(['CONTRACT_MISMATCH', 'RATE_LIMITED']);
 
 /**
- * Decide whether the cached session may be presented, and present it if so.
+ * Get a read-scoped session for this origin — reusing the cached one, or minting
+ * it — and present it.
  *
- * The origin mismatch is its own outcome rather than "no session": the two are
- * indistinguishable to an agent, and the remedy for one is the remedy the other
- * must NOT get. `not_performed` tells the agent to run `session start`, which is
- * the single verb that opens the keystore — and an agent that reached a mismatch
- * by carrying `--base-url` would carry it straight into that suggestion, minting
- * a wallet-signed delegation against the wrong host and clobbering the good one.
+ * THE MINT IS NOT A SECOND PATH. It is `resolveWriteAuth` at `read` scope, the
+ * same call `publish` and `edit` make, so the delegation this leaves on disk is
+ * the one they reuse and vice versa. The cached branch above it exists for one
+ * reason: `resolveWriteAuth` takes a signer by value, and resolving one decrypts
+ * the keystore, so asking for it first would charge every owned read a
+ * passphrase the live delegation was minted to avoid.
+ *
+ * THE PIN COMES FIRST. A host the config does not name gets no signature and no
+ * keystore prompt, whatever `--base-url` said: `isSameDeployment` is the same
+ * compare `resource-ref` pins a payable URL with, applied here to the CONFIGURED
+ * base and the configured public shelf rather than to the resolved ones, which a
+ * flag moves.
+ *
+ * The origin mismatch below is its own outcome rather than "no session": the two
+ * are indistinguishable to an agent, and the remedy for one is the remedy the
+ * other must NOT get. A cached delegation for another deployment means the
+ * configured base moved after it was minted, and minting here would overwrite
+ * the good credential with one for the new origin.
  */
-async function presentIfUsable(
-  cached: SessionFile | null,
+async function presentOrMint(
+  ctx: CommandContext,
   origin: string,
+  settings: { configuredBaseUrl: string; publicShelfUrl: string },
   now: () => number,
   url: string,
   fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch },
+  deps: ReadDeps,
 ): Promise<PresentOutcome> {
-  if (cached === null) return { kind: 'refuse', check: 'not_performed' };
-  if (cached.origin !== origin) {
+  if (!onConfiguredDeployment(origin, settings)) {
+    return { kind: 'refuse', check: 'origin_not_configured' };
+  }
+  const cached = await loadSessionFile(ctx.dataDir);
+  if (cached !== null && cached.origin !== origin) {
     return { kind: 'refuse', check: 'session_origin_mismatch' };
   }
-  if (!isSessionPresentable(cached, now(), 'read', origin)) {
-    return { kind: 'refuse', check: 'not_performed' };
+  if (cached !== null && isSessionPresentable(cached, now(), 'read', origin)) {
+    return await present((req) => signWithSession(cached, req, { now }), url, fetchOpts);
   }
-  return await present(cached, url, fetchOpts, now);
+  let headersFor: SignHeaders;
+  try {
+    const provider = resolveWalletProvider(
+      ctx,
+      deps.provider !== undefined ? { provider: deps.provider } : {},
+    );
+    const signer = await provider.getSigner();
+    const auth = resolveWriteAuth({
+      signer,
+      // The origin being read, not the configured base URL: in team mode a piece
+      // may live on the public shelf while `baseUrl` names the team's, and a
+      // delegation is only ever valid for the origin it was bound to.
+      baseUrl: origin,
+      dataDir: ctx.dataDir,
+      scope: 'read',
+      env: deps.env ?? process.env,
+    });
+    headersFor = (req) => auth.headersFor(req);
+  } catch {
+    // No wallet, or one that will not open. Ownership was never asked, and a
+    // machine with no key owns nothing here anyway: refuse on the price rather
+    // than replace a recoverable exit 3 with a keystore error.
+    return { kind: 'refuse', check: 'no_wallet' };
+  }
+  return await present(headersFor, url, fetchOpts);
+}
+
+/** Is this origin one of the two shelves the config names? */
+function onConfiguredDeployment(
+  origin: string,
+  settings: { configuredBaseUrl: string; publicShelfUrl: string },
+): boolean {
+  for (const configured of [settings.configuredBaseUrl, settings.publicShelfUrl]) {
+    const shelf = tryOriginOf(configured);
+    if (shelf !== null && isSameDeployment(origin, shelf)) return true;
+  }
+  return false;
 }
 
 /**
@@ -207,14 +276,13 @@ async function presentIfUsable(
  * keystore-opening command instead).
  */
 async function present(
-  session: SessionFile,
+  headersFor: SignHeaders,
   url: string,
   fetchOpts: { timeoutMs: number; fetchImpl?: typeof fetch },
-  now: () => number,
 ): Promise<PresentOutcome> {
   let second: SessionReadResult;
   try {
-    const sessionHeaders = await signWithSession(session, { method: 'GET', url }, { now });
+    const sessionHeaders = await headersFor({ method: 'GET', url });
     second = await fetchRead(url, { ...fetchOpts, sessionHeaders });
   } catch (err) {
     if (err instanceof CliError && LOUD_CODES.has(err.code)) throw err;
@@ -246,13 +314,14 @@ async function present(
  * from it rather than from a single default:
  *
  *  - `session` — the server answered "you do not own this". Buying is the answer.
- *  - `session_origin_mismatch` — a session exists, for a DIFFERENT origin. The
- *    remedy is to stop redirecting the CLI, never to mint. `sessionCommand` is
- *    deliberately absent: recommending it here would send an agent that still
- *    carries `--base-url` to wallet-sign a delegation against the wrong host and
- *    overwrite the good one.
- *  - everything else — the question is still open, so re-minting may deliver it
- *    free and `sessionCommand` rides.
+ *  - `origin_not_configured` — this host is not a shelf the config names, so
+ *    nothing was signed for it. The remedy is to stop redirecting the CLI.
+ *  - `session_origin_mismatch` — a session exists, for a DIFFERENT origin, so
+ *    nothing was presented and nothing was minted. The remedy is to stop
+ *    redirecting the CLI.
+ *  - `no_wallet` — there is no key on this machine to ask the question with, so
+ *    ownership is unknown rather than denied.
+ *  - everything else — the question is still open; retrying is free.
  */
 function refusal(
   ref: { url: string; resourceId?: string },
@@ -265,13 +334,14 @@ function refusal(
   const priceText = `${formatUsdDisplay(price.atomic)} USD (${price.atomic} atomic)`;
   const url = sanitizeForTerminal(ref.url);
   const buyFix = `Run \`tenjin buy ${url}\` to pay and read it, or \`tenjin inspect\` for the card first.`;
-  const mismatch = check === 'session_origin_mismatch';
-  const mintable = check !== 'session' && !mismatch;
-  const fix = mismatch
-    ? `Your session key was minted for a different Tenjin deployment, so it was not presented. Read from the origin it belongs to, rather than minting a new session against this one. Check the configured origin with \`tenjin config get baseUrl\` and drop any host override. ${buyFix}`
-    : mintable
-      ? `${buyFix} If you already bought it, \`tenjin session start --scope read\` lets this read recover it free.`
-      : buyFix;
+  const fix =
+    check === 'origin_not_configured'
+      ? `That host is not a Tenjin shelf this machine is configured for, so nothing was signed for it. Check the configured origin with \`tenjin config get baseUrl\` and drop any host override. ${buyFix}`
+      : check === 'session_origin_mismatch'
+        ? `Your session key was minted for a different Tenjin deployment, so it was not presented and no new one was minted against this host. Read from the origin it belongs to. Check the configured origin with \`tenjin config get baseUrl\` and drop any host override. ${buyFix}`
+        : check === 'no_wallet'
+          ? `This machine has no wallet that opens, so whether you own this piece could never be asked. Create or fix one (\`tenjin wallet create\`, \`tenjin doctor\`), then read it again. ${buyFix}`
+          : buyFix;
   return new CliError('REFUSED', `This piece costs ${priceText}; \`tenjin read\` never pays.`, {
     fix,
     details: {
@@ -282,7 +352,6 @@ function refusal(
       price,
       network: requirement.network,
       buyCommand: `tenjin buy ${ref.url}`,
-      ...(mintable ? { sessionCommand: 'tenjin session start --scope read' } : {}),
     },
   });
 }

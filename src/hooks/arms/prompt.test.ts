@@ -11,7 +11,7 @@ import { cleanup, fireContext, freshDb, hookInput, kernelConfig } from './test-s
 
 afterEach(cleanup);
 
-const ON = kernelConfig({ push: 'on' });
+const ON = kernelConfig();
 
 /** A real question, of the shape a person actually types. */
 const PROMPT =
@@ -36,8 +36,8 @@ describe('the prompt arm registration', () => {
 });
 
 describe('the prompt arm plan', () => {
-  it('asks nothing at all while `hooks.push` is off', () => {
-    expect(plan(PROMPT, kernelConfig({ push: 'off' }))).toBeNull();
+  it('asks nothing at all while `hooks.prompt` is off', () => {
+    expect(plan(PROMPT, kernelConfig({ prompt: false }))).toBeNull();
   });
 
   it('asks both shelves at once: one stage, team first', () => {
@@ -111,7 +111,7 @@ describe('the prompt arm under team.publicFallback off', () => {
     };
     vi.stubGlobal('fetch', fetchImpl);
     try {
-      const config = kernelConfig({ push: 'on' }, { publicFallback: 'off' });
+      const config = kernelConfig({}, { publicFallback: 'off' });
       const db = freshDb();
       const ctx = fireContext({
         db,

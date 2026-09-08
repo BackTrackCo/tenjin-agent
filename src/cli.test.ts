@@ -111,6 +111,67 @@ describe('main', () => {
     );
   });
 
+  /**
+   * The shape `tenjin --help` is expected to hold (clig.dev's "display the most
+   * common flags and commands at the start", gh's grouped root list): five
+   * headings, one line per command, the globals listed once, and examples plus
+   * pointers at the end. A command that lands outside the five falls into
+   * commander's ungrouped `Commands:` bucket, which is what this catches.
+   */
+  it('files every command under the five headings, in order', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    const groups = ['Setup:', 'Search and read:', 'Publish:', 'Wallet:', 'Integration:'];
+    const at = groups.map((group) => help.indexOf(group));
+    expect(at.filter((i) => i === -1)).toEqual([]);
+    expect(at).toEqual([...at].sort((a, b) => a - b));
+    expect(help).not.toMatch(/^Commands:$/m);
+  });
+
+  /**
+   * gh, git, cargo and docker all take both spellings, so this one does too.
+   * The heading matters as much as the command: `help` is the one command
+   * commander files itself, and an ungrouped one is exactly the stray
+   * `Commands:` block the case above forbids. Exit 0, because the text was
+   * asked for — a bare `tenjin` is the usage error, and stays one.
+   */
+  it('takes `tenjin help <command>` as well as `<command> --help`', async () => {
+    const root = captureIo();
+    expect(await main(['--help'], root.io)).toBe(0);
+    expect(root.stdout()).toContain('help [command]');
+
+    const cap = captureIo();
+    expect(await main(['help', 'hooks'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('Usage: tenjin hooks');
+    expect(cap.stdout()).toContain('$ tenjin hooks disable web-fetch');
+  });
+
+  // vercel's rule, applied here: a global flag is listed once, on the root. The
+  // per-command copies still PARSE (`tenjin doctor --json`, covered below); they
+  // are hidden so a command's own flags are what its help shows.
+  it('lists the globals once, on the root, and not again under a command', async () => {
+    const root = captureIo();
+    expect(await main(['--help'], root.io)).toBe(0);
+    expect(root.stdout()).toContain('Global options:');
+    expect(root.stdout()).toContain('emit one machine JSON envelope on stdout');
+
+    const leafHelp = captureIo();
+    expect(await main(['doctor', '--help'], leafHelp.io)).toBe(0);
+    expect(leafHelp.stdout()).toContain('--prune');
+    expect(leafHelp.stdout()).not.toContain('--base-url');
+  });
+
+  it('ends with examples and the pointers, not a second copy of the docs', async () => {
+    const cap = captureIo();
+    expect(await main(['--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('Examples:');
+    expect(help).toContain('$ tenjin install');
+    expect(help).toContain('Run `tenjin <command> --help` for one command.');
+    expect(help).toContain(PERMISSIONS_DOC_URL);
+  });
+
   // A pointer in help has to work from wherever the reader is standing, which is
   // their own project and not this package. A repo-relative `docs/...` path reads
   // as a file they can open and is not one.
@@ -120,9 +181,38 @@ describe('main', () => {
     const help = cap.stdout();
     expect(help).toContain(PERMISSIONS_DOC_URL);
     expect(help).not.toMatch(/(?<!\/)docs\/agent-permissions\.md/);
-    // Same tier claim as every other surface, doctor's local check included.
-    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC or move your keys');
-    expect(help.replace(/\s+/g, ' ')).toContain('doctor may check your wallet still opens');
+    // Same tier claim as every other surface: no spending, and the keystore
+    // access `read` and `doctor` do have.
+    expect(help.replace(/\s+/g, ' ')).toContain('none can spend USDC');
+    expect(help.replace(/\s+/g, ' ')).toContain(
+      '`tenjin read` opens the keystore to mint a read-scoped session key',
+    );
+    expect(help.replace(/\s+/g, ' ')).toContain(
+      '`tenjin doctor` decrypts locally to check your wallet still opens',
+    );
+  });
+
+  // The Bazaar lane is a flag now, not a prompt, so it has to be discoverable
+  // where every other flag is.
+  it('offers the lane install no longer asks about as a flag', async () => {
+    const cap = captureIo();
+    expect(await main(['install', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('--bazaar-pay');
+    // The hooks are not a flag or a prompt any more: all seven arms are on and
+    // `tenjin config set hooks.<arm> false` is the one place to change that.
+    expect(help).not.toContain('--search-hooks');
+  });
+
+  // The compat no-ops are gone rather than hidden: `install` writes no CLAUDE.md
+  // line, and `--allow-free-verbs` only ever restated the default. Rejected at
+  // parse time, so the action never runs.
+  it('rejects the compat no-op flags', async () => {
+    for (const flag of ['--claude-md', '--no-claude-md', '--allow-free-verbs']) {
+      const cap = captureIo();
+      expect(await main(['install', flag, '--json'], cap.io), flag).toBe(2);
+      expect(cap.stdout(), flag).toContain(`unknown option '${flag}'`);
+    }
   });
 
   it('bare invocation at a TTY: commander help on stderr, stdout empty (no envelope)', async () => {
@@ -409,50 +499,64 @@ describe('publish --search-id collects (the dispatcher mapping)', () => {
 });
 
 /**
- * The `session` group. Dispatcher-level only: `session start` reaches a wallet,
- * so the cases here are the ones that resolve BEFORE it — the group exists, the
- * leaf exists, and a bad `--scope` is USAGE.
+ * The verbs decision 15 deleted, and the ones that replaced them. Dispatcher
+ * level only: `wallet send` reaches a wallet and `hooks list` reaches loop.db,
+ * so what is asserted here is what resolves BEFORE either — the command exists,
+ * or it does not.
  */
-describe('session command group', () => {
-  it('registers `session start` as a subcommand, not a bare verb', async () => {
+describe('the deleted verbs and their replacements', () => {
+  it.each(['push', 'state', 'session', 'send'])('`tenjin %s` is not a command', async (verb) => {
     const cap = captureIo();
-    expect(await main(['session', '--help'], cap.io)).toBe(0);
-    expect(cap.stdout()).toContain('start [options]');
-  });
-
-  it('a bare `tenjin session` is USAGE, never a silent mint', async () => {
-    const cap = captureIo();
-    expect(await main(['session'], cap.io)).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
-  });
-
-  it('--scope read+write is refused as USAGE, before any wallet work', async () => {
-    const cap = captureIo();
-    const code = await main(['session', 'start', '--scope', 'read+write', '--json'], cap.io);
-    expect(code).toBe(2);
+    expect(await main([verb, '--json'], cap.io)).toBe(2);
     const parsed = JSON.parse(cap.stdout()) as { error: { code: string; message: string } };
     expect(parsed.error.code).toBe('USAGE');
-    expect(parsed.error.message).toContain('read+write');
+    expect(parsed.error.message).toContain(`unknown command '${verb}'`);
   });
 
-  it('the leaf takes trailing global flags like every other command', async () => {
+  it('`tenjin wallet send` is registered under the wallet group', async () => {
     const cap = captureIo();
-    // A bad --timeout is a dispatcher-level USAGE, which proves the leaf parsed
-    // the global flag rather than passing it through as an unknown option.
-    const code = await main(['session', 'start', '--timeout', 'abc'], cap.io);
-    expect(code).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+    expect(await main(['wallet', '--help'], cap.io)).toBe(0);
+    expect(cap.stdout()).toContain('send [options] <amount> <token> <to>');
+  });
+
+  it('`tenjin hooks` carries list, enable and disable', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    expect(help).toContain('list');
+    expect(help).toContain('enable [options] <arm>');
+    expect(help).toContain('disable [options] <arm>');
+    // How to run it and how to switch an arm, with one example.
+    expect(help).toContain('$ tenjin hooks disable web-fetch');
+  });
+
+  // The arm -> event -> counts table is two thirds live state, so it ships as the
+  // command's OUTPUT and is never snapshotted into help, where it would rot.
+  it('leaves the arms table to `tenjin hooks` itself, not its help', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const column of ['ARM', 'STATE', 'FIRED', 'HIT']) expect(help).not.toContain(column);
+  });
+
+  it('`tenjin hooks disable` on an unknown arm is USAGE naming the seven', async () => {
+    const cap = captureIo();
+    expect(await main(['hooks', 'disable', 'nope', '--json'], cap.io)).toBe(2);
+    const parsed = JSON.parse(cap.stdout()) as { error: { code: string; fix?: string } };
+    expect(parsed.error.code).toBe('USAGE');
+    expect(parsed.error.fix).toContain('prompt, web-search, web-fetch, subagent, failure');
+  });
+
+  it('`tenjin grade` is a top-level verb carrying the four grading flags', async () => {
+    const cap = captureIo();
+    expect(await main(['grade', '--help'], cap.io)).toBe(0);
+    const help = cap.stdout();
+    for (const flag of ['--since', '--session', '--explain', '--label']) {
+      expect(help).toContain(flag);
+    }
   });
 });
 
-/**
- * The stored-finding source on `publish`, at the dispatcher.
- *
- * There is no `finding` COMMAND GROUP to reach the queue with: the id the
- * capture ask prints is an argument to the command the ask already names, so
- * what has to hold here is that the flag exists and that a wrong id fails the
- * way every other missing resource in this CLI does — before any wallet touch.
- */
 describe('publish --finding', () => {
   it('is registered on publish rather than as a command group of its own', async () => {
     const help = captureIo();

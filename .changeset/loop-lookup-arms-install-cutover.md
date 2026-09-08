@@ -45,17 +45,16 @@ re-run is byte-identical and **`tenjin uninstall` first is not needed**. It brin
 a healthy daemon up _before_ it writes `settings.json`, because Claude Code picks
 that file up through a watcher and an entry naming a daemon that is not there turns
 a live session's next tool call into an `HTTP hook error`; the file is written mode
-0600, since it now carries the daemon token as a literal. `tenjin push on|off` is a
-config write and nothing else — no wiring step, no re-install, effective on your
-next prompt, and it neither adds nor removes an entry. `tenjin update` fetches the
+0600, since it now carries the daemon token as a literal. Turning an arm on or off
+is a config write and nothing else — no wiring step, no re-install, effective on
+your next prompt, and it neither adds nor removes an entry. `tenjin update` fetches the
 new build and refreshes the profile it ran under; the bundles are the same bytes for
 every profile now, so there is nothing to hunt for. `tenjin uninstall` takes the
-entries out first, then stops the daemon and removes its files, keeping `loop.db`
-beside `state.db`. `tenjin doctor` compares the port the entries name to the daemon
+entries out first, then stops the daemon and removes its files, keeping `loop.db`.
+`tenjin doctor` compares the port the entries name to the daemon
 answering `/health`, and warns on a settings file wider than 0600.
 
 **Hermes is gone.** `tenjin install --harness hermes`, its Python plugin and its
 native wiring are deleted; nobody used it, and the adapter comes back against the
 frozen kernel if anyone ever does. `loop.db` is deleted rather than migrated across
-this series, and `tenjin push status`'s 7-day window holds the previous release's
-rows until the loop's own reader ships.
+this series.

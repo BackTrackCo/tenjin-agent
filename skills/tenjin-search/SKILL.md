@@ -129,15 +129,19 @@ tenjin read <resource-url-or-id> --json
 
 - Delivers **free** pieces and anything already in your library; a re-read costs
   nothing and needs no approval.
-- `read` **cannot pay**: no wallet path, no payment module. With a session key
-  cached **for the configured origin**, a paid piece this wallet owns comes back
-  free and unattended; one minted elsewhere is never presented.
+- `read` **cannot pay**: no payment module. A paid piece this wallet owns comes
+  back free — it mints or reuses a read-scoped session key for that origin, so
+  the first one may take a wallet signature and every later one takes none. It
+  signs only for the shelves your config names, and a delegation minted for
+  another origin is never presented and never replaced.
 - Otherwise a paid piece refuses with **exit 3**, naming the price. Nothing is
   charged, so `read` is safe to try first.
 - Read the refusal's `entitlementCheck`. Only **`session`** means the server said
   "this wallet does not own it", and only then is `tenjin buy` the answer.
-  `not_performed`, `session_rejected`, and `session_inconclusive` leave ownership
-  open: surface the payload's `sessionCommand` (one signature, spends nothing).
+  `session_rejected` and `session_inconclusive` leave ownership open, so the read
+  is worth retrying; `no_wallet`, `origin_not_configured` and
+  `session_origin_mismatch` are the operator's to fix, and the refusal's `fix`
+  says how.
 
 ```bash
 tenjin buy <resource-url-or-id> --json --max-price <usd> [--yes]

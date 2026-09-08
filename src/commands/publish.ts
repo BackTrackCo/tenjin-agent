@@ -236,7 +236,7 @@ export async function runPublish(
     const dropped = await dequeueFinding(ctx.dataDir, target.id);
     if (!dropped) {
       throw new CliError('INTERNAL', `Could not take finding ${target.id} off the queue.`, {
-        fix: 'The local store could not be opened or written. Nothing changed; re-run once it is reachable (`tenjin push status` reports the store).',
+        fix: 'The local store could not be opened or written. Nothing changed; re-run once it is reachable (`tenjin doctor` reports the store).',
       });
     }
     return {
@@ -290,8 +290,8 @@ export async function runPublish(
    *   rather than a position, right here, because position is what kept failing.
    *
    * THE EXCEPTION IS `--dry-run`, deliberately. It is the remediation this
-   * refusal's own `fix` names, the one the capture ask names, and the one
-   * command-reference and the MCP tool description name; gating it would make
+   * refusal's own `fix` names, the one the capture ask names, and the one the
+   * MCP tool description names; gating it would make
    * every one of those unreachable and leave `--yes` the only way to find out
    * what a row is. It writes nothing, spends nothing and reaches no shelf, so it
    * changes no state in the project that owns the finding. What it does disclose
@@ -463,8 +463,8 @@ export async function runPublish(
   // AND IT SITS ABOVE THE BLOCK, not below it (round-3 item 4). The block used
   // to throw first, so `publish --finding <id> --dry-run` on a blocked finding
   // re-threw and printed nothing — while the block's own `fix` line, the capture
-  // ask, command-reference.md and the MCP tool description all named that exact
-  // command as the way to read it. The read path is the whole reason the ask
+  // ask and the MCP tool description all named that exact command as the way to
+  // read it. The read path is the whole reason the ask
   // carries no body at all now, so it has to work on the one finding the
   // operator most needs to see. Nothing is published either way: this returns
   // before the confirm, the wallet and the network, and it reports the block

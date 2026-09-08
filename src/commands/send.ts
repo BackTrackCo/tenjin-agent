@@ -17,7 +17,7 @@ import { describeWallet, resolveWalletProvider, type WalletProvider } from '../l
 import type { CommandContext, CommandResult } from '../context';
 
 /**
- * `tenjin send <amount> <token> <to>`: the escape hatch that moves funds OUT of
+ * `tenjin wallet send <amount> <token> <to>`: the escape hatch that moves funds OUT of
  * the agent wallet, complementary to delegation (which redirects future revenue
  * off the hot key; this is for a balance already on it). Invariants a reader
  * cannot derive from the code order alone:
@@ -60,7 +60,7 @@ export async function runSend(
   const amountAtomic = BigInt(parseUsdToAtomic(args.amount));
   if (amountAtomic === 0n) {
     throw new CliError('USAGE', 'The send amount must be greater than zero.', {
-      fix: 'Pass a positive decimal USDC amount, e.g. `tenjin send 5 usdc <to>`.',
+      fix: 'Pass a positive decimal USDC amount, e.g. `tenjin wallet send 5 usdc <to>`.',
     });
   }
   const to = parseRecipient(args.to);
@@ -147,7 +147,7 @@ export async function runSend(
     throw new CliError(
       'PROVIDER_ERROR',
       `The signer address ${signer.address} does not match the confirmed wallet ${desc.address}.`,
-      { fix: 'The wallet changed between preview and signing; re-run `tenjin send`.' },
+      { fix: 'The wallet changed between preview and signing; re-run `tenjin wallet send`.' },
     );
   }
 
@@ -219,7 +219,7 @@ function enforceSendCap(
 function requireUsdc(token: string): void {
   if (token.trim().toLowerCase() === 'usdc') return;
   throw new CliError('USAGE', `Unsupported token: ${JSON.stringify(token)}`, {
-    fix: 'Only USDC on Base is supported: `tenjin send <amount> usdc <to>`.',
+    fix: 'Only USDC on Base is supported: `tenjin wallet send <amount> usdc <to>`.',
   });
 }
 

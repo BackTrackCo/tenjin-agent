@@ -79,7 +79,7 @@ describe('readChildFinding', () => {
 
   it('says the queue is empty rather than naming ids that are not there', async () => {
     const err = (await readChildFinding(dir, 'GONE').catch((e: unknown) => e)) as { fix?: string };
-    expect(err.fix).toContain('hooks.capture');
+    expect(err.fix).toContain('hooks.publish');
   });
 
   it('drops a fact whose value is not readable JSON', async () => {

@@ -21,8 +21,8 @@ export const promptArm: Arm = lookupArm({
   on: [{ event: 'prompt' }],
   trigger: 'prompt',
   // The entry is permanent now, so the switch is here rather than in the
-  // installed file: `tenjin push off` takes effect on the next prompt.
-  enabled: (cfg) => cfg.hooks.push === 'on',
+  // installed file: `hooks.prompt` takes effect on the next prompt.
+  enabled: (cfg) => cfg.hooks.prompt,
   text: (input) => input.prompt ?? null,
   skip: promptSkip,
   shelves: ['team', 'public'],

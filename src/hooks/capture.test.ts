@@ -26,7 +26,7 @@ import type { Actor, Deps, KernelConfig } from './types';
  * and published. A child's ask carries none of those.
  */
 
-const TEAM = kernelConfig({ push: 'on', capture: 'on' });
+const TEAM = kernelConfig();
 const PUBLIC_ONLY: KernelConfig = { ...TEAM, baseUrl: PRODUCTION_ORIGIN };
 const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 
@@ -230,9 +230,7 @@ describe('the child ask', () => {
     const silent = freshDb();
     started(silent);
     setMark(silent, CHILD, 'edited:abc', 'src/a.ts', NOW);
-    expect(
-      await fire(silent, childStop(), kernelConfig({ push: 'on', capture: 'off' })),
-    ).toBeNull();
+    expect(await fire(silent, childStop(), kernelConfig({ publish: false }))).toBeNull();
     expect(getMark(silent, CHILD, 'capture:asked')).toBeNull();
 
     const workflow = freshDb();
@@ -320,14 +318,6 @@ describe('the child ask', () => {
     expect(lead).toContain('(open-1) had no answer');
     expect(lead).toContain('`--key fingerprint=sig_v1_test:ab12`');
   });
-
-  it('push off is silent everywhere, whatever capture says', async () => {
-    const db = freshDb();
-    started(db);
-    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
-    expect(await fire(db, childStop(), kernelConfig({ push: 'off', capture: 'on' }))).toBeNull();
-    expect(getMark(db, CHILD, 'capture:asked')).toBeNull();
-  });
 });
 
 describe('the lead ask', () => {
@@ -414,7 +404,7 @@ describe('the lead ask', () => {
 
     const off = freshDb();
     seedFire(off, LEAD, 'research', 'hit');
-    expect(await fire(off, leadStop(), kernelConfig({ push: 'on', capture: 'off' }))).toBeNull();
+    expect(await fire(off, leadStop(), kernelConfig({ publish: false }))).toBeNull();
     expect(getMark(off, LEAD, 'capture:asked')).toBeNull();
   });
 

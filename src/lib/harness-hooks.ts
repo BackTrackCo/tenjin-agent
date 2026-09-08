@@ -6,7 +6,6 @@ import { startDaemon, type DaemonDeps, type DaemonStart } from '../daemon/contro
 import { HARNESS_MS } from '../hooks/constants';
 import { readPid, readToken } from '../hooks/shim';
 import { writeFileAtomic } from './atomic-json';
-import type { WebSearchMode } from './config';
 import { claudeSettingsPath } from './harness-permissions';
 import { hooksDir, shimBundlePath } from './paths';
 
@@ -65,8 +64,6 @@ export interface HooksResult {
   path?: string;
   /** Where the daemon bundles live (or would). */
   hooksDir: string;
-  /** The behavior the arms will follow (config `hooks.webSearch`). */
-  mode: WebSearchMode;
   /** Hook entries of ours registered after this run. Eleven, or 0 on a skip. */
   entries: number;
   /** True when this run changed settings.json; false when it already matched. */
@@ -82,18 +79,12 @@ export interface HooksResult {
   fix?: string;
 }
 
-/** The undo, stated the same way everywhere it is shown. */
-export function hooksUndo(settingsPath: string, dir: string): string {
-  return `Undo anytime: \`tenjin uninstall\` removes the entries from ${settingsPath} and the daemon from ${dir}; \`tenjin config set hooks.push off\` silences the arms without unwiring anything.`;
-}
-
 function skip(
   reason: HooksSkipReason,
   args: {
     harness: string;
     path?: string;
     hooksDir: string;
-    mode: WebSearchMode;
     warning?: string;
     fix?: string;
   },
@@ -102,7 +93,6 @@ function skip(
     harness: args.harness,
     ...(args.path !== undefined ? { path: args.path } : {}),
     hooksDir: args.hooksDir,
-    mode: args.mode,
     entries: 0,
     wrote: false,
     skipped: reason,
@@ -116,14 +106,12 @@ export function hooksSkipped(
   harness: string,
   homeDir: string,
   dataDir: string,
-  mode: WebSearchMode,
   reason: HooksSkipReason,
 ): HooksResult {
   return skip(reason, {
     harness,
     ...(harness === 'claude' ? { path: claudeSettingsPath(homeDir) } : {}),
     hooksDir: hooksDir(dataDir),
-    mode,
     fix: fixFor(reason),
   });
 }
@@ -139,7 +127,7 @@ function fixFor(reason: HooksSkipReason): string {
       return 'Hooks are wired for Claude Code only. Re-run `tenjin install --harness claude` on a machine with Claude Code.';
     case 'declined':
     case 'dry-run':
-      return 'Wire them with `tenjin install --search-hooks auto`.';
+      return 'Wire them with `tenjin install`.';
     case 'daemon-down':
       return 'Run `tenjin daemon start`, then re-run `tenjin install`.';
     case 'changed-since-read':
@@ -350,38 +338,47 @@ function urlPort(url: string): number | null {
   }
 }
 
-/** The port a settings entry of ours currently names, or null when none does. */
-export async function registeredHookPort(homeDir: string, dataDir: string): Promise<number | null> {
+/**
+ * What this machine has registered: how many entries of ours the settings file
+ * carries, and the port they name. `port` is null when no entry of ours names
+ * one, which is also what an absent or unreadable settings file answers — the
+ * two are the same thing to every caller: nothing of ours is wired here.
+ */
+export async function registeredHooks(
+  homeDir: string,
+  dataDir: string,
+): Promise<{ port: number | null; entries: number }> {
   let hooks: unknown;
   try {
     const parsed: unknown = JSON.parse(await readFile(claudeSettingsPath(homeDir), 'utf8'));
     hooks = isPlainObject(parsed) ? parsed.hooks : undefined;
   } catch {
-    return null;
+    return { port: null, entries: 0 };
   }
-  if (!isPlainObject(hooks)) return null;
+  if (!isPlainObject(hooks)) return { port: null, entries: 0 };
+  let entries = 0;
+  let port: number | null = null;
   for (const list of Object.values(hooks)) {
     if (!Array.isArray(list)) continue;
     for (const entry of list) {
       if (!ownsHookEntry(entry, dataDir)) continue;
+      entries += 1;
       for (const handler of (entry as { hooks: unknown[] }).hooks) {
         // OURS ONLY, and parsed defensively even then: an entry someone
         // hand-merged their own handler into sits beside ours, and a relative
         // `url` in theirs would otherwise throw ERR_INVALID_URL out of doctor.
         if (!ownsHandler(handler, dataDir)) continue;
         if (!isPlainObject(handler) || typeof handler.url !== 'string') continue;
-        const port = urlPort(handler.url);
-        if (port !== null) return port;
+        port ??= urlPort(handler.url);
       }
     }
   }
-  return null;
+  return { port, entries };
 }
 
 export interface WriteClaudeHooksOptions {
   homeDir: string;
   dataDir: string;
-  mode: WebSearchMode;
   /** Where the built bundles are copied from; the CLI's own dist by default. */
   bundleDir?: string;
   /** Seam for step 1-3: bundles, token, a healthy daemon. Tests inject it. */
@@ -403,7 +400,7 @@ export interface WriteClaudeHooksOptions {
  * writes nothing at all.
  */
 export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<HooksResult> {
-  const { homeDir, dataDir, mode } = opts;
+  const { homeDir, dataDir } = opts;
   const dir = hooksDir(dataDir);
 
   // Steps 1-3. A daemon that will not come up is reported as a skip rather than
@@ -419,7 +416,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path: claudeSettingsPath(homeDir),
       hooksDir: dir,
-      mode,
       warning: `${err instanceof Error ? err.message : String(err)}; no hook entry was written, so nothing points at a daemon that is not there.`,
       fix: fixFor('daemon-down'),
     });
@@ -435,7 +431,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path: claudeSettingsPath(homeDir),
       hooksDir: dir,
-      mode,
       warning: `The daemon answered but left no ${pid === null ? 'daemon.pid' : 'daemon.token'} under ${dataDir}, so no hook entry could name it.`,
       fix: fixFor('daemon-down'),
     });
@@ -448,7 +443,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path: found.refusal.path,
       hooksDir: dir,
-      mode,
       warning: found.refusal.message,
       fix: fixFor(found.refusal.reason),
     });
@@ -491,7 +485,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
     harness: 'claude',
     path,
     hooksDir: dir,
-    mode,
     entries: plan.length,
     wrote: next !== raw,
     daemon: { pid: started.health.pid, port: pid.port, version: started.health.version },
@@ -516,7 +509,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path,
       hooksDir: dir,
-      mode,
       warning: `${path} changed while it was being updated, so no hooks were registered. Re-run \`tenjin install\`.`,
       fix: fixFor('changed-since-read'),
     });
@@ -531,7 +523,6 @@ export async function writeClaudeHooks(opts: WriteClaudeHooksOptions): Promise<H
       harness: 'claude',
       path,
       hooksDir: dir,
-      mode,
       warning: `${path} could not be written (${err instanceof Error ? err.message : String(err)}); no hook entry was registered.`,
       fix: fixFor('unwritable'),
     });

@@ -14,8 +14,9 @@ import type { Arm } from '../types';
  * `delivered`, the child's own `seen:` mark, the lead's form (proposal A: no
  * ladder, no outcome ask, no marker).
  *
- * `before` writes `started` whatever else happens: it is what `actorOf`
- * requires at `agent.stop`, and a stop with no start is a phantom.
+ * `before` writes `started` for the ASK, not for this arm: it is what `actorOf`
+ * requires at `agent.stop` and what names the child in its parent's ask, so it
+ * answers `hooks.publish` while the handoff below answers `hooks.subagent`.
  */
 
 export const subagentStartArm: Arm = {
@@ -24,10 +25,12 @@ export const subagentStartArm: Arm = {
   on: [{ event: 'agent.start' }],
   before(ctx) {
     const { db, clock } = ctx.deps;
+    if (!ctx.deps.config().hooks.publish) return;
     setMark(db, ctx.actor, STARTED_MARK, ctx.input.agentType ?? '', clock());
   },
   plan(ctx) {
     const { db, clock } = ctx.deps;
+    if (!ctx.deps.config().hooks.subagent) return null;
     const row = claim(db, ctx.actor.session, ctx.input.turn);
     if (row === null) return null;
     // The claim consumed the row, so a miss is recorded here, as the child's

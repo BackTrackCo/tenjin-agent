@@ -62,15 +62,16 @@ export interface ExcludedVerb {
 }
 
 /**
- * FREE verbs: they CANNOT SPEND AND CANNOT MOVE YOUR KEYS. That is the whole
- * definition of this tier, and it is deliberately narrower than the older "no
- * wallet, no signing, no payment" — which stopped being true the moment `read`
- * gained the ability to PRESENT a cached session key. `read` signs, with a P-256
- * delegation loaded from disk; it cannot mint one (that needs the wallet, and its
- * import graph is test-pinned clear of it) and cannot produce the
- * secp256k1/EIP-712 signature a payment authorization needs (wrong curve). Money
- * stays out of reach; a signature as such no longer does, so the tier says what
- * it means. `doctor` decrypts locally to check the wallet still opens.
+ * FREE verbs: they CANNOT SPEND. That is the whole definition of this tier, and
+ * it is deliberately narrower than the older "no wallet, no signing, no
+ * payment" — which stopped being true the moment `read` gained the ability to
+ * recover an owned piece. `read` signs, with a P-256 delegation, and mints one
+ * with a wallet signature when none is live; what it cannot do is produce the
+ * secp256k1/EIP-712 signature a payment authorization needs (wrong curve), which
+ * is test-pinned by its import graph never reaching the payment module. Money
+ * stays out of reach; a signature, and the keystore access behind minting one,
+ * no longer do, so the tier says what it means. `doctor` decrypts locally to
+ * check the wallet still opens.
  *
  * What the tier does NOT claim, because it is not true: that the read scope
  * limits what a leaked delegation is worth. Scope is enforced only on the request
@@ -138,16 +139,18 @@ export const ALWAYS_SAFE_ALLOWLIST: readonly AllowlistEntry[] = [
     command: 'tenjin read',
     note:
       'Free-only delivery: free pieces, local-library re-reads, and pieces this ' +
-      'wallet already owns when a read-scoped session key is cached. Cannot spend ' +
-      'and cannot open the keystore: the wallet, payment, and session-MINTING ' +
-      'modules are all absent from its import graph, so the key it may present is ' +
-      'a P-256 delegation loaded from disk, which is the wrong curve to authorize ' +
-      'a payment. TRANSMITS A CREDENTIAL: when a session key exists, a cold 402 ' +
-      'sends that wallet-derived delegation to the server. It goes only to the ' +
-      'origin the delegation was minted for, which is what stops a stray ' +
-      '`--base-url` from redirecting it, and no scope on it limits what a holder ' +
-      'could do with it. Not read-only: a freshly delivered piece is saved to the ' +
-      'library.',
+      'wallet already owns. Cannot spend: the payment module is absent from its ' +
+      'import graph, and the key it signs with is a P-256 delegation, the wrong ' +
+      'curve to authorize a payment. OPENS THE KEYSTORE (one wallet signature) ' +
+      'when an owned piece is not on this machine and no session key is live, ' +
+      'minting the same ≤24h read-scoped delegation `publish` and `edit` mint; ' +
+      'every later owned read reuses it and asks for nothing. TRANSMITS A ' +
+      'CREDENTIAL: that wallet-derived delegation goes to the server on a cold ' +
+      '402. It is minted and presented only for the origin of the piece being ' +
+      'read, and never for a second origin while one for another is cached, ' +
+      'which is what bounds a stray `--base-url`; no scope on it limits what a ' +
+      'holder could do with it. Not read-only: a freshly delivered piece is ' +
+      'saved to the library.',
   },
   {
     rule: 'Bash(tenjin outcome:*)',
@@ -226,23 +229,6 @@ export const OPT_IN_ALLOWLIST: readonly AllowlistEntry[] = [
       'dedupe: a looping agent pays on every call. Set maxAutoSpend and ' +
       'sessionBudget first, and leave `bazaarPay` off unless you mean it.',
   },
-  {
-    rule: 'Bash(tenjin session start:*)',
-    command: 'tenjin session start',
-    note:
-      'OPENS THE KEYSTORE (one wallet signature), but SPENDS NOTHING and cannot: ' +
-      'it mints a ≤24h P-256 session key so `tenjin read` can recover pieces you ' +
-      'already own without paying. The delegated key is the wrong curve for a ' +
-      'payment authorization, so no session file can ever move money. Do NOT read ' +
-      'the `read` scope as a bound on the rest: the file it leaves is a ' +
-      'wallet-derived credential, and what limits it is that it expires in 24h, ' +
-      'lives 0600, and is refused off the origin it was minted for, not its ' +
-      'scope. What you are opting into is unattended keystore access: on an ' +
-      'encrypted wallet the passphrase prompt is skipped or answered from the ' +
-      'environment, and the `--base-url` caveat below bites hardest here, because ' +
-      'a mint against an attacker-chosen host is a wallet signature you did not ' +
-      'intend to make.',
-  },
 ];
 
 /**
@@ -270,8 +256,8 @@ export const PUBLISH_MODE_ALLOWLIST: readonly AllowlistEntry[] = [
       'auto or full-auto: the mode is the consent, and the harness prompt would ask for it ' +
       'twice. Three things it clears that the free tier never did. It OPENS THE KEYSTORE: ' +
       'publish always resolves a signer, and with no usable session it mints one at ' +
-      'read+write scope, which is strictly broader than the read-only key ' +
-      '`tenjin session start` exists as a deliberate opt-in for. It publishes the contents ' +
+      'read+write scope, which is strictly broader than the read-only key `tenjin read` ' +
+      'mints to recover an owned piece. It publishes the contents ' +
       'of ANY REGULAR LOCAL FILE the agent can read, gated only by the heuristic scan. And it is a ' +
       'PREFIX rule, so it pins the verb and not the flags: `--base-url` rides it (see the ' +
       'flag caveat), and `--yes` is an ordinary flag on the same verb that clears exactly ' +
@@ -307,10 +293,11 @@ export function modeGatedAllowlist(mode: PublishMode): AllowlistEntry[] {
 
 /**
  * Verbs that must NEVER appear in the recommended allowlist, with the reason each
- * one is a human decision. `tenjin send` is the wallet escape hatch (tenjin-agent
- * #40) and heads this list: it moves USDC to an arbitrary address, outside the
- * spend policy that bounds `buy`. Naming it here is load-bearing even in versions
- * where the verb does not exist yet — the exclusion ships before the verb does.
+ * one is a human decision. `tenjin wallet send` is the wallet escape hatch
+ * (tenjin-agent #40) and heads this list: it moves USDC to an arbitrary address,
+ * outside the spend policy that bounds `buy`. Naming it here is load-bearing even
+ * in versions where the verb does not exist yet — the exclusion ships before the
+ * verb does.
  *
  * `tenjin publish` stays on this list under its own terms: nothing RECOMMENDS it,
  * and no line here or on the doc page adds it. {@link PUBLISH_MODE_ALLOWLIST} is
@@ -318,7 +305,7 @@ export function modeGatedAllowlist(mode: PublishMode): AllowlistEntry[] {
  */
 export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
   {
-    command: 'tenjin send',
+    command: 'tenjin wallet send',
     reason:
       'Moves USDC out of the wallet to an arbitrary address (the escape hatch, #40). ' +
       'Irreversible and not bounded by the buy spend policy. Always a human decision.',
@@ -371,16 +358,6 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
     reason: 'Writes into harness config and skills directories.',
   },
   {
-    command: 'tenjin push',
-    reason:
-      'Writes hook entries into harness settings, and arms the one hook in this CLI that can ' +
-      'CANCEL a tool call the agent asked for (the abort-and-answer WebSearch/WebFetch deny) ' +
-      'and inject shelf content into later turns. Narrower authority than its list-mates — it ' +
-      'cannot spend, open the keystore or publish under your identity — but which hooks run in ' +
-      'your harness is an operator decision, and `runPushOn` has no consent gate of its own. ' +
-      'A prefix rule pins the verb, not the flags, so it would clear `off` and `status` too.',
-  },
-  {
     command: 'tenjin mcp',
     reason:
       'Long-running server that re-exposes every command core over stdio; ' +
@@ -406,10 +383,10 @@ export const NEVER_ALLOWLISTED: readonly ExcludedVerb[] = [
 export const FLAG_CAVEAT: readonly string[] = [
   'Caveat: a prefix rule pins the VERB, not the flags. Every line above also clears',
   '`--base-url <url>` on that verb, which re-points where the question, the probe, the',
-  'session key `read` may present, and (for buy) the signature and payment go. Signed',
-  'and credential-bearing traffic is NOT confined to the paying verb: `read` is in the',
-  'safe tier and still transmits a wallet-derived delegation once one is cached, which is',
-  'why that delegation is bound to the origin it was minted for and refused elsewhere.',
+  'session key `read` mints and presents, and (for buy) the signature and payment go.',
+  'Signed and credential-bearing traffic is NOT confined to the paying verb: `read` is in',
+  'the safe tier and both mints a wallet-derived delegation and transmits it, which is why',
+  'that delegation is bound to the origin it was minted for and refused elsewhere.',
   'Allowlist these verbs only if you are content for the agent to choose the destination',
   'host, and set the base URL in config instead of letting it be an argument. The skills',
   'tell agents never to pass --base-url on an allowlisted verb, but that is a convention,',
@@ -483,27 +460,8 @@ export const PERMISSIONS_DOC_URL =
   'https://github.com/BackTrackCo/tenjin-agent/blob/main/docs/agent-permissions.md';
 
 /**
- * The single line that replaced the block: what is on the page, and its URL. It
- * names the counts rather than the rules so the operator knows whether the page
- * answers their question before they open it.
- *
- * Subagent delegation is named here rather than on a second line, because doctor
- * deliberately closes with ONE pointer (#81) and the operator deciding what to
- * hand a subagent is reading exactly this line. The free tier IS the
- * subagent-safe set, so the counts already answer the question; which verbs stay
- * human-gated lives on the page with every other caveat.
- */
-export function permissionsPointer(): string {
-  return (
-    `Auto-mode permission allowlist and subagent delegation (${ALWAYS_SAFE_ALLOWLIST.length} free verbs, ` +
-    `${OPT_IN_ALLOWLIST.length} opt-ins, the --base-url caveat): ${PERMISSIONS_DOC_URL}`
-  );
-}
-
-/**
  * The rules the current mode is missing, or null when it needs none. This one
- * DOES name them,
- * unlike {@link permissionsPointer}: they are not a tier to weigh and paste, they
+ * DOES name them: they are not a tier to weigh and paste, they
  * are lines that should already be in the operator's settings file, and an
  * operator whose agent is being prompted for work the mode said not to ask about
  * needs to see exactly which rules are missing.

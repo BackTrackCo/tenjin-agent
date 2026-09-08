@@ -69,13 +69,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  runInstall,
-  PERMISSIONS_QUESTION,
-  permissionsQuestion,
-  PUBLISH_MODE_CHOICES,
-  WALLET_QUESTION,
-} from './install';
+import { runInstall, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
 import type { InstallDeps, PromptPublishModeFn } from './install';
 import type { PublishMode } from '../lib/config';
 import type { ExecFn } from '../lib/wallet/passphrase';
@@ -85,7 +79,7 @@ import {
   SHIPPED_SKILL_FILES,
   SKILL_NAMES,
 } from '../lib/skills-source';
-import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED, PERMISSIONS_DOC_URL } from '../lib/permissions';
+import { ALWAYS_SAFE_ALLOWLIST, NEVER_ALLOWLISTED } from '../lib/permissions';
 import {
   claudeSettingsPath,
   EDIT_MODE_RULE,
@@ -95,11 +89,11 @@ import {
   MODE_GATED_RULES,
   PUBLISH_MODE_RULE,
 } from '../lib/harness-permissions';
+import { CLI_SKILL_NAMES } from '../lib/skill-wiring';
 import { CliError } from '../lib/errors';
 import type { DaemonStart } from '../daemon/control';
-import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
+import { configPath, daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from '../lib/paths';
 import { renderSkillMarkdown } from '../lib/skill-materialize';
-import { PRODUCTION_HOST } from '../lib/production-origin';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
 
@@ -267,21 +261,17 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // decision-specific tests override them.
     walletExists: async () => false,
     confirmWallet: async () => false,
-    confirmBazaarPay: async () => false,
     // Stubbed by default so the ~140 tests that are not about the wallet do not
     // each pay for a real scrypt key derivation. The wallet tests below opt into
     // the real creator with `realWalletCreate()`, which still goes through the
     // fake keychain above.
     createWallet: async () => STUB_ADDRESS,
     promptPublishMode: async () => null,
-    promptSearchHooks: async () => null,
     // NEVER the real one. Steps 1-3 of the hook cutover spawn a detached daemon;
     // this writes exactly what one leaves behind (the bundles, the token, the pid
     // file) so the settings write has a real port and token to read back.
     startDaemon: fakeStart,
-    confirmPermissions: async () => false,
     intro: async () => {},
-    outro: async () => {},
     ...over,
   };
 }
@@ -428,12 +418,12 @@ describe('runInstall: dry run', () => {
   });
 });
 
-describe('runInstall: the bazaarPay decision', () => {
+describe('runInstall: the bazaarPay flag', () => {
   const payPath = () => join(home, '.claude', 'skills', 'tenjin-pay', 'SKILL.md');
 
-  it('a headless run never enables it and persists nothing (asked later)', async () => {
+  it('a run without the flag leaves it off and persists nothing', async () => {
     const { data: out } = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
-    expect(asData(out).bazaarPay).toEqual({ enabled: false, status: 'not-asked' });
+    expect(asData(out).bazaarPay).toEqual({ enabled: false, status: 'unset' });
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
     expect((JSON.parse(raw) as { bazaarPay?: boolean }).bazaarPay).toBeUndefined();
     // The lane's teaching is presence-gated: off means the skill is not there.
@@ -441,15 +431,13 @@ describe('runInstall: the bazaarPay decision', () => {
   });
 
   it('the tenjin-pay skill is present exactly while the toggle is on', async () => {
-    await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmBazaarPay: async () => true }),
-    );
+    const first = await runInstall({ harness: ['claude'], bazaarPay: true }, makeCtx(), deps());
+    expect(asData(first.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
     expect(await readFile(payPath(), 'utf8')).toContain('name: tenjin-pay');
 
-    // The next install honors the persisted decision without re-asking...
-    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    // The next install honors the persisted decision without the flag...
+    const second = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(asData(second.data).bazaarPay).toEqual({ enabled: true, status: 'kept' });
     expect(existsSync(payPath())).toBe(true);
 
     // ...and an install after the operator turned it off removes our copy.
@@ -460,44 +448,22 @@ describe('runInstall: the bazaarPay decision', () => {
         bazaarPay: false,
       }),
     );
-    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    const third = await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(asData(third.data).bazaarPay).toEqual({ enabled: false, status: 'kept' });
     expect(existsSync(payPath())).toBe(false);
     expect(existsSync(join(home, '.claude', 'skills', 'tenjin-search', 'SKILL.md'))).toBe(true);
   });
 
-  it('an interactive yes persists true; the next install keeps it without re-asking', async () => {
-    const confirm = vi.fn(async () => true);
-    const first = await runInstall(
-      { harness: ['claude'] },
+  it('--dry-run reports the lane it would turn on and writes nothing', async () => {
+    const res = await runInstall(
+      { harness: ['claude'], bazaarPay: true, dryRun: true },
       makeCtx(),
-      deps({ isInteractive: true, confirmBazaarPay: confirm }),
+      deps(),
     );
-    expect(asData(first.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
-    expect(confirm).toHaveBeenCalledTimes(1);
-    const second = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmBazaarPay: confirm }),
-    );
-    expect(asData(second.data).bazaarPay).toEqual({ enabled: true, status: 'kept' });
-    expect(confirm).toHaveBeenCalledTimes(1);
-  });
-
-  it('an interactive no is remembered too', async () => {
-    const confirm = vi.fn(async () => false);
-    const first = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmBazaarPay: confirm }),
-    );
-    expect(asData(first.data).bazaarPay).toEqual({ enabled: false, status: 'declined' });
-    const second = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmBazaarPay: confirm }),
-    );
-    expect(asData(second.data).bazaarPay).toEqual({ enabled: false, status: 'kept' });
-    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(asData(res.data).bazaarPay).toEqual({ enabled: true, status: 'enabled' });
+    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => '{}');
+    expect((JSON.parse(raw) as { bazaarPay?: boolean }).bazaarPay).toBeUndefined();
+    expect(existsSync(payPath())).toBe(false);
   });
 });
 
@@ -633,10 +599,10 @@ describe('runInstall: doctor as the final step', () => {
     const failing: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
-      checks: [{ name: 'api-contract', status: 'fail', required: true, detail: 'down' }],
+      checks: [{ name: 'api', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
-        result: { name: 'api-contract', status: 'fail', required: true, detail: 'down' },
+        result: { name: 'api', status: 'fail', required: true, detail: 'down' },
       },
     };
     const { data: d } = await runInstall(
@@ -688,9 +654,9 @@ describe('runInstall: doctor as the final step', () => {
 });
 
 // #80: the run reads "here is what happened", then "here is what still needs
-// you". It used to read the other way round, so "Setup complete" was followed by
-// a block of warnings before a single ✓.
-describe('runInstall: walkthrough ordering', () => {
+// you". The rows are the first half; the second half is one line for the doctor
+// run and, only when a writer refused, the reason.
+describe('runInstall: output ordering', () => {
   const human = (res: { humanLines?: string[] }): string =>
     (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
@@ -699,7 +665,7 @@ describe('runInstall: walkthrough ordering', () => {
     missingModeGated: [],
     checks: [
       {
-        name: 'search-contract',
+        name: 'search',
         status: 'warn',
         required: false,
         detail: 'A2 not deployed',
@@ -708,27 +674,36 @@ describe('runInstall: walkthrough ordering', () => {
     ],
   };
 
-  it('puts the summary above the attention items', async () => {
+  it('puts the rows above the doctor verdict', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true, collectChecks: async () => warning }),
     );
     const lines = human(res).split('\n');
-    const firstTick = lines.findIndex((l) => l.includes('Claude Code:'));
-    const attention = lines.findIndex((l) => l.includes('need attention'));
-    expect(firstTick).toBeGreaterThanOrEqual(0);
-    expect(attention).toBeGreaterThan(firstTick);
+    const firstRow = lines.findIndex((l) => l.startsWith('  skills'));
+    const verdict = lines.findIndex((l) => l.includes('run tenjin doctor'));
+    expect(firstRow).toBeGreaterThanOrEqual(0);
+    expect(verdict).toBeGreaterThan(firstRow);
   });
 
-  it('a clean run is the summary and nothing else', async () => {
-    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(human(res)).not.toContain('need attention');
+  // The verdict is a tally, never a second copy of doctor's own render: the
+  // check's detail and fix belong to `tenjin doctor`.
+  it('never expands the doctor verdict into a check list', async () => {
+    const res = await runInstall(
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({ isInteractive: true, collectChecks: async () => warning }),
+    );
+    const text = human(res);
+    expect(text).toContain('1 checks: 0 ok, 1 warn; run tenjin doctor');
+    expect(text).not.toContain('A2 not deployed');
+    expect(text).not.toContain('point baseUrl');
   });
 
   // The dry-run banner is not an attention item: it says what the rest of the
   // output means, so it stays on top of the thing it qualifies.
-  it('keeps the dry-run banner above the summary', async () => {
+  it('keeps the dry-run banner above the headline', async () => {
     const res = await runInstall(
       { harness: ['claude'], dryRun: true },
       makeCtx(),
@@ -736,112 +711,20 @@ describe('runInstall: walkthrough ordering', () => {
     );
     const lines = human(res).split('\n');
     expect(lines[0]).toContain('Dry run');
-    expect(lines.findIndex((l) => l.includes('Claude Code:'))).toBeGreaterThan(0);
+    expect(lines.findIndex((l) => l.includes('tenjin is wired for'))).toBeGreaterThan(0);
   });
 
-  // The other half of #80: with no wallet, the summary's own line already says
-  // `none` and names `tenjin wallet create`. Repeating it as a yellow warning
-  // told someone who only wants `tenjin search` that their setup needs attention
-  // when it does not.
-  it('does not repeat the no-wallet line as a warning', async () => {
-    const noWallet: DoctorChecks = {
-      publishMode: 'review',
-      missingModeGated: [],
-      checks: [
-        {
-          name: 'wallet',
-          status: 'warn',
-          required: false,
-          detail: 'No wallet; needed only for buy/publish',
-          fix: 'tenjin wallet create',
-          // The marker doctor's noWalletCheck sets; doctor.test.ts pins that the
-          // production check really carries it, so this stub cannot drift into
-          // testing a shape nothing emits.
-          data: { credential: 'absent' },
-        },
-      ],
-    };
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({
-        isInteractive: true,
-        walletExists: async () => false,
-        confirmWallet: async () => false,
-        collectChecks: async () => noWallet,
-      }),
-    );
-    const text = human(res);
-    expect(text).not.toContain('need attention');
-    expect(text).toContain('Wallet: none. Create one later with: tenjin wallet create');
-  });
-
-  // ...but a wallet that is BROKEN is not something the summary says anywhere,
-  // so suppressing the no-wallet case must not suppress the whole check.
-  it('still reports a wallet warning the summary does not carry', async () => {
-    const broken: DoctorChecks = {
-      publishMode: 'review',
-      missingModeGated: [],
-      checks: [
-        {
-          name: 'wallet',
-          status: 'warn',
-          required: false,
-          detail: 'Wallet 0xabc (file): the keystore cannot be decrypted',
-          fix: 'Set TENJIN_WALLET_PASSPHRASE',
-        },
-      ],
-    };
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({
-        isInteractive: true,
-        walletExists: async () => true,
-        walletAddress: async () => '0xabc',
-        collectChecks: async () => broken,
-      }),
-    );
-    const text = human(res);
-    expect(text).toContain('need attention');
-    expect(text).toContain('the keystore cannot be decrypted');
-  });
-
-  // The suppression keys on the check that says there is NO credential, never on
-  // the name `wallet`. `walletExists` is a wallet-FILE probe, so a broken
-  // TENJIN_WALLET_KEY with no file on disk records `none` in the summary while
-  // doctor is warning about a credential that exists and does not work. Filtering
-  // by name hid exactly that, which is the one wallet state install says nothing
-  // else about.
-  it('reports a broken env key even while the summary says none', async () => {
-    const badEnvKey: DoctorChecks = {
-      publishMode: 'review',
-      missingModeGated: [],
-      checks: [
-        {
-          name: 'wallet',
-          status: 'warn',
-          required: false,
-          detail: 'TENJIN_WALLET_KEY is not a valid private key.',
-          fix: 'Set TENJIN_WALLET_KEY to a 0x-prefixed 32-byte hex key, or unset it to use the wallet file.',
-        },
-      ],
-    };
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({
-        isInteractive: true,
-        walletExists: async () => false,
-        confirmWallet: async () => false,
-        collectChecks: async () => badEnvKey,
-      }),
-    );
-    const text = human(res);
-    expect(text).toContain('need attention');
-    expect(text).toContain('not a valid private key');
-    // ...and the summary still reports what the walkthrough itself settled.
-    expect(text).toContain('Wallet: none');
+  // A writer that refused is the one thing the rows cannot say in their own
+  // words, so it prints under them. The string quotes bytes out of the
+  // operator's settings file, so it is sanitized on the way through.
+  it('prints a refusing writer under the rows', async () => {
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await writeFile(claudeSettingsPath(home), '\x1b[2K\x1b[1G not json');
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const lines = human(res).split('\n');
+    const warn = lines.findIndex((l) => l.startsWith('! '));
+    expect(warn).toBeGreaterThan(lines.findIndex((l) => l.startsWith('  wallet')));
+    expect(lines[warn]).not.toContain('\x1b');
   });
 });
 
@@ -933,17 +816,19 @@ describe('runInstall: publish-mode selection', () => {
     };
   }
 
-  it('offers auto first, as the recommended answer, with one line of consequence', () => {
+  // This select is the whole consent moment, so the `auto` hint carries both
+  // consequences: the agent publishes as you, and the harness allowlist gains the
+  // two verbs that lets it.
+  it('offers auto first, with both consequences on one line', () => {
     expect(PUBLISH_MODE_CHOICES.map((c) => c.value)).toEqual(['auto', 'review', 'full-auto']);
     expect(PUBLISH_MODE_CHOICES[0]!.label).toBe('Auto (recommended)');
     expect(PUBLISH_MODE_CHOICES[0]!.hint).toBe(
-      'your agent publishes and updates pieces on its own, under your identity',
+      'your agent publishes and updates pieces on its own, under your identity; it also allows `tenjin publish` and `tenjin edit` in the harness',
     );
     // The clause that used to end this hint promised a harness prompt in front of
-    // every publish, which this same mode now writes a rule to remove.
+    // every publish, which this same mode writes a rule to remove.
     for (const c of PUBLISH_MODE_CHOICES) {
       const hint: string = 'hint' in c ? c.hint : '';
-      expect(hint).not.toMatch(/harness/i);
       expect(hint).not.toMatch(/approval/i);
     }
     expect(PUBLISH_MODE_CHOICES[1]!.label).toBe('Ask me in chat first');
@@ -1091,14 +976,22 @@ describe('runInstall: publish-mode selection', () => {
     expect(await persistedMode()).toBeUndefined(); // dry run wrote nothing
   });
 
-  it('--dry-run does not prompt', async () => {
+  it('--dry-run does not prompt, and opens no frame for the questions it skips', async () => {
     const spy = promptSpy(['review']);
+    let frames = 0;
     const { data: d } = await runInstall(
       { harness: ['claude'], dryRun: true },
       makeCtx(),
-      deps({ isInteractive: true, promptPublishMode: spy.fn }),
+      deps({
+        isInteractive: true,
+        promptPublishMode: spy.fn,
+        intro: async () => {
+          frames += 1;
+        },
+      }),
     );
     expect(spy.calls()).toBe(0);
+    expect(frames).toBe(0);
     expect(modeOf(d)).toEqual({ value: 'review', source: 'default-skipped' });
     expect(await persistedMode()).toBeUndefined();
   });
@@ -1126,7 +1019,7 @@ describe('runInstall: publish-mode selection', () => {
   });
 });
 
-describe('runInstall: interactive walkthrough', () => {
+describe('runInstall: the ten rows', () => {
   const ADDR = '0x1234567890abcdef1234567890abcdef12345678';
 
   // install is human-first: it returns the walkthrough as humanLines (the
@@ -1136,227 +1029,145 @@ describe('runInstall: interactive walkthrough', () => {
   const walletOf = (d: unknown) =>
     (d as { wallet: { status: string; address?: string; reason?: string; fix?: string } }).wallet;
 
-  // The summary is one line per subject and it closes the output, so it is read
-  // off the TAIL: whatever disclosures a given run owed the operator sit above it,
-  // and adding one must not be able to quietly drop a summary line.
-  it('closes with a six-line summary: skills, publishing, permissions, hooks, wallet, next', async () => {
-    // Nothing disclosable: hooks not wired this run, permissions declined by the
-    // default seam, no nudge. What is left is the summary, which is what this
-    // pins. `--no-hooks`, not `--search-hooks off`: `off` is a per-fire gate the
-    // arms read now, and it still registers the entries.
+  /**
+   * The whole human output of a clean install, pinned as a shape rather than as
+   * substrings: a headline, five aligned facts, the way back out, and the
+   * doctor's verdict. Anything that wants a sixth paragraph fails here.
+   */
+  it('is a headline, five rows, an undo and a doctor line', async () => {
     const res = await runInstall(
-      { harness: ['claude'], noHooks: true, claudeMd: false },
+      { harness: ['claude'] },
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        promptPublishMode: async () => 'auto',
+        confirmWallet: async () => true,
+      }),
+    );
+    const lines = human(res).split('\n');
+    expect(lines).toHaveLength(10);
+    expect(lines[0]).toBe('tenjin is wired for Claude Code.');
+    expect(lines[1]).toBe('');
+    expect(lines[2]).toBe(`  skills       3 in ${join(home, '.claude', 'skills')}`);
+    expect(lines[3]).toBe(
+      `  permissions  ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in ${claudeSettingsPath(home)}`,
+    );
+    // The arms and the one command that changes them. The entry count and the
+    // port live in `tenjin doctor`, under Hooks.
+    expect(lines[4]).toBe('  hooks        7 enabled; change: tenjin hooks disable <arm>');
+    expect(lines[5]).toBe('  publishing   auto - your agent publishes under your identity');
+    expect(lines[6]).toBe(`  wallet       ${STUB_ADDRESS}, $0 - fund with: tenjin wallet fund`);
+    expect(lines[7]).toBe('');
+    expect(lines[8]).toBe(
+      'Restart Claude Code to load the hooks. Undo everything: tenjin uninstall',
+    );
+    expect(lines[9]).toBe('tenjin doctor: 1 checks, all pass.');
+  });
+
+  // The labels are a column, so the facts beside them line up. A row that
+  // formats its own label would drift the moment a label changes length.
+  it('aligns every row on one column', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const columns = human(res)
+      .split('\n')
+      .filter((l) => l.startsWith('  '))
+      .map((l) => l.length - l.replace(/^ {2}\S+\s+/, '').length);
+    expect(new Set(columns).size).toBe(1);
+  });
+
+  // The restart is what makes the entries live, and it is only true of a run
+  // that wired some: hooks are read once at session start.
+  it('names the restart only when entries were registered', async () => {
+    const wired = await runInstall(
+      { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true }),
     );
-    const lines = human(res).split('\n');
-    expect(lines).toHaveLength(6);
-    expect(lines[0]).toContain('Claude Code: 3 skills installed');
-    expect(lines[0]).toContain('tenjin-search, tenjin-publish (CLI)');
-    expect(lines[1]).toContain('Publishing: review');
-    expect(lines[2]).toContain('Permissions:');
-    expect(lines[3]).toContain('Hooks:');
-    expect(lines[4]).toContain('Wallet:');
-    expect(lines[5]).toContain('Next: tenjin search');
-  });
+    expect(human(wired)).toContain('Restart Claude Code to load the hooks.');
 
-  // Nothing this command writes into the operator's home may land silently, and
-  // that has to hold for the eleven entries and the daemon a bare run now writes.
-  it('discloses the entries, the daemon and how to take them back', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
+    const none = await runInstall(
+      { harness: ['claude'], noHooks: true },
       makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
+      deps({ isInteractive: true }),
     );
-    const text = human(res);
-    // The local half first: what is registered, where it POSTs, and why the
-    // settings file is now 0600.
-    expect(text).toContain('Wired 11 hook entries');
-    expect(text).toContain(`nine POST to a Tenjin daemon on http://127.0.0.1:${DAEMON_PORT}`);
-    expect(text).toContain('your machine only, authorized by a token in that file');
-    expect(text).toContain('mode 0600');
-    expect(text).toContain(join(data, 'hooks'));
-    expect(text).toContain('Nothing here can block or change a tool call');
-    // Then the off-machine half.
-    expect(text).toContain(`the arms ask ${PRODUCTION_HOST} the same question`);
-    expect(text).toContain('the query text leaves the machine, redacted');
-    // And the undo, which is one key now, not two.
-    expect(text).toContain('tenjin config set hooks.push off');
-    expect(text).toContain('tenjin uninstall');
-  });
-
-  // The recipient is read off `config.baseUrl`, which is what the arms ask.
-  // Naming tenjin.blog on a machine with a configured shelf discloses a host
-  // that is never asked at all.
-  it('names the configured shelf as the recipient, not the tenjin.blog literal', async () => {
-    const SHELF = 'https://team-shelf.example';
-    // WITH the secret, because the fallthrough sentence below is gated on team
-    // mode and team mode is "a secret is set AND baseUrl is the team's own shelf".
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ baseUrl: SHELF, shelfBypassSecret: 'door-key' }),
-    );
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
-    );
-    const text = human(res);
-    expect(text).toContain('the arms ask team-shelf.example the same question');
-    expect(text).not.toContain(`the arms ask ${PRODUCTION_HOST}`);
-    // The public leg is the one the marketplace still sees, named rather than
-    // left implied.
-    expect(text).toContain(
-      `A question team-shelf.example has nothing for is then asked of ${PRODUCTION_HOST} as well.`,
-    );
+    expect(human(none)).not.toContain('Restart Claude Code');
+    expect(human(none)).toContain('Undo everything: tenjin uninstall');
+    expect(human(none)).toContain('hooks        none registered (--no-hooks)');
   });
 
   /**
-   * `publicShelfUrl` is operator-settable, and it is what the public leg asks.
-   * Naming the production host here omits the recipient that actually receives
-   * the query text on that leg.
+   * The prose the rows replaced: what the entries POST, what leaves the machine,
+   * where the keystore lives, an undo per item. It is reference material an
+   * operator meets once and cannot act on mid-install, so it lives in
+   * docs/agent-permissions.md and in the `--json` envelope. Pinned negatively
+   * because a paragraph is exactly the thing that creeps back one sentence at a
+   * time.
    */
-  it('names the configured publicShelfUrl as the fallthrough, not the tenjin.blog literal', async () => {
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({
-        baseUrl: 'https://team-shelf.example',
-        publicShelfUrl: 'https://mirror.example',
-        shelfBypassSecret: 'door-key',
-      }),
-    );
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
-    );
+  it('prints no disclosure paragraph, no per-item undo, and no doctor check list', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     const text = human(res);
-    expect(text).toContain(
-      'A question team-shelf.example has nothing for is then asked of mirror.example as well.',
-    );
-    expect(text).not.toContain(PRODUCTION_HOST);
-  });
-
-  /**
-   * The half-set state: a custom `baseUrl` and no `shelfBypassSecret`. The two
-   * setup commands are independent, so this is both the documented sequence's
-   * intermediate step and the terminal state for a shelf with no Deployment
-   * Protection. `ask.ts` gates the public leg on team mode, so nobody is asked a
-   * second time — the sentence must not claim otherwise. Over-disclosure sends
-   * nothing extra, but it is false in the one text an operator cannot check
-   * later without reading the code.
-   */
-  it('promises no fallthrough on a custom shelf with no bypass secret', async () => {
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ baseUrl: 'https://shelf.example' }),
-    );
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
-    );
-    const text = human(res);
-    // The FIRST leg is still named off baseUrl: that one is asked in either mode.
-    expect(text).toContain('the arms ask shelf.example the same question');
-    expect(text).not.toContain('is then asked of');
-  });
-
-  /**
-   * `baseUrl` and `publicShelfUrl` set to the SAME custom origin. The disclosure
-   * used to derive from `isTeamShelfOrigin`, which answers "is this a shelf of
-   * the team's own" and returns false when the two match — so it named
-   * `tenjin.blog` on a machine whose arms ask this host and never touch the
-   * marketplace at all.
-   */
-  it('names the shelf when baseUrl and publicShelfUrl are the same custom origin', async () => {
-    const SHELF = 'https://shelf.internal.example';
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ baseUrl: SHELF, publicShelfUrl: SHELF }),
-    );
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
-    );
-    const text = human(res);
-    expect(text).toContain('the arms ask shelf.internal.example the same question');
-    expect(text).not.toContain(`the arms ask ${PRODUCTION_HOST}`);
-    // No secret, so no team mode and no second leg to disclose.
-    expect(text).not.toContain('is then asked of');
-  });
-
-  it('keeps naming the marketplace when the base URL is the marketplace', async () => {
-    // Including its alias: an alias of production is not somebody's team shelf.
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ baseUrl: `https://${PRODUCTION_HOST}` }),
-    );
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'auto' }),
-    );
-    const text = human(res);
-    expect(text).toContain(`the arms ask ${PRODUCTION_HOST} the same question`);
-    expect(text).not.toContain('is then asked of');
-  });
-
-  /**
-   * The `remind` branch says something different about what leaves the machine,
-   * and it is the one line where an operator decides whether to arm any of this.
-   */
-  it('says the remind branch prints a reminder rather than asking', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
-    );
-    const text = human(res);
-    expect(text).toContain(`print a one-line reminder that ${PRODUCTION_HOST} may have an answer`);
+    expect(text).not.toContain('Wired 11 hook entries');
     expect(text).not.toContain('the query text leaves the machine');
-    // The local half is the same either way: eleven entries and a daemon.
-    expect(text).toContain('Wired 11 hook entries');
+    expect(text).not.toContain('keystore v3');
+    expect(text).not.toContain('Undo anytime');
+    expect(text).not.toContain('Next: tenjin search');
+    expect(text).not.toContain('Some checks need attention');
+    // No rule string, in any form: an operator meeting one mid-install cannot
+    // act on it.
+    expect(text).not.toMatch(/Bash\(/);
+    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).not.toContain(e.rule);
+    for (const e of NEVER_ALLOWLISTED) {
+      const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
+      expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
+    }
   });
 
-  /**
-   * THE ENTRY SET IS THE SAME WHATEVER `hooks.push` SAYS. It is a per-fire config
-   * key the daemon re-stats, not a wiring step, so there is no "push arms" count
-   * to report apart and no second switch in the undo line.
-   */
-  it('says the same thing about the entries whether or not push is on', async () => {
-    const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
-    const base = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
-    expect(base).not.toContain('Push arms:');
-    expect(base).toContain('Hooks: auto mode, 11 entries registered');
+  // The wording pin the old allowlist block carried, kept alive now that the
+  // block itself is gone. lib/permissions.ts refuses to call this tier
+  // read-only, and the consent surface must not claim what the module it draws
+  // from will not: `search` and `outcome` POST off-machine, `read` writes to the
+  // library and can present a wallet-derived delegation, and two of the nine
+  // rules are `wallet show` / `wallet balance`.
+  it('never calls the free tier read-only, and never claims it cannot touch your wallet', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const auto = PUBLISH_MODE_CHOICES.find((c) => c.value === 'auto');
+    for (const text of [human(res), auto?.hint ?? '']) {
+      expect(text).not.toMatch(/read-only/i);
+      expect(text).not.toMatch(/touch your wallet/i);
+      expect(text).not.toMatch(/free, read-only verbs/i);
+    }
+  });
 
-    await rm(join(home, '.claude', 'settings.json'), { force: true });
-    await writeFile(
-      join(data, 'config.json'),
-      JSON.stringify({ hooks: { webSearch: 'auto', push: 'on' } }),
+  // The count is every rule of ours in the file, and the word "free" is gone with
+  // the line that needed it: a count that excluded the pair under-reported what
+  // just landed.
+  it('counts every rule of ours on the permissions row', async () => {
+    const rowFor = async (mode: PublishMode): Promise<string> => {
+      const res = await runInstall(
+        { harness: ['claude'], publishMode: mode },
+        makeCtx(),
+        deps({ isInteractive: true }),
+      );
+      return (
+        human(res)
+          .split('\n')
+          .find((l) => l.includes('permissions')) ?? ''
+      );
+    };
+
+    const review = await rowFor('review');
+    expect(review).toContain(`${FREE_VERB_RULES.length} tenjin commands in`);
+    expect(review).not.toMatch(/free/i);
+
+    await rm(claudeSettingsPath(home), { force: true });
+    const auto = await rowFor('auto');
+    expect(auto).toContain(
+      `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in`,
     );
-    const armed = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
-    expect(armed).toContain('Hooks: auto mode, 11 entries registered');
-    expect(armed).toContain('tenjin config set hooks.push off');
-    expect(armed).not.toContain('Push arms:');
   });
 
-  /** A re-run registers the same eleven and says so rather than reporting zero. */
-  it('does not report zero entries on a run that changed nothing', async () => {
-    const interactive = { isInteractive: true, promptSearchHooks: async () => 'auto' as const };
-    await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive));
-    const text = human(await runInstall({ harness: ['claude'] }, makeCtx(), deps(interactive)));
-    expect(text).not.toContain('0 entries');
-    expect(text).toContain('11 entries already registered');
-  });
-
-  // The disclosure names the count, the file and the undo. It does NOT recite the
-  // nine rules: that block is `doctor`'s, and the machine envelope carries them.
-  // The nudge is written by default now, so its existing disclosure block has to
-  // fire on a bare run rather than only behind the flag it used to need.
   // The footprint is gone: a harness already loads every skill's frontmatter
-  // description at session start, so the pointer line only duplicated it.
+  // description at session start, so a pointer line only duplicated it.
   it('writes no CLAUDE.md at all, and says nothing about a nudge', async () => {
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     expect(existsSync(join(home, '.claude', 'CLAUDE.md'))).toBe(false);
@@ -1378,123 +1189,25 @@ describe('runInstall: interactive walkthrough', () => {
     expect(await readFile(claudeMd, 'utf8')).toBe(before);
   });
 
-  /**
-   * A run that wired permissions has to say so and say how to take it back. It
-   * said it twice: a ✓ line with the count, the file and the link, then a dim
-   * paragraph repeating all three. The count and the link stay on the ✓ line, the
-   * undo stays here, and neither recites a rule. The full grant story lives in the
-   * `--json` envelope, asserted in the mode-gated block below.
-   */
-  it('discloses the permission rules it wired and how to take them back', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: async () => true }),
+  /** A re-run registers the same eleven and says so rather than reporting zero. */
+  it('reports the arms that answer, not the entries, on a run that changed nothing', async () => {
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const text = human(
+      await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true })),
     );
-    const text = human(res);
-    expect(text).toContain(
-      `${FREE_VERB_RULES.length} tenjin commands allowed in ${claudeSettingsPath(home)}`,
-    );
-    expect(text).toContain(`Undo anytime: remove those lines from ${claudeSettingsPath(home)}`);
-    for (const rule of FREE_VERB_RULES) expect(text).not.toContain(rule);
-    // Said once, not twice: the old pairing repeated the count and the file in a
-    // dim paragraph directly under the line that already carried them.
-    expect(text.match(/tenjin commands allowed in/g)).toHaveLength(1);
+    expect(text).not.toContain('entries');
+    expect(text).toContain('hooks        7 enabled; change: tenjin hooks disable <arm>');
   });
 
-  it('no longer prints the allowlist block or the security essays that went with it', async () => {
+  // The row counts what config says, so a machine that turned two arms off says
+  // so rather than repeating the default at every operator who reads it.
+  it('counts only the arms config leaves on', async () => {
+    await writeFile(
+      configPath(data),
+      JSON.stringify({ hooks: { 'web-search': false, primer: false } }),
+    );
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
-    const text = human(res);
-    // The rules and their caveats are reference material: `doctor` prints them,
-    // the README documents them, and a setup flow does not recite them.
-    for (const e of ALWAYS_SAFE_ALLOWLIST) expect(text).not.toContain(e.rule);
-    expect(text).not.toContain('Bash(tenjin buy:*)');
-    expect(text).not.toContain('Bash(tenjin session start:*)');
-    expect(text).not.toContain('mcp__tenjin__tenjin_publish');
-    expect(text).not.toContain('maxAutoSpend');
-    // And no rule for a money-moving or state-changing verb, in any form.
-    for (const e of NEVER_ALLOWLISTED) {
-      const verb = (e.command.split(' / ')[0] ?? e.command).replace(/^tenjin /, '');
-      expect(text).not.toMatch(new RegExp(`Bash\\(tenjin ${verb}[^)]*\\)`));
-    }
-  });
-
-  // The wording pin the old allowlist block carried, kept alive now that the
-  // block itself is gone. lib/permissions.ts refuses to call this tier
-  // read-only, and the consent surface must not claim what the module it draws
-  // from will not: `search` and `outcome` POST off-machine, `read` writes to the
-  // library and can present a wallet-derived delegation, and two of the nine
-  // rules are `wallet show` / `wallet balance`.
-  it('never calls the free tier read-only, and never claims it cannot touch your wallet', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
-    const surfaces = [human(res), PERMISSIONS_QUESTION];
-    for (const text of surfaces) {
-      expect(text).not.toMatch(/read-only/i);
-      expect(text).not.toMatch(/touch your wallet/i);
-      expect(text).not.toMatch(/free, read-only verbs/i);
-    }
-  });
-
-  /**
-   * Two sentences and a link. The question is a yes/no an operator answers in a
-   * couple of seconds, so it carries only what they can decide on: it cannot
-   * spend their money, and the rules land in a named file. The tier inventory,
-   * the caveats and the undos are one hop away, unchanged.
-   */
-  it('the consent question is short, honest, and points at the details', async () => {
-    expect(PERMISSIONS_QUESTION).toContain(
-      `Adds ${FREE_VERB_RULES.length} command rules to ~/.claude/settings.json`,
-    );
-    expect(PERMISSIONS_QUESTION).toMatch(/spend your money/);
-    expect(permissionsQuestion('auto')).toMatch(/spend your money/);
-    // The one thing auto changes about the answer, said in the question itself.
-    expect(permissionsQuestion('auto')).toContain('publish under your identity on its own');
-    expect(PERMISSIONS_QUESTION).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
-    expect(PERMISSIONS_QUESTION).not.toContain('tenjin doctor');
-    // No inventory, no rule syntax, no jargon the operator has not met yet.
-    expect(PERMISSIONS_QUESTION).not.toMatch(/Bash\(/);
-    expect(PERMISSIONS_QUESTION).not.toMatch(/send or store data/i);
-    expect(PERMISSIONS_QUESTION).not.toMatch(/keystore/i);
-    // Short enough to read at a prompt. The old one ran past 300 characters of
-    // inventory before the link, which is where the owner stopped reading.
-    for (const mode of ['review', 'auto', 'full-auto'] as const) {
-      const q = permissionsQuestion(mode);
-      expect(q.split('Details:')[0]!.length, mode).toBeLessThan(230);
-    }
-  });
-
-  it('the line reporting a write says how many are allowed, and where the rest is', async () => {
-    const permissionsLineOf = async (mode: PublishMode): Promise<string> => {
-      const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: mode },
-        makeCtx(),
-        deps({ isInteractive: true }),
-      );
-      return (
-        human(res)
-          .split('\n')
-          .find((l) => l.includes('Permissions:')) ?? ''
-      );
-    };
-
-    const review = await permissionsLineOf('review');
-    expect(review).toContain(`${FREE_VERB_RULES.length} tenjin commands allowed in`);
-    expect(review).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
-    // "free" was a qualifier this count needed only while it excluded the pair.
-    expect(review).not.toMatch(/free/i);
-
-    // The count is every rule of ours in the file, so an auto machine says eleven
-    // rather than reporting nine and leaving the pair to a line that no longer
-    // exists.
-    await rm(claudeSettingsPath(home), { force: true });
-    const auto = await permissionsLineOf('auto');
-    expect(auto).toContain(
-      `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed in`,
-    );
+    expect(human(res)).toContain('hooks        5 enabled; change: tenjin hooks disable <arm>');
   });
 
   it('--json carries the same three tiers in the machine payload', async () => {
@@ -1512,7 +1225,6 @@ describe('runInstall: interactive walkthrough', () => {
     expect(d.permissions.optIn.map((e) => e.rule)).toEqual([
       'Bash(tenjin buy:*)',
       'Bash(tenjin pay:*)',
-      'Bash(tenjin session start:*)',
     ]);
   });
 
@@ -1530,7 +1242,7 @@ describe('runInstall: interactive walkthrough', () => {
     expect(confirm).not.toHaveBeenCalled();
   });
 
-  it('creates a wallet on yes and shows the address + funding lines', async () => {
+  it('creates a wallet on yes and shows the address and the funding command', async () => {
     const create = vi.fn(async () => ADDR);
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1543,13 +1255,10 @@ describe('runInstall: interactive walkthrough', () => {
       }),
     );
     expect(create).toHaveBeenCalledOnce();
-    const text = human(res);
-    expect(text).toContain(ADDR);
-    expect(text).toContain('Fund it with a few dollars of USDC on Base');
-    expect(text).toContain('tenjin wallet balance');
+    expect(human(res)).toContain(`wallet       ${ADDR}, $0 - fund with: tenjin wallet fund`);
   });
 
-  it('declining the wallet prompt shows the create-later line, no create', async () => {
+  it('declining the wallet prompt shows the create-later row, no create', async () => {
     const create = vi.fn(async () => ADDR);
     const res = await runInstall(
       { harness: ['claude'] },
@@ -1562,7 +1271,7 @@ describe('runInstall: interactive walkthrough', () => {
       }),
     );
     expect(create).not.toHaveBeenCalled();
-    expect(human(res)).toContain('Create one later with: tenjin wallet create');
+    expect(human(res)).toContain('wallet       none - create with: tenjin wallet create');
   });
 
   it('--no-wallet skips the wallet prompt entirely', async () => {
@@ -1575,7 +1284,7 @@ describe('runInstall: interactive walkthrough', () => {
     expect(confirm).not.toHaveBeenCalled();
     // An opt-out is a `skipped` state with its reason and a remedy, not a
     // `declined` answer: nobody said no, the flag said never ask.
-    expect(human(res)).toContain('Wallet: none (flag)');
+    expect(human(res)).toContain('wallet       none (flag)');
     expect(walletOf(res.data)).toMatchObject({ status: 'skipped', reason: 'flag' });
     expect(walletOf(res.data).fix).toContain('tenjin wallet create');
   });
@@ -1593,13 +1302,13 @@ describe('runInstall: interactive walkthrough', () => {
       }),
     );
     expect(confirm).not.toHaveBeenCalled();
-    expect(human(res)).toContain(`Wallet: ${ADDR} (existing)`);
+    expect(human(res)).toContain(`wallet       ${ADDR} (existing)`);
   });
 
-  it('a TTY with no stdin renders the walkthrough with defaults, no prompt', async () => {
+  it('a TTY with no stdin renders the rows with defaults, no prompt', async () => {
     // humanOutput true (io.isTTY, no --json), but canPrompt false (stdin is not a
     // TTY in the test runner and no isInteractive override): default mode, no
-    // wallet prompt, still a full walkthrough.
+    // wallet prompt, still the full ten rows.
     const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
     const ttyCtx: CommandContext = {
       flags: { json: false, timeout: 10000 },
@@ -1608,40 +1317,39 @@ describe('runInstall: interactive walkthrough', () => {
     };
     const prompt = vi.fn(async () => 'review' as const);
     const confirm = vi.fn(async () => true);
-    const permissions = vi.fn(async () => true);
     const res = await runInstall(
       { harness: ['claude'] },
       ttyCtx,
-      deps({
-        promptPublishMode: prompt,
-        confirmWallet: confirm,
-        confirmPermissions: permissions,
-        walletExists: async () => false,
-      }),
+      deps({ promptPublishMode: prompt, confirmWallet: confirm, walletExists: async () => false }),
     );
     expect(prompt).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
-    expect(permissions).not.toHaveBeenCalled();
     // No prompt possible, so publishing settles the recommended mode too.
-    expect(human(res)).toContain('Publishing: auto');
+    expect(human(res)).toContain('publishing   auto');
     // No prompt, but a wallet all the same: a run nobody can answer takes the
     // default rather than treating silence as a no.
-    expect(human(res)).toContain(`Wallet: ${STUB_ADDRESS}, holding $0`);
+    expect(human(res)).toContain(`wallet       ${STUB_ADDRESS}, $0`);
   });
 
-  it('a green doctor says nothing; a failure surfaces with its fix', async () => {
+  /**
+   * One line for the embedded doctor run, whatever it found. A clean machine
+   * says so; a machine with a warn or a fail gets the tally and the command that
+   * explains it, and never a second copy of every check.
+   */
+  it('reports the doctor run as one line, pass or not', async () => {
     const okRes = await runInstall(
-      { harness: ['claude'], noHooks: true, claudeMd: false },
+      { harness: ['claude'], noHooks: true },
       makeCtx(),
       deps({ isInteractive: true }),
     );
-    expect(human(okRes)).not.toContain('need attention');
-    expect(human(okRes).split('\n')).toHaveLength(6);
+    expect(human(okRes)).toContain('tenjin doctor: 1 checks, all pass.');
 
-    const failing: DoctorChecks = {
+    const mixed: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
       checks: [
+        { name: 'node', status: 'ok', required: true, detail: '24.4.0' },
+        { name: 'balance', status: 'warn', required: false, detail: '$0.00 USDC' },
         {
           name: 'api',
           status: 'fail',
@@ -1658,12 +1366,13 @@ describe('runInstall: interactive walkthrough', () => {
     const failRes = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
-      deps({ isInteractive: true, collectChecks: async () => failing }),
+      deps({ isInteractive: true, collectChecks: async () => mixed }),
     );
     const text = human(failRes);
-    expect(text).toContain('need attention');
-    expect(text).toContain('api: unreachable');
-    expect(text).toContain('fix: check the base URL');
+    expect(text).toContain('3 checks: 1 ok, 1 warn, 1 fail; run tenjin doctor');
+    // The checks themselves are doctor's to print, not install's.
+    expect(text).not.toContain('unreachable');
+    expect(text).not.toContain('check the base URL');
   });
 
   it('emits no internal jargon (no "roadmap") in the data or walkthrough', async () => {
@@ -1716,48 +1425,20 @@ describe('runInstall: permissions decision', () => {
     );
   }
 
-  it('writes the allowlist on an interactive yes and says so in one line', async () => {
-    const confirm = vi.fn(async (_label: string) => true);
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
-    );
-    expect(confirm).toHaveBeenCalledOnce();
-    expect(confirm.mock.calls[0]![0]).toContain('without permission popups');
+  // No question of its own any more: the publish-mode select carries the consent,
+  // so an interactive run writes the rules and names them on one row.
+  it('writes the allowlist at a TTY and says so in one row', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     expect(human(res)).toContain(
-      `${FREE_VERB_RULES.length} tenjin commands allowed in ${claudeSettingsPath(home)}`,
+      `permissions  ${FREE_VERB_RULES.length} tenjin commands in ${claudeSettingsPath(home)}`,
     );
   });
 
-  it('writes nothing on an interactive no and offers the flag instead', async () => {
+  it('works under --json and reports the write in the envelope', async () => {
     const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: async () => false }),
-    );
-    expect(wiredOf(res.data)).toMatchObject({ skipped: 'declined', added: [] });
-    expect(await allowList()).toBeUndefined();
-    expect(human(res)).toContain('tenjin install --allow-free-verbs');
-  });
-
-  it('--allow-free-verbs wires it headlessly, with no prompt', async () => {
-    const confirm = vi.fn(async () => false);
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
-      makeCtx(),
-      deps({ confirmPermissions: confirm }),
-    );
-    expect(confirm).not.toHaveBeenCalled();
-    expect(wiredOf(res.data).added).toEqual([...FREE_VERB_RULES]);
-    expect(await allowList()).toEqual([...FREE_VERB_RULES]);
-  });
-
-  it('--allow-free-verbs works under --json and reports the write in the envelope', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], publishMode: 'review' },
       makeCtx({ json: true }),
       deps({ isInteractive: true }),
     );
@@ -1783,13 +1464,11 @@ describe('runInstall: permissions decision', () => {
   });
 
   it('--no-allow-free-verbs is the opt-out and writes nothing', async () => {
-    const confirm = vi.fn(async () => true);
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false },
+      { harness: ['claude'], noAllowFreeVerbs: true },
       makeCtx({ json: true }),
-      deps({ confirmPermissions: confirm }),
+      deps(),
     );
-    expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'declined', added: [] });
     expect(await allowList()).toBeUndefined();
   });
@@ -1805,7 +1484,7 @@ describe('runInstall: permissions decision', () => {
   // pending, not a flag that suppresses everything forever.
   it('--no-allow-free-verbs persists the exact rules that were pending', async () => {
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -1822,7 +1501,7 @@ describe('runInstall: permissions decision', () => {
    */
   it('a satisfied file clears a stale decline, even when satisfied by hand', async () => {
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
       makeCtx(),
       deps(),
     );
@@ -1846,17 +1525,13 @@ describe('runInstall: permissions decision', () => {
    */
   it('a later grant clears the declined list entirely', async () => {
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
       makeCtx(),
       deps(),
     );
     expect((await declinedList())?.length).toBeGreaterThan(0);
 
-    await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
-      makeCtx(),
-      deps(),
-    );
+    await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
     expect(await declinedList()).toEqual([]);
   });
 
@@ -1874,7 +1549,7 @@ describe('runInstall: permissions decision', () => {
   it('a failed grant leaves the decline on record, so refresh keeps honoring it', async () => {
     await writeSettings({ permissions: { allow: [] } });
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -1889,7 +1564,7 @@ describe('runInstall: permissions decision', () => {
     let res;
     try {
       res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        { harness: ['claude'], publishMode: 'auto' },
         makeCtx(),
         deps({ which: (bin) => bin === 'claude' }),
       );
@@ -1918,89 +1593,22 @@ describe('runInstall: permissions decision', () => {
     for (const rule of declinedBefore ?? []) expect(pending).not.toContain(rule);
   });
 
-  /**
-   * Greptile's round-2 delta on the same P1 (tenjin-agent#272): the wire-then-
-   * clear fix above landed on the headless/grant branch but not on the
-   * interactive-yes branch eleven lines below it, which still cleared
-   * `freeVerbsDeclined` before `wireFreeVerbAllowlist` returned. An operator who
-   * says yes to the prompt but whose settings write is then refused loses the
-   * record just the same way, and the next refresh re-nags about rules the
-   * operator already declined. Same race, same `changed-since-read` interleave
-   * hook, but driven through `confirmPermissions: async () => true` instead of
-   * `allowFreeVerbs: true`.
-   */
-  it('a failed interactive grant leaves the decline on record, so refresh keeps honoring it', async () => {
-    await writeSettings({ permissions: { allow: [] } });
-    await runInstall(
-      { harness: ['claude'], publishMode: 'auto' },
-      makeCtx(),
-      deps({
-        isInteractive: true,
-        confirmPermissions: async () => false,
-        which: (bin) => bin === 'claude',
-      }),
-    );
-    const declinedBefore = await declinedList();
-    expect(declinedBefore?.length).toBeGreaterThan(0);
-
-    // The file changes the instant the grant's own snapshot read returns, so
-    // its later current-vs-raw compare sees a moved file and refuses to write.
-    fsHooks.settingsInterleave = `${JSON.stringify({ permissions: { allow: [] }, theirs: 1 }, null, 2)}\n`;
-    fsHooks.settingsInterleaveOnRead = 2;
-    fsHooks.settingsReads = 0;
-    let res;
-    try {
-      res = await runInstall(
-        { harness: ['claude'], publishMode: 'auto' },
-        makeCtx(),
-        deps({
-          isInteractive: true,
-          confirmPermissions: async () => true,
-          which: (bin) => bin === 'claude',
-        }),
-      );
-    } finally {
-      fsHooks.settingsInterleave = '';
-      fsHooks.settingsReads = 0;
-      fsHooks.settingsInterleaveOnRead = 1;
-    }
-    expect(wiredOf(res.data).skipped).toBe('changed-since-read');
-    // The rules never landed...
-    expect(await allowList()).toEqual([]);
-    // ...and the refusal must not have erased the record that told the
-    // operator so: it survives exactly as it was.
-    expect(await declinedList()).toEqual(declinedBefore);
-
-    // A follow-up refresh must still honor that surviving record rather than
-    // re-nagging: with the decline erased (the bug), these rules would be
-    // recomputed as freshly pending on every refresh, which is the #234
-    // regression this whole changeset exists to close.
-    const refreshRes = await runInstall(
-      { refresh: true },
-      makeCtx(),
-      deps({ which: (bin) => bin === 'claude' }),
-    );
-    const refreshPending = (refreshRes.data as { permissions: { pending: string[] } }).permissions
-      .pending;
-    for (const rule of declinedBefore ?? []) expect(refreshPending).not.toContain(rule);
-  });
-
   // Every skipped state names the command that changes it, the same contract a
   // CliError's `fix` carries, so a machine consumer never has to parse prose.
   it('carries a fix string on every skipped permissions state', async () => {
     const declined = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false },
+      { harness: ['claude'], noAllowFreeVerbs: true },
       makeCtx({ json: true }),
       deps(),
     );
-    expect(wiredOf(declined.data).fix).toContain('tenjin install --allow-free-verbs');
+    expect(wiredOf(declined.data).fix).toContain('tenjin install');
 
     const dry = await runInstall(
       { harness: ['claude'], dryRun: true },
       makeCtx({ json: true }),
       deps(),
     );
-    expect(wiredOf(dry.data).fix).toContain('tenjin install --allow-free-verbs');
+    expect(wiredOf(dry.data).fix).toContain('tenjin install');
 
     const codex = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
     expect(wiredOf(codex.data).fix).toContain('tenjin doctor');
@@ -2017,50 +1625,37 @@ describe('runInstall: permissions decision', () => {
   });
 
   it('is idempotent: a second run adds nothing and reports already-present', async () => {
-    const args = { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' };
+    const args = { harness: ['claude'], publishMode: 'review' };
     await runInstall(args, makeCtx(), deps());
     const res = await runInstall(args, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data).added).toEqual([]);
     expect(wiredOf(res.data).alreadyPresent).toEqual([...FREE_VERB_RULES]);
     expect(await allowList()).toEqual([...FREE_VERB_RULES]);
-    expect(human(res)).toContain('were already allowed');
+    expect(human(res)).toContain(`${FREE_VERB_RULES.length} tenjin commands in`);
   });
 
   // Re-running install is the advice for refreshing a stale setup, so this is the
   // ordinary second-run path, not an edge case.
-  it('does not re-ask once every rule is already allowed', async () => {
-    await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
-      makeCtx(),
-      deps(),
-    );
-    const confirm = vi.fn(async () => true);
+  it('adds nothing once every rule is already allowed', async () => {
+    await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
     const res = await runInstall(
       { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
+      deps({ isInteractive: true }),
     );
-    expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data)).toMatchObject({ added: [], alreadyPresent: [...FREE_VERB_RULES] });
-    expect(human(res)).toContain('were already allowed');
+    expect(human(res)).toContain(`${FREE_VERB_RULES.length} tenjin commands in`);
   });
 
-  // The no-prompt path must not perform a SECOND read. Re-reading meant a rule
-  // revoked between probe and write was silently re-added without a prompt, which
-  // is the one thing a consent gate cannot do.
+  // The satisfied path must not perform a SECOND read: re-reading meant a rule
+  // revoked between probe and write was silently re-added.
   it('reports the probe snapshot and writes nothing if a rule is revoked mid-run', async () => {
-    await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
-      makeCtx(),
-      deps(),
-    );
-    const confirm = vi.fn(async () => true);
+    await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
     const res = await runInstall(
       { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
       deps({
         isInteractive: true,
-        confirmPermissions: confirm,
         // Probe says satisfied; the file loses a rule immediately afterwards.
         inspectPermissions: async (h) => {
           const out = await inspectFreeVerbRules(h);
@@ -2069,9 +1664,8 @@ describe('runInstall: permissions decision', () => {
         },
       }),
     );
-    expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data).added).toEqual([]);
-    // The revoked rule stays revoked: no unprompted re-grant.
+    // The revoked rule stays revoked: no second read, no silent re-grant.
     expect(await allowList()).toEqual([...FREE_VERB_RULES.slice(1)]);
   });
 
@@ -2088,11 +1682,7 @@ describe('runInstall: permissions decision', () => {
     fsHooks.settingsReads = 0;
     let res;
     try {
-      res = await runInstall(
-        { harness: ['claude'] },
-        makeCtx(),
-        deps({ isInteractive: true, confirmPermissions: async () => true }),
-      );
+      res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     } finally {
       fsHooks.settingsInterleave = '';
       fsHooks.settingsReads = 0;
@@ -2100,65 +1690,52 @@ describe('runInstall: permissions decision', () => {
     }
     expect(wiredOf(res.data).skipped).toBe('changed-since-read');
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
-    expect(text).toContain('changed while it was being updated');
-    expect(text).toContain('Re-run: tenjin install');
-    expect(text).not.toContain('Fix it, then');
+    expect(text).toContain('changed mid-write, nothing written');
+    expect(text).toContain('re-run: tenjin install');
+    expect(text).not.toContain('was left untouched');
   });
 
-  it('still asks when only SOME of the rules are allowed', async () => {
+  it('adds only the rules that are missing', async () => {
     await writeSettings({ permissions: { allow: [FREE_VERB_RULES[0]] } });
-    const confirm = vi.fn(async () => true);
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
-    );
-    expect(confirm).toHaveBeenCalledTimes(1);
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data).added).toEqual(FREE_VERB_RULES.slice(1));
   });
 
   // A file we cannot read is not "already allowed": the probe returns null and the
-  // question is still asked, so the writer gets to report why nothing was written.
-  it('still asks when the settings file cannot be parsed', async () => {
+  // writer is still called, so it gets to report why nothing was written.
+  it('reaches the writer when the settings file cannot be parsed', async () => {
     await writeSettings('not json at all');
-    const confirm = vi.fn(async () => true);
     const res = await runInstall(
       { harness: ['claude'], publishMode: 'auto' },
       makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
+      deps({ isInteractive: true }),
     );
-    expect(confirm).toHaveBeenCalledTimes(1);
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
   });
 
   // Under `review` the retraction runs first and reads the same file, so an
-  // unreadable one is settled before the question: nothing can be written either
-  // way, and asking a question whose yes cannot be honored is a prompt for
-  // nothing. What the operator gets instead is the pair named, with the command
-  // that always works.
-  it('asks nothing on an unreadable file under review, and names the pair', async () => {
+  // unreadable one is settled there: nothing can be written either way, and what
+  // the operator gets instead is the pair named, with the command that always
+  // works.
+  it('settles an unreadable file under review, and names the pair', async () => {
     await writeSettings('not json at all');
-    const confirm = vi.fn(async () => true);
     const res = await runInstall(
       { harness: ['claude'], publishMode: 'review' },
       makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
+      deps({ isInteractive: true }),
     );
-    expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'unparsable' });
     const fix = wiredOf(res.data).fix ?? '';
     for (const rule of MODE_GATED_RULES) expect(fix).toContain(rule);
     expect(fix).toContain('tenjin uninstall');
   });
 
-  it('--dry-run neither prompts nor writes', async () => {
-    const confirm = vi.fn(async () => true);
+  it('--dry-run writes nothing', async () => {
     const res = await runInstall(
-      { harness: ['claude'], dryRun: true, allowFreeVerbs: true },
+      { harness: ['claude'], dryRun: true },
       makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
+      deps({ isInteractive: true }),
     );
-    expect(confirm).not.toHaveBeenCalled();
     expect(wiredOf(res.data)).toMatchObject({ skipped: 'dry-run' });
     expect(await allowList()).toBeUndefined();
   });
@@ -2171,7 +1748,7 @@ describe('runInstall: permissions decision', () => {
    */
   it('--dry-run reports the rules it WOULD write, grant included', async () => {
     const res = await runInstall(
-      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], dryRun: true, publishMode: 'auto' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -2207,26 +1784,23 @@ describe('runInstall: permissions decision', () => {
       permissions: { allow: [...FREE_VERB_RULES, PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
     });
     const res = await runInstall(
-      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], dryRun: true, publishMode: 'review' },
       makeCtx(),
       deps({ isInteractive: true }),
     );
     const line =
       human(res)
         .split('\n')
-        .find((l) => l.includes('Permissions:')) ?? '';
-    expect(line).toContain('would remove 2 rule(s) for publish and edit');
-    // Nothing happened, so nothing is "otherwise" unchanged.
-    expect(line).not.toContain('otherwise unchanged');
-    expect(line).toContain('unchanged (dry run)');
-    // Past tense belongs to a run that actually wrote.
-    expect(line).not.toContain('were removed');
+        .find((l) => l.includes('permissions')) ?? '';
+    // Future tense: past tense belongs to a run that actually wrote.
+    expect(line).toContain('2 to remove');
+    expect(line).not.toContain('2 removed');
     expect(await allowList()).toEqual([...FREE_VERB_RULES, PUBLISH_MODE_RULE, EDIT_MODE_RULE]);
   });
 
   it('--dry-run on review plans the free tier only, and no grant', async () => {
     const res = await runInstall(
-      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], dryRun: true, publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -2236,9 +1810,9 @@ describe('runInstall: permissions decision', () => {
     expect(await allowList()).toBeUndefined();
   });
 
-  it('--dry-run says "would allow" in the human line, and offers no undo', async () => {
+  it('--dry-run says "would allow" on the permissions row', async () => {
     const res = await runInstall(
-      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], dryRun: true, publishMode: 'auto' },
       makeCtx(),
       deps({ isInteractive: true }),
     );
@@ -2246,19 +1820,13 @@ describe('runInstall: permissions decision', () => {
     expect(text).toContain(
       `would allow ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in`,
     );
-    expect(text).toContain('Would turn off: tenjin config set publish.mode review');
-    // The tail that tells an operator how to undo a write belongs to a write.
-    expect(text).not.toContain('Undo anytime:');
+    expect(text).toContain('Dry run: nothing was written.');
   });
 
   it('--dry-run on an already-wired machine says so rather than planning a write', async () => {
-    await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
-      makeCtx({ json: true }),
-      deps(),
-    );
+    await runInstall({ harness: ['claude'], publishMode: 'auto' }, makeCtx({ json: true }), deps());
     const res = await runInstall(
-      { harness: ['claude'], dryRun: true, allowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], dryRun: true, publishMode: 'auto' },
       makeCtx(),
       deps({ isInteractive: true }),
     );
@@ -2267,14 +1835,8 @@ describe('runInstall: permissions decision', () => {
     expect(human(res)).toContain('unchanged (dry run)');
   });
 
-  it('skips a codex-only install without asking, and says why', async () => {
-    const confirm = vi.fn(async () => true);
-    const res = await runInstall(
-      { harness: ['codex'] },
-      makeCtx(),
-      deps({ isInteractive: true, confirmPermissions: confirm }),
-    );
-    expect(confirm).not.toHaveBeenCalled();
+  it('skips a codex-only install, and says why', async () => {
+    const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data)).toMatchObject({ harness: 'codex', skipped: 'harness-not-claude' });
     expect(await allowList()).toBeUndefined();
     expect(human(res)).toContain('Claude Code only');
@@ -2291,11 +1853,7 @@ describe('runInstall: permissions decision', () => {
     // one that echoes the file. A payload that fails later gets a positional
     // message with no excerpt and would test nothing.
     await writeFile(claudeSettingsPath(home), '\x1b[2K\x1b[1G\x1b[32m OK: safe\x1b[0m{"a":1}');
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     const wired = wiredOf(res.data);
     expect(wired.skipped).toBe('unparsable');
     // The escapes really do reach the warning: V8 quotes the input it choked on.
@@ -2312,11 +1870,7 @@ describe('runInstall: permissions decision', () => {
   it('warns and writes nothing when settings.json is unparsable', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await writeFile(claudeSettingsPath(home), '{ not json');
-    const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true },
-      makeCtx(),
-      deps({ isInteractive: true }),
-    );
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
     expect(wiredOf(res.data).skipped).toBe('unparsable');
     expect(await readFile(claudeSettingsPath(home), 'utf8')).toBe('{ not json');
     const text = human(res);
@@ -2330,11 +1884,7 @@ describe('runInstall: permissions decision', () => {
       claudeSettingsPath(home),
       JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(git status:*)'] } }, null, 2),
     );
-    await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
-      makeCtx(),
-      deps(),
-    );
+    await runInstall({ harness: ['claude'], publishMode: 'review' }, makeCtx(), deps());
     const settings = JSON.parse(await readFile(claudeSettingsPath(home), 'utf8')) as {
       model: string;
       permissions: { allow: string[] };
@@ -2345,7 +1895,7 @@ describe('runInstall: permissions decision', () => {
 
   it('keeps the three recommendation tiers beside the write outcome', async () => {
     const res = await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+      { harness: ['claude'], publishMode: 'review' },
       makeCtx({ json: true }),
       deps(),
     );
@@ -2366,7 +1916,7 @@ describe('runInstall: permissions decision', () => {
   describe('the publish rule follows publish.mode', () => {
     it('writes it when --publish-mode names auto on this run', async () => {
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        { harness: ['claude'], publishMode: 'auto' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2376,22 +1926,18 @@ describe('runInstall: permissions decision', () => {
 
     it('writes it when auto is already the configured mode', async () => {
       await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        { harness: ['claude'], publishMode: 'auto' },
         makeCtx({ json: true }),
         deps(),
       );
       // Second run names no mode: it reads `auto` back out of config.
-      const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true },
-        makeCtx({ json: true }),
-        deps(),
-      );
+      const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
       expect(wiredOf(res.data).alreadyPresent).toContain(PUBLISH_MODE_RULE);
     });
 
     it('does not write it on review', async () => {
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], publishMode: 'review' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2435,10 +1981,10 @@ describe('runInstall: permissions decision', () => {
       expect(grant.state).toBe('added');
       expect(grant.disclosure).toContain('publish.mode auto');
       expect(grant.disclosure).toContain('without a harness prompt');
-      // The keystore is the part the free-tier wording does not cover, and the
-      // part `tenjin session start` exists as an explicit opt-in for. The rest of
-      // what the pair clears is in docs/agent-permissions.md; this line stays one
-      // sentence.
+      // The keystore is the part the free-tier wording does not cover at this
+      // scope: `read` opens it for a read-scoped key, and this pair mints a
+      // strictly broader read+write one. The rest of what the pair clears is in
+      // docs/agent-permissions.md; this line stays one sentence.
       expect(grant.disclosure).toContain('open your wallet keystore');
       expect(grant.undo).toEqual([
         'tenjin install --publish-mode review',
@@ -2474,11 +2020,11 @@ describe('runInstall: permissions decision', () => {
       const res = await runInstall(
         { harness: ['claude'], publishMode: 'auto' },
         makeCtx(),
-        deps({ isInteractive: true, confirmPermissions: async () => true }),
+        deps({ isInteractive: true }),
       );
       const text = human(res);
       expect(text).toContain(
-        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed`,
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in`,
       );
       expect(text).not.toMatch(/free tenjin commands/);
     });
@@ -2506,26 +2052,23 @@ describe('runInstall: permissions decision', () => {
       const res = await runInstall(
         { harness: ['claude'], publishMode: 'auto' },
         makeCtx(),
-        deps({ isInteractive: true, confirmPermissions: async () => true }),
+        deps({ isInteractive: true }),
       );
       /**
-       * PRESENCE, not absence. The first cut of this test pinned the lean terminal
-       * with `not.toMatch(/Bash\(/)` and `not.toContain('tenjin uninstall')`, which
-       * encodes the deletion rather than the disclosure: both pass just as well
-       * when the whole block goes missing. These assert the two lines an operator
+       * PRESENCE, not absence. Pinning the lean terminal with `not.toMatch(/Bash\(/)`
+       * alone encodes the deletion rather than the disclosure: it passes just as
+       * well when the whole row goes missing. These assert the two rows an operator
        * has to leave the install with.
        */
       const lines = human(res).split('\n');
-      const publishing = lines.find((l) => l.includes('Publishing:')) ?? '';
-      expect(publishing).toContain('Publishing: auto');
-      expect(publishing).toContain('publishes and updates pieces on its own, under your identity');
-      expect(publishing).toContain('Turn off: tenjin config set publish.mode review');
+      const publishing = lines.find((l) => l.includes('publishing')) ?? '';
+      expect(publishing).toContain('publishing   auto');
+      expect(publishing).toContain('your agent publishes under your identity');
 
-      const permissions = lines.find((l) => l.includes('Permissions:')) ?? '';
+      const permissions = lines.find((l) => l.includes('permissions')) ?? '';
       expect(permissions).toContain(
-        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands allowed in`,
+        `${FREE_VERB_RULES.length + MODE_GATED_RULES.length} tenjin commands in`,
       );
-      expect(permissions).toContain(`Details: ${PERMISSIONS_DOC_URL}`);
 
       // Lean stays lean: the depth lives in the envelope and the doc, both pinned
       // above and in `docs/agent-permissions.md`.
@@ -2539,13 +2082,13 @@ describe('runInstall: permissions decision', () => {
         deps({ isInteractive: true }),
       );
       expect(human(res)).not.toContain(PUBLISH_MODE_RULE);
-      expect(human(res)).not.toContain('Turn off:');
+      expect(human(res)).toContain('publishing   review');
     });
 
     // `--no-allow-free-verbs` still refuses the whole write, publish rule included.
     it('writes nothing at all when the allowlist itself is refused', async () => {
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: false },
+        { harness: ['claude'], noAllowFreeVerbs: true },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2565,7 +2108,7 @@ describe('runInstall: permissions decision', () => {
         permissions: { allow: [FREE_VERB_RULES[0], PUBLISH_MODE_RULE, EDIT_MODE_RULE] },
       });
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+        { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2590,43 +2133,39 @@ describe('runInstall: permissions decision', () => {
         return (
           human(res)
             .split('\n')
-            .find((l) => l.includes('Permissions:')) ?? ''
+            .find((l) => l.includes('permissions')) ?? ''
         );
       };
 
       const declined = await lineFor({
         harness: ['claude'],
-        allowFreeVerbs: false,
+        noAllowFreeVerbs: true,
         publishMode: 'review',
       });
-      expect(declined).toContain('2 rule(s) for publish and edit were removed');
-      expect(declined).not.toMatch(/Permissions: unchanged\./);
+      expect(declined).toContain('2 removed');
 
       const otherHarness = await lineFor({ harness: ['codex'], publishMode: 'review' });
-      expect(otherHarness).toContain('2 rule(s) for publish and edit were removed');
-      // "not wired (Claude Code only)" read as "your Claude settings were left
-      // alone", which is the opposite of what just happened to them.
-      expect(otherHarness).not.toMatch(/not wired \(Claude Code only\)/);
+      expect(otherHarness).toContain('2 removed');
       // And it NAMES the file. A non-Claude skip carries no path on purpose, but
       // once this run has deleted from that file, withholding its name is the
       // thing that leaves the operator unable to check.
       expect(otherHarness).toContain(claudeSettingsPath(home));
     });
 
-    // And the word stays honest the other way: a run that retracted nothing and
-    // wrote nothing is the only one allowed to say "unchanged".
-    it('still says unchanged when there was genuinely nothing to take back', async () => {
+    // And the row stays honest the other way: a run that retracted nothing says
+    // nothing about a retraction.
+    it('says nothing about a retraction when there was nothing to take back', async () => {
       await writeSettings({ permissions: { allow: ['Bash(git status:*)'] } });
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: false, publishMode: 'review' },
+        { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'review' },
         makeCtx(),
         deps({ isInteractive: true }),
       );
       const line = human(res)
         .split('\n')
-        .find((l) => l.includes('Permissions:'));
-      expect(line).toMatch(/Permissions: unchanged\./);
-      expect(line).not.toContain('were removed');
+        .find((l) => l.includes('permissions'));
+      expect(line).toContain('none written (--no-allow-free-verbs)');
+      expect(line).not.toContain('removed');
     });
 
     // Same ordering bug, the other guard: scoping a WRITE to the harnesses a run
@@ -2663,7 +2202,7 @@ describe('runInstall: permissions decision', () => {
         },
       });
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], publishMode: 'review' },
         makeCtx(),
         deps({ isInteractive: true }),
       );
@@ -2674,15 +2213,12 @@ describe('runInstall: permissions decision', () => {
       }
       expect(await allowList()).toEqual(['Bash(git status:*)', ...FREE_VERB_RULES]);
 
-      // And the line says what happened rather than claiming a tier it never wrote.
+      // And the row says what happened rather than claiming a tier it never wrote:
+      // what is allowed now, and how many rules this run took away.
       const text = human(res);
-      expect(text).toContain(`${FREE_VERB_RULES.length} tenjin commands allowed in`);
-      expect(text).not.toContain('were already allowed');
-      expect(text).toContain('Publishing is back to asking first');
-      // The legacy sweep's note is about commands that no longer exist. `publish`
-      // and `edit` very much exist, so they must not be counted into it.
+      expect(text).toContain(`${FREE_VERB_RULES.length} tenjin commands in`);
       expect(text).toContain(
-        `Removed ${LEGACY_ALLOWLIST_RULES.length} permission rule(s) an older tenjin left`,
+        `, ${MODE_GATED_RULES.length + LEGACY_ALLOWLIST_RULES.length} removed`,
       );
     });
 
@@ -2690,12 +2226,12 @@ describe('runInstall: permissions decision', () => {
     // must not outlive it.
     it('takes it back when the mode returns to review', async () => {
       await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        { harness: ['claude'], publishMode: 'auto' },
         makeCtx({ json: true }),
         deps(),
       );
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'review' },
+        { harness: ['claude'], publishMode: 'review' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2703,38 +2239,18 @@ describe('runInstall: permissions decision', () => {
       expect(await allowList()).toEqual([...FREE_VERB_RULES]);
     });
 
-    // The consent prompt has to name what the write actually carries.
-    // What auto changes about the answer, in the question itself: the count goes
-    // up and the agent publishes as them. NOT the rule strings, which the operator
-    // has not met yet and cannot act on at a yes/no.
-    it('discloses what auto adds in the question it asks', async () => {
-      const confirm = vi.fn(async (_label: string) => true);
-      await runInstall(
-        { harness: ['claude'], publishMode: 'auto' },
-        makeCtx(),
-        deps({ isInteractive: true, confirmPermissions: confirm }),
-      );
-      const asked = confirm.mock.calls[0]![0];
-      expect(asked).toContain(
-        `Adds ${FREE_VERB_RULES.length + MODE_GATED_RULES.length} command rules`,
-      );
-      expect(asked).toContain('publish.mode auto your agent will publish under your identity');
-      expect(asked).not.toContain(PUBLISH_MODE_RULE);
-    });
-
-    it('names no extra rule in the question on review', async () => {
-      const confirm = vi.fn(async (_label: string) => true);
-      await runInstall(
-        { harness: ['claude'], publishMode: 'review' },
-        makeCtx(),
-        deps({ isInteractive: true, confirmPermissions: confirm }),
-      );
-      expect(confirm.mock.calls[0]![0]).not.toContain(PUBLISH_MODE_RULE);
+    // The consent for the pair is the `auto` hint on the publish-mode select, and
+    // it names the two verbs rather than the rule strings, which an operator has
+    // not met yet and cannot act on mid-install.
+    it('names the two verbs in the auto hint, and no rule string', () => {
+      const auto = PUBLISH_MODE_CHOICES.find((c) => c.value === 'auto');
+      expect(auto?.hint).toContain('`tenjin publish` and `tenjin edit`');
+      expect(auto?.hint).not.toContain(PUBLISH_MODE_RULE);
     });
 
     it('carries the mode-gated tier in the envelope', async () => {
       const res = await runInstall(
-        { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+        { harness: ['claude'], publishMode: 'auto' },
         makeCtx({ json: true }),
         deps(),
       );
@@ -2744,10 +2260,10 @@ describe('runInstall: permissions decision', () => {
   });
 });
 
-// --- The five decisions, in order, and nothing else -------------------------------
+// --- Two questions, in order, and nothing else ------------------------------------
 
-describe('runInstall: at most five questions', () => {
-  it('asks publishing, permissions, search hooks, wallet, bazaarPay, and stops there', async () => {
+describe('runInstall: two questions', () => {
+  it('asks publishing and the wallet, and stops there', async () => {
     const asked: string[] = [];
     await runInstall(
       { harness: ['claude'] },
@@ -2758,26 +2274,14 @@ describe('runInstall: at most five questions', () => {
           asked.push('publishing');
           return 'auto';
         },
-        confirmPermissions: async () => {
-          asked.push('permissions');
-          return true;
-        },
-        promptSearchHooks: async () => {
-          asked.push('search-hooks');
-          return 'auto';
-        },
         walletExists: async () => false,
         confirmWallet: async () => {
           asked.push('wallet');
           return false;
         },
-        confirmBazaarPay: async () => {
-          asked.push('bazaar-pay');
-          return false;
-        },
       }),
     );
-    expect(asked).toEqual(['publishing', 'permissions', 'search-hooks', 'wallet', 'bazaar-pay']);
+    expect(asked).toEqual(['publishing', 'wallet']);
   });
 
   it('asks nothing at all on a machine run', async () => {
@@ -2791,20 +2295,8 @@ describe('runInstall: at most five questions', () => {
           asked.push('publishing');
           return 'auto';
         },
-        confirmPermissions: async () => {
-          asked.push('permissions');
-          return true;
-        },
-        promptSearchHooks: async () => {
-          asked.push('search-hooks');
-          return 'auto';
-        },
         confirmWallet: async () => {
           asked.push('wallet');
-          return true;
-        },
-        confirmBazaarPay: async () => {
-          asked.push('bazaar-pay');
           return true;
         },
       }),
@@ -2876,13 +2368,21 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(h.notes.join('\n')).toContain('take precedence');
   });
 
-  it('tells the human that publish is wired and the hosted skill was superseded', async () => {
+  // The terminal counts the skills; which ones landed, and what became of a
+  // hosted mirror that was already there, is the envelope's to carry.
+  it('reports the superseded hosted skill in the envelope, not on a row', async () => {
     await seedHostedSkill(join(home, '.claude', 'skills'));
     const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    const h = asData(res.data).harnesses[0]!;
+    expect(h.skills.filter((sk) => sk.cli).map((sk) => sk.name)).toEqual([...CLI_SKILL_NAMES]);
+    expect(h.notes.join('\n')).toContain('zero-install fallback');
+    expect(h.notes.join('\n')).toContain('take precedence');
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
-    expect(text).toContain('tenjin-search, tenjin-publish (CLI)');
-    expect(text).toContain('zero-install fallback');
-    expect(text).toContain('take precedence');
+    expect(text).toContain(`  skills       3 in ${join(home, '.claude', 'skills')}`);
+    // The writer's own warning still prints: it names a file this run replaced.
+    // The notice that the CLI skills now take precedence does not.
+    expect(text).toContain('was replaced by');
+    expect(text).not.toContain('take precedence');
   });
 
   // The notice is about arriving through the hosted skill. After run 1 the mirror on
@@ -2908,10 +2408,10 @@ describe('runInstall: hosted skill already present (#35)', () => {
     expect(h.notes.join('\n')).toContain('was already here');
   });
 
-  // The hosted-skill-first funnel puts the mirror in BOTH targets, and the notice
-  // is emitted once per harness. Without the directory the two lines are byte
-  // identical and read as the CLI stuttering.
-  it('names the directory, so a two-harness machine gets two distinguishable lines', async () => {
+  // The hosted-skill-first funnel puts the mirror in BOTH targets, so the skills
+  // row names each directory: a count with no directory cannot tell a
+  // two-harness machine which tree it is talking about.
+  it('names every directory it wrote, on one row', async () => {
     const claudeSkills = join(home, '.claude', 'skills');
     const sharedSkills = join(home, '.agents', 'skills');
     await seedHostedSkill(claudeSkills);
@@ -2922,15 +2422,10 @@ describe('runInstall: hosted skill already present (#35)', () => {
       makeCtx(),
       deps({ isInteractive: true }),
     );
-    const lines = (res.humanLines ?? [])
-      .map((l) => l.replace(/\x1b\[[0-9;]*m/g, '')) // eslint-disable-line no-control-regex
-      // The notice's own phrase: the per-harness warning says "stays as", and the
-      // summary's skill list says "(hosted, zero-install fallback)".
-      .filter((l) => l.includes('kept as the zero-install fallback'));
-    expect(lines).toHaveLength(2);
-    expect(new Set(lines).size).toBe(2);
-    expect(lines.some((l) => l.includes(claudeSkills))).toBe(true);
-    expect(lines.some((l) => l.includes(sharedSkills))).toBe(true);
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain(`  skills       3 in ${claudeSkills}; 3 in ${sharedSkills}`);
+    expect(text).toContain('tenjin is wired for Claude Code and Codex.');
+    for (const h of asData(res.data).harnesses) expect(h.hostedArrivedFirst).toBe(true);
   });
 
   it('re-running on top of a hosted-skill machine is idempotent', async () => {
@@ -3694,9 +3189,7 @@ describe('runInstall: the skill-directory write', () => {
   // delivered by the per-file atomic renames (install.ts says the same).
   it('leaves concurrent installs neither failing nor corrupting the tree', async () => {
     const runs = await Promise.allSettled(
-      Array.from({ length: 5 }, () =>
-        runInstall({ harness: ['claude'], allowFreeVerbs: true }, makeCtx(), deps()),
-      ),
+      Array.from({ length: 5 }, () => runInstall({ harness: ['claude'] }, makeCtx(), deps())),
     );
     expect(runs.filter((r) => r.status === 'rejected')).toEqual([]);
     for (const name of SKILL_NAMES) {
@@ -3737,15 +3230,14 @@ describe('runInstall: the skill-directory write', () => {
   });
 });
 
-// --- Decision 3: the harness search hooks ------------------------------------------
+// --- The harness hook entries -------------------------------------------------------
 
-describe('runInstall: search hooks', () => {
+describe('runInstall: harness hooks', () => {
   type HooksData = {
     hooks: {
       harness: string;
       path?: string;
       hooksDir: string;
-      mode: string;
       entries: number;
       wrote: boolean;
       url?: string;
@@ -3761,19 +3253,10 @@ describe('runInstall: search hooks', () => {
     const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
     return raw === null ? {} : (JSON.parse(raw) as Record<string, unknown>);
   }
-  async function persistedMode(): Promise<string | undefined> {
+  async function persistedHooks(): Promise<Record<string, boolean> | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
-    const hooks = (JSON.parse(raw) as { hooks?: { webSearch?: string; searchMode?: string } })
-      .hooks;
-    return hooks?.webSearch ?? hooks?.searchMode;
-  }
-  async function persistedAgentMode(): Promise<string | undefined> {
-    const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
-    if (raw === null) return undefined;
-    const hooks = (JSON.parse(raw) as { hooks?: { agentDispatch?: string; dispatchMode?: string } })
-      .hooks;
-    return hooks?.agentDispatch ?? hooks?.dispatchMode;
+    return (JSON.parse(raw) as { hooks?: Record<string, boolean> }).hooks;
   }
 
   // A bare headless install is the one that most needs the hooks, and it is the
@@ -3783,7 +3266,6 @@ describe('runInstall: search hooks', () => {
     const h = hooksOf(res.data);
 
     expect(h.skipped).toBeUndefined();
-    expect(h.mode).toBe('auto');
     expect(h.entries).toBe(11);
     expect(h.wrote).toBe(true);
     expect(h.hooksDir).toBe(join(data, 'hooks'));
@@ -3796,7 +3278,9 @@ describe('runInstall: search hooks', () => {
     expect(entries).toHaveLength(11);
     expect(entries.filter(([, e]) => e.hooks[0]?.type === 'http')).toHaveLength(9);
     expect(entries.filter(([, e]) => e.hooks[0]?.type === 'command')).toHaveLength(2);
-    expect(await persistedMode()).toBe('auto');
+    // Install writes no hook key: the seven arms are on by default and each is
+    // one `tenjin config set hooks.<arm> false` away.
+    expect(await persistedHooks()).toBeUndefined();
   });
 
   // settings.json hooks load at session start, so an operator who does not
@@ -3805,64 +3289,23 @@ describe('runInstall: search hooks', () => {
     const human = (res: { humanLines?: string[] }): string =>
       (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
 
-    // The flag settles the hooks without a prompt; isInteractive is only what
-    // makes install return the walkthrough as humanLines at all.
+    // isInteractive is only what makes install return the walkthrough as
+    // humanLines at all; nothing about the hooks is asked.
     const wired = await runInstall(
-      { harness: ['claude'], searchHooks: 'auto' },
+      { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true }),
     );
-    expect(human(wired)).toContain('Restart Claude Code');
-    expect(human(wired)).toContain('read once at session start');
+    expect(human(wired)).toContain('Restart Claude Code to load the hooks.');
 
-    // `--no-hooks`, not `--search-hooks off`: the entry set is permanent now and
-    // `off` is a per-fire gate the arms read, so the only run that wires nothing
-    // is the one that declined to wire.
+    // `--no-hooks` is the only run that wires nothing: the entry set is permanent
+    // now and every other switch is a per-fire gate the arms read.
     const declined = await runInstall(
       { harness: ['claude'], noHooks: true },
       makeCtx(),
       deps({ isInteractive: true }),
     );
     expect(human(declined)).not.toContain('Restart Claude Code');
-  });
-
-  it('--search-hooks off still registers the eleven entries and persists the choice', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], searchHooks: 'off' },
-      makeCtx({ json: true }),
-      deps(),
-    );
-    // The entry set is permanent and every gate is in an arm: `off` silences the
-    // research arm per fire, and the prompt, fetch and context arms answer to
-    // `hooks.push`, so registering nothing here would have left them dead.
-    expect(hooksOf(res.data)).toMatchObject({ mode: 'off', entries: 11 });
-    expect(hooksOf(res.data).skipped).toBeUndefined();
-    expect(Object.keys((await settings()).hooks as object).length).toBeGreaterThan(0);
-    expect(await persistedMode()).toBe('off');
-    expect(await persistedAgentMode()).toBe('off');
-  });
-
-  it('--search-hooks remind wires the hooks in remind mode', async () => {
-    const res = await runInstall(
-      { harness: ['claude'], searchHooks: 'remind' },
-      makeCtx({ json: true }),
-      deps(),
-    );
-    expect(hooksOf(res.data).mode).toBe('remind');
-    expect(hooksOf(res.data).entries).toBe(11);
-    expect(await persistedMode()).toBe('remind');
-  });
-
-  it('rejects an unknown --search-hooks value as USAGE, before anything is written', async () => {
-    const err = await caught(() =>
-      runInstall(
-        { harness: ['claude'], searchHooks: 'sometimes' },
-        makeCtx({ json: true }),
-        deps(),
-      ),
-    );
-    expect(err.code).toBe('USAGE');
-    expect(err.fix).toContain('auto');
   });
 
   it('is idempotent: a second run writes a byte-identical file', async () => {
@@ -3875,60 +3318,12 @@ describe('runInstall: search hooks', () => {
     expect(await readFile(claudeSettingsPath(home), 'utf8')).toBe(first);
   });
 
-  it('honors the interactive choice and persists it', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => 'remind' }),
-    );
-    expect(hooksOf(res.data).mode).toBe('remind');
-    expect(await persistedMode()).toBe('remind');
-  });
-
-  // Escape at this prompt is the one cancel that used to WRITE: it resolved to
-  // `auto`, registered both hooks and persisted the mode. Every other decision in
-  // the walkthrough treats cancel as a decline, and so does this one now.
-  it('a cancelled choice registers nothing and writes no config', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => null }),
-    );
-    expect(hooksOf(res.data).skipped).toBe('declined');
-    expect(hooksOf(res.data).entries).toBe(0);
-    expect(existsSync(join(data, 'hooks'))).toBe(false);
-    expect((await settings()).hooks).toBeUndefined();
-    expect(await persistedMode()).toBeUndefined();
-  });
-
-  it('a cancelled choice leaves an already-configured mode alone', async () => {
-    await runInstall(
-      { harness: ['claude'], searchHooks: 'remind' },
-      makeCtx({ json: true }),
-      deps(),
-    );
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({ isInteractive: true, promptSearchHooks: async () => null }),
-    );
-    expect(hooksOf(res.data).skipped).toBe('declined');
-    expect(await persistedMode()).toBe('remind');
-  });
-
-  // Same treatment for an answer the schema does not recognize: a cancel, never a
-  // write of something unknown.
-  it('an unrecognized answer is a cancel, not a write', async () => {
-    const res = await runInstall(
-      { harness: ['claude'] },
-      makeCtx(),
-      deps({
-        isInteractive: true,
-        promptSearchHooks: async () => 'sometimes' as never,
-      }),
-    );
-    expect(hooksOf(res.data).skipped).toBe('declined');
-    expect(await persistedMode()).toBeUndefined();
+  // No prompt and no key: an interactive run wires the same entries a machine
+  // run does, and says nothing about the arms.
+  it('wires the entries at a TTY, with nothing asked and no hook key written', async () => {
+    const res = await runInstall({ harness: ['claude'] }, makeCtx(), deps({ isInteractive: true }));
+    expect(hooksOf(res.data).entries).toBe(11);
+    expect(await persistedHooks()).toBeUndefined();
   });
 
   it('writes nothing under --dry-run and says why', async () => {
@@ -3940,7 +3335,7 @@ describe('runInstall: search hooks', () => {
     expect(hooksOf(res.data).skipped).toBe('dry-run');
     expect(existsSync(join(data, 'hooks'))).toBe(false);
     expect((await settings()).hooks).toBeUndefined();
-    expect(await persistedMode()).toBeUndefined();
+    expect(await persistedHooks()).toBeUndefined();
   });
 
   it('is not wired for a Codex-only install, and names no Claude settings file', async () => {
@@ -4156,17 +3551,19 @@ describe('runInstall: wallet creation is the default', () => {
     expect(walletOf(res.data)).toEqual({ status: 'declined' });
   });
 
-  it('discloses the empty balance, the human funding step, and where the key lives', async () => {
+  // The row says the two things an operator has to act on: it is empty, and
+  // funding it is theirs to do. Where the key lives and how it is encrypted is
+  // reference material, in docs/agent-permissions.md.
+  it('names the empty balance and the human funding step, in one row', async () => {
     const res = await runInstall(
       { harness: ['claude'] },
       makeCtx(),
       deps({ isInteractive: true, confirmWallet: async () => true }),
     );
     const text = human(res);
-    expect(text).toContain('It holds $0.');
-    expect(text).toContain('Funding it is a human step');
-    expect(text).toContain(join(data, 'wallet.json'));
-    expect(text).toContain('encrypted at rest');
+    expect(text).toContain(`wallet       ${STUB_ADDRESS}, $0 - fund with: tenjin wallet fund`);
+    expect(text).not.toContain('encrypted at rest');
+    expect(text).not.toContain(join(data, 'wallet.json'));
   });
 
   it('leaves an existing wallet alone and never creates a second', async () => {
@@ -4215,7 +3612,8 @@ describe('runInstall: --no-hooks', () => {
     expect((JSON.parse(raw) as { hooks?: unknown }).hooks).toBeUndefined();
   });
 
-  // The difference from `--search-hooks off`, which IS a durable statement.
+  // The difference from `tenjin config set hooks.<arm> false`, which IS a
+  // durable statement.
   it('leaves a later bare re-run free to wire them', async () => {
     await runInstall({ harness: ['claude'], noHooks: true }, makeCtx({ json: true }), deps());
     const res = await runInstall({ harness: ['claude'] }, makeCtx({ json: true }), deps());
@@ -4243,7 +3641,7 @@ describe('runInstall --refresh', () => {
   /** A machine that ran a real install: skills, hooks, rules and config. */
   async function installed(): Promise<void> {
     await runInstall(
-      { harness: ['claude'], searchHooks: 'auto', allowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -4259,13 +3657,9 @@ describe('runInstall --refresh', () => {
       // A TTY with stdin: the state in which every other install path prompts.
       isInteractive: true,
       promptPublishMode: boom('ask for a publish mode') as never,
-      promptSearchHooks: boom('ask about hooks') as never,
-      confirmPermissions: boom('ask about permissions') as never,
       confirmWallet: boom('ask about a wallet') as never,
-      confirmBazaarPay: boom('ask about the Bazaar lane') as never,
       createWallet: boom('create a wallet') as never,
       intro: boom('open a prompt sequence') as never,
-      outro: boom('close a prompt sequence') as never,
       collectChecks: boom('run the doctor probes') as never,
       ...over,
     });
@@ -4278,7 +3672,7 @@ describe('runInstall --refresh', () => {
     const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
     expect((result.data as { refresh: boolean }).refresh).toBe(true);
     expect(existsSync(join(data, 'wallet.json'))).toBe(false);
-    // Config is READ (for hooks.push and publish.mode) and never written.
+    // Config is READ (for publish.mode) and never written.
     expect(await readFile(join(data, 'config.json'), 'utf8')).toBe(configBefore);
   });
 
@@ -4388,7 +3782,7 @@ describe('runInstall --refresh', () => {
    */
   it('does not re-report a declined allowlist as pending', async () => {
     await runInstall(
-      { harness: ['claude'], searchHooks: 'auto', allowFreeVerbs: false, publishMode: 'auto' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -4410,7 +3804,7 @@ describe('runInstall --refresh', () => {
    */
   it('still reports a genuinely new rule after an earlier decline', async () => {
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -4447,7 +3841,7 @@ describe('runInstall --refresh', () => {
   // the grant stops clearing it.
   it('reports freshly-pending rules again once a decline has been cleared by a grant', async () => {
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: false, publishMode: 'auto' },
+      { harness: ['claude'], noAllowFreeVerbs: true, publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );
@@ -4458,7 +3852,7 @@ describe('runInstall --refresh', () => {
 
     // A later, explicit run grants the allowlist and clears the record.
     await runInstall(
-      { harness: ['claude'], allowFreeVerbs: true, publishMode: 'auto' },
+      { harness: ['claude'], publishMode: 'auto' },
       makeCtx(),
       deps({ which: (bin) => bin === 'claude' }),
     );

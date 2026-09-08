@@ -13,6 +13,7 @@ export const subagentStopArm: Arm = {
   id: 'subagent-stop',
   wait: 'tool',
   on: [{ event: 'agent.stop' }],
-  // Gated like every push arm: a push-off machine says nothing to a child.
-  after: (ctx) => (ctx.deps.config().hooks.push === 'on' ? stop(ctx, 'child') : null),
+  // The ask's own switch: a machine with `hooks.publish` off says nothing to a
+  // child either.
+  after: (ctx) => (ctx.deps.config().hooks.publish ? stop(ctx, 'child') : null),
 };

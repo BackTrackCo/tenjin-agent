@@ -21,7 +21,7 @@ import {
  * absence of everything else: no plan, no question, no lookup.
  */
 
-const PUSH_ON = kernelConfig({ push: 'on' });
+const ON = kernelConfig();
 
 let db: LoopDb;
 
@@ -43,7 +43,7 @@ function ctxFor(
   kind: 'edit' | 'shell' | 'read',
   input: Record<string, unknown>,
   actor: Actor = LEAD,
-  config: KernelConfig = PUSH_ON,
+  config: KernelConfig = ON,
 ) {
   return fireContext({
     db,
@@ -63,7 +63,7 @@ function fire(
   kind: 'edit' | 'shell' | 'read',
   input: Record<string, unknown>,
   actor: Actor = LEAD,
-  config: KernelConfig = PUSH_ON,
+  config: KernelConfig = ON,
 ): void {
   contextArm.before?.(ctxFor(event, kind, input, actor, config));
 }
@@ -155,8 +155,8 @@ describe('the marks PR D reads', () => {
     expect(getMark(db, LEAD, `edits:${key(path)}`)).toBeNull();
   });
 
-  it('writes nothing at all while push is off', () => {
-    const off = kernelConfig({ push: 'off' });
+  it('writes nothing at all while both arms it keeps books for are off', () => {
+    const off = kernelConfig({ failure: false, publish: false });
     const path = '/p/d.ts';
     fire('tool.before', 'edit', { file_path: path }, LEAD, off);
     fire('tool.before', 'shell', { command: 'ls' }, LEAD, off);

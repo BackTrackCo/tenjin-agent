@@ -274,7 +274,7 @@ const editInput = {
 // that it mirrors the cores, and the consent it carries is the core's: `runDelete`
 // never reads publish.mode and refuses without `yes`, and this context is
 // non-interactive (isTTY:false), so a call without yes:true always comes back as
-// NEEDS_CONFIRMATION for the client to render. `tenjin send` stays excluded for a
+// NEEDS_CONFIRMATION for the client to render. `tenjin wallet send` stays excluded for a
 // different reason and is not a precedent for excluding this one: send moves
 // money to an arbitrary address, while delete only ever touches a post this
 // wallet already owns, and a surface that can publish unattended and cannot
@@ -291,7 +291,7 @@ const deleteInput = {
 
 // The wallet cores take no args beyond the action discriminator.
 //
-// `tenjin send` (the funds-out escape hatch, src/commands/send.ts) is
+// `tenjin wallet send` (the funds-out escape hatch, src/commands/send.ts) is
 // DELIBERATELY EXCLUDED from this toolset, as an action here and as a tool of
 // its own: the MCP surface stays narrower than the CLI (spec 10's narrow-toolset
 // rule; MCP agents discover and pay under policy, they never export a wallet or
