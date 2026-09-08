@@ -847,7 +847,7 @@ in hooks smokes one to three printed `Corepack is about to download .../pnpm-12.
 fetched it, so those runs were not offline. Fixed at `bench1-hooks-smoke-4`, not rerun.
 `toolchain.py` closes it in four parts. Each fixture's `package.json` pins
 `"packageManager": "pnpm@11.11.0"`, the version the command matrix was proven on, so a shim
-resolves without a lookup. `claude_live.launch` detects the shim (its first lines name
+resolves without a registry request. `claude_live.launch` detects the shim (its first lines name
 corepack), copies exactly the pinned version out of the operator's corepack cache (19 MB,
 against 194 MB for the whole cache) into the trial's own `COREPACK_HOME` under the trial root,
 and gives the child `COREPACK_HOME` and `COREPACK_ENABLE_NETWORK=0`, so a version corepack
