@@ -37,7 +37,10 @@ evals/benchmark/
                    grandchild in the frozen Claude shapes
   claude_live.py   the live Claude Code executor: validated argv, minted session id,
                    per-trial settings, child environment allowlist, sessions resolver
-  verifier.py      hidden verifier registry, hidden layer, and the fixed fake verifiers
+  tenjin_arm.py    the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped
+                   before the delivery join
+  verifier.py      hidden verifier registry, hidden layer, the fake verifiers, and the
+                   Node test verifier the task fixtures use
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection, its redaction guard, and the isolation stamp
@@ -46,7 +49,9 @@ evals/benchmark/
   selftest.py      offline unittest entry (a step of the required CI workflow)
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
-  fixtures/live/   the live plumbing smoke manifest, its repo fixture, and the regression baseline
+  fixtures/live/   the plumbing smoke manifest and its repo, the hooks smoke manifest and its
+                   task fixture, and the regression baseline
+  hidden/          code-owned hidden layers, one per task, mounted only into the verifier copy
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
 
@@ -106,9 +111,10 @@ rather than a result.
 
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only; `report.guard` refuses anything else. It also carries the run's
-isolation stamp, `publishable` and `isolation` (`fake`, `attested`, `operator_plumbing`, or
-`automated_plumbing`): one non-publishable record makes the whole report non-publishable and
-no comparison in it headline eligible, and `summary` says so in its header.
+isolation stamp, `publishable`, `isolation` (`fake`, `attested`, `operator_plumbing`,
+`automated_plumbing`, or `team_shelf_secret`), and `shelf_secret_present`: one non-publishable
+record makes the whole report non-publishable and no comparison in it headline eligible, and
+`summary` says so in its header.
 
 `reduce` and `report` rebuild the aggregates and the publishable projection from the immutable
 records alone, so a finished run can be re-reduced without re-running anything.
@@ -174,9 +180,11 @@ Four properties of a live trial are worth naming.
   `--strict-mcp-config` so the operator's own configuration cannot leak into a measured run.
   The fragment is checked to the leaf, not only at its top level: `env` may not name a variable
   the trial's own roots or the credential seam own, `permissions` may narrow the flag pins but
-  never widen them, and `hooks` is shape-checked. It also has to hash to the arm's declared
-  `settings_hash`, which proves the fragment is the treatment the record names and proves
-  nothing about whether it is safe.
+  never widen them, and `hooks` is shape-checked: a `command` hook is a string, an `http` hook
+  may name only `http://127.0.0.1` or `http://localhost` with a port, and any other host is
+  refused. It also has to hash to the arm's declared `settings_hash`, which proves the fragment
+  is the treatment the record names and proves nothing about whether it is safe. A provisioned
+  arm's fragment is a template (below); the hash is over the template.
 - **A hook command is operator-authored code, and the fixture is too.** Claude Code runs a
   hook's `command` string through a shell in the child, which is what a hooks arm is for. The
   manifest hash and the arm's `settings_hash` name exactly which commands ran; the container the
@@ -187,7 +195,8 @@ Four properties of a live trial are worth naming.
   `CLAUDE_CODE_PROJECT_DIR_NAME` are the trial's own; `PATH`, `TERM`, `LANG`, and the one named
   credential variable are inherited, and nothing else in the operator's environment is. A wallet
   key, a shelf secret, and the operator's own `CLAUDE_CONFIG_DIR` have no way through, through
-  the spawn or through the arm's `settings.env`.
+  the spawn or through the arm's `settings.env`. The one door a shelf secret has is the seeded
+  data dir of a provisioned arm, and a run that opens it is non-publishable by construction.
 
 Without `--dry-run` the command requires `--attestation` (or `--plumbing`, below), refuses an
 automated environment (`CI` or `GITHUB_ACTIONS` set) unless `--ci-live` is given, and refuses a
@@ -223,10 +232,12 @@ into every record, so a published result names the isolation it ran under.
 
 - a disposable container or VM that is thrown away after the run, booted from a pinned image;
 - fresh home, profile, data, repository, and output roots, which the run directory owns;
-- no wallet and no shelf secret anywhere in the image or the environment;
+- no wallet anywhere in the image or the environment, and no shelf secret except the one
+  `--tenjin-source` seeds on purpose, which makes the run non-publishable;
 - the model credential in exactly one allowlisted variable (`ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`), named by `pins.credential_env`;
-- network allowlisted to the provider plus the arm under test, matching the attestation; and
+- network allowlisted to the provider plus the arm under test, matching the attestation, which
+  for a provisioned arm has to list the seeded shelf's host as well; and
 - `pins.image`, `pins.harness_version`, and `pins.model` set to the image, the CLI version, and
   the model this instance actually runs.
 
@@ -235,9 +246,11 @@ operating-system sandbox, and a temp directory does not isolate a keychain (tenj
 
 ### The smoke manifest and gate 3
 
-`fixtures/live/smoke-manifest.json` is a plumbing smoke, not a benchmark task set: one trivial
-task under the fixed hidden verifier, two arms that differ by a marker in their settings, two
-repeats, four attempts. Bench-2 and Bench-3 own the real task sets and the real treatment arms.
+`fixtures/live/smoke-manifest.json` (`bench1-live-smoke-1`; the bump is the isolation block
+and the hook schema this version added) is a plumbing smoke, not a benchmark task set: one
+trivial task under the fixed hidden verifier, two arms that differ by a marker in their
+settings, two repeats, four attempts. Bench-2 and Bench-3 own the real task sets and the real
+treatment arms; the hooks smoke below is the first arm that runs the product.
 
 Gate 3 of the plan is four to eight live integration attempts. What they prove is plumbing:
 disposable isolation, recursive settlement, usage capture from real transcripts, verifier
@@ -255,6 +268,97 @@ where a run has a lower pass rate, more tokens or cost per attempt than the tole
 an invalid attempt, or an excluded record, and exits 0 whatever it finds. To refresh the
 baseline, run the smoke, copy the numbers from `summary` and the records' `cost_usd` into the
 file, and bump `date`; the figures are plumbing evidence inside this repository only.
+
+## The Tenjin hooks arm
+
+The product's hooks are not an environment difference. The CLI reads `<TENJIN_DATA_DIR>/config.json`
+and nothing else for `baseUrl`, `publicShelfUrl`, and `shelfBypassSecret`; the two `command`
+hooks run the shim bundle under `<TENJIN_DATA_DIR>/hooks/`; the nine `http` hooks POST to a
+loopback daemon that reads `daemon.token` from the same directory; and the daemon ignores the
+environment. So the arm is a seeded data dir plus a daemon, and `tenjin_arm.py` is the seam that
+builds one per trial. `--tenjin-source <dir>` names the operator's data dir it is seeded from;
+there is no default, and nothing here ever reads a home path on its own.
+
+**Provisioning.** An arm that declares `provision: "tenjin"` is prepared after its roots exist
+and before its launch: the two bundles are copied from the source, exactly `COPIED_KEYS`
+(`baseUrl`, `publicShelfUrl`, `shelfBypassSecret`) are copied from the source config, the
+constants in `SEEDED` are forced (`publish.mode` review, `hooks.capture` off,
+`team.publicFallback` off, `loop.idle_exit_min` 2), a fresh `daemon.token` is minted, a free
+loopback port goes into `loop.port`, and one daemon is started with `runner.process_start`: its
+own session, an allowlisted environment, its group in the pids ledger under `<trial>.daemon`, so
+`cli.py cleanup` reaches it. `prepare` waits for `/health` to answer with this data dir and this
+pid, and refuses the trial if it never does. Nothing wallet-related is copied, and no key outside
+`COPIED_KEYS` is read.
+
+**Stop before the join.** As soon as the agent's process has exited, `stop` ends the daemon and
+waits for `loop.db-wal` to disappear. The shim spawns a detached daemon of its own when the one
+it expects is not healthy, and a detached process is outside the trial's group, so `stop` also
+reads `daemon.pid` as it is then, confirms through `/health` that the pid serves exactly this
+data dir, and signals that pid too; the record's `isolation.daemon_respawned` says whether that
+happened. A WAL still live after the wait is the existing rule: `delivery:wal_live`, the attempt
+is invalid. A daemon this package loses track of ends itself on the seeded two-minute idle exit.
+
+**Templates.** The arm's `settings.hooks` is the installed hook set with three placeholders:
+`{daemon_url}` for the trial's `http://127.0.0.1:<port>/hook/claude`, `{daemon_token}` for its
+bearer token, and `{data_dir}` for the shim path. `settings_hash` is over the template, so it is
+one value for every trial and names the treatment; the resolved fragment is what the child reads,
+and its hash goes into the record as `private_hashes.resolved_settings`, private because the
+resolved bytes hold the token. A placeholder in an arm with no `provision`, a resolution that
+lands on a host other than loopback, and a placeholder left unresolved are refusals. The command
+hook uses the placeholder rather than `$TENJIN_DATA_DIR` even though Claude Code runs a
+`command` string through `sh -c` with the child's environment, so that the resolved hash names
+the literal command that ran.
+
+**The shelf secret.** `shelfBypassSecret` is copied because the team shelf leg is an unsigned
+POST that carries it as a header; without it the arm is public mode and measures nothing about
+team transfer. The run says so in every record: `isolation.shelf_secret_present` is true,
+`isolation.shelf_origin` is the seeded `baseUrl` host (the record's private isolation block,
+not the report), `publishable` is false, `report.isolation` is `team_shelf_secret`, and `summary`
+prints `team shelf secret present: NOT PUBLISHABLE`. `require_isolation` refuses a publishable
+run that seeds a secret, `records.validate` refuses a record that claims both, `--attestation`
+refuses a source that carries one, and `--ci-live` refuses any manifest with a provisioned arm.
+The secret's value is a second canary: `scan_sentinels` counts it in the repo, the output, the
+data dir except the seeded config, and the profile where the transcripts live, and `execute`
+deletes a `report.json` that carries it. The value is held in memory and written to the seeded
+config only; it is never logged, printed, or hashed.
+
+**Origins and legs.** The seeded shelf host is added to the origins the attestation has to list,
+so a team-shelf request is the arm under test and never a public request. Every delivery leg is
+classified by its `shelf` column into `delivery.shelves` (`team`, `public`; a `skipped` leg
+reached nothing and is not counted), and a public-fallback leg counts as a public request unless
+the attestation lists the public shelf's host. The seeded config turns public fallback off, so
+in this arm a team miss is a miss and the prompt never leaves for the public marketplace.
+
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-0`) is one
+task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
+0.75. The task is Bench-0's: a fixture whose `pnpm test` script runs a noisy wrong suite and
+whose `node_modules/.bin/vitest` runs exactly one file, a source fix, and a hidden Node test
+mounted after shutdown (`hidden/actor/`, verifier `node_test_actor`, `node` from `PATH`). The
+prompt states the task without the lesson: "Run only that one test file" is the whole
+instruction, and no phrase from the shelf piece appears in the prompt, the fixture, or the test
+name. Bash is pinned to `pnpm test:*` (the trap) and `pnpm exec vitest run:*` (the lesson). It is
+a hooks-arm plumbing smoke in one lesson family, test-harness convention, and not a task corpus;
+Bench-2 owns the corpus. The operator runs it on their own machine:
+
+```bash
+python3 -m evals.benchmark.cli live-run \
+  --manifest evals/benchmark/fixtures/live/hooks-smoke-manifest.json \
+  --out <run dir> --plumbing --tenjin-source <tenjin data dir>
+python3 -m evals.benchmark.cli verify --run <run dir>
+python3 -m evals.benchmark.cli summary --run <run dir>
+```
+
+`--dry-run` with or without `--tenjin-source` prints every resolved hook line (event, kind, URL
+with port 0, header names) and the provision facts, and never a token or the secret. `regress`
+compares against the plumbing smoke's baseline and does not apply to this manifest. This
+manifest never runs in CI: the live lane and `--ci-live` stay on the plumbing smoke, and the
+refusal is in code rather than in the workflow.
+
+**What the number would mean.** The shelf search leg sends the question, a limit, the trigger,
+and a budget, so a per-run namespace on an existing shelf cannot isolate retrieval, and the
+operator's shelf already holds the Bench-0 lesson beside a large related family. A numbered
+result needs a dedicated disposable shelf with `team.publicFallback` on, which is Bench-3 scope;
+this smoke proves the funnel on a real agent and nothing more.
 
 ## Cleanup
 
@@ -284,9 +388,10 @@ Each trial gets fresh `home`, `profile`, `TENJIN_DATA_DIR`, repository, and outp
 operator's: the roots' own by default, or the one a live launch built when it needs the
 credential seam as well. The verifier process gets an allowlist too (`PATH` and the locale
 names, nothing else), so code that reads a finished worktree is not handed a wallet or a shelf
-variable. `runner.process_spawn` is the only place this package starts a process:
-`shell=False`, its own session, and on the wall-clock pin it kills the whole process group so
-a grandchild cannot outlive the trial. The clock, the settlement barrier, and the process
+variable. `runner.process_spawn` and `runner.process_start` are the only places this package starts a
+process: `shell=False`, its own session, and on the wall-clock pin it kills the whole process
+group so a grandchild cannot outlive the trial; `process_start` is the provisioned arm's daemon,
+recorded in the same ledger and stopped by `process_stop` before the delivery join. The clock, the settlement barrier, and the process
 boundary are injected, so every offline case except the process-group one runs without real
 time.
 
@@ -313,7 +418,9 @@ Sentinels make isolation observable rather than assumed. `artifact.create` plant
 credential in the disposable home and, when the runner is given a loopback sentinel, exports
 its origin as `BENCHMARK_PUBLIC_ORIGIN`. Per attempt the runner counts new sentinel hits and
 scans the roots the agent writes to for the canary; either count invalidates the attempt. The
-credential scan proves the secret travelled, not that it was read.
+credential scan proves the secret travelled, not that it was read. A provisioned arm's seeded
+shelf secret is a second canary under the same rule, and a public-fallback delivery leg is a
+public request unless the attestation lists that host.
 
 `artifact.require_isolation` is the live-run gate. A live executor in CI is refused outright.
 A publishable live run needs an `Attestation`: `container` or `vm` kind, a non-empty instance
@@ -358,8 +465,9 @@ task failure gets no free retry unless the same rule applies to every arm.
 `arms`, and optionally `phases` with `producer`, `capture`, `consumer` labels. Pins are
 `model`, `harness_version`, `effort`, `image`, `dependency_lock_hash`, `permission_mode`,
 `wall_clock_s`, `turn_budget`. A task is `id`, `family`, `transfer_distance`, `fixture`,
-`fixture_hash`, `verifier`; an arm is `id`, `executor`, `product_version`, `settings_hash`,
-`memory_snapshot_hash`, `auxiliary_usage`.
+`fixture_hash`, `verifier`, optionally `prompt`; an arm is `id`, `executor`, `product_version`,
+`settings_hash`, `memory_snapshot_hash`, `auxiliary_usage`, optionally `settings` and
+`provision` (the provisioner the executor prepares the arm with; only `tenjin` exists).
 
 `auxiliary_usage` is the arm's declaration about model spend outside the harness session:
 `none` (it spends none), `exposed` (its memory product emits auxiliary receipts), or
@@ -458,12 +566,14 @@ settings, and environment hashes; task, arm, repeat, position; harness and nativ
 actors and parent edges; deduplicated usage, the reconciliation, and auxiliary receipts;
 outcome (`pass` | `fail` | `capped` | `interrupted` | `invalid`) with `invalid_reason` set
 exactly for `invalid`; verifier verdict and patch hash; stop reason (`exit` | `timeout` |
-`interrupted`), wall time, unresolved actors, turns, tool counts, cost; delivery projection;
-sentinel counts and isolation checks; and hashes of private inputs, never their bodies or host
-paths.
+`interrupted`), wall time, unresolved actors, turns, tool counts, cost; delivery projection with
+its per-shelf leg counts; sentinel counts and the isolation block (`live`, `publishable`,
+`fresh_roots`, `attested_container`, `attestation_hash`, `automated`, `shelf_secret_present`,
+`shelf_origin`, and `daemon_respawned` for a provisioned arm); and hashes of private inputs
+(`root_transcript`, `executor_stderr`, `resolved_settings`), never their bodies or host paths.
 
-`records.validate` refuses unknown keys, a `trial_id` that does not derive from the record's
-own fields, a scored attempt without the lead actor, usage or fires naming an actor outside
+`records.validate` refuses unknown keys, a record that seeded a shelf secret and claims to be
+publishable, a `trial_id` that does not derive from the record's own fields, a scored attempt without the lead actor, usage or fires naming an actor outside
 the attempt, undeduplicated or conflicting usage, receipts duplicating native ids, and a pass
 or fail without a verifier verdict. It also carries the accounting invariant rather than
 leaving it to the runner that wrote the file: a non-`invalid` outcome needs a
@@ -485,7 +595,8 @@ another agent id never receives a fire, and no ancestry is inferred. Fires for a
 the native set are returned as `unmatched_fires`, which the runner treats as an attribution
 error (`delivery:fire_without_usage`), never as a zero-token actor. A native actor with no
 fire is normal. Projected fields are ids, timestamps, enums, and the `delivered` resource
-token; `question`, `cwd`, `emit`, `error`, `title`, and `url` stay private.
+token; `question`, `cwd`, `emit`, `error`, `title`, and `url` stay private. `shelves` counts
+the legs that went to each shelf; a `skipped` leg reached nothing and is not counted.
 
 ## Reduction contract
 
@@ -575,7 +686,9 @@ Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
 - A new arm is a manifest entry plus an `executor.REGISTRY` entry. Arms in one manifest share
   one executor, because arms running different harnesses do not have comparable token totals.
   A driver that installs a competing memory hook gets its own image, home, and data roots; never
-  co-install two memory hooks in one profile.
+  co-install two memory hooks in one profile. An arm whose product needs state on disk declares
+  a provisioner: `ExecutorSpec.prepare` builds it per trial and `ExecutorSpec.stop` ends it
+  before the delivery join, and what it seeds is stated in the record's isolation block.
 - A new harness is one module implementing the usage adapter contract: return logical model
   requests as `usage.UsageRecord`, one per native request, with nulls for categories the
   provider does not expose. Add the harness id to `usage.HARNESSES`. Claude's JSONL reader is
