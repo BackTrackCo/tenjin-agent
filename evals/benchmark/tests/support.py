@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -416,6 +417,26 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
 
 
 EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+def fake_toolchain(tmp: Path, cached: tuple[str, ...] = ("11.11.0",), shim: bool = True) -> dict[str, str]:
+    """A `pnpm` on PATH and a corepack cache under `COREPACK_HOME`, so no case reads the host's."""
+    bin_dir = tmp / "toolchain" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    pnpm = bin_dir / "pnpm"
+    if shim:
+        pnpm.write_text("#!/usr/bin/env node\nprocess.env.COREPACK_ENABLE_DOWNLOAD_PROMPT??='1'\nrequire('./lib/corepack.cjs').runMain(['pnpm']);\n", encoding="utf-8")
+    else:
+        pnpm.write_text("#!/bin/sh\necho 11.11.0\n", encoding="utf-8")
+    pnpm.chmod(0o755)
+    home = tmp / "toolchain" / "corepack"
+    for version in cached:
+        (home / "v1" / "pnpm" / version).mkdir(parents=True, exist_ok=True)
+        (home / "v1" / "pnpm" / version / "package.json").write_text(f'{{"name":"pnpm","version":"{version}"}}\n', encoding="utf-8")
+        (home / "v1" / "pnpm" / version / "bin").mkdir(exist_ok=True)
+        (home / "v1" / "pnpm" / version / "bin" / "pnpm.cjs").write_text("// fake\n", encoding="utf-8")
+    # The fake pnpm comes first; the host PATH stays behind it so `ps` and `node` still resolve.
+    return {"PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]), "COREPACK_HOME": str(home)}
+
+
 # Files a run leaves behind. A frozen fixture carries none of them.
 RUN_ARTEFACTS = (
     ".bench1",

@@ -116,6 +116,11 @@ class TrialRoots:
         return self.base / "verify"
 
     @property
+    def corepack_home(self) -> Path:
+        """The trial's own corepack cache: one pinned pnpm, no network, nothing of the operator's."""
+        return self.base / "corepack"
+
+    @property
     def agent_roots(self) -> tuple[Path, ...]:
         """Roots the agent writes to. The verifier mount is not one of them."""
         return (self.repo, self.output, self.data_dir)

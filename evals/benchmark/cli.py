@@ -42,6 +42,7 @@ from . import (
     runner,
     schedule,
     tenjin_arm,
+    toolchain,
     vendor as vendor_module,
     verifier,
 )
@@ -154,7 +155,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         # A dry run seeds the data dir and resolves the template with a port of
         # 0 and a labelled token; it starts no daemon.
         provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True))
-    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
+    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True))
     settings = arm.get("settings") or {}
     resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
     return {
@@ -165,6 +166,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         "argv": list(launch.argv),
         "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
         "vendor": None if vendor is None else {**vendor.facts, "host": host, "host_matches": vendor_module.matches(vendor, host)},
+        "package_manager": launch.package_manager,
         "hooks": describe_hooks(resolved),
         "roots": {
             "cwd": str(launch.cwd),
@@ -220,6 +222,10 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                 f"  {'vendor':10}{facts['id']} platform={facts['platform']} node_abi={facts['node_abi']} "
                 f"host={facts['host']['platform']} {verdict}"
             )
+        if plan["package_manager"] is not None:
+            manager = plan["package_manager"]
+            state = f"pnpm {manager['version']}" if manager["version"] else "not the pinned pnpm: live-run refuses"
+            lines.append(f"  {'pnpm':10}{manager['kind']} {state}; the child gets its own COREPACK_HOME with network off")
         lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
 
@@ -236,6 +242,20 @@ def refuse_foreign_vendor(manifest: manifest_module.Manifest, environ: Mapping[s
         try:
             vendor_module.check_platform(vendor, host)
         except vendor_module.VendorError as error:
+            raise CliError(f"task {task['id']!r}: {error.detail}") from error
+
+
+def refuse_package_manager(manifest: manifest_module.Manifest, environ: Mapping[str, str]) -> None:
+    """The pnpm on PATH must be each pinning fixture's pin, or the run would fetch one; refused before any root."""
+    for task in manifest.tasks:
+        fixture = manifest.fixture_path(task)
+        try:
+            pin = toolchain.package_manager_pin(fixture)
+            if pin is None:
+                continue
+            manager = toolchain.inspect(environ, pin, probe_binary=True, cwd=fixture.parent)
+            toolchain.check(manager, pin, toolchain.corepack_home(environ))
+        except toolchain.ToolchainError as error:
             raise CliError(f"task {task['id']!r}: {error.detail}") from error
 
 
@@ -286,6 +306,7 @@ def live_run(
             "a publishable live run states the isolation it ran under"
         )
     refuse_foreign_vendor(manifest, environ)
+    refuse_package_manager(manifest, environ)
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
     # wall-clock cap on attempts that cannot reach the provider.

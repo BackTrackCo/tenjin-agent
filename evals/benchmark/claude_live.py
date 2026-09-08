@@ -48,7 +48,7 @@ from typing import Any, Mapping
 
 from urllib.parse import urlsplit
 
-from . import artifact, sha256_json, tenjin_arm
+from . import artifact, sha256_json, tenjin_arm, toolchain
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest, Provision, ProvisionRequest
 
 NAME = "claude_live"
@@ -114,7 +114,7 @@ INHERITED = ("PATH", "TERM", "LANG")
 # Variables the trial's own roots own, or that would move the model traffic,
 # the config directory, or the process loader. An arm names its treatment with
 # its own variables; it does not reach these through `settings.env`.
-RESERVED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_", "DYLD_", "GITHUB_", "LD_", "NODE_", "TENJIN_")
+RESERVED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_", "COREPACK_", "DYLD_", "GITHUB_", "LD_", "NODE_", "TENJIN_")
 RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "TERM", "LANG", "SHELL", "PYTHONPATH", artifact.PUBLIC_ORIGIN_VAR})
 
 # `\Z` rather than `$`: in Python `$` also matches before a trailing newline,
@@ -512,7 +512,27 @@ def child_environment(
     credential = parent.get(credential_env)
     if credential:
         env[credential_env] = credential
+    env.update(toolchain.child_variables(roots.corepack_home))
     return env
+
+
+def package_manager_for(request: LaunchRequest, parent: Mapping[str, str]) -> toolchain.PackageManager | None:
+    """The pnpm this trial runs, refused unless it is the fixture's pin, and seeded into the trial's corepack home.
+
+    A fixture without a package.json (the plumbing smoke) needs no pnpm and
+    gets nothing here. A dry run probes and reports, and neither refuses nor
+    copies.
+    """
+    pin = toolchain.package_manager_pin(request.roots.repo)
+    if pin is None:
+        return None
+    manager = toolchain.inspect(parent, pin, probe_binary=not request.dry_run, cwd=request.roots.base)
+    if request.dry_run:
+        return manager
+    toolchain.check(manager, pin, toolchain.corepack_home(parent))
+    if manager.kind == "corepack-shim":
+        toolchain.seed(toolchain.corepack_home(parent), request.roots.corepack_home, pin)
+    return manager
 
 
 def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[str]:
@@ -557,12 +577,17 @@ def launch(request: LaunchRequest) -> Launch:
     session_id = root_session_id(request.trial_id)
     path = settings_path(request.roots)
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        manager = package_manager_for(request, os.environ)
+    except toolchain.ToolchainError as error:
+        raise LiveExecutorError(error.detail) from error
     return Launch(
         argv=build_argv(request, path, session_id),
         cwd=working_dir(request.roots),
         root_session_id=session_id,
         env=child_environment(request.roots, os.environ, credential_env, session_id),
         resolved_settings_hash=resolved_hash,
+        package_manager=None if manager is None else manager.facts,
     )
 
 

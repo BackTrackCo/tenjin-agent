@@ -86,6 +86,9 @@ class LaunchRequest:
     arm: dict[str, Any]
     pins: dict[str, Any]
     provision: Provision | None = None
+    # A dry run builds the launch and starts nothing, so a spec that seeds or
+    # probes the host toolchain reports what it would do instead of doing it.
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,6 +104,9 @@ class Launch:
     # declared fragment is a template resolved per trial. The record keeps it
     # under `private_hashes`: the resolved bytes hold a bearer token.
     resolved_settings_hash: str | None = None
+    # The package manager the child runs (`toolchain.PackageManager.facts`),
+    # recorded in the attempt's isolation block by a live spec.
+    package_manager: dict[str, Any] | None = None
 
 
 # Where a finished trial's transcripts are, given its roots and root session

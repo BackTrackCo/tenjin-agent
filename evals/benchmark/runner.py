@@ -290,6 +290,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         assert spec.prepare is not None
         provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
+    if launch.package_manager is not None:
+        isolation = {**isolation, "package_manager": launch.package_manager}
     hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
 
     started = runtime.clock()

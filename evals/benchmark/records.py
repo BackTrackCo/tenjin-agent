@@ -71,6 +71,8 @@ REQUIRED = frozenset(
 )
 
 
+PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
+
 class RecordError(ValueError):
     pass
 
@@ -256,6 +258,12 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
+    manager = isolation.get("package_manager")
+    if manager is not None:
+        if not isinstance(manager, dict) or set(manager) != {"kind", "version"} or manager["kind"] not in PACKAGE_MANAGER_KINDS:
+            raise RecordError("isolation.package_manager must name a kind and a version")
+        if manager["version"] is not None and (not isinstance(manager["version"], str) or not manager["version"]):
+            raise RecordError("isolation.package_manager.version must be null or a version")
     for name in ("shelves", "classes", "public"):
         counts = delivery.get(name, {})
         if not isinstance(counts, dict) or not all(_count(value) for value in counts.values()):

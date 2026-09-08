@@ -44,6 +44,8 @@ evals/benchmark/
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   vendor.py        the vendored Vitest toolchain: one deterministic archive, extracted and
                    verified into each trial's node_modules, platform-pinned
+  toolchain.py     the trial's pnpm: shim detection, the packageManager pin, a per-trial
+                   corepack home with network off, the refusal, the record's package_manager
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection, its redaction guard, and the isolation stamp
   regress.py       informational regression check against the committed baseline
@@ -343,7 +345,7 @@ the sentinel's `public_requests` and invalidates. Public-origin legs are counted
 the report's `origins` block and `summary` read them apart, so the plan's canary gate is two
 counts, unknown requests zero and public hits zero, each judged on its own.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-3`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-4`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
 0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
 exact version in `package.json`, a committed `pnpm-lock.yaml`, and the hoisted `node_modules`
@@ -352,7 +354,8 @@ which is the `operator-machine` image pin) vendored once as
 `fixtures/live/vendor/vitest-3.2.4-node24-darwin-arm64.tar.gz` and extracted into every trial's
 copy at preparation, offline, so a trial installs nothing and reaches no network (see
 **Vendored toolchain** below; `bench1-hooks-smoke-3` is `bench1-hooks-smoke-2` with the tree
-vendored, and a trial sees the same bytes); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
+vendored, and a trial sees the same bytes; `bench1-hooks-smoke-4` adds the `packageManager`
+pin that makes the trial offline against corepack, see **Offline against corepack**); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
 otherwise runs a registry install before the first `pnpm exec` or `pnpm run` in a fresh tree,
 which is what every trial of the second smoke did before its first test ran. The barrier is the
 repository, not the permission pin. Bash is `pnpm:*`, `npx:*`, `node:*`, `ls:*`, and `cat:*`,
@@ -833,6 +836,31 @@ puts the fixture back to the shim alone. `python3 -m evals.benchmark.vendor chec
 evals/benchmark/fixtures/live --id <id>` verifies an archive against its record and this host.
 A rebuilt archive changes every `fixture_hash` that names it, so the manifests re-pin and bump
 `benchmark_version`.
+
+### Offline against corepack
+
+The `pnpm` a trial runs comes from the inherited `PATH`, and on the operator's machine it is a
+corepack shim (`/opt/homebrew/bin/pnpm` calls `corepack.cjs`). Corepack keeps its cache under
+`HOME`, every trial gets a fresh `HOME`, and a fixture without a `packageManager` pin makes
+corepack resolve the latest pnpm from the registry: the first `pnpm` command of every trial
+in hooks smokes one to three printed `Corepack is about to download .../pnpm-12.x.tgz` and
+fetched it, so those runs were not offline. Fixed at `bench1-hooks-smoke-4`, not rerun.
+`toolchain.py` closes it in four parts. Each fixture's `package.json` pins
+`"packageManager": "pnpm@11.11.0"`, the version the command matrix was proven on, so a shim
+resolves without a lookup. `claude_live.launch` detects the shim (its first lines name
+corepack), copies exactly the pinned version out of the operator's corepack cache (19 MB,
+against 194 MB for the whole cache) into the trial's own `COREPACK_HOME` under the trial root,
+and gives the child `COREPACK_HOME` and `COREPACK_ENABLE_NETWORK=0`, so a version corepack
+does not have fails fast on "Network access disabled by the environment" instead of fetching;
+`COREPACK_` is a reserved prefix an arm's `settings.env` cannot set. `live-run` refuses before
+any root when the `pnpm` that would run cannot be the pin: a shim with no cached copy of it
+(`corepack install -g pnpm@11.11.0` once with network is the fix), a binary of another version
+(pnpm would fetch the pinned one itself), or no pnpm at all; `--dry-run` prints the `pnpm`
+line and probes nothing. The record's isolation block carries `package_manager` (`kind`
+`corepack-shim`, `binary`, or `missing`, and `version`). Proven by hand on a trial copy with
+the operator's shim, a fresh `HOME`, and the seeded home: `pnpm test -- tests/actor.test.mjs`
+prints no corepack and no registry line, `pnpm --version` inside the trial is 11.11.0, the
+command matrix holds, and the operator's cache and `lastKnownGood.json` are untouched.
 
 ## Extending the foundation
 

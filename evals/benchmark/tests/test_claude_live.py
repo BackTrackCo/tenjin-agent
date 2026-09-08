@@ -83,6 +83,10 @@ class LiveCase(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.run_dir = self.dir / "run"
+        # A launch reads the pnpm on PATH and the corepack cache; a case never reads the host's.
+        patcher = mock.patch.dict(os.environ, support.fake_toolchain(self.dir))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def request(self, manifest: manifest_module.Manifest, index: int = 0) -> executor.LaunchRequest:
         trial = schedule.expand(manifest)[index]
@@ -556,6 +560,8 @@ class ChildEnvironmentTest(LiveCase):
                 "ANTHROPIC_API_KEY",
                 "CLAUDE_CODE_PROJECT_DIR_NAME",
                 "CLAUDE_CONFIG_DIR",
+                "COREPACK_ENABLE_NETWORK",
+                "COREPACK_HOME",
                 "HOME",
                 "LANG",
                 "PATH",
@@ -568,6 +574,9 @@ class ChildEnvironmentTest(LiveCase):
         self.assertEqual(env["TENJIN_DATA_DIR"], str(self.roots.data_dir))
         self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-operator-key")
         self.assertEqual(env[claude_live.PROJECT_DIR_VAR], self.session_id)
+        # Corepack gets the trial's own cache and no network, never the operator's cache.
+        self.assertEqual(env["COREPACK_HOME"], str(self.roots.corepack_home))
+        self.assertEqual(env["COREPACK_ENABLE_NETWORK"], "0")
 
     def test_the_child_gets_no_wallet_no_shelf_secret_and_not_the_operators_profile(self) -> None:
         env = self.environment()

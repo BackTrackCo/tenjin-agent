@@ -46,6 +46,7 @@ SUBJECTS = {
     "test_runner": "trial execution, settlement, caps, process-group kill, resume",
     "test_schedule": "seeded balanced schedule and trial identity",
     "test_tenjin_arm": "the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped before the join",
+    "test_toolchain": "the trial's pnpm: shim detection, the pin, an offline per-trial corepack home, and the refusal",
     "test_usage": "usage contract: arithmetic, null versus zero, dedupe",
     "test_vendor": "the vendored toolchain: one deterministic archive, extracted and verified per trial, platform-pinned",
     "test_verifier": "hidden verifier registry, fail-closed argv, outcome vocabulary",
