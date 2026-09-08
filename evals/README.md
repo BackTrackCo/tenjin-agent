@@ -32,7 +32,7 @@ What the README covers: the manifest, attempt, usage, verifier, and invalid-run 
 reduction and interval rules; the private versus publishable artifact boundary; and how
 Bench-2, Bench-3, and Bench-6 add fixtures and adapters without changing the foundation. It
 also records what Bench-1 deliberately does not measure: the product's `tokens saved` counter,
-`tenjin push grade`, provider usage-limit percentages, and LLM judging are not primary
+`tenjin grade`, provider usage-limit percentages, and LLM judging are not primary
 benchmark outcomes.
 
 ## Layout
