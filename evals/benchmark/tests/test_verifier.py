@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from evals.benchmark import artifact, executor, manifest as manifest_module, verifier
@@ -18,6 +22,14 @@ from evals.benchmark.verifier import VerifierError, VerifierSpec
 def _echo(length: int) -> VerifierSpec:
     program = f"print('x' * {length}); raise SystemExit(1)"
     return VerifierSpec(name="echo", argv=lambda repo: [sys.executable, "-c", program], timeout_s=30)
+
+
+def _write_marker(repo: Path, name: str, **overrides: Any) -> None:
+    """The marker the fixture's reporter would write for task `name`, with fields overridden."""
+    marker = {"task": name, "files": [f"tests/{name}.test.mjs"], "passed": 2, "failed": 0, **overrides}
+    path = verifier.marker_path(repo, name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(marker), encoding="utf-8")
 
 
 class VerifierRegistryTest(unittest.TestCase):
@@ -113,10 +125,60 @@ class VerifierRegistryTest(unittest.TestCase):
         unfixed = verifier.run(spec, copy, self.run_dir)
         self.assertEqual((unfixed.outcome, unfixed.exit_code), ("fail", 1))
         (copy / "src" / "actor.mjs").write_text("export function actorKey(session, agent) {\n  return `${session}:${agent ?? 'root'}`;\n}\n", encoding="utf-8")
+        # A correct edit alone is not a pass: the named test has to have run green in the trial.
+        unrun = verifier.run(spec, copy, self.run_dir)
+        self.assertEqual((unrun.outcome, unrun.exit_code), ("fail", 1))
+        self.assertIn("no run marker", unrun.detail)
+        _write_marker(copy, "actor", files=["tests/actor.test.mjs"])
         self.assertEqual(verifier.run(spec, copy, self.run_dir).outcome, "pass")
         (copy / verifier.HIDDEN_TESTS / "actor.test.mjs").unlink()
         undecided = verifier.run(spec, copy, self.run_dir)
         self.assertEqual((undecided.outcome, undecided.exit_code), ("invalid", 3))
+
+    def test_the_run_marker_must_name_exactly_the_one_test_and_a_green_run(self) -> None:
+        self.assertIn("no run marker", verifier.check_marker(self.repo, "actor") or "")
+        cases = {
+            "wrong file": dict(files=["tests/other.test.mjs"]),
+            "the whole set": dict(files=["tests/actor.test.mjs", "unrelated/shard-1.test.mjs"]),
+            "no files": dict(files=[]),
+            "wrong task": dict(task="budget"),
+            "nothing passed": dict(passed=0),
+            "a failure": dict(failed=1),
+            "a boolean count": dict(passed=True),
+        }
+        for name, overrides in cases.items():
+            with self.subTest(case=name):
+                _write_marker(self.repo, "actor", **overrides)
+                self.assertIsNotNone(verifier.check_marker(self.repo, "actor"))
+        verifier.marker_path(self.repo, "actor").write_text("{not json", encoding="utf-8")
+        self.assertIn("not readable JSON", verifier.check_marker(self.repo, "actor") or "")
+        _write_marker(self.repo, "actor")
+        self.assertIsNone(verifier.check_marker(self.repo, "actor"))
+
+    def test_the_package_test_script_never_forwards_the_file_argument(self) -> None:
+        # The trap, on a fake vitest that records its argv: `pnpm test -- <file>`
+        # reaches `scripts/all-tests.mjs`, and the file never reaches vitest.
+        fixture = verifier.HIDDEN.parent / "fixtures" / "live" / "actor"
+        trap = self.dir / "trap"
+        (trap / "scripts").mkdir(parents=True)
+        (trap / "node_modules" / "vitest").mkdir(parents=True)
+        shutil.copy(fixture / "scripts" / "all-tests.mjs", trap / "scripts" / "all-tests.mjs")
+        (trap / "node_modules" / "vitest" / "vitest.mjs").write_text(
+            "import { writeFileSync } from 'node:fs';\nwriteFileSync('argv.json', JSON.stringify(process.argv.slice(2)));\nprocess.exit(1);\n",
+            encoding="utf-8",
+        )
+        completed = subprocess.run(
+            ["node", "scripts/all-tests.mjs", "--", "tests/actor.test.mjs"],
+            cwd=trap,
+            env=verifier.child_environment(),
+            capture_output=True,
+            text=True,
+            shell=False,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertEqual(json.loads((trap / "argv.json").read_text(encoding="utf-8")), ["run"])
+        self.assertIn("not forwarded", completed.stderr)
 
     def test_verifier_output_is_bounded(self) -> None:
         verdict = verifier.run(_echo(5000), self.repo, self.run_dir)

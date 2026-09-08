@@ -9,5 +9,7 @@ __pycache__/
 # artifact of the most recent local `vitest run`, never something to commit.
 .vitest-report.json
 
-# Bench-1 task fixtures ship a mock vitest under node_modules on purpose.
-!evals/benchmark/fixtures/live/*/node_modules/
+# Bench-1 task fixtures commit their vitest tree on purpose: every nested
+# node_modules and every package dist/ inside it stays tracked.
+!evals/benchmark/fixtures/live/*/**/node_modules/
+!evals/benchmark/fixtures/live/*/node_modules/**/dist/

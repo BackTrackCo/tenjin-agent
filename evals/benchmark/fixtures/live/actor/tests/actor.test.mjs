@@ -1,4 +1,7 @@
-import assert from 'node:assert/strict';
+import { expect, test } from 'vitest';
 import { actorKey } from '../src/actor.mjs';
-assert.equal(actorKey('s1', undefined), 's1:root');
-console.log('PASS actor');
+import { cases } from './support/cases.mjs';
+
+test.each(cases)('actorKey case %#', ({ args, expected }) => {
+  expect(actorKey(...args)).toBe(expected);
+});

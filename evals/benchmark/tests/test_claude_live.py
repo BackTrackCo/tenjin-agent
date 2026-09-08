@@ -296,6 +296,10 @@ class HooksArmTest(LiveCase):
         for task in manifest.tasks:
             claude_live.refuse_project_settings(manifest.fixture_path(task))
             self.assertEqual(verifier.lookup(task["verifier"]).hidden_layer, verifier.HIDDEN / task["id"])
+            support.assert_vitest_fixture(self, manifest.fixture_path(task), task["id"])
+            # The prompt states the task and never the lesson.
+            for phrase in ("pnpm test --", "pnpm exec", "vitest", "wrong set"):
+                self.assertNotIn(phrase, task["prompt"])
 
     def test_the_template_resolves_per_trial_and_the_child_reads_the_resolved_fragment(self) -> None:
         provision = executor.Provision(values={"daemon_url": "http://127.0.0.1:4321/hook/claude", "daemon_token": "tok-1", "data_dir": "/trial/data"})

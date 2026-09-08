@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-hooks-smoke-0",
+  "benchmark_version": "bench1-hooks-smoke-1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,
@@ -38,7 +38,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "fixture_hash": "sha256:123f53ff02f522b17ab6d225ae447f69f919715c94164089cf20f925494c5ca1",
+      "fixture_hash": "sha256:38c625b6bcfaa02ad6bc12eddfda07fbb19d6b742032141323a69ca6dc83fb74",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }

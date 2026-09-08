@@ -411,3 +411,34 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
     for item in record["usage"]:
         item["trial_id"] = record["trial_id"]
     return record
+
+
+EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
+# Files a run leaves behind. A frozen fixture carries none of them.
+RUN_ARTEFACTS = (".bench1", "node_modules/.vite", "node_modules/.vite-temp", "node_modules/.modules.yaml", "node_modules/.pnpm-workspace-state-v1.json")
+
+
+def assert_vitest_fixture(case: Any, fixture: Path, task: str) -> None:
+    """A live task fixture is a real, frozen Vitest project whose only green path is the lesson."""
+    package = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
+    pinned = package["devDependencies"]["vitest"]
+    case.assertRegex(pinned, EXACT_VERSION)
+    installed = json.loads((fixture / "node_modules" / "vitest" / "package.json").read_text(encoding="utf-8"))
+    case.assertEqual(installed["version"], pinned)
+    case.assertTrue((fixture / "pnpm-lock.yaml").is_file())
+    case.assertTrue((fixture / "node_modules" / ".bin" / "vitest").is_file())
+    # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
+    case.assertEqual(package["scripts"]["test"], "node scripts/all-tests.mjs")
+    case.assertNotIn("argv", (fixture / "scripts" / "all-tests.mjs").read_text(encoding="utf-8"))
+    config = (fixture / "vitest.config.mjs").read_text(encoding="utf-8")
+    case.assertIn("'unrelated/**/*.test.mjs'", config)
+    case.assertIn(f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]", config)
+    case.assertTrue(list((fixture / "unrelated").glob("*.test.mjs")))
+    # The named test is a vitest test, so plain `node` cannot run it, and its cases are a blob.
+    test = (fixture / "tests" / f"{task}.test.mjs").read_text(encoding="utf-8")
+    case.assertIn("from 'vitest'", test)
+    case.assertIn("./support/cases.mjs", test)
+    case.assertIn("gunzipSync", (fixture / "tests" / "support" / "cases.mjs").read_text(encoding="utf-8"))
+    for artefact in RUN_ARTEFACTS:
+        case.assertFalse((fixture / artefact).exists(), artefact)
+    case.assertEqual([path for path in fixture.rglob("*") if path.is_symlink()], [])
