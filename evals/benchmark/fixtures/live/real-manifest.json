@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-real-3",
+  "benchmark_version": "bench1-real-4",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,
@@ -42,7 +42,7 @@
       "transfer_distance": "same_family",
       "fixture": "actor",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:0e12bf820d5f6825839848b5dc1d694d30fb0cb39826b76f47389d32cb402d1d",
+      "fixture_hash": "sha256:ce92d076c680388ae6566d8a9c932ffc8554d471cc3c13369c8004fd1db04a88",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -52,7 +52,7 @@
       "transfer_distance": "same_family",
       "fixture": "budget",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:b5fa727d3624e74d9afe3042741e6e775b97c46c81e9f4b9aab03a8ab0d8b685",
+      "fixture_hash": "sha256:33e3fc95065c051b7a8158df520a3f8b4d0f6da368ff5acad526c25d4d530f88",
       "verifier": "node_test_budget",
       "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -62,7 +62,7 @@
       "transfer_distance": "same_family",
       "fixture": "candidate",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:84ea54a56ec3bcdcec33118b9f34dd290b0db22f8f75e72c4b3b118ec396678e",
+      "fixture_hash": "sha256:6cf5115ead17c1a84b38110a7e16ed7d6ce7c5580f9dab815b407d26e24b1a5d",
       "verifier": "node_test_candidate",
       "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -72,7 +72,7 @@
       "transfer_distance": "same_family",
       "fixture": "slug",
       "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:ab758ef3c959588ccff6bca25d4348cd05b1836a1ca5d8cc805480f35f923b4a",
+      "fixture_hash": "sha256:215daff0e5ccde272a119d7d724d76a4ecf8bc674171d69308dae5d2e94426f6",
       "verifier": "node_test_slug",
       "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }

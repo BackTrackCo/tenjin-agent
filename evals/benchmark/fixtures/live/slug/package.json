@@ -2,6 +2,7 @@
   "name": "bench1-slug",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.11.0",
   "scripts": {
     "test": "node scripts/all-tests.mjs"
   },
