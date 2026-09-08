@@ -46,8 +46,10 @@ import uuid
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import artifact, sha256_json
-from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest
+from urllib.parse import urlsplit
+
+from . import artifact, sha256_json, tenjin_arm
+from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest, Provision, ProvisionRequest
 
 NAME = "claude_live"
 HARNESS = "claude"
@@ -92,10 +94,21 @@ HOOK_EVENTS = frozenset(
         "SessionStart",
         "SessionEnd",
         "PreCompact",
+        "PostToolUseFailure",
     }
 )
 HOOK_ENTRY_KEYS = frozenset({"matcher", "hooks"})
-HOOK_KEYS = frozenset({"type", "command", "timeout"})
+COMMAND_HOOK_KEYS = frozenset({"type", "command", "timeout"})
+# An `http` hook is a POST from the CLI to a URL. The only URL an arm may name
+# is a loopback one: the product's own daemon on this machine, which the
+# provisioning seam starts per trial. Any other host is refused.
+HTTP_HOOK_KEYS = frozenset({"type", "url", "headers", "timeout"})
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+HTTP_HEADER_LIMIT = 512
+# The values a provisioned arm's settings template resolves to, per trial.
+# `settings_hash` is over the template, so it names the treatment once; the
+# resolved fragment's hash goes under the record's private hashes.
+PLACEHOLDER = re.compile(r"\{(" + "|".join(tenjin_arm.PLACEHOLDERS) + r")\}")
 # The variables the CLI genuinely needs that only the parent can supply.
 INHERITED = ("PATH", "TERM", "LANG")
 # Variables the trial's own roots own, or that would move the model traffic,
@@ -320,8 +333,55 @@ def _settings_permissions(permissions: Any, pins: Mapping[str, Any]) -> None:
         raise LiveExecutorError("arm settings.permissions.deny must be a list of strings")
 
 
-def _settings_hooks(hooks: Any) -> None:
-    """Shape only. A hook command is operator-authored code, and it says so."""
+def _hook_url(where: str, url: Any, templated: bool) -> None:
+    """A loopback URL, or the daemon placeholder in a template. Nothing else."""
+    if not isinstance(url, str) or not url.strip() or "\x00" in url or len(url) > HOOK_COMMAND_LIMIT:
+        raise LiveExecutorError(f"{where} url must be a plain string")
+    if url == "{daemon_url}":
+        if not templated:
+            raise LiveExecutorError(f"{where} url placeholder was never resolved")
+        return
+    parts = urlsplit(url)
+    if parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS or parts.port is None:
+        raise LiveExecutorError(f"{where} url must be http on 127.0.0.1 or localhost with a port")
+
+
+def _hook_handler(where: str, handler: Any, templated: bool) -> None:
+    if not isinstance(handler, dict):
+        raise LiveExecutorError(f"{where} entries must be objects")
+    kind = handler.get("type")
+    if kind == "command":
+        if set(handler) - COMMAND_HOOK_KEYS:
+            raise LiveExecutorError(f"{where} command entries hold {', '.join(sorted(COMMAND_HOOK_KEYS))} only")
+        text = handler.get("command")
+        if not isinstance(text, str) or not text.strip() or len(text) > HOOK_COMMAND_LIMIT or "\x00" in text:
+            raise LiveExecutorError(f"{where} command must be a plain string")
+    elif kind == "http":
+        if set(handler) - HTTP_HOOK_KEYS:
+            raise LiveExecutorError(f"{where} http entries hold {', '.join(sorted(HTTP_HOOK_KEYS))} only")
+        _hook_url(where, handler.get("url"), templated)
+        headers = handler.get("headers", {})
+        if not isinstance(headers, dict):
+            raise LiveExecutorError(f"{where} headers must be an object")
+        for name, value in headers.items():
+            if not isinstance(name, str) or not re.match(r"^[A-Za-z][A-Za-z0-9-]{0,63}\Z", name):
+                raise LiveExecutorError(f"{where} header name {name!r} is not a header name")
+            if not isinstance(value, str) or "\x00" in value or "\n" in value or len(value) > HTTP_HEADER_LIMIT:
+                raise LiveExecutorError(f"{where} header {name} must be a plain string")
+    else:
+        raise LiveExecutorError(f"{where} entries must be {{type: command, ...}} or {{type: http, url: ...}}")
+    timeout = handler.get("timeout", 1)
+    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
+        raise LiveExecutorError(f"{where} timeout must be a positive integer")
+
+
+def _settings_hooks(hooks: Any, templated: bool = True) -> None:
+    """Shape only. A hook command is operator-authored code, and it says so.
+
+    `templated` is whether the daemon placeholders may still stand in for
+    values: true for the arm's declared fragment, false for the resolved one
+    the child reads.
+    """
     if not isinstance(hooks, dict):
         raise LiveExecutorError("arm settings.hooks must be an object")
     for event, entries in hooks.items():
@@ -337,18 +397,33 @@ def _settings_hooks(hooks: Any) -> None:
             # shape check rather than the non-empty rule an argument gets.
             if not isinstance(matcher, str) or len(matcher) > 128 or "\x00" in matcher:
                 raise LiveExecutorError(f"arm settings.hooks.{event} matcher must be a plain string")
-            commands = entry.get("hooks")
-            if not isinstance(commands, list) or not commands:
+            handlers = entry.get("hooks")
+            if not isinstance(handlers, list) or not handlers:
                 raise LiveExecutorError(f"arm settings.hooks.{event} needs a non-empty hooks list")
-            for command in commands:
-                if not isinstance(command, dict) or set(command) - HOOK_KEYS or command.get("type") != "command":
-                    raise LiveExecutorError(f"arm settings.hooks.{event} entries must be {{type: command, command: ...}}")
-                text = command.get("command")
-                if not isinstance(text, str) or not text.strip() or len(text) > HOOK_COMMAND_LIMIT or "\x00" in text:
-                    raise LiveExecutorError(f"arm settings.hooks.{event} command must be a plain string")
-                timeout = command.get("timeout", 1)
-                if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
-                    raise LiveExecutorError(f"arm settings.hooks.{event} timeout must be a positive integer")
+            for handler in handlers:
+                _hook_handler(f"arm settings.hooks.{event}", handler, templated)
+
+
+def placeholders_of(value: Any) -> set[str]:
+    """Every daemon placeholder a fragment names, wherever a string holds one."""
+    if isinstance(value, str):
+        return set(PLACEHOLDER.findall(value))
+    if isinstance(value, dict):
+        return set().union(*(placeholders_of(item) for item in value.values())) if value else set()
+    if isinstance(value, list):
+        return set().union(*(placeholders_of(item) for item in value)) if value else set()
+    return set()
+
+
+def resolve_settings(settings: Any, values: Mapping[str, str]) -> Any:
+    """The fragment with each placeholder replaced by its per-trial value. Strings only, no format."""
+    if isinstance(settings, str):
+        return PLACEHOLDER.sub(lambda match: values[match.group(1)], settings)
+    if isinstance(settings, dict):
+        return {key: resolve_settings(item, values) for key, item in settings.items()}
+    if isinstance(settings, list):
+        return [resolve_settings(item, values) for item in settings]
+    return settings
 
 
 def settings_of(arm: Mapping[str, Any], pins: Mapping[str, Any]) -> dict[str, Any]:
@@ -375,6 +450,34 @@ def settings_of(arm: Mapping[str, Any], pins: Mapping[str, Any]) -> dict[str, An
     if arm.get("settings_hash") != digest:
         raise LiveExecutorError(f"arm {arm.get('id')!r} settings_hash does not match its settings fragment")
     return settings
+
+
+def provision_of(arm: Mapping[str, Any]) -> str | None:
+    """The provisioner an arm declares. Only the Tenjin one exists."""
+    name = arm.get("provision")
+    if name is None:
+        return None
+    if name != tenjin_arm.NAME:
+        raise LiveExecutorError(f"arm {arm.get('id')!r} declares unknown provision {name!r}")
+    return name
+
+
+def settings_for_launch(request: LaunchRequest) -> tuple[dict[str, Any], str | None]:
+    """The fragment the child reads, and its hash when it differs from the declared one."""
+    settings = settings_of(request.arm, request.pins)
+    placeholders = placeholders_of(settings)
+    if request.provision is None:
+        if placeholders:
+            raise LiveExecutorError(
+                f"arm {request.arm.get('id')!r} names {', '.join(sorted(placeholders))} but declares no provision"
+            )
+        return settings, None
+    resolved = resolve_settings(settings, request.provision.values)
+    if placeholders_of(resolved):
+        raise LiveExecutorError("the provision left a placeholder unresolved")
+    if "hooks" in resolved:
+        _settings_hooks(resolved["hooks"], templated=False)
+    return resolved, "sha256:" + sha256_json(resolved)
 
 
 def refuse_project_settings(repo: Path) -> None:
@@ -447,7 +550,8 @@ def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[
 
 def launch(request: LaunchRequest) -> Launch:
     """Validate the manifest's values, write the trial's settings, name the command."""
-    settings = settings_of(request.arm, request.pins)
+    provision_of(request.arm)
+    settings, resolved_hash = settings_for_launch(request)
     credential_env = credential_env_of(request.pins)
     refuse_project_settings(request.roots.repo)
     session_id = root_session_id(request.trial_id)
@@ -458,7 +562,14 @@ def launch(request: LaunchRequest) -> Launch:
         cwd=working_dir(request.roots),
         root_session_id=session_id,
         env=child_environment(request.roots, os.environ, credential_env, session_id),
+        resolved_settings_hash=resolved_hash,
     )
+
+
+def prepare(request: ProvisionRequest) -> Provision:
+    if provision_of(request.arm) is None:
+        raise LiveExecutorError(f"arm {request.arm.get('id')!r} declares no provision")
+    return tenjin_arm.prepare(request)
 
 
 SPEC = ExecutorSpec(
@@ -469,6 +580,8 @@ SPEC = ExecutorSpec(
     required_origins=REQUIRED_ORIGINS,
     sessions=sessions_dir,
     credential_seam=credential_env_of,
+    prepare=prepare,
+    stop=tenjin_arm.stop,
 )
 
 REGISTRY[NAME] = SPEC
