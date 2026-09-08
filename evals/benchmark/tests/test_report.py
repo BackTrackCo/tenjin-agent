@@ -7,6 +7,8 @@ memory body, each pushed through a field the projection actually copies.
 
 from __future__ import annotations
 
+import json
+
 import unittest
 from pathlib import Path
 
@@ -149,6 +151,23 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(published["publishable"], False)
         self.assertEqual(published["isolation"], "operator_plumbing")
         self.assertEqual(published["comparisons"]["on"]["headline_eligible"], False)
+
+    def test_a_seeded_shelf_secret_marks_the_report_and_its_reading(self) -> None:
+        accepted = self.stamped(live=True, publishable=False, shelf_secret_present=True, shelf_origin="team-shelf.example")
+        published = self.project(accepted=accepted)
+        self.assertEqual((published["publishable"], published["isolation"], published["shelf_secret_present"]), (False, "team_shelf_secret", True))
+        self.assertEqual(published["comparisons"]["on"]["headline_eligible"], False)
+        self.assertNotIn("team-shelf.example", json.dumps(published))
+        report.guard(published)
+        self.assertIn("team shelf secret present: NOT PUBLISHABLE", report.render(published))
+        self.assertEqual(self.project()["shelf_secret_present"], False)
+
+    def test_a_record_that_seeded_a_secret_and_claims_publishable_is_refused(self) -> None:
+        record = support.reduction_record("t1", "off", 0, 0, 6000, "pass")
+        record["isolation"] = {**record["isolation"], "live": True, "shelf_secret_present": True}
+        with self.assertRaises(records.RecordError) as caught:
+            records.validate(record)
+        self.assertIn("shelf secret", str(caught.exception))
 
     def test_a_record_without_the_isolation_booleans_is_excluded_not_projected(self) -> None:
         record = support.reduction_record("t1", "off", 0, 0, 6000, "pass")

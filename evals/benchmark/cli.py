@@ -41,11 +41,13 @@ from . import (
     report as report_module,
     runner,
     schedule,
+    tenjin_arm,
     verifier,
 )
 
 FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
 SMOKE_MANIFEST = FIXTURES / "live" / "smoke-manifest.json"
+HOOKS_SMOKE_MANIFEST = FIXTURES / "live" / "hooks-smoke-manifest.json"
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job
 # timeout, and gives up any claim to a publishable number in return.
@@ -85,6 +87,19 @@ def require_executor(manifest: manifest_module.Manifest, *, live: bool) -> execu
     return specs[0]
 
 
+def provisioned_arms(manifest: manifest_module.Manifest) -> list[str]:
+    return [str(arm["id"]) for arm in manifest.arms if arm.get("provision")]
+
+
+def refuse_secret_in_report(out: Path, secrets: tuple[str, ...]) -> None:
+    """The report is the one file that may leave the run directory. A seeded secret in it is a refusal."""
+    path = out / "report.json"
+    text = path.read_text(encoding="utf-8")
+    if any(secret and secret in text for secret in secrets):
+        path.unlink()
+        raise CliError("report.json carried the seeded shelf secret and was deleted: nothing from this run is publishable")
+
+
 def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
     """Write the run's manifest pointer and schedule, execute it, publish the report."""
     out.mkdir(parents=True, exist_ok=True)
@@ -92,6 +107,7 @@ def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], ou
     digest = schedule.write(out, manifest, trials)
     results = runner.run(manifest, trials, out, digest, runtime)
     report = do_report(out)
+    refuse_secret_in_report(out, tuple(getattr(runtime.source, "secrets", ()) or ()))
     return {
         "trials": len(results),
         "resumed": sum(1 for result in results if result.resumed),
@@ -107,20 +123,42 @@ def fake_run(out: Path, manifest_path: Path = FAKE_MANIFEST, runtime: runner.Run
     return execute(manifest, schedule.expand(manifest), out, runtime or runner.Runtime())
 
 
-def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: Path) -> dict[str, Any]:
+def describe_hooks(settings: Mapping[str, Any]) -> list[str]:
+    """One line per hook handler: the event, the kind, and the command or the URL with header names only."""
+    lines = []
+    for event, entries in sorted((settings.get("hooks") or {}).items()):
+        for entry in entries:
+            for handler in entry.get("hooks", []):
+                if handler.get("type") == "http":
+                    names = ",".join(sorted(handler.get("headers", {}))) or "none"
+                    lines.append(f"{event} http {handler.get('url')} headers={names}")
+                else:
+                    lines.append(f"{event} command {handler.get('command')}")
+    return lines
+
+
+def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: Path, source: Any = None) -> dict[str, Any]:
     """Build one trial's roots and launch exactly as `runner.run_trial` does, then stop."""
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
     spec = executor.lookup(arm["executor"])
     roots = artifact.create(out, trial.trial_id, manifest.fixture_path(task))
-    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins))
+    provision = None
+    if arm.get("provision") and spec.prepare is not None:
+        # A dry run seeds the data dir and resolves the template with a port of
+        # 0 and a labelled token; it starts no daemon.
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True))
+    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     settings = arm.get("settings") or {}
+    resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
     return {
         "trial_id": trial.trial_id,
         "task_id": trial.task_id,
         "arm_id": trial.arm_id,
         "repeat": trial.repeat,
         "argv": list(launch.argv),
+        "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
+        "hooks": describe_hooks(resolved),
         "roots": {
             "cwd": str(launch.cwd),
             "home": str(roots.home),
@@ -160,6 +198,14 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
         lines.append(f"  {'env':10}{' '.join(plan['environment'])}")
         lines.append(f"  {'arm env':10}{' '.join(plan['settings_env']) or '(none)'}")
         lines.append(f"  {'arm hooks':10}{' '.join(plan['settings_hooks']) or '(none)'}")
+        for hook in plan["hooks"]:
+            lines.append(f"  {'hook':10}{hook}")
+        if plan["provision"] is not None:
+            facts = plan["provision"]
+            lines.append(
+                f"  {'provision':10}shelf_secret_present={str(facts['shelf_secret_present']).lower()} "
+                f"shelf_origin={facts['shelf_origin']} public_origin={facts['public_origin']}"
+            )
         lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
 
@@ -175,15 +221,29 @@ def live_run(
     environ: Mapping[str, str] | None = None,
     stream: Any = None,
     runtime: runner.Runtime | None = None,
+    tenjin_source: Path | None = None,
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
+    # The product compares data dir strings, so every root has to be spelled
+    # absolutely and the same way in every process.
+    out = Path(os.path.abspath(out))
     manifest = manifest_module.load(manifest_path)
     spec = require_executor(manifest, live=True)
     trials = schedule.expand(manifest)
+    provisioned = provisioned_arms(manifest)
+    if ci_live and provisioned:
+        raise CliError(f"--ci-live refuses a manifest that provisions an arm ({', '.join(provisioned)}): the live lane is smoke-only")
+    if tenjin_source is not None and not provisioned:
+        raise CliError("--tenjin-source is for a manifest with a provisioned arm; this one has none")
+    source = None if tenjin_source is None else tenjin_arm.load_source(tenjin_source)
     if dry_run:
-        plans = [plan_trial(manifest, trial, out) for trial in trials]
+        plans = [plan_trial(manifest, trial, out, source) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
         return {"dry_run": True, "trials": plans}
+    if provisioned and source is None:
+        raise CliError(f"arm {provisioned[0]!r} is provisioned: live-run needs --tenjin-source <data dir>")
+    if source is not None and source.shelf_secret_present and attestation_path is not None:
+        raise CliError("--attestation refuses a source that carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, run it with --plumbing")
     if ci_live and not plumbing:
         raise CliError("--ci-live is valid only with --plumbing: an automated live run is never publishable")
     if ci_live and attestation_path is not None:
@@ -214,6 +274,7 @@ def live_run(
         publishable=not plumbing,
         ci=bool(automation),
         automated=ci_live,
+        source=source,
     )
     return execute(manifest, trials, out, runtime)
 
@@ -281,6 +342,11 @@ def main(argv: list[str] | None = None) -> int:
         help="allow an automated environment; only with --plumbing, and every record is stamped automated",
     )
     live.add_argument("--dry-run", action="store_true", help="print each trial's argv and roots, start nothing")
+    live.add_argument(
+        "--tenjin-source",
+        type=Path,
+        help="a tenjin data dir whose config keys and hook bundles seed each provisioned arm's trial; never defaulted",
+    )
     for name in ("verify", "reduce", "report"):
         commands.add_parser(name).add_argument("--run", required=True, type=Path)
     # `summary` prints a finished report as text instead of JSON. It reads the
@@ -321,8 +387,9 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 plumbing=args.plumbing,
                 ci_live=args.ci_live,
+                tenjin_source=args.tenjin_source,
             )
-        except CliError as error:
+        except (CliError, executor.ProvisionError) as error:
             sys.stderr.write(f"{error}\n")
             return 2
         if args.dry_run:

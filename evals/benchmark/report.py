@@ -24,7 +24,7 @@ from .artifact import CANARY_PREFIX
 REPORT_SCHEMA = "bench1.report.v1"
 # How a run was isolated, weakest first. A report takes the weakest kind any
 # accepted record carries, so one plumbing record marks the whole run.
-ISOLATION_KINDS = ("automated_plumbing", "operator_plumbing", "attested", "fake")
+ISOLATION_KINDS = ("team_shelf_secret", "automated_plumbing", "operator_plumbing", "attested", "fake")
 MAX_TOKEN = 64
 OPAQUE = re.compile(r"^[A-Za-z0-9_.:+-]{0,%d}$" % MAX_TOKEN)
 HASH = re.compile(r"^(?:sha256:)?[0-9a-f]{64}$")
@@ -117,6 +117,8 @@ def _guard_string(value: str, trail: str) -> None:
 
 def isolation_kind(record: dict[str, Any]) -> str:
     isolation = record["isolation"]
+    if isolation.get("shelf_secret_present", False):
+        return "team_shelf_secret"
     if not isolation["live"]:
         return "fake"
     if isolation["attested_container"]:
@@ -155,6 +157,7 @@ def project(
         "repeats": manifest_data["repeats"],
         "publishable": publishable,
         "isolation": kind,
+        "shelf_secret_present": any(record["isolation"].get("shelf_secret_present", False) for record in accepted.values()),
         "baseline": reduction["baseline"],
         "arms": reduction["arms"],
         # A headline needs complete accounting and a publishable run; the
@@ -210,6 +213,10 @@ def render(report: dict[str, Any]) -> str:
         f"manifest {report['manifest_hash'][:12]}  schedule {report['schedule_hash'][:12]}  "
         f"seed {report['seed']}  repeats {report['repeats']}",
         stamp_line,
+    ]
+    if report.get("shelf_secret_present", False):
+        lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
+    lines += [
         "",
         f"{'arm'.ljust(width)} {'attempts':>8s} {'passes':>7s} {'pass rate':>9s} {'tokens':>10s} "
         f"{'per attempt':>12s} {'accounting':>12s}",
