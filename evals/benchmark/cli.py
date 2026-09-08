@@ -36,6 +36,7 @@ from . import (
     FIXTURES,
     reap as reap_module,
     artifact,
+    cases as cases_module,
     executor,
     manifest as manifest_module,
     records,
@@ -457,9 +458,30 @@ def main(argv: list[str] | None = None) -> int:
     # relatives, also matches an operator's unrelated sessions; do not.
     cleanup = commands.add_parser("cleanup", help="kill any process this run started and left behind")
     cleanup.add_argument("--run", required=True, type=Path)
+    # Case records for the search-intent experiment: after settlement only,
+    # one JSONL row per hook fire, each question replayed through the shelf.
+    cases = commands.add_parser("cases", help="export a settled run's hook fires as search-intent case records")
+    cases.add_argument("--run", required=True, type=Path)
+    cases.add_argument("--tenjin-source", type=Path, help="the data dir whose team shelf the questions are replayed on")
+    cases.add_argument("--out", type=Path, help="the JSONL file to write")
+    cases.add_argument("--dry-run", action="store_true", help="list the cases that would be replayed and call nothing")
     args = parser.parse_args(argv)
     if args.command == "cleanup":
         json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+    if args.command == "cases":
+        try:
+            payload = do_cases(args.run, args.tenjin_source, args.out, dry_run=args.dry_run)
+        except (CliError, cases_module.CasesError, executor.ProvisionError, manifest_module.ManifestError, records.RecordError) as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        if args.dry_run:
+            for row in payload["listing"]:
+                sys.stdout.write(f"{row['case_id']} {row['trigger']} {row['question'] or row['command_head'] or '(key only)'}\n")
+            sys.stdout.write(f"cases dry run: {payload['cases']} case(s) across {payload['trials']} trial(s); nothing replayed, nothing written\n")
+            return 0
+        json.dump({key: value for key, value in payload.items() if key != "listing"}, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
     if args.command in ("summary", "regress", "verify", "reduce", "report"):
@@ -489,6 +511,17 @@ def main(argv: list[str] | None = None) -> int:
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def do_cases(run_dir: Path, source_path: Path | None, out: Path | None, *, dry_run: bool = False, replay: Any = None) -> dict[str, Any]:
+    """The search-intent case export: refuses a run that is not settled, and a replay without a source or an output file."""
+    manifest, digest = load_run(run_dir)
+    if not dry_run and out is None:
+        raise CliError("cases needs --out <file.jsonl> unless --dry-run")
+    if not dry_run and source_path is None:
+        raise CliError("cases needs --tenjin-source <data dir> to replay each question on the team shelf, or --dry-run")
+    source = None if source_path is None else tenjin_arm.load_source(source_path)
+    return cases_module.export(manifest, digest, run_dir, out, source, dry_run=dry_run, replay=replay)
 
 
 def run_reader(args: argparse.Namespace) -> int:

@@ -32,6 +32,7 @@ BUDGET_S = 60.0
 SUBJECTS = {
     "test_artifact": "disposable trial roots, hidden layer, isolation attestation",
     "test_budget": "the suite's own wall-clock budget",
+    "test_cases": "search-intent case records: after settlement, one per fire, replayed on the fake CLI, seeded marked apart",
     "test_claude_live": "live Claude executor: argv, session id, sessions resolver, child env, live-run",
     "test_claude_usage": "Claude JSONL adapter: request grouping, retries, ambiguity",
     "test_fake_run": "the fake path end to end, manifest to report",

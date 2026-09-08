@@ -982,6 +982,33 @@ the operator's shim, a fresh `HOME`, and the seeded home: `pnpm test -- tests/ac
 prints no corepack and no registry line, `pnpm --version` inside the trial is 11.11.0, the
 command matrix holds, and the operator's cache and `lastKnownGood.json` are untouched.
 
+### Cases for the search-intent experiment
+
+`python3 -m evals.benchmark.cli cases --run <dir> --tenjin-source <dir> --out <file.jsonl>` is
+the export the teammate's plan asks for (`tenjin-notes` `loop-redesign/14-search-intent.md`,
+"Quick experiment for the benchmark teammate" and "Minimal records and benchmark integration").
+It runs only after settlement: a live process in the run's ledger or a live WAL on a trial's
+`loop.db` is a refusal. For each accepted attempt with a trial ledger, every hook fire that
+carried a question or a question key becomes one JSONL record: `case_id` (run nonce, trial,
+fire), `source` (trial, arm, task, harness, fire event and hook arm, actor), `trigger`,
+`prompt` (the question as fired, or the key), `context_packet` (fixture id and hash, family,
+transfer distance, the runner facts from `isolation`, and for a failure fire the observed
+situation from the `pairings` row the key names: command head, command, error line, each with
+its source column), `human_label: null` with `labels_schema` saying what a labeller writes,
+`corpus_snapshot` (shelf origin, `post_floor: true`, limit 10, `replayed_at` UTC), `revisions`
+(benchmark version, manifest and schedule hash, the arm's `product_version`, the run nonce),
+`method: "baseline"`, `seeded_piece_ids`, `baseline` (the ledger's own outcome: rank-1 title,
+each leg's status and outcome, the delivered piece and whether it was seeded, `hit`), `replay`
+(the same question through `tenjin search --json --limit 10` on the source data dir's team
+shelf: each candidate's id, rank, title, url, `strong`, and `confidence`, `corroborated`,
+`calibration`, `score` when the shelf sends them, plus `seeded: true` for an id in the trial's
+seed list; a key-only failure fire is not replayed, a keys resolve is not a search), and
+`attempt` (outcome, tokens, cost, wall time, turns). Secrets are masked and the home path is
+`~` in every string. Limits: the replay is post-floor and top ten, so it cannot establish
+recall below the shelf's floor; labels are human-supplied, never written here; seeded
+positives are marked so they are reported apart from real ones. `--dry-run` lists the cases
+and calls nothing. Nothing here changes a record.
+
 ## Extending the foundation
 
 Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.

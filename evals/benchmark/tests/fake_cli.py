@@ -38,6 +38,11 @@ def main(argv: list[str]) -> int:
     if command == "search":
         results = data_dir / "search-results.json"
         candidates = json.loads(results.read_text(encoding="utf-8")) if results.exists() else []
+        items = data_dir / "search-items.json"
+        if items.exists():
+            # The v3 receipt: `data.response.items`, each a passthrough candidate.
+            sys.stdout.write(json.dumps({"ok": True, "data": {"shelf": "team", "response": {"searchId": "search-1", "items": json.loads(items.read_text(encoding="utf-8"))}}}) + "\n")
+            return 0
         sys.stderr.write(json.dumps({"ok": True, "data": {"candidates": candidates}}) + "\n")
         return 0
     if command == "delete":
