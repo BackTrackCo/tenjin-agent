@@ -162,6 +162,19 @@ class ProjectionTest(unittest.TestCase):
         self.assertIn("team shelf secret present: NOT PUBLISHABLE", report.render(published))
         self.assertEqual(self.project()["shelf_secret_present"], False)
 
+    def test_the_failure_key_lane_and_keys_leg_verdict_are_summed_per_arm(self) -> None:
+        accepted = {trial_id: dict(record) for trial_id, record in self.accepted.items()}
+        first = sorted(accepted)[0]
+        arm = accepted[first]["arm_id"]
+        accepted[first]["delivery"] = {**accepted[first]["delivery"], "failure_key": {"fire_id": "f", "lane": "sig_v1_test", "key_hash": "abcd", "keys_leg": {"status": "ok", "outcome": "hit"}, "keys_leg_hit": True, "reason": "hit", "delivered_piece_id": "p1", "report_file_present": True}}
+        published = self.project(accepted=accepted)
+        self.assertEqual(published["failure_keys"][arm]["keyed"], 1)
+        self.assertEqual(published["failure_keys"][arm]["lanes"], {"sig_v1_test": 1})
+        rendered = report.render(published)
+        self.assertIn(f"failure key {arm}: keyed 1/", rendered)
+        self.assertIn("(sig_v1_test x1), keys leg hit 1, report file 1, delivered 1", rendered)
+        self.assertNotIn("failure key", report.render(self.project()))
+
     def test_a_seeded_piece_left_on_the_shelf_is_counted_and_the_summary_warns(self) -> None:
         seed = {"lesson": "fam", "title": "The lesson", "nonce": "20260908T000000Z-0badf00d", "key_hashes": ["abcd"], "keys": 1, "shelf_origin": "team-shelf.example", "piece_id": "piece-1", "published": True, "probe": None, "deleted": False, "delete_error": "tenjin delete exited 4: 502"}
         accepted = {trial_id: dict(record) for trial_id, record in self.accepted.items()}

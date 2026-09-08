@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -43,6 +44,20 @@ Replay = Callable[[str], dict[str, Any]]
 
 class CasesError(RuntimeError):
     pass
+
+
+FILE_NAME_RE = re.compile(r"[A-Za-z0-9_./-]*[A-Za-z0-9_-]+\.[A-Za-z0-9]{1,5}\b")
+
+
+def shared_file_names(prompt: str, body: str) -> list[str]:
+    """File names (and their stems) the prompt names that the body also names: what lets a search vouch a piece on words alone."""
+    names = set()
+    for match in FILE_NAME_RE.findall(prompt):
+        base = match.split("/")[-1]
+        names.add(base.lower())
+        names.add(base.split(".")[0].lower())
+    lowered = body.lower()
+    return sorted(name for name in names if name and name in lowered)
 
 
 def _mask(value: Any, secrets: tuple[str, ...], home: str) -> Any:

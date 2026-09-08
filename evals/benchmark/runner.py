@@ -360,6 +360,9 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         usage_reason = usage_reason or "delivery:wal_live"
     if delivery["unmatched_fires"]:
         usage_reason = usage_reason or "delivery:fire_without_usage"
+    if delivery.get("failure_key") is not None:
+        # The product's test lane reads `.vitest-report.json` in the repository when a reporter is wired; its presence after the run is a fact.
+        delivery["failure_key"] = {**delivery["failure_key"], "report_file_present": (roots.repo / ".vitest-report.json").is_file()}
     # The team shelf and the public marketplace are the seeded config's two
     # named origins, listed in the allowlist a provisioned run has to state. A
     # leg to either is the product under test and is counted in the record; a

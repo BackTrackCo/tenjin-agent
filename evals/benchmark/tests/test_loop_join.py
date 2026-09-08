@@ -153,6 +153,33 @@ class LoopJoinTest(unittest.TestCase):
 
 
 
+class FailureKeyTest(unittest.TestCase):
+    def test_the_last_keyed_failure_fire_names_its_lane_and_the_keys_leg_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "loop.db"
+            db = sqlite3.connect(path)
+            db.executescript(loop_ddl())
+            for fire_id, at, key, delivered in (("f1", 1, "aaaaaaaaaaaaaaaa", None), ("f2", 2, "502b90852a1505e3", "keys:piece-7")):
+                db.execute(
+                    "INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms, elapsed_ms, reason, question_key, delivered)"
+                    " VALUES (?, ?, 's', '', 'failure', 'claude', 'tool.after', '', 'sync', 1000, 5, 'hit', ?, ?)",
+                    (fire_id, at, key, delivered),
+                )
+            db.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('f2', 0, 'local', 'ok', 'no-answer', 1)")
+            db.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('f2', 0, 'keys', 'ok', 'hit', 40)")
+            db.execute(
+                "INSERT INTO pairings (uid, at, session, project, machine, kind, key, scope, status) VALUES ('u', 2, 's', 'p', 'm', 'sig_v1_test', '502b90852a1505e3', 'project', 'open')"
+            )
+            db.commit()
+            db.close()
+            key = loop_join.project(path, [])["failure_key"]
+            self.assertEqual((key["fire_id"], key["lane"], key["keys_leg_hit"], key["delivered_piece_id"], key["report_file_present"]), ("f2", "sig_v1_test", True, "piece-7", None))
+            self.assertEqual(key["keys_leg"], {"status": "ok", "outcome": "hit"})
+            self.assertRegex(key["key_hash"], r"^[0-9a-f]{16}$")
+            self.assertNotIn("502b90852a1505e3", str(key))
+            self.assertIsNone(loop_join.unavailable()["failure_key"])
+
+
 class CliSearchesTest(unittest.TestCase):
     def test_searches_the_agent_ran_through_the_cli_are_counted_apart_from_the_hooks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

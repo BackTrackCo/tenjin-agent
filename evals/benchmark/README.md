@@ -349,6 +349,31 @@ for `actor`, the value run seven's fires table recorded as the question key; the
 it byte for byte. The prepare probe re-derives every command every trial. The operator's next
 run is the proof; nothing here was run against a shelf.
 
+**Keys smoke.** `fixtures/live/keys-smoke-manifest.json` (`bench1-keys-smoke-0`) is a one-hour
+test of the failure path's test-identity key end to end, because no ledger row anywhere has
+shown a `sig_v1_test` hit yet (tenjin-agent#324, and the teammate's finding) and run eight never
+exercised it: the fix was injected on the prompt fire before the first command. One task
+(`actor`), two repeats, three arms. `off` as today. `tenjin_keyed_console` seeds only
+`fixtures/live/lessons/actor-fix-keyonly.md`, bound to `sig_v1_test:502b90852a1505e3`, whose
+title and body name no file and none of `actor`, `actorKey`, `src/actor.mjs`, or
+`tests/actor.test.mjs` (`cases.shared_file_names` proves the body shares no file name with the
+prompt), so the prompt-fire search cannot vouch it strong and only the keys leg can deliver it;
+the fixture's vitest config wires no reporter, so the product keys the failure through the test
+lane's console fallback. `tenjin_keyed_reporter` seeds the same lesson and adds an arm-level
+`settings.overlay`: `vitest.config.mjs` rewritten with the product's reporter wired exactly as
+`tenjin install` wires it (`['<data dir>/hooks/tenjin-vitest-reporter.mjs', { outputFile:
+'.vitest-report.json' }]`, the reporter copied from the seeded data dir's `hooks/` by the
+provisioning seam, the path templated as `{data_dir}` and hashed with the rest of the settings,
+resolved per trial, applied to the repository copy before the seed probe and before the launch,
+never written into the child's settings file); the product's test lane then reads the artifact.
+Both keyed arms keep the shelf reads allowed. The record's `delivery.failure_key` carries the
+last keyed failure fire's lane (`sig_v1` or `sig_v1_test`, from the pairings row), whether the
+keys leg hit, whether `.vitest-report.json` existed in the repository after the run, and the
+delivered piece; `summary` prints one `failure key <arm>` line per arm. Plumbing evidence only:
+one lesson family, seeded, non-publishable. Operator: `python3 -m evals.benchmark.cli live-run
+--manifest evals/benchmark/fixtures/live/keys-smoke-manifest.json --out <dir> --plumbing
+--tenjin-source <tenjin data dir>`, then `verify` and `summary`.
+
 **The seeded arm may read the shelf by hand.** `tenjin_seeded` carries arm-level
 `settings.permissions.allow` for `Bash(tenjin search:*)`, `Bash(tenjin read:*)`, and
 `Bash(tenjin inspect:*)`, because a seeded agent in run seven followed the primer's instruction,

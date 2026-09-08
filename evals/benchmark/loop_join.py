@@ -15,6 +15,7 @@ a trial ledger has to open it that way.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,7 @@ def unavailable() -> dict[str, Any]:
         "classes": classify([]),
         "public": public_summary([]),
         "cli_searches": {"count": 0, "decisions": {}},
+        "failure_key": None,
     }
 
 
@@ -83,6 +85,39 @@ def cli_searches(connection: sqlite3.Connection) -> dict[str, Any]:
         decision = str(row[0])
         decisions[decision] = decisions.get(decision, 0) + 1
     return {"count": len(rows), "decisions": decisions}
+
+
+def failure_key(connection: sqlite3.Connection) -> dict[str, Any] | None:
+    """The last failure fire that carried a key: which lane keyed it, whether the keys leg hit, and what was delivered."""
+    try:
+        fire = connection.execute(
+            "SELECT id, question_key, reason, delivered FROM fires WHERE arm = 'failure' AND question_key IS NOT NULL ORDER BY at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if fire is None:
+        return None
+    key = str(fire["question_key"])
+    lane = None
+    try:
+        row = connection.execute("SELECT kind FROM pairings WHERE key = ? ORDER BY at DESC LIMIT 1", (key,)).fetchone()
+        lane = None if row is None else str(row["kind"])
+    except sqlite3.Error:
+        lane = None
+    legs = [dict(row) for row in connection.execute("SELECT shelf, status, outcome FROM legs WHERE fire_id = ? ORDER BY stage, shelf", (fire["id"],))]
+    keys_legs = [leg for leg in legs if leg.get("shelf") == "keys"]
+    delivered = fire["delivered"]
+    piece = delivered.split(":", 1)[1] if isinstance(delivered, str) and ":" in delivered else None
+    return {
+        "fire_id": fire["id"],
+        "lane": lane,
+        "key_hash": hashlib.sha256(f"{lane}:{key}".encode("utf-8")).hexdigest()[:16] if lane else hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
+        "keys_leg": None if not keys_legs else {"status": keys_legs[-1].get("status"), "outcome": keys_legs[-1].get("outcome")},
+        "keys_leg_hit": any(leg.get("outcome") == HIT for leg in keys_legs),
+        "reason": fire["reason"],
+        "delivered_piece_id": piece or None,
+        "report_file_present": None,
+    }
 
 
 def _sent(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -174,6 +209,7 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
             ):
                 legs.append({**dict(leg), "actor": list(actor)})
         searches = cli_searches(connection)
+        key = failure_key(connection)
     finally:
         connection.close()
     return {
@@ -185,4 +221,5 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
         "classes": classify(legs),
         "public": public_summary(legs),
         "cli_searches": searches,
+        "failure_key": key,
     }

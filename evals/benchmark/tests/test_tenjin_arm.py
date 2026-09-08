@@ -720,6 +720,33 @@ class SeedCase(DaemonCase):
         self.assertNotIn("seed", provision.facts)
         self.assertEqual(self.calls(), [])
 
+    def test_an_arm_may_name_exactly_the_lessons_it_seeds(self) -> None:
+        self.write_fix_lesson()
+        roots = self.seed_roots()
+        request = self.request(roots)
+        request = ProvisionRequest(request.trial_id, request.roots, {**request.arm, "lessons": ["probe-fix"]}, request.source, task=request.task, environment=request.environment, nonce=request.nonce)
+        provision = tenjin_arm.prepare(request)
+        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        self.assertEqual([seed["lesson"] for seed in provision.facts["seed"]], ["probe-fix"])
+        self.assertEqual(sorted(path.name for path in (roots.data_dir / "hooks").iterdir()), sorted(tenjin_arm.BUNDLES))
+        self.assertIn("tenjin-vitest-reporter.mjs", tenjin_arm.BUNDLES)
+        with self.assertRaises(ProvisionError):
+            tenjin_arm.lessons_for(self.task, selected=["absent"])
+
+    def test_the_key_only_lesson_shares_no_file_name_with_the_prompt(self) -> None:
+        from evals.benchmark import cases
+
+        live = tenjin_arm.FIXTURES / "live" / "lessons"
+        lesson = tenjin_arm.lesson_named("actor-fix-keyonly", live)
+        assert lesson is not None
+        prompt = next(task for task in json.loads(cli.KEYS_SMOKE_MANIFEST.read_text(encoding="utf-8"))["tasks"])["prompt"]
+        text = lesson.title + "\n" + lesson.body.read_text(encoding="utf-8")
+        self.assertEqual(cases.shared_file_names(prompt, text), [])
+        for word in ("actor", "actorKey", "src/actor.mjs", "tests/actor.test.mjs"):
+            self.assertNotIn(word.lower(), text.lower())
+        self.assertEqual(lesson.keys, ("sig_v1_test:502b90852a1505e3",))
+        self.assertEqual(cases.shared_file_names(prompt, "edit src/actor.mjs"), ["actor", "actor.mjs"])
+
     def test_the_live_lesson_is_loadable_and_its_keys_are_the_fixture_failures(self) -> None:
         live = tenjin_arm.FIXTURES / "live" / "lessons"
         lessons = tenjin_arm.lessons_for({"id": "actor", "family": "test-harness-convention"}, live)

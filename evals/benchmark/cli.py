@@ -54,6 +54,7 @@ from . import (
 FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
 SMOKE_MANIFEST = FIXTURES / "live" / "smoke-manifest.json"
 HOOKS_SMOKE_MANIFEST = FIXTURES / "live" / "hooks-smoke-manifest.json"
+KEYS_SMOKE_MANIFEST = FIXTURES / "live" / "keys-smoke-manifest.json"
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job
 # timeout, and gives up any claim to a publishable number in return.
@@ -200,6 +201,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
         "vendor": None if vendor is None else {**vendor.facts, "host": host, "host_matches": vendor_module.matches(vendor, host)},
         "package_manager": launch.package_manager,
+        "overlay": sorted((settings.get("overlay") or {}).keys()),
         "hooks": describe_hooks(resolved),
         "roots": {
             "cwd": str(launch.cwd),
@@ -260,6 +262,8 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                 f"  {'vendor':10}{facts['id']} platform={facts['platform']} node_abi={facts['node_abi']} "
                 f"host={facts['host']['platform']} {verdict}"
             )
+        for path in plan.get("overlay") or []:
+            lines.append(f"  {'overlay':10}{path} written into the repository copy from the arm's settings template ({{data_dir}} resolved)")
         if plan["package_manager"] is not None:
             manager = plan["package_manager"]
             state = f"pnpm {manager['version']}" if manager["version"] else "not the pinned pnpm: live-run refuses"

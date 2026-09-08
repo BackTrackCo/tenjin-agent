@@ -52,7 +52,7 @@ ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "mem
 # into argv owns the flag and value allowlists (`claude_live.py`).
 OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env"})
 OPTIONAL_TASK_KEYS = frozenset({"prompt", "vendor"})
-OPTIONAL_ARM_KEYS = frozenset({"settings", "provision"})
+OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
 TRANSFER_DISTANCES = frozenset({"none", "same_task", "same_family", "cross_family"})
 # What an arm's memory product can prove about its own model spend. `none` is a
@@ -154,6 +154,11 @@ def _require_optional_shapes(name: str, item: dict[str, Any]) -> None:
         raise ManifestError(f"{name}.settings must be an object")
     if "provision" in item:
         _require_id(f"{name} provision", item["provision"])
+    if "lessons" in item:
+        if not isinstance(item["lessons"], list) or not item["lessons"]:
+            raise ManifestError(f"{name}.lessons must be a non-empty list of lesson ids")
+        for lesson in item["lessons"]:
+            _require_id(f"{name} lesson", lesson)
     budget = item.get("max_budget_usd")
     if "max_budget_usd" in item and (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0):
         raise ManifestError(f"{name}.max_budget_usd must be a positive number")

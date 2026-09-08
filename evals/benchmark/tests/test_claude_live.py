@@ -317,6 +317,40 @@ class HooksArmTest(LiveCase):
             for phrase in ("pnpm test --", "pnpm exec", "vitest", "wrong set"):
                 self.assertNotIn(phrase, task["prompt"])
 
+    def test_the_keys_smoke_arms_seed_the_key_only_lesson_and_the_reporter_arm_overlays_the_config(self) -> None:
+        manifest = manifest_module.load(cli.KEYS_SMOKE_MANIFEST)
+        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_keyed_console", "tenjin_keyed_reporter"])
+        self.assertEqual(len(schedule.expand(manifest)), 6)
+        console, reporter = manifest.arms[1], manifest.arms[2]
+        self.assertEqual((console["lessons"], reporter["lessons"]), (["actor-fix-keyonly"], ["actor-fix-keyonly"]))
+        self.assertNotIn("overlay", console["settings"])
+        overlay = reporter["settings"]["overlay"]
+        self.assertEqual(list(overlay), ["vitest.config.mjs"])
+        self.assertIn("['{data_dir}/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }]", overlay["vitest.config.mjs"])
+        self.assertIn(support.PNPM_GUARD, overlay["vitest.config.mjs"])
+        for arm in (console, reporter):
+            self.assertEqual(arm["settings_hash"], "sha256:" + sha256_json(arm["settings"]))
+            self.assertEqual(arm["settings"]["permissions"], {"allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]})
+        self.assertEqual(manifest.arms[0], next(arm for arm in manifest_module.load(cli.HOOKS_SMOKE_MANIFEST).arms if arm["id"] == "off"))
+        # The overlay lands in the trial copy with the data dir resolved, and never in the child's settings file.
+        index = next(index for index, trial in enumerate(schedule.expand(manifest)) if trial.arm_id == "tenjin_keyed_reporter")
+        request = dataclasses.replace(self.request(manifest, index), provision=executor.Provision(values={"daemon_url": "http://127.0.0.1:1/hook/claude", "daemon_token": "t", "data_dir": str(self.run_dir / "d")}), dry_run=True)
+        launch = claude_live.launch(request)
+        written = (request.roots.repo / "vitest.config.mjs").read_text(encoding="utf-8")
+        self.assertIn(f"['{request.roots.data_dir}/hooks/tenjin-vitest-reporter.mjs', {{ outputFile: '.vitest-report.json' }}]", written)
+        self.assertNotIn("{data_dir}", written)
+        child = json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8"))
+        self.assertNotIn("overlay", child)
+        self.assertEqual(launch.resolved_settings_hash, "sha256:" + sha256_json(child))
+        # The product's config regex (test-identity.ts) finds the reporter and its output file in the overlaid config.
+        self.assertRegex(written, r"reporters\s*:[\s\S]{0,600}?['\"][^'\"]*tenjin-vitest-reporter[^'\"]*['\"][\s\S]{0,300}?outputFile\s*:\s*['\"]\.vitest-report\.json['\"]")
+
+    def test_an_overlay_is_bounded_to_the_repository_and_the_data_dir_placeholder(self) -> None:
+        for name, overlay in (("absolute", {"/etc/x": "a"}), ("escape", {"../x": "a"}), ("empty", {}), ("foreign placeholder", {"a.mjs": "{daemon_token}"}), ("not text", {"a.mjs": 1})):
+            with self.subTest(name), self.assertRaises(LiveExecutorError):
+                claude_live._settings_overlay(overlay)
+        claude_live._settings_overlay({"vitest.config.mjs": "x {data_dir} y"})
+
     def test_the_template_resolves_per_trial_and_the_child_reads_the_resolved_fragment(self) -> None:
         provision = executor.Provision(values={"daemon_url": "http://127.0.0.1:4321/hook/claude", "daemon_token": "tok-1", "data_dir": "/trial/data"})
         request = self.seeded_request(provision)

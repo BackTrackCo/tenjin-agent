@@ -286,6 +286,12 @@ def validate(record: dict[str, Any]) -> None:
         counts = delivery.get(name, {})
         if not isinstance(counts, dict) or not all(_count(value) for value in counts.values()):
             raise RecordError(f"delivery.{name} must map names to counts")
+    key = delivery.get("failure_key")
+    if key is not None:
+        if not isinstance(key, dict) or key.get("lane") not in (None, "sig_v1", "sig_v1_test") or not isinstance(key.get("keys_leg_hit"), bool):
+            raise RecordError("delivery.failure_key must name a lane and say whether the keys leg hit")
+        if key.get("report_file_present") is not None and not isinstance(key["report_file_present"], bool):
+            raise RecordError("delivery.failure_key.report_file_present must be null or a boolean")
     searches = delivery.get("cli_searches")
     if searches is not None:
         if not isinstance(searches, dict) or not _count(searches.get("count")) or not isinstance(searches.get("decisions"), dict):

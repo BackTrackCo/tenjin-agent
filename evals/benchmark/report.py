@@ -166,6 +166,21 @@ def project(
                 seeds["published"] += 1
                 if seed.get("deleted") is not True:
                     seeds["not_deleted"] += 1
+    # The failure path per arm: which lane keyed the failure fire, whether the
+    # keys leg hit, whether the reporter's artifact existed, what was delivered.
+    failure_keys: dict[str, dict[str, Any]] = {}
+    for record in accepted.values():
+        key = record["delivery"].get("failure_key")
+        row = failure_keys.setdefault(record["arm_id"], {"attempts": 0, "keyed": 0, "lanes": {}, "keys_leg_hits": 0, "report_files": 0, "delivered": 0})
+        row["attempts"] += 1
+        if key is None:
+            continue
+        row["keyed"] += 1
+        lane = key.get("lane") or "unknown"
+        row["lanes"][lane] = row["lanes"].get(lane, 0) + 1
+        row["keys_leg_hits"] += int(bool(key.get("keys_leg_hit")))
+        row["report_files"] += int(key.get("report_file_present") is True)
+        row["delivered"] += int(key.get("delivered_piece_id") is not None)
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
@@ -189,6 +204,7 @@ def project(
         "excluded": excluded,
         "origins": origins,
         "seeds": seeds,
+        "failure_keys": failure_keys,
         "trials": [
             {
                 "trial_id": record["trial_id"],
@@ -262,6 +278,14 @@ def render(report: dict[str, Any]) -> str:
             f"{arm['accounting']:>12s}"
         )
     lines.append("")
+    for arm_id, row in sorted((report.get("failure_keys") or {}).items()):
+        if not row["keyed"]:
+            continue
+        lanes = ", ".join(f"{lane} x{count}" for lane, count in sorted(row["lanes"].items()))
+        lines.append(
+            f"failure key {arm_id}: keyed {row['keyed']}/{row['attempts']} ({lanes}), keys leg hit {row['keys_leg_hits']}, "
+            f"report file {row['report_files']}, delivered {row['delivered']}"
+        )
     seeds = report.get("seeds")
     if seeds is not None and seeds["published"]:
         lines.append(f"seeded pieces: {seeds['published']} published to the team shelf, {seeds['published'] - seeds['not_deleted']} deleted")

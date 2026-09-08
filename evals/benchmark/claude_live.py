@@ -78,7 +78,13 @@ CREDENTIAL_ENVS = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUD
 DEFAULT_CREDENTIAL_ENV = "ANTHROPIC_API_KEY"
 # An arm is a settings difference. These are the settings keys a benchmark arm
 # may state; anything else would change the harness rather than the treatment.
-SETTINGS_KEYS = frozenset({"env", "hooks", "permissions"})
+SETTINGS_KEYS = frozenset({"env", "hooks", "permissions", "overlay"})
+# A fixture overlay: files an arm writes into the trial's repository copy before
+# the agent starts (a vitest config that wires the product's reporter). Paths
+# are relative and inside the repository; the one placeholder is `{data_dir}`,
+# where the seeded hooks live. Hashed with the rest of the settings template.
+OVERLAY_FILE_LIMIT = 16_000
+OVERLAY_PLACEHOLDERS = frozenset({"data_dir"})
 # Inside `permissions`: rules that narrow, plus a default mode that has to
 # agree with the pinned one. `additionalDirectories` is absent on purpose,
 # because it widens the filesystem past the trial's own roots.
@@ -376,6 +382,39 @@ def _hook_handler(where: str, handler: Any, templated: bool) -> None:
         raise LiveExecutorError(f"{where} timeout must be a positive integer")
 
 
+def _settings_overlay(overlay: Any) -> None:
+    if not isinstance(overlay, dict) or not overlay:
+        raise LiveExecutorError("arm settings.overlay must be a non-empty object of relative path to file text")
+    for path, text in overlay.items():
+        if not isinstance(path, str) or not path or Path(path).is_absolute() or ".." in Path(path).parts or path.startswith("/"):
+            raise LiveExecutorError(f"arm settings.overlay path {path!r} must be relative and inside the repository")
+        if not isinstance(text, str) or not text or len(text) > OVERLAY_FILE_LIMIT:
+            raise LiveExecutorError(f"arm settings.overlay {path!r} must be a non-empty string under {OVERLAY_FILE_LIMIT} characters")
+        foreign = placeholders_of(text) - OVERLAY_PLACEHOLDERS
+        if foreign:
+            raise LiveExecutorError(f"arm settings.overlay {path!r} names {', '.join(sorted(foreign))}; an overlay may name {{data_dir}} only")
+
+
+def overlay_of(arm: Mapping[str, Any], roots: artifact.TrialRoots) -> dict[str, str]:
+    """The arm's overlay with `{data_dir}` resolved to this trial's data dir, or empty."""
+    overlay = (arm.get("settings") or {}).get("overlay")
+    if not isinstance(overlay, dict):
+        return {}
+    _settings_overlay(overlay)
+    return {path: resolve_settings(text, {"data_dir": str(roots.data_dir)}) for path, text in overlay.items()}
+
+
+def apply_overlay(roots: artifact.TrialRoots, overlay: Mapping[str, str]) -> list[str]:
+    """Write the overlay into the trial's repository copy. Idempotent: the provisioner and the launch both call it."""
+    written = []
+    for path, text in sorted(overlay.items()):
+        target = roots.repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        written.append(path)
+    return written
+
+
 def _settings_hooks(hooks: Any, templated: bool = True) -> None:
     """Shape only. A hook command is operator-authored code, and it says so.
 
@@ -441,6 +480,8 @@ def settings_of(arm: Mapping[str, Any], pins: Mapping[str, Any]) -> dict[str, An
         _settings_permissions(settings["permissions"], pins)
     if "hooks" in settings:
         _settings_hooks(settings["hooks"])
+    if "overlay" in settings:
+        _settings_overlay(settings["overlay"])
     try:
         digest = "sha256:" + sha256_json(settings)
     except (TypeError, ValueError) as error:
@@ -466,6 +507,9 @@ def provision_of(arm: Mapping[str, Any]) -> str | None:
 def settings_for_launch(request: LaunchRequest) -> tuple[dict[str, Any], str | None]:
     """The fragment the child reads, and its hash when it differs from the declared one."""
     settings = settings_of(request.arm, request.pins)
+    # The overlay is the repository's, not the child's settings file: it is
+    # applied to the trial copy and left out of what Claude Code reads.
+    settings = {key: value for key, value in settings.items() if key != "overlay"}
     placeholders = placeholders_of(settings)
     if request.provision is None:
         if placeholders:
@@ -589,6 +633,7 @@ def launch(request: LaunchRequest) -> Launch:
     session_id = root_session_id(request.trial_id)
     path = settings_path(request.roots)
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    apply_overlay(request.roots, overlay_of(request.arm, request.roots))
     try:
         manager = package_manager_for(request.roots, os.environ, request.dry_run)
     except toolchain.ToolchainError as error:
@@ -607,6 +652,9 @@ def prepare(request: ProvisionRequest) -> Provision:
     """Provision the arm, with the trial's toolchain in place so the seed probe runs the fixture's commands as the agent will."""
     if provision_of(request.arm) is None:
         raise LiveExecutorError(f"arm {request.arm.get('id')!r} declares no provision")
+    # The overlay is in place before the seed probe, so the probe runs the
+    # fixture as the agent will see it.
+    apply_overlay(request.roots, overlay_of(request.arm, request.roots))
     if request.dry_run:
         return tenjin_arm.prepare(request)
     try:

@@ -1,0 +1,396 @@
+{
+  "benchmark_version": "bench1-keys-smoke-0",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260907,
+  "repeats": 2,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 600,
+    "turn_budget": 40,
+    "max_budget_usd": 0.75,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ]
+  },
+  "price_sheet_version": "keys-2026-09",
+  "phases": {
+    "producer": "seeded",
+    "capture": "none",
+    "consumer": "local"
+  },
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:ce92d076c680388ae6566d8a9c932ffc8554d471cc3c13369c8004fd1db04a88",
+      "verifier": "node_test_actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_keyed_console",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "lessons": ["actor-fix-keyonly"],
+      "settings": {
+        "permissions": {
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
+        },
+        "hooks": {
+          "SessionStart": [
+            {
+              "matcher": "startup|clear|compact",
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "UserPromptSubmit": [
+            {
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PreToolUse": [
+            {
+              "matcher": "WebSearch|WebFetch",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Agent|Task",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Edit|Write|MultiEdit|Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUse": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Read",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUseFailure": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStart": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "Stop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_keyed_reporter",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "lessons": ["actor-fix-keyonly"],
+      "settings": {
+        "permissions": {
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
+        },
+        "hooks": {
+          "SessionStart": [
+            {
+              "matcher": "startup|clear|compact",
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "UserPromptSubmit": [
+            {
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PreToolUse": [
+            {
+              "matcher": "WebSearch|WebFetch",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Agent|Task",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Edit|Write|MultiEdit|Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUse": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Read",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUseFailure": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStart": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "Stop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ]
+        },
+        "overlay": {
+          "vitest.config.mjs": "// The workspace convention: tests run through pnpm. A runner reached any\n// other way has no pnpm agent in its environment and is refused here.\nconst agent = process.env.npm_config_user_agent ?? '';\nif (!agent.startsWith('pnpm/')) {\n  throw new Error(\"this repository's tests run through pnpm; see the repository convention\");\n}\n\nexport default {\n  test: {\n    include: ['tests/**/*.test.mjs', 'unrelated/**/*.test.mjs'],\n    reporters: [\n      'default',\n      ['./scripts/ran-marker.mjs', { task: 'actor' }],\n      ['{data_dir}/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }],\n    ],\n    cache: false,\n  },\n};\n"
+        }
+      },
+      "settings_hash": "sha256:770ee586e0945b4075b90bb8f35b2e69a0d3168fc1b6a30948984e2093eaa197",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    }
+  ]
+}

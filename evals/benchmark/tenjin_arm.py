@@ -47,7 +47,8 @@ LOOP_DB = "loop.db"
 HOOKS_DIR = "hooks"
 DAEMON_BUNDLE = "tenjin-daemon.mjs"
 SHIM_BUNDLE = "tenjin-shim.mjs"
-BUNDLES = (DAEMON_BUNDLE, SHIM_BUNDLE)
+REPORTER_BUNDLE = "tenjin-vitest-reporter.mjs"
+BUNDLES = (DAEMON_BUNDLE, SHIM_BUNDLE, REPORTER_BUNDLE)
 HOOK_PATH = "/hook/claude"
 # The only keys copied from the source config. `shelfBypassSecret` is the
 # team shelf secret and is what makes a run non-publishable; nothing about a
@@ -149,8 +150,16 @@ def lesson_named(name: str, lessons: Path | None = None) -> Lesson | None:
     return Lesson(id=name, title=str(data["title"]), body=body, commands=tuple(commands))
 
 
-def lessons_for(task: dict[str, Any], lessons: Path | None = None) -> list[Lesson]:
-    """The task's lessons: the family's convention lesson (the prompt path) and the task's own fix (the failure path)."""
+def lessons_for(task: dict[str, Any], lessons: Path | None = None, selected: list[str] | None = None) -> list[Lesson]:
+    """The task's lessons: by default the family's convention lesson (the prompt path) and the task's own fix (the failure path); an arm's `lessons` list names exactly which."""
+    if selected is not None:
+        chosen = []
+        for name in selected:
+            lesson = lesson_named(name, lessons)
+            if lesson is None:
+                raise ProvisionError(f"arm names lesson {name!r}, which the benchmark does not hold")
+            chosen.append(lesson)
+        return chosen
     found = []
     for name in (str(task.get("family", "")), f"{task.get('id', '')}{FIX_SUFFIX}"):
         lesson = lesson_named(name, lessons) if name else None
@@ -576,7 +585,7 @@ def prepare(request: ProvisionRequest) -> Provision:
     # so a publish that fails costs no daemon and no spend. A dry run states
     # the title and the key hashes and publishes nothing.
     facts: dict[str, Any] = dict(source.facts)
-    lessons = [] if request.task is None else lessons_for(request.task)
+    lessons = [] if request.task is None else lessons_for(request.task, selected=request.arm.get("lessons"))
     pieces: list[str] = []
     if lessons:
         task_id = str(request.task["id"]) if request.task is not None else ""
