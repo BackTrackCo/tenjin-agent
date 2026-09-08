@@ -35,6 +35,47 @@ BEHAVIORS = ("pass", "wrong-answer", "hang")
 HANG_S = 300
 
 
+class ProvisionError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Provision:
+    """What an arm's provisioning left for its launch, and what the record has to know about it.
+
+    `values` are the per-trial values the arm's settings template resolves to
+    (a daemon URL, a bearer token, the data dir). `secrets` are values that
+    must never appear in anything the agent writes; the sentinel scan treats
+    each as a canary. `origins` are hosts the arm's own product reaches, which
+    the attestation has to list and the public-request sentinel must not
+    count. `facts` is the slice of the record's isolation block the provision
+    owns: booleans and hosts, never a value from `secrets`.
+    """
+
+    values: dict[str, str] = field(default_factory=dict)
+    secrets: tuple[str, ...] = field(default_factory=tuple)
+    origins: tuple[str, ...] = field(default_factory=tuple)
+    facts: dict[str, Any] = field(default_factory=dict)
+    stop_state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ProvisionRequest:
+    trial_id: str
+    roots: artifact.TrialRoots
+    arm: dict[str, Any]
+    source: Any
+    dry_run: bool = False
+
+
+# An arm that declares `provision` is prepared before its launch and stopped
+# after its process exits; `prepare` returns the values the launch resolves its
+# settings template with, and `stop` ends what `prepare` started and waits for
+# its state to settle on disk. Both are code-owned by the executor's module.
+Prepare = Callable[[ProvisionRequest], Provision]
+Stop = Callable[[artifact.TrialRoots, Provision], dict[str, Any]]
+
+
 @dataclass(frozen=True)
 class LaunchRequest:
     """Everything a spec may read to build one attempt's argv. All of it data."""
@@ -44,6 +85,7 @@ class LaunchRequest:
     task: dict[str, Any]
     arm: dict[str, Any]
     pins: dict[str, Any]
+    provision: Provision | None = None
 
 
 @dataclass(frozen=True)
@@ -55,6 +97,10 @@ class Launch:
     # the credential seam) owns its child environment here. `None` keeps the
     # roots' default, which is what every fake spec uses.
     env: dict[str, str] | None = None
+    # The hash of the settings fragment the child actually read, when the arm's
+    # declared fragment is a template resolved per trial. The record keeps it
+    # under `private_hashes`: the resolved bytes hold a bearer token.
+    resolved_settings_hash: str | None = None
 
 
 # Where a finished trial's transcripts are, given its roots and root session
@@ -82,6 +128,8 @@ class ExecutorSpec:
     required_origins: tuple[str, ...] = field(default_factory=tuple)
     sessions: SessionsResolver = output_sessions
     credential_seam: CredentialSeam | None = None
+    prepare: Prepare | None = None
+    stop: Stop | None = None
 
 
 class ExecutorError(ValueError):

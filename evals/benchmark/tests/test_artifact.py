@@ -166,8 +166,22 @@ class IsolationTest(unittest.TestCase):
                 "attested_container": False,
                 "attestation_hash": None,
                 "automated": False,
+                "shelf_secret_present": False,
+                "shelf_origin": None,
             },
         )
+
+    def test_a_seeded_shelf_secret_is_non_publishable_by_construction(self) -> None:
+        isolation = artifact.require_isolation(
+            live=True, publishable=False, attestation=None, shelf_secret_present=True, shelf_origin="team-shelf.example"
+        )
+        self.assertEqual((isolation["publishable"], isolation["shelf_secret_present"], isolation["shelf_origin"]), (False, True, "team-shelf.example"))
+        with self.assertRaises(IsolationError) as caught:
+            artifact.require_isolation(live=True, publishable=True, attestation=ATTESTED, shelf_secret_present=True)
+        self.assertEqual(caught.exception.code, "shelf_secret_publishable")
+        with self.assertRaises(IsolationError) as caught:
+            artifact.require_isolation(live=True, publishable=False, attestation=None, ci=True, automated=True, shelf_secret_present=True)
+        self.assertEqual(caught.exception.code, "automated_shelf_secret")
 
     def test_ci_never_runs_a_live_executor_unless_it_is_automated_plumbing(self) -> None:
         with self.assertRaises(IsolationError) as caught:

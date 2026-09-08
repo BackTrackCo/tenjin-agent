@@ -240,9 +240,22 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("tool_counts", "sentinel", "isolation", "private_hashes"):
         if not isinstance(record[name], dict):
             raise RecordError(f"{name} must be an object")
+    isolation = record["isolation"]
     for name in ("live", "publishable", "attested_container"):
-        if not isinstance(record["isolation"].get(name), bool):
+        if not isinstance(isolation.get(name), bool):
             raise RecordError(f"isolation.{name} must be true or false")
+    for name in ("shelf_secret_present", "daemon_respawned"):
+        if name in isolation and not isinstance(isolation[name], bool):
+            raise RecordError(f"isolation.{name} must be true or false")
+    # Non-publishable by construction: the file on disk cannot claim otherwise.
+    if isolation.get("shelf_secret_present") and isolation["publishable"]:
+        raise RecordError("an attempt that seeded a team shelf secret cannot be publishable")
+    for name in ("shelf_origin", "public_origin"):
+        if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
+            raise RecordError(f"isolation.{name} must be null or a host")
+    shelves = delivery.get("shelves", {})
+    if not isinstance(shelves, dict) or not all(_count(value) for value in shelves.values()):
+        raise RecordError("delivery.shelves must map shelves to counts")
     if record["wall_time_s"] is not None and (
         isinstance(record["wall_time_s"], bool) or not isinstance(record["wall_time_s"], (int, float)) or record["wall_time_s"] < 0
     ):

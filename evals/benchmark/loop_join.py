@@ -27,8 +27,24 @@ class LoopJoinError(RuntimeError):
     pass
 
 
+SHELVES = ("team", "public")
+# A leg the product planned but never sent: public fallback off, or a stage
+# the arm dropped. It reached no origin, so it is not a request.
+SKIPPED = "skipped"
+
+
 def unavailable() -> dict[str, Any]:
-    return {"status": "unavailable", "fires": [], "legs": [], "unmatched_fires": []}
+    return {"status": "unavailable", "fires": [], "legs": [], "unmatched_fires": [], "shelves": count_shelves([])}
+
+
+def count_shelves(legs: list[dict[str, Any]]) -> dict[str, int]:
+    """How many legs went to each shelf. The public count is what the sentinel reads."""
+    counts = {shelf: 0 for shelf in SHELVES}
+    for leg in legs:
+        shelf = leg.get("shelf")
+        if shelf in counts and leg.get("status") != SKIPPED:
+            counts[shelf] += 1
+    return counts
 
 
 def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
@@ -79,4 +95,4 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
                 legs.append({**dict(leg), "actor": list(actor)})
     finally:
         connection.close()
-    return {"status": "joined", "fires": fires, "legs": legs, "unmatched_fires": unmatched}
+    return {"status": "joined", "fires": fires, "legs": legs, "unmatched_fires": unmatched, "shelves": count_shelves(legs)}

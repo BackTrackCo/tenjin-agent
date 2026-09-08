@@ -209,21 +209,35 @@ def _contains(path: Path, token: bytes) -> bool:
     return False
 
 
-def scan_sentinels(roots: TrialRoots, public_requests: int) -> SentinelReport:
+def scan_sentinels(
+    roots: TrialRoots, public_requests: int, canaries: tuple[str, ...] = (), exclude: tuple[Path, ...] = ()
+) -> SentinelReport:
     """Count sentinel evidence for one attempt.
 
     `public_requests` is the loopback sentinel's hit count for this trial. The
     credential scan looks for the planted token in the roots the agent writes
     to; it proves the credential travelled, not that it was read, which no
     filesystem fact can prove.
+
+    `canaries` are further values with the same standing, such as a team
+    shelf secret an arm seeded on purpose. Those are scanned across the
+    profile too, because the transcripts live there, and `exclude` names the
+    one file the seeding wrote the value to, which is not an exposure.
     """
-    token = roots.canary_token.encode("utf-8")
+    tokens = [roots.canary_token.encode("utf-8")]
+    seeded = [canary.encode("utf-8") for canary in canaries if canary]
+    excluded = {os.path.abspath(path) for path in exclude}
     exposures = 0
-    for root in roots.agent_roots:
+    for root in roots.agent_roots + ((roots.profile,) if seeded else ()):
         for parent, _names, files in os.walk(root, followlinks=False):
             for name in files:
                 entry = Path(parent) / name
-                if not entry.is_symlink() and entry.is_file() and _contains(entry, token):
+                if entry.is_symlink() or not entry.is_file():
+                    continue
+                wanted = tokens if root != roots.profile else []
+                if os.path.abspath(entry) not in excluded:
+                    wanted = wanted + seeded
+                if any(_contains(entry, token) for token in wanted):
                     exposures += 1
     return SentinelReport(public_requests=public_requests, credential_exposures=exposures)
 
@@ -316,14 +330,23 @@ def require_isolation(
     credential_seam: str | None = None,
     ci: bool = False,
     automated: bool = False,
+    shelf_secret_present: bool = False,
+    shelf_origin: str | None = None,
 ) -> dict[str, Any]:
     """The isolation slice of an attempt record, or a refusal to run at all.
 
     `automated` is the `--ci-live` stamp: a live run nobody is watching, which
     CI may host only as non-publishable plumbing with no attestation to claim.
+    `shelf_secret_present` says a provisioned arm seeds a team shelf secret
+    into the trial; such a run is non-publishable by construction, so asking
+    for a publishable one is a refusal rather than a downgrade.
     """
     if automated and (publishable or attestation is not None):
         raise IsolationError("automated_publishable", "an automated live run is never publishable and never attested")
+    if automated and shelf_secret_present:
+        raise IsolationError("automated_shelf_secret", "an automated live run never seeds a team shelf secret")
+    if shelf_secret_present and publishable:
+        raise IsolationError("shelf_secret_publishable", "a run that seeds a team shelf secret is never publishable")
     if live and ci and not automated:
         raise IsolationError("live_in_ci", "CI runs a live executor only as automated plumbing")
     if not live:
@@ -334,6 +357,8 @@ def require_isolation(
             "attested_container": False,
             "attestation_hash": None,
             "automated": automated,
+            "shelf_secret_present": False,
+            "shelf_origin": None,
         }
     if publishable and attestation is None:
         raise IsolationError("attestation_missing", "a publishable live run requires an isolation attestation")
@@ -346,4 +371,6 @@ def require_isolation(
         "attested_container": attestation is not None,
         "attestation_hash": None if attestation is None else attestation.hash(),
         "automated": automated,
+        "shelf_secret_present": shelf_secret_present,
+        "shelf_origin": shelf_origin,
     }

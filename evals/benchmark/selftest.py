@@ -45,6 +45,7 @@ SUBJECTS = {
     "test_report": "publishable projection and the redaction guard",
     "test_runner": "trial execution, settlement, caps, process-group kill, resume",
     "test_schedule": "seeded balanced schedule and trial identity",
+    "test_tenjin_arm": "the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped before the join",
     "test_usage": "usage contract: arithmetic, null versus zero, dedupe",
     "test_verifier": "hidden verifier registry, fail-closed argv, outcome vocabulary",
 }

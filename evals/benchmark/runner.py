@@ -109,12 +109,66 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
 _ORPHAN_WAIT_S = 5.0
 
 
-def _kill_group(process: subprocess.Popen[str]) -> None:
-    """Kill the trial's whole process group: a live grandchild still spends."""
+def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> None:
+    """Signal the trial's whole process group: a live grandchild still spends."""
     try:
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        os.killpg(os.getpgid(process.pid), sig)
     except (ProcessLookupError, PermissionError):
-        process.kill()
+        process.send_signal(sig)
+
+
+@dataclass(frozen=True)
+class Started:
+    """A helper process an arm's provisioning owns for the length of one trial."""
+
+    process: subprocess.Popen[Any]
+    ledger_id: str
+
+
+def process_start(
+    argv: list[str], *, cwd: Path, env: dict[str, str], roots: artifact.TrialRoots, ledger_id: str, log: Path
+) -> Started:
+    """Start a helper the way the agent is started: own session, no shell, in the ledger.
+
+    The one other place a process begins. It exists for a provisioned arm's
+    daemon, which has to outlive the launch call and die before `loop.db` is
+    read, so it cannot be a child of the agent's group; its own group is
+    recorded under the trial's ledger id with a suffix, and `cli.py cleanup`
+    reaches it the same way.
+    """
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a", encoding="utf-8") as handle:
+        process = subprocess.Popen(
+            argv,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            shell=False,
+        )
+    reap.register(roots.run_dir, ledger_id, process.pid, argv[0])
+    return Started(process=process, ledger_id=ledger_id)
+
+
+def process_stop(started: Started, run_dir: Path, grace_s: float) -> int | None:
+    """SIGTERM the helper's group, wait, SIGKILL what is left, and clear its ledger entry."""
+    process = started.process
+    try:
+        if process.poll() is None:
+            _kill_group(process, signal.SIGTERM)
+            try:
+                process.wait(timeout=grace_s)
+            except subprocess.TimeoutExpired:
+                _kill_group(process)
+                try:
+                    process.wait(timeout=_ORPHAN_WAIT_S)
+                except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
+                    pass
+    finally:
+        reap.release(run_dir, started.ledger_id)
+    return process.returncode
 
 
 @dataclass(frozen=True)
@@ -134,6 +188,10 @@ class Runtime:
     publishable: bool = True
     ci: bool = field(default_factory=lambda: bool(os.environ.get("CI")))
     automated: bool = False
+    # What a provisioned arm is seeded from (`live-run --tenjin-source`). The
+    # executor's module reads it; the runner only passes it through and folds
+    # its isolation facts into the record.
+    source: Any = None
 
 
 @dataclass(frozen=True)
@@ -204,22 +262,41 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if spec.harness != manifest.harness:
         raise executor.ExecutorError(f"executor {spec.name!r} runs {spec.harness!r}, manifest pins {manifest.harness!r}")
     verifier_spec = verifier.lookup(task["verifier"])
+    provisioned = spec.prepare is not None and bool(arm.get("provision"))
+    # The isolation facts a provisioned arm brings are known before any root
+    # exists: they are facts about the source, and the gate reads them first so
+    # a run that would carry a shelf secret into a publishable record is
+    # refused before spend.
+    facts = dict(getattr(runtime.source, "facts", {}) or {}) if provisioned else {}
+    source_origins = tuple(getattr(runtime.source, "origins", ()) or ()) if provisioned else ()
     isolation = artifact.require_isolation(
         live=spec.live,
         publishable=runtime.publishable,
         attestation=runtime.attestation,
-        required_origins=spec.required_origins,
+        required_origins=tuple(spec.required_origins) + source_origins,
         credential_seam=None if spec.credential_seam is None else spec.credential_seam(manifest.pins),
         ci=runtime.ci,
         automated=runtime.automated,
+        shelf_secret_present=bool(facts.get("shelf_secret_present", False)),
+        shelf_origin=facts.get("shelf_origin"),
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin
     roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)
-    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins))
+    provision = None
+    if provisioned:
+        assert spec.prepare is not None
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source))
+    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
 
     started = runtime.clock()
-    completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
+    try:
+        completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
+    finally:
+        # The daemon stops as soon as the agent has, before settlement and
+        # before anything reads `loop.db`: a stopped daemon is what makes the
+        # WAL rule below decidable.
+        provision_stop = None if provision is None or spec.stop is None else spec.stop(roots, provision)
     # The spec says where its harness left the transcripts; the parser and the
     # settlement scan read that directory whatever the harness is.
     sessions = spec.sessions(roots, launch.root_session_id)
@@ -239,7 +316,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     except artifact.ArtifactError as error:
         isolation_reason = f"isolation:{error.code}"
     hits = 0 if runtime.sentinel is None else len(runtime.sentinel.hits) - hits_before
-    sentinel = artifact.scan_sentinels(roots, hits)
+    canaries = () if provision is None else provision.secrets
 
     session: claude_usage.SessionUsage | None = None
     usage_reason: str | None = None
@@ -256,6 +333,15 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         usage_reason = usage_reason or "delivery:wal_live"
     if delivery["unmatched_fires"]:
         usage_reason = usage_reason or "delivery:fire_without_usage"
+    # A leg the product sent to the public shelf is a request to an origin the
+    # attestation may not list. It counts as a public request unless it does;
+    # a team-shelf leg is the arm under test and never counts.
+    public_legs = delivery["shelves"]["public"]
+    allowlist = () if runtime.attestation is None else runtime.attestation.network_allowlist
+    public_origin = facts.get("public_origin") if provisioned else None
+    if public_legs and public_origin not in allowlist:
+        hits += public_legs
+    sentinel = artifact.scan_sentinels(roots, hits, canaries=canaries, exclude=(roots.data_dir / "config.json",))
 
     auxiliary: list[dict[str, Any]] = []
     if runtime.receipts is not None:
@@ -344,10 +430,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "unresolved_actors": settlement.unresolved,
         "delivery": delivery,
         "sentinel": sentinel.counts(),
-        "isolation": isolation,
+        "isolation": {**isolation, "daemon_respawned": bool((provision_stop or {}).get("respawned", False))} if provision is not None else isolation,
         "private_hashes": {
             "root_transcript": sha256_file(root_transcript) if root_transcript.is_file() else None,
             "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None,
+            "resolved_settings": None if launch.resolved_settings_hash is None else launch.resolved_settings_hash,
         },
     }
 
