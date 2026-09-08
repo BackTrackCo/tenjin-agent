@@ -528,13 +528,18 @@ class SeedCase(DaemonCase):
     def environment(self, roots: artifact.TrialRoots) -> dict[str, str]:
         return {"PATH": os.environ.get("PATH", ""), "HOME": str(roots.home)}
 
+    def request(self, roots: artifact.TrialRoots, nonce: str | None = "20260908T000000Z-0badf00d", **overrides: object) -> ProvisionRequest:
+        base = dict(task=self.task, environment=self.environment(roots), nonce=nonce)
+        base.update(overrides)
+        return ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, **base)  # type: ignore[arg-type]
+
     def calls(self) -> list[dict]:
         path = Path(self.source.path) / "cli-calls.jsonl"
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
     def test_prepare_probes_publishes_with_the_key_and_stop_deletes(self) -> None:
         roots = self.seed_roots()
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        request = self.request(roots)
         provision = tenjin_arm.prepare(request)
         self.addCleanup(lambda: provision.stop_state.get("started") and runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         seed = provision.facts["seed"]
@@ -547,7 +552,8 @@ class SeedCase(DaemonCase):
         self.assertEqual(publish["argv"][:1] + publish["argv"][2:], ["publish", "--yes", "--json", "--key", f"fingerprint=sig_v1:{self.key}"])
         body = Path(publish["argv"][1])
         self.assertTrue(body.is_relative_to(roots.base) and not body.is_relative_to(roots.repo))
-        self.assertIn(f"Benchmark seed: trial {roots.trial_id}.", body.read_text(encoding="utf-8"))
+        self.assertIn(f"Benchmark seed: run 20260908T000000Z-0badf00d trial {roots.trial_id}.", body.read_text(encoding="utf-8"))
+        self.assertEqual(seed["nonce"], "20260908T000000Z-0badf00d")
         self.assertIn("TENJIN_DATA_DIR", publish["env"])
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", publish["env"])
         report = tenjin_arm.stop(roots, provision)
@@ -557,7 +563,7 @@ class SeedCase(DaemonCase):
 
     def test_a_delete_that_fails_is_a_fact_in_the_record(self) -> None:
         roots = self.seed_roots()
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        request = self.request(roots)
         provision = tenjin_arm.prepare(request)
         (Path(self.source.path) / "fail-delete").write_text("", encoding="utf-8")
         report = tenjin_arm.stop(roots, provision)
@@ -573,7 +579,7 @@ class SeedCase(DaemonCase):
 
     def test_key_drift_and_a_failed_publish_refuse_the_trial_before_the_daemon_and_mask_the_secret(self) -> None:
         roots = self.seed_roots()
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        request = self.request(roots)
         self.write_lesson("0000000000000000")
         with self.assertRaises(ProvisionError) as caught:
             tenjin_arm.prepare(request)
@@ -591,7 +597,7 @@ class SeedCase(DaemonCase):
     def test_an_envelope_on_stderr_is_read_by_shape(self) -> None:
         roots = self.seed_roots()
         (Path(self.source.path) / "envelope-on-stderr").write_text("", encoding="utf-8")
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        request = self.request(roots)
         provision = tenjin_arm.prepare(request)
         self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         self.assertEqual(provision.facts["seed"]["piece_id"], "piece-1")
@@ -609,7 +615,7 @@ class SeedCase(DaemonCase):
             json.dumps([{"resourceId": "stray-1", "title": "The lesson"}, {"resourceId": "theirs", "title": "Somebody else's piece"}, {"resourceId": "stray-2", "title": "The lesson"}]),
             encoding="utf-8",
         )
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        request = self.request(roots)
         with self.assertRaises(ProvisionError) as caught:
             tenjin_arm.prepare(request)
         self.assertIn("no piece id could be read", str(caught.exception))
@@ -622,9 +628,38 @@ class SeedCase(DaemonCase):
         self.assertIn(f"trial {roots.trial_id}", note["stamp"])
         self.assertEqual(reap.read_records(roots.run_dir), [])
 
+    def test_a_dedup_answer_is_a_refusal_and_two_runs_stamp_differently(self) -> None:
+        roots = self.seed_roots()
+        (Path(self.source.path) / "already-published").write_text("", encoding="utf-8")
+        with self.assertRaises(ProvisionError) as caught:
+            tenjin_arm.prepare(self.request(roots))
+        self.assertIn("the CLI's publish dedup matched a body this machine already published; the stamp must be unique per run", str(caught.exception))
+        note = json.loads((roots.output / tenjin_arm.SEED_NOTE).read_text(encoding="utf-8"))
+        self.assertEqual((note["published"], note["already_published_url"]), (False, "https://team-shelf.example/a/ali/the-lesson"))
+        self.assertEqual([call["argv"][0] for call in self.calls()], ["publish"])
+        self.assertEqual(reap.read_records(roots.run_dir), [])
+        with self.assertRaises(ProvisionError) as missing:
+            tenjin_arm.prepare(self.request(roots, nonce=None))
+        self.assertIn("run nonce", str(missing.exception))
+        lesson = tenjin_arm.lesson_for("fam")
+        assert lesson is not None
+        first = tenjin_arm.seed_body(lesson, roots, "20260908T000000Z-0badf00d", roots.trial_id).read_text(encoding="utf-8")
+        second = tenjin_arm.seed_body(lesson, roots, "20260908T000100Z-deadbeef", roots.trial_id).read_text(encoding="utf-8")
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.split("Benchmark seed")[0], second.split("Benchmark seed")[0])
+
+    def test_the_run_nonce_is_minted_once_and_reused_on_resume(self) -> None:
+        manifest = support.synthetic_manifest(self.dir)  # type: ignore[arg-type]
+        out = self.dir / "run-a"
+        first = cli.run_nonce(out, manifest)
+        self.assertRegex(first, cli.NONCE)
+        self.assertEqual(cli.run_nonce(out, manifest), first)
+        self.assertEqual(json.loads((out / "manifest.json").read_text(encoding="utf-8"))["nonce"], first)
+        self.assertNotEqual(cli.run_nonce(self.dir / "run-b", manifest), first)
+
     def test_a_dry_run_states_the_seed_and_publishes_nothing(self) -> None:
         roots = self.seed_roots()
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, dry_run=True, task=self.task)
+        request = self.request(roots, nonce=None, dry_run=True, environment=None)
         with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
             provision = tenjin_arm.prepare(request)
         seed = provision.facts["seed"]
@@ -633,7 +668,7 @@ class SeedCase(DaemonCase):
 
     def test_a_task_without_a_lesson_seeds_nothing(self) -> None:
         roots = self.seed_roots()
-        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task={"id": "x", "family": "smoke"}, environment=self.environment(roots))
+        request = self.request(roots, task={"id": "x", "family": "smoke"})
         provision = tenjin_arm.prepare(request)
         self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         self.assertNotIn("seed", provision.facts)

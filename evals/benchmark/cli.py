@@ -24,8 +24,11 @@ import argparse
 import dataclasses
 import json
 import os
+import re
+import secrets
 import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -113,10 +116,28 @@ def refuse_secret_in_report(out: Path, secrets: tuple[str, ...]) -> None:
         raise CliError("report.json carried the seeded shelf secret and was deleted: nothing from this run is publishable")
 
 
+NONCE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{8}\Z")
+
+
+def run_nonce(out: Path, manifest: manifest_module.Manifest) -> str:
+    """One nonce per run, minted at the first `live-run` and kept in the manifest sidecar so a resume reuses it."""
+    sidecar = out / "manifest.json"
+    existing = None
+    if sidecar.is_file():
+        try:
+            existing = json.loads(sidecar.read_text(encoding="utf-8")).get("nonce")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            existing = None
+    nonce = existing if isinstance(existing, str) and NONCE.match(existing) else f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(4)}"
+    out.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text(json.dumps({"path": str(manifest.path), "hash": manifest.hash, "nonce": nonce}, indent=2) + "\n", encoding="utf-8")
+    return nonce
+
+
 def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
     """Write the run's manifest pointer and schedule, execute it, publish the report."""
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "manifest.json").write_text(json.dumps({"path": str(manifest.path), "hash": manifest.hash}, indent=2) + "\n", encoding="utf-8")
+    nonce = run_nonce(out, manifest)
+    runtime = dataclasses.replace(runtime, run_nonce=nonce)
     digest = schedule.write(out, manifest, trials)
     results = runner.run(manifest, trials, out, digest, runtime)
     report = do_report(out)

@@ -344,8 +344,23 @@ and fails closed: a publish that exits 0 with no readable id searches the shelf 
 lesson's title, deletes every match (owner-scoped, so another wallet's piece is refused, never
 removed), writes `output/seed.json` with `published: "unknown"`, the masked tail of both
 streams, and the sweep, and refuses the trial. `summary`, `verify`, `reduce`, `report`, and
-`regress` on a run that never started say so in one sentence and exit 2. Fixed after
-`74cbec5`, not rerun.
+`regress` on a run that never started say so in one sentence and exit 2. Fixed at
+`1ec0e7d`, not rerun.
+
+The sixth hooks smoke (`1ec0e7d`) aborted at prepare on the publish dedup: the CLI answered
+`{"ok":true,"data":{"alreadyPublished":true,"url":...}}` and published nothing. `tenjin
+publish` dedups per machine on the body's content hash (`src/lib/publish-dedup.ts`, a
+`published:<hash>` fact in the data dir's `loop.db`); the stamp was `trial <trial_id>`, trial
+ids are deterministic from the manifest and the seed, so run six's body hashed the same as run
+five's, and `tenjin delete` does not clear that fact in 0.1.0-alpha.15, so the CLI handed back
+the dead url. There is no flag that bypasses the dedup (`publish --help` and `publish.ts` have
+none; `publishedUrlFor` has no override), so the stamp is now unique per run: `Benchmark seed:
+run <nonce> trial <trial_id>.`, where the nonce is `<UTC start>-<8 hex>` minted once per
+`live-run` by `cli.run_nonce` into the run's `manifest.json` sidecar and reused on resume, and
+recorded in `isolation.seed.nonce`. An `alreadyPublished` answer is a refusal ("the CLI's
+publish dedup matched a body this machine already published; the stamp must be unique per
+run"), never a seeded piece, with the url in `output/seed.json`. Fixed after `1ec0e7d`, not
+rerun.
 
 **Stop before the join.** As soon as the agent's process has exited, `stop` ends the daemon and
 waits for `loop.db-wal` to disappear. The shim spawns a detached daemon of its own when the one

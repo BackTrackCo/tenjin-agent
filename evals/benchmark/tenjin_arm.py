@@ -277,16 +277,17 @@ def _run_cli(argv: list[str], env: dict[str, str], secrets_: tuple[str, ...]) ->
     return completed.returncode, envelope_of(completed.stdout, completed.stderr), tail
 
 
-def seed_body(lesson: Lesson, roots: artifact.TrialRoots, trial_id: str) -> Path:
-    """The lesson with a trial stamp, written outside the agent's roots: the CLI dedups a body it already published."""
+def seed_body(lesson: Lesson, roots: artifact.TrialRoots, nonce: str, trial_id: str) -> Path:
+    """The lesson with the run stamp, written outside the agent's roots."""
     target = roots.base / SEED_DIR / lesson.body.name
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(lesson.body.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{stamp_of(trial_id)}\n", encoding="utf-8")
+    target.write_text(lesson.body.read_text(encoding="utf-8").rstrip("\n") + f"\n\n{stamp_of(nonce, trial_id)}\n", encoding="utf-8")
     return target
 
 
-def stamp_of(trial_id: str) -> str:
-    return f"Benchmark seed: trial {trial_id}."
+def stamp_of(nonce: str, trial_id: str) -> str:
+    """Unique per run and trial: the CLI dedups a body per machine by its content hash, and `tenjin delete` leaves that record."""
+    return f"Benchmark seed: run {nonce} trial {trial_id}."
 
 
 def sweep_stamped(source: Source, lesson: Lesson) -> dict[str, Any]:
@@ -305,19 +306,30 @@ def sweep_stamped(source: Source, lesson: Lesson) -> dict[str, Any]:
     return {"search_exit": code, "search_tail": tail if code != 0 else "", "matched": len(matches), "deleted": deleted, "failed": failed}
 
 
-def publish_lesson(source: Source, roots: artifact.TrialRoots, lesson: Lesson, trial_id: str) -> str:
+def publish_lesson(source: Source, roots: artifact.TrialRoots, lesson: Lesson, nonce: str, trial_id: str) -> str:
     """Publish the lesson under its keys through the CLI, the way a producer's turn end would. Returns the piece id.
 
     Fails closed: a publish whose id cannot be read may still have landed, so
     every piece with the lesson's title is deleted before the refusal, and the
     trial's output keeps a note saying the publish outcome was unknown.
     """
-    body = seed_body(lesson, roots, trial_id)
+    body = seed_body(lesson, roots, nonce, trial_id)
     code, payload, tail = _run_cli(PUBLISH_ARGV(body, lesson.keys), cli_environment(source), source.secrets)
     piece_id = piece_id_of(payload)
+    stamp = stamp_of(nonce, trial_id)
+    if code == 0 and _find(payload, "alreadyPublished") is True:
+        # Nothing landed: the CLI answered with the url of a body this machine
+        # published before, which a delete does not clear (0.1.0-alpha.15).
+        note = {"title": lesson.title, "stamp": stamp, "published": False, "exit": code, "tail": tail, "already_published_url": _find(payload, "url")}
+        roots.output.mkdir(parents=True, exist_ok=True)
+        (roots.output / SEED_NOTE).write_text(json.dumps(note, indent=2) + "\n", encoding="utf-8")
+        raise ProvisionError(
+            "seeding the lesson failed: the CLI's publish dedup matched a body this machine already published; "
+            f"the stamp must be unique per run (stamp {stamp!r}, dedup url in {roots.output / SEED_NOTE})"
+        )
     if code == 0 and piece_id is not None:
         return piece_id
-    note: dict[str, Any] = {"title": lesson.title, "stamp": stamp_of(trial_id), "published": "unknown" if code == 0 else False, "exit": code, "tail": tail}
+    note = {"title": lesson.title, "stamp": stamp, "published": "unknown" if code == 0 else False, "exit": code, "tail": tail}
     if code == 0:
         note["sweep"] = sweep_stamped(source, lesson)
     roots.output.mkdir(parents=True, exist_ok=True)
@@ -339,9 +351,10 @@ def delete_lesson(source: Source, piece_id: str) -> str | None:
     return f"tenjin delete exited {code}: {tail or 'no output'}"
 
 
-def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dict[str, str | None] | None) -> dict[str, Any]:
+def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dict[str, str | None] | None, nonce: str | None) -> dict[str, Any]:
     return {
         "title": lesson.title,
+        "nonce": nonce,
         "key_hashes": lesson.key_hashes,
         "keys": len(lesson.keys),
         "shelf_origin": source.shelf_origin,
@@ -543,10 +556,12 @@ def prepare(request: ProvisionRequest) -> Provision:
         if not request.dry_run:
             if request.environment is None:
                 raise ProvisionError("seeding needs the trial's child environment to probe the fixture's commands")
+            if not request.nonce:
+                raise ProvisionError("seeding needs the run nonce (`cli.run_nonce`) so the body differs from every earlier run's")
             probed = probe_keys(roots, lesson, task_id, request.environment)
             check_keys(lesson, task_id, probed)
-            piece_id = publish_lesson(source, roots, lesson, request.trial_id)
-        facts["seed"] = seed_facts(lesson, source, piece_id, probed)
+            piece_id = publish_lesson(source, roots, lesson, request.nonce, request.trial_id)
+        facts["seed"] = seed_facts(lesson, source, piece_id, probed, request.nonce)
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
         started = runner.process_start(

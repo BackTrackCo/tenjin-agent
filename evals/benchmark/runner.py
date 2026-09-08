@@ -195,6 +195,10 @@ class Runtime:
     # executor's module reads it; the runner only passes it through and folds
     # its isolation facts into the record.
     source: Any = None
+    # The run's nonce (`cli.run_nonce`), handed to a provisioner that seeds a
+    # shelf: the CLI dedups a body per machine by content hash, and trial ids
+    # repeat across runs of one manifest, so the body has to carry the run.
+    run_nonce: str | None = None
 
 
 @dataclass(frozen=True)
@@ -301,7 +305,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     provision = None
     if provisioned:
         assert spec.prepare is not None
-        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task))
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}

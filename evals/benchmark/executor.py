@@ -71,6 +71,9 @@ class ProvisionRequest:
     # trial's repository copy runs under. A dry run carries neither.
     task: dict[str, Any] | None = None
     environment: dict[str, str] | None = None
+    # Minted once per `live-run` invocation and reused on resume, so what a
+    # provisioner writes to a shelf differs between runs of the same schedule.
+    nonce: str | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped
