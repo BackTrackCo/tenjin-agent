@@ -1,51 +1,40 @@
 """The offline suite's own wall-clock budget.
 
 The budget is a property of this package rather than of the machine that
-happens to run it, so the suite times itself instead of trusting a runner. The case runs the whole self-test as a child process and times it;
-the child sets `BENCH1_SELFTEST_CHILD` so it does not run this case again.
+happens to run it, so the entry point times the one run it makes and fails
+past `BUDGET_S`. Nothing here re-runs the suite: a second run inside the
+first would double the wall time it is meant to bound.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
-import sys
-import time
+import io
 import unittest
 
-from evals.benchmark import REPO_ROOT, selftest
-
-CHILD = "BENCH1_SELFTEST_CHILD"
+from evals.benchmark import selftest
 
 
 class BudgetTest(unittest.TestCase):
-    def test_the_whole_offline_suite_finishes_inside_its_declared_budget(self) -> None:
-        if os.environ.get(CHILD):
-            self.skipTest("already inside the timed run")
-        started = time.monotonic()
-        completed = subprocess.run(
-            [sys.executable, str(REPO_ROOT / "evals" / "benchmark" / "selftest.py")],
-            cwd=REPO_ROOT,
-            env={**os.environ, CHILD: "1"},
-            capture_output=True,
-            text=True,
-            timeout=selftest.BUDGET_S * 2,
-            shell=False,
-            check=False,
-        )
-        elapsed = time.monotonic() - started
-        self.assertEqual(completed.returncode, 0, completed.stderr[-2000:])
-        self.assertLess(
-            elapsed,
-            selftest.BUDGET_S,
-            f"the offline suite took {elapsed:.1f}s, over its {selftest.BUDGET_S:.0f}s budget",
-        )
+    def test_the_entry_point_judges_the_budget_on_its_one_run(self) -> None:
+        stream = io.StringIO()
+        passed = selftest.run(["test_schedule"], budget_s=selftest.BUDGET_S, stream=stream)
+        self.assertTrue(passed.ok)
+        self.assertEqual([result.module for result in passed.results], ["test_schedule"])
+        self.assertGreater(passed.results[0].tests, 0)
+        self.assertIn("benchmark self-test passed:", stream.getvalue())
+        self.assertIn(f"budget {selftest.BUDGET_S:.0f}s", stream.getvalue())
+        stream = io.StringIO()
+        slow = selftest.run(["test_schedule"], budget_s=0.0, stream=stream)
+        self.assertFalse(slow.ok)
+        self.assertTrue(all(result.ok for result in slow.results))
+        self.assertIn("over its 0s budget", stream.getvalue())
+        self.assertNotIn("passed:", stream.getvalue())
 
-    def test_the_entry_point_fails_a_suite_that_runs_over_budget(self) -> None:
-        # Running the suite by hand reports the same failure the bridge would.
+    def test_the_budget_is_sixty_seconds_and_the_rule_is_strict(self) -> None:
         self.assertEqual(selftest.BUDGET_S, 60.0)
         self.assertFalse(selftest.over_budget(59.9))
         self.assertTrue(selftest.over_budget(60.1))
+        self.assertTrue(selftest.over_budget(0.1, 0.0))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,8 @@ was exercised. `--groups` wraps each module in a GitHub Actions log group, and
 
 The suite owns a wall-clock budget as well as a result: a suite that grows
 past `BUDGET_S` fails here rather than turning its own lane into a slow one.
+The budget is judged on the one run this process makes; nothing re-runs the
+suite to time it.
 """
 
 from __future__ import annotations
@@ -148,6 +150,45 @@ def run_module(module: str, verbosity: int = 1, groups: bool = False, stream=Non
     )
 
 
+@dataclass(frozen=True)
+class Run:
+    results: list[ModuleResult]
+    elapsed: float
+    ok: bool
+
+
+def run(names: list[str], *, budget_s: float = BUDGET_S, verbosity: int = 1, groups: bool = False, stream=None, summary: Path | None = None) -> Run:
+    """Run the named modules once, time that one run, and print the verdict. The budget is judged here, on this run, and nowhere twice."""
+    stream = stream if stream is not None else sys.stdout
+    started = time.monotonic()
+    results = [run_module(module, verbosity, groups, stream) for module in names]
+    elapsed = time.monotonic() - started
+
+    total = sum(result.tests for result in results)
+    failed = [result for result in results if not result.ok]
+    slow = over_budget(elapsed, budget_s)
+    ok = not failed and not slow
+
+    print("", file=stream)
+    print(render_table(results), file=stream)
+    print("", file=stream)
+    if failed:
+        print(f"benchmark self-test FAILED in {', '.join(result.module for result in failed)}", file=stream)
+    elif slow:
+        print(f"benchmark self-test took {elapsed:.1f}s, over its {budget_s:.0f}s budget", file=stream)
+    else:
+        print(
+            f"benchmark self-test passed: {total} tests across {len(results)} modules in "
+            f"{elapsed:.1f}s, budget {budget_s:.0f}s",
+            file=stream,
+        )
+
+    if summary:
+        with summary.open("a", encoding="utf-8") as handle:
+            handle.write(render_markdown(results, elapsed, ok) + "\n")
+    return Run(results=results, elapsed=elapsed, ok=ok)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python3 evals/benchmark/selftest.py")
     parser.add_argument(
@@ -162,34 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     sys.path.insert(0, str(REPO_ROOT))
-    stream = sys.stdout
-    started = time.monotonic()
-    results = [run_module(module, args.verbosity, args.groups, stream) for module in modules()]
-    elapsed = time.monotonic() - started
-
-    total = sum(result.tests for result in results)
-    failed = [result for result in results if not result.ok]
-    slow = over_budget(elapsed)
-    ok = not failed and not slow
-
-    print("", file=stream)
-    print(render_table(results), file=stream)
-    print("", file=stream)
-    if failed:
-        print(f"benchmark self-test FAILED in {', '.join(result.module for result in failed)}", file=stream)
-    elif slow:
-        print(f"benchmark self-test took {elapsed:.1f}s, over its {BUDGET_S:.0f}s budget", file=stream)
-    else:
-        print(
-            f"benchmark self-test passed: {total} tests across {len(results)} modules in "
-            f"{elapsed:.1f}s, budget {BUDGET_S:.0f}s",
-            file=stream,
-        )
-
-    if args.summary:
-        with args.summary.open("a", encoding="utf-8") as handle:
-            handle.write(render_markdown(results, elapsed, ok) + "\n")
-    return 0 if ok else 1
+    return 0 if run(modules(), verbosity=args.verbosity, groups=args.groups, summary=args.summary).ok else 1
 
 
 if __name__ == "__main__":
