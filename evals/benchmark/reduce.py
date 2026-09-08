@@ -67,7 +67,7 @@ def consumer_auxiliary(record: dict[str, Any]) -> int:
     )
 
 
-def capture_tokens(cells: list[dict[str, Any]]) -> int:
+def capture_tokens(cells: list[dict[str, Any]], phases: frozenset[str] = CAPTURE_PHASES) -> int:
     """One-time producer/capture spend for a set of attempts.
 
     Keyed by native request id: a capture call that several consuming trials
@@ -77,9 +77,58 @@ def capture_tokens(cells: list[dict[str, Any]]) -> int:
     seen: dict[str, int] = {}
     for record in cells:
         for receipt in record["auxiliary"]:
-            if receipt["phase"] in CAPTURE_PHASES:
+            if receipt["phase"] in phases:
                 seen[receipt["native_request_id"]] = receipt["input_total"] + receipt["output_total"]
     return sum(seen.values())
+
+
+def phase_tokens(cells: list[dict[str, Any]]) -> dict[str, int]:
+    """The one-time spend by phase: `producer` is the task's own work, `capture` what the capture ask added on top."""
+    return {phase: capture_tokens(cells, frozenset({phase})) for phase in sorted(CAPTURE_PHASES)}
+
+
+def child_usage(record: dict[str, Any]) -> tuple[int, int]:
+    """Tokens and requests of the attempt's descendants (every actor but the lead), for the recursive slice's per-actor reading."""
+    tokens = requests = 0
+    for item in record["usage"]:
+        if item["actor_key"][2] != "":
+            tokens += item["input_total"] + item["output_total"]
+            requests += 1
+    return tokens, requests
+
+
+def local_legs(record: dict[str, Any]) -> tuple[int, int]:
+    """Legs the local store answered (`shelf` local): sent, and hits."""
+    legs = [leg for leg in record["delivery"].get("legs", []) if leg.get("shelf") == "local"]
+    return len(legs), sum(1 for leg in legs if leg.get("outcome") == "hit")
+
+
+def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """What the natural arm's producer phases did, over every accepted attempt of the arm: run, passed, captured, and refused."""
+    phases = [record["isolation"]["producer"] for record in records if isinstance(record["isolation"].get("producer"), dict)]
+    if not phases:
+        return None
+    return {
+        "attempts": len(phases),
+        "passes": sum(1 for phase in phases if phase.get("outcome") == "pass"),
+        "captured": sum(1 for phase in phases if sum(phase.get("capture", {}).get("pairings", {}).get(status, 0) for status in ("unverified", "verified")) > 0),
+        "findings": sum(int(phase.get("capture", {}).get("findings", 0)) for phase in phases),
+        "invalid": sum(1 for phase in phases if phase.get("outcome") == "invalid"),
+        "wal_live": sum(1 for phase in phases if phase.get("wal_live_between_phases")),
+    }
+
+
+def local_seed_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    seeds = [record["isolation"]["local_seed"] for record in records if isinstance(record["isolation"].get("local_seed"), dict)]
+    if not seeds:
+        return None
+    closed = [sum(seed.get("pairings", {}).get(status, 0) for status in ("unverified", "verified")) for seed in seeds]
+    return {
+        "attempts": len(seeds),
+        "pairings": sum(closed),
+        "empty": sum(1 for count in closed if count == 0),
+        "distractors": max((int(seed.get("distractors", 0)) for seed in seeds), default=0),
+    }
 
 
 def _accounting(record: dict[str, Any]) -> str:
@@ -102,6 +151,8 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     passes = sum(1 for record in records if record["outcome"] == "pass")
     subsets = [summed["reasoning_output_subset"] for summed in per_attempt]
     reasoning = None if any(value is None for value in subsets) else sum(subsets)
+    children = [child_usage(record) for record in records]
+    locals_ = [local_legs(record) for record in records]
     return {
         "attempts": attempts,
         "passes": passes,
@@ -118,6 +169,11 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
             "reasoning_output_subset": reasoning,
             "reasoning_unavailable": sum(summed["unavailable"]["reasoning_output_subset"] for summed in per_attempt),
             "deliveries": sum(len(record["delivery"]["fires"]) for record in records),
+            "local_legs": sum(sent for sent, _hits in locals_),
+            "local_hits": sum(hits for _sent, hits in locals_),
+            "child_tokens": sum(tokens for tokens, _requests in children),
+            "child_requests": sum(requests for _tokens, requests in children),
+            "actors": sum(len(record["actors"]) for record in records),
             "counted_in_tokens": False,
         },
     }
@@ -199,6 +255,15 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
                 "token_ratio": None if not divisor else _round(arm_point["tokens_per_attempt"] / divisor),
             }
         )
+    # The plan's amortization charges only the capture's incremental cost: the
+    # producer's own work would have happened anyway. The series above is the
+    # conservative one that charges the whole producer phase too.
+    capture_only: list[dict[str, Any]] = []
+    base_only = amortize(base["tokens_per_attempt"], base["phase_tokens"]["capture"])
+    arm_only = amortize(arm["tokens_per_attempt"], arm["phase_tokens"]["capture"])
+    for point, arm_point in zip(base_only, arm_only):
+        divisor = point["tokens_per_attempt"]
+        capture_only.append({"reuse": point["reuse"], "token_ratio": None if not divisor else _round(arm_point["tokens_per_attempt"] / divisor)})
     pass_delta = (
         None
         if arm["pass_rate"] is None or base["pass_rate"] is None
@@ -211,6 +276,7 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         "pass_rate_delta": pass_delta,
         "interval": paired_bootstrap(ratios, seed),
         "amortized_token_ratio": capture_ratio,
+        "amortized_capture_only_token_ratio": capture_only,
         "headline_eligible": bool(arm["headline_eligible"] and base["headline_eligible"] and ratio is not None),
     }
 
@@ -234,7 +300,9 @@ def reduce(
     invalid: list[dict[str, str]] = []
     cells: dict[tuple[str, str], list[dict[str, Any]]] = {}
     scored_by_arm: dict[str, list[dict[str, Any]]] = {}
+    all_by_arm: dict[str, list[dict[str, Any]]] = {}
     for record in accepted.values():
+        all_by_arm.setdefault(record["arm_id"], []).append(record)
         arm = arms.setdefault(
             record["arm_id"],
             {"attempts": 0, "outcomes": {name: 0 for name in OUTCOMES}, "tasks": {}, "accounting_reasons": []},
@@ -270,6 +338,9 @@ def reduce(
         arm["accounting_reasons"] = sorted(reasons)
         arm["headline_eligible"] = arm["accounting"] != "incomplete" and bool(arm["tasks"])
         arm["capture_tokens"] = capture_tokens(scored)
+        arm["phase_tokens"] = phase_tokens(scored)
+        arm["producer"] = producer_summary(all_by_arm.get(arm_id, []))
+        arm["local_seed"] = local_seed_summary(all_by_arm.get(arm_id, []))
         tasks = list(arm["tasks"].values())
         arm["tokens"] = sum(task["tokens"] for task in tasks)
         arm["pass_rate"] = _mean([task["pass_rate"] for task in tasks])
@@ -282,6 +353,7 @@ def reduce(
             arm["tokens_per_verified_resolution"] = _mean(per_task)
             arm["tokens_per_verified_resolution_reason"] = None
         arm["amortization"] = amortize(arm["tokens_per_attempt"], arm["capture_tokens"])
+        arm["amortization_capture_only"] = amortize(arm["tokens_per_attempt"], arm["phase_tokens"]["capture"])
     comparisons: dict[str, Any] = {}
     if baseline is not None:
         if baseline not in arms:

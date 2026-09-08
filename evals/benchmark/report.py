@@ -195,6 +195,7 @@ def project(
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
+        "slice": manifest_data.get("slice"),
         "price_sheet_version": manifest_data["price_sheet_version"],
         "manifest_hash": manifest_hash,
         "schedule_hash": schedule_hash,
@@ -233,6 +234,12 @@ def project(
                 "public_legs": record["delivery"].get("public", {}).get("legs", 0),
                 "public_hits": record["delivery"].get("public", {}).get("hits", 0),
                 "other_requests": record["delivery"].get("classes", {}).get("other", 0),
+                "local_hits": sum(1 for leg in record["delivery"].get("legs", []) if leg.get("shelf") == "local" and leg.get("outcome") == "hit"),
+                "child_tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"] if item["actor_key"][2] != ""),
+                "producer_outcome": None if not isinstance(record["isolation"].get("producer"), dict) else record["isolation"]["producer"].get("outcome"),
+                "producer_tokens": None
+                if not isinstance(record["isolation"].get("producer"), dict)
+                else sum(int(value) for value in record["isolation"]["producer"].get("phase_tokens", {}).values()),
             }
             for record in sorted(accepted.values(), key=lambda item: item["position"])
         ],
@@ -276,6 +283,8 @@ def render(report: dict[str, Any]) -> str:
     ]
     if report.get("shelf_secret_present", False):
         lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
+    if report.get("slice"):
+        lines.append("slice: " + " ".join(f"{key}={value}" for key, value in sorted(report["slice"].items())))
     lines += [
         "",
         f"{'arm'.ljust(width)} {'attempts':>8s} {'passes':>7s} {'pass rate':>9s} {'tokens':>10s} "
@@ -301,6 +310,22 @@ def render(report: dict[str, Any]) -> str:
             f"failure key {arm_id}: keyed {row['keyed']}/{row['attempts']} ({lanes}), keys leg hit {row['keys_leg_hits']}, "
             f"report file {row['report_files']}, delivered {row['delivered']}"
         )
+    for arm_id, arm in sorted(report["arms"].items()):
+        producer = arm.get("producer")
+        if producer:
+            lines.append(
+                f"{arm_id} producer phases: {producer['attempts']} run, {producer['passes']} passed, {producer['captured']} left a closed local record, "
+                f"{producer['findings']} finding(s) harvested, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
+            )
+        seeded = arm.get("local_seed")
+        if seeded:
+            lines.append(f"{arm_id} local seed: {seeded['attempts']} store(s) seeded through the daemon, {seeded['pairings']} closed record(s), {seeded['empty']} empty, {seeded['distractors']} distractor(s) beside each")
+        diagnostics = [task.get("diagnostics", {}) for task in arm.get("tasks", {}).values()]
+        local_hits = sum(item.get("local_hits", 0) for item in diagnostics)
+        local_legs = sum(item.get("local_legs", 0) for item in diagnostics)
+        child_tokens = sum(item.get("child_tokens", 0) for item in diagnostics)
+        if local_legs or child_tokens:
+            lines.append(f"{arm_id} local legs: {local_legs}, hits: {local_hits}; descendant tokens: {child_tokens}")
     seeds = report.get("seeds")
     if seeds is not None and seeds["published"]:
         lines.append(f"seeded pieces: {seeds['published']} published to the team shelf, {seeds['published'] - seeds['not_deleted']} deleted")
@@ -325,6 +350,13 @@ def render(report: dict[str, Any]) -> str:
                 f"  {arm_id}: {ratio:.3f}  interval [{interval['low']:.3f}, {interval['high']:.3f}] "
                 f"at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}, {eligible}"
             )
+            amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
+            capture_only = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_capture_only_token_ratio", [])}
+            if any(value is not None for value in amortized.values()):
+                lines.append(
+                    f"    amortized, capture only, at reuse 1/10: {_number(capture_only.get(1), '.3f')}/{_number(capture_only.get(10), '.3f')}; "
+                    f"with the producer's own work charged too: {_number(amortized.get(1), '.3f')}/{_number(amortized.get(10), '.3f')}"
+                )
     else:
         lines.append(f"no comparison: {baseline} is the only arm with a result")
     outcomes: dict[str, int] = {}
