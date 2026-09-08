@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from evals.benchmark import executor, manifest as manifest_module, verifier
+from evals.benchmark import artifact, executor, manifest as manifest_module, verifier
 from evals.benchmark.manifest import ManifestError
 from evals.benchmark.tests import support
 from evals.benchmark.verifier import VerifierError, VerifierSpec
@@ -100,6 +100,23 @@ class VerifierRegistryTest(unittest.TestCase):
         passed = spawned.call_args.kwargs["env"]
         self.assertNotIn("TENJIN_SHELF_TOKEN", passed)
         self.assertIn("PATH", passed)
+
+    def test_the_node_test_verifier_decides_from_its_hidden_layer_and_fails_closed_without_it(self) -> None:
+        spec = verifier.lookup("node_test_actor")
+        fixture = verifier.HIDDEN.parent / "fixtures" / "live" / "actor"
+        roots = artifact.create(self.run_dir, "trial-node", fixture)
+        roots.mark_stopped()
+        copy = roots.hidden_copy(spec.hidden_layer)
+        # The hidden layer is on the copy and nowhere near the agent's mount.
+        self.assertTrue((copy / verifier.HIDDEN_TESTS / "actor.test.mjs").is_file())
+        self.assertFalse((roots.repo / verifier.HIDDEN_TESTS).exists())
+        unfixed = verifier.run(spec, copy, self.run_dir)
+        self.assertEqual((unfixed.outcome, unfixed.exit_code), ("fail", 1))
+        (copy / "src" / "actor.mjs").write_text("export function actorKey(session, agent) {\n  return `${session}:${agent ?? 'root'}`;\n}\n", encoding="utf-8")
+        self.assertEqual(verifier.run(spec, copy, self.run_dir).outcome, "pass")
+        (copy / verifier.HIDDEN_TESTS / "actor.test.mjs").unlink()
+        undecided = verifier.run(spec, copy, self.run_dir)
+        self.assertEqual((undecided.outcome, undecided.exit_code), ("invalid", 3))
 
     def test_verifier_output_is_bounded(self) -> None:
         verdict = verifier.run(_echo(5000), self.repo, self.run_dir)

@@ -23,9 +23,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
-from . import REPO_ROOT
+from . import PACKAGE_ROOT, REPO_ROOT
 
 OUTPUT_LIMIT = 800
+# Code-owned hidden layers, one directory per task, mounted into the
+# verifier's copy after shutdown. The agent-visible fixture never holds them.
+HIDDEN = PACKAGE_ROOT / "hidden"
+HIDDEN_TESTS = "hidden-tests"
+NODE = "node"
 # What a `python3 -m` child needs to run at all. Everything else the operator
 # happens to have exported stays out of the verifier process.
 INHERITED = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
@@ -65,9 +70,23 @@ def _fake_crash(repo: Path) -> list[str]:
     return [sys.executable, "-m", "evals.benchmark.verifier", "fake-crash", "--repo", str(repo)]
 
 
+def _node_test(task: str) -> Callable[[Path], list[str]]:
+    """A Node test from the task's hidden layer, run inside the verifier's copy."""
+
+    def argv(repo: Path) -> list[str]:
+        return [sys.executable, "-m", "evals.benchmark.verifier", "node-test", "--repo", str(repo), "--test", f"{HIDDEN_TESTS}/{task}.test.mjs"]
+
+    return argv
+
+
+def node_test_spec(task: str) -> VerifierSpec:
+    return VerifierSpec(name=f"node_test_{task}", argv=_node_test(task), timeout_s=60, hidden_layer=HIDDEN / task)
+
+
 REGISTRY: dict[str, VerifierSpec] = {
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),
     "fake_crash": VerifierSpec(name="fake_crash", argv=_fake_crash, timeout_s=30),
+    "node_test_actor": node_test_spec("actor"),
 }
 
 
@@ -116,16 +135,37 @@ def fake_answer_file(repo: Path) -> int:
     return 0
 
 
+def node_test(repo: Path, test: str) -> int:
+    """Run one hidden Node test in the copy. 0 and 1 are the test's verdict; anything else is ours."""
+    target = repo / test
+    if not target.is_file():
+        print(f"hidden test {test} is not mounted")
+        return 3
+    try:
+        completed = subprocess.run([NODE, str(target)], cwd=repo, env=child_environment(), capture_output=True, text=True, shell=False, check=False)
+    except FileNotFoundError:
+        print("node is not on PATH")
+        return 3
+    sys.stdout.write(completed.stdout[-OUTPUT_LIMIT:])
+    sys.stderr.write(completed.stderr[-OUTPUT_LIMIT:])
+    return 0 if completed.returncode == 0 else 1 if completed.returncode == 1 else 3
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evals.benchmark.verifier")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("fake-answer-file", "fake-crash"):
         commands.add_parser(name).add_argument("--repo", required=True)
+    node = commands.add_parser("node-test")
+    node.add_argument("--repo", required=True)
+    node.add_argument("--test", required=True)
     args = parser.parse_args(argv)
     if args.command == "fake-crash":
         # A verifier that cannot decide. The attempt is invalid, not failed.
         print("fake verifier crashed")
         return 3
+    if args.command == "node-test":
+        return node_test(Path(args.repo), args.test)
     return fake_answer_file(Path(args.repo))
 
 

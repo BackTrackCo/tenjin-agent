@@ -8,3 +8,6 @@ __pycache__/
 # The tenjin-agent#267 test-identity key lane's own reporter output — an
 # artifact of the most recent local `vitest run`, never something to commit.
 .vitest-report.json
+
+# Bench-1 task fixtures ship a mock vitest under node_modules on purpose.
+!evals/benchmark/fixtures/live/*/node_modules/
