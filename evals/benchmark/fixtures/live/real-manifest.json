@@ -1,0 +1,246 @@
+{
+  "benchmark_version": "bench1-real-0",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260907,
+  "repeats": 2,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 600,
+    "turn_budget": 40,
+    "max_budget_usd": 0.75,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm test:*)",
+      "Bash(pnpm exec vitest run:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ]
+  },
+  "price_sheet_version": "real-2026-09",
+  "phases": {
+    "producer": "seeded",
+    "capture": "none",
+    "consumer": "local"
+  },
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "fixture_hash": "sha256:123f53ff02f522b17ab6d225ae447f69f919715c94164089cf20f925494c5ca1",
+      "verifier": "node_test_actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "budget",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "budget",
+      "fixture_hash": "sha256:c22f1cff55d91635559a7d3f6c649c72624a131ee844831800fa8c50e6686730",
+      "verifier": "node_test_budget",
+      "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "candidate",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "candidate",
+      "fixture_hash": "sha256:aadbf93b3757c69e07b1fda5377c576f24700a144fe5b6483de138432976cd0f",
+      "verifier": "node_test_candidate",
+      "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "slug",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "slug",
+      "fixture_hash": "sha256:34e3c46fa4287bbb73e799aa6326d6773bab5a2e0aa7dca3ca6e70f4e2200177",
+      "verifier": "node_test_slug",
+      "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_seeded",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings": {
+        "hooks": {
+          "SessionStart": [
+            {
+              "matcher": "startup|clear|compact",
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "UserPromptSubmit": [
+            {
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PreToolUse": [
+            {
+              "matcher": "WebSearch|WebFetch",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Agent|Task",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Edit|Write|MultiEdit|Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUse": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Read",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUseFailure": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStart": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "Stop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "settings_hash": "sha256:ac6da5fc8e446182bf07ec833edb2c87157a52c309b3890198fd6a8f13de8829",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    }
+  ]
+}

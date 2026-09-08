@@ -55,6 +55,7 @@ FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
 SMOKE_MANIFEST = FIXTURES / "live" / "smoke-manifest.json"
 HOOKS_SMOKE_MANIFEST = FIXTURES / "live" / "hooks-smoke-manifest.json"
 KEYS_SMOKE_MANIFEST = FIXTURES / "live" / "keys-smoke-manifest.json"
+REAL_MANIFEST = FIXTURES / "live" / "real-manifest.json"
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job
 # timeout, and gives up any claim to a publishable number in return.

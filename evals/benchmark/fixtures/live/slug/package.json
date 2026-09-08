@@ -1,0 +1,8 @@
+{
+  "name": "bench1-slug",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node scripts/all-tests.mjs"
+  }
+}
