@@ -558,13 +558,19 @@ compares against the plumbing smoke's baseline and does not apply to this manife
 manifest never runs in CI: the live lane and `--ci-live` stay on the plumbing smoke, and the
 refusal is in code rather than in the workflow.
 
-**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-0`) is the same two
+**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-1`) is the same two
 arms and the same pins over all four Bench-0 tasks, `actor`, `budget`, `candidate`, and `slug`,
-two repeats, sixteen attempts. Each task is its own frozen fixture and its own hidden layer
-(`hidden/<task>/`, verifier `node_test_<task>`), and each prompt is the same sentence with the
-file names changed. It is still one lesson family, and it is still the operator's plumbing run
-only: the same `live-run --plumbing --tenjin-source` command with this manifest, then `verify`
-and `summary`, and never in CI. Bench-2 owns the corpus that replaces it.
+two repeats, sixteen attempts. Each task is its own frozen Vitest project built the same way as
+`actor` (pinned `vitest`, committed lockfile and `node_modules`, the trap script, the marker
+reporter, `unrelated/` shards, a cases blob) with its own hidden layer (`hidden/<task>/`,
+verifier `node_test_<task>`), and each prompt is the same sentence with the file names changed.
+The discovery step per task is what the failing run prints: `budget` shows
+`expected 3200 to be 2500` (a ceiling), `candidate` shows the received `{ id: 'a', strong: false }`
+against the expected `{ id: 'b', strong: true }` (the first strong item, `null` for none), and
+`slug` shows `'BackTrackCo/Tenjin.git'` against `'backtrackco/tenjin'` (lower-case, drop
+`.git`). It is still one lesson family, and it is still the operator's plumbing run only: the
+same `live-run --plumbing --tenjin-source` command with this manifest, then `verify` and
+`summary`, and never in CI. Bench-2 owns the corpus that replaces it.
 
 **What the number would mean.** The shelf search leg sends the question, a limit, the trigger,
 and a budget, so a per-run namespace on an existing shelf cannot isolate retrieval, and the
