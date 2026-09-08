@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from evals.benchmark import artifact, cli, executor, reap, records, runner, schedule, tenjin_arm, vendor
+from evals.benchmark import artifact, cli, executor, reap, records, runner, schedule, signature, tenjin_arm, vendor
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -478,6 +478,141 @@ class CliTest(SourceCase):
         (self.run_dir / "report.json").write_text("{}", encoding="utf-8")
         cli.refuse_secret_in_report(self.run_dir, (SECRET,))
         self.assertTrue((self.run_dir / "report.json").exists())
+
+
+
+FAKE_CLI = str(Path(__file__).with_name("fake_cli.py"))
+PROBE_MJS = "console.error('Error: ENOENT: no such file or directory, open \\'settings.json\\'');\nconsole.error('    at load (/tmp/x/src/load.mjs:3:9)');\nprocess.exit(1);\n"
+
+
+class SeedCase(DaemonCase):
+    """The lesson seed on a fake CLI: keyed publish at prepare, delete at stop, every outcome in the facts."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.lessons = self.dir / "lessons"
+        self.lessons.mkdir()
+        # The key the probe will derive, computed the same way from the bytes the script prints.
+        self.key = signature.sig_v1("Error: ENOENT: no such file or directory, open 'settings.json'", "Error: ENOENT: no such file or directory, open 'settings.json'\n    at load (/tmp/x/src/load.mjs:3:9)")
+        assert self.key is not None
+        (self.lessons / "fam.md").write_text("# The lesson\n\nRun the one file.\n", encoding="utf-8")
+        self.write_lesson(self.key)
+        for name, value in (("PUBLISH_ARGV", lambda body, keys: [sys.executable, FAKE_CLI, *tenjin_arm.publish_argv(body, keys)[1:]]), ("DELETE_ARGV", lambda piece: [sys.executable, FAKE_CLI, *tenjin_arm.delete_argv(piece)[1:]]), ("LESSONS", self.lessons)):
+            patcher = mock.patch.object(tenjin_arm, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.task = {"id": "probe", "family": "fam"}
+
+    def write_lesson(self, key: str | None) -> None:
+        (self.lessons / "fam.json").write_text(
+            json.dumps(
+                {
+                    "family": "fam",
+                    "title": "The lesson",
+                    "commands": [
+                        {"command": "node probe-{task}.mjs", "sig_v1": key, "check": True, "reason": "stable"},
+                        {"command": "node ok-{task}.mjs", "sig_v1": None, "check": True, "reason": "passes"},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def seed_roots(self) -> artifact.TrialRoots:
+        fixture = self.dir / "seed-fixture"
+        fixture.mkdir(exist_ok=True)
+        (fixture / "probe-probe.mjs").write_text(PROBE_MJS, encoding="utf-8")
+        (fixture / "ok-probe.mjs").write_text("process.exit(0);\n", encoding="utf-8")
+        return artifact.create(self.run_dir, "trial-seed", fixture)
+
+    def environment(self, roots: artifact.TrialRoots) -> dict[str, str]:
+        return {"PATH": os.environ.get("PATH", ""), "HOME": str(roots.home)}
+
+    def calls(self) -> list[dict]:
+        path = Path(self.source.path) / "cli-calls.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_prepare_probes_publishes_with_the_key_and_stop_deletes(self) -> None:
+        roots = self.seed_roots()
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        provision = tenjin_arm.prepare(request)
+        self.addCleanup(lambda: provision.stop_state.get("started") and runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        seed = provision.facts["seed"]
+        self.assertEqual((seed["piece_id"], seed["published"], seed["keys"], seed["deleted"]), ("piece-1", True, 1, None))
+        self.assertEqual(seed["key_hashes"], [tenjin_arm.key_hash(self.key)])
+        self.assertEqual(seed["probe"], {"node probe-probe.mjs": tenjin_arm.key_hash(self.key), "node ok-probe.mjs": None})
+        self.assertNotIn(self.key, json.dumps(seed))
+        self.assertFalse((roots.base / "probe").exists())
+        publish = self.calls()[0]
+        self.assertEqual(publish["argv"][:1] + publish["argv"][2:], ["publish", "--yes", "--json", "--key", f"fingerprint=sig_v1:{self.key}"])
+        body = Path(publish["argv"][1])
+        self.assertTrue(body.is_relative_to(roots.base) and not body.is_relative_to(roots.repo))
+        self.assertIn(f"Benchmark seed: trial {roots.trial_id}.", body.read_text(encoding="utf-8"))
+        self.assertIn("TENJIN_DATA_DIR", publish["env"])
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", publish["env"])
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual((report["seed_deleted"], report["seed_delete_error"]), (True, None))
+        self.assertEqual(self.calls()[1]["argv"], ["delete", "piece-1", "--yes", "--json"])
+        self.assertEqual(runner.isolation_of({"live": True}, provision, report)["seed"]["deleted"], True)
+
+    def test_a_delete_that_fails_is_a_fact_in_the_record(self) -> None:
+        roots = self.seed_roots()
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        provision = tenjin_arm.prepare(request)
+        (Path(self.source.path) / "fail-delete").write_text("", encoding="utf-8")
+        report = tenjin_arm.stop(roots, provision)
+        self.assertFalse(report["seed_deleted"])
+        self.assertIn("exited 4", report["seed_delete_error"])
+        isolation = runner.isolation_of({"live": True}, provision, report)
+        self.assertEqual((isolation["seed"]["deleted"], isolation["seed"]["piece_id"]), (False, "piece-1"))
+        record = support.attempt_record(support.parse("sess-family"))
+        record["isolation"] = {**record["isolation"], "seed": isolation["seed"]}
+        records.validate(record)
+        with self.assertRaises(records.RecordError):
+            records.validate({**record, "isolation": {**record["isolation"], "seed": {**isolation["seed"], "piece_id": None}}})
+
+    def test_key_drift_and_a_failed_publish_refuse_the_trial_before_the_daemon_and_mask_the_secret(self) -> None:
+        roots = self.seed_roots()
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task=self.task, environment=self.environment(roots))
+        self.write_lesson("0000000000000000")
+        with self.assertRaises(ProvisionError) as caught:
+            tenjin_arm.prepare(request)
+        self.assertIn("seed key drift", str(caught.exception))
+        self.assertEqual(self.calls(), [])
+        self.write_lesson(self.key)
+        (Path(self.source.path) / "fail-publish").write_text("", encoding="utf-8")
+        with self.assertRaises(ProvisionError) as caught:
+            tenjin_arm.prepare(request)
+        self.assertIn("tenjin publish exited 4", str(caught.exception))
+        self.assertNotIn(SECRET, str(caught.exception))
+        self.assertIn("[secret]", str(caught.exception))
+        self.assertEqual(reap.read_records(roots.run_dir), [])
+
+    def test_a_dry_run_states_the_seed_and_publishes_nothing(self) -> None:
+        roots = self.seed_roots()
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, dry_run=True, task=self.task)
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
+            provision = tenjin_arm.prepare(request)
+        seed = provision.facts["seed"]
+        self.assertEqual((seed["published"], seed["piece_id"], seed["probe"], seed["key_hashes"]), (False, None, None, [tenjin_arm.key_hash(self.key)]))
+        self.assertEqual(self.calls(), [])
+
+    def test_a_task_without_a_lesson_seeds_nothing(self) -> None:
+        roots = self.seed_roots()
+        request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, task={"id": "x", "family": "smoke"}, environment=self.environment(roots))
+        provision = tenjin_arm.prepare(request)
+        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        self.assertNotIn("seed", provision.facts)
+        self.assertEqual(self.calls(), [])
+
+    def test_the_live_lesson_is_loadable_and_its_keys_are_the_fixture_failures(self) -> None:
+        live = tenjin_arm.FIXTURES / "live" / "lessons"
+        lesson = tenjin_arm.lesson_for("test-harness-convention", live)
+        assert lesson is not None
+        self.assertEqual(lesson.keys, ("ee9fd96defcffbeb",))
+        self.assertEqual([entry.command for entry in lesson.commands if entry.check and entry.sig_v1 is None], ["pnpm test -- tests/{task}.test.mjs"])
+        self.assertIn("pnpm exec vitest run", lesson.body.read_text(encoding="utf-8"))
+        self.assertIsNone(tenjin_arm.lesson_for("smoke", live))
 
 
 if __name__ == "__main__":

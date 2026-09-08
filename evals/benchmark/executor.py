@@ -66,6 +66,11 @@ class ProvisionRequest:
     arm: dict[str, Any]
     source: Any
     dry_run: bool = False
+    # The task the trial runs, for a provisioner that seeds something task-shaped
+    # (the hooks arm's lesson), and the child environment a probe inside the
+    # trial's repository copy runs under. A dry run carries neither.
+    task: dict[str, Any] | None = None
+    environment: dict[str, str] | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped

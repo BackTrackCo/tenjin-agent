@@ -37,8 +37,10 @@ evals/benchmark/
                    grandchild in the frozen Claude shapes
   claude_live.py   the live Claude Code executor: validated argv, minted session id,
                    per-trial settings, child environment allowlist, sessions resolver
-  tenjin_arm.py    the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped
-                   before the delivery join
+  tenjin_arm.py    the Tenjin hooks arm: seeded data dir, the keyed lesson published at
+                   prepare and deleted at stop, one daemon per trial, stopped before the join
+  signature.py     the product's sig_v1 failure key, ported byte for byte and held to the
+                   TypeScript by src/hooks/failure/signature.parity.test.ts
   verifier.py      hidden verifier registry, hidden layer, the fake verifiers, and the
                    Node test verifier the task fixtures use, with its run-marker check
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
@@ -296,6 +298,41 @@ own session, an allowlisted environment, its group in the pids ledger under `<tr
 pid, and refuses the trial if it never does. Nothing wallet-related is copied, and no key outside
 `COPIED_KEYS` is read.
 
+**The seeded lesson.** Seeding is honest only if the lesson reached the shelf the way a
+producer's would: published through the CLI, under the `sig_v1` failure key the consumer's
+failure fire resolves on the keys leg. Before the daemon starts, `prepare` loads
+`fixtures/live/lessons/<family>.md` (the lesson in this benchmark's own words) and
+`<family>.json` beside it, which freezes the keys the fixture's failing commands yield; copies
+the trial's repository to a scratch directory and runs those commands under the child's own
+environment (the vendored tree, the seeded corepack home); keys each output with
+`signature.py`, the product's formula ported byte for byte (`error_line`, `normalize_for_sig`,
+`errno_of`, `top_frame_file`, `sig_v1`; `src/hooks/failure/signature.parity.test.ts` runs both
+sides over the same outputs, so drift fails the product's suite); refuses the trial on
+`seed key drift`; and runs `tenjin publish <body> --yes --json --key fingerprint=sig_v1:<key>`
+under `TENJIN_DATA_DIR` set to the operator's source data dir, whose wallet signs it. `--key`
+needs no open pairing: the CLI stamps a matching local pairing row if one exists and sends
+the key to the shelf either way. The body carries a trial stamp line, because the CLI hands
+back the last url for a body it already published. At `stop`, after the daemon, `tenjin
+delete <id> --yes --json` removes the piece; the record's `isolation.seed` carries the title,
+`key_hashes`, `keys`, `shelf_origin`, `piece_id`, `published`, `probe` (which command keyed,
+as hashes), `deleted`, and `delete_error`, and `summary` warns when a piece is still up. A
+dry run states the title and key hashes and publishes nothing. The shared team shelf still
+holds the teammate's original piece with no key, so the prompt-fire search leg sees both
+pieces during a trial; only the seeded one answers a keys resolve.
+
+What the fixture keys to is narrower than the plan assumed. The product's key is
+`sha256("sig_v1|" + normalized line + "|" + errno + "|" + top frame)[:16]` over the last
+error-shaped line of the output; the command head is on the pairing row, not in the key. Of
+the fixture's failing commands, `pnpm test -- tests/<task>.test.mjs` (the trap) keys to
+nothing: its tail is a totals row with nothing specific left in its block, the product's
+specificity floor. `npx vitest run` and `./node_modules/.bin/vitest run` (the pnpm-agent
+refusal) key to a different value on every run, because the top frame is vite's temporary
+config bundle, `vitest.config.mjs.timestamp-<ms>-<hash>.mjs`, so no published key can match
+them. `node tests/<task>.test.mjs` ("Vitest failed to access its internal state", top frame a
+chunk of the vendored vitest dist) keys stably to `ee9fd96defcffbeb`, the same for all four
+tasks, and that is the key the lesson carries. The prepare probe re-derives all three every
+trial. The operator's next run is the proof; nothing here was run against a shelf.
+
 **Stop before the join.** As soon as the agent's process has exited, `stop` ends the daemon and
 waits for `loop.db-wal` to disappear. The shim spawns a detached daemon of its own when the one
 it expects is not healthy, and a detached process is outside the trial's group, so `stop` also
@@ -345,7 +382,7 @@ the sentinel's `public_requests` and invalidates. Public-origin legs are counted
 the report's `origins` block and `summary` read them apart, so the plan's canary gate is two
 counts, unknown requests zero and public hits zero, each judged on its own.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-4`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-5`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
 0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
 exact version in `package.json`, a committed `pnpm-lock.yaml`, and the hoisted `node_modules`
@@ -355,7 +392,8 @@ which is the `operator-machine` image pin) vendored once as
 copy at preparation, offline, so a trial installs nothing and reaches no network (see
 **Vendored toolchain** below; `bench1-hooks-smoke-3` is `bench1-hooks-smoke-2` with the tree
 vendored, and a trial sees the same bytes; `bench1-hooks-smoke-4` adds the `packageManager`
-pin that makes the trial offline against corepack, see **Offline against corepack**); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
+pin that makes the trial offline against corepack, see **Offline against corepack**;
+`bench1-hooks-smoke-5` seeds the lesson with its failure key, see **The seeded lesson**); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
 otherwise runs a registry install before the first `pnpm exec` or `pnpm run` in a fresh tree,
 which is what every trial of the second smoke did before its first test ran. The barrier is the
 repository, not the permission pin. Bash is `pnpm:*`, `npx:*`, `node:*`, `ls:*`, and `cat:*`,
@@ -835,7 +873,9 @@ never extracts it, the offline suite packs a tiny archive of its own. Rebuild wi
 puts the fixture back to the shim alone. `python3 -m evals.benchmark.vendor check --base
 evals/benchmark/fixtures/live --id <id>` verifies an archive against its record and this host.
 A rebuilt archive changes every `fixture_hash` that names it, so the manifests re-pin and bump
-`benchmark_version`.
+`benchmark_version`. `fixtures/live/lessons/` is arm-side data, never copied into a trial and
+outside every `fixture_hash`: one `<family>.md` body and one `<family>.json` of frozen keys per
+lesson family.
 
 ### Offline against corepack
 

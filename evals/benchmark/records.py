@@ -72,6 +72,7 @@ REQUIRED = frozenset(
 
 
 PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
+SEED_KEYS = frozenset({"title", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
 
 class RecordError(ValueError):
     pass
@@ -258,6 +259,21 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
+    seed = isolation.get("seed")
+    if seed is not None:
+        if not isinstance(seed, dict) or set(seed) != SEED_KEYS:
+            raise RecordError("isolation.seed must carry exactly the seed fields")
+        if not isinstance(seed["title"], str) or not seed["title"] or not isinstance(seed["published"], bool):
+            raise RecordError("isolation.seed must name a title and say whether it published")
+        if not isinstance(seed["key_hashes"], list) or not all(isinstance(item, str) and item for item in seed["key_hashes"]) or seed["keys"] != len(seed["key_hashes"]):
+            raise RecordError("isolation.seed key_hashes must be a list matching keys")
+        for name in ("piece_id", "shelf_origin", "delete_error"):
+            if seed[name] is not None and (not isinstance(seed[name], str) or not seed[name]):
+                raise RecordError(f"isolation.seed.{name} must be null or a non-empty string")
+        if seed["deleted"] is not None and not isinstance(seed["deleted"], bool):
+            raise RecordError("isolation.seed.deleted must be null or a boolean")
+        if seed["published"] and seed["piece_id"] is None:
+            raise RecordError("a seed that published names its piece")
     manager = isolation.get("package_manager")
     if manager is not None:
         if not isinstance(manager, dict) or set(manager) != {"kind", "version"} or manager["kind"] not in PACKAGE_MANAGER_KINDS:

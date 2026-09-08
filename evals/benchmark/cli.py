@@ -154,7 +154,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
     if arm.get("provision") and spec.prepare is not None:
         # A dry run seeds the data dir and resolves the template with a port of
         # 0 and a labelled token; it starts no daemon.
-        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True))
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True, task=task))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True))
     settings = arm.get("settings") or {}
     resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
@@ -215,6 +215,12 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                 f"  {'provision':10}shelf_secret_present={str(facts['shelf_secret_present']).lower()} "
                 f"shelf_origin={facts['shelf_origin']} public_origin={facts['public_origin']}"
             )
+            seed = facts.get("seed")
+            if seed is not None:
+                lines.append(
+                    f"  {'seed':10}\"{seed['title']}\" keys={seed['keys']} key_hashes={','.join(seed['key_hashes'])} "
+                    "published through tenjin publish --key at prepare, deleted at stop; a dry run publishes nothing"
+                )
         if plan["vendor"] is not None:
             facts = plan["vendor"]
             verdict = "extracted into repo/node_modules at trial preparation" if facts["host_matches"] else "MISMATCH: live-run refuses this host"

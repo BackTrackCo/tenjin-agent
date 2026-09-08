@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
+import shutil
 import signal
 import socket
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -33,7 +36,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from . import artifact, runner
+from . import FIXTURES, artifact, runner, sha256_text, signature
 from .executor import Provision, ProvisionError, ProvisionRequest
 
 NAME = "tenjin"
@@ -69,6 +72,208 @@ STOP_GRACE_S = 5.0
 WAL_TIMEOUT_S = 5.0
 PLACEHOLDERS = ("daemon_url", "daemon_token", "data_dir")
 DRY_TOKEN = "minted-at-launch"
+# The seeded lesson: one piece per lesson family under `fixtures/live/lessons/`,
+# published into the team shelf through the CLI at prepare, under the `sig_v1`
+# keys the fixture's failing commands yield, and deleted at stop. The keys are
+# frozen beside the body and re-derived at prepare by running those commands
+# on a scratch copy of the trial's repository, so drift is a refusal.
+LESSONS = FIXTURES / "live" / "lessons"
+LESSON_KEYS = frozenset({"family", "title", "commands"})
+COMMAND_KEYS = frozenset({"command", "sig_v1", "check", "reason"})
+CLI = "tenjin"
+PROBE_DIR = "probe"
+SEED_DIR = "seed"
+PROBE_TIMEOUT_S = 120
+CLI_TIMEOUT_S = 180
+OUTPUT_LIMIT = 300
+
+
+@dataclass(frozen=True)
+class LessonCommand:
+    command: str
+    sig_v1: str | None
+    check: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class Lesson:
+    family: str
+    title: str
+    body: Path
+    commands: tuple[LessonCommand, ...]
+
+    @property
+    def keys(self) -> tuple[str, ...]:
+        return tuple(entry.sig_v1 for entry in self.commands if entry.sig_v1 is not None)
+
+    @property
+    def key_hashes(self) -> list[str]:
+        return [key_hash(key) for key in self.keys]
+
+
+def key_hash(key: str) -> str:
+    return sha256_text(f"sig_v1:{key}")[:16]
+
+
+def lesson_for(family: str, lessons: Path | None = None) -> Lesson | None:
+    """The family's lesson, or None when the benchmark holds none for it (the plumbing smoke)."""
+    lessons = LESSONS if lessons is None else lessons
+    record = lessons / f"{family}.json"
+    body = lessons / f"{family}.md"
+    if not record.is_file():
+        return None
+    try:
+        data = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProvisionError(f"lesson {family!r} is unreadable: {error.__class__.__name__}") from error
+    if not isinstance(data, dict) or set(data) != LESSON_KEYS or data["family"] != family or not body.is_file():
+        raise ProvisionError(f"lesson {family!r} must be {record.name} with family, title, commands, and {body.name} beside it")
+    commands = []
+    for entry in data["commands"]:
+        if not isinstance(entry, dict) or set(entry) != COMMAND_KEYS or not isinstance(entry["check"], bool):
+            raise ProvisionError(f"lesson {family!r} has a malformed command entry")
+        if entry["sig_v1"] is not None and not re.fullmatch(r"[0-9a-f]{16}", str(entry["sig_v1"])):
+            raise ProvisionError(f"lesson {family!r} names a key that is not 16 hex characters")
+        commands.append(LessonCommand(str(entry["command"]), entry["sig_v1"], entry["check"], str(entry["reason"])))
+    if not any(entry.sig_v1 is not None for entry in commands):
+        raise ProvisionError(f"lesson {family!r} has no keyed command")
+    return Lesson(family=family, title=str(data["title"]), body=body, commands=tuple(commands))
+
+
+def probe_keys(roots: artifact.TrialRoots, lesson: Lesson, task_id: str, environment: dict[str, str]) -> dict[str, str | None]:
+    """Run each of the lesson's commands on a scratch copy of the trial's repository and key its output the product's way."""
+    probe = roots.base / PROBE_DIR
+    if probe.exists():
+        shutil.rmtree(probe)
+    shutil.copytree(roots.repo, probe, symlinks=False)
+    probed: dict[str, str | None] = {}
+    try:
+        for entry in lesson.commands:
+            command = entry.command.replace("{task}", task_id)
+            try:
+                completed = subprocess.run(
+                    command.split(" "), cwd=probe, env=environment, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, shell=False, check=False
+                )
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise ProvisionError(f"the seed probe could not run {command!r}: {error.__class__.__name__}") from error
+            probed[command] = signature.key_of((completed.stdout or "") + "\n" + (completed.stderr or ""))["key"]
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+    return probed
+
+
+def check_keys(lesson: Lesson, task_id: str, probed: dict[str, str | None]) -> None:
+    """The frozen keys must be what the trial's own commands yield today, or the seed is a lie."""
+    for entry in lesson.commands:
+        if not entry.check:
+            continue
+        command = entry.command.replace("{task}", task_id)
+        if probed.get(command) != entry.sig_v1:
+            raise ProvisionError(
+                f"seed key drift: {command!r} keys to {probed.get(command)!r}, the lesson records {entry.sig_v1!r}; "
+                f"re-derive {lesson.family}.json before seeding"
+            )
+
+
+def publish_argv(body: Path, keys: tuple[str, ...]) -> list[str]:
+    argv = [CLI, "publish", str(body), "--yes", "--json"]
+    for key in keys:
+        argv += ["--key", f"fingerprint=sig_v1:{key}"]
+    return argv
+
+
+def delete_argv(piece_id: str) -> list[str]:
+    return [CLI, "delete", piece_id, "--yes", "--json"]
+
+
+# The seams a test replaces with a fake CLI. Code-owned: the manifest never
+# names a program, and the arguments above are the only ones ever passed.
+PUBLISH_ARGV: Callable[[Path, tuple[str, ...]], list[str]] = publish_argv
+DELETE_ARGV: Callable[[str], list[str]] = delete_argv
+
+
+def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dict[str, str]:
+    """The operator's own data dir (its wallet signs the publish), and nothing else of the operator's."""
+    parent = os.environ if parent is None else parent
+    env = {"PATH": parent.get("PATH", ""), "HOME": parent.get("HOME", ""), "TENJIN_DATA_DIR": os.path.abspath(source.path)}
+    for name in ("LANG", "TMPDIR"):
+        if parent.get(name):
+            env[name] = parent[name]
+    return env
+
+
+def _find(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        if name in value:
+            return value[name]
+        for item in value.values():
+            found = _find(item, name)
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find(item, name)
+            if found is not None:
+                return found
+    return None
+
+
+def _run_cli(argv: list[str], env: dict[str, str], secrets_: tuple[str, ...]) -> tuple[int, Any, str]:
+    """One CLI call: exit code, the parsed JSON on stdout (or None), and the tail of stderr with every secret masked."""
+    try:
+        completed = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=CLI_TIMEOUT_S, shell=False, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return 1, None, f"{argv[0]} could not run: {error.__class__.__name__}"
+    tail = (completed.stderr or "").strip()[-OUTPUT_LIMIT:]
+    for secret in secrets_:
+        tail = tail.replace(secret, "[secret]")
+    try:
+        payload = json.loads(completed.stdout) if completed.stdout.strip() else None
+    except json.JSONDecodeError:
+        payload = None
+    return completed.returncode, payload, tail
+
+
+def seed_body(lesson: Lesson, roots: artifact.TrialRoots, trial_id: str) -> Path:
+    """The lesson with a trial stamp, written outside the agent's roots: the CLI dedups a body it already published."""
+    target = roots.base / SEED_DIR / lesson.body.name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(lesson.body.read_text(encoding="utf-8").rstrip("\n") + f"\n\nBenchmark seed: trial {trial_id}.\n", encoding="utf-8")
+    return target
+
+
+def publish_lesson(source: Source, roots: artifact.TrialRoots, lesson: Lesson, trial_id: str) -> str:
+    """Publish the lesson under its keys through the CLI, the way a producer's turn end would. Returns the piece id."""
+    body = seed_body(lesson, roots, trial_id)
+    code, payload, tail = _run_cli(PUBLISH_ARGV(body, lesson.keys), cli_environment(source), source.secrets)
+    piece_id = _find(payload, "resourceId")
+    if code != 0 or not isinstance(piece_id, str) or not piece_id:
+        raise ProvisionError(f"seeding the lesson failed: tenjin publish exited {code}: {tail or 'no output'}")
+    return piece_id
+
+
+def delete_lesson(source: Source, piece_id: str) -> str | None:
+    """Delete the seeded piece. Returns None on success, else the reason, so the record can say it."""
+    code, payload, tail = _run_cli(DELETE_ARGV(piece_id), cli_environment(source), source.secrets)
+    if code == 0 and _find(payload, "deleted") is True:
+        return None
+    return f"tenjin delete exited {code}: {tail or 'no output'}"
+
+
+def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dict[str, str | None] | None) -> dict[str, Any]:
+    return {
+        "title": lesson.title,
+        "key_hashes": lesson.key_hashes,
+        "keys": len(lesson.keys),
+        "shelf_origin": source.shelf_origin,
+        "piece_id": piece_id,
+        "published": piece_id is not None,
+        # Hashes, like `key_hashes`: the record names which command keyed and which did not, never the key itself.
+        "probe": None if probed is None else {command: None if key is None else key_hash(key) for command, key in probed.items()},
+        "deleted": None,
+        "delete_error": None,
+    }
 
 
 def dry_source() -> "Source":
@@ -248,6 +453,22 @@ def prepare(request: ProvisionRequest) -> Provision:
     config_path = roots.data_dir / CONFIG_FILE
     config_path.write_text(json.dumps(seeded_config(source, port, with_secret=not request.dry_run), indent=2) + "\n", encoding="utf-8")
     config_path.chmod(0o600)
+    # The lesson: keyed, published through the CLI before the daemon starts,
+    # so a publish that fails costs no daemon and no spend. A dry run states
+    # the title and the key hashes and publishes nothing.
+    facts: dict[str, Any] = dict(source.facts)
+    lesson = None if request.task is None else lesson_for(str(request.task.get("family", "")))
+    piece_id: str | None = None
+    if lesson is not None:
+        task_id = str(request.task["id"]) if request.task is not None else ""
+        probed = None
+        if not request.dry_run:
+            if request.environment is None:
+                raise ProvisionError("seeding needs the trial's child environment to probe the fixture's commands")
+            probed = probe_keys(roots, lesson, task_id, request.environment)
+            check_keys(lesson, task_id, probed)
+            piece_id = publish_lesson(source, roots, lesson, request.trial_id)
+        facts["seed"] = seed_facts(lesson, source, piece_id, probed)
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
         started = runner.process_start(
@@ -262,14 +483,16 @@ def prepare(request: ProvisionRequest) -> Provision:
             live = wait_healthy(roots, started, HEALTH_TIMEOUT_S)
         except ProvisionError:
             runner.process_stop(started, roots.run_dir, STOP_GRACE_S)
+            if piece_id is not None:
+                delete_lesson(source, piece_id)
             raise
         port = live["port"]
-        stop_state = {"started": started, "pid": live["pid"], "port": port}
+        stop_state = {"started": started, "pid": live["pid"], "port": port, "piece_id": piece_id, "source": source}
     return Provision(
         values={"daemon_url": f"http://127.0.0.1:{port}{HOOK_PATH}", "daemon_token": token, "data_dir": str(roots.data_dir)},
         secrets=source.secrets,
         origins=source.origins,
-        facts=source.facts,
+        facts=facts,
         stop_state=stop_state,
     )
 
@@ -322,4 +545,12 @@ def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
     while wal.exists() and time.monotonic() < end:
         time.sleep(HEALTH_POLL_S)
     report["wal_live"] = wal.exists()
+    # The seeded piece leaves the shelf with the trial. A delete that fails is
+    # a fact in the record, never a retry loop and never silence.
+    piece_id = state.get("piece_id")
+    source = state.get("source")
+    if isinstance(piece_id, str) and isinstance(source, Source):
+        error = delete_lesson(source, piece_id)
+        report["seed_deleted"] = error is None
+        report["seed_delete_error"] = error
     return report

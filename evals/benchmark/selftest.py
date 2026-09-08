@@ -45,6 +45,7 @@ SUBJECTS = {
     "test_report": "publishable projection and the redaction guard",
     "test_runner": "trial execution, settlement, caps, process-group kill, resume",
     "test_schedule": "seeded balanced schedule and trial identity",
+    "test_signature": "the sig_v1 port: the same line, floor, and key the product's failure arm derives",
     "test_tenjin_arm": "the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped before the join",
     "test_toolchain": "the trial's pnpm: shim detection, the pin, an offline per-trial corepack home, and the refusal",
     "test_usage": "usage contract: arithmetic, null versus zero, dedupe",

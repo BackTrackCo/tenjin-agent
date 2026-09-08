@@ -39,6 +39,7 @@ seam is not the variable this executor passes is refused too.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -516,23 +517,34 @@ def child_environment(
     return env
 
 
-def package_manager_for(request: LaunchRequest, parent: Mapping[str, str]) -> toolchain.PackageManager | None:
+def package_manager_for(roots: artifact.TrialRoots, parent: Mapping[str, str], dry_run: bool) -> toolchain.PackageManager | None:
     """The pnpm this trial runs, refused unless it is the fixture's pin, and seeded into the trial's corepack home.
 
     A fixture without a package.json (the plumbing smoke) needs no pnpm and
     gets nothing here. A dry run probes and reports, and neither refuses nor
-    copies.
+    copies. Seeding is idempotent: the provisioner and the launch both call it.
     """
-    pin = toolchain.package_manager_pin(request.roots.repo)
+    pin = toolchain.package_manager_pin(roots.repo)
     if pin is None:
         return None
-    manager = toolchain.inspect(parent, pin, probe_binary=not request.dry_run, cwd=request.roots.base)
-    if request.dry_run:
+    manager = toolchain.inspect(parent, pin, probe_binary=not dry_run, cwd=roots.base)
+    if dry_run:
         return manager
     toolchain.check(manager, pin, toolchain.corepack_home(parent))
-    if manager.kind == "corepack-shim":
-        toolchain.seed(toolchain.corepack_home(parent), request.roots.corepack_home, pin)
+    if manager.kind == "corepack-shim" and pin not in toolchain.cached_versions(roots.corepack_home):
+        toolchain.seed(toolchain.corepack_home(parent), roots.corepack_home, pin)
     return manager
+
+
+def probe_environment(roots: artifact.TrialRoots, parent: Mapping[str, str]) -> dict[str, str]:
+    """What a command run inside the trial's repository copy sees before the agent does: the child's allowlist, no credential."""
+    env = roots.environment(parent.get("PATH", ""))
+    for name in INHERITED:
+        value = parent.get(name)
+        if value:
+            env[name] = value
+    env.update(toolchain.child_variables(roots.corepack_home))
+    return env
 
 
 def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[str]:
@@ -578,7 +590,7 @@ def launch(request: LaunchRequest) -> Launch:
     path = settings_path(request.roots)
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     try:
-        manager = package_manager_for(request, os.environ)
+        manager = package_manager_for(request.roots, os.environ, request.dry_run)
     except toolchain.ToolchainError as error:
         raise LiveExecutorError(error.detail) from error
     return Launch(
@@ -592,9 +604,16 @@ def launch(request: LaunchRequest) -> Launch:
 
 
 def prepare(request: ProvisionRequest) -> Provision:
+    """Provision the arm, with the trial's toolchain in place so the seed probe runs the fixture's commands as the agent will."""
     if provision_of(request.arm) is None:
         raise LiveExecutorError(f"arm {request.arm.get('id')!r} declares no provision")
-    return tenjin_arm.prepare(request)
+    if request.dry_run:
+        return tenjin_arm.prepare(request)
+    try:
+        package_manager_for(request.roots, os.environ, dry_run=False)
+    except toolchain.ToolchainError as error:
+        raise LiveExecutorError(error.detail) from error
+    return tenjin_arm.prepare(dataclasses.replace(request, environment=probe_environment(request.roots, os.environ)))
 
 
 SPEC = ExecutorSpec(

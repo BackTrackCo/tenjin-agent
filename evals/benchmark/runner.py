@@ -258,6 +258,19 @@ def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path 
         runtime.sleep(min(runtime.settle_interval_s, runtime.settle_cap_s - waited))
 
 
+def isolation_of(isolation: dict[str, Any], provision: executor.Provision | None, stop: dict[str, Any] | None) -> dict[str, Any]:
+    """The record's isolation block: the gate's facts, the daemon's, and what became of the seeded piece."""
+    if provision is None:
+        return isolation
+    out = {**isolation, "daemon_respawned": bool((stop or {}).get("respawned", False))}
+    seed = provision.facts.get("seed")
+    if seed is not None:
+        out["seed"] = dict(seed)
+        if stop is not None and "seed_deleted" in stop:
+            out["seed"].update({"deleted": bool(stop["seed_deleted"]), "delete_error": stop.get("seed_delete_error")})
+    return out
+
+
 def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str, runtime: Runtime = Runtime()) -> dict[str, Any]:
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
@@ -288,7 +301,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     provision = None
     if provisioned:
         assert spec.prepare is not None
-        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source))
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}
@@ -447,7 +460,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "unresolved_actors": settlement.unresolved,
         "delivery": delivery,
         "sentinel": sentinel.counts(),
-        "isolation": {**isolation, "daemon_respawned": bool((provision_stop or {}).get("respawned", False))} if provision is not None else isolation,
+        "isolation": isolation_of(isolation, provision, provision_stop),
         "private_hashes": {
             "root_transcript": sha256_file(root_transcript) if root_transcript.is_file() else None,
             "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None,

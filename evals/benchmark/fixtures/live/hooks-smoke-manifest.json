@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-hooks-smoke-4",
+  "benchmark_version": "bench1-hooks-smoke-5",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,

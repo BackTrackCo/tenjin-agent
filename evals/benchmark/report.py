@@ -157,6 +157,15 @@ def project(
         origins["public_hits"] += public.get("hits", 0)
         origins["public_timeouts"] += public.get("timeouts", 0)
         origins["other_requests"] += record["delivery"].get("classes", {}).get("other", 0)
+    # The seeded pieces: how many trials wrote one to the team shelf, and how
+    # many left it there because the delete failed, which the summary warns on.
+    seeds = {"published": 0, "not_deleted": 0}
+    for record in accepted.values():
+        seed = record["isolation"].get("seed")
+        if seed is not None and seed.get("published"):
+            seeds["published"] += 1
+            if seed.get("deleted") is not True:
+                seeds["not_deleted"] += 1
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
@@ -179,6 +188,7 @@ def project(
         "invalid": reduction["invalid"],
         "excluded": excluded,
         "origins": origins,
+        "seeds": seeds,
         "trials": [
             {
                 "trial_id": record["trial_id"],
@@ -252,6 +262,11 @@ def render(report: dict[str, Any]) -> str:
             f"{arm['accounting']:>12s}"
         )
     lines.append("")
+    seeds = report.get("seeds")
+    if seeds is not None and seeds["published"]:
+        lines.append(f"seeded pieces: {seeds['published']} published to the team shelf, {seeds['published'] - seeds['not_deleted']} deleted")
+        if seeds["not_deleted"]:
+            lines.append(f"WARNING: {seeds['not_deleted']} seeded piece(s) still on the team shelf: delete them by hand (isolation.seed.piece_id in the records)")
     origins = report.get("origins")
     if origins is not None:
         lines.append(
