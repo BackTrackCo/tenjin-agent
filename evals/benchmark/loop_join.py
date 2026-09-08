@@ -3,11 +3,14 @@
 Loop 2 owns delivery facts (`fires`, `legs` in src/hooks/store.ts). The
 benchmark reads them after the trial stops and joins each fire to the exact
 `(harness, session, agent)` it was recorded under; a sibling with another
-agent id never receives it, and no ancestry is inferred. A `-wal` file means
-the daemon has not settled, so the join refuses rather than reading a main
-file that is missing the WAL's frames. The connection is `mode=ro` plus
-`immutable=1`, which also keeps SQLite from creating `-wal`/`-shm` files in a
-directory the benchmark only reads.
+agent id never receives it, and no ancestry is inferred. A `-wal` file with
+frames in it means the daemon has not settled, so the join refuses rather
+than reading a main file that is missing them; a zero-byte `-wal` holds no
+frames and is what any SQLite reader that opened the ledger without
+`immutable=1` leaves behind, so it reads as settled. The connection here is
+`mode=ro` plus `immutable=1`, which also keeps SQLite from creating
+`-wal`/`-shm` files in a directory the benchmark only reads; every reader of
+a trial ledger has to open it that way.
 """
 
 from __future__ import annotations
@@ -48,6 +51,12 @@ NO_ANSWER = "no-answer"
 # product stores with `source = 'cli'`; the hooks' own legs are `fires` and
 # `legs`. Counted and costed apart, so a manual search is visible.
 CLI_SOURCE = "cli"
+
+
+def wal_live(loop_db: Path) -> bool:
+    """A `-wal` beside the ledger with frames in it. A zero-byte one is a reader's residue, not an unsettled daemon."""
+    wal = loop_db.with_name(loop_db.name + "-wal")
+    return wal.exists() and wal.stat().st_size > 0
 
 
 def unavailable() -> dict[str, Any]:
@@ -127,7 +136,7 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
     """
     if loop_db is None or not loop_db.is_file():
         return unavailable()
-    if loop_db.with_name(loop_db.name + "-wal").exists():
+    if wal_live(loop_db):
         raise LoopJoinError("loop.db WAL is live: settlement has not completed")
     wanted = set(actors)
     fires: list[dict[str, Any]] = []

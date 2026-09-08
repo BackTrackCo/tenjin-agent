@@ -124,9 +124,16 @@ class LoopJoinTest(unittest.TestCase):
 
     def test_live_wal_refuses_the_join(self) -> None:
         wal = self.db.with_name("loop.db-wal")
-        wal.write_bytes(b"")
+        wal.write_bytes(b"\x37\x7f\x06\x82" + b"\x00" * 28)
         with self.assertRaises(LoopJoinError):
             loop_join.project(self.db, [ROOT])
+
+    def test_an_empty_wal_is_settled(self) -> None:
+        # What a reader that opened the ledger without immutable=1 leaves behind: no frames, nothing unsettled.
+        self.db.with_name("loop.db-wal").write_bytes(b"")
+        self.db.with_name("loop.db-shm").write_bytes(b"\x00" * 32)
+        self.assertFalse(loop_join.wal_live(self.db))
+        self.assertEqual(loop_join.project(self.db, [ROOT])["status"], "joined")
 
     def test_join_is_read_only_and_leaves_no_side_files(self) -> None:
         before = hashlib.sha256(self.db.read_bytes()).hexdigest()

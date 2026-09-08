@@ -827,9 +827,12 @@ current manifest and schedule hashes and excludes everything else with a reason:
 ## Delivery join contract
 
 `loop_join.project(loop_db, actors)` opens a stopped trial's `loop.db` with
-`file:...?mode=ro&immutable=1` and refuses when a `loop.db-wal` file exists: settlement is not
-complete and the main file alone would be missing frames. It never writes and creates no
-`-wal`/`-shm` side files. Fires join on the exact `(harness, session, agent)`; a sibling with
+`file:...?mode=ro&immutable=1` and refuses when a `loop.db-wal` file with frames in it exists:
+settlement is not complete and the main file alone would be missing them. A zero-byte `-wal`
+(with a `-shm` beside it) is what any SQLite reader that opened the ledger without `immutable=1`
+leaves behind, holds no frames, and reads as settled. The join never writes and creates no
+`-wal`/`-shm` side files; every reader of a trial ledger, `cases` included, must open it with
+`mode=ro&immutable=1` for the same reason. Fires join on the exact `(harness, session, agent)`; a sibling with
 another agent id never receives a fire, and no ancestry is inferred. Fires for actors outside
 the native set are returned as `unmatched_fires`, which the runner treats as an attribution
 error (`delivery:fire_without_usage`), never as a zero-token actor. A native actor with no
@@ -987,8 +990,8 @@ command matrix holds, and the operator's cache and `lastKnownGood.json` are unto
 `python3 -m evals.benchmark.cli cases --run <dir> --tenjin-source <dir> --out <file.jsonl>` is
 the export the teammate's plan asks for (`tenjin-notes` `loop-redesign/14-search-intent.md`,
 "Quick experiment for the benchmark teammate" and "Minimal records and benchmark integration").
-It runs only after settlement: a live process in the run's ledger or a live WAL on a trial's
-`loop.db` is a refusal. For each accepted attempt with a trial ledger, every hook fire that
+It runs only after settlement: a live process in the run's ledger or a live WAL (one with
+frames; a zero-byte one is a reader's residue) on a trial's `loop.db` is a refusal. For each accepted attempt with a trial ledger, every hook fire that
 carried a question or a question key becomes one JSONL record: `case_id` (run nonce, trial,
 fire), `source` (trial, arm, task, harness, fire event and hook arm, actor), `trigger`,
 `prompt` (the question as fired, or the key), `context_packet` (fixture id and hash, family,

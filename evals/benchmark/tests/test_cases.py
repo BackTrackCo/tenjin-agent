@@ -69,7 +69,7 @@ class CasesCase(unittest.TestCase):
         db.commit()
         db.close()
         if wal:
-            path.with_name("loop.db-wal").write_bytes(b"")
+            path.with_name("loop.db-wal").write_bytes(b"\x37\x7f\x06\x82" + b"\x00" * 28)
         return path
 
     def seeded(self, trial_id: str, piece_id: str) -> None:
@@ -145,6 +145,9 @@ class ExportTest(CasesCase):
         with self.assertRaises(cases.CasesError) as caught:
             cli.do_cases(self.run_dir, self.source_dir, self.dir / "x.jsonl")
         self.assertIn("live loop.db WAL", str(caught.exception))
+        # A zero-byte WAL, the residue of a reader that opened the ledger without immutable=1, is settled.
+        (self.run_dir / "trials" / trial / "data" / "loop.db-wal").write_bytes(b"")
+        self.assertEqual(cli.do_cases(self.run_dir, None, None, dry_run=True)["cases"], 2)
         (self.run_dir / "trials" / trial / "data" / "loop.db-wal").unlink()
         with self.assertRaises(cli.CliError):
             cli.do_cases(self.run_dir, None, self.dir / "x.jsonl")

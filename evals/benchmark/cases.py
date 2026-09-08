@@ -65,7 +65,7 @@ def refuse_live(run_dir: Path, trial_ids: list[str]) -> None:
     if alive:
         raise CasesError(f"the run still has {len(alive)} live process(es) in its ledger; run cleanup first")
     for trial_id in trial_ids:
-        if (run_dir / "trials" / trial_id / "data" / "loop.db-wal").exists():
+        if loop_join.wal_live(run_dir / "trials" / trial_id / "data" / "loop.db"):
             raise CasesError(f"trial {trial_id} has a live loop.db WAL: settlement has not completed")
 
 
