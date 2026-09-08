@@ -558,11 +558,11 @@ compares against the plumbing smoke's baseline and does not apply to this manife
 manifest never runs in CI: the live lane and `--ci-live` stay on the plumbing smoke, and the
 refusal is in code rather than in the workflow.
 
-**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-1`) is the same two
+**The real manifest.** `fixtures/live/real-manifest.json` (`bench1-real-2`) is the same two
 arms and the same pins over all four Bench-0 tasks, `actor`, `budget`, `candidate`, and `slug`,
 two repeats, sixteen attempts. Each task is its own frozen Vitest project built the same way as
-`actor` (pinned `vitest`, committed lockfile and `node_modules`, the trap script, the marker
-reporter, `unrelated/` shards, a cases blob) with its own hidden layer (`hidden/<task>/`,
+`actor` (pinned `vitest`, committed lockfile and `node_modules`, the trap script, the pnpm-agent
+guard and `pnpm-workspace.yaml`, the marker reporter, `unrelated/` shards, a cases blob) with its own hidden layer (`hidden/<task>/`,
 verifier `node_test_<task>`), and each prompt is the same sentence with the file names changed.
 The discovery step per task is what the failing run prints: `budget` shows
 `expected 3200 to be 2500` (a ceiling), `candidate` shows the received `{ id: 'a', strong: false }`

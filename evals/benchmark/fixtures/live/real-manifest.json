@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-real-1",
+  "benchmark_version": "bench1-real-2",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,
@@ -17,8 +17,11 @@
     "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
     "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "allowed_tools": [
-      "Bash(pnpm test:*)",
-      "Bash(pnpm exec vitest run:*)",
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
       "Read(./**)",
       "Edit(./**)",
       "Write(./**)",
@@ -38,7 +41,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "fixture_hash": "sha256:38c625b6bcfaa02ad6bc12eddfda07fbb19d6b742032141323a69ca6dc83fb74",
+      "fixture_hash": "sha256:ab9a4181e1cf0be01df15bbfb6cfc083ca2e9da4384a57130adb00182a70ab2f",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -47,7 +50,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "budget",
-      "fixture_hash": "sha256:2b7fd1ac7ba8c0a408aae178dc10aa07e70bd8c40364369f19ec276e8ab5d169",
+      "fixture_hash": "sha256:6df7cc509e6e8171f8dec15cbb06a45e2a232ce0c262af152c556c2261cc4320",
       "verifier": "node_test_budget",
       "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -56,7 +59,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "candidate",
-      "fixture_hash": "sha256:5e727d1a2ed59cd531a168b49d33f3498d83c44d609837b98c8868b56f0926ff",
+      "fixture_hash": "sha256:563a1d224dd7bdd199fce708791a5fa777e885b5715472c08c1b75934344c789",
       "verifier": "node_test_candidate",
       "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -65,7 +68,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "slug",
-      "fixture_hash": "sha256:6042d135a3bca0a17e7f3359b17e28b7ae27dd253d67dcb28044701fff95b135",
+      "fixture_hash": "sha256:f82afadca11beb3670ddcdc1d7c1d152d9e4b395a47e871f806fdce9b0385f98",
       "verifier": "node_test_slug",
       "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }
