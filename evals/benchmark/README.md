@@ -40,7 +40,7 @@ evals/benchmark/
   tenjin_arm.py    the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped
                    before the delivery join
   verifier.py      hidden verifier registry, hidden layer, the fake verifiers, and the
-                   Node test verifier the task fixtures use
+                   Node test verifier the task fixtures use, with its run-marker check
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection, its redaction guard, and the isolation stamp
@@ -50,7 +50,8 @@ evals/benchmark/
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
   fixtures/live/   the plumbing smoke manifest and its repo, the hooks smoke manifest and its
-                   task fixture, and the regression baseline
+                   frozen Vitest task fixture (lockfile and node_modules committed), and the
+                   regression baseline
   hidden/          code-owned hidden layers, one per task, mounted only into the verifier copy
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
@@ -332,16 +333,35 @@ is classified by its `shelf` column into `delivery.shelves`: `team` (a team-shel
 reached nothing and is not counted. A `team` or `public` leg is the product under test; an
 `other` leg is a request to an unknown origin and counts as a public request for the sentinel.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-0`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-1`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
-0.75. The task is Bench-0's: a fixture whose `pnpm test` script runs a noisy wrong suite and
-whose `node_modules/.bin/vitest` runs exactly one file, a source fix, and a hidden Node test
-mounted after shutdown (`hidden/actor/`, verifier `node_test_actor`, `node` from `PATH`). The
-prompt states the task without the lesson: "Run only that one test file" is the whole
-instruction, and no phrase from the shelf piece appears in the prompt, the fixture, or the test
-name. Bash is pinned to `pnpm test:*` (the trap) and `pnpm exec vitest run:*` (the lesson). It is
-a hooks-arm plumbing smoke in one lesson family, test-harness convention, and not a task corpus;
-Bench-2 owns the corpus. The operator runs it on their own machine:
+0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
+exact version in `package.json`, a committed `pnpm-lock.yaml`, and a committed hoisted
+`node_modules` holding vitest and its transitive dependencies only (about 24 MB, 780 files,
+darwin-arm64 natives, which is the `operator-machine` image pin), so a trial installs nothing and
+reaches no network. The package `test` script is the trap: `scripts/all-tests.mjs` never forwards
+its arguments and runs the whole `vitest.config.mjs` set, which includes `unrelated/`, three
+shards that fail loudly, so `pnpm test -- tests/actor.test.mjs` fails whatever the source says.
+`pnpm exec vitest run tests/actor.test.mjs` is the only command that runs exactly the one file
+and passes once `src/actor.mjs` is fixed, and `node tests/actor.test.mjs` fails because the test
+imports `vitest`. Bash is pinned to `pnpm test:*` (the trap) and `pnpm exec vitest run:*` (the
+lesson); `node` and `pnpm` come from the inherited `PATH`. The prompt states the task without
+the lesson: "Run only that one test file" is the whole instruction, and no phrase from the shelf
+piece appears in the prompt, the fixture, or the test name.
+
+**Discovery.** The fix has to be learned from a run. `tests/actor.test.mjs` takes its cases
+from `tests/support/cases.mjs`, where they are a gzip-and-base64 blob decoded at import, so
+reading the source and the test does not reveal the expected value; the failing run prints it
+(`expected 's1:undefined' to be 's1:root'`). The hidden layer (`hidden/actor/`, verifier
+`node_test_actor`) is a plain Node assert file over different literals of the same rule, mounted
+after shutdown and run with `node` from `PATH`, so a lookup table over the visible cases fails
+it. The verifier then requires the run marker: the fixture's `scripts/ran-marker.mjs` reporter
+writes `.bench1/ran-actor.json` with the run's file list and pass count only when the run is
+green, and `verifier.check_marker` accepts only a list of exactly `tests/actor.test.mjs`. The
+marker is evidence, not proof: the agent can write any file under the fixture, so the
+transcript's tool counts remain the primary record of what ran. The task is a hooks-arm plumbing
+smoke in one lesson family, test-harness convention, and not a task corpus; Bench-2 owns the
+corpus. The operator runs it on their own machine:
 
 ```bash
 python3 -m evals.benchmark.cli live-run \
@@ -362,6 +382,25 @@ and a budget, so a per-run namespace on an existing shelf cannot isolate retriev
 operator's shelf already holds the Bench-0 lesson beside a large related family. A numbered
 result needs a dedicated disposable shelf with `team.publicFallback` on, which is Bench-3 scope;
 this smoke proves the funnel on a real agent and nothing more.
+
+**Retrieval finding 2026-09-08.** The first seeded run of the smoke, on `bench1-hooks-smoke-0`
+(four attempts, all pass, verify agreeing, plumbing complete), delivered nothing. The prompt hook
+searched with the full prompt as its question: `Fix src/actor.mjs so that tests/actor.test.mjs
+passes. Run only that one test file, never the whole suite, and do not spawn subagents.` The team
+leg returned the correct piece as its top candidate, title "tenjin: `pnpm test -- <files>` runs
+the wrong set; use `pnpm exec vitest run <files>`" (shelf team, status ok, calibration
+hybrid-v1), and the grader's verdict was `miss`; the public leg also missed, and nothing was
+injected. `tenjin_seeded` used 1.138x the tokens of `off` with zero delivery. This is Bench-4
+input, grader calibration evidence, and not a benchmark result.
+
+The same run taught the task-design rule. In every attempt, seeded or not, the agent read the two
+files, edited the source, called `node tests/actor.test.mjs`, which the pin denied, then asked
+for permission and stopped. It never ran `pnpm test`, so it never met the trap, and the hidden
+test passed on the edit alone; the fixture of that version had no Vitest at all, so the lesson's
+command could not have worked even if injected. Bench-0's prompt phrase had been carrying the
+task. A task must force the lesson's failure mode without naming the lesson: the only green path
+is the lesson's command, the fix needs a run to discover, and the verifier requires the run.
+`bench1-hooks-smoke-1` above is that redesign; it has not yet been rerun.
 
 ## Cleanup
 
@@ -441,6 +480,13 @@ registry's code-owned hidden layer, which `artifact.TrialRoots.hidden_copy` moun
 of the final worktree after shutdown; the agent-visible mount never holds them. An unknown
 verifier id, a target outside the run directory, a symlink that escapes the worktree, and a
 manifest value shaped like a shell command all fail closed before the verifier runs.
+
+A task verifier (`node_test_<task>`) decides two things: the hidden Node test passes on the
+retained worktree, and the run marker `.bench1/ran-<task>.json`, which the fixture's vitest
+reporter writes only on a green run, names exactly `tests/<task>.test.mjs` with at least one
+pass and no failure. A correct edit that never ran the named test green is `fail`. The marker is
+evidence rather than proof, since the agent can write any file, so the transcript's tool counts
+stay the primary record of what ran.
 
 Exit 0 is `pass`, exit 1 is `fail`, and any other exit or a timeout means the measurement broke
 rather than the task, so the attempt is `invalid`. The five outcomes stay distinct:
@@ -679,13 +725,22 @@ product's own `LOOP_DDL` in `src/hooks/store.ts`. Real transcripts are never rea
   depends on it.
 - `bootstrap-golden.json`: frozen `paired_bootstrap` output for four seeded inputs.
 
+`fixtures/live/` holds the operator-side manifests, `repo/` for the plumbing smoke, and one
+frozen Vitest project per task (`actor/`): a pinned `vitest`, a committed `pnpm-lock.yaml` and
+hoisted `node_modules`, the `scripts/all-tests.mjs` trap, the `scripts/ran-marker.mjs`
+reporter, `unrelated/` failing shards, and the cases blob under `tests/support/`. Frozen means
+no run artefacts: `.bench1/`, `node_modules/.vite*`, and pnpm's state files never enter the
+tree, and `manifest.fixture_hash` covers every file, `node_modules` included. Hidden layers live
+in `hidden/<task>/hidden-tests/` as plain Node assert files.
+
 ## Extending the foundation
 
 Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
 
-- A new task is a manifest entry plus a fixture directory and a verifier id. The fixture hash is
-  `manifest.fixture_hash(dir)`; the verifier is a new `verifier.REGISTRY` entry with its own
-  code-owned argv and hidden layer. No reducer or record change.
+- A new task is a manifest entry plus a fixture directory and a verifier id. The fixture is a
+  copy of an existing one with its `src/`, `tests/`, cases blob, and the reporter's `task`
+  renamed; its hash is `manifest.fixture_hash(dir)`; the verifier is `node_test_spec(task)` in
+  `verifier.REGISTRY` with a hidden layer under `hidden/<task>/`. No reducer or record change.
 - A new arm is a manifest entry plus an `executor.REGISTRY` entry. Arms in one manifest share
   one executor, because arms running different harnesses do not have comparable token totals.
   A driver that installs a competing memory hook gets its own image, home, and data roots; never
