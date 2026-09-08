@@ -56,9 +56,35 @@ class LoopJoinTest(unittest.TestCase):
     def test_legs_are_counted_per_shelf_and_a_skipped_leg_is_not_a_request(self) -> None:
         projection = loop_join.project(self.db, [ROOT, CHILD, SIBLING])
         # Two team legs went out; the public leg was planned and dropped.
-        self.assertEqual(projection["shelves"], {"team": 2, "public": 0, "other": 0})
-        self.assertEqual(loop_join.unavailable()["shelves"], {"team": 0, "public": 0, "other": 0})
-        self.assertEqual(loop_join.count_shelves([{"shelf": "public", "status": "ok"}, {"shelf": "mirror", "status": "ok"}]), {"team": 0, "public": 1, "other": 1})
+        self.assertEqual(projection["shelves"], {"team": 2, "public": 0, "keys": 0, "local": 0, "other": 0})
+        self.assertEqual(projection["classes"], {"team": 2, "public": 0, "local": 0, "other": 0})
+        self.assertEqual(projection["public"], {"legs": 0, "hits": 0, "timeouts": 0, "no_answer": 0})
+        empty = loop_join.unavailable()
+        self.assertEqual(empty["classes"], {"team": 0, "public": 0, "local": 0, "other": 0})
+        self.assertEqual(empty["public"], {"legs": 0, "hits": 0, "timeouts": 0, "no_answer": 0})
+
+    def test_every_shelf_the_product_writes_has_a_class_and_only_an_unknown_one_is_other(self) -> None:
+        # The tool-failure fire sends a keys leg and a local leg; the prompt
+        # fire sends a team leg and, on a team miss, a public leg. The keys
+        # leg is served by the public marketplace, so it is a public request;
+        # the local leg never leaves the process, so it is not a request at
+        # all; a shelf value outside the product's union is an unknown origin.
+        legs = [
+            {"shelf": "team", "status": "ok", "outcome": "miss"},
+            {"shelf": "public", "status": "timeout", "outcome": "no-answer"},
+            {"shelf": "keys", "status": "ok", "outcome": "miss"},
+            {"shelf": "local", "status": "ok", "outcome": "miss"},
+            {"shelf": "keys", "status": "ok", "outcome": "hit"},
+            {"shelf": "mirror", "status": "ok", "outcome": "hit"},
+            {"shelf": "public", "status": "skipped", "outcome": None},
+        ]
+        self.assertEqual(loop_join.count_shelves(legs), {"team": 1, "public": 1, "keys": 2, "local": 1, "other": 1})
+        self.assertEqual(loop_join.classify(legs), {"team": 1, "public": 3, "local": 1, "other": 1})
+        self.assertEqual(loop_join.public_summary(legs), {"legs": 3, "hits": 1, "timeouts": 1, "no_answer": 1})
+        for shelf in loop_join.SHELVES:
+            self.assertIn(loop_join.class_of({"shelf": shelf}), loop_join.CLASSES)
+            self.assertNotEqual(loop_join.class_of({"shelf": shelf}), "other")
+        self.assertEqual(loop_join.class_of({"shelf": None}), "other")
 
     def test_exact_actor_join_with_legs(self) -> None:
         projection = loop_join.project(self.db, [ROOT, CHILD])

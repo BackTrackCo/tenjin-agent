@@ -199,7 +199,10 @@ class ProjectionTest(unittest.TestCase):
                 "arm_id",
                 "auxiliary_receipts",
                 "invalid_reason",
+                "other_requests",
                 "outcome",
+                "public_hits",
+                "public_legs",
                 "requests",
                 "sentinel_hits",
                 "stop_reason",
@@ -208,12 +211,29 @@ class ProjectionTest(unittest.TestCase):
                 "trial_id",
             ]
         ))
+        # The corpus predates leg classes, so every origin count reads as zero
+        # rather than as a missing field.
+        self.assertEqual(published["origins"], {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "other_requests": 0})
         # The private record has fields the projection deliberately drops.
         private = self.accepted[trial["trial_id"]]
         self.assertIn("private_hashes", private)
         self.assertIn("delivery", private)
         self.assertNotIn("private_hashes", trial)
         self.assertNotIn("delivery", trial)
+
+    def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(self) -> None:
+        accepted = {}
+        for trial_id, record in self.accepted.items():
+            copy = json.loads(json.dumps(record))
+            copy["delivery"]["classes"] = {"team": 1, "public": 2, "local": 1, "other": 1}
+            copy["delivery"]["public"] = {"legs": 2, "hits": 1, "timeouts": 1, "no_answer": 1}
+            accepted[trial_id] = copy
+        published = self.project(accepted=accepted)
+        count = len(accepted)
+        self.assertEqual(published["origins"], {"public_legs": 2 * count, "public_hits": count, "public_timeouts": count, "other_requests": count})
+        self.assertEqual(published["trials"][0]["public_legs"], 2)
+        self.assertEqual(published["trials"][0]["other_requests"], 1)
+        report.guard(published)
 
 
 class RecordBoundaryTest(unittest.TestCase):

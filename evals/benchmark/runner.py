@@ -338,9 +338,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         usage_reason = usage_reason or "delivery:fire_without_usage"
     # The team shelf and the public marketplace are the seeded config's two
     # named origins, listed in the allowlist a provisioned run has to state. A
-    # leg to either is the product under test; a leg to a shelf this package
-    # cannot name is a request to an unknown origin and counts as public.
-    hits += delivery["shelves"]["other"]
+    # leg to either is the product under test and is counted in the record; a
+    # local leg reaches nothing; only a leg to an origin outside that set is a
+    # public request for the sentinel.
+    hits += delivery["classes"]["other"]
     sentinel = artifact.scan_sentinels(roots, hits, canaries=canaries, exclude=(roots.data_dir / "config.json",))
 
     auxiliary: list[dict[str, Any]] = []

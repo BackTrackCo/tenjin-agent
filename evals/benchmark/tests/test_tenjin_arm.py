@@ -301,7 +301,7 @@ class RunnerTest(RunnerCase):
         isolation = record["isolation"]
         self.assertEqual((isolation["publishable"], isolation["shelf_secret_present"], isolation["shelf_origin"]), (False, True, "team-shelf.example"))
         self.assertEqual(isolation["daemon_respawned"], False)
-        self.assertEqual(record["delivery"]["shelves"], {"team": 0, "public": 0, "other": 0})
+        self.assertEqual(record["delivery"]["classes"], {"team": 0, "public": 0, "local": 0, "other": 0})
         self.assertEqual(reap.read_records(self.run_dir), [])
         self.assertNotIn(SECRET, json.dumps(record))
 
@@ -335,16 +335,19 @@ class RunnerTest(RunnerCase):
         self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "delivery:wal_live"))
         self.assertEqual(reap.read_records(self.run_dir), [])
 
-    def legs(self, *shelves: str):
+    def legs(self, *shelves: str | tuple[str, str, str]):
+        """Legs on one prompt fire: a shelf name, or (shelf, status, outcome)."""
+
         def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             db = roots.data_dir / "loop.db"
             support.write_loop_db(db, [("fire-1", launch.root_session_id, "")])
             import sqlite3
 
             connection = sqlite3.connect(db)
-            for stage, shelf in enumerate(shelves, start=1):
+            for stage, leg in enumerate(shelves, start=1):
+                shelf, status, outcome = (leg, "ok", "hit") if isinstance(leg, str) else leg
                 connection.execute(
-                    "INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('fire-1', ?, ?, 'ok', 'hit', 5)", (stage, shelf)
+                    "INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('fire-1', ?, ?, ?, ?, 5)", (stage, shelf, status, outcome)
                 )
             connection.commit()
             connection.close()
@@ -358,16 +361,44 @@ class RunnerTest(RunnerCase):
         record = runner.run_trial(
             manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=self.legs("team", "public")), source=public)
         )
-        self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 1, "other": 0})
+        self.assertEqual(record["delivery"]["classes"], {"team": 1, "public": 1, "local": 0, "other": 0})
         self.assertEqual(record["sentinel"]["public_requests"], 0)
         self.assertEqual(record["outcome"], "pass")
         # A leg to a shelf this package cannot name is a request to an unknown origin.
         record = runner.run_trial(
             manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=self.legs("team", "mirror")), source=public)
         )
-        self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 0, "other": 1})
+        self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 0, "keys": 0, "local": 0, "other": 1})
+        self.assertEqual(record["delivery"]["classes"], {"team": 1, "public": 0, "local": 0, "other": 1})
         self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "sentinel:public_request"))
         self.assertEqual(record["sentinel"]["public_requests"], 1)
+
+    def test_keys_and_local_legs_are_classified_and_never_invalidate(self) -> None:
+        # What the second hooks smoke recorded per seeded attempt: the prompt
+        # fire's team miss and public timeout, then two tool-failure fires
+        # each sending a keys leg and a local leg. Every one of them is inside
+        # the seeded config's reachable set, so none is a public request.
+        manifest = self.manifest()
+        public = tenjin_arm.load_source(self.write_source({"baseUrl": "https://team-shelf.example", "publicShelfUrl": "https://public.example"}))
+        legs = self.legs(
+            ("team", "ok", "miss"),
+            ("public", "timeout", "no-answer"),
+            ("keys", "ok", "miss"),
+            ("local", "ok", "miss"),
+            ("keys", "ok", "hit"),
+            ("local", "ok", "miss"),
+        )
+        record = runner.run_trial(
+            manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=legs), source=public)
+        )
+        self.assertEqual(record["outcome"], "pass")
+        self.assertEqual(record["sentinel"]["public_requests"], 0)
+        self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 1, "keys": 2, "local": 2, "other": 0})
+        self.assertEqual(record["delivery"]["classes"], {"team": 1, "public": 3, "local": 2, "other": 0})
+        self.assertEqual(record["delivery"]["public"], {"legs": 3, "hits": 1, "timeouts": 1, "no_answer": 1})
+        # The leg's own status and outcome travel with it.
+        statuses = [(leg["shelf"], leg["status"], leg["outcome"]) for leg in record["delivery"]["legs"]]
+        self.assertIn(("public", "timeout", "no-answer"), statuses)
         # A publishable run has to list both named origins beside the provider.
         listed = support.ATTESTED.__class__(**{**support.ATTESTED.__dict__, "network_allowlist": ("api.provider.example", "team-shelf.example")})
         with self.assertRaises(IsolationError) as caught:

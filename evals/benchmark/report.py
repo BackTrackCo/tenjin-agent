@@ -147,6 +147,16 @@ def project(
         reason = item["reason"].split(":", 1)[0]
         excluded[reason] = excluded.get(reason, 0) + 1
     publishable, kind = stamp(accepted)
+    # The delivery legs by origin, summed over the accepted attempts, so the
+    # plan's canary gate reads as two separate counts: requests to an origin
+    # outside the known set, and legs the public marketplace answered.
+    origins = {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "other_requests": 0}
+    for record in accepted.values():
+        public = record["delivery"].get("public", {})
+        origins["public_legs"] += public.get("legs", 0)
+        origins["public_hits"] += public.get("hits", 0)
+        origins["public_timeouts"] += public.get("timeouts", 0)
+        origins["other_requests"] += record["delivery"].get("classes", {}).get("other", 0)
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
@@ -168,6 +178,7 @@ def project(
         },
         "invalid": reduction["invalid"],
         "excluded": excluded,
+        "origins": origins,
         "trials": [
             {
                 "trial_id": record["trial_id"],
@@ -181,12 +192,23 @@ def project(
                 "auxiliary_receipts": len(record["auxiliary"]),
                 "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]),
                 "sentinel_hits": sum(record["sentinel"].values()),
+                "public_legs": record["delivery"].get("public", {}).get("legs", 0),
+                "public_hits": record["delivery"].get("public", {}).get("hits", 0),
+                "other_requests": record["delivery"].get("classes", {}).get("other", 0),
             }
             for record in sorted(accepted.values(), key=lambda item: item["position"])
         ],
     }
     guard(report)
     return report
+
+
+def _number(value: float | None, spec: str) -> str:
+    """A float under its format, or `none` right-aligned to the same width."""
+    if value is None:
+        width = int(spec.split(".", 1)[0])
+        return "none".rjust(width)
+    return format(value, spec)
 
 
 def plural(count: int, noun: str) -> str:
@@ -222,12 +244,20 @@ def render(report: dict[str, Any]) -> str:
         f"{'per attempt':>12s} {'accounting':>12s}",
     ]
     for arm_id, arm in sorted(report["arms"].items()):
+        # An arm whose every attempt was invalid has no scored cell, so its
+        # rate and mean are null; the row says so instead of failing to print.
         lines.append(
             f"{labels[arm_id].ljust(width)} {arm['attempts']:8d} {arm['outcomes']['pass']:7d} "
-            f"{arm['pass_rate']:9.3f} {arm['tokens']:10d} {arm['tokens_per_attempt']:12.1f} "
+            f"{_number(arm['pass_rate'], '9.3f')} {arm['tokens']:10d} {_number(arm['tokens_per_attempt'], '12.1f')} "
             f"{arm['accounting']:>12s}"
         )
     lines.append("")
+    origins = report.get("origins")
+    if origins is not None:
+        lines.append(
+            f"public legs: {origins['public_legs']}, hits: {origins['public_hits']}, "
+            f"timeouts: {origins['public_timeouts']}; requests to an unknown origin: {origins['other_requests']}"
+        )
     if report["comparisons"]:
         lines.append(f"token ratio versus {baseline}, 1.0 means no change, lower means fewer tokens:")
         for arm_id, comparison in sorted(report["comparisons"].items()):

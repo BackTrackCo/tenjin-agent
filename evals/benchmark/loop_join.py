@@ -27,28 +27,77 @@ class LoopJoinError(RuntimeError):
     pass
 
 
-# Per-leg origin classes: the team shelf, the public marketplace, or a shelf
-# value this package does not know, which the sentinel treats as a public
-# request because no named origin covers it.
-SHELVES = ("team", "public", "other")
+# The product's own `Shelf` union (src/hooks/types.ts): the team shelf, the
+# public marketplace, the keys leg the public marketplace also serves, and the
+# local leg that never leaves the process. Anything else is `other`.
+SHELVES = ("team", "public", "keys", "local")
+# What each leg is as a request. Under a seeded config the reachable set is
+# known by construction: `team` is the seeded shelf, `public` is the public
+# marketplace host and covers the keys leg too, `local` reaches nothing, and
+# `other` is an origin outside that set, which is the only class the
+# public-request sentinel counts.
+CLASSES = ("team", "public", "local", "other")
+CLASS_OF = {"team": "team", "public": "public", "keys": "public", "local": "local"}
 # A leg the product planned but never sent: public fallback off, or a stage
 # the arm dropped. It reached no origin, so it is not a request.
 SKIPPED = "skipped"
+TIMEOUT = "timeout"
+HIT = "hit"
+NO_ANSWER = "no-answer"
 
 
 def unavailable() -> dict[str, Any]:
-    return {"status": "unavailable", "fires": [], "legs": [], "unmatched_fires": [], "shelves": count_shelves([])}
+    return {
+        "status": "unavailable",
+        "fires": [],
+        "legs": [],
+        "unmatched_fires": [],
+        "shelves": count_shelves([]),
+        "classes": classify([]),
+        "public": public_summary([]),
+    }
+
+
+def _sent(legs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [leg for leg in legs if leg.get("status") != SKIPPED]
+
+
+def class_of(leg: dict[str, Any]) -> str:
+    return CLASS_OF.get(leg.get("shelf"), "other")  # type: ignore[arg-type]
 
 
 def count_shelves(legs: list[dict[str, Any]]) -> dict[str, int]:
-    """How many legs went to each shelf. The public count is what the sentinel reads."""
-    counts = {shelf: 0 for shelf in SHELVES}
-    for leg in legs:
-        if leg.get("status") == SKIPPED:
-            continue
+    """How many legs went to each shelf value the product writes, plus `other`."""
+    counts = {shelf: 0 for shelf in (*SHELVES, "other")}
+    for leg in _sent(legs):
         shelf = leg.get("shelf")
         counts[shelf if shelf in counts else "other"] += 1
     return counts
+
+
+def classify(legs: list[dict[str, Any]]) -> dict[str, int]:
+    """How many legs fell in each request class. `other` is what the sentinel reads."""
+    counts = {name: 0 for name in CLASSES}
+    for leg in _sent(legs):
+        counts[class_of(leg)] += 1
+    return counts
+
+
+def public_summary(legs: list[dict[str, Any]]) -> dict[str, int]:
+    """The public-origin legs, counted the way the canary gate reads them.
+
+    `legs` is how many requests reached the public marketplace (public and
+    keys legs), `hits` how many came back with a piece, `timeouts` how many
+    the product gave up waiting on, and `no_answer` how many ended without
+    an answer of any kind, the outcome a timeout usually pairs with.
+    """
+    public = [leg for leg in _sent(legs) if class_of(leg) == "public"]
+    return {
+        "legs": len(public),
+        "hits": sum(1 for leg in public if leg.get("outcome") == HIT),
+        "timeouts": sum(1 for leg in public if leg.get("status") == TIMEOUT),
+        "no_answer": sum(1 for leg in public if leg.get("outcome") == NO_ANSWER),
+    }
 
 
 def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
@@ -99,4 +148,12 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
                 legs.append({**dict(leg), "actor": list(actor)})
     finally:
         connection.close()
-    return {"status": "joined", "fires": fires, "legs": legs, "unmatched_fires": unmatched, "shelves": count_shelves(legs)}
+    return {
+        "status": "joined",
+        "fires": fires,
+        "legs": legs,
+        "unmatched_fires": unmatched,
+        "shelves": count_shelves(legs),
+        "classes": classify(legs),
+        "public": public_summary(legs),
+    }

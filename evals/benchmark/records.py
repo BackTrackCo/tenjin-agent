@@ -256,9 +256,10 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
-    shelves = delivery.get("shelves", {})
-    if not isinstance(shelves, dict) or not all(_count(value) for value in shelves.values()):
-        raise RecordError("delivery.shelves must map shelves to counts")
+    for name in ("shelves", "classes", "public"):
+        counts = delivery.get(name, {})
+        if not isinstance(counts, dict) or not all(_count(value) for value in counts.values()):
+            raise RecordError(f"delivery.{name} must map names to counts")
     if record["wall_time_s"] is not None and (
         isinstance(record["wall_time_s"], bool) or not isinstance(record["wall_time_s"], (int, float)) or record["wall_time_s"] < 0
     ):

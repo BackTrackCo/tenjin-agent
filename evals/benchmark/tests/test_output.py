@@ -155,6 +155,24 @@ class ReportRenderTest(unittest.TestCase):
         base.update(overrides)
         return base
 
+    def test_an_arm_with_no_scored_attempt_prints_none_rather_than_failing(self) -> None:
+        # Four invalid attempts leave both arms without a task cell: the rate
+        # and the mean are null, and the reading has to say so. The second
+        # hooks smoke's `summary` died on exactly this row.
+        payload = self.report(comparisons={})
+        for arm in payload["arms"].values():
+            arm.update({"pass_rate": None, "tokens": 0, "tokens_per_attempt": None, "outcomes": {"pass": 0, "fail": 0, "capped": 0, "interrupted": 0, "invalid": 2}})
+        text = report_module.render(payload)
+        self.assertIn("none", text)
+        self.assertIn("no comparison", text)
+
+    def test_the_origin_line_reads_public_legs_and_unknown_requests_apart(self) -> None:
+        payload = self.report(origins={"public_legs": 3, "public_hits": 1, "public_timeouts": 1, "other_requests": 0})
+        text = report_module.render(payload)
+        self.assertIn("public legs: 3, hits: 1, timeouts: 1; requests to an unknown origin: 0", text)
+        # A report written before the origin block still renders.
+        self.assertNotIn("public legs", report_module.render(self.report()))
+
     def test_the_reading_prints_every_arm_not_only_the_winner(self) -> None:
         text = report_module.render(self.report())
         self.assertIn("off (baseline)", text)
