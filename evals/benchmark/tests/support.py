@@ -456,54 +456,69 @@ BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
 
 
-def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.Vendor) -> None:
+def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.Vendor, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
     """A live task fixture is a real, frozen Vitest project whose only green path is the lesson.
 
     Its `node_modules` is derived: the committed tree holds the shim alone, and
     the pinned vitest is the one inside the vendored archive the task names.
+    `trap` is the Bench-0 family's barrier (the wrapper script, the pnpm guard,
+    the failing shards); a Bench-2 family carries its own real failure instead
+    and no barrier. `package_dir` is the workspace package the tests live in.
     """
-    package = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
-    pinned = package["devDependencies"]["vitest"]
+    root = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
+    pinned = root["devDependencies"]["vitest"]
     case.assertRegex(pinned, EXACT_VERSION)
     installed = json.loads(vendor.read_member(vendored, "vitest/package.json").decode("utf-8"))
     case.assertEqual((installed["version"], vendored.record["vitest"]), (pinned, pinned))
     case.assertTrue((fixture / "pnpm-lock.yaml").is_file())
     case.assertEqual(vendored.record["lock_sha256"], "sha256:" + sha256_file(fixture / "pnpm-lock.yaml"))
     case.assertEqual([path.relative_to(fixture).as_posix() for path in (fixture / "node_modules").rglob("*") if path.is_file()], ["node_modules/.bin/vitest"])
-    # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
-    case.assertEqual(package["scripts"]["test"], "node scripts/all-tests.mjs")
-    case.assertNotIn("argv", (fixture / "scripts" / "all-tests.mjs").read_text(encoding="utf-8"))
-    config = (fixture / "vitest.config.mjs").read_text(encoding="utf-8")
-    case.assertIn("'unrelated/**/*.test.mjs'", config)
+    project = fixture / package_dir if package_dir else fixture
+    package = json.loads((project / "package.json").read_text(encoding="utf-8"))
+    config = (project / "vitest.config.mjs").read_text(encoding="utf-8")
     case.assertIn(f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]", config)
-    case.assertIn(PNPM_GUARD, config)
-    case.assertIn(PNPM_GUARD_MESSAGE, config)
     case.assertNotIn("pnpm exec", config)
+    if trap:
+        # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
+        case.assertEqual(package["scripts"]["test"], "node scripts/all-tests.mjs")
+        case.assertNotIn("argv", (project / "scripts" / "all-tests.mjs").read_text(encoding="utf-8"))
+        case.assertIn("'unrelated/**/*.test.mjs'", config)
+        case.assertIn(PNPM_GUARD, config)
+        case.assertIn(PNPM_GUARD_MESSAGE, config)
+        case.assertTrue(list((project / "unrelated").glob("*.test.mjs")))
+    else:
+        case.assertNotIn(PNPM_GUARD, config)
+        case.assertFalse((project / "unrelated").exists())
+        case.assertFalse((project / "scripts" / "all-tests.mjs").exists())
     # pnpm 11 reads its settings from pnpm-workspace.yaml and, without this,
     # runs an install before the first `pnpm exec` or `pnpm run` in a fresh
     # tree: a registry download the trial must never make.
     workspace = (fixture / "pnpm-workspace.yaml").read_text(encoding="utf-8")
     case.assertIn("verifyDepsBeforeRun: false", workspace)
     case.assertIn("nodeLinker: hoisted", workspace)
-    case.assertTrue(list((fixture / "unrelated").glob("*.test.mjs")))
     # The named test is a vitest test, so plain `node` cannot run it, and its cases come from the
     # runner's setup file: nothing in the tree holds them, decodable or not.
-    test = (fixture / "tests" / f"{task}.test.mjs").read_text(encoding="utf-8")
+    test = (project / "tests" / f"{task}.test.{test_ext}").read_text(encoding="utf-8")
     case.assertIn("from 'vitest'", test)
     case.assertIn("globalThis.__bench1Cases", test)
     case.assertIn("setupFiles: ['./.bench1/cases.setup.mjs']", config)
-    case.assertFalse((fixture / "tests" / "support").exists())
+    case.assertFalse((project / "tests" / "support").exists())
     hidden = REPO_ROOT / "evals" / "benchmark" / "hidden" / task / "cases.json"
     case.assertTrue(hidden.is_file(), f"hidden/{task}/cases.json holds the expected values")
-    expected = {str(entry["expected"]) for entry in json.loads(hidden.read_text(encoding="utf-8"))}
+    # Values of three characters or more, so a bare digit is not "revealed" by a version string;
+    # the source under test is skipped, since the fix's own tokens (an enum member, a unit) live there.
+    expected = {str(entry["expected"]) for entry in json.loads(hidden.read_text(encoding="utf-8")) if len(str(entry["expected"])) >= 3}
     for path in fixture.rglob("*"):
         if path.is_file() and "node_modules" not in path.parts:
             text = path.read_text(encoding="utf-8", errors="replace")
             # The lockfile's integrity hashes are base64 by design and name no expected value.
             if path.name != "pnpm-lock.yaml":
                 case.assertIsNone(BLOB.search(text), f"{path.relative_to(fixture)} holds a decodable blob")
+            if "src" in path.relative_to(fixture).parts:
+                continue
             for value in expected:
                 case.assertNotIn(value, text, f"{path.relative_to(fixture)} reveals an expected value")
     for artefact in RUN_ARTEFACTS:
         case.assertFalse((fixture / artefact).exists(), artefact)
+        case.assertFalse((project / artefact).exists(), artefact)
     case.assertEqual([path for path in fixture.rglob("*") if path.is_symlink()], [])

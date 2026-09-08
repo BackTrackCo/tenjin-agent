@@ -154,6 +154,16 @@ class VerifierRegistryTest(unittest.TestCase):
         self.assertIn("not readable JSON", verifier.check_marker(self.repo, "actor") or "")
         _write_marker(self.repo, "actor")
         self.assertIsNone(verifier.check_marker(self.repo, "actor"))
+        # A TypeScript test file is the same one file; a workspace package's marker lives under the package.
+        _write_marker(self.repo, "alias", files=["tests/alias.test.ts"])
+        self.assertIsNone(verifier.check_marker(self.repo, "alias"))
+        self.assertIn("packages/core/.bench1", verifier.check_marker(self.repo, "core", "packages/core") or "")
+        package = self.repo / "packages" / "core"
+        package.mkdir(parents=True)
+        _write_marker(package, "core")
+        self.assertIsNone(verifier.check_marker(self.repo, "core", "packages/core"))
+        self.assertIsNotNone(verifier.check_marker(self.repo, "core"))
+        self.assertIn("--package", verifier.lookup("node_test_core").argv(self.repo))
 
     def test_the_package_test_script_never_forwards_the_file_argument(self) -> None:
         # The trap, on a fake vitest that records its argv: `pnpm test -- <file>`
@@ -214,12 +224,13 @@ class VerifierRegistryTest(unittest.TestCase):
 
     def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer(self) -> None:
         live = verifier.HIDDEN.parent / "fixtures" / "live"
-        for task in ("actor", "budget", "candidate", "slug"):
+        for task, package in verifier.TASK_PACKAGES.items():
             with self.subTest(task=task):
                 spec = verifier.lookup(f"node_test_{task}")
-                # Only the unfixed source matters here; the 24 MB vitest tree is not copied four times.
+                # Only the unfixed source matters here; the 24 MB vitest tree is not copied eight times.
                 source_only = self.dir / f"source-{task}"
-                shutil.copytree(live / task / "src", source_only / "src")
+                source = (live / task / package if package else live / task) / "src"
+                shutil.copytree(source, (source_only / package if package else source_only) / "src")
                 roots = artifact.create(self.run_dir, f"trial-{task}", source_only)
                 roots.mark_stopped()
                 verdict = verifier.run(spec, roots.hidden_copy(spec.hidden_layer), self.run_dir)

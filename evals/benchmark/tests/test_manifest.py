@@ -63,10 +63,32 @@ class ManifestTest(unittest.TestCase):
             },
             "phase keys": {**base, "phases": {"producer": "x"}},
             "empty phase": {**base, "phases": {**base["phases"], "capture": ""}},
+            "seed without provision": {**base, "arms": [{**arm, "seed": "local"}, base["arms"][1]]},
+            "unknown seed path": {**base, "arms": [{**arm, "provision": "tenjin", "seed": "hand"}, base["arms"][1]]},
+            "producer without provision": {**base, "arms": [{**arm, "producer": True}, base["arms"][1]]},
+            "producer not a boolean": {**base, "arms": [{**arm, "provision": "tenjin", "producer": "yes"}, base["arms"][1]]},
+            "slice kind": {**base, "slice": {"kind": "fast"}},
+            "stale slice without age": {**base, "slice": {"kind": "stale"}},
+            "scale slice with a negative count": {**base, "slice": {"kind": "scale", "distractors": -1}},
+            "recursive slice without a subagent task": {**base, "slice": {"kind": "recursive"}},
+            "subagent tool outside a recursive slice": {**base, "tasks": [{**task, "tools": ["Agent"]}]},
+            "task tools not strings": {**base, "tasks": [{**task, "tools": [1]}]},
         }
         for name, data in cases.items():
             with self.subTest(name), self.assertRaises(ManifestError):
                 self.check(data)
+
+    def test_a_slice_and_a_seeded_producer_arm_validate(self) -> None:
+        data = json.loads(json.dumps(self.base))
+        data["arms"][1].update({"provision": "tenjin", "seed": "local", "producer": True})
+        for item in ({"kind": "stale", "age_days": 400}, {"kind": "scale", "distractors": 50}):
+            with self.subTest(item["kind"]):
+                self.check({**data, "slice": item})
+        recursive = {**data, "slice": {"kind": "recursive"}, "tasks": [{**data["tasks"][0], "tools": ["Bash", "Agent"], "allowed_tools": ["Bash(pnpm:*)"]}]}
+        self.check(recursive)
+        loaded = manifest.Manifest(data=recursive, path=self.dir / "manifest.json", hash="sha256:x")
+        self.assertEqual(loaded.slice, {"kind": "recursive"})
+        self.assertIsNone(manifest.Manifest(data=data, path=self.dir / "manifest.json", hash="sha256:x").slice)
 
     def test_fixture_hash_tracks_fixture_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

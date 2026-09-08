@@ -78,6 +78,9 @@ class ProvisionRequest:
     # Minted once per `live-run` invocation and reused on resume, so what a
     # provisioner writes to a shelf differs between runs of the same schedule.
     nonce: str | None = None
+    # The manifest's slice, when it names one: a provisioner that seeds locally
+    # reads the distractor count and the stale age from it.
+    slice: dict[str, Any] | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped
@@ -101,6 +104,9 @@ class LaunchRequest:
     # A dry run builds the launch and starts nothing, so a spec that seeds or
     # probes the host toolchain reports what it would do instead of doing it.
     dry_run: bool = False
+    # The consumer by default; the natural arm's producer runs first under the
+    # same trial with its own session, so the phase is part of the session id.
+    phase: str | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +154,9 @@ class ExecutorSpec:
     credential_seam: CredentialSeam | None = None
     prepare: Prepare | None = None
     stop: Stop | None = None
+    # The root session id a phase of a trial runs under (the local seed replay
+    # is one), so the delivery join can tell that phase's fires from a stray.
+    session_of: Callable[[str, str], str] | None = None
 
 
 class ExecutorError(ValueError):
@@ -156,7 +165,7 @@ class ExecutorError(ValueError):
 
 def _fake_launch(behavior: str) -> Callable[[LaunchRequest], Launch]:
     def launch(request: LaunchRequest) -> Launch:
-        session = f"fake-{request.trial_id}"
+        session = f"fake-{request.trial_id}" if request.phase is None else f"fake-{request.trial_id}-{request.phase}"
         argv = [
             sys.executable,
             "-m",

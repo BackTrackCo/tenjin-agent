@@ -1,0 +1,20 @@
+{
+  "id": "pnpm-workspace",
+  "title": "In this pnpm workspace, run a package's tests from the package: `pnpm --filter <name> exec vitest run <file>`",
+  "commands": [
+    {
+      "command": "pnpm test",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "pnpm's missing-script refusal prints no error-shaped line the formula keeps"
+    },
+    {
+      "command": "pnpm exec vitest run packages/core/tests/core.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "6652999d3bca393f",
+      "check": true,
+      "reason": "a root-scoped run reaches the assertion under the root-relative file path, which the test-identity lane keys apart from the package-scoped run"
+    }
+  ]
+}

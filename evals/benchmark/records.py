@@ -278,6 +278,13 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("isolation.seed.deleted must be null or a boolean")
         if seed["published"] and (seed["piece_id"] is None or seed["nonce"] is None):
             raise RecordError("a seed that published names its piece and its run nonce")
+    for name in ("producer", "local_seed"):
+        if name in isolation and not isinstance(isolation[name], dict):
+            raise RecordError(f"isolation.{name} must be an object")
+    if "producer" in isolation and isolation["producer"].get("outcome") not in OUTCOMES:
+        raise RecordError("isolation.producer must carry an outcome")
+    if "slice" in isolation and (not isinstance(isolation["slice"], dict) or not isinstance(isolation["slice"].get("kind"), str)):
+        raise RecordError("isolation.slice must name a kind")
     manager = isolation.get("package_manager")
     if manager is not None:
         if not isinstance(manager, dict) or set(manager) != {"kind", "version"} or manager["kind"] not in PACKAGE_MANAGER_KINDS:
@@ -298,6 +305,9 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("delivery.failure_key must name a lane and say whether the keys leg hit")
         if key.get("report_file_present") is not None and not isinstance(key["report_file_present"], bool):
             raise RecordError("delivery.failure_key.report_file_present must be null or a boolean")
+    phase_fires = delivery.get("phase_fires")
+    if phase_fires is not None and (not isinstance(phase_fires, dict) or not all(_count(value) for value in phase_fires.values())):
+        raise RecordError("delivery.phase_fires must map sessions to counts")
     searches = delivery.get("cli_searches")
     if searches is not None:
         if not isinstance(searches, dict) or not _count(searches.get("count")) or not isinstance(searches.get("decisions"), dict):

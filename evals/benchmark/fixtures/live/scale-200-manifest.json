@@ -1,0 +1,301 @@
+{
+  "benchmark_version": "bench2-scale-200-0",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260908,
+  "repeats": 3,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 600,
+    "turn_budget": 40,
+    "max_budget_usd": 0.75,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ]
+  },
+  "price_sheet_version": "real-2026-09",
+  "phases": {
+    "producer": "seeded",
+    "capture": "local-store",
+    "consumer": "local"
+  },
+  "slice": {
+    "kind": "scale",
+    "distractors": 200
+  },
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:ce92d076c680388ae6566d8a9c932ffc8554d471cc3c13369c8004fd1db04a88",
+      "verifier": "node_test_actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "budget",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "budget",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:33e3fc95065c051b7a8158df520a3f8b4d0f6da368ff5acad526c25d4d530f88",
+      "verifier": "node_test_budget",
+      "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "candidate",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "candidate",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:6cf5115ead17c1a84b38110a7e16ed7d6ce7c5580f9dab815b407d26e24b1a5d",
+      "verifier": "node_test_candidate",
+      "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "slug",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "slug",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:215daff0e5ccde272a119d7d724d76a4ecf8bc674171d69308dae5d2e94426f6",
+      "verifier": "node_test_slug",
+      "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "alias",
+      "family": "vitest-path-alias",
+      "transfer_distance": "same_task",
+      "fixture": "alias",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:af7a7973a161cc8fea0c472f385acf2f1453a8ba843464ed7a1d1598861e0923",
+      "verifier": "node_test_alias",
+      "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "level",
+      "family": "node-type-stripping",
+      "transfer_distance": "same_task",
+      "fixture": "level",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:3402809d1d5fd0baf91ac6e192f1b2d8d0d158b3dc2af387c4ee89b535cf2e8c",
+      "verifier": "node_test_level",
+      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "money",
+      "family": "esm-cjs-interop",
+      "transfer_distance": "same_task",
+      "fixture": "money",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:dc68188bffb0516eecbab4a0ed1c0464b66404467048cd784a7ba23837026ef7",
+      "verifier": "node_test_money",
+      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "core",
+      "family": "pnpm-workspace",
+      "transfer_distance": "same_task",
+      "fixture": "core",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:8f6c7e2e6d49d4b1a6c68c8904fac106bc7ba79d7eaff7ce82c6ef6ef961a4de",
+      "verifier": "node_test_core",
+      "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_seeded",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings": {
+        "permissions": {
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
+        },
+        "hooks": {
+          "SessionStart": [
+            {
+              "matcher": "startup|clear|compact",
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "UserPromptSubmit": [
+            {
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PreToolUse": [
+            {
+              "matcher": "WebSearch|WebFetch",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Agent|Task",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Edit|Write|MultiEdit|Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUse": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Read",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUseFailure": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStart": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "Stop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "seed": "local"
+    }
+  ]
+}

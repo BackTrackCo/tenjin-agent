@@ -35,6 +35,21 @@ class TrialRootsTest(unittest.TestCase):
         self.assertTrue((first.repo / "TASK.md").is_file())
         self.assertNotEqual(first.canary_token, second.canary_token)
 
+    def test_a_phase_gets_its_own_roots_and_shares_the_consumer_data_dir_and_repo_path(self) -> None:
+        roots = artifact.create(self.run_dir, "trial-x", self.fixture)
+        self.assertEqual((roots.trial_id, roots.run_dir, roots.phase), ("trial-x", self.run_dir, None))
+        producer = artifact.create(self.run_dir, "trial-x", self.fixture, phase="producer", data_dir=roots.data_dir)
+        self.assertEqual(producer.data_dir, roots.data_dir)
+        self.assertEqual(producer.repo, roots.repo)
+        self.assertEqual(producer.base, roots.base / "producer")
+        self.assertNotEqual(producer.home, roots.home)
+        self.assertNotEqual(producer.canary_token, roots.canary_token)
+        self.assertEqual((producer.trial_id, producer.run_dir, producer.phase), ("trial-x", self.run_dir, "producer"))
+        (producer.repo / "edited.txt").write_text("x\n", encoding="utf-8")
+        artifact.refresh_repo(roots, self.fixture, None)
+        self.assertFalse((roots.repo / "edited.txt").exists())
+        self.assertTrue((roots.repo / "TASK.md").is_file())
+
     def test_a_reused_trial_root_is_rebuilt_from_the_fixture(self) -> None:
         first = self.create("trial-a")
         (first.repo / "scratch.txt").write_text("left over\n", encoding="utf-8")

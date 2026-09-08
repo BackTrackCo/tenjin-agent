@@ -32,7 +32,7 @@ TOP_KEYS = frozenset(
         "arms",
     }
 )
-OPTIONAL_TOP_KEYS = frozenset({"phases"})
+OPTIONAL_TOP_KEYS = frozenset({"phases", "slice"})
 PIN_KEYS = frozenset(
     {
         "model",
@@ -51,9 +51,19 @@ ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "mem
 # checked here so a bad manifest costs nothing; the executor that turns these
 # into argv owns the flag and value allowlists (`claude_live.py`).
 OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env"})
-OPTIONAL_TASK_KEYS = frozenset({"prompt", "vendor"})
-OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons"})
+OPTIONAL_TASK_KEYS = frozenset({"prompt", "vendor", "tools", "allowed_tools"})
+# `lessons` names exactly which lessons a provisioned arm seeds (the default is
+# the task's family lesson and its own fix). `seed` says how they reach the
+# product (`shelf`: published to the team shelf through the CLI; `local`:
+# replayed into the trial's own store through the daemon), and `producer` runs
+# a producer phase in the same data dir before the consumer. An arm's static
+# files are `settings.overlay`, validated by the live executor.
+OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "seed", "producer"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
+SEED_PATHS = frozenset({"shelf", "local"})
+SLICE_KINDS = frozenset({"stale", "scale", "recursive"})
+SLICE_KEYS = {"stale": frozenset({"kind", "age_days"}), "scale": frozenset({"kind", "distractors"}), "recursive": frozenset({"kind"})}
+SUBAGENT_TOOL = "Agent"
 TRANSFER_DISTANCES = frozenset({"none", "same_task", "same_family", "cross_family"})
 # What an arm's memory product can prove about its own model spend. `none` is a
 # claim that it spends no model tokens outside the harness session; `exposed`
@@ -102,6 +112,10 @@ class Manifest:
         if "vendor" not in task:
             return None
         return vendor_module.resolve(self.path.parent, task["vendor"])
+
+    @property
+    def slice(self) -> dict[str, Any] | None:
+        return None if "slice" not in self.data else dict(self.data["slice"])
 
 
 def fixture_hash(fixture: Path, vendor: vendor_module.Vendor | None = None) -> str:
@@ -159,9 +173,32 @@ def _require_optional_shapes(name: str, item: dict[str, Any]) -> None:
             raise ManifestError(f"{name}.lessons must be a non-empty list of lesson ids")
         for lesson in item["lessons"]:
             _require_id(f"{name} lesson", lesson)
+    if "seed" in item and item["seed"] not in SEED_PATHS:
+        raise ManifestError(f"{name}.seed must be one of {', '.join(sorted(SEED_PATHS))}")
+    if "producer" in item and not isinstance(item["producer"], bool):
+        raise ManifestError(f"{name}.producer must be true or false")
+    for key in ("seed", "producer"):
+        if key in item and not item.get("provision"):
+            raise ManifestError(f"{name}.{key} needs a provisioned arm")
     budget = item.get("max_budget_usd")
     if "max_budget_usd" in item and (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0):
         raise ManifestError(f"{name}.max_budget_usd must be a positive number")
+
+
+def _validate_slice(data: dict[str, Any]) -> None:
+    """A slice is one named variation of a local run, with exactly the fields its kind needs."""
+    item = data["slice"]
+    if not isinstance(item, dict) or item.get("kind") not in SLICE_KINDS:
+        raise ManifestError(f"slice.kind must be one of {', '.join(sorted(SLICE_KINDS))}")
+    kind = item["kind"]
+    if set(item) != SLICE_KEYS[kind]:
+        raise ManifestError(f"slice {kind!r} carries exactly {', '.join(sorted(SLICE_KEYS[kind]))}")
+    if kind == "stale":
+        _require_count("slice.age_days", item["age_days"], 1)
+    if kind == "scale":
+        _require_count("slice.distractors", item["distractors"])
+    if kind == "recursive" and not any(SUBAGENT_TOOL in task.get("tools", []) for task in data["tasks"]):
+        raise ManifestError(f"a recursive slice needs a task whose tools include {SUBAGENT_TOOL}")
 
 
 def validate(data: dict[str, Any], base: Path) -> None:
@@ -240,6 +277,10 @@ def validate(data: dict[str, Any], base: Path) -> None:
     # token totals would not be comparable under one manifest.
     if len(executors) != 1:
         raise ManifestError("arms are unbalanced: every arm must share one executor")
+    if "slice" in data:
+        _validate_slice(data)
+    if data.get("slice", {}).get("kind") != "recursive" and any(SUBAGENT_TOOL in task.get("tools", []) for task in data["tasks"]):
+        raise ManifestError(f"only a recursive slice may give a task the {SUBAGENT_TOOL} tool")
 
 
 def load(path: Path) -> Manifest:

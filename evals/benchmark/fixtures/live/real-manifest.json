@@ -1,9 +1,9 @@
 {
-  "benchmark_version": "bench1-real-6",
+  "benchmark_version": "bench2-local-pilot-0",
   "schema_version": 1,
   "harness": "claude",
-  "seed": 20260907,
-  "repeats": 2,
+  "seed": 20260908,
+  "repeats": 3,
   "pins": {
     "model": "claude-opus-5",
     "harness_version": "2.1.263",
@@ -31,8 +31,8 @@
   },
   "price_sheet_version": "real-2026-09",
   "phases": {
-    "producer": "seeded",
-    "capture": "none",
+    "producer": "natural",
+    "capture": "local-store",
     "consumer": "local"
   },
   "tasks": [
@@ -75,6 +75,46 @@
       "fixture_hash": "sha256:215daff0e5ccde272a119d7d724d76a4ecf8bc674171d69308dae5d2e94426f6",
       "verifier": "node_test_slug",
       "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "alias",
+      "family": "vitest-path-alias",
+      "transfer_distance": "same_task",
+      "fixture": "alias",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:af7a7973a161cc8fea0c472f385acf2f1453a8ba843464ed7a1d1598861e0923",
+      "verifier": "node_test_alias",
+      "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "level",
+      "family": "node-type-stripping",
+      "transfer_distance": "same_task",
+      "fixture": "level",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:3402809d1d5fd0baf91ac6e192f1b2d8d0d158b3dc2af387c4ee89b535cf2e8c",
+      "verifier": "node_test_level",
+      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "money",
+      "family": "esm-cjs-interop",
+      "transfer_distance": "same_task",
+      "fixture": "money",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:dc68188bffb0516eecbab4a0ed1c0464b66404467048cd784a7ba23837026ef7",
+      "verifier": "node_test_money",
+      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "core",
+      "family": "pnpm-workspace",
+      "transfer_distance": "same_task",
+      "fixture": "core",
+      "vendor": "vitest-3.2.4-node24-darwin-arm64",
+      "fixture_hash": "sha256:8f6c7e2e6d49d4b1a6c68c8904fac106bc7ba79d7eaff7ce82c6ef6ef961a4de",
+      "verifier": "node_test_core",
+      "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }
   ],
   "arms": [
@@ -88,7 +128,6 @@
       "auxiliary_usage": "none"
     },
     {
-      "id": "tenjin_seeded",
       "executor": "claude_live",
       "product_version": "operator-installed",
       "provision": "tenjin",
@@ -250,7 +289,9 @@
       },
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
-      "auxiliary_usage": "none"
+      "auxiliary_usage": "exposed",
+      "id": "tenjin_natural",
+      "producer": true
     }
   ]
 }

@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -40,6 +41,10 @@ HIDDEN = PACKAGE_ROOT / "hidden"
 HIDDEN_TESTS = "hidden-tests"
 # Where the fixture's `scripts/ran-marker.mjs` reporter records a green run.
 MARKER_DIR = ".bench1"
+
+
+def TEST_FILE(task: str) -> "re.Pattern[str]":  # noqa: N802
+    return re.compile(rf"^tests/{re.escape(task)}\.test\.(?:mjs|ts)\Z")
 NODE = "node"
 # What a `python3 -m` child needs to run at all. Everything else the operator
 # happens to have exported stays out of the verifier process.
@@ -80,23 +85,29 @@ def _fake_crash(repo: Path) -> list[str]:
     return [sys.executable, "-m", "evals.benchmark.verifier", "fake-crash", "--repo", str(repo)]
 
 
-def _node_test(task: str) -> Callable[[Path], list[str]]:
+def _node_test(task: str, package: str) -> Callable[[Path], list[str]]:
     """A Node test from the task's hidden layer, run inside the verifier's copy."""
 
     def argv(repo: Path) -> list[str]:
-        return [sys.executable, "-m", "evals.benchmark.verifier", "node-test", "--repo", str(repo), "--test", f"{HIDDEN_TESTS}/{task}.test.mjs", "--task", task]
+        base = [sys.executable, "-m", "evals.benchmark.verifier", "node-test", "--repo", str(repo), "--test", f"{HIDDEN_TESTS}/{task}.test.mjs", "--task", task]
+        return base + (["--package", package] if package else [])
 
     return argv
 
 
-def node_test_spec(task: str) -> VerifierSpec:
-    return VerifierSpec(name=f"node_test_{task}", argv=_node_test(task), timeout_s=60, hidden_layer=HIDDEN / task)
+def node_test_spec(task: str, package: str = "") -> VerifierSpec:
+    """`package` is the workspace package the task's tests live in (`packages/core`), where the run marker is written; empty for a single-package fixture."""
+    return VerifierSpec(name=f"node_test_{task}", argv=_node_test(task, package), timeout_s=60, hidden_layer=HIDDEN / task)
 
+
+# The Bench-0 family, one project each, and the Bench-2 families: `core` is a
+# pnpm workspace whose tests and marker live in `packages/core`.
+TASK_PACKAGES = {"actor": "", "budget": "", "candidate": "", "slug": "", "alias": "", "level": "", "money": "", "core": "packages/core"}
 
 REGISTRY: dict[str, VerifierSpec] = {
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),
     "fake_crash": VerifierSpec(name="fake_crash", argv=_fake_crash, timeout_s=30),
-    **{f"node_test_{task}": node_test_spec(task) for task in ("actor", "budget", "candidate", "slug")},
+    **{f"node_test_{task}": node_test_spec(task, package) for task, package in TASK_PACKAGES.items()},
 }
 
 
@@ -149,16 +160,21 @@ def fake_answer_file(repo: Path) -> int:
     return 0
 
 
-def marker_path(repo: Path, task: str) -> Path:
-    return repo / MARKER_DIR / f"ran-{task}.json"
+def marker_path(repo: Path, task: str, package: str = "") -> Path:
+    return (repo / package if package else repo) / MARKER_DIR / f"ran-{task}.json"
 
 
-def check_marker(repo: Path, task: str) -> str | None:
-    """Why the run marker does not show `tests/<task>.test.mjs` ran green alone, or None."""
-    expected = f"tests/{task}.test.mjs"
-    path = marker_path(repo, task)
+def check_marker(repo: Path, task: str, package: str = "") -> str | None:
+    """Why the run marker does not show the task's one test file ran green alone, or None.
+
+    The marker names files relative to the vitest root, which is the package
+    the test lives in, so `tests/<task>.test.<ext>` is the expected entry
+    whether the fixture is one project or a workspace package.
+    """
+    path = marker_path(repo, task, package)
+    where = f"{package}/{MARKER_DIR}" if package else MARKER_DIR
     if not path.is_file():
-        return f"no run marker at {MARKER_DIR}/ran-{task}.json: {expected} never ran green inside the trial"
+        return f"no run marker at {where}/ran-{task}.json: tests/{task}.test.* never ran green inside the trial"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -166,15 +182,15 @@ def check_marker(repo: Path, task: str) -> str | None:
     if not isinstance(data, dict) or data.get("task") != task:
         return f"run marker does not name task {task!r}"
     files = data.get("files")
-    if files != [expected]:
-        return f"run marker names {files!r} rather than exactly [{expected!r}]"
+    if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], str) or not TEST_FILE(task).match(files[0]):
+        return f"run marker names {files!r} rather than exactly the one tests/{task}.test.* file"
     passed = data.get("passed")
     if not isinstance(passed, int) or isinstance(passed, bool) or passed < 1 or data.get("failed") != 0:
         return "run marker does not record a green run"
     return None
 
 
-def node_test(repo: Path, test: str, task: str) -> int:
+def node_test(repo: Path, test: str, task: str, package: str = "") -> int:
     """Run one hidden Node test in the copy, then require the run marker. 0 and 1 are the verdict; anything else is ours."""
     target = repo / test
     if not target.is_file():
@@ -189,7 +205,7 @@ def node_test(repo: Path, test: str, task: str) -> int:
     sys.stderr.write(completed.stderr[-OUTPUT_LIMIT:])
     if completed.returncode != 0:
         return 1 if completed.returncode == 1 else 3
-    reason = check_marker(repo, task)
+    reason = check_marker(repo, task, package)
     if reason is not None:
         print(reason)
         return 1
@@ -205,13 +221,14 @@ def main(argv: list[str] | None = None) -> int:
     node.add_argument("--repo", required=True)
     node.add_argument("--test", required=True)
     node.add_argument("--task", required=True)
+    node.add_argument("--package", default="")
     args = parser.parse_args(argv)
     if args.command == "fake-crash":
         # A verifier that cannot decide. The attempt is invalid, not failed.
         print("fake verifier crashed")
         return 3
     if args.command == "node-test":
-        return node_test(Path(args.repo), args.test, args.task)
+        return node_test(Path(args.repo), args.test, args.task, args.package)
     return fake_answer_file(Path(args.repo))
 
 

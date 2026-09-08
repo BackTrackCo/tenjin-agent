@@ -1,0 +1,9 @@
+{
+  "name": "bench2-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.11.0",
+  "devDependencies": {
+    "vitest": "3.2.4"
+  }
+}

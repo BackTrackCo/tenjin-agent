@@ -108,12 +108,21 @@ class SourceTest(SourceCase):
         source = tenjin_arm.load_source(self.write_source())
         seeded = tenjin_arm.seeded_config(source, 4321)
         self.assertEqual(seeded["publish"], {"mode": "review"})
-        self.assertEqual(seeded["hooks"], {"capture": "off"})
+        # The seven product arms, all on: the product as shipped, and no key the product does not read.
+        self.assertEqual(seeded["hooks"], {arm: True for arm in ("prompt", "web-search", "web-fetch", "subagent", "failure", "publish", "primer")})
         self.assertEqual(seeded["team"], {"publicFallback": "on"})
         self.assertEqual(seeded["loop"], {"idle_exit_min": 2, "port": 4321})
         self.assertEqual(seeded["shelfBypassSecret"], SECRET)
         self.assertNotIn("wallet", seeded)
         self.assertNotIn("shelfBypassSecret", tenjin_arm.seeded_config(source, 1, with_secret=False))
+        # The producer's daemon tells the capture ask to publish; the seed daemon sees no team origin and carries no secret.
+        producer = tenjin_arm.seeded_config(source, 1, mode="producer")
+        self.assertEqual((producer["publish"], producer["baseUrl"]), ({"mode": "auto"}, "https://team-shelf.example"))
+        seed = tenjin_arm.seeded_config(source, 1, mode="seed")
+        self.assertEqual((seed["baseUrl"], seed["publish"]), ("https://public.example", {"mode": "review"}))
+        self.assertNotIn("shelfBypassSecret", seed)
+        with self.assertRaises(ProvisionError):
+            tenjin_arm.seeded_config(source, 1, mode="other")
 
 
 class DaemonCase(SourceCase):
@@ -518,15 +527,15 @@ class SeedCase(DaemonCase):
             encoding="utf-8",
         )
 
-    def write_fix_lesson(self) -> str:
+    def write_fix_lesson(self, fix: dict | None = None) -> str:
         """The task's own fix, keyed on the test identity vitest's FAIL header names."""
         identity = signature.TestIdentity(file="tests/probe.test.mjs", suite="probeKey", test="case 1")
         key = signature.sig_v1_test(identity)
         (self.lessons / "probe-fix.md").write_text("# The fix\n\nDefault the agent.\n", encoding="utf-8")
-        (self.lessons / "probe-fix.json").write_text(
-            json.dumps({"id": "probe-fix", "title": "The fix", "commands": [{"command": "node assertion-{task}.mjs", "kind": "sig_v1_test", "key": key, "check": True, "reason": "header"}]}),
-            encoding="utf-8",
-        )
+        record = {"id": "probe-fix", "title": "The fix", "commands": [{"command": "node assertion-{task}.mjs", "kind": "sig_v1_test", "key": key, "check": True, "reason": "header"}]}
+        if fix is not None:
+            record["fix"] = fix
+        (self.lessons / "probe-fix.json").write_text(json.dumps(record), encoding="utf-8")
         return key
 
     def seed_roots(self) -> artifact.TrialRoots:
@@ -760,6 +769,233 @@ class SeedCase(DaemonCase):
         self.assertEqual(tenjin_arm.key_hash("sig_v1:ee9fd96defcffbeb"), "ed094b3427f6e7e2")
         self.assertNotIn("s9", fix.body.read_text(encoding="utf-8"))
         self.assertEqual(tenjin_arm.lessons_for({"id": "answer-file", "family": "smoke"}, live), [])
+
+
+FIX = {"file": "src/probe.mjs", "command": "node assertion-{task}.mjs"}
+
+
+class LocalSeedTest(SeedCase):
+    """The local seed: the lesson replayed into the trial's store through the daemon, never through the CLI."""
+
+    def local_request(self, roots: artifact.TrialRoots, **overrides: object) -> ProvisionRequest:
+        request = self.request(roots, **overrides)
+        return ProvisionRequest(request.trial_id, request.roots, {"id": "tenjin_seeded", "provision": "tenjin", "seed": "local"}, request.source, dry_run=request.dry_run, task=request.task, environment=request.environment, nonce=request.nonce, slice=request.slice)
+
+    def test_prepare_replays_the_fix_lesson_and_leaves_the_consumer_daemon_on_the_consumer_config(self) -> None:
+        self.write_fix_lesson(FIX)
+        roots = self.seed_roots()
+        provision = tenjin_arm.prepare(self.local_request(roots))
+        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        seed = provision.facts["local_seed"]
+        self.assertEqual((seed["path"], seed["distractors"], seed["events"]), ("local", 0, 5))
+        self.assertEqual([lesson["lesson"] for lesson in seed["lessons"]], ["fam", "probe-fix"])
+        # The family lesson has no fix the product could hold; the task's fix is replayed and closed.
+        self.assertEqual(seed["lessons"][0]["commands"], [{"command": "node probe-probe.mjs", "kind": "sig_v1", "replayed": False, "reason": "no_fix_file"}])
+        self.assertEqual(seed["lessons"][1]["commands"], [{"command": "node assertion-probe.mjs", "kind": "sig_v1_test", "replayed": True, "reason": None}])
+        self.assertEqual(seed["pairings"], {"open": 0, "unverified": 1, "verified": 0})
+        self.assertEqual(len(seed["pairing_key_hashes"]), 1)
+        self.assertEqual((provision.facts["seed_path"], provision.facts["daemon_mode"]), ("local", "consumer"))
+        self.assertNotIn("seed", provision.facts)
+        self.assertEqual(self.calls(), [])
+        config = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual((config["baseUrl"], config["shelfBypassSecret"], config["publish"]), ("https://team-shelf.example", SECRET, {"mode": "review"}))
+        self.assertEqual(provision.values["daemon_url"], f"http://127.0.0.1:{provision.stop_state['port']}/hook/claude")
+        self.assertEqual(reap.read_records(roots.run_dir)[0].trial_id, f"{roots.trial_id}.daemon")
+        # A re-failure under the seeded key is a local hit, which is what the consumer's daemon answers.
+        from evals.benchmark import local_seed
+
+        replay = local_seed.Replay(provision.values["daemon_url"], provision.values["daemon_token"], "consumer-session", str(roots.repo.resolve()), "t", sleep=lambda _s: None)
+        replay.post({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "node assertion-probe.mjs"}, "tool_use_id": "c1", "error": (roots.repo / "assertion-probe.mjs").read_text(encoding="utf-8").replace("console.log('", "").replace("');", "")})
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual(report["wal_live"], False)
+        projection = loop_join_project(roots.data_dir / "loop.db", [("claude", "consumer-session", "")], foreign_sessions=(replay.session + "-none",))
+        self.assertEqual(projection["classes"]["local"], 1)
+        # The seed session's fires are a phase, not a stray, when the join is told about them.
+        seeded_session = __import__("evals.benchmark.claude_live", fromlist=["root_session_id"]).root_session_id(roots.trial_id, "seed")
+        scoped = loop_join_project(roots.data_dir / "loop.db", [("claude", "consumer-session", "")], foreign_sessions=(seeded_session,))
+        self.assertEqual((scoped["unmatched_fires"], scoped["phase_fires"]), ([], {seeded_session: 1}))
+
+    def test_a_scale_slice_seeds_the_distractors_beside_the_lesson(self) -> None:
+        self.write_fix_lesson(FIX)
+        corpus = self.dir / "distractors.json"
+        corpus.write_text(
+            json.dumps(
+                [
+                    {"id": f"noise-{index}", "command": f"node noise-{index}.mjs", "file": f"src/noise-{index}.mjs", "error": f" FAIL  tests/noise-{index}.test.mjs > noise > case {index}\nAssertionError: expected {index} to be 0\n"}
+                    for index in range(3)
+                ]
+            ),
+            encoding="utf-8",
+        )
+        from evals.benchmark import local_seed
+
+        with mock.patch.object(local_seed, "DISTRACTORS", corpus):
+            roots = self.seed_roots()
+            provision = tenjin_arm.prepare(self.local_request(roots, slice={"kind": "scale", "distractors": 2}))
+        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
+        seed = provision.facts["local_seed"]
+        self.assertEqual((seed["distractors"], seed["events"], seed["pairings"]["unverified"]), (2, 15, 3))
+        with mock.patch.object(local_seed, "DISTRACTORS", corpus), self.assertRaises(ProvisionError):
+            tenjin_arm.prepare(self.local_request(self.seed_roots(), slice={"kind": "scale", "distractors": 4}))
+
+    def test_the_stale_slice_is_refused_with_the_product_reason_and_stated_on_a_dry_run(self) -> None:
+        self.write_fix_lesson(FIX)
+        roots = self.seed_roots()
+        with self.assertRaises(ProvisionError) as refused:
+            tenjin_arm.prepare(self.local_request(roots, slice={"kind": "stale", "age_days": 400}))
+        self.assertIn("valid_until", str(refused.exception))
+        self.assertEqual(reap.read_records(roots.run_dir), [])
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
+            provision = tenjin_arm.prepare(self.local_request(roots, nonce=None, dry_run=True, environment=None, slice={"kind": "stale", "age_days": 400}))
+        self.assertIn("valid_until", provision.facts["stale_refusal"])
+        self.assertEqual(provision.facts["local_seed"]["lessons"][1]["commands"][0]["replayed"], True)
+
+    def test_a_dry_run_states_the_replay_and_a_cross_command_fix_is_not_seedable(self) -> None:
+        self.write_fix_lesson({"file": "src/probe.mjs", "command": "pnpm exec vitest run tests/{task}.test.mjs"})
+        roots = self.seed_roots()
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
+            provision = tenjin_arm.prepare(self.local_request(roots, nonce=None, dry_run=True, environment=None))
+        plan = provision.facts["local_seed"]
+        self.assertEqual(plan["path"], "local")
+        self.assertEqual([entry["reason"] for lesson in plan["lessons"] for entry in lesson["commands"]], ["no_fix_file", "cross_command"])
+        self.assertEqual(self.calls(), [])
+
+    def test_a_lesson_fix_block_is_checked(self) -> None:
+        self.write_fix_lesson({"file": "src/probe.mjs"})
+        with self.assertRaises(ProvisionError):
+            tenjin_arm.lesson_named("probe-fix", self.lessons)
+
+
+def loop_join_project(loop_db: Path, actors: list, foreign_sessions: tuple = ()) -> dict:
+    from evals.benchmark import loop_join
+
+    return loop_join.project(loop_db, actors, foreign_sessions)
+
+
+class ProducerTest(RunnerCase):
+    """The natural arm: a verified producer session on the same store, then the consumer on a fresh copy."""
+
+    def natural_manifest(self) -> object:
+        manifest = support.synthetic_manifest(self.dir, executor_name=LIVE, arms=("off", "tenjin_natural"))  # type: ignore[arg-type]
+        manifest.data["arms"][1].update({"provision": "tenjin", "producer": True})
+        return manifest
+
+    def producer_spawn(self, *, fix: bool = True, capture: bool = True) -> runner.Spawn:
+        from evals.benchmark import local_seed
+
+        def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            if roots.phase != "producer":
+                return
+            record = tenjin_arm.read_pid(roots.data_dir)
+            assert record is not None
+            token = (roots.data_dir / "daemon.token").read_text(encoding="utf-8")
+            replay = local_seed.Replay(f"http://127.0.0.1:{record['port']}/hook/claude", token, launch.root_session_id, str(launch.cwd), "t", sleep=lambda _s: None)
+            if capture:
+                local_seed.failure_then_fix(replay, "node assertion-x.mjs", " FAIL  tests/x.test.mjs > x > case 1\nAssertionError: expected 1 to be 2\n", f"{launch.cwd}/src/x.mjs", "1 passed", "p")
+                replay.post({"hook_event_name": "Stop", "stop_hook_active": False})
+
+        def after(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            if roots.phase != "producer":
+                return
+            if not fix:
+                (roots.repo / "answer.txt").write_text("41\n", encoding="utf-8")
+            # The fake executor reuses request ids per session; a real harness mints unique ones.
+            for path in (roots.output / "sessions").rglob("*.jsonl"):
+                path.write_text(path.read_text(encoding="utf-8").replace('"req_', '"producer_req_'), encoding="utf-8")
+
+        return support.fake_spawn(before=before, after=after)
+
+    def test_the_producer_runs_first_is_verified_and_its_capture_reaches_the_consumer(self) -> None:
+        manifest = self.natural_manifest()
+        spawns: list[str | None] = []
+        base = self.producer_spawn()
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            spawns.append(roots.phase)
+            return base(launch, roots, timeout_s)
+
+        record = runner.run_trial(manifest, self.trial(manifest, "tenjin_natural"), self.run_dir, "sha256:schedule", self.runtime(spawn=spawn))
+        records.validate(record)
+        self.assertEqual(spawns, ["producer", None])
+        self.assertEqual(record["outcome"], "pass")
+        produced = record["isolation"]["producer"]
+        self.assertEqual((produced["outcome"], produced["daemon"], produced["wal_live_between_phases"], produced["stop_reason"]), ("pass", "restarted", False, "exit"))
+        self.assertEqual(produced["verifier"], {"id": "fake_answer_file", "exit_code": 0})
+        self.assertEqual(produced["capture"]["pairings"], {"open": 0, "unverified": 1, "verified": 0})
+        self.assertEqual((produced["capture"]["turn_end_fires"], produced["capture"]["fires"]), (1, 2))
+        self.assertEqual(produced["usage_reconciliation"], {"status": "matched"})
+        self.assertGreater(produced["tokens"]["input_total"], 0)
+        self.assertEqual(produced["phase_tokens"]["capture"], 0)
+        self.assertEqual({receipt["component"] for receipt in record["auxiliary"]}, {"producer"})
+        self.assertEqual({receipt["phase"] for receipt in record["auxiliary"]}, {"producer"})
+        self.assertEqual(sum(receipt["input_total"] + receipt["output_total"] for receipt in record["auxiliary"]), produced["tokens"]["input_total"] + produced["tokens"]["output_total"])
+        self.assertEqual(record["delivery"]["phase_fires"], {produced["native_root_id"]: 2})
+        self.assertEqual(record["delivery"]["unmatched_fires"], [])
+        self.assertNotEqual(produced["native_root_id"], record["native_root_id"])
+        # Producer roots beside the consumer's, on the shared data dir; the consumer's repository was fresh.
+        trial_dir = self.run_dir / "trials" / record["trial_id"]
+        self.assertTrue((trial_dir / "producer" / "output" / "sessions").is_dir())
+        self.assertTrue((trial_dir / "producer" / "verify").is_dir())
+        self.assertEqual(reap.read_records(self.run_dir), [])
+        self.assertNotIn(SECRET, json.dumps(record))
+
+    def test_a_producer_that_does_not_fix_the_task_makes_the_attempt_invalid_and_starts_no_consumer(self) -> None:
+        manifest = self.natural_manifest()
+        spawns: list[str | None] = []
+        base = self.producer_spawn(fix=False)
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            spawns.append(roots.phase)
+            return base(launch, roots, timeout_s)
+
+        record = runner.run_trial(manifest, self.trial(manifest, "tenjin_natural"), self.run_dir, "sha256:schedule", self.runtime(spawn=spawn))
+        records.validate(record)
+        self.assertEqual(spawns, ["producer"])
+        self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "producer:failed"))
+        self.assertEqual(record["isolation"]["producer"]["outcome"], "invalid")
+        self.assertEqual(record["isolation"]["producer"]["verifier"]["exit_code"], 1)
+        self.assertEqual(reap.read_records(self.run_dir), [])
+
+    def test_a_producer_that_captured_nothing_is_a_valid_natural_attempt(self) -> None:
+        manifest = self.natural_manifest()
+        record = runner.run_trial(manifest, self.trial(manifest, "tenjin_natural"), self.run_dir, "sha256:schedule", self.runtime(spawn=self.producer_spawn(capture=False)))
+        records.validate(record)
+        self.assertEqual(record["outcome"], "pass")
+        self.assertEqual(record["isolation"]["producer"]["capture"]["pairings"], {"open": 0, "unverified": 0, "verified": 0})
+        self.assertEqual(record["delivery"].get("phase_fires"), {})
+
+    def test_producer_requests_from_the_first_turn_end_on_are_capture_cost(self) -> None:
+        from evals.benchmark import producer, usage
+
+        def record(request_id: str) -> usage.UsageRecord:
+            return usage.from_json(
+                {
+                    "adapter": "claude",
+                    "adapter_version": "1",
+                    "trial_id": "t",
+                    "actor_key": ["claude", "s", ""],
+                    "native_request_id": request_id,
+                    "input_total": 10,
+                    "uncached_input": None,
+                    "cache_read": None,
+                    "cache_write": None,
+                    "output_total": 5,
+                    "reasoning_output_subset": None,
+                    "provider_total": None,
+                    "native_request_cost": None,
+                    "completion_state": "complete",
+                    "source_hash": "sha256:x",
+                }
+            )
+
+        times = {"a": 1000, "b": 2000, "c": 3000}
+        receipts = producer.receipts_of("t", [record("a"), record("b"), record("c"), record("d")], times, 2000)
+        self.assertEqual([(receipt.native_request_id, receipt.phase) for receipt in receipts], [("a", "producer"), ("b", "capture"), ("c", "capture"), ("d", "producer")])
+        self.assertEqual(producer.phase_tokens(receipts), {"producer": 30, "capture": 30})
+        self.assertEqual({receipt.phase for receipt in producer.receipts_of("t", [record("a")], times, None)}, {"producer"})
+        transcript = self.dir / "root.jsonl"
+        transcript.write_text('{"requestId": "r1", "timestamp": "2026-09-08T00:00:01.500Z"}\n{"requestId": "r1", "timestamp": "2026-09-08T00:00:09Z"}\nnot json\n{"requestId": "r2"}\n', encoding="utf-8")
+        self.assertEqual(producer.request_times(transcript), {"r1": 1788825601500})
 
 
 if __name__ == "__main__":

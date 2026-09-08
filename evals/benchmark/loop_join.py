@@ -87,11 +87,18 @@ def cli_searches(connection: sqlite3.Connection) -> dict[str, Any]:
     return {"count": len(rows), "decisions": decisions}
 
 
-def failure_key(connection: sqlite3.Connection) -> dict[str, Any] | None:
-    """The last failure fire that carried a key: which lane keyed it, whether the keys leg hit, and what was delivered."""
+def failure_key(connection: sqlite3.Connection, foreign_sessions: tuple[str, ...] = ()) -> dict[str, Any] | None:
+    """The last failure fire that carried a key: which lane keyed it, whether the keys leg hit, and what was delivered.
+
+    A foreign phase's fires (the producer's, the seed replay's) are on the
+    same ledger and are never this attempt's failure key.
+    """
+    placeholders = ", ".join("?" for _session in foreign_sessions)
+    exclude = f" AND session NOT IN ({placeholders})" if foreign_sessions else ""
     try:
         fire = connection.execute(
-            "SELECT id, question_key, reason, delivered FROM fires WHERE arm = 'failure' AND question_key IS NOT NULL ORDER BY at DESC, id DESC LIMIT 1"
+            f"SELECT id, question_key, reason, delivered FROM fires WHERE arm = 'failure' AND question_key IS NOT NULL{exclude} ORDER BY at DESC, id DESC LIMIT 1",
+            tuple(foreign_sessions),
         ).fetchone()
     except sqlite3.Error:
         return None
@@ -162,12 +169,14 @@ def public_summary(legs: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
+def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tuple[str, ...] = ()) -> dict[str, Any]:
     """Fires and legs for exactly these actors, plus fires for actors that are not in the set.
 
     `unmatched_fires` is an attribution error for the caller: Loop 2 recorded
     a fire for an actor the harness never exposed usage for, which is not a
-    zero-token actor.
+    zero-token actor. `foreign_sessions` are the sessions another phase of the
+    same trial ran on this store (the producer, the local seed replay): their
+    fires are expected, counted under `phase_fires`, and never unmatched.
     """
     if loop_db is None or not loop_db.is_file():
         return unavailable()
@@ -177,6 +186,7 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
     fires: list[dict[str, Any]] = []
     legs: list[dict[str, Any]] = []
     unmatched: list[dict[str, Any]] = []
+    phase_fires: dict[str, int] = {}
     uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
     try:
         connection = sqlite3.connect(uri, uri=True)
@@ -201,7 +211,10 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
                 "delivered": row["delivered"],
             }
             if actor not in wanted:
-                unmatched.append(fire)
+                if row["session"] in foreign_sessions:
+                    phase_fires[row["session"]] = phase_fires.get(row["session"], 0) + 1
+                else:
+                    unmatched.append(fire)
                 continue
             fires.append(fire)
             for leg in connection.execute(
@@ -209,7 +222,7 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
             ):
                 legs.append({**dict(leg), "actor": list(actor)})
         searches = cli_searches(connection)
-        key = failure_key(connection)
+        key = failure_key(connection, foreign_sessions)
     finally:
         connection.close()
     return {
@@ -222,4 +235,5 @@ def project(loop_db: Path | None, actors: list[ActorKey]) -> dict[str, Any]:
         "public": public_summary(legs),
         "cli_searches": searches,
         "failure_key": key,
+        **({"phase_fires": phase_fires} if foreign_sessions else {}),
     }

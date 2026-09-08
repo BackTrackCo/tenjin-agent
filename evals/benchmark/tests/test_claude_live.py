@@ -28,6 +28,7 @@ from typing import Any
 from unittest import mock
 
 from evals.benchmark import (
+    tenjin_arm,
     artifact,
     claude_live,
     claude_usage,
@@ -367,31 +368,132 @@ class HooksArmTest(LiveCase):
             with self.subTest(name), self.assertRaises(LiveExecutorError):
                 claude_live._settings_overlay(overlay)
         claude_live._settings_overlay({"vitest.config.mjs": "x {data_dir} y"})
-    def test_the_real_manifest_is_four_tasks_in_one_family_under_the_same_two_arms(self) -> None:
-        manifest = manifest_module.load(cli.REAL_MANIFEST)
-        trials = schedule.expand(manifest)
-        self.assertEqual(len(trials), 16)
-        self.assertEqual({trial.task_id for trial in trials}, {"actor", "budget", "candidate", "slug"})
-        schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
-        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded"])
-        smoke = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
-        self.assertEqual(manifest.arms, smoke.arms)
-        self.assertEqual(manifest.pins, smoke.pins)
+    BENCH2 = {
+        "actor": ("test-harness-convention", True, "", "mjs"),
+        "budget": ("test-harness-convention", True, "", "mjs"),
+        "candidate": ("test-harness-convention", True, "", "mjs"),
+        "slug": ("test-harness-convention", True, "", "mjs"),
+        "alias": ("vitest-path-alias", False, "", "ts"),
+        "level": ("node-type-stripping", False, "", "mjs"),
+        "money": ("esm-cjs-interop", False, "", "mjs"),
+        "core": ("pnpm-workspace", False, "packages/core", "mjs"),
+    }
+    LESSON_PHRASES = ("pnpm test --", "pnpm exec", "vitest", "repository-specific", "truly targets", "wrong set", "tsconfig", "resolve.alias", "paths", "enum", "strip", "CommonJS", "default export", "--filter", "-C packages")
+
+    def assert_bench2_tasks(self, manifest: manifest_module.Manifest) -> None:
+        self.assertEqual([task["id"] for task in manifest.tasks], list(self.BENCH2))
+        self.assertEqual(len({task["family"] for task in manifest.tasks}), 5)
         for task in manifest.tasks:
+            family, trap, package_dir, ext = self.BENCH2[task["id"]]
+            self.assertEqual(task["family"], family)
+            self.assertEqual(task["transfer_distance"], "same_family" if trap else "same_task")
             fixture = manifest.fixture_path(task)
             claude_live.refuse_project_settings(fixture)
-            layer = verifier.lookup(task["verifier"]).hidden_layer
-            self.assertTrue((layer / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs").is_file())
+            spec = verifier.lookup(task["verifier"])
+            self.assertTrue((spec.hidden_layer / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs").is_file())
             self.assertFalse((fixture / verifier.HIDDEN_TESTS).exists())
-            self.assertEqual(task["family"], "test-harness-convention")
+            self.assertEqual("--package" in spec.argv(fixture), bool(package_dir))
             vendored = manifest.vendor_for(task)
             assert vendored is not None
             self.assertEqual(vendored.id, "vitest-3.2.4-node24-darwin-arm64")
-            support.assert_vitest_fixture(self, fixture, task["id"], vendored)
-            # The prompt states the task and not the lesson: none of the shelf
-            # piece's phrases, and no mention of the wrong command.
-            for phrase in ("pnpm test --", "pnpm exec", "vitest", "repository-specific", "truly targets", "wrong set"):
-                self.assertNotIn(phrase, task["prompt"])
+            support.assert_vitest_fixture(self, fixture, task["id"], vendored, trap=trap, package_dir=package_dir, test_ext=ext)
+            # The prompt states the goal and never the lesson.
+            for phrase in self.LESSON_PHRASES:
+                self.assertNotIn(phrase.lower(), task["prompt"].lower(), (task["id"], phrase))
+            # Every task has its family lesson and its own fix lesson in the benchmark's words.
+            lessons = tenjin_arm.lessons_for(task)
+            self.assertEqual([lesson.id for lesson in lessons], [family, f"{task['id']}-fix"])
+
+    def test_the_real_manifest_is_the_phase_one_local_pilot(self) -> None:
+        manifest = manifest_module.load(cli.REAL_MANIFEST)
+        trials = schedule.expand(manifest)
+        self.assertEqual((len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]), (48, 3, "bench2-local-pilot-0"))
+        schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
+        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_natural"])
+        off, natural = manifest.arms
+        self.assertEqual((natural["provision"], natural["producer"], natural["auxiliary_usage"]), ("tenjin", True, "exposed"))
+        self.assertNotIn("seed", natural)
+        self.assertIsNone(manifest.slice)
+        smoke = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+        self.assertEqual(off, smoke.arms[0])
+        self.assertEqual(natural["settings"], smoke.arms[1]["settings"])
+        self.assertEqual(manifest.pins, smoke.pins)
+        self.assertEqual(manifest.pins["max_budget_usd"], 0.75)
+        self.assert_bench2_tasks(manifest)
+
+    def test_the_local_arms_manifest_runs_the_four_arms_over_the_eight_tasks(self) -> None:
+        manifest = manifest_module.load(cli.LOCAL_ARMS_MANIFEST)
+        trials = schedule.expand(manifest)
+        self.assertEqual(len(trials), 96)
+        schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
+        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "flat", "tenjin_seeded", "tenjin_natural"])
+        off, flat, seeded, natural = manifest.arms
+        self.assertEqual((seeded["seed"], seeded["provision"], natural["producer"]), ("local", "tenjin", True))
+        # The flat arm is the same lessons as static Markdown, through the foundation's overlay, hashed into its settings.
+        self.assertEqual(sorted(flat["settings"]), ["overlay"])
+        self.assertEqual(sorted(flat["settings"]["overlay"]), ["CLAUDE.md", "LESSONS.md"])
+        self.assertEqual(flat["settings_hash"], "sha256:" + sha256_json(flat["settings"]))
+        self.assertNotIn("provision", flat)
+        lessons = tenjin_arm.LESSONS
+        expected = "\n\n".join((lessons / f"{name}.md").read_text(encoding="utf-8").rstrip("\n") for name in ("test-harness-convention", "actor-fix", "budget-fix", "candidate-fix", "slug-fix", "vitest-path-alias", "alias-fix", "node-type-stripping", "level-fix", "esm-cjs-interop", "money-fix", "pnpm-workspace", "core-fix")) + "\n"
+        self.assertTrue(flat["settings"]["overlay"]["LESSONS.md"].endswith(expected))
+        self.assertIn("read LESSONS.md", flat["settings"]["overlay"]["CLAUDE.md"])
+        claude_live._settings_overlay(flat["settings"]["overlay"])
+        self.assertEqual(manifest.tasks, manifest_module.load(cli.REAL_MANIFEST).tasks)
+
+    def test_the_slice_manifests_state_one_variation_each(self) -> None:
+        pilot = manifest_module.load(cli.REAL_MANIFEST)
+        for name, path in cli.SLICE_MANIFESTS.items():
+            with self.subTest(name):
+                manifest = manifest_module.load(path)
+                trials = schedule.expand(manifest)
+                schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
+                self.assertEqual(manifest.pins, pilot.pins)
+                kind = manifest.slice["kind"]
+                if kind == "scale":
+                    self.assertEqual((len(trials), manifest.slice["distractors"]), (48, int(name.split("-")[1])))
+                    self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded"])
+                    self.assertEqual(manifest.tasks, pilot.tasks)
+                elif kind == "stale":
+                    self.assertEqual((len(trials), manifest.slice["age_days"]), (48, 400))
+                    self.assertEqual(manifest.tasks, pilot.tasks)
+                else:
+                    self.assertEqual(kind, "recursive")
+                    self.assertEqual(len(trials), 9)
+                    (task,) = manifest.tasks
+                    self.assertEqual(task["id"], "actor")
+                    self.assertIn("Agent", task["tools"])
+                    self.assertIn("Agent", task["allowed_tools"])
+                    self.assertIn("subagent", task["prompt"])
+                    self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded", "tenjin_natural"])
+                    for arm in manifest.arms[1:]:
+                        self.assertEqual(arm["lessons"], ["test-harness-convention", "actor-fix"])
+                    # The other manifests never hand a task the subagent tool.
+                    self.assertTrue(all("tools" not in task for task in pilot.tasks))
+
+    def test_the_lessons_and_the_distractor_corpus_are_loadable_and_keyed_apart(self) -> None:
+        from evals.benchmark import local_seed, signature
+
+        lesson_keys: set[str] = set()
+        for path in sorted(tenjin_arm.LESSONS.glob("*.json")):
+            lesson = tenjin_arm.lesson_named(path.stem)
+            assert lesson is not None
+            lesson_keys.update(lesson.keys)
+            if lesson.fix is not None:
+                self.assertEqual(lesson.fix["command"].split(" ")[0], "pnpm")
+        # The fix lessons the local seed can replay name a fix; the convention lesson cannot be held locally and names none.
+        self.assertIsNone(tenjin_arm.lesson_named("test-harness-convention").fix)
+        self.assertIsNone(tenjin_arm.lesson_named("alias-fix").fix)
+        for name in ("actor-fix", "budget-fix", "candidate-fix", "slug-fix", "level-fix", "money-fix", "core-fix"):
+            self.assertIsNotNone(tenjin_arm.lesson_named(name).fix, name)
+        corpus = local_seed.load_distractors()
+        self.assertEqual(len(corpus), 200)
+        keys = [signature.key_of(item["error"])["test_key"] for item in corpus]
+        self.assertTrue(all(keys))
+        self.assertEqual(len(set(keys)), 200)
+        self.assertEqual({f"sig_v1_test:{key}" for key in keys} & lesson_keys, set())
+        text = json.dumps(corpus)
+        self.assertNotIn("http", text)
 
     def test_the_template_resolves_per_trial_and_the_child_reads_the_resolved_fragment(self) -> None:
         provision = executor.Provision(values={"daemon_url": "http://127.0.0.1:4321/hook/claude", "daemon_token": "tok-1", "data_dir": "/trial/data"})

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, discovery, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
+from . import artifact, claude_usage, discovery, executor, loop_join, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from . import reap
 from .schedule import Trial
@@ -307,11 +307,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin
     roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin, vendor=manifest.vendor_for(task))
+    # The manifest's slice is identity of the run, stated in every record.
+    if manifest.slice is not None:
+        isolation = {**isolation, "slice": manifest.slice}
     provision = None
     if provisioned:
         assert spec.prepare is not None
         try:
-            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
+            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce, slice=manifest.slice))
         except executor.ProvisionError as error:
             # One trial's provisioning refused (a seed key that drifted, a
             # publish that failed, a daemon that never answered): the trial is
@@ -321,6 +324,33 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             # before any trial by `live-run`, never here.
             (roots.output / "provision-refusal.txt").write_text(str(error) + "\n", encoding="utf-8")
             return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", str(error))
+    # The natural arm: a producer session first, on the same store, verified;
+    # then the consumer on a fresh repository copy at the same path.
+    produced: producer_module.ProducerResult | None = None
+    foreign_sessions: tuple[str, ...] = ()
+    if provisioned and arm.get("producer"):
+        assert provision is not None
+        produced = producer_module.run(
+            spec=spec,
+            trial_id=trial.trial_id,
+            task=task,
+            arm=arm,
+            pins=manifest.pins,
+            fixture=manifest.fixture_path(task),
+            vendor=manifest.vendor_for(task),
+            roots=roots,
+            provision=provision,
+            runtime=runtime,
+            verifier_spec=verifier_spec,
+            wall_clock_s=float(manifest.pins["wall_clock_s"]),
+        )
+        provision = produced.provision
+        foreign_sessions = produced.foreign_sessions
+        isolation = {**isolation, "producer": produced.facts}
+        artifact.refresh_repo(roots, manifest.fixture_path(task), manifest.vendor_for(task))
+    if provision is not None and provision.facts.get("local_seed"):
+        isolation = {**isolation, "local_seed": provision.facts["local_seed"]}
+        foreign_sessions = foreign_sessions + (spec.session_of(trial.trial_id, "seed"),) if spec.session_of is not None else foreign_sessions
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}
@@ -328,7 +358,12 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
 
     started = runtime.clock()
     try:
-        completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
+        if produced is not None and produced.invalid_reason is not None:
+            # The producer left nothing to reuse: no consumer is started, and
+            # the attempt is invalid under the producer's own reason.
+            completed = Completed(returncode=0, stderr="", timed_out=False)
+        else:
+            completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
     finally:
         # The daemon stops as soon as the agent has, before settlement and
         # before anything reads `loop.db`: a stopped daemon is what makes the
@@ -364,7 +399,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         usage_reason = f"usage:{error.code}"
     actors = [] if session is None else session.actors
     try:
-        delivery = loop_join.project(roots.data_dir / "loop.db", actors)
+        delivery = loop_join.project(roots.data_dir / "loop.db", actors, foreign_sessions)
     except loop_join.LoopJoinError:
         delivery = loop_join.unavailable()
         usage_reason = usage_reason or "delivery:wal_live"
@@ -382,8 +417,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     sentinel = artifact.scan_sentinels(roots, hits, canaries=canaries, exclude=(roots.data_dir / "config.json",))
 
     auxiliary: list[dict[str, Any]] = []
+    collected = [] if produced is None else list(produced.receipts)
     if runtime.receipts is not None:
-        collected = runtime.receipts(trial.trial_id, roots)
+        collected = collected + list(runtime.receipts(trial.trial_id, roots))
+    if collected:
         try:
             if any(receipt.trial_id != trial.trial_id for receipt in collected):
                 raise usage.UsageError("foreign_trial", "an auxiliary receipt names another trial")
@@ -406,7 +443,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
-    invalid_reason = isolation_reason or sentinel.reason or usage_reason
+    invalid_reason = (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or usage_reason
     outcome = "invalid"
     verdict: verifier.Verdict | None = None
     patch_hash: str | None = None

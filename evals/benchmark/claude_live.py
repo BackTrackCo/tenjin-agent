@@ -67,7 +67,7 @@ SESSION_NAMESPACE = uuid.uuid5(uuid.NAMESPACE_URL, "https://github.com/BackTrack
 # Declared allowlists. A manifest value outside one of these is a refusal, not
 # a quoted argument.
 TOOLS = frozenset(
-    {"Bash", "Read", "Edit", "Write", "Glob", "Grep", "Task", "TodoWrite", "WebFetch", "WebSearch", "NotebookEdit"}
+    {"Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent", "Task", "TodoWrite", "WebFetch", "WebSearch", "NotebookEdit"}
 )
 # `bypassPermissions` is deliberately absent: a benchmark arm that needs the
 # mode which turns the permission system off is not a treatment difference,
@@ -155,9 +155,9 @@ class LiveExecutorError(ExecutorError):
     pass
 
 
-def root_session_id(trial_id: str) -> str:
-    """A real UUID, derived from the trial id, stable across resume."""
-    return str(uuid.uuid5(SESSION_NAMESPACE, trial_id))
+def root_session_id(trial_id: str, phase: str | None = None) -> str:
+    """A real UUID, derived from the trial id and the phase, stable across resume."""
+    return str(uuid.uuid5(SESSION_NAMESPACE, trial_id if phase is None else f"{trial_id}:{phase}"))
 
 
 def project_slug(cwd: Path) -> str:
@@ -262,6 +262,20 @@ def budget_of(pins: Mapping[str, Any]) -> str:
         raise LiveExecutorError(f"pins.max_budget_usd must be above 0 and at most {BUDGET_CEILING_USD}")
     # Formatted by this module, so no manifest string reaches the argument.
     return f"{float(value):.2f}"
+
+
+def pins_for(pins: Mapping[str, Any], task: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The pins with a task's own `tools` and `allowed_tools` in place of the manifest's, when the task states them.
+
+    A recursive-slice task is the one case: it may hand the agent the subagent
+    tool, and only that task does, so the override is per task and never widens
+    another task's pins.
+    """
+    merged = dict(pins)
+    for key in ("tools", "allowed_tools"):
+        if task is not None and key in task:
+            merged[key] = task[key]
+    return merged
 
 
 def tools_of(pins: Mapping[str, Any]) -> list[str]:
@@ -524,7 +538,7 @@ def provision_of(arm: Mapping[str, Any]) -> str | None:
 
 def settings_for_launch(request: LaunchRequest) -> tuple[dict[str, Any], str | None]:
     """The fragment the child reads, and its hash when it differs from the declared one."""
-    settings = settings_of(request.arm, request.pins)
+    settings = settings_of(request.arm, pins_for(request.pins, request.task))
     # The overlay is the repository's, not the child's settings file: it is
     # applied to the trial copy and left out of what Claude Code reads.
     settings = {key: value for key, value in settings.items() if key != "overlay"}
@@ -611,7 +625,7 @@ def probe_environment(roots: artifact.TrialRoots, parent: Mapping[str, str]) -> 
 
 def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[str]:
     """The whole command. Every flag is a literal here; every value is checked above."""
-    pins = request.pins
+    pins = pins_for(request.pins, request.task)
     return [
         CLI,
         "-p",
@@ -648,7 +662,7 @@ def launch(request: LaunchRequest) -> Launch:
     settings, resolved_hash = settings_for_launch(request)
     credential_env = credential_env_of(request.pins)
     refuse_project_settings(request.roots.repo)
-    session_id = root_session_id(request.trial_id)
+    session_id = root_session_id(request.trial_id, request.phase)
     path = settings_path(request.roots)
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     apply_overlay(request.roots, overlay_of(request.arm, request.roots))
@@ -695,6 +709,7 @@ SPEC = ExecutorSpec(
     credential_seam=credential_env_of,
     prepare=prepare,
     stop=tenjin_arm.stop,
+    session_of=root_session_id,
 )
 
 REGISTRY[NAME] = SPEC

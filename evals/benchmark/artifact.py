@@ -75,6 +75,9 @@ class SentinelReport:
         return None
 
 
+PRODUCER_PHASE = "producer"
+
+
 @dataclass
 class TrialRoots:
     base: Path
@@ -86,6 +89,12 @@ class TrialRoots:
     canary_token: str
     public_origin: str | None = None
     stopped: bool = False
+    # `<run>/trials/<trial_id>` is the consumer's base; a producer phase lives
+    # under it and shares the consumer's data dir, so these two are stated
+    # rather than read back off the path.
+    trial: str = ""
+    run_root: Path = Path(".")
+    phase: str | None = None
 
     @property
     def stream(self) -> Path:
@@ -102,14 +111,11 @@ class TrialRoots:
 
     @property
     def run_dir(self) -> Path:
-        """`<run>/trials/<trial_id>` is the layout `create` builds, so the run
-        directory and the trial id are already on hand here. Reading them back
-        keeps the spawn seam's signature unchanged."""
-        return self.base.parent.parent
+        return self.run_root
 
     @property
     def trial_id(self) -> str:
-        return self.base.name
+        return self.trial
 
     @property
     def verify(self) -> Path:
@@ -177,35 +183,61 @@ def canary_token(trial_id: str) -> str:
 
 
 def create(
-    run_dir: Path, trial_id: str, fixture: Path, public_origin: str | None = None, vendor: vendor_module.Vendor | None = None
+    run_dir: Path,
+    trial_id: str,
+    fixture: Path,
+    public_origin: str | None = None,
+    vendor: vendor_module.Vendor | None = None,
+    *,
+    phase: str | None = None,
+    data_dir: Path | None = None,
 ) -> TrialRoots:
-    """Fresh roots, the fixture copied in, and the vendored toolchain extracted into its `node_modules`."""
-    base = run_dir / "trials" / trial_id
+    """Fresh roots, the fixture copied in, and the vendored toolchain extracted into its `node_modules`.
+
+    A `phase` (the producer) gets its own home, profile, output, and repository
+    under the consumer's base and shares the consumer's `data_dir`: the store is
+    the one thing the two phases have in common, by design. The repository sits
+    at the same path in both phases, because the product scopes its local
+    records by a hash of the working directory.
+    """
+    consumer = run_dir / "trials" / trial_id
+    base = consumer if phase is None else consumer / phase
     if base.exists():
         shutil.rmtree(base)
     roots = TrialRoots(
         base=base,
         home=base / "home",
         profile=base / "profile",
-        data_dir=base / "data",
-        repo=base / "repo",
+        data_dir=base / "data" if data_dir is None else data_dir,
+        repo=consumer / "repo",
         output=base / "output",
-        canary_token=canary_token(trial_id),
+        canary_token=canary_token(trial_id if phase is None else f"{trial_id}:{phase}"),
         public_origin=public_origin,
+        trial=trial_id,
+        run_root=run_dir,
+        phase=phase,
     )
-    for path in (roots.home, roots.profile, roots.data_dir, roots.output):
+    for path in (roots.home, roots.profile, roots.output):
         path.mkdir(parents=True)
+    roots.data_dir.mkdir(parents=True, exist_ok=True)
+    refresh_repo(roots, fixture, vendor)
+    (roots.home / CREDENTIAL_FILE).write_text(
+        f"# Planted by the benchmark. Nothing real depends on it.\nBENCH1_FAKE_API_KEY={roots.canary_token}\n",
+        encoding="utf-8",
+    )
+    return roots
+
+
+def refresh_repo(roots: TrialRoots, fixture: Path, vendor: vendor_module.Vendor | None) -> None:
+    """A fresh repository copy at the roots' repo path: the fixture and the vendored tree; an arm's `settings.overlay` is the launch's to apply."""
+    if roots.repo.exists():
+        shutil.rmtree(roots.repo)
     shutil.copytree(fixture, roots.repo, symlinks=False)
     if vendor is not None:
         try:
             vendor_module.extract(vendor, roots.repo / vendor_module.TARGET)
         except vendor_module.VendorError as error:
             raise ArtifactError(error.code, error.detail) from error
-    (roots.home / CREDENTIAL_FILE).write_text(
-        f"# Planted by the benchmark. Nothing real depends on it.\nBENCH1_FAKE_API_KEY={roots.canary_token}\n",
-        encoding="utf-8",
-    )
-    return roots
 
 
 def _contains(path: Path, token: bytes) -> bool:
