@@ -768,17 +768,37 @@ shards: their one real failure is the family's.
   foundation already does, and the report's `child_tokens` and `actors` read the descendants
   apart.
 
+**Metrics: the headline rule.** Pre-registered by the operator on 2026-09-08, before any
+pilot number was read: the headline token ratio of every publishable comparison is the
+capture-only amortized ratio at reuse 1 (`comparisons[arm].headline`, rule
+`capture_only_amortized_reuse_1`), that is, every token the capture ask added to the producer's
+session is charged to a single consumer and nothing of the producer's own work is, because that
+work would have happened anyway (the plan's `amortized_tokens(k)` at k = 1). It is task-equal
+like `token_ratio`: one ratio per shared task, (consumer tokens per attempt + that task's capture
+tokens) over the baseline's, the mean as the figure and the task-paired bootstrap of the reuse-1
+set as `headline_interval`; `headline_eligible` is that figure's, ANDed with the run's
+`publishable` stamp. The consumer-only ratio (`token_ratio`, its own interval) is the secondary
+line, labelled "capture-free (future: capture on an operator-run model)": it is what the product
+would cost if capture ran on a model the operator pays for separately, and it is not the
+headline today. The amortization that charges the whole producer phase too
+(`amortized_token_ratio`) stays a diagnostic line, never a headline. Why this order: reuse 1 is
+the worst honest case for a capture-based product, the one a single reuse has to beat, and
+choosing it before the first number exists is what keeps the choice from being tuned to it.
+
 **The reducer and the report.** Per arm: `phase_tokens` (`producer`, `capture`, once per native
-request id), `amortization` (the foundation's, charging producer and capture together) and
-`amortization_capture_only` (the plan's, charging the capture's incremental cost alone),
-`producer` (phases run, passed, captured a closed record, findings harvested, invalid, WAL
-live) and `local_seed` (stores seeded, closed records, empty stores, distractors). Per
-comparison: `token_ratio` (consumer-only), `amortized_token_ratio`, and
-`amortized_capture_only_token_ratio` at reuse 1, 2, 5, 10. Per cell diagnostics: `local_legs`,
+request id; also per task cell), `amortization` (the foundation's, charging producer and capture
+together) and `amortization_capture_only` (the capture's incremental cost alone), `producer`
+(phases run, passed, captured a closed record, findings harvested, invalid, WAL live) and
+`local_seed` (stores seeded, closed records, empty stores, distractors). Per comparison:
+`headline`, `headline_rule`, `headline_interval`, `headline_eligible`, `token_ratio`
+(consumer-only), `amortized_token_ratio`, and `amortized_capture_only_token_ratio` at reuse 1,
+2, 5, 10 (task-equal). `summary` prints, per comparison, the headline line first with its label
+and interval, then the capture-only reuse curve at 2/5/10, then the capture-free line, then the
+producer's-own-work diagnostic. Per cell diagnostics: `local_legs`,
 `local_hits`, `child_tokens`, `child_requests`, `actors`. The report carries `slice`, and each
 trial row `producer_outcome`, `producer_tokens`, `local_hits`, `child_tokens`; `summary` prints
-the slice, one producer line and one local-seed line per arm, the local legs and descendant
-tokens, and both amortized ratios at reuse 1 and 10. The regress baseline is untouched: nothing
+the slice, one producer line and one local-seed line per arm, and the local legs and descendant
+tokens. The regress baseline is untouched: nothing
 here has run, so nothing here has a baseline.
 
 **Manifests and cost.** `real-manifest.json` (`bench2-local-pilot-0`) is the plan's Phase 1

@@ -157,6 +157,7 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
         "attempts": attempts,
         "passes": passes,
         "pass_rate": _round(passes / attempts),
+        "phase_tokens": phase_tokens(records),
         "requests": sum(summed["requests"] for summed in per_attempt),
         "tokens": tokens,
         "tokens_per_attempt": _round(tokens / attempts),
@@ -255,15 +256,27 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
                 "token_ratio": None if not divisor else _round(arm_point["tokens_per_attempt"] / divisor),
             }
         )
-    # The plan's amortization charges only the capture's incremental cost: the
-    # producer's own work would have happened anyway. The series above is the
-    # conservative one that charges the whole producer phase too.
+    # The headline rule (pre-registered before any pilot number was read):
+    # charge every token the capture ask added to a single consumer, and
+    # nothing of the producer's own work, which would have happened anyway.
+    # Task-equal like `token_ratio`: one ratio per shared task at each reuse
+    # point, the arm figure their mean, and the reuse-1 set bootstrapped for
+    # the headline interval. The series above is the diagnostic that charges
+    # the whole producer phase too.
     capture_only: list[dict[str, Any]] = []
-    base_only = amortize(base["tokens_per_attempt"], base["phase_tokens"]["capture"])
-    arm_only = amortize(arm["tokens_per_attempt"], arm["phase_tokens"]["capture"])
-    for point, arm_point in zip(base_only, arm_only):
-        divisor = point["tokens_per_attempt"]
-        capture_only.append({"reuse": point["reuse"], "token_ratio": None if not divisor else _round(arm_point["tokens_per_attempt"] / divisor)})
+    headline_ratios: list[float] = []
+    for reuse in REUSE_POINTS:
+        per_task: list[float] = []
+        for task_id in shared:
+            base_cell, arm_cell = base["tasks"][task_id], arm["tasks"][task_id]
+            divisor = base_cell["tokens_per_attempt"] + base_cell["phase_tokens"]["capture"] / reuse
+            if not divisor:
+                per_task = []
+                break
+            per_task.append((arm_cell["tokens_per_attempt"] + arm_cell["phase_tokens"]["capture"] / reuse) / divisor)
+        capture_only.append({"reuse": reuse, "token_ratio": _mean(per_task)})
+        if reuse == 1:
+            headline_ratios = per_task
     pass_delta = (
         None
         if arm["pass_rate"] is None or base["pass_rate"] is None
@@ -277,7 +290,10 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         "interval": paired_bootstrap(ratios, seed),
         "amortized_token_ratio": capture_ratio,
         "amortized_capture_only_token_ratio": capture_only,
-        "headline_eligible": bool(arm["headline_eligible"] and base["headline_eligible"] and ratio is not None),
+        "headline": capture_only[0]["token_ratio"],
+        "headline_rule": "capture_only_amortized_reuse_1",
+        "headline_interval": paired_bootstrap(headline_ratios, seed),
+        "headline_eligible": bool(arm["headline_eligible"] and base["headline_eligible"] and capture_only[0]["token_ratio"] is not None),
     }
 
 

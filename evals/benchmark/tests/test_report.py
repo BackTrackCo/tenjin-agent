@@ -276,7 +276,27 @@ class ProjectionTest(unittest.TestCase):
         text = report.render(projected)
         self.assertIn("slice: distractors=50 kind=scale", text)
         self.assertIn("on producer phases: 1 run, 1 passed, 1 left a closed local record", text)
-        self.assertIn("amortized, capture only, at reuse 1/10:", text)
+        # The pre-registered headline: capture-only amortized at reuse 1, first, with its own
+        # task-paired interval; the reuse curve; the consumer-only ratio as the secondary line;
+        # the producer's-own-work amortization last, as a diagnostic.
+        comparison = projected["comparisons"]["on"]
+        self.assertEqual((comparison["headline"], comparison["headline_rule"], comparison["headline_eligible"]), (round(550 / 800, 12), "capture_only_amortized_reuse_1", True))
+        self.assertEqual((comparison["headline_interval"]["tasks"], comparison["headline_interval"]["point"]), (1, round(550 / 800, 12)))
+        self.assertEqual(comparison["token_ratio"], 0.5)
+        lines = text.splitlines()
+        headline = next(index for index, line in enumerate(lines) if line.startswith("  headline on: 0.688 (" + report.HEADLINE_LABEL + ")"))
+        self.assertIn("headline eligible", lines[headline])
+        self.assertTrue(lines[headline + 1].startswith("    reuse 2/5/10: 0.594/0.537/0.519"))
+        self.assertTrue(lines[headline + 2].startswith("    " + report.CAPTURE_FREE_LABEL + ": 0.500  interval"))
+        self.assertTrue(lines[headline + 3].startswith("    diagnostic, the producer's own work charged too, reuse 1/10: 1.688/0.619"))
+        self.assertEqual(report.CAPTURE_FREE_LABEL, "capture-free (future: capture on an operator-run model)")
+        # A non-publishable run keeps the number and loses the claim, on the headline line.
+        for record_ in accepted.values():
+            record_["isolation"] = {**record_["isolation"], "publishable": False}
+        plumbing = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+        self.assertFalse(plumbing["comparisons"]["on"]["headline_eligible"])
+        self.assertIn("headline on: 0.688", report.render(plumbing))
+        self.assertIn("NOT headline eligible", report.render(plumbing).splitlines()[headline])
 
     def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(self) -> None:
         accepted = {}

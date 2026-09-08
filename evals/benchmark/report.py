@@ -22,6 +22,11 @@ from typing import Any
 from .artifact import CANARY_PREFIX
 
 REPORT_SCHEMA = "bench1.report.v1"
+# The pre-registered headline: the capture-only amortized ratio at reuse 1, every
+# token the capture ask added charged to a single consumer. The consumer-only
+# ratio is the secondary line.
+HEADLINE_LABEL = "capture-only amortized, reuse 1: every capture token charged to one consumer"
+CAPTURE_FREE_LABEL = "capture-free (future: capture on an operator-run model)"
 # How a run was isolated, weakest first. A report takes the weakest kind any
 # accepted record carries, so one plumbing record marks the whole run.
 ISOLATION_KINDS = ("team_shelf_secret", "automated_plumbing", "operator_plumbing", "attested", "fake")
@@ -340,23 +345,28 @@ def render(report: dict[str, Any]) -> str:
     if report["comparisons"]:
         lines.append(f"token ratio versus {baseline}, 1.0 means no change, lower means fewer tokens:")
         for arm_id, comparison in sorted(report["comparisons"].items()):
+            headline = comparison.get("headline")
+            eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
+            interval = comparison.get("headline_interval")
+            if headline is None:
+                lines.append(f"  headline {arm_id}: none ({comparison['token_ratio_reason'] or 'no capture-only ratio'}), {eligible}")
+            else:
+                span = "" if not interval else f"  interval [{interval['low']:.3f}, {interval['high']:.3f}] at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}"
+                lines.append(f"  headline {arm_id}: {headline:.3f} ({HEADLINE_LABEL}){span}, {eligible}")
+            curve = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_capture_only_token_ratio", [])}
+            lines.append(f"    reuse 2/5/10: {_number(curve.get(2), '5.3f')}/{_number(curve.get(5), '5.3f')}/{_number(curve.get(10), '5.3f')}")
             ratio = comparison["token_ratio"]
             if ratio is None:
-                lines.append(f"  {arm_id}: none ({comparison['token_ratio_reason']})")
-                continue
-            interval = comparison["interval"]
-            eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
-            lines.append(
-                f"  {arm_id}: {ratio:.3f}  interval [{interval['low']:.3f}, {interval['high']:.3f}] "
-                f"at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}, {eligible}"
-            )
-            amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
-            capture_only = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_capture_only_token_ratio", [])}
-            if any(value is not None for value in amortized.values()):
+                lines.append(f"    {CAPTURE_FREE_LABEL}: none ({comparison['token_ratio_reason']})")
+            else:
+                free_interval = comparison["interval"]
                 lines.append(
-                    f"    amortized, capture only, at reuse 1/10: {_number(capture_only.get(1), '.3f')}/{_number(capture_only.get(10), '.3f')}; "
-                    f"with the producer's own work charged too: {_number(amortized.get(1), '.3f')}/{_number(amortized.get(10), '.3f')}"
+                    f"    {CAPTURE_FREE_LABEL}: {ratio:.3f}  interval [{free_interval['low']:.3f}, {free_interval['high']:.3f}] "
+                    f"at {free_interval['confidence']:.0%} over {plural(free_interval['tasks'], 'task')}"
                 )
+            amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
+            if any(value is not None for value in amortized.values()):
+                lines.append(f"    diagnostic, the producer's own work charged too, reuse 1/10: {_number(amortized.get(1), '5.3f')}/{_number(amortized.get(10), '5.3f')}")
     else:
         lines.append(f"no comparison: {baseline} is the only arm with a result")
     outcomes: dict[str, int] = {}
