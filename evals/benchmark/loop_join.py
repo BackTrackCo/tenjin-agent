@@ -27,7 +27,10 @@ class LoopJoinError(RuntimeError):
     pass
 
 
-SHELVES = ("team", "public")
+# Per-leg origin classes: the team shelf, the public marketplace, or a shelf
+# value this package does not know, which the sentinel treats as a public
+# request because no named origin covers it.
+SHELVES = ("team", "public", "other")
 # A leg the product planned but never sent: public fallback off, or a stage
 # the arm dropped. It reached no origin, so it is not a request.
 SKIPPED = "skipped"
@@ -41,9 +44,10 @@ def count_shelves(legs: list[dict[str, Any]]) -> dict[str, int]:
     """How many legs went to each shelf. The public count is what the sentinel reads."""
     counts = {shelf: 0 for shelf in SHELVES}
     for leg in legs:
+        if leg.get("status") == SKIPPED:
+            continue
         shelf = leg.get("shelf")
-        if shelf in counts and leg.get("status") != SKIPPED:
-            counts[shelf] += 1
+        counts[shelf if shelf in counts else "other"] += 1
     return counts
 
 

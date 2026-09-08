@@ -333,14 +333,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         usage_reason = usage_reason or "delivery:wal_live"
     if delivery["unmatched_fires"]:
         usage_reason = usage_reason or "delivery:fire_without_usage"
-    # A leg the product sent to the public shelf is a request to an origin the
-    # attestation may not list. It counts as a public request unless it does;
-    # a team-shelf leg is the arm under test and never counts.
-    public_legs = delivery["shelves"]["public"]
-    allowlist = () if runtime.attestation is None else runtime.attestation.network_allowlist
-    public_origin = facts.get("public_origin") if provisioned else None
-    if public_legs and public_origin not in allowlist:
-        hits += public_legs
+    # The team shelf and the public marketplace are the seeded config's two
+    # named origins, listed in the allowlist a provisioned run has to state. A
+    # leg to either is the product under test; a leg to a shelf this package
+    # cannot name is a request to an unknown origin and counts as public.
+    hits += delivery["shelves"]["other"]
     sentinel = artifact.scan_sentinels(roots, hits, canaries=canaries, exclude=(roots.data_dir / "config.json",))
 
     auxiliary: list[dict[str, Any]] = []

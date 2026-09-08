@@ -56,9 +56,9 @@ class LoopJoinTest(unittest.TestCase):
     def test_legs_are_counted_per_shelf_and_a_skipped_leg_is_not_a_request(self) -> None:
         projection = loop_join.project(self.db, [ROOT, CHILD, SIBLING])
         # Two team legs went out; the public leg was planned and dropped.
-        self.assertEqual(projection["shelves"], {"team": 2, "public": 0})
-        self.assertEqual(loop_join.unavailable()["shelves"], {"team": 0, "public": 0})
-        self.assertEqual(loop_join.count_shelves([{"shelf": "public", "status": "ok"}, {"shelf": "other", "status": "ok"}]), {"team": 0, "public": 1})
+        self.assertEqual(projection["shelves"], {"team": 2, "public": 0, "other": 0})
+        self.assertEqual(loop_join.unavailable()["shelves"], {"team": 0, "public": 0, "other": 0})
+        self.assertEqual(loop_join.count_shelves([{"shelf": "public", "status": "ok"}, {"shelf": "mirror", "status": "ok"}]), {"team": 0, "public": 1, "other": 1})
 
     def test_exact_actor_join_with_legs(self) -> None:
         projection = loop_join.project(self.db, [ROOT, CHILD])

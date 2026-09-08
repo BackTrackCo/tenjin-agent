@@ -82,7 +82,7 @@ class SourceTest(SourceCase):
         self.assertEqual(sorted(source.config), ["baseUrl", "publicShelfUrl", "shelfBypassSecret"])
         self.assertTrue(source.shelf_secret_present)
         self.assertEqual(source.facts, {"shelf_secret_present": True, "shelf_origin": "team-shelf.example", "public_origin": "public.example"})
-        self.assertEqual(source.origins, ("team-shelf.example",))
+        self.assertEqual(source.origins, ("team-shelf.example", "public.example"))
         self.assertEqual(source.secrets, (SECRET,))
         self.assertNotIn(SECRET, json.dumps(source.facts))
 
@@ -109,7 +109,7 @@ class SourceTest(SourceCase):
         seeded = tenjin_arm.seeded_config(source, 4321)
         self.assertEqual(seeded["publish"], {"mode": "review"})
         self.assertEqual(seeded["hooks"], {"capture": "off"})
-        self.assertEqual(seeded["team"], {"publicFallback": "off"})
+        self.assertEqual(seeded["team"], {"publicFallback": "on"})
         self.assertEqual(seeded["loop"], {"idle_exit_min": 2, "port": 4321})
         self.assertEqual(seeded["shelfBypassSecret"], SECRET)
         self.assertNotIn("wallet", seeded)
@@ -143,7 +143,7 @@ class PrepareStopTest(DaemonCase):
         self.assertEqual(oct((data / "daemon.token").stat().st_mode & 0o777), "0o600")
         seeded = json.loads((data / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(seeded["shelfBypassSecret"], SECRET)
-        self.assertEqual(seeded["team"], {"publicFallback": "off"})
+        self.assertEqual(seeded["team"], {"publicFallback": "on"})
         pid_record = json.loads((data / "daemon.pid").read_text(encoding="utf-8"))
         self.assertEqual(provision.values["daemon_url"], f"http://127.0.0.1:{pid_record['port']}/hook/claude")
         self.assertEqual(provision.values["daemon_token"], token)
@@ -301,7 +301,7 @@ class RunnerTest(RunnerCase):
         isolation = record["isolation"]
         self.assertEqual((isolation["publishable"], isolation["shelf_secret_present"], isolation["shelf_origin"]), (False, True, "team-shelf.example"))
         self.assertEqual(isolation["daemon_respawned"], False)
-        self.assertEqual(record["delivery"]["shelves"], {"team": 0, "public": 0})
+        self.assertEqual(record["delivery"]["shelves"], {"team": 0, "public": 0, "other": 0})
         self.assertEqual(reap.read_records(self.run_dir), [])
         self.assertNotIn(SECRET, json.dumps(record))
 
@@ -335,32 +335,44 @@ class RunnerTest(RunnerCase):
         self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "delivery:wal_live"))
         self.assertEqual(reap.read_records(self.run_dir), [])
 
-    def test_a_public_fallback_leg_is_a_public_request_unless_the_attestation_lists_it(self) -> None:
-        manifest = self.manifest()
-        public = tenjin_arm.load_source(self.write_source({"baseUrl": "https://team-shelf.example", "publicShelfUrl": "https://public.example"}))
-
+    def legs(self, *shelves: str):
         def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             db = roots.data_dir / "loop.db"
             support.write_loop_db(db, [("fire-1", launch.root_session_id, "")])
             import sqlite3
 
             connection = sqlite3.connect(db)
-            connection.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('fire-1', 1, 'team', 'ok', 'miss', 5)")
-            connection.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('fire-1', 2, 'public', 'ok', 'hit', 5)")
+            for stage, shelf in enumerate(shelves, start=1):
+                connection.execute(
+                    "INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('fire-1', ?, ?, 'ok', 'hit', 5)", (stage, shelf)
+                )
             connection.commit()
             connection.close()
 
-        with mock.patch.object(tenjin_arm, "DAEMON_ARGV", lambda roots: list(FAKE_DAEMON)):
-            record = runner.run_trial(manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=before), source=public))
-            self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 1})
-            self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "sentinel:public_request"))
-            self.assertEqual(record["sentinel"]["public_requests"], 1)
-            listed = support.ATTESTED.__class__(**{**support.ATTESTED.__dict__, "network_allowlist": ("api.provider.example", "team-shelf.example", "public.example")})
-            record = runner.run_trial(
-                manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=before), source=public, publishable=True, attestation=listed)
-            )
+        return before
+
+    def test_team_and_public_fallback_legs_are_named_origins_and_an_unknown_shelf_is_a_public_request(self) -> None:
+        manifest = self.manifest()
+        public = tenjin_arm.load_source(self.write_source({"baseUrl": "https://team-shelf.example", "publicShelfUrl": "https://public.example"}))
+        # A team miss that fell back to the public marketplace: two named legs.
+        record = runner.run_trial(
+            manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=self.legs("team", "public")), source=public)
+        )
+        self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 1, "other": 0})
         self.assertEqual(record["sentinel"]["public_requests"], 0)
         self.assertEqual(record["outcome"], "pass")
+        # A leg to a shelf this package cannot name is a request to an unknown origin.
+        record = runner.run_trial(
+            manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=self.legs("team", "mirror")), source=public)
+        )
+        self.assertEqual(record["delivery"]["shelves"], {"team": 1, "public": 0, "other": 1})
+        self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "sentinel:public_request"))
+        self.assertEqual(record["sentinel"]["public_requests"], 1)
+        # A publishable run has to list both named origins beside the provider.
+        listed = support.ATTESTED.__class__(**{**support.ATTESTED.__dict__, "network_allowlist": ("api.provider.example", "team-shelf.example")})
+        with self.assertRaises(IsolationError) as caught:
+            runner.run_trial(manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(source=public, publishable=True, attestation=listed))
+        self.assertIn("public.example", str(caught.exception))
 
 
 class CliTest(SourceCase):

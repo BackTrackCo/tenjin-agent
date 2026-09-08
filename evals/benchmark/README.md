@@ -12,7 +12,7 @@ What Bench-1 does not measure, and will not be made to measure:
 
 - the product's own `tokens saved` counter. It is a product diagnostic computed from product
   state, not an independent observation, so it can never be the outcome that judges the product.
-- `tenjin push grade`. It stays an explanatory field; the hidden verifier decides pass and fail.
+- `tenjin grade`. It stays an explanatory field; the hidden verifier decides pass and fail.
 - provider usage-limit percentages, quota depletion, and surge-hour multipliers. They move for
   reasons that have nothing to do with tokens and never enter the reducer.
 - an LLM judge. A judge, if one is ever added, is benchmark overhead reported in its own field:
@@ -283,7 +283,7 @@ there is no default, and nothing here ever reads a home path on its own.
 and before its launch: the two bundles are copied from the source, exactly `COPIED_KEYS`
 (`baseUrl`, `publicShelfUrl`, `shelfBypassSecret`) are copied from the source config, the
 constants in `SEEDED` are forced (`publish.mode` review, `hooks.capture` off,
-`team.publicFallback` off, `loop.idle_exit_min` 2), a fresh `daemon.token` is minted, a free
+`team.publicFallback` on, `loop.idle_exit_min` 2), a fresh `daemon.token` is minted, a free
 loopback port goes into `loop.port`, and one daemon is started with `runner.process_start`: its
 own session, an allowlisted environment, its group in the pids ledger under `<trial>.daemon`, so
 `cli.py cleanup` reaches it. `prepare` waits for `/health` to answer with this data dir and this
@@ -322,12 +322,15 @@ data dir except the seeded config, and the profile where the transcripts live, a
 deletes a `report.json` that carries it. The value is held in memory and written to the seeded
 config only; it is never logged, printed, or hashed.
 
-**Origins and legs.** The seeded shelf host is added to the origins the attestation has to list,
-so a team-shelf request is the arm under test and never a public request. Every delivery leg is
-classified by its `shelf` column into `delivery.shelves` (`team`, `public`; a `skipped` leg
-reached nothing and is not counted), and a public-fallback leg counts as a public request unless
-the attestation lists the public shelf's host. The seeded config turns public fallback off, so
-in this arm a team miss is a miss and the prompt never leaves for the public marketplace.
+**Origins and legs.** The seeded config names two origins, the team shelf (`baseUrl`) and the
+public marketplace (`publicShelfUrl`, the CLI's default public base URL), and both are added to
+the origins the attestation has to list, so each is distinguishable from an unknown one. Public
+fallback stays on, as the product ships it and as Bench-3's dedicated disposable shelf runs it
+per the token-savings plan, so a team miss may reach the public marketplace. Every delivery leg
+is classified by its `shelf` column into `delivery.shelves`: `team` (a team-shelf leg), `public`
+(a public-fallback leg), or `other` (a shelf value this package cannot name); a `skipped` leg
+reached nothing and is not counted. A `team` or `public` leg is the product under test; an
+`other` leg is a request to an unknown origin and counts as a public request for the sentinel.
 
 **The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-0`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
@@ -419,8 +422,8 @@ credential in the disposable home and, when the runner is given a loopback senti
 its origin as `BENCHMARK_PUBLIC_ORIGIN`. Per attempt the runner counts new sentinel hits and
 scans the roots the agent writes to for the canary; either count invalidates the attempt. The
 credential scan proves the secret travelled, not that it was read. A provisioned arm's seeded
-shelf secret is a second canary under the same rule, and a public-fallback delivery leg is a
-public request unless the attestation lists that host.
+shelf secret is a second canary under the same rule, and a delivery leg to a shelf that is
+neither the seeded team shelf nor the public marketplace is a public request.
 
 `artifact.require_isolation` is the live-run gate. A live executor in CI is refused outright.
 A publishable live run needs an `Attestation`: `container` or `vm` kind, a non-empty instance

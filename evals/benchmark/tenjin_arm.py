@@ -53,12 +53,14 @@ COPIED_KEYS = ("baseUrl", "publicShelfUrl", "shelfBypassSecret")
 SECRET_KEY = "shelfBypassSecret"
 # Forced whatever the source says. Review mode so a capture can never publish
 # from a trial, capture off because this is a consumer-only measurement, public
-# fallback off so a team miss never sends the prompt to the public marketplace,
-# and a short idle exit so a daemon this module lost track of ends itself.
+# fallback on because that is the product as shipped and as Bench-3 runs it (a
+# team miss then reaches the public marketplace, which is a named origin and a
+# counted leg), and a short idle exit so a daemon this module lost track of
+# ends itself.
 SEEDED: dict[str, Any] = {
     "publish": {"mode": "review"},
     "hooks": {"capture": "off"},
-    "team": {"publicFallback": "off"},
+    "team": {"publicFallback": "on"},
     "loop": {"idle_exit_min": 2},
 }
 HEALTH_TIMEOUT_S = 15.0
@@ -96,7 +98,8 @@ class Source:
 
     @property
     def origins(self) -> tuple[str, ...]:
-        return () if self.shelf_origin is None else (self.shelf_origin,)
+        """The two named origins the arm may reach: the team shelf and the public marketplace."""
+        return tuple(host for host in (self.shelf_origin, self.public_origin) if host is not None)
 
     @property
     def public_origin(self) -> str | None:
