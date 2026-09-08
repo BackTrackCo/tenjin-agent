@@ -547,6 +547,30 @@ denials rather than on the repository, and pnpm 11 running a registry install on
 `pnpm` command of every trial; `618522f` is the task barrier above (`bench1-hooks-smoke-2`),
 which has not yet been rerun.
 
+**Retrieval finding 2026-09-08, run eight: first delivery.** `bench1-hooks-smoke-6` ran on
+`812bbd8` (05:08 UTC, operator machine, `--plumbing --tenjin-source`, non-publishable): 4 of 4
+pass and valid, `verify` agrees, reconciliation matched, sentinels clean, offline held. Seeded
+pieces: 4 published (the convention lesson and the fix lesson, once per seeded trial), 4
+deleted. `off` 2 pass, 39 s and 51 s, 0.19 and 0.25 USD, 11 and 15 turns, 5 and 6 Bash calls,
+234,685 tokens total. `tenjin_seeded` 2 pass, 32 s and 39 s, 0.14 and 0.16 USD, 7 turns each,
+2 Bash calls each, 151,819 tokens total; ratio 0.647 against `off`, not headline eligible.
+
+For the first time the hook delivered a piece. On both seeded attempts the prompt fire's team
+leg returned a strong candidate and the hook injected it (fires table: `prompt`, `hit`,
+`delivered inject:<piece id>`). The delivered piece was the seeded fix lesson, "actorKey: the
+agent half of the key defaults to root", vouched strong on the goal-shaped prompt because its
+body names the prompt's files; the rank-1 title in the leg row was still the teammate's
+convention piece, which was not strong, and the convention lesson was not delivered. No failure
+fire ran the keys leg, because the agent never failed a command after the injection. CLI
+searches by the agent: 0. Public legs 2, hits 0.
+
+Read plainly, this is the fix-reuse story through the prompt path: a teammate published the
+exact fix for this exact failure, the consumer's prompt named the same files, the shelf vouched
+it, and the hook injected it before the first command. It is the easiest possible case and an
+oracle-shaped lesson, n = 2, one task, non-publishable. It proves the funnel end to end and
+says nothing yet about developer token savings on real corpora; the 0.647 ratio is plumbing
+evidence only. The failure path (the keys leg) remains unexercised on this fixture.
+
 ## Cleanup
 
 Every process this package starts leads its own session, and its group is recorded under
