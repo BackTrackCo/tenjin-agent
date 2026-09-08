@@ -1,4 +1,7 @@
-import assert from 'node:assert/strict';
+import { expect, test } from 'vitest';
 import { budgetMs } from '../src/budget.mjs';
-assert.equal(budgetMs('3200'), 2500);
-console.log('PASS budget');
+import { cases } from './support/cases.mjs';
+
+test.each(cases)('budgetMs case %#', ({ args, expected }) => {
+  expect(budgetMs(...args)).toBe(expected);
+});

@@ -1,10 +1,7 @@
-import assert from 'node:assert/strict';
+import { expect, test } from 'vitest';
 import { firstStrong } from '../src/candidate.mjs';
-assert.equal(
-  firstStrong([
-    { id: 'a', strong: false },
-    { id: 'b', strong: true },
-  ]).id,
-  'b',
-);
-console.log('PASS candidate');
+import { cases } from './support/cases.mjs';
+
+test.each(cases)('firstStrong case %#', ({ args, expected }) => {
+  expect(firstStrong(...args)).toEqual(expected);
+});

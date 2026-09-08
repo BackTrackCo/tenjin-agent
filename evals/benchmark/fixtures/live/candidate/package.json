@@ -4,5 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "node scripts/all-tests.mjs"
+  },
+  "devDependencies": {
+    "vitest": "3.2.4"
   }
 }

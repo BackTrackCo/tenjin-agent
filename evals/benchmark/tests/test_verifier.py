@@ -217,7 +217,10 @@ class VerifierRegistryTest(unittest.TestCase):
         for task in ("actor", "budget", "candidate", "slug"):
             with self.subTest(task=task):
                 spec = verifier.lookup(f"node_test_{task}")
-                roots = artifact.create(self.run_dir, f"trial-{task}", live / task)
+                # Only the unfixed source matters here; the 24 MB vitest tree is not copied four times.
+                source_only = self.dir / f"source-{task}"
+                shutil.copytree(live / task / "src", source_only / "src")
+                roots = artifact.create(self.run_dir, f"trial-{task}", source_only)
                 roots.mark_stopped()
                 verdict = verifier.run(spec, roots.hidden_copy(spec.hidden_layer), self.run_dir)
                 self.assertEqual((verdict.outcome, verdict.exit_code), ("fail", 1))

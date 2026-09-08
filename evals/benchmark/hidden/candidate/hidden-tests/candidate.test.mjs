@@ -2,8 +2,10 @@ import assert from 'node:assert/strict';
 import { firstStrong } from '../src/candidate.mjs';
 assert.equal(
   firstStrong([
-    { id: 'a', strong: false },
-    { id: 'b', strong: true },
+    { id: 'x', strong: false },
+    { id: 'y', strong: false },
+    { id: 'z', strong: true },
   ]).id,
-  'b',
+  'z',
 );
+assert.equal(firstStrong([]), null);

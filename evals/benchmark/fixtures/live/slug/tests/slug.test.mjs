@@ -1,4 +1,7 @@
-import assert from 'node:assert/strict';
+import { expect, test } from 'vitest';
 import { repoSlug } from '../src/slug.mjs';
-assert.equal(repoSlug(' BackTrackCo/Tenjin.git '), 'backtrackco/tenjin');
-console.log('PASS slug');
+import { cases } from './support/cases.mjs';
+
+test.each(cases)('repoSlug case %#', ({ args, expected }) => {
+  expect(repoSlug(...args)).toBe(expected);
+});
