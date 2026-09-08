@@ -3242,12 +3242,14 @@ describe('runInstall: harness hooks', () => {
       wrote: boolean;
       url?: string;
       daemon?: { pid: number; port: number; version: string };
+      activation?: string;
       removed: string[];
       skipped?: string;
       fix?: string;
-    };
+    }[];
   };
-  const hooksOf = (d: unknown) => (d as HooksData).hooks;
+  /** The one outcome a single-harness run reports. */
+  const hooksOf = (d: unknown) => (d as HooksData).hooks[0]!;
 
   async function settings(): Promise<Record<string, unknown>> {
     const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
@@ -3338,10 +3340,57 @@ describe('runInstall: harness hooks', () => {
     expect(await persistedHooks()).toBeUndefined();
   });
 
-  it('is not wired for a Codex-only install, and names no Claude settings file', async () => {
+  it('a Codex-only install writes hooks.json under ~/.codex and no Claude settings file', async () => {
     const res = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
+    expect((res.data as HooksData).hooks).toHaveLength(1);
     const h = hooksOf(res.data);
-    expect(h.skipped).toBe('harness-not-claude');
+    expect(h).toMatchObject({ harness: 'codex', entries: 7, wrote: true });
+    expect(h.skipped).toBeUndefined();
+    expect(h.path).toBe(join(home, '.codex', 'hooks.json'));
+    expect(h.url).toBeUndefined();
+    expect(h.activation).toContain('/hooks');
+    expect(existsSync(join(data, 'hooks'))).toBe(true);
+    expect(existsSync(claudeSettingsPath(home))).toBe(false);
+    const file = JSON.parse(await readFile(h.path ?? '', 'utf8')) as {
+      hooks: Record<string, unknown[]>;
+    };
+    expect(Object.keys(file.hooks).sort()).toEqual(
+      [
+        'PostToolUse',
+        'PreToolUse',
+        'SessionStart',
+        'Stop',
+        'SubagentStart',
+        'SubagentStop',
+        'UserPromptSubmit',
+      ].sort(),
+    );
+    expect(JSON.stringify(file)).not.toContain(DAEMON_PORT.toString());
+  });
+
+  it('both harnesses: one outcome each, one daemon, and the Codex trust step in the walkthrough', async () => {
+    const res = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const hooks = (res.data as HooksData).hooks;
+    expect(hooks.map((h) => [h.harness, h.entries])).toEqual([
+      ['claude', 11],
+      ['codex', 7],
+    ]);
+    expect(hooks[0]?.daemon?.port).toBe(hooks[1]?.daemon?.port);
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('hooks        Claude Code: 7 enabled');
+    expect(text).toContain('hooks        Codex: 7 enabled');
+    expect(text).toContain('Restart Claude Code to load the hooks.');
+    expect(text).toContain('run /hooks');
+  });
+
+  it('a skills-only target has no hook harness and says so', async () => {
+    const res = await runInstall({ harness: ['shared'] }, makeCtx({ json: true }), deps());
+    const h = hooksOf(res.data);
+    expect(h.skipped).toBe('no-hook-harness');
     expect(h.path).toBeUndefined();
     expect(existsSync(join(data, 'hooks'))).toBe(false);
   });
@@ -3503,11 +3552,11 @@ describe('runInstall: wallet creation is the default', () => {
     );
     const d = res.data as {
       permissions: { wired: { added: string[] } };
-      hooks: { entries: number };
+      hooks: { entries: number }[];
     };
     // The default mode is auto, so the publish rule rides along with the tier.
     expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
-    expect(d.hooks.entries).toBe(11);
+    expect(d.hooks[0]?.entries).toBe(11);
   });
 
   it('never writes a passphrase to a plain file', async () => {
@@ -3598,7 +3647,7 @@ describe('runInstall: wallet creation is the default', () => {
 });
 
 describe('runInstall: --no-hooks', () => {
-  const hooksOf = (d: unknown) => (d as { hooks: { skipped?: string; mode: string } }).hooks;
+  const hooksOf = (d: unknown) => (d as { hooks: { skipped?: string; mode: string }[] }).hooks[0]!;
 
   it('registers nothing and writes no config', async () => {
     const res = await runInstall(
@@ -3685,7 +3734,7 @@ describe('runInstall --refresh', () => {
       makeCtx(),
       refreshDeps({ startDaemon: startAt(40_002) }),
     );
-    const hooks = (result.data as { hooks: { entries: number; url: string } }).hooks;
+    const hooks = (result.data as { hooks: { entries: number; url: string }[] }).hooks[0]!;
     expect(hooks.entries).toBe(11);
     expect(hooks.url).toBe('http://127.0.0.1:40002/hook/claude');
     const urls = hookEntries(await readSettings())
@@ -3888,7 +3937,7 @@ describe('runInstall --refresh', () => {
     const before = existsSync(settingsPath()) ? await readFile(settingsPath(), 'utf8') : null;
 
     const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
-    expect((result.data as { hooks: { skipped?: string } }).hooks.skipped).toBe('declined');
+    expect((result.data as { hooks: { skipped?: string }[] }).hooks[0]?.skipped).toBe('declined');
     const after = existsSync(settingsPath()) ? await readFile(settingsPath(), 'utf8') : null;
     expect(after).toBe(before);
     // And no daemon was materialized for it either.

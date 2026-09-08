@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
 import { openLoopDb } from '../hooks/store';
 import { claudeSettingsPath, FREE_VERB_RULES, PUBLISH_MODE_RULE } from '../lib/harness-permissions';
-import { writeClaudeHooks } from '../lib/harness-hooks';
+import { writeHooks } from '../lib/harness-hooks';
+import { claudeAdapter } from '../adapters/claude';
+import { codexAdapter } from '../adapters/codex';
 import type { DaemonStart } from '../daemon/control';
 import {
   daemonPidPath,
@@ -77,7 +79,7 @@ async function fakeStart(dataDir: string): Promise<DaemonStart> {
 }
 
 const wire = (): Promise<unknown> =>
-  writeClaudeHooks({ homeDir: home, dataDir: data, start: fakeStart });
+  writeHooks({ adapter: claudeAdapter, homeDir: home, dataDir: data, env: {}, start: fakeStart });
 
 /** A settings.json holding every hook entry we write and our rules, plus a
  *  stranger's on two of the same events. */
@@ -437,6 +439,79 @@ describe('runUninstall — operator files in our directories', () => {
     const { report } = await run();
     expect(existsSync(skillDir)).toBe(false);
     expect(report.skills).toEqual([skillDir]);
+  });
+});
+
+describe('runUninstall — the Codex hooks file', () => {
+  const codexPath = (): string => join(home, '.codex', 'hooks.json');
+  const wireCodex = (): Promise<unknown> =>
+    writeHooks({ adapter: codexAdapter, homeDir: home, dataDir: data, env: {}, start: fakeStart });
+
+  it('removes only the entries it wrote and reports the file beside settings.json', async () => {
+    await seedSettings();
+    await wireCodex();
+    const before = JSON.parse(await readFile(codexPath(), 'utf8')) as {
+      hooks: Record<string, unknown[]>;
+    };
+    before.hooks.Stop = [
+      { hooks: [{ type: 'command', command: 'node /other/stop.mjs' }] },
+      ...(before.hooks.Stop ?? []),
+    ];
+    await writeFile(codexPath(), JSON.stringify(before, null, 2));
+
+    const { report, text } = await run();
+    const real = await realpath(codexPath());
+    const file = report.hookFiles.find((f) => f.path === real);
+    expect(file?.hooks.sort()).toEqual(
+      [
+        'PostToolUse',
+        'PreToolUse',
+        'SessionStart',
+        'Stop',
+        'SubagentStart',
+        'SubagentStop',
+        'UserPromptSubmit',
+      ].sort(),
+    );
+    const after = JSON.parse(await readFile(codexPath(), 'utf8')) as {
+      hooks?: Record<string, unknown[]>;
+    };
+    // Theirs stays, alone; every event we emptied is gone.
+    expect(after.hooks).toEqual({
+      Stop: [{ hooks: [{ type: 'command', command: 'node /other/stop.mjs' }] }],
+    });
+    expect(report.settings.hooks.sort()).toEqual(['PreToolUse', 'SessionStart', 'Stop']);
+    expect(text).toContain(`Stop hook entry in ${real}`);
+  });
+
+  it('reports an absent hooks.json as absent and never creates one', async () => {
+    const { report } = await run();
+    expect(report.hookFiles).toEqual([
+      { path: codexPath(), hooks: [], rules: [], skipped: 'absent' },
+    ]);
+    expect(existsSync(codexPath())).toBe(false);
+  });
+
+  it('honours CODEX_HOME', async () => {
+    const codexHome = join(home, 'elsewhere');
+    await writeHooks({
+      adapter: codexAdapter,
+      homeDir: home,
+      dataDir: data,
+      env: { CODEX_HOME: codexHome },
+      start: fakeStart,
+    });
+    const res = await runUninstall(makeCtx(), {
+      home,
+      stop: () => Promise.resolve({ state: 'not-running' as const }),
+      env: { CODEX_HOME: codexHome },
+    });
+    const report = res.data as UninstallReport;
+    expect(report.hookFiles[0]?.hooks).toHaveLength(7);
+    const after = JSON.parse(await readFile(join(codexHome, 'hooks.json'), 'utf8')) as {
+      hooks?: unknown;
+    };
+    expect(after.hooks).toBeUndefined();
   });
 });
 

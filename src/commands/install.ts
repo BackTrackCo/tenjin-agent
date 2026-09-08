@@ -57,8 +57,9 @@ import {
   wireFreeVerbAllowlist,
 } from '../lib/harness-permissions';
 import type { PermissionsResult } from '../lib/harness-permissions';
-import { hasClaudeHooks, hooksSkipped, writeClaudeHooks } from '../lib/harness-hooks';
-import type { WriteClaudeHooksOptions } from '../lib/harness-hooks';
+import { hasHooks, hooksSkipped, writeHooks } from '../lib/harness-hooks';
+import type { WriteHooksOptions } from '../lib/harness-hooks';
+import { ADAPTERS, adapterFor } from '../adapters/registry';
 import { healWiredSkills } from '../lib/skill-heal';
 import type { HealOutcome } from '../lib/skill-heal';
 import type { HooksResult } from '../lib/harness-hooks';
@@ -251,7 +252,7 @@ export interface InstallDeps {
    */
   walletPassphrase?: PassphraseOverrides;
   /** Steps 1-3 of the hook cutover: bundles, token, a healthy daemon. */
-  startDaemon?: WriteClaudeHooksOptions['start'];
+  startDaemon?: WriteHooksOptions['start'];
 }
 
 /**
@@ -375,19 +376,27 @@ async function runInstallRefresh(
     ...(deps.skillsSourceDir !== undefined ? { skillsSourceDir: deps.skillsSourceDir } : {}),
   });
 
-  // THE SAME WRITER `install` RUNS, gated on what is already there. There is one
-  // converging write now (lib/harness-hooks.ts) and it always writes the whole
-  // entry set, so the only thing that keeps a refresh from becoming an install is
-  // this question: a machine with no entry of ours has nothing to converge, and
-  // an unattended upgrade may not materialize a surface nobody asked for.
-  const wired = await hasClaudeHooks(home, ctx.dataDir);
-  const hooks = wired
-    ? await writeClaudeHooks({
-        homeDir: home,
-        dataDir: ctx.dataDir,
-        ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
-      })
-    : hooksSkipped('claude', home, ctx.dataDir, 'declined');
+  // THE SAME WRITER `install` RUNS, per harness, gated on what is already
+  // there. There is one converging write (lib/harness-hooks.ts) and it always
+  // writes the whole entry set, so the only thing that keeps a refresh from
+  // becoming an install is this question: a machine with no entry of ours has
+  // nothing to converge, and an unattended upgrade may not materialize a
+  // surface nobody asked for.
+  const hooks: HooksResult[] = [];
+  for (const adapter of Object.values(ADAPTERS)) {
+    hooks.push(
+      (await hasHooks(adapter, home, ctx.dataDir, env))
+        ? await writeHooks({
+            adapter,
+            homeDir: home,
+            dataDir: ctx.dataDir,
+            env,
+            ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
+          })
+        : hooksSkipped(adapter.id, home, ctx.dataDir, 'declined', env),
+    );
+  }
+  const wired = hooks.some((h) => h.skipped !== 'declined');
 
   // `pending` is exactly the set a real install WOULD add, which is exactly the
   // set this run must not. Reported so the operator can see what an explicit
@@ -431,8 +440,9 @@ async function runInstallRefresh(
   // hook counter at zero, so a machine whose hooks directory is a symlink can
   // reach `!touched` on the strength of the refusal itself and report "nothing
   // is installed here" over a machine where plenty is. The specific reason wins.
-  if (hooks.warning !== undefined) {
-    throw new CliError('REFUSED', hooks.warning, {
+  const refused = hooks.find((h) => h.warning !== undefined);
+  if (refused?.warning !== undefined) {
+    throw new CliError('REFUSED', refused.warning, {
       fix: 'Run `tenjin install` to bring the skills and hook scripts up to this version.',
       details: data,
     });
@@ -453,7 +463,7 @@ async function runInstallRefresh(
  * this never has to describe a refresh that did not happen.
  */
 function refreshLines(
-  hooks: HooksResult,
+  hooks: HooksResult[],
   skills: HealOutcome,
   permissions: { pending: string[] },
   dataDir: string,
@@ -464,13 +474,15 @@ function refreshLines(
       ? '- skills: the wired CLI skills match this build'
       : `- skills: left alone (${skills.reason ?? 'nothing to heal'})`,
   );
-  lines.push(
-    hooks.skipped !== undefined
-      ? `- hooks: left alone (${hooks.skipped})`
-      : hooks.wrote
-        ? `- hooks: rewrote ${hooks.entries} entries in ${hooks.path ?? 'settings'} against port ${hooks.daemon?.port ?? '?'}`
-        : `- hooks: ${hooks.entries} entries already current in ${hooks.path ?? 'settings'}`,
-  );
+  for (const h of hooks) {
+    lines.push(
+      h.skipped !== undefined
+        ? `- hooks (${h.harness}): left alone (${h.skipped})`
+        : h.wrote
+          ? `- hooks (${h.harness}): rewrote ${h.entries} entries in ${h.path ?? 'settings'} against port ${h.daemon?.port ?? '?'}`
+          : `- hooks (${h.harness}): ${h.entries} entries already current in ${h.path ?? 'settings'}`,
+    );
+  }
   if (permissions.pending.length > 0) {
     lines.push(
       `- permissions: ${permissions.pending.length} rule(s) this version would add were NOT written; run \`tenjin install\` to grant them.`,
@@ -752,7 +764,8 @@ interface WalkthroughState {
   harnesses: HarnessResult[];
   publishMode: PublishModeSelection;
   permissions: PermissionsResult;
-  hooks: HooksResult;
+  /** One outcome per harness with a hook registrar, or one skip when none was targeted. */
+  hooks: HooksResult[];
   /** Arms answering after this run; every one is on unless config turned it off. */
   hooksEnabled: number;
   wallet: WalletOutcome;
@@ -787,7 +800,14 @@ function rows(io: Io, s: WalkthroughState): string[] {
   const entries: [string, string][] = [
     ['skills', skillsValue(s.harnesses)],
     ['permissions', permissionsValue(s.permissions)],
-    ['hooks', hooksValue(s.hooks, s.hooksEnabled)],
+    // One row per wired harness, named in the value when there are several,
+    // so a Claude-only machine keeps the row it had and the columns hold.
+    ...s.hooks.map((h): [string, string] => [
+      'hooks',
+      s.hooks.length > 1
+        ? `${harnessLabel(h.harness as Harness)}: ${hooksValue(h, s.hooksEnabled)}`
+        : hooksValue(h, s.hooksEnabled),
+    ]),
     ['publishing', `${s.publishMode.value} - ${modeBlurb(s.publishMode.value)}`],
     ['wallet', walletValue(s.wallet)],
   ];
@@ -810,9 +830,13 @@ function harnessNames(harnesses: HarnessResult[]): string {
  * operator who does not restart gets no hook activity at all and nothing telling
  * them why; a run that registered none has nothing to restart for.
  */
-function undoLine(h: HooksResult): string {
-  const restart = h.entries > 0 ? 'Restart Claude Code to load the hooks. ' : '';
-  return `${restart}Undo everything: tenjin uninstall`;
+/** How each wired harness picks the entries up: a restart, or the trust
+ *  step its registrar names. Then the one way back out. */
+function undoLine(hooks: HooksResult[]): string {
+  const steps = hooks
+    .filter((h) => h.entries > 0)
+    .map((h) => h.activation ?? `Restart ${harnessLabel(h.harness as Harness)} to load the hooks.`);
+  return `${steps.map((s) => `${s} `).join('')}Undo everything: tenjin uninstall`;
 }
 
 /**
@@ -884,7 +908,7 @@ function hooksValue(h: HooksResult, enabled: number): string {
   if (h.skipped === undefined) {
     return `${enabled} enabled; change: tenjin hooks disable <arm>`;
   }
-  if (h.skipped === 'harness-not-claude') return 'not wired (Claude Code only)';
+  if (h.skipped === 'no-hook-harness') return 'not wired (no hook-capable harness targeted)';
   if (h.skipped === 'dry-run') return `${h.entries} entries unchanged (dry run)`;
   if (h.skipped === 'declined') return 'none registered (--no-hooks)';
   if (h.skipped === 'daemon-down') {
@@ -920,7 +944,7 @@ function problemLines(io: Io, s: WalkthroughState): string[] {
   // Sanitized for the same reason doctor sanitizes its own detail: these strings
   // embed a V8 JSON parse error, and V8 quotes the offending input, so bytes out
   // of the operator's settings file reach the terminal through them.
-  for (const w of [s.hooks.warning, s.wallet.warning, s.permissions.warning]) {
+  for (const w of [...s.hooks.map((h) => h.warning), s.wallet.warning, s.permissions.warning]) {
     if (w !== undefined) lines.push(paint(io, 'yellow', `! ${sanitizeForTerminal(w)}`));
   }
   return lines;
@@ -1345,24 +1369,35 @@ async function resolveHooks(args: {
   deps: InstallDeps;
   noHooks: boolean;
   dryRun: boolean;
-}): Promise<HooksResult> {
+}): Promise<HooksResult[]> {
   const { plans, home, ctx, deps, noHooks, dryRun } = args;
   const dataDir = ctx.dataDir;
+  const env = deps.env ?? process.env;
 
-  if (!plans.some((p) => p.harness === 'claude')) {
-    const harness = plans[0]?.harness ?? 'shared';
-    return hooksSkipped(harness, home, dataDir, 'harness-not-claude');
+  // Every targeted harness with an adapter gets its own entries and its own
+  // outcome; a skills-only target (`shared`) has nothing to register.
+  const adapters = plans.map((p) => adapterFor(p.harness)).filter((a) => a !== undefined);
+  if (adapters.length === 0) {
+    return [hooksSkipped(plans[0]?.harness ?? 'shared', home, dataDir, 'no-hook-harness', env)];
   }
-  // `--no-hooks` is a decision about THIS RUN and writes no config, so a later
-  // bare re-run wires them.
-  if (noHooks) return hooksSkipped('claude', home, dataDir, 'declined');
-  if (dryRun) return hooksSkipped('claude', home, dataDir, 'dry-run');
-
-  return writeClaudeHooks({
-    homeDir: home,
-    dataDir,
-    ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
-  });
+  const out: HooksResult[] = [];
+  for (const adapter of adapters) {
+    // `--no-hooks` is a decision about THIS RUN and writes no config, so a
+    // later bare re-run wires them.
+    if (noHooks) out.push(hooksSkipped(adapter.id, home, dataDir, 'declined', env));
+    else if (dryRun) out.push(hooksSkipped(adapter.id, home, dataDir, 'dry-run', env));
+    else
+      out.push(
+        await writeHooks({
+          adapter,
+          homeDir: home,
+          dataDir,
+          env,
+          ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
+        }),
+      );
+  }
+  return out;
 }
 
 // --- Detection + planning --------------------------------------------------------

@@ -48,6 +48,10 @@ import {
   MODE_GATED_RULES,
 } from '../lib/harness-permissions';
 import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
+import { ADAPTERS } from '../adapters/registry';
+import { codexHome } from '../adapters/codex';
+import { trustedEntries } from '../lib/codex-trust';
+import { existsSync } from 'node:fs';
 import { health, readPid } from '../hooks/shim';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
@@ -272,7 +276,7 @@ export async function collectDoctorChecks(
   // Silent (nothing pushed) on a machine with no hook entries of ours at all;
   // see checkHooks.
   built.push(
-    ...(await checkHooks(home, ctx.dataDir)),
+    ...(await checkHooks(home, ctx.dataDir, env, deps.openLoopDb ?? openLoopDbForCli)),
     await checkSkills(
       home,
       which,
@@ -1182,51 +1186,110 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
 }
 
 /**
- * Two facts about the loop's wiring, and both are silent on a machine with no
- * entry of ours: a fresh machine that never ran `tenjin install` is the skills
- * check's business, not this one's.
+ * The loop's wiring, per harness, and silent on a machine with no entry of
+ * ours: a fresh machine that never ran `tenjin install` is the skills check's
+ * business, not this one's.
  *
  * `daemon` is the comparison that fails silently in the wild: the URL in
- * settings.json carries the port the daemon had bound WHEN INSTALL RAN, and a
- * daemon that later lost that port (a pinned `loop.port` changed, a foreign
- * listener took it, a second profile) comes back on another one. Claude Code
- * then posts every tool fire into a closed port and reports a non-blocking
- * `HTTP hook error` the operator never sees. `/health` tells the two apart.
+ * Claude's settings.json carries the port the daemon had bound WHEN INSTALL
+ * RAN, and a daemon that later lost that port (a pinned `loop.port` changed, a
+ * foreign listener took it, a second profile) comes back on another one.
+ * Claude Code then posts every tool fire into a closed port and reports a
+ * non-blocking `HTTP hook error` the operator never sees. `/health` tells the
+ * two apart. A Codex entry names no port (it runs the shim, which finds the
+ * daemon itself), so there the daemon is checked through `daemon.pid` alone.
  *
- * `entries` is the file itself: how many of ours are registered, and its mode,
- * because that file now carries the daemon token as a literal — a settings.json
- * anything on the machine can read is a token anything on the machine can
- * present.
+ * `entries` is Claude's file itself: how many of ours are registered, and its
+ * mode, because that file carries the daemon token as a literal.
+ *
+ * `codex hooks` keeps three facts apart that a file listing would blur:
+ * configured (entries of ours in hooks.json), trusted (a `[hooks.state]`
+ * record in config.toml, which only the operator's `/hooks` writes), and
+ * observed (fires the daemon actually recorded from Codex this week). A
+ * configured entry is not an active one until Codex has been told to trust it.
  */
-async function checkHooks(homeDir: string, dataDir: string): Promise<BuiltCheck[]> {
-  const { port, entries } = await registeredHooks(homeDir, dataDir);
-  if (port === null) return [];
-  const path = claudeSettingsPath(homeDir);
-  const mode = await settingsMode(homeDir);
-  const wide = mode !== null && (mode & 0o077) !== 0;
-  return [
-    await checkDaemon(port, dataDir),
-    {
+async function checkHooks(
+  homeDir: string,
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  open: typeof openLoopDbForCli,
+): Promise<BuiltCheck[]> {
+  const out: BuiltCheck[] = [];
+  const claude = await registeredHooks(ADAPTERS.claude, homeDir, dataDir, env);
+  const codex = await registeredHooks(ADAPTERS.codex, homeDir, dataDir, env);
+  if (claude.entries === 0 && codex.entries === 0) return out;
+  out.push(await checkDaemon(claude.port, dataDir));
+  if (claude.entries > 0) {
+    const path = claudeSettingsPath(homeDir);
+    const mode = await settingsMode(homeDir);
+    const wide = mode !== null && (mode & 0o077) !== 0;
+    out.push({
       result: wide
         ? {
             name: 'entries',
             status: 'warn',
             required: false,
-            detail: `${entries} in ${path}, mode ${mode.toString(8).padStart(3, '0')} — wider than 0600, and it carries the daemon token`,
+            detail: `${claude.entries} in ${path}, mode ${mode.toString(8).padStart(3, '0')} — wider than 0600, and it carries the daemon token`,
             fix: `chmod 600 ${path}`,
           }
         : {
             name: 'entries',
             status: 'ok',
             required: false,
-            detail: `${entries} in ${path}`,
+            detail: `${claude.entries} in ${path}`,
           },
-    },
-  ];
+    });
+  }
+  if (codex.entries > 0) {
+    const trust = await trustedEntries(codexHome(homeDir, env), codex.path, codex.positions);
+    const observed = codexFiresThisWeek(dataDir, open);
+    const facts = `${codex.entries} in ${codex.path}; ${trust.trusted} of ${codex.entries} trusted in Codex; ${observed} fire${observed === 1 ? '' : 's'} observed in ${WEEK_DAYS}d`;
+    out.push({
+      result:
+        trust.untrusted.length > 0
+          ? {
+              name: 'codex hooks',
+              status: 'warn',
+              required: false,
+              detail: `${facts} — Codex runs an entry only once it is trusted`,
+              fix: 'Open Codex, run /hooks, and enable the tenjin entries.',
+            }
+          : { name: 'codex hooks', status: 'ok', required: false, detail: facts },
+    });
+  }
+  return out;
 }
 
-async function checkDaemon(port: number, dataDir: string): Promise<BuiltCheck> {
-  const live = await health(port);
+const WEEK_DAYS = 7;
+
+/** Fires the daemon recorded from Codex in the last week; 0 when there is no
+ *  ledger yet or it cannot be opened, which the `store` check reports itself. */
+function codexFiresThisWeek(dataDir: string, open: typeof openLoopDbForCli): number {
+  if (!existsSync(loopDbPath(dataDir))) return 0;
+  try {
+    const db = open(dataDir);
+    try {
+      const row = db
+        .prepare("SELECT count(*) AS n FROM fires WHERE harness = 'codex' AND at >= ?")
+        .get(Date.now() - WEEK_DAYS * 24 * 60 * 60 * 1000) as { n?: unknown } | undefined;
+      return typeof row?.n === 'number' ? row.n : 0;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * The daemon behind the entries. With a port from Claude's `http` entries the
+ * check is whether THAT port answers; with none (Codex alone), whether the
+ * daemon `daemon.pid` names answers at all.
+ */
+async function checkDaemon(port: number | null, dataDir: string): Promise<BuiltCheck> {
+  const pid = readPid(dataDir);
+  const probe = port ?? pid?.port ?? null;
+  const live = probe === null ? null : await health(probe);
   if (live !== null && live.data_dir === dataDir) {
     return {
       result: {
@@ -1237,15 +1300,14 @@ async function checkDaemon(port: number, dataDir: string): Promise<BuiltCheck> {
       },
     };
   }
-  const pid = readPid(dataDir);
-  const moved = pid !== null && pid.port !== port;
+  const moved = port !== null && pid !== null && pid.port !== port;
   const bundles = await hookBundlesPresent(dataDir);
   return {
     result: {
       name: 'daemon',
       status: 'warn',
       required: false,
-      detail: `the entries point at 127.0.0.1:${port}, but ${moved ? `the daemon is on port ${pid.port} instead` : 'daemon not running'}${bundles ? '' : ', and no daemon bundle is installed'}; every hook fire is a silent HTTP error until it is back`,
+      detail: `${port === null ? 'the entries run the shim' : `the entries point at 127.0.0.1:${port}`}, but ${moved ? `the daemon is on port ${pid.port} instead` : 'daemon not running'}${bundles ? '' : ', and no daemon bundle is installed'}; every hook fire is a silent ${port === null ? 'daemon-down line' : 'HTTP error'} until it is back`,
       fix: moved ? 'tenjin install' : 'tenjin daemon start',
     },
   };
