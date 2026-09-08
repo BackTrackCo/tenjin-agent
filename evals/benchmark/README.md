@@ -106,9 +106,10 @@ hashes is skipped. No model, no network, no spend.
 the trials where a fresh verdict disagrees with the recorded one.
 
 `summary` reads a finished `report.json` as text: every arm with its pass rate and tokens, the
-token ratio against the baseline with its interval, and the attempt outcomes. It computes
-nothing. It prints every arm rather than the best one, because an arm shown alone is a claim
-rather than a result.
+delivery legs by origin (`public legs: N, hits: M, timeouts: K; requests to an unknown origin:
+J`), the token ratio against the baseline with its interval, and the attempt outcomes. It
+computes nothing. It prints every arm rather than the best one, because an arm shown alone is a
+claim rather than a result, and an arm with no scored attempt prints `none` for its rate.
 
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only; `report.guard` refuses anything else. It also carries the run's
@@ -327,27 +328,44 @@ config only; it is never logged, printed, or hashed.
 public marketplace (`publicShelfUrl`, the CLI's default public base URL), and both are added to
 the origins the attestation has to list, so each is distinguishable from an unknown one. Public
 fallback stays on, as the product ships it and as Bench-3's dedicated disposable shelf runs it
-per the token-savings plan, so a team miss may reach the public marketplace. Every delivery leg
-is classified by its `shelf` column into `delivery.shelves`: `team` (a team-shelf leg), `public`
-(a public-fallback leg), or `other` (a shelf value this package cannot name); a `skipped` leg
-reached nothing and is not counted. A `team` or `public` leg is the product under test; an
-`other` leg is a request to an unknown origin and counts as a public request for the sentinel.
+per the token-savings plan, so a team miss may reach the public marketplace. Under a seeded
+config the reachable set is therefore known by construction, and every delivery leg falls in a
+class by its `shelf` column: `team` (a team-shelf leg), `public` (a public-fallback leg, and a
+`keys` leg, which the public marketplace host also serves), `local` (the local leg, which never
+leaves the process and is not a request), or `other` (a shelf value outside the product's own
+union, so an origin outside the known set); a `skipped` leg reached nothing and is not counted.
+The record keeps the raw per-shelf counts in `delivery.shelves`, the class counts in
+`delivery.classes`, and a public summary in `delivery.public` (`legs`, `hits`, `timeouts`,
+`no_answer`), and each leg's own `status` and `outcome` travel with it. Only `other` reaches
+the sentinel's `public_requests` and invalidates. Public-origin legs are counted, not refused:
+the report's `origins` block and `summary` read them apart, so the plan's canary gate is two
+counts, unknown requests zero and public hits zero, each judged on its own.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-1`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-2`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
 0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
 exact version in `package.json`, a committed `pnpm-lock.yaml`, and a committed hoisted
 `node_modules` holding vitest and its transitive dependencies only (about 24 MB, 780 files,
 darwin-arm64 natives, which is the `operator-machine` image pin), so a trial installs nothing and
-reaches no network. The package `test` script is the trap: `scripts/all-tests.mjs` never forwards
-its arguments and runs the whole `vitest.config.mjs` set, which includes `unrelated/`, three
-shards that fail loudly, so `pnpm test -- tests/actor.test.mjs` fails whatever the source says.
-`pnpm exec vitest run tests/actor.test.mjs` is the only command that runs exactly the one file
-and passes once `src/actor.mjs` is fixed, and `node tests/actor.test.mjs` fails because the test
-imports `vitest`. Bash is pinned to `pnpm test:*` (the trap) and `pnpm exec vitest run:*` (the
-lesson); `node` and `pnpm` come from the inherited `PATH`. The prompt states the task without
-the lesson: "Run only that one test file" is the whole instruction, and no phrase from the shelf
-piece appears in the prompt, the fixture, or the test name.
+reaches no network; `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
+otherwise runs a registry install before the first `pnpm exec` or `pnpm run` in a fresh tree,
+which is what every trial of the second smoke did before its first test ran. The barrier is the
+repository, not the permission pin. Bash is `pnpm:*`, `npx:*`, `node:*`, `ls:*`, and `cat:*`,
+no network tool, and each natural command fails for a repository reason: the package `test`
+script is the trap, `scripts/all-tests.mjs` never forwards its arguments and runs the whole
+`vitest.config.mjs` set, which includes `unrelated/`, three shards that fail loudly, so `pnpm
+test -- tests/actor.test.mjs` fails whatever the source says; the vitest config itself refuses
+to load unless `npm_config_user_agent` starts with `pnpm/`, printing "this repository's tests
+run through pnpm; see the repository convention", so `npx vitest run tests/actor.test.mjs`,
+`node node_modules/vitest/vitest.mjs run ...`, and `./node_modules/.bin/vitest run ...` exit 1
+without a test running (that is the `only-allow pnpm` convention moved to where a test run
+meets it, and the message names the convention, never the command that satisfies it); and
+`node tests/actor.test.mjs` fails because the test imports `vitest`. `pnpm exec vitest run
+tests/actor.test.mjs` and `pnpm vitest run tests/actor.test.mjs` carry the pnpm agent, run
+exactly the one file, and pass once `src/actor.mjs` is fixed. `node`, `pnpm`, and `npx` come
+from the inherited `PATH`. The prompt states the task without the lesson: "Run only that one
+test file" is the whole instruction, and no phrase from the shelf piece appears in the prompt,
+the fixture, or the test name.
 
 **Discovery.** The fix has to be learned from a run. `tests/actor.test.mjs` takes its cases
 from `tests/support/cases.mjs`, where they are a gzip-and-base64 blob decoded at import, so
@@ -399,7 +417,33 @@ test passed on the edit alone; the fixture of that version had no Vitest at all,
 command could not have worked even if injected. Bench-0's prompt phrase had been carrying the
 task. A task must force the lesson's failure mode without naming the lesson: the only green path
 is the lesson's command, the fix needs a run to discover, and the verifier requires the run.
-`bench1-hooks-smoke-1` above is that redesign; it has not yet been rerun.
+`bench1-hooks-smoke-1` was that redesign.
+
+**Retrieval finding 2026-09-08, second run.** `bench1-hooks-smoke-1` ran on `ab116b5` and all
+four attempts came back invalid, which is where the two Bench-1 bugs below were found. The
+product facts first. The team leg missed on the correct top candidate for the same question a
+third consecutive time (calibration `hybrid-v1`, the pnpm lesson again), and now the tool-failure
+fires missed too: each of them sent a `keys` leg (184 to 1418 ms) and a `local` leg (0 to 1 ms),
+both `miss`. One public leg timed out (`status: timeout`, `outcome: no-answer`, 2353 ms). No piece
+was delivered; the hooks injected only the session-start primer and the Stop-hook publish
+prompt. That is Bench-4 input and grader-calibration evidence. The task facts: `off` never
+solved the task in either attempt (10 and 14 turns, 0.87 and 0.91 USD, stopped on the budget
+while it tried `npx vitest run` and `./node_modules/.bin/vitest`, both denied by the pin) and
+`tenjin_seeded` solved it in both (16 and 19 turns, 0.29 and 0.36 USD, `pnpm exec vitest run`
+after the same two denials, marker written). At n=2 with zero delivery that split is chance or
+the primer's nudge, not a Tenjin result, and it is not a number this package reports.
+
+The two bugs. First, a budget stop was invalid instead of failed: the CLI's
+`error_max_budget_usd` envelope undercounts every category (output 2859 against 29386 in the
+actor rows), `reconcile` called it a mismatch, and a paid failure left the reducer. Fixed in
+`6cc5831`: a capped envelope below the transcript is `envelope_partial`, the attempt is `capped`
+with stop reason `budget` or `turns`, and its spend counts. Second, the sentinel counted the
+`keys` and `local` legs as public requests and invalidated both seeded attempts. Fixed in
+`aa8f88f`: legs are classed as team, public, local, or other, and only `other` invalidates.
+The same run also showed the pin doing the barrier's work, since `off` failed on permission
+denials rather than on the repository, and pnpm 11 running a registry install on the first
+`pnpm` command of every trial; `618522f` is the task barrier above (`bench1-hooks-smoke-2`),
+which has not yet been rerun.
 
 ## Cleanup
 
@@ -436,14 +480,21 @@ recorded in the same ledger and stopped by `process_stop` before the delivery jo
 boundary are injected, so every offline case except the process-group one runs without real
 time.
 
-Two caps, two outcomes. The wall-clock pin ends the attempt as `capped` with `stop_reason`
-`timeout`; the settlement cap (`Runtime.settle_cap_s`) ends a wait for descendants that never
-produced a terminal row as `interrupted`. Both retain the usage observed so far and list the
-native actor ids that never settled in `unresolved_actors` (`''` is the lead). A root that
-exits while a child is live is not a complete attempt.
+Three caps, two outcomes. The wall-clock pin ends the attempt as `capped` with `stop_reason`
+`timeout`; the harness's own budget and turn stops (`error_max_budget_usd`, `error_max_turns`)
+end it as `capped` with `stop_reason` `budget` or `turns`, and that cap outranks the exit code
+the CLI chooses for its own stop; the settlement cap (`Runtime.settle_cap_s`) ends a wait for
+descendants that never produced a terminal row as `interrupted`. All retain the usage observed
+so far and list the native actor ids that never settled in `unresolved_actors` (`''` is the
+lead). A capped attempt is a failed task with its spend, never an invalid one; the verifier runs
+on it too, because its worktree is final, and the verdict is recorded beside the outcome as a
+diagnostic (a pass-with-cap is not a pass). A root that exits while a child is live is not a
+complete attempt.
 
 `pass` and `fail` come from the hidden verifier and nothing else; a verifier exit that is
-neither 0 nor 1 means the measurement broke, so the attempt is `invalid`. An executor exit
+neither 0 nor 1 means the measurement broke, so the attempt is `invalid`. A `capped` attempt
+carries the verifier's verdict as well (`verifier.exit_code`), and `verify` re-reads it against
+that verdict rather than against the cap. An executor exit
 code, a usage or delivery rejection, a symlink escape, and a sentinel hit are all `invalid`
 with a machine-readable reason (`executor:exit_N`, `usage:<code>`, `delivery:<code>`,
 `isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`,
@@ -460,8 +511,10 @@ credential in the disposable home and, when the runner is given a loopback senti
 its origin as `BENCHMARK_PUBLIC_ORIGIN`. Per attempt the runner counts new sentinel hits and
 scans the roots the agent writes to for the canary; either count invalidates the attempt. The
 credential scan proves the secret travelled, not that it was read. A provisioned arm's seeded
-shelf secret is a second canary under the same rule, and a delivery leg to a shelf that is
-neither the seeded team shelf nor the public marketplace is a public request.
+shelf secret is a second canary under the same rule, and a delivery leg to an origin outside
+the seeded set (neither the team shelf, nor the public marketplace and its keys leg, nor the
+local leg) is a public request; a public-origin leg is counted in the record and never
+invalidates.
 
 `artifact.require_isolation` is the live-run gate. A live executor in CI is refused outright.
 A publishable live run needs an `Attestation`: `container` or `vm` kind, a non-empty instance
@@ -494,7 +547,7 @@ rather than the task, so the attempt is `invalid`. The five outcomes stay distin
 | ------------- | --------------------------------------------------- | ------------------- | ---------------------- |
 | `pass`        | the verifier decided, correctly                     | retained            | yes                    |
 | `fail`        | the verifier decided, incorrectly                   | retained            | yes                    |
-| `capped`      | the wall-clock pin or a native budget ended it      | retained, partial   | yes, as a task outcome |
+| `capped`      | the wall-clock pin or a harness cap ended it        | retained, partial   | yes, as a task outcome |
 | `interrupted` | descendants never settled inside the settlement cap | retained, partial   | yes, as a task outcome |
 | `invalid`     | the measurement is incomplete or contradictory      | retained in history | never                  |
 
@@ -588,20 +641,27 @@ synthetic sessions under `fixtures/claude/sessions/`:
 - `completion_state` is `complete` when any row in the group has a `stop_reason` or the
   transcript ends in a `result` envelope; a group cut off by a kill is `partial` and keeps its
   last observed counts.
+- The `result` envelope (`subtype`, `is_error`, `num_turns`, `total_cost_usd`, `usage`,
+  `modelUsage`) must be the last row. `subtype` `error_max_budget_usd` or `error_max_turns`
+  marks the attempt `capped` with stop reason `budget` or `turns`. The CLI writes that envelope
+  before the last requests fold in, so its totals fall below the transcript's; the per-actor
+  rows stay the count and the envelope is kept as partial.
 - A row's actor is its `agentId` when present, else the file's actor. A row in the root file
   with `isSidechain` or `parent_tool_use_id` and no `agentId` is rejected
   (`sidechain_without_agent`); a child file whose rows name another agent is rejected
   (`actor_mismatch`). Root-forwarded child prose in tool results adds nothing; an echo of a
   child request in the root file with identical counts collapses to one record.
-- The `result` envelope (`subtype`, `is_error`, `num_turns`, `total_cost_usd`, `usage`,
-  `modelUsage`) must be the last row. `subtype` in `error_max_turns` or
-  `error_max_budget_usd` marks the attempt `capped`.
 - Reconciliation compares the selected root records with the envelope per category. Statuses:
   `matched` (root records alone), `matched_with_descendants` (envelope also counts child
   requests), `explained_by_side_models` (the remainder equals `modelUsage` for models that
   wrote no root row; kept as an attempt-level `unattributed` value, never apportioned),
-  `mismatch` (the attempt is `invalid` with reason `usage:mismatch`), `no_envelope` (the root
-  did not settle), `envelope_without_usage`. A category either side hides is skipped, not zeroed.
+  `envelope_partial` (a capped envelope at or below the transcript in every category; the
+  records are the count, the envelope's totals stay in `categories`, and the attempt is
+  `capped`, not invalid), `mismatch` (the attempt is `invalid` with reason `usage:mismatch`,
+  cap or no cap, because an envelope above the transcript means a request is missing),
+  `no_envelope` (the root did not settle), `envelope_without_usage`. `envelope` names whether
+  the totals were `complete`, `partial`, or absent. A category either side hides is skipped,
+  not zeroed.
 - Every rejection raises `ClaudeUsageError` with a stable `code` (`malformed_row`,
   `malformed_usage`, `duplicate_request`, `conflicting_records`, `rows_after_result`,
   `session_mismatch`, `tool_use_reused`, `ambiguous_parent`, and the codes above); the runner
@@ -614,8 +674,9 @@ settings, and environment hashes; task, arm, repeat, position; harness and nativ
 actors and parent edges; deduplicated usage, the reconciliation, and auxiliary receipts;
 outcome (`pass` | `fail` | `capped` | `interrupted` | `invalid`) with `invalid_reason` set
 exactly for `invalid`; verifier verdict and patch hash; stop reason (`exit` | `timeout` |
-`interrupted`), wall time, unresolved actors, turns, tool counts, cost; delivery projection with
-its per-shelf leg counts; sentinel counts and the isolation block (`live`, `publishable`,
+`interrupted` | `budget` | `turns`), wall time, unresolved actors, turns, tool counts, cost;
+delivery projection with its per-shelf leg counts, its class counts, and its public summary;
+sentinel counts and the isolation block (`live`, `publishable`,
 `fresh_roots`, `attested_container`, `attestation_hash`, `automated`, `shelf_secret_present`,
 `shelf_origin`, and `daemon_respawned` for a provisioned arm); and hashes of private inputs
 (`root_transcript`, `executor_stderr`, `resolved_settings`), never their bodies or host paths.
@@ -626,8 +687,8 @@ the attempt, undeduplicated or conflicting usage, receipts duplicating native id
 or fail without a verifier verdict. It also carries the accounting invariant rather than
 leaving it to the runner that wrote the file: a non-`invalid` outcome needs a
 `usage_reconciliation` of `matched`, `matched_with_descendants`, or `explained_by_side_models`,
-and only a `capped` or `interrupted` outcome may add `no_envelope`, because the cap itself
-names the gap. `records.publish` writes a unique partial file, flushes
+and only a `capped` or `interrupted` outcome may add `no_envelope` or `envelope_partial`,
+because the cap itself names the gap. `records.publish` writes a unique partial file, flushes
 and fsyncs it, then hard-links the final path; a second writer for the same `trial_id` loses
 and keeps its partial file as evidence. `records.select` returns final records matching the
 current manifest and schedule hashes and excludes everything else with a reason: `partial`,
@@ -644,7 +705,10 @@ the native set are returned as `unmatched_fires`, which the runner treats as an 
 error (`delivery:fire_without_usage`), never as a zero-token actor. A native actor with no
 fire is normal. Projected fields are ids, timestamps, enums, and the `delivered` resource
 token; `question`, `cwd`, `emit`, `error`, `title`, and `url` stay private. `shelves` counts
-the legs that went to each shelf; a `skipped` leg reached nothing and is not counted.
+the legs that went to each shelf value (`team`, `public`, `keys`, `local`, `other`), `classes`
+counts them by request class (`team`, `public`, `local`, `other`), and `public` summarises the
+public-class legs (`legs`, `hits`, `timeouts`, `no_answer`); a `skipped` leg reached nothing and
+is not counted.
 
 ## Reduction contract
 
@@ -708,8 +772,8 @@ canary by value, and refuses a private-sounding key (`prompt`, `transcript`, `qu
 `sess-family` (child, grandchild, two concurrent siblings, forwarded prose, sidechain echo),
 `sess-flat` (child without a structured edge), `sess-retry` (`usage.iterations`),
 `sess-categories`, `sess-null-zero`, `sess-fallback` (message-id keys), `sess-malformed`,
-`sess-duplicate`, `sess-capped` (killed mid-request), `sess-capped-turns`, `sess-ambiguous`,
-`sess-mismatch`, `sess-side-models`. The `loop.db` fixture is built at test time from the
+`sess-duplicate`, `sess-capped` (killed mid-request), `sess-capped-turns`, `sess-capped-budget`
+(a budget stop with a partial envelope), `sess-ambiguous`, `sess-mismatch`, `sess-side-models`. The `loop.db` fixture is built at test time from the
 product's own `LOOP_DDL` in `src/hooks/store.ts`. Real transcripts are never read.
 
 `fixtures/fake/` holds the offline end-to-end data:
@@ -726,10 +790,12 @@ product's own `LOOP_DDL` in `src/hooks/store.ts`. Real transcripts are never rea
 
 `fixtures/live/` holds the operator-side manifests, `repo/` for the plumbing smoke, and one
 frozen Vitest project per task (`actor/`): a pinned `vitest`, a committed `pnpm-lock.yaml` and
-hoisted `node_modules`, the `scripts/all-tests.mjs` trap, the `scripts/ran-marker.mjs`
-reporter, `unrelated/` failing shards, and the cases blob under `tests/support/`. Frozen means
-no run artefacts: `.bench1/`, `node_modules/.vite*`, and pnpm's state files never enter the
-tree, and `manifest.fixture_hash` covers every file, `node_modules` included. Hidden layers live
+hoisted `node_modules`, a `pnpm-workspace.yaml` that turns pnpm's pre-run install off, the
+`scripts/all-tests.mjs` trap, the pnpm-agent guard in `vitest.config.mjs`, the
+`scripts/ran-marker.mjs` reporter, `unrelated/` failing shards, and the cases blob under
+`tests/support/`. Frozen means no run artefacts: `.bench1/`, `node_modules/.vite*`, and pnpm's
+state files never enter the tree, and `manifest.fixture_hash` covers every file, `node_modules`
+included. Hidden layers live
 in `hidden/<task>/hidden-tests/` as plain Node assert files.
 
 ## Extending the foundation
@@ -738,7 +804,7 @@ Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
 
 - A new task is a manifest entry plus a fixture directory and a verifier id. The fixture is a
   copy of an existing one with its `src/`, `tests/`, cases blob, and the reporter's `task`
-  renamed; its hash is `manifest.fixture_hash(dir)`; the verifier is `node_test_spec(task)` in
+  renamed, the pnpm-agent guard and `pnpm-workspace.yaml` kept as they are; its hash is `manifest.fixture_hash(dir)`; the verifier is `node_test_spec(task)` in
   `verifier.REGISTRY` with a hidden layer under `hidden/<task>/`. No reducer or record change.
 - A new arm is a manifest entry plus an `executor.REGISTRY` entry. Arms in one manifest share
   one executor, because arms running different harnesses do not have comparable token totals.
