@@ -350,7 +350,3 @@ pnpm run lint
 ```
 
 Release notes live in [RELEASING.md](./RELEASING.md).
-
-## License
-
-MIT. See [NOTICE.md](./NOTICE.md) for third-party attributions.
