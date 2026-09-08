@@ -42,6 +42,7 @@ from . import (
     runner,
     schedule,
     tenjin_arm,
+    vendor as vendor_module,
     verifier,
 )
 
@@ -142,7 +143,12 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
     spec = executor.lookup(arm["executor"])
+    # The roots are built as the run builds them, short of the vendored
+    # toolchain: a dry run extracts nothing and starts nothing, so it states
+    # the platform verdict alone and leaves the node probe to the live run.
     roots = artifact.create(out, trial.trial_id, manifest.fixture_path(task))
+    vendor = manifest.vendor_for(task)
+    host = vendor_module.host_facts(probe_node=False)
     provision = None
     if arm.get("provision") and spec.prepare is not None:
         # A dry run seeds the data dir and resolves the template with a port of
@@ -158,6 +164,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         "repeat": trial.repeat,
         "argv": list(launch.argv),
         "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
+        "vendor": None if vendor is None else {**vendor.facts, "host": host, "host_matches": vendor_module.matches(vendor, host)},
         "hooks": describe_hooks(resolved),
         "roots": {
             "cwd": str(launch.cwd),
@@ -206,8 +213,30 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                 f"  {'provision':10}shelf_secret_present={str(facts['shelf_secret_present']).lower()} "
                 f"shelf_origin={facts['shelf_origin']} public_origin={facts['public_origin']}"
             )
+        if plan["vendor"] is not None:
+            facts = plan["vendor"]
+            verdict = "extracted into repo/node_modules at trial preparation" if facts["host_matches"] else "MISMATCH: live-run refuses this host"
+            lines.append(
+                f"  {'vendor':10}{facts['id']} platform={facts['platform']} node_abi={facts['node_abi']} "
+                f"host={facts['host']['platform']} {verdict}"
+            )
         lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
+
+
+def refuse_foreign_vendor(manifest: manifest_module.Manifest, environ: Mapping[str, str]) -> None:
+    """A vendored toolchain built for another platform is refused before any root exists."""
+    vendors = [(task, manifest.vendor_for(task)) for task in manifest.tasks]
+    if not any(vendor is not None for _task, vendor in vendors):
+        return
+    host = vendor_module.host_facts(environ)
+    for task, vendor in vendors:
+        if vendor is None:
+            continue
+        try:
+            vendor_module.check_platform(vendor, host)
+        except vendor_module.VendorError as error:
+            raise CliError(f"task {task['id']!r}: {error.detail}") from error
 
 
 def live_run(
@@ -256,6 +285,7 @@ def live_run(
             "live-run requires --attestation, or --plumbing for a non-publishable smoke: "
             "a publishable live run states the isolation it ran under"
         )
+    refuse_foreign_vendor(manifest, environ)
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
     # wall-clock cap on attempts that cannot reach the provider.

@@ -25,7 +25,7 @@ secondary, and this package produces no savings claim of its own.
 
 ```
 evals/benchmark/
-  manifest.py      frozen manifest: load, validate, hash; fixture directory hash
+  manifest.py      frozen manifest: load, validate, hash; fixture hash over the directory and its vendor archive
   schedule.py      balanced, seeded schedule; trial_id and schedule SHA-256
   records.py       immutable attempt record: partial write, flush, publish without overwrite
   usage.py         UsageRecord and AuxiliaryReceipt contracts, arithmetic, null-vs-zero, dedupe, totals
@@ -42,6 +42,8 @@ evals/benchmark/
   verifier.py      hidden verifier registry, hidden layer, the fake verifiers, and the
                    Node test verifier the task fixtures use, with its run-marker check
   artifact.py      disposable trial roots, sentinels, and the live-run isolation attestation
+  vendor.py        the vendored Vitest toolchain: one deterministic archive, extracted and
+                   verified into each trial's node_modules, platform-pinned
   reduce.py        failure-inclusive task-equal reducer, amortization, seeded bootstrap
   report.py        publishable projection, its redaction guard, and the isolation stamp
   regress.py       informational regression check against the committed baseline
@@ -50,8 +52,8 @@ evals/benchmark/
   tests/           unittest modules, one per contract
   fixtures/fake/   the fake manifest and repo, the frozen attempt corpus, the bootstrap golden
   fixtures/live/   the plumbing smoke manifest and its repo, the hooks smoke manifest and its
-                   frozen Vitest task fixture (lockfile and node_modules committed), and the
-                   regression baseline
+                   frozen Vitest task fixture (lockfile committed, node_modules derived), the
+                   vendored toolchain archive under vendor/, and the regression baseline
   hidden/          code-owned hidden layers, one per task, mounted only into the verifier copy
   fixtures/claude/ sanitized synthetic Claude JSONL sessions (no real transcript)
 ```
@@ -341,13 +343,16 @@ the sentinel's `public_requests` and invalidates. Public-origin legs are counted
 the report's `origins` block and `summary` read them apart, so the plan's canary gate is two
 counts, unknown requests zero and public hits zero, each judged on its own.
 
-**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-2`) is one
+**The hooks smoke.** `fixtures/live/hooks-smoke-manifest.json` (`bench1-hooks-smoke-3`) is one
 task, `actor`, under `off` and `tenjin_seeded`, two repeats, four attempts, `max_budget_usd`
 0.75. The fixture is a real Vitest project frozen with its dependencies: `vitest` pinned to an
-exact version in `package.json`, a committed `pnpm-lock.yaml`, and a committed hoisted
-`node_modules` holding vitest and its transitive dependencies only (about 24 MB, 780 files,
-darwin-arm64 natives, which is the `operator-machine` image pin), so a trial installs nothing and
-reaches no network; `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
+exact version in `package.json`, a committed `pnpm-lock.yaml`, and the hoisted `node_modules`
+(vitest and its transitive dependencies only, about 24 MB, 781 files, darwin-arm64 natives,
+which is the `operator-machine` image pin) vendored once as
+`fixtures/live/vendor/vitest-3.2.4-node24-darwin-arm64.tar.gz` and extracted into every trial's
+copy at preparation, offline, so a trial installs nothing and reaches no network (see
+**Vendored toolchain** below; `bench1-hooks-smoke-3` is `bench1-hooks-smoke-2` with the tree
+vendored, and a trial sees the same bytes); `pnpm-workspace.yaml` pins `verifyDepsBeforeRun: false` because pnpm 11
 otherwise runs a registry install before the first `pnpm exec` or `pnpm run` in a fresh tree,
 which is what every trial of the second smoke did before its first test ran. The barrier is the
 repository, not the permission pin. Bash is `pnpm:*`, `npx:*`, `node:*`, `ls:*`, and `cat:*`,
@@ -566,7 +571,9 @@ task failure gets no free retry unless the same rule applies to every arm.
 `arms`, and optionally `phases` with `producer`, `capture`, `consumer` labels. Pins are
 `model`, `harness_version`, `effort`, `image`, `dependency_lock_hash`, `permission_mode`,
 `wall_clock_s`, `turn_budget`. A task is `id`, `family`, `transfer_distance`, `fixture`,
-`fixture_hash`, `verifier`, optionally `prompt`; an arm is `id`, `executor`, `product_version`,
+`fixture_hash`, `verifier`, optionally `prompt` and `vendor` (the id of an archive under
+`vendor/` beside the manifest, extracted into the trial's `node_modules`); an arm is `id`,
+`executor`, `product_version`,
 `settings_hash`, `memory_snapshot_hash`, `auxiliary_usage`, optionally `settings` and
 `provision` (the provisioner the executor prepares the arm with; only `tenjin` exists).
 
@@ -578,8 +585,10 @@ about auxiliary spend is exactly the failure the field names, and the reducer ke
 
 Validation happens before any spend and rejects unknown keys, duplicate ids, ids that are not
 opaque tokens, a fixture path that is absolute, escapes the manifest directory, or is missing,
-a `fixture_hash` that does not equal `manifest.fixture_hash(dir)` (sorted relative paths plus
-file digests), any version that is empty or a range (`latest`, `^`, `~`, `*`, `>`, `<`), hash
+a `fixture_hash` that does not equal `manifest.fixture_hash(dir, vendor)` (sorted relative paths
+plus file digests, and the vendor archive's digest when the task names one), a `vendor` whose
+record or archive is missing or malformed or whose archive digest disagrees with its record,
+any version that is empty or a range (`latest`, `^`, `~`, `*`, `>`, `<`), hash
 fields without a `sha256:` prefix, an `auxiliary_usage` outside those three values, and arms
 that do not share one executor. Manifest values are
 data: executor and verifier names select code-owned argv and nothing is shell-evaluated. The
@@ -789,14 +798,41 @@ product's own `LOOP_DDL` in `src/hooks/store.ts`. Real transcripts are never rea
 - `bootstrap-golden.json`: frozen `paired_bootstrap` output for four seeded inputs.
 
 `fixtures/live/` holds the operator-side manifests, `repo/` for the plumbing smoke, and one
-frozen Vitest project per task (`actor/`): a pinned `vitest`, a committed `pnpm-lock.yaml` and
-hoisted `node_modules`, a `pnpm-workspace.yaml` that turns pnpm's pre-run install off, the
+frozen Vitest project per task (`actor/`): a pinned `vitest`, a committed `pnpm-lock.yaml`, the
+hand-written `node_modules/.bin/vitest` shim and nothing else under `node_modules` (the tree is
+derived; see below), a `pnpm-workspace.yaml` that turns pnpm's pre-run install off, the
 `scripts/all-tests.mjs` trap, the pnpm-agent guard in `vitest.config.mjs`, the
 `scripts/ran-marker.mjs` reporter, `unrelated/` failing shards, and the cases blob under
 `tests/support/`. Frozen means no run artefacts: `.bench1/`, `node_modules/.vite*`, and pnpm's
-state files never enter the tree, and `manifest.fixture_hash` covers every file, `node_modules`
-included. Hidden layers live
-in `hidden/<task>/hidden-tests/` as plain Node assert files.
+state files never enter the tree, and `manifest.fixture_hash` covers every committed file plus
+the vendor archive's digest. Hidden layers live in `hidden/<task>/hidden-tests/` as plain Node
+assert files.
+
+### Vendored toolchain
+
+A trial's `node_modules` is derived, never committed. `fixtures/live/vendor/` holds one archive
+per toolchain and platform, `vitest-3.2.4-node24-darwin-arm64.tar.gz` (7.4 MB, 781 files), with
+`vitest-3.2.4-node24-darwin-arm64.json` beside it recording `archive_sha256`, `tree_sha256`,
+`files`, `platform`, `node_abi`, `vitest`, `lock_sha256` (the fixture lockfile it was installed
+from), and `pnpm`. A task names the id under `vendor`, and every fixture that names it shares
+the one archive. `artifact.create` extracts it into `<repo>/node_modules` of the trial's fixture
+copy, offline, after checking the archive against its record and the host against `platform`
+and `node_abi`, then checks the extracted tree against `tree_sha256`. The archive is
+deterministic (sorted entries, one fixed mtime, uid and gid 0, modes 0644 or 0755, no links,
+gzip with no name and no timestamp), so packing the same tree twice gives the same bytes; the
+archive digest still depends on the zlib of the Python that packed it, the tree digest does not.
+
+The natives are darwin-arm64. `live-run` refuses a manifest whose vendor was built for another
+platform or node ABI before any root exists (`vendor_platform`, `vendor_node_abi`);
+`--dry-run` prints the vendor line with the host's platform verdict and extracts nothing; CI
+never extracts it, the offline suite packs a tiny archive of its own. Rebuild with
+`evals/benchmark/scripts/vendor-vitest.sh [fixture] [id]`: it runs `pnpm install
+--frozen-lockfile` in the fixture (the one network step), packs the tree with
+`python3 -m evals.benchmark.vendor build --fixture <fixture> --id <id> --pnpm <version>`, and
+puts the fixture back to the shim alone. `python3 -m evals.benchmark.vendor check --base
+evals/benchmark/fixtures/live --id <id>` verifies an archive against its record and this host.
+A rebuilt archive changes every `fixture_hash` that names it, so the manifests re-pin and bump
+`benchmark_version`.
 
 ## Extending the foundation
 
@@ -804,7 +840,8 @@ Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture.
 
 - A new task is a manifest entry plus a fixture directory and a verifier id. The fixture is a
   copy of an existing one with its `src/`, `tests/`, cases blob, and the reporter's `task`
-  renamed, the pnpm-agent guard and `pnpm-workspace.yaml` kept as they are; its hash is `manifest.fixture_hash(dir)`; the verifier is `node_test_spec(task)` in
+  renamed, the pnpm-agent guard and `pnpm-workspace.yaml` kept as they are; its `vendor` is
+  the shared archive id and its hash `manifest.fixture_hash(dir, vendor)`; the verifier is `node_test_spec(task)` in
   `verifier.REGISTRY` with a hidden layer under `hidden/<task>/`. No reducer or record change.
 - A new arm is a manifest entry plus an `executor.REGISTRY` entry. Arms in one manifest share
   one executor, because arms running different harnesses do not have comparable token totals.

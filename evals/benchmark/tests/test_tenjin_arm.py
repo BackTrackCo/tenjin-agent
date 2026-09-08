@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from evals.benchmark import artifact, cli, executor, reap, records, runner, schedule, tenjin_arm
+from evals.benchmark import artifact, cli, executor, reap, records, runner, schedule, tenjin_arm, vendor
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -450,6 +450,12 @@ class CliTest(SourceCase):
             self.assertTrue(any(hook.startswith("SubagentStart http http://127.0.0.1:0/hook/claude headers=Authorization") for hook in plan["hooks"]))
             self.assertTrue(any("tenjin-shim.mjs" in hook and hook.startswith("SessionStart command") for hook in plan["hooks"]))
         self.assertIn("shelf_secret_present=true shelf_origin=team-shelf.example", printed)
+        # The vendored toolchain is named, with the host verdict, and nothing was extracted.
+        self.assertIn("vendor    vitest-3.2.4-node24-darwin-arm64 platform=darwin-arm64 node_abi=137 host=", printed)
+        self.assertIn(("extracted into repo/node_modules" if vendor.host_platform() == "darwin-arm64" else "MISMATCH"), printed)
+        for plan in payload["trials"]:
+            self.assertEqual(plan["vendor"]["id"], "vitest-3.2.4-node24-darwin-arm64")
+            self.assertFalse((Path(plan["roots"]["cwd"]) / "node_modules" / "vitest").exists())
         self.assertNotIn(SECRET, printed)
         self.assertNotIn(tenjin_arm.DRY_TOKEN, printed)
         for plan in payload["trials"]:

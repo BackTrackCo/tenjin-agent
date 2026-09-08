@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import sha256_json, sha256_text
+from . import sha256_json, sha256_text, vendor as vendor_module
 
 CANARY_PREFIX = "bench1-canary-"
 CREDENTIAL_FILE = ".benchmark-credential"
@@ -171,7 +171,10 @@ def canary_token(trial_id: str) -> str:
     return CANARY_PREFIX + sha256_text(f"{trial_id}:credential-canary")[:32]
 
 
-def create(run_dir: Path, trial_id: str, fixture: Path, public_origin: str | None = None) -> TrialRoots:
+def create(
+    run_dir: Path, trial_id: str, fixture: Path, public_origin: str | None = None, vendor: vendor_module.Vendor | None = None
+) -> TrialRoots:
+    """Fresh roots, the fixture copied in, and the vendored toolchain extracted into its `node_modules`."""
     base = run_dir / "trials" / trial_id
     if base.exists():
         shutil.rmtree(base)
@@ -188,6 +191,11 @@ def create(run_dir: Path, trial_id: str, fixture: Path, public_origin: str | Non
     for path in (roots.home, roots.profile, roots.data_dir, roots.output):
         path.mkdir(parents=True)
     shutil.copytree(fixture, roots.repo, symlinks=False)
+    if vendor is not None:
+        try:
+            vendor_module.extract(vendor, roots.repo / vendor_module.TARGET)
+        except vendor_module.VendorError as error:
+            raise ArtifactError(error.code, error.detail) from error
     (roots.home / CREDENTIAL_FILE).write_text(
         f"# Planted by the benchmark. Nothing real depends on it.\nBENCH1_FAKE_API_KEY={roots.canary_token}\n",
         encoding="utf-8",

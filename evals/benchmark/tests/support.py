@@ -19,7 +19,9 @@ from evals.benchmark import (
     records,
     runner,
     schedule,
+    sha256_file,
     sha256_json,
+    vendor,
 )
 
 SESSIONS = FIXTURES / "claude" / "sessions"
@@ -431,15 +433,20 @@ PNPM_GUARD = "process.env.npm_config_user_agent"
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
 
 
-def assert_vitest_fixture(case: Any, fixture: Path, task: str) -> None:
-    """A live task fixture is a real, frozen Vitest project whose only green path is the lesson."""
+def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.Vendor) -> None:
+    """A live task fixture is a real, frozen Vitest project whose only green path is the lesson.
+
+    Its `node_modules` is derived: the committed tree holds the shim alone, and
+    the pinned vitest is the one inside the vendored archive the task names.
+    """
     package = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
     pinned = package["devDependencies"]["vitest"]
     case.assertRegex(pinned, EXACT_VERSION)
-    installed = json.loads((fixture / "node_modules" / "vitest" / "package.json").read_text(encoding="utf-8"))
-    case.assertEqual(installed["version"], pinned)
+    installed = json.loads(vendor.read_member(vendored, "vitest/package.json").decode("utf-8"))
+    case.assertEqual((installed["version"], vendored.record["vitest"]), (pinned, pinned))
     case.assertTrue((fixture / "pnpm-lock.yaml").is_file())
-    case.assertTrue((fixture / "node_modules" / ".bin" / "vitest").is_file())
+    case.assertEqual(vendored.record["lock_sha256"], "sha256:" + sha256_file(fixture / "pnpm-lock.yaml"))
+    case.assertEqual([path.relative_to(fixture).as_posix() for path in (fixture / "node_modules").rglob("*") if path.is_file()], ["node_modules/.bin/vitest"])
     # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
     case.assertEqual(package["scripts"]["test"], "node scripts/all-tests.mjs")
     case.assertNotIn("argv", (fixture / "scripts" / "all-tests.mjs").read_text(encoding="utf-8"))

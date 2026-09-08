@@ -303,7 +303,9 @@ class HooksArmTest(LiveCase):
         for task in manifest.tasks:
             claude_live.refuse_project_settings(manifest.fixture_path(task))
             self.assertEqual(verifier.lookup(task["verifier"]).hidden_layer, verifier.HIDDEN / task["id"])
-            support.assert_vitest_fixture(self, manifest.fixture_path(task), task["id"])
+            vendored = manifest.vendor_for(task)
+            assert vendored is not None
+            support.assert_vitest_fixture(self, manifest.fixture_path(task), task["id"], vendored)
             # The prompt states the task and never the lesson.
             for phrase in ("pnpm test --", "pnpm exec", "vitest", "wrong set"):
                 self.assertNotIn(phrase, task["prompt"])
