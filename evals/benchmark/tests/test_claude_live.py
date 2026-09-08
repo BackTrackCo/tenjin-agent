@@ -367,6 +367,27 @@ class HooksArmTest(LiveCase):
             with self.subTest(name), self.assertRaises(LiveExecutorError):
                 claude_live._settings_overlay(overlay)
         claude_live._settings_overlay({"vitest.config.mjs": "x {data_dir} y"})
+    def test_the_real_manifest_is_four_tasks_in_one_family_under_the_same_two_arms(self) -> None:
+        manifest = manifest_module.load(cli.REAL_MANIFEST)
+        trials = schedule.expand(manifest)
+        self.assertEqual(len(trials), 16)
+        self.assertEqual({trial.task_id for trial in trials}, {"actor", "budget", "candidate", "slug"})
+        schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
+        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded"])
+        smoke = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+        self.assertEqual(manifest.arms, smoke.arms)
+        self.assertEqual(manifest.pins, smoke.pins)
+        for task in manifest.tasks:
+            fixture = manifest.fixture_path(task)
+            claude_live.refuse_project_settings(fixture)
+            layer = verifier.lookup(task["verifier"]).hidden_layer
+            self.assertTrue((layer / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs").is_file())
+            self.assertFalse((fixture / verifier.HIDDEN_TESTS).exists())
+            self.assertEqual(task["family"], "test-harness-convention")
+            # The prompt states the task and not the lesson: none of the shelf
+            # piece's phrases, and no mention of the wrong command.
+            for phrase in ("pnpm test --", "pnpm exec", "vitest", "repository-specific", "truly targets", "wrong set"):
+                self.assertNotIn(phrase, task["prompt"])
 
     def test_the_template_resolves_per_trial_and_the_child_reads_the_resolved_fragment(self) -> None:
         provision = executor.Provision(values={"daemon_url": "http://127.0.0.1:4321/hook/claude", "daemon_token": "tok-1", "data_dir": "/trial/data"})

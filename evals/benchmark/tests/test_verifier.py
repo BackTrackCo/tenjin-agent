@@ -212,6 +212,16 @@ class VerifierRegistryTest(unittest.TestCase):
                     self.assertIn(support.PNPM_GUARD_MESSAGE, completed.stderr)
                     self.assertNotIn("pnpm exec", completed.stderr)
 
+    def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer(self) -> None:
+        live = verifier.HIDDEN.parent / "fixtures" / "live"
+        for task in ("actor", "budget", "candidate", "slug"):
+            with self.subTest(task=task):
+                spec = verifier.lookup(f"node_test_{task}")
+                roots = artifact.create(self.run_dir, f"trial-{task}", live / task)
+                roots.mark_stopped()
+                verdict = verifier.run(spec, roots.hidden_copy(spec.hidden_layer), self.run_dir)
+                self.assertEqual((verdict.outcome, verdict.exit_code), ("fail", 1))
+
     def test_verifier_output_is_bounded(self) -> None:
         verdict = verifier.run(_echo(5000), self.repo, self.run_dir)
         self.assertEqual(verdict.outcome, "fail")
