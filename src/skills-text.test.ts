@@ -1042,9 +1042,14 @@ describe('the public render did not move', () => {
   // Re-pinned once more for the same PR's mint pin: `read` signs only for the
   // shelves the config names, so tenjin-search says so and its
   // `entitlementCheck` list gains `origin_not_configured`.
+  //
+  // Re-pinned for the #315 Act 2 pointer: `config get` reads single leaf keys
+  // only, so tenjin-search's command surface now points hook-arm state at bare
+  // `tenjin hooks` (table + enable/disable) instead of letting agents guess a
+  // `config get hooks` subtree that never existed. tenjin-publish is untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '7a4e9c74c05362b85ea8e59d219ad9bd',
+      'tenjin-search': '66e4e4f52fa60d845ca1e0d3b21253d3',
       'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });

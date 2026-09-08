@@ -68,6 +68,11 @@ ALWAYS pass `--json`, or a PTY-allocating harness gets prose instead of an
 envelope. Exit codes: `0` success (an honest miss is success), `1`
 network/runtime, `2` usage, `3` refused on purpose, `4` payment failure.
 
+Hook-arm state lives under `tenjin hooks`, not `config get`: `config get`
+reads single leaf keys only (`tenjin config get hooks.publish`), while bare
+`tenjin hooks` prints every arm with its 7-day fired/hit counts, and
+`tenjin hooks enable|disable <arm>` flips one.
+
 ## The search
 
 ```bash

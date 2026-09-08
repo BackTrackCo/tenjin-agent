@@ -358,7 +358,7 @@ export async function runDoctor(
 }
 
 /**
- * The five files and directories the loop database replaced. Deleted by
+ * The seven files and directories the loop database replaced. Deleted by
  * `doctor --prune`, never imported: the pairings and the outcome history in
  * `state.db` are a record of a system that no longer exists, and a one-time
  * importer is code that lives forever to serve a week (plan 03, owner
@@ -368,6 +368,11 @@ export async function runDoctor(
  * mutex: a lock directory left behind by a crashed writer is never
  * stale-stolen (that is the protocol's whole safety property), so nothing
  * would ever remove it once its owner is gone.
+ *
+ * `hook-nags.json` and `hook-health.json` are the pre-daemon hook notebooks
+ * (which loops were already nagged about; the dispatch arm's health log).
+ * Nothing reads either since the loop database replaced them — no importer in
+ * `src/` references them — so they are retired the same way (#315).
  */
 const RETIRED_STATE_ENTRIES = [
   'push-ledger.jsonl',
@@ -375,6 +380,8 @@ const RETIRED_STATE_ENTRIES = [
   'searches.json.lock',
   'push',
   'candidates',
+  'hook-nags.json',
+  'hook-health.json',
 ] as const;
 
 /** The retired database and the two WAL sidecars that are meaningless without it. */
