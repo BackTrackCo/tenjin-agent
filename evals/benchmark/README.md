@@ -829,6 +829,71 @@ python3 -m evals.benchmark.cli verify --run <dir>
 python3 -m evals.benchmark.cli summary --run <dir>
 ```
 
+**Pilot 1 readout** (`bench2-local-pilot-1`, 2026-09-08, the operator's machine,
+`--plumbing --tenjin-source`, so `team_shelf_secret`: NOT PUBLISHABLE, plumbing plus the first
+pilot, and no number here is a result). 48 of 48 attempts pass, 0 invalid, `verify` agrees.
+Producers: 24 of 24 pass, mean 107k tokens of their own work and 17k of capture ask per
+producer (2,576,266 and 413,701 in all). Discovery, both arms alike: 12 of 24 ran the test
+before the fix, 18 of 24 read the injected setup file. Delivery: 8 prompt-fire team-shelf hits,
+all on `level`, `money`, and `alias`, from pre-existing shelf content (which piece, the
+orchestrator is identifying); local legs 9, hits 0; keys legs 0 hits; 32 public legs, 0 hits.
+
+| Task        | off tokens per attempt, mean | natural over off |
+| ----------- | ---------------------------: | ---------------: |
+| `actor`     |                      100,721 |             0.87 |
+| `budget`    |                      116,308 |             0.81 |
+| `candidate` |                       94,675 |             0.97 |
+| `slug`      |                       99,193 |             0.97 |
+| `level`     |                      101,527 |             1.15 |
+| `alias`     |                       99,710 |             1.23 |
+| `core`      |                       83,108 |             1.33 |
+| `money`     |                      130,115 |             1.41 |
+
+Consumer-only ratio (the capture-free line): 1.092, interval [0.949, 1.225] at 95% over 8
+tasks. Amortized per lesson, task-equal (the corrected rule, below): headline, capture only at
+reuse 1, 1.260 [1.101, 1.407]; reuse 2/5/10 1.176/1.126/1.109; the producer's own work charged
+too, reuse 1/10, 2.298/1.213. The first `summary` of this run printed 5.104 / 30.075 for the
+amortized lines: `amortize` was handed the arm-wide capture sum (413,701 over 24 producers) and
+divided it by reuse alone, charging every producer's capture to one consumer. The rule is per
+lesson: each task's consumer tokens plus that task's mean per-producer capture over `reuse`,
+against the baseline's, then task-equal weighting like everything else (`reduce.task_cost`,
+`amortize_tasks`); the report in the pilot's run directory was regenerated with `reduce`, `report`,
+and `summary` on the untouched records.
+
+Why the local path delivered nothing, from the 24 natural ledgers (`fires`, `pairings`,
+`pairing_closes`, `marks`, read with `mode=ro&immutable=1`) and the producer transcripts:
+
+- The data dir was shared as designed: every ledger holds exactly two sessions, the producer's
+  and the consumer's, and the consumer's failure fires ran a `local` leg on that store.
+- 14 of 24 producers opened no pairing at all: they edited the source before any test run (12
+  of the 24 never ran a failing test; two more ran a command whose output keyed nothing), so the
+  failure arm never fired with a key and there was no row for a consumer to find.
+- 10 producers opened a pairing (8 `sig_v1_test` from a vitest assertion, 4 `sig_v1` where
+  Node's error line carried a frame). A green run of the same command head followed the edit in
+  all 10 (`vitest` or `pnpm`), but only 3 pairings closed, all `sig_v1` rows on `level` whose
+  error block named `src/level.ts`: the close rule's file branch matched the edited basename.
+  The `sig_v1_test` rows name only the test file (`error_files: ["actor.test.mjs"]`), so that
+  branch fails, and the other branch needs the passing command to equal the failing one byte for
+  byte; the producers re-ran the same head with a different pipe (`... 2>&1 | tail -60` to fail,
+  `... 2>&1 | tail -40` to pass; `| head -100` to `| tail -40`), so `sameCommand` was false and
+  the row stayed `open`, which `findPairing` never returns. That is the whole of the 0 hits:
+  in the 4 trials where the consumer's raw failure key equalled the producer's pairing key
+  (`actor` 4baf, `candidate` f1de, `money` 6028 and 741a) the consumer's fire is `no-hit` on
+  an `open` row; in the other keyed trials the keys differ across lanes because each agent's
+  `| head`/`| tail` kept a different part of the output (a `sig_v1_test` on one case number
+  versus another, or a `sig_v1` with Node's frame versus none), which is the same finding from
+  the other side.
+
+Product finding, for the operator to file: in `src/hooks/failure/pairings.ts`, `closeOpenPairings`
+closes a pairing only when `named` (an edited basename among `error_files`) or `sameCommand`
+(`pairing.cmd === mask(passed)`) holds. Under Claude Code an agent almost never re-runs a
+command byte-identically (it changes the `| head`/`| tail` it appends), and a vitest assertion's
+`error_files` is the test file, never the source, so a fix that edits the source and re-runs the
+same head with any other pipe leaves the row `open` for good; `findPairing` (same file) reads
+`unverified` and `verified` only. In this pilot 7 of the 10 opened rows stayed open that way.
+A close that matches on the command head plus the file argument, or on the pairing's own key
+recurring green, would have closed them. Filing is the operator's call; nothing was filed.
+
 `--dry-run` on each prints, per trial, the phases line for a producer arm, one `seed` line per
 lesson command (replayed, or why not) and the distractor count for a local seed, the
 `overlay` files for `flat`, the `slice`, and the stale refusal, and starts nothing. None of

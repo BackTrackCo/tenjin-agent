@@ -151,6 +151,35 @@ class AmortizationTest(unittest.TestCase):
         cell = arm["tasks"]["t1"]["diagnostics"]
         self.assertEqual((cell["local_legs"], cell["local_hits"], cell["child_tokens"], cell["child_requests"], cell["actors"]), (0, 0, 0, 0, 1))
 
+    def test_amortization_charges_each_task_its_own_lesson_at_the_mean_producer_cost(self) -> None:
+        # t1 ran three producers (one per repeat), t2 ran one; the arm-wide capture sum
+        # (3 x 300 + 900 = 1800) is never what a consumer is charged.
+        def producer(request: str, capture: int) -> tuple[dict, dict]:
+            return support.receipt("producer", "producer", f"p_{request}", 1000, 0), support.receipt("producer", "capture", f"c_{request}", capture, 0)
+
+        natural = [
+            support.reduction_record("t1", "on", 0, 1, 400, auxiliary=producer("a", 300)),
+            support.reduction_record("t1", "on", 1, 3, 400, auxiliary=producer("b", 300)),
+            support.reduction_record("t1", "on", 2, 5, 400, auxiliary=producer("c", 300)),
+            support.reduction_record("t2", "on", 0, 7, 400, auxiliary=producer("d", 900)),
+        ]
+        off = [support.reduction_record("t1", "off", 0, 0, 800), support.reduction_record("t2", "off", 0, 6, 800)]
+        reduction = reduce_module.reduce(support.accept(*off, *natural), [], baseline="off")
+        arm = reduction["arms"]["on"]
+        self.assertEqual((arm["capture_tokens"], arm["phase_tokens"]), (4000 + 1800, {"capture": 1800, "producer": 4000}))
+        self.assertEqual((arm["tasks"]["t1"]["producers"], arm["tasks"]["t2"]["producers"]), (3, 1))
+        self.assertEqual(arm["tasks"]["t1"]["capture_per_producer"], {"capture": 300.0, "producer": 1000.0})
+        self.assertEqual(arm["tasks"]["t2"]["capture_per_producer"], {"capture": 900.0, "producer": 1000.0})
+        # Per task at reuse 1: t1 (400 + 300) / 800, t2 (400 + 900) / 800; the arm figure is their mean.
+        comparison = reduction["comparisons"]["on"]
+        self.assertEqual(comparison["headline"], round(((700 / 800) + (1300 / 800)) / 2, 12))
+        self.assertEqual(comparison["amortized_capture_only_token_ratio"][3]["token_ratio"], round(((430 / 800) + (490 / 800)) / 2, 12))
+        self.assertEqual(comparison["amortized_token_ratio"][0]["token_ratio"], round(((1700 / 800) + (2300 / 800)) / 2, 12))
+        self.assertEqual(comparison["headline_interval"]["tasks"], 2)
+        self.assertEqual(arm["amortization_capture_only"][0], {"reuse": 1, "capture_tokens_per_use": 600.0, "tokens_per_attempt": 1000.0})
+        self.assertEqual(arm["amortization"][0]["tokens_per_attempt"], 2000.0)
+        self.assertEqual(reduction["arms"]["off"]["amortization"][0], {"reuse": 1, "capture_tokens_per_use": 0.0, "tokens_per_attempt": 800.0})
+
     def test_producer_and_local_seed_facts_are_summarised_per_arm(self) -> None:
         record = support.reduction_record("t1", "on", 0, 1, 400)
         record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 2}, "wal_live_between_phases": False}}
@@ -313,9 +342,12 @@ class CorpusTest(unittest.TestCase):
         self.assertLessEqual(0.825, comparison["interval"]["high"])
         # Cheaper per attempt and more often right, on two separate axes.
         self.assertGreater(comparison["pass_rate_delta"], 0)
-        # Capture only pays for itself once the knowledge is reused.
+        # Amortization is per lesson: only the corpus task whose attempt carried the
+        # producer and capture receipts is charged them, at its own per-producer cost,
+        # so the reuse-1 ratio sits just under 1 and falls from there.
         ratios = {point["reuse"]: point["token_ratio"] for point in comparison["amortized_token_ratio"]}
-        self.assertGreater(ratios[1], 1)
+        self.assertEqual(ratios[1], round(0.991666666667, 12))
+        self.assertLess(ratios[10], ratios[1])
         self.assertLess(ratios[10], 1)
 
 

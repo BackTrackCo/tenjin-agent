@@ -87,6 +87,23 @@ def phase_tokens(cells: list[dict[str, Any]]) -> dict[str, int]:
     return {phase: capture_tokens(cells, frozenset({phase})) for phase in sorted(CAPTURE_PHASES)}
 
 
+def producers_of(cells: list[dict[str, Any]]) -> int:
+    """How many attempts in the cell carried a producer or capture receipt: one producer per such attempt."""
+    return sum(1 for record in cells if any(receipt["phase"] in CAPTURE_PHASES for receipt in record["auxiliary"]))
+
+
+def per_producer(cells: list[dict[str, Any]]) -> dict[str, float]:
+    """The one-time spend one lesson cost, per phase: the cell's phase tokens over its producers, zero with none.
+
+    Amortization is per lesson, and a task is one lesson: a task that ran three
+    producers paid for the lesson three times over, so the figure a consumer
+    is charged is the mean producer's, never the cell's sum.
+    """
+    count = producers_of(cells)
+    totals = phase_tokens(cells)
+    return {phase: (float(totals[phase]) / count if count else 0.0) for phase in totals}
+
+
 def child_usage(record: dict[str, Any]) -> tuple[int, int]:
     """Tokens and requests of the attempt's descendants (every actor but the lead), for the recursive slice's per-actor reading."""
     tokens = requests = 0
@@ -158,6 +175,8 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
         "passes": passes,
         "pass_rate": _round(passes / attempts),
         "phase_tokens": phase_tokens(records),
+        "producers": producers_of(records),
+        "capture_per_producer": {phase: _round(value) for phase, value in per_producer(records).items()},
         "requests": sum(summed["requests"] for summed in per_attempt),
         "tokens": tokens,
         "tokens_per_attempt": _round(tokens / attempts),
@@ -180,7 +199,7 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def amortize(tokens_per_attempt: float | None, capture: int) -> list[dict[str, Any]]:
+def amortize(tokens_per_attempt: float | None, capture: float) -> list[dict[str, Any]]:
     """Capture cost spread over 1, 2, 5, and 10 consuming uses."""
     schedule: list[dict[str, Any]] = []
     for reuse in REUSE_POINTS:
@@ -190,6 +209,26 @@ def amortize(tokens_per_attempt: float | None, capture: int) -> list[dict[str, A
                 "reuse": reuse,
                 "capture_tokens_per_use": _round(share),
                 "tokens_per_attempt": None if tokens_per_attempt is None else _round(tokens_per_attempt + share),
+            }
+        )
+    return schedule
+
+
+def task_cost(cell: dict[str, Any], phases: tuple[str, ...], reuse: int) -> float:
+    """One task's consumer tokens per attempt plus its per-producer one-time cost over `reuse` uses."""
+    return cell["tokens_per_attempt"] + sum(cell["capture_per_producer"][phase] for phase in phases) / reuse
+
+
+def amortize_tasks(tasks: list[dict[str, Any]], phases: tuple[str, ...]) -> list[dict[str, Any]]:
+    """The arm's amortization, task-equal: each task charged its own lesson's per-producer cost, then the mean."""
+    schedule: list[dict[str, Any]] = []
+    for reuse in REUSE_POINTS:
+        shares = [sum(cell["capture_per_producer"][phase] for phase in phases) / reuse for cell in tasks]
+        schedule.append(
+            {
+                "reuse": reuse,
+                "capture_tokens_per_use": _mean(shares),
+                "tokens_per_attempt": _mean([task_cost(cell, phases, reuse) for cell in tasks]),
             }
         )
     return schedule
@@ -245,38 +284,31 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
     if not shared:
         reason = "no_shared_task"
     ratio = _mean(ratios)
-    capture_ratio: list[dict[str, Any]] = []
-    base_points = amortize(base["tokens_per_attempt"], base["capture_tokens"])
-    arm_points = amortize(arm["tokens_per_attempt"], arm["capture_tokens"])
-    for point, arm_point in zip(base_points, arm_points):
-        divisor = point["tokens_per_attempt"]
-        capture_ratio.append(
-            {
-                "reuse": point["reuse"],
-                "token_ratio": None if not divisor else _round(arm_point["tokens_per_attempt"] / divisor),
-            }
-        )
-    # The headline rule (pre-registered before any pilot number was read):
-    # charge every token the capture ask added to a single consumer, and
+    # Amortization is per lesson, task-equal like everything else: each shared
+    # task's consumer tokens plus that task's per-producer one-time cost over
+    # `reuse` uses, against the baseline's, then the mean of the ratios. The
+    # first series charges the producer's own work too (a diagnostic); the
+    # second charges only what the capture ask added, which is the headline
+    # rule (pre-registered before any pilot number was read): every token the
+    # capture ask added is charged to a single consumer at reuse 1, and
     # nothing of the producer's own work, which would have happened anyway.
-    # Task-equal like `token_ratio`: one ratio per shared task at each reuse
-    # point, the arm figure their mean, and the reuse-1 set bootstrapped for
-    # the headline interval. The series above is the diagnostic that charges
-    # the whole producer phase too.
+    # The reuse-1 set of the capture-only series is bootstrapped for the
+    # headline interval.
+    capture_ratio: list[dict[str, Any]] = []
     capture_only: list[dict[str, Any]] = []
     headline_ratios: list[float] = []
-    for reuse in REUSE_POINTS:
-        per_task: list[float] = []
-        for task_id in shared:
-            base_cell, arm_cell = base["tasks"][task_id], arm["tasks"][task_id]
-            divisor = base_cell["tokens_per_attempt"] + base_cell["phase_tokens"]["capture"] / reuse
-            if not divisor:
-                per_task = []
-                break
-            per_task.append((arm_cell["tokens_per_attempt"] + arm_cell["phase_tokens"]["capture"] / reuse) / divisor)
-        capture_only.append({"reuse": reuse, "token_ratio": _mean(per_task)})
-        if reuse == 1:
-            headline_ratios = per_task
+    for phases, series in ((("producer", "capture"), capture_ratio), (("capture",), capture_only)):
+        for reuse in REUSE_POINTS:
+            per_task: list[float] = []
+            for task_id in shared:
+                divisor = task_cost(base["tasks"][task_id], phases, reuse)
+                if not divisor:
+                    per_task = []
+                    break
+                per_task.append(task_cost(arm["tasks"][task_id], phases, reuse) / divisor)
+            series.append({"reuse": reuse, "token_ratio": _mean(per_task)})
+            if series is capture_only and reuse == 1:
+                headline_ratios = per_task
     pass_delta = (
         None
         if arm["pass_rate"] is None or base["pass_rate"] is None
@@ -368,8 +400,8 @@ def reduce(
         else:
             arm["tokens_per_verified_resolution"] = _mean(per_task)
             arm["tokens_per_verified_resolution_reason"] = None
-        arm["amortization"] = amortize(arm["tokens_per_attempt"], arm["capture_tokens"])
-        arm["amortization_capture_only"] = amortize(arm["tokens_per_attempt"], arm["phase_tokens"]["capture"])
+        arm["amortization"] = amortize_tasks(tasks, ("producer", "capture"))
+        arm["amortization_capture_only"] = amortize_tasks(tasks, ("capture",))
     comparisons: dict[str, Any] = {}
     if baseline is not None:
         if baseline not in arms:
