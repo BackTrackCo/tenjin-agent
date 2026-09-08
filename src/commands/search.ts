@@ -3,7 +3,7 @@ import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
 import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
 import { recordSearch } from '../lib/searches';
-import { readSessionId } from '../lib/session';
+import { readActor, type SessionActor } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
 import { sanitizeForTerminal } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
@@ -49,7 +49,7 @@ export interface SearchArgs {
 
 export interface SearchDeps {
   fetchImpl?: typeof fetch;
-  /** Environment seam (TENJIN_SESSION_ID); defaults to process.env. */
+  /** Environment seam (the harness session and thread ids); defaults to process.env. */
   env?: NodeJS.ProcessEnv;
 }
 
@@ -67,7 +67,7 @@ export async function runSearch(
     input.appliesTo = parseAppliesTo(args.appliesTo);
   }
 
-  const sessionId = readSessionId(deps.env ?? process.env);
+  const actor = readActor(deps.env ?? process.env);
   const request = buildSearchRequest(input);
 
   // SHELF ONE IS ALWAYS `baseUrl`, and the label follows the mode: in team mode
@@ -99,7 +99,7 @@ export async function runSearch(
         request,
         ctx,
         settings,
-        sessionId,
+        actor,
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       }),
     );
@@ -122,7 +122,7 @@ export async function runSearch(
         request,
         ctx,
         settings,
-        sessionId,
+        actor,
         ...(deps.fetchImpl !== undefined ? { fetchImpl: deps.fetchImpl } : {}),
       }),
     );
@@ -201,7 +201,8 @@ interface ShelfQuery {
   request: ReturnType<typeof buildSearchRequest>;
   ctx: CommandContext;
   settings: ResolvedSettings;
-  sessionId: string | undefined;
+  /** Who ran it, from the harness env; undefined stamps neither column. */
+  actor: SessionActor | undefined;
   fetchImpl?: typeof fetch;
 }
 
@@ -255,9 +256,11 @@ async function queryShelf(q: ShelfQuery): Promise<ShelfLeg> {
     // to the marketplace that did the work. `outcome` and publish's search-close
     // route on this.
     shelfBaseUrl: q.baseUrl,
-    // Usually absent; see readSessionId. An unstamped entry is raised in every
-    // session, which is the safe direction for a reminder.
-    ...(q.sessionId !== undefined ? { sessionId: q.sessionId } : {}),
+    // Usually absent; see readActor. An unstamped entry is raised in every
+    // session, which is the safe direction for a reminder. The agent is the
+    // child this ran inside, so the capture ask names the miss to it alone.
+    ...(q.actor !== undefined ? { sessionId: q.actor.session } : {}),
+    ...(q.actor?.agent !== undefined ? { agentId: q.actor.agent } : {}),
     candidates: response.items.map((c) => ({
       resourceId: c.resourceId,
       url: c.url,

@@ -36,8 +36,9 @@ afterEach(async () => {
 const NOW = 1_700_000_000_000;
 const WAIT_MS = 2500;
 
-const LEAD: Actor = { session: 's1', agent: '' };
-const CHILD: Actor = { session: 's1', agent: 'a7c31e9f' };
+// The stored session is namespaced by harness (`actorOf`); the input names `s1`.
+const LEAD: Actor = { session: 'claude:s1', agent: '' };
+const CHILD: Actor = { session: 'claude:s1', agent: 'a7c31e9f' };
 
 const ANSWER: Answer = {
   shelf: 'team',
@@ -269,7 +270,7 @@ describe('actorOf', () => {
     });
     expect(actorOf(stop, db)).toBeNull();
     // Another child's start does not vouch for this one.
-    setMark(db, { session: 's1', agent: 'deadbeef' }, STARTED_MARK, String(NOW), NOW);
+    setMark(db, { session: LEAD.session, agent: 'deadbeef' }, STARTED_MARK, String(NOW), NOW);
     expect(actorOf(stop, db)).toBeNull();
     setMark(db, CHILD, STARTED_MARK, String(NOW), NOW);
     expect(actorOf(stop, db)).toEqual(CHILD);
