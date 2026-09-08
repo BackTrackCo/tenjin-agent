@@ -40,6 +40,10 @@ def open_loop_db(path: Path) -> None:
         db.close()
 
 
+# A WAL with frames in it, as a live daemon leaves; a zero-byte one reads as settled.
+WAL_FRAMES = b"\x37\x7f\x06\x82" + b"\x00" * 28
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="fake_daemon")
     parser.add_argument("--keep-wal", action="store_true")
@@ -51,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     port = args.port if args.port is not None else int(config.get("loop", {}).get("port") or 0)
     wal = data / "loop.db-wal"
     open_loop_db(data / "loop.db")
-    wal.touch()
+    wal.write_bytes(WAL_FRAMES)
     started = int(time.time() * 1000)
     calls = data / "hook-calls.jsonl"
 

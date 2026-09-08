@@ -466,7 +466,7 @@ class UsageInvalidationTest(TrialCase):
     def test_a_live_loop_db_wal_means_settlement_is_incomplete(self) -> None:
         def edit(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             support.write_loop_db(roots.data_dir / "loop.db", [("fire-root", launch.root_session_id, "")])
-            (roots.data_dir / "loop.db-wal").write_bytes(b"")
+            (roots.data_dir / "loop.db-wal").write_bytes(b"\x37\x7f\x06\x82" + b"\x00" * 28)
 
         record = self.rewrite(edit)
         self.assertEqual(record["outcome"], "invalid")
