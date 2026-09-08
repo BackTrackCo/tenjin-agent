@@ -374,6 +374,23 @@ one lesson family, seeded, non-publishable. Operator: `python3 -m evals.benchmar
 --manifest evals/benchmark/fixtures/live/keys-smoke-manifest.json --out <dir> --plumbing
 --tenjin-source <tenjin data dir>`, then `verify` and `summary`.
 
+**Keys smoke result (`bench1-keys-smoke-0` on `ae333ae`, 2026-09-08 06:30 UTC, `--plumbing
+--tenjin-source`, non-publishable).** 6 of 6 pass and valid, `verify` agrees, sentinels clean, 4
+seeded key-only lessons published and 4 deleted. `off` 2 attempts, 160,506 tokens;
+`tenjin_keyed_console` 2 attempts, 247,705 tokens (ratio 1.543); `tenjin_keyed_reporter` 2
+attempts, 175,581 tokens (ratio 1.094). Summary line: `failure key tenjin_keyed_console: keyed
+1/2 (sig_v1_test x1), keys leg hit 1, report file 0, delivered 1`. Trial `39dd0ffb` (console
+arm) is the first observed `sig_v1_test` resolution anywhere: the unfixed `pnpm exec vitest run`
+failed, the failure fire keyed `502b90852a1505e3` through the test lane's console fallback, the
+keys leg hit, the key-only fix lesson (piece `01a07fb6-7fc9...`) was injected, and the agent
+fixed the source and passed. The same attempt's `npx vitest run` refusal opened a `sig_v1`
+pairing (`d87d36ab...`) that hit nothing. Reporter arm: `.vitest-report.json` was present in
+both trial repositories, so the overlay wiring works, but no failure occurred there and the
+resolution through the JSON path is unobserved. Three of the four keyed attempts never failed:
+the agents decoded `tests/support/cases.mjs` with `node -e` and fixed the source before running
+a test. That is a task-design leak, to fix later, not here. Reading: the key resolves from
+console text with no target-repo opt-in; plumbing evidence only, n = 2 per arm.
+
 **The seeded arm may read the shelf by hand.** `tenjin_seeded` carries arm-level
 `settings.permissions.allow` for `Bash(tenjin search:*)`, `Bash(tenjin read:*)`, and
 `Bash(tenjin inspect:*)`, because a seeded agent in run seven followed the primer's instruction,
