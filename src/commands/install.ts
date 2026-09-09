@@ -593,6 +593,7 @@ async function installBody(
     harness,
     detectedBy: harnessDetectedBy(home, harness, which),
   }));
+  const harnessFlags = HARNESSES.map((harness) => `--harness ${harness}`);
   let selectedHarnesses: Harness[];
   if (explicitHarness) {
     selectedHarnesses = uniqueHarnesses(parsed.data.harness!.map(validateHarness));
@@ -601,13 +602,13 @@ async function installBody(
     const answer = await (deps.promptHarnesses ?? promptHarnesses)(detected);
     if (answer === null || answer.length === 0) {
       throw new CliError('REFUSED', 'Install cancelled before anything was written.', {
-        fix: `Re-run and select at least one harness, or pass ${HARNESSES.map((h) => `\`--harness ${h}\``).join(' or ')}.`,
+        fix: `Re-run and select at least one harness, or pass ${harnessFlags.join(' or ')}.`,
       });
     }
     selectedHarnesses = uniqueHarnesses(answer);
   } else {
     throw new CliError('USAGE', 'A non-interactive install needs an explicit harness.', {
-      fix: `Pass one or more of: ${HARNESSES.map((h) => `\`--harness ${h}\``).join(', ')}.`,
+      fix: `Pass one or more of: ${harnessFlags.join(', ')}.`,
     });
   }
 
