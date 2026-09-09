@@ -154,6 +154,9 @@ class Runtime:
     # The run's egress (`container.Egress`), created before the first trial and
     # removed after the last. Every live container joins its internal network.
     egress: Any = None
+    # The run's one corpus reading (`snapshot.Once`), asked for once the first
+    # seed has reached the shelf, so the count is the corpus the trials searched.
+    snapshot: Any = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +297,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             # before any trial by `live-run`, never here.
             (roots.output / "provision-refusal.txt").write_text(str(error) + "\n", encoding="utf-8")
             return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", str(error))
+        # The seed is on the shelf now, so this is the corpus every trial of
+        # this run searches. Asked once; `Once` ignores every later ask.
+        if runtime.snapshot is not None:
+            runtime.snapshot.fire()
     # The natural arm: a producer session first, on the same store, verified;
     # then the consumer on a fresh repository copy at the same path.
     produced: producer_module.ProducerResult | None = None

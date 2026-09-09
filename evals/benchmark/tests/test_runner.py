@@ -8,6 +8,7 @@ grandchild the root left behind.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import tempfile
@@ -592,6 +593,58 @@ class ProvisionRefusalTest(TrialCase):
         # The arm that runs the product as shipped says so with an empty list,
         # rather than leaving a reader to read absence as either.
         self.assertEqual(written, {"off_nudge": ["publish"], "as_shipped": []})
+
+
+class CorpusSnapshotTest(TrialCase):
+    """The run's one corpus reading fires once the first seed is on the shelf, and never twice."""
+
+    def executor_name(self, prepared: list[str]) -> str:
+        name = "provisioned_snapshot_for_this_test"
+
+        def prepare(request: executor.ProvisionRequest) -> executor.Provision:
+            prepared.append(request.trial_id)
+            if request.trial_id == prepared[0] and len(prepared) == 1 and getattr(self, "refuse_first", False):
+                raise executor.ProvisionError("the seed never published", code="seed_publish")
+            return executor.Provision()
+
+        executor.REGISTRY[name] = ExecutorSpec(name=name, harness="claude", launch=executor.REGISTRY["fake"].launch, prepare=prepare)
+        self.addCleanup(executor.REGISTRY.pop, name)
+        return name
+
+    def manifest_and_once(self, name: str):
+        from evals.benchmark import snapshot as snapshot_module
+
+        manifest = support.synthetic_manifest(self.dir, executor_name=name, arms=("on", "on2"))
+        for arm in manifest.data["arms"]:
+            arm["provision"] = "tenjin"
+        pages = [{"items": [{"id": "a", "slug": "s", "title": "t", "price": "0", "publishedAt": "p", "updatedAt": "u"}], "nextCursor": None}]
+        asked: list[object] = []
+
+        class Catalog:
+            def page(self, origin, cursor):
+                asked.append(cursor)
+                return pages[0]
+
+        return manifest, snapshot_module.Once(self.run_dir, "bench.tenjin.sh", Catalog()), asked
+
+    def test_the_reading_is_taken_once_however_many_trials_seeded(self) -> None:
+        prepared: list[str] = []
+        manifest, once, asked = self.manifest_and_once(self.executor_name(prepared))
+        results = runner.run(manifest, schedule.expand(manifest), self.run_dir, "sha256:schedule", dataclasses.replace(self.runtime(), snapshot=once))
+        self.assertEqual([result.outcome for result in results], ["pass", "pass"])
+        self.assertEqual(len(prepared), 2)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual((once.result["posts"], once.result["origin"]), (1, "bench.tenjin.sh"))
+
+    def test_a_trial_whose_seeding_was_refused_reads_nothing(self) -> None:
+        self.refuse_first = True
+        prepared: list[str] = []
+        manifest, once, asked = self.manifest_and_once(self.executor_name(prepared))
+        trials = schedule.expand(manifest)
+        results = runner.run(manifest, trials[:1], self.run_dir, "sha256:schedule", dataclasses.replace(self.runtime(), snapshot=once))
+        self.assertEqual([result.outcome for result in results], ["invalid"])
+        self.assertEqual(asked, [])
+        self.assertIsNone(once.result)
 
 
 class LiveRefusalTest(TrialCase):

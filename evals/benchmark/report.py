@@ -164,12 +164,25 @@ def stamp(accepted: dict[str, dict[str, Any]]) -> tuple[bool, str]:
     return publishable, kind
 
 
+def snapshot_fields(taken: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the corpus reading may say in public: counts, a hash, a time, or a refusal code.
+
+    The reading's own `detail` names a host and an exception, which is a private
+    string; the run directory keeps it and the report states the code alone.
+    """
+    if not taken:
+        return None
+    fields = {key: taken.get(key) for key in ("origin", "posts", "content_hash", "taken_at", "error")}
+    return {key: value for key, value in fields.items() if value is not None}
+
+
 def project(
     manifest_data: dict[str, Any],
     manifest_hash: str,
     schedule_hash: str,
     reduction: dict[str, Any],
     accepted: dict[str, dict[str, Any]],
+    corpus_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The whole publishable artifact, refused as a unit if anything private rides along."""
     excluded: dict[str, int] = {}
@@ -239,6 +252,7 @@ def project(
         # is entitled to know which.
         "automated": any(record["isolation"].get("automated", False) for record in accepted.values()),
         "corpus": corpus_stamp(accepted),
+        "corpus_snapshot": snapshot_fields(corpus_snapshot),
         "baseline": reduction["baseline"],
         "arms": reduction["arms"],
         # A headline needs complete accounting and a publishable run; the
@@ -348,6 +362,11 @@ def render(report: dict[str, Any]) -> str:
         lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
     if report.get("slice"):
         lines.append("slice: " + " ".join(f"{key}={value}" for key, value in sorted(report["slice"].items())))
+    taken = report.get("corpus_snapshot")
+    if taken and taken.get("error"):
+        lines.append(f"corpus snapshot unavailable ({taken['error']}): this report does not say which corpus produced it")
+    elif taken:
+        lines.append(f"corpus snapshot: {taken['posts']} pieces on {taken['origin']} at {taken['taken_at']}, {taken['content_hash']}")
     corpus = report.get("corpus")
     if corpus:
         lines.append(
