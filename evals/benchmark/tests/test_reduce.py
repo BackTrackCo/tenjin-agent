@@ -1,14 +1,15 @@
 """The reducer: what counts, what never counts, and how tasks are weighed.
 
 Each case here is one line of the plan's reduction contract. The corpus cases
-read the frozen fixture under `fixtures/fake/corpus/`, so a change in the
-reducer that moves a published aggregate has to be an explicit edit to checked
-in numbers rather than a quiet drift.
+build a finished run through `support.fake_corpus` and recompute the contract's
+arithmetic beside the reducer's own output, so a regenerated corpus moves both
+sides together and only a reducer change can open a gap.
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
@@ -17,15 +18,12 @@ from evals.benchmark import FIXTURES, manifest as manifest_module, records, redu
 from evals.benchmark.records import Excluded
 from evals.benchmark.tests import support
 
-CORPUS_MANIFEST = FIXTURES / "fake" / "corpus-manifest.json"
-CORPUS = FIXTURES / "fake" / "corpus"
 GOLDEN = FIXTURES / "fake" / "bootstrap-golden.json"
 
 
-def corpus() -> tuple[manifest_module.Manifest, str, dict, list[Excluded]]:
-    manifest = manifest_module.load(CORPUS_MANIFEST)
-    digest = json.loads((CORPUS / "schedule.json").read_text(encoding="utf-8"))["schedule_hash"]
-    accepted, excluded = records.select(CORPUS / "records", manifest.hash, digest)
+def corpus(tmp: Path) -> tuple[manifest_module.Manifest, str, dict, list[Excluded]]:
+    manifest, digest, records_dir = support.fake_corpus(tmp)
+    accepted, excluded = records.select(records_dir, manifest.hash, digest)
     return manifest, digest, accepted, excluded
 
 
@@ -240,11 +238,13 @@ class BootstrapTest(unittest.TestCase):
 
 
 class CorpusTest(unittest.TestCase):
-    """The frozen fake corpus: 12 attempts, 3 tasks, 2 arms, 2 repeats."""
+    """A built fake corpus: 12 attempts, 3 tasks, 2 arms, 2 repeats."""
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.manifest, cls.digest, cls.accepted, cls.excluded = corpus()
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls.manifest, cls.digest, cls.accepted, cls.excluded = corpus(Path(tmp.name))
         cls.reduction = reduce_module.reduce(cls.accepted, cls.excluded, "off", cls.manifest.data["seed"], cls.manifest.arms)
 
     @classmethod
@@ -268,7 +268,8 @@ class CorpusTest(unittest.TestCase):
             arm["per_resolution"] = sum(arm["tokens"][task] / arm["passes"][task] for task in arm["tokens"]) / len(arm["tokens"])
         return cells
 
-    def test_the_corpus_matches_the_manifest_and_the_frozen_schedule(self) -> None:
+    def test_the_corpus_matches_the_manifest_and_its_schedule(self) -> None:
+        # Re-expanding the manifest reproduces the schedule its records were written under.
         trials = schedule.expand(self.manifest)
         self.assertEqual(schedule.schedule_hash(trials), self.digest)
         self.assertEqual(len(self.accepted), 12)
@@ -279,7 +280,7 @@ class CorpusTest(unittest.TestCase):
     def test_stale_partial_and_foreign_files_are_excluded_with_a_reason(self) -> None:
         self.assertEqual(sorted(item.reason for item in self.excluded), ["foreign", "partial", "stale"])
 
-    def test_the_corpus_reduces_to_frozen_task_equal_aggregates(self) -> None:
+    def test_the_corpus_reduces_to_task_equal_aggregates(self) -> None:
         off, on = self.reduction["arms"]["off"], self.reduction["arms"]["on"]
         # The treatment arm declares `auxiliary_usage: exposed` and backs it
         # with receipts, so its only named gap is the declared cap.
