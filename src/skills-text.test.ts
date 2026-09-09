@@ -1047,9 +1047,17 @@ describe('the public render did not move', () => {
   // only, so tenjin-search's command surface now points hook-arm state at bare
   // `tenjin hooks` (table + enable/disable) instead of letting agents guess a
   // `config get hooks` subtree that never existed. tenjin-publish is untouched.
+  //
+  // Re-pinned for the tenjin-search tighten (same PR): 228 to 207 lines with no
+  // fact dropped — compressed bullets (matched/item/miss, read refusal taxonomy,
+  // outcome id lines, publish-handoff close), a shorter team-privacy bullet and
+  // description examples, and the fund line folded into the buy list. Every
+  // pinned invariant (firing gate pairs, leak refusal, denial rule and its
+  // five-sentence cap, untrusted-data verbatim, mode handoff, no trust-scope
+  // language) holds in both renders; only the digest moved.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '66e4e4f52fa60d845ca1e0d3b21253d3',
+      'tenjin-search': 'c35f1bd9796f33640b80eeea15072875',
       'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });
