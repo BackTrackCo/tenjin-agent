@@ -5,9 +5,16 @@ reads a settled run and writes one JSONL record per hook fire that carried a
 question or a question key: the prompt as fired, or for a failure fire the
 command head and error line the ledger holds as the observed situation packet,
 the context the benchmark knows about the trial, the baseline's own outcome
-from the ledger, and a replay of the same question through `tenjin search`
-on the team shelf (post-floor, top ten). Human labels are not filled in here;
-the schema note says what a labeller writes.
+from the ledger, and the shelf's shortlist for the same question (post-floor,
+top ten). Human labels are not filled in here; the schema note says what a
+labeller writes.
+
+The shortlist comes from the trial's own `output/shortlist.json` where the arm
+took one at stop, and only otherwise from a `tenjin search` run here.
+`replay.source` says which: `in_run_snapshot` or `post_run_replay`. The
+preference is the whole point. The seeded pieces are deleted when a trial
+stops, so a search run after the run cannot return one and measures precision
+alone; only the in-run snapshot can say whether the right piece was there.
 
 It runs only after settlement: a live process from the run or a live WAL on a
 trial ledger is a refusal, never a read. Seeded pieces are marked apart from
@@ -28,8 +35,11 @@ from typing import Any, Callable
 from . import loop_join, reap, records, tenjin_arm
 from .manifest import Manifest
 
-SEARCH_LIMIT = 10
+SEARCH_LIMIT = tenjin_arm.SEARCH_LIMIT
 METHOD = "baseline"
+SNAPSHOT = "in_run_snapshot"
+REPLAY = "post_run_replay"
+KEY_ONLY = "the fire carried a key and no question text; a keys resolve is not a search"
 LABELS_SCHEMA = (
     "human-supplied after reading the candidate bodies: applicable | not_applicable | ambiguous, "
     "with a reason; titles alone are not ground truth, and an empty applicable set is a valid label"
@@ -37,7 +47,6 @@ LABELS_SCHEMA = (
 FIRE_COLUMNS = ("id", "at", "session", "agent", "arm", "harness", "event", "prompt_id", "reason", "question_key", "question", "delivered", "error")
 LEG_COLUMNS = ("stage", "shelf", "status", "outcome", "elapsed_ms", "search_id", "title", "url", "form", "calibration")
 PAIRING_COLUMNS = ("kind", "key", "cmd_head", "cmd", "error_line", "error_files", "status", "post_id")
-CANDIDATE_FIELDS = ("confidence", "corroborated", "calibration", "score")
 
 Replay = Callable[[str], dict[str, Any]]
 
@@ -153,34 +162,27 @@ def baseline_outcome(fire: dict[str, Any], legs: list[dict[str, Any]], seeded: s
 
 
 def replay_search(source: tenjin_arm.Source, question: str) -> dict[str, Any]:
-    """The same question through `tenjin search --json --limit 10` on the source data dir's shelf: post-floor, top ten."""
-    code, payload, tail = tenjin_arm._run_cli(tenjin_arm.SEARCH_ARGV(question), tenjin_arm.cli_environment(source), source.secrets)
-    items = tenjin_arm._find(payload, "items")
-    if not isinstance(items, list):
-        items = tenjin_arm._find(payload, "candidates")
-    candidates = []
-    for rank, item in enumerate(items if isinstance(items, list) else [], start=1):
-        if not isinstance(item, dict):
-            continue
-        candidates.append(
-            {
-                "id": item.get("resourceId"),
-                "rank": rank,
-                "title": item.get("title"),
-                "url": item.get("url"),
-                "strong": item.get("strong"),
-                **{name: item.get(name) for name in CANDIDATE_FIELDS},
-                "match_reasons": item.get("matchReasons"),
-            }
-        )
-    return {
-        "exit": code,
-        "search_id": tenjin_arm._find(payload, "searchId"),
-        "candidates": candidates,
-        "error": None if code == 0 else tail,
-        "limit": SEARCH_LIMIT,
-        "post_floor": True,
-    }
+    """The same question through `tenjin search --json --limit 10` on the source data dir's shelf, now: the shelf without the seeded pieces."""
+    return tenjin_arm.search_shortlist(source, question)
+
+
+def snapshot_of(run_dir: Path, trial_id: str) -> dict[tuple[str, Any], dict[str, Any]]:
+    """The trial's own in-run shortlist keyed by the question and question key it was taken for, or empty when the trial left none.
+
+    An unreadable or malformed file is empty rather than a refusal: the fall
+    back is a replay, which is what every run before the snapshot had.
+    """
+    path = run_dir / "trials" / trial_id / "output" / tenjin_arm.SHORTLIST_FILE
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = payload.get("entries") if isinstance(payload, dict) else None
+    found = {}
+    for entry in entries if isinstance(entries, list) else []:
+        if isinstance(entry, dict) and isinstance(entry.get("search"), dict) and entry.get("question"):
+            found.setdefault((entry["question"], entry.get("question_key")), entry)
+    return found
 
 
 def tokens_of(record: dict[str, Any]) -> int | None:
@@ -293,21 +295,32 @@ def export(
     for trial_id in sorted(accepted):
         cases.extend(trial_cases(manifest, run_dir, nonce, accepted[trial_id], shelf_origin))
     seeded_candidates = 0
+    from_snapshot = 0
     if not dry_run:
         if source is None:
             raise CasesError("replaying the cases needs --tenjin-source: the search runs on that data dir's team shelf")
+        snapshots = {trial_id: snapshot_of(run_dir, trial_id) for trial_id in sorted(accepted)}
         do_replay = replay or (lambda question: replay_search(source, question))
         for case in cases:
             question = case["prompt"]["text"]
             if not question:
-                case["replay"] = {"skipped": "the fire carried a key and no question text; a keys resolve is not a search"}
+                case["replay"] = {"skipped": KEY_ONLY}
                 continue
-            result = do_replay(question)
+            # The trial's own snapshot wins: it was taken while the seeded
+            # pieces were on the shelf, and a replay now cannot be.
+            entry = snapshots.get(case["source"]["trial_id"], {}).get((question, case["prompt"]["question_key"]))
+            if entry is None:
+                result = {**do_replay(question), "source": REPLAY}
+                taken_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now()))
+            else:
+                result = {**entry["search"], "source": SNAPSHOT}
+                taken_at = entry.get("at")
+                from_snapshot += 1
             for candidate in result.get("candidates", []):
                 candidate["seeded"] = candidate.get("id") in case["seeded_piece_ids"]
                 seeded_candidates += int(candidate["seeded"])
             case["replay"] = result
-            case["corpus_snapshot"]["replayed_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now()))
+            case["corpus_snapshot"]["replayed_at"] = taken_at
     cases = [_mask(case, secrets, home) for case in cases]
     if out is not None and not dry_run:
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -318,6 +331,7 @@ def export(
         "cases": len(cases),
         "trials": len(accepted),
         "replayed": 0 if dry_run else sum(1 for case in cases if case["replay"] and "candidates" in case["replay"]),
+        "from_snapshot": from_snapshot,
         "seeded_candidates": seeded_candidates,
         "dry_run": dry_run,
         "out": None if dry_run or out is None else str(out),

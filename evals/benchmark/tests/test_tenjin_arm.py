@@ -14,6 +14,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequ
 from evals.benchmark.tests import support
 
 SECRET = "bench1-test-shelf-secret-0123456789abcdef"
+QUESTION = "How do I run one vitest file here?"
 LIVE = "live_provisioned_for_this_test"
 
 
@@ -517,7 +519,7 @@ PROBE_MJS = "console.error('Error: ENOENT: no such file or directory, open \\'se
 
 
 class SeedCase(DaemonCase):
-    """The lesson seed on a fake CLI: keyed publish at prepare, delete at stop, every outcome in the facts."""
+    """The lesson seed on a fake CLI: keyed publish at prepare, the shortlist and the delete at stop, every outcome in the facts."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -845,6 +847,100 @@ class SeedCase(DaemonCase):
         self.assertEqual(tenjin_arm.key_hash("sig_v1:ee9fd96defcffbeb"), "ed094b3427f6e7e2")
         self.assertNotIn("s9", fix.body.read_text(encoding="utf-8"))
         self.assertEqual(tenjin_arm.lessons_for({"id": "answer-file", "family": "smoke"}, live), [])
+
+    def write_ledger(self, roots: artifact.TrialRoots, rows: list[tuple[str, str, str, str | None, str | None]]) -> None:
+        """A settled ledger in the trial's data dir: one fire per row of (id, arm, event, question, question key)."""
+        db = sqlite3.connect(roots.data_dir / tenjin_arm.LOOP_DB)
+        try:
+            db.executescript(support.loop_ddl())
+            for index, (fire_id, arm, event, question, key) in enumerate(rows, start=1):
+                db.execute(
+                    "INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait, deadline_ms, elapsed_ms, reason, question, question_key)"
+                    " VALUES (?, ?, 's1', 'a1', ?, 'claude', ?, ?, '/repo', 'sync', 1000, 12, 'hit', ?, ?)",
+                    (fire_id, index, arm, event, f"p{index}", question, key),
+                )
+            db.commit()
+        finally:
+            db.close()
+
+    def shelf(self, *items: dict) -> None:
+        (Path(self.source.path) / "search-items.json").write_text(json.dumps(list(items)), encoding="utf-8")
+
+    def read_shortlist(self, roots: artifact.TrialRoots) -> dict:
+        return json.loads((roots.output / tenjin_arm.SHORTLIST_FILE).read_text(encoding="utf-8"))
+
+    def test_the_shortlist_is_taken_before_the_delete_and_names_the_live_seeded_ids(self) -> None:
+        roots = self.seed_roots()
+        provision = tenjin_arm.prepare(self.request(roots))
+        self.write_ledger(
+            roots,
+            [
+                ("f1", "prompt", "prompt", QUESTION, None),
+                ("f2", "prompt", "prompt", QUESTION, None),
+                ("f3", "failure", "tool.after", "Why does the actor test fail?", "502b90852a1505e3"),
+                ("f4", "failure", "tool.after", None, "502b90852a1505e3"),
+            ],
+        )
+        self.shelf(
+            {"resourceId": "piece-1", "title": "The lesson", "url": "https://team-shelf.example/p/piece-1", "strong": True, "confidence": 0.9, "corroborated": True, "calibration": "hybrid-v1"},
+            {"resourceId": "piece-real", "title": "The convention piece", "url": "https://team-shelf.example/p/piece-real", "strong": False},
+        )
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual(report["shortlist"], {"written": True, "questions": 2, "failed": 0, "error": None})
+        self.assertEqual(report["seed_deleted"], {"piece-1": None})
+        payload = self.read_shortlist(roots)
+        self.assertEqual((payload["trial_id"], payload["seeded_piece_ids"], payload["limit"]), (roots.trial_id, ["piece-1"], 10))
+        self.assertEqual(payload["shelf_origin"], "team-shelf.example")
+        self.assertRegex(payload["at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        # One entry per distinct question and key, in fire order; the key-only fire is not a search.
+        self.assertEqual([(entry["question"], entry["question_key"], entry["fire_id"], entry["fire_event"], entry["hook_arm"]) for entry in payload["entries"]],
+                         [(QUESTION, None, "f1", "prompt", "prompt"), ("Why does the actor test fail?", "502b90852a1505e3", "f3", "tool.after", "failure")])
+        self.assertRegex(payload["entries"][0]["at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        search = payload["entries"][0]["search"]
+        self.assertEqual((search["exit"], search["error"], search["post_floor"], search["limit"], search["search_id"]), (0, None, True, 10, "search-1"))
+        # The seeded piece is in the shortlist, which it can only be while it is still on the shelf.
+        self.assertEqual([(c["rank"], c["id"], c["title"], c["strong"], c["confidence"], c["corroborated"]) for c in search["candidates"]],
+                         [(1, "piece-1", "The lesson", True, 0.9, True), (2, "piece-real", "The convention piece", False, None, None)])
+        argv = [call["argv"] for call in self.calls()]
+        self.assertEqual([call[0] for call in argv], ["publish", "search", "search", "delete"])
+        self.assertEqual(argv[1], ["search", QUESTION, "--json", "--limit", "10"])
+        # And after the delete it is gone, which is the whole reason the snapshot exists.
+        self.assertEqual(tenjin_arm.search_shortlist(self.source, QUESTION)["candidates"][0]["id"], "piece-real")
+
+    def test_a_search_that_fails_is_recorded_for_that_question_and_the_trial_still_stops(self) -> None:
+        roots = self.seed_roots()
+        provision = tenjin_arm.prepare(self.request(roots))
+        self.write_ledger(roots, [("f1", "prompt", "prompt", QUESTION, None)])
+        (Path(self.source.path) / "fail-search").write_text("", encoding="utf-8")
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual(report["shortlist"], {"written": True, "questions": 1, "failed": 1, "error": None})
+        self.assertEqual(report["seed_deleted"], {"piece-1": None})
+        search = self.read_shortlist(roots)["entries"][0]["search"]
+        self.assertEqual((search["exit"], search["candidates"]), (4, []))
+        self.assertIn("search refused: 502", search["error"])
+
+    def test_a_trial_with_no_ledger_writes_an_empty_shortlist_and_an_unreadable_one_is_not_fatal(self) -> None:
+        roots = self.seed_roots()
+        provision = tenjin_arm.prepare(self.request(roots))
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual((report["shortlist"]["written"], report["shortlist"]["questions"]), (True, 0))
+        self.assertEqual(self.read_shortlist(roots)["entries"], [])
+        self.assertEqual(report["seed_deleted"], {"piece-1": None})
+        roots.data_dir.joinpath(tenjin_arm.LOOP_DB).write_bytes(b"not a database")
+        report = tenjin_arm.stop(roots, provision)
+        self.assertFalse(report["shortlist"]["written"])
+        self.assertIn("DatabaseError", report["shortlist"]["error"])
+        self.assertEqual(report["seed_deleted"], {"piece-1": None})
+
+    def test_the_shortlist_masks_the_shelf_secret(self) -> None:
+        roots = self.seed_roots()
+        provision = tenjin_arm.prepare(self.request(roots))
+        self.write_ledger(roots, [("f1", "prompt", "prompt", QUESTION, None)])
+        self.shelf({"resourceId": "piece-1", "title": f"The lesson {SECRET}", "url": "https://team-shelf.example/p/piece-1", "strong": True})
+        tenjin_arm.stop(roots, provision)
+        text = (roots.output / tenjin_arm.SHORTLIST_FILE).read_text(encoding="utf-8")
+        self.assertNotIn(SECRET, text)
+        self.assertIn("[secret]", text)
 
 
 def _post(url: str, token: str, payload: dict) -> None:

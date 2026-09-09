@@ -8,6 +8,12 @@ import sys
 from pathlib import Path
 
 
+def deleted(data_dir: Path) -> set[str]:
+    """The piece ids this fake shelf has already taken down."""
+    path = data_dir / "deleted.json"
+    return set(json.loads(path.read_text(encoding="utf-8"))) if path.exists() else set()
+
+
 def main(argv: list[str]) -> int:
     data_dir = Path(os.environ["TENJIN_DATA_DIR"])
     command = argv[0] if argv else ""
@@ -36,12 +42,18 @@ def main(argv: list[str]) -> int:
         sys.stdout.write("warning: no answer card\n" + json.dumps(envelope) + "\n")
         return 0
     if command == "search":
+        if (data_dir / "fail-search").exists():
+            sys.stderr.write("search refused: 502 from the shelf\n")
+            return 4
+        # A deleted piece stops being findable, which is what makes the order
+        # of the snapshot and the delete observable from the answers alone.
         results = data_dir / "search-results.json"
-        candidates = json.loads(results.read_text(encoding="utf-8")) if results.exists() else []
+        candidates = [item for item in (json.loads(results.read_text(encoding="utf-8")) if results.exists() else []) if item.get("resourceId") not in deleted(data_dir)]
         items = data_dir / "search-items.json"
         if items.exists():
             # The v3 receipt: `data.response.items`, each a passthrough candidate.
-            sys.stdout.write(json.dumps({"ok": True, "data": {"shelf": "team", "response": {"searchId": "search-1", "items": json.loads(items.read_text(encoding="utf-8"))}}}) + "\n")
+            live = [item for item in json.loads(items.read_text(encoding="utf-8")) if item.get("resourceId") not in deleted(data_dir)]
+            sys.stdout.write(json.dumps({"ok": True, "data": {"shelf": "team", "response": {"searchId": "search-1", "items": live}}}) + "\n")
             return 0
         sys.stderr.write(json.dumps({"ok": True, "data": {"candidates": candidates}}) + "\n")
         return 0
@@ -49,6 +61,7 @@ def main(argv: list[str]) -> int:
         if (data_dir / "fail-delete").exists():
             sys.stderr.write("delete refused: 502 from the shelf\n")
             return 4
+        (data_dir / "deleted.json").write_text(json.dumps(sorted(deleted(data_dir) | {argv[1]})), encoding="utf-8")
         json.dump({"ok": True, "data": {"deleted": True, "postId": argv[1]}}, sys.stdout)
         return 0
     return 2

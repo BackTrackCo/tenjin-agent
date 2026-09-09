@@ -15,6 +15,12 @@ leaves `daemon.json` in the trial's output root. So the port is a constant
 rather than a free host port, and what this module used to observe by
 signalling a pid it started it now reads back out of that file.
 
+Stop also snapshots the shelf before it deletes. The seeded pieces are what a
+retrieval reading of the run is about, and a search run after the delete can
+never return one, so `stop` asks the shelf every question the trial's ledger
+holds and writes the answers to `output/shortlist.json` first. `cases` prefers
+that file to a replay of its own; without it, recall is not measurable.
+
 The team shelf secret is one of the copied keys. It enters the trial by
 construction, so the run says so: `Source.facts` becomes part of the record's
 isolation block, the secret's value is a sentinel canary for everything the
@@ -31,6 +37,7 @@ import os
 import re
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
@@ -291,6 +298,9 @@ SEARCH_ARGV: Callable[[str], list[str]] = search_argv
 SEARCH_LIMIT = 10
 ENVELOPE_KEYS = frozenset({"ok", "data", "resourceId", "postId", "deleted", "candidates"})
 SEED_NOTE = "seed.json"
+CANDIDATE_FIELDS = ("confidence", "corroborated", "calibration", "score")
+SHORTLIST_FILE = "shortlist.json"
+SHORTLIST_FIRE_COLUMNS = ("id", "at", "arm", "event", "question", "question_key")
 
 
 def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dict[str, str]:
@@ -433,6 +443,102 @@ def publish_lesson(source: Source, roots: artifact.TrialRoots, lesson: Lesson, n
             f"swept the shelf by title: {sweep['matched']} matched, {len(sweep['deleted'])} deleted, {len(sweep['failed'])} failed; see {roots.output / SEED_NOTE}"
         )
     raise ProvisionError(f"seeding the lesson failed: tenjin publish exited {code}: {tail or 'no output'}", code="seed_publish")
+
+
+def utc_now() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def search_shortlist(source: Source, question: str) -> dict[str, Any]:
+    """One question through `tenjin search --json --limit 10` on that data dir's team shelf: post-floor, top ten, in rank order.
+
+    The one place the envelope becomes a candidate list, so an in-run snapshot
+    and a post-run replay are the same shape and a reader of `cases` never has
+    to tell the two apart by their fields.
+    """
+    code, payload, tail = _run_cli(SEARCH_ARGV(question), cli_environment(source), source.secrets)
+    items = _find(payload, "items")
+    if not isinstance(items, list):
+        items = _find(payload, "candidates")
+    candidates = []
+    for rank, item in enumerate(items if isinstance(items, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        candidates.append(
+            {
+                "id": item.get("resourceId"),
+                "rank": rank,
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "strong": item.get("strong"),
+                **{name: item.get(name) for name in CANDIDATE_FIELDS},
+                "match_reasons": item.get("matchReasons"),
+            }
+        )
+    return {
+        "exit": code,
+        "search_id": _find(payload, "searchId"),
+        "candidates": candidates,
+        "error": None if code == 0 else tail,
+        "limit": SEARCH_LIMIT,
+        "post_floor": True,
+    }
+
+
+def asked_questions(loop_db: Path) -> list[dict[str, Any]]:
+    """The distinct question and question key the trial's ledger recorded, in fire order, each with the fire that first carried it.
+
+    A fire that carried a key and no question text is not here: a keys resolve
+    is not a search, and there is nothing to ask the shelf.
+    """
+    if not loop_db.is_file():
+        return []
+    uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(f"SELECT {', '.join(SHORTLIST_FIRE_COLUMNS)} FROM fires ORDER BY at, id").fetchall()
+    finally:
+        connection.close()
+    found: dict[tuple[str, Any], dict[str, Any]] = {}
+    for row in rows:
+        question = row["question"]
+        if not question:
+            continue
+        found.setdefault(
+            (question, row["question_key"]),
+            {"question": question, "question_key": row["question_key"], "fire_id": row["id"], "fire_event": row["event"], "hook_arm": row["arm"]},
+        )
+    return list(found.values())
+
+
+def shortlist(roots: artifact.TrialRoots, source: Source, pieces: list[str]) -> dict[str, Any]:
+    """What the shelf answers today for every question this trial asked, with the seeded pieces named as live."""
+    entries = []
+    for entry in asked_questions(roots.data_dir / LOOP_DB):
+        entries.append({**entry, "at": utc_now(), "search": search_shortlist(source, entry["question"])})
+    return {
+        "trial_id": roots.trial_id,
+        "phase": roots.phase,
+        "at": utc_now(),
+        "shelf_origin": source.shelf_origin,
+        "limit": SEARCH_LIMIT,
+        "seeded_piece_ids": sorted(pieces),
+        "entries": entries,
+    }
+
+
+def write_shortlist(roots: artifact.TrialRoots, source: Source, pieces: list[str]) -> dict[str, Any]:
+    """Take the shortlist and write it beside the daemon report. Never raises: the trial's own result does not depend on it."""
+    try:
+        payload = shortlist(roots, source, pieces)
+        roots.output.mkdir(parents=True, exist_ok=True)
+        text = _mask(json.dumps(payload, indent=2, sort_keys=True), source.secrets)
+        (roots.output / SHORTLIST_FILE).write_text(text + "\n", encoding="utf-8")
+    except (OSError, sqlite3.Error, ValueError) as error:
+        return {"written": False, "questions": 0, "failed": 0, "error": f"{error.__class__.__name__}: {error}"}
+    failed = sum(1 for entry in payload["entries"] if entry["search"]["exit"] != 0)
+    return {"written": True, "questions": len(payload["entries"]), "failed": failed, "error": None}
 
 
 def delete_lesson(source: Source, piece_id: str) -> str | None:
@@ -726,7 +832,7 @@ def prepare(request: ProvisionRequest) -> Provision:
 
 
 def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
-    """Read the container's daemon report, wait for the WAL, and take the seeded pieces off the shelf."""
+    """Read the container's daemon report, wait for the WAL, snapshot the shelf, and take the seeded pieces off it."""
     state = provision.stop_state
     report = settle_daemon(roots, roots.output)
     # The seeded piece leaves the shelf with the trial. A delete that fails is
@@ -734,5 +840,10 @@ def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
     pieces = state.get("pieces")
     source = state.get("source")
     if isinstance(pieces, list) and pieces and isinstance(source, Source):
+        # The shortlist first, while the pieces are still on the shelf. After
+        # the delete the same question cannot return them, so a later replay
+        # measures precision and nothing about recall. The WAL has settled
+        # above, which is what makes the ledger readable here.
+        report["shortlist"] = write_shortlist(roots, source, pieces)
         report["seed_deleted"] = {piece_id: delete_lesson(source, piece_id) for piece_id in pieces}
     return report

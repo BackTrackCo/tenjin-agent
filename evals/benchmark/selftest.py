@@ -34,7 +34,7 @@ BUDGET_S = 60.0
 SUBJECTS = {
     "test_artifact": "disposable trial roots, hidden layer, isolation attestation",
     "test_budget": "the suite's own wall-clock budget",
-    "test_cases": "search-intent case records: after settlement, one per fire, replayed on the fake CLI, seeded marked apart",
+    "test_cases": "search-intent case records: after settlement, one per fire, the trial's snapshot preferred over a replay, seeded marked apart",
     "test_claude_live": "live Claude executor: argv, session id, sessions resolver, child env, live-run",
     "test_container": "the container seam: same-path mounts, the docker argv, the run's egress, the proxy log as the sentinel",
     "test_claude_usage": "Claude JSONL adapter: request grouping, retries, ambiguity",
@@ -53,7 +53,7 @@ SUBJECTS = {
     "test_runner": "trial execution, settlement, caps, process-group kill, resume",
     "test_schedule": "seeded balanced schedule and trial identity",
     "test_signature": "the sig_v1 port: the same line, floor, and key the product's failure arm derives",
-    "test_tenjin_arm": "the Tenjin hooks arm: seeded data dir, one daemon per trial, stopped before the join",
+    "test_tenjin_arm": "the Tenjin hooks arm: seeded data dir, one daemon per trial, the shelf snapshotted before the seed is deleted",
     "test_usage": "usage contract: arithmetic, null versus zero, dedupe",
     "test_verifier": "hidden verifier registry, fail-closed argv, outcome vocabulary",
 }

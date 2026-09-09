@@ -39,7 +39,8 @@ evals/benchmark/
   claude_live.py   the live Claude Code executor: validated argv, minted session id,
                    per-trial settings, child environment allowlist, sessions resolver
   tenjin_arm.py    the Tenjin hooks arm: seeded data dir, the keyed lesson published at
-                   prepare and deleted at stop, one daemon per trial, stopped before the join
+                   prepare, the shelf snapshotted and the lesson deleted at stop, one
+                   daemon per trial, stopped before the join
   signature.py     the product's sig_v1 failure key, ported byte for byte and held to the
                    TypeScript by src/hooks/failure/signature.parity.test.ts
   verifier.py      hidden verifier registry, hidden layer, the fake verifiers, and the
@@ -338,7 +339,8 @@ both sides over the same outputs, so drift fails the product's suite); refuses t
 under `TENJIN_DATA_DIR` set to the operator's source data dir, whose wallet signs it. `--key`
 needs no open pairing: the CLI stamps a matching local pairing row if one exists and sends
 the key to the shelf either way. The body carries a trial stamp line, because the CLI hands
-back the last url for a body it already published. At `stop`, after the daemon, `tenjin
+back the last url for a body it already published. At `stop`, after the daemon and after the
+shortlist snapshot (see **Cases for the search-intent experiment**), `tenjin
 delete <id> --yes --json` removes every piece; the record's `isolation.seed` is a list, one
 entry per lesson, each with `lesson`, the title, `key_hashes`, `keys`, `shelf_origin`,
 `piece_id`, `published`, `probe` (which command keyed under the lesson's kind, as hashes),
@@ -1472,15 +1474,31 @@ its source column), `human_label: null` with `labels_schema` saying what a label
 (benchmark version, manifest and schedule hash, the arm's `product_version`, the run nonce),
 `method: "baseline"`, `seeded_piece_ids`, `baseline` (the ledger's own outcome: rank-1 title,
 each leg's status and outcome, the delivered piece and whether it was seeded, `hit`), `replay`
-(the same question through `tenjin search --json --limit 10` on the source data dir's team
-shelf: each candidate's id, rank, title, url, `strong`, and `confidence`, `corroborated`,
-`calibration`, `score` when the shelf sends them, plus `seeded: true` for an id in the trial's
-seed list; a key-only failure fire is not replayed, a keys resolve is not a search), and
-`attempt` (outcome, tokens, cost, wall time, turns). Secrets are masked and the home path is
-`~` in every string. Limits: the replay is post-floor and top ten, so it cannot establish
-recall below the shelf's floor; labels are human-supplied, never written here; seeded
-positives are marked so they are reported apart from real ones. `--dry-run` lists the cases
-and calls nothing. Nothing here changes a record.
+(the shelf's shortlist for the same question, `tenjin search --json --limit 10`: each
+candidate's id, rank, title, url, `strong`, and `confidence`, `corroborated`, `calibration`,
+`score` when the shelf sends them, plus `seeded: true` for an id in the trial's own
+`isolation.seed` list, and `source`; a key-only failure fire has no shortlist, a keys resolve
+is not a search), and `attempt` (outcome, tokens, cost, wall time, turns). Secrets are masked
+and the home path is `~` in every string. `--dry-run` lists the cases and calls nothing.
+Nothing here changes a record.
+
+**Where the shortlist comes from, and why it decides what is measurable.** `replay.source` is
+`in_run_snapshot` or `post_run_replay`. The seeded pieces are deleted when the trial stops, so
+a search run after the run can never return one: a post-run replay measures precision and says
+nothing at all about recall, because no case has its correct piece in the shortlist. The
+snapshot is what makes recall measurable. `tenjin_arm.stop` takes it while the pieces are
+still live: for each distinct question and question key in that trial's ledger, one
+`tenjin search --json --limit 10`, written to `<trial>/output/shortlist.json` as `entries`
+(question, question key, the fire event and hook arm it came from, the UTC time, and the
+envelope's candidate list) alongside the `seeded_piece_ids` that were live at that moment, and
+only then are the pieces deleted. A search that fails is recorded for its question with the
+exit code and the masked tail; it never fails the trial, whose own result does not depend on
+this. `cases` prefers that file, matching a case to an entry on the question and question key,
+and `corpus_snapshot.replayed_at` is then the snapshot's time rather than the export's. A run
+with no snapshot, or a question the snapshot does not hold, falls back to a replay here.
+Remaining limits: either shortlist is post-floor and top ten, so it cannot establish recall
+below the shelf's floor; labels are human-supplied, never written here; seeded positives are
+marked so they are reported apart from real ones.
 
 ## Extending the foundation
 

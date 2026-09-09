@@ -79,6 +79,26 @@ class CasesCase(unittest.TestCase):
         records.validate(record)
         (self.records_dir / f"{trial_id}.json").write_text(json.dumps(record), encoding="utf-8")
 
+    def write_snapshot(self, trial_id: str, entries: list[dict], seeded_ids: list[str]) -> Path:
+        """The shortlist the arm's stop path would have left in the trial's output."""
+        output = self.run_dir / "trials" / trial_id / "output"
+        output.mkdir(parents=True, exist_ok=True)
+        path = output / tenjin_arm.SHORTLIST_FILE
+        payload = {"trial_id": trial_id, "phase": None, "at": "2026-09-09T00:00:00Z", "shelf_origin": "team-shelf.example", "limit": 10, "seeded_piece_ids": seeded_ids, "entries": entries}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def snapshot_entry(self, question: str, key: str | None, candidates: list[dict]) -> dict:
+        return {
+            "question": question,
+            "question_key": key,
+            "fire_id": "f1",
+            "fire_event": "prompt",
+            "hook_arm": "prompt",
+            "at": "2026-09-09T00:00:00Z",
+            "search": {"exit": 0, "search_id": "search-in-run", "candidates": candidates, "error": None, "limit": 10, "post_floor": True},
+        }
+
 
 class ExportTest(CasesCase):
     def test_one_record_per_fire_with_a_question_or_a_key_replayed_and_seeded_marked_apart(self) -> None:
@@ -111,6 +131,8 @@ class ExportTest(CasesCase):
         self.assertEqual([(c["rank"], c["id"], c["seeded"], c["strong"], c["confidence"], c["corroborated"], c["calibration"]) for c in prompt["replay"]["candidates"]],
                          [(1, "piece-seeded", True, True, 0.9, True, "hybrid-v1"), (2, "piece-real", False, False, None, None, None)])
         self.assertEqual((prompt["replay"]["post_floor"], prompt["replay"]["limit"], prompt["replay"]["search_id"]), (True, 10, "search-1"))
+        # No trial snapshot on disk, so the shortlist is this command's own search.
+        self.assertEqual((prompt["replay"]["source"], summary["from_snapshot"]), ("post_run_replay", 0))
         self.assertRegex(prompt["corpus_snapshot"]["replayed_at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
         self.assertEqual(prompt["corpus_snapshot"]["shelf_origin"], "team-shelf.example")
         self.assertEqual(prompt["revisions"]["run_nonce"], nonce)
@@ -125,6 +147,79 @@ class ExportTest(CasesCase):
         self.assertNotIn(SECRET, text)
         self.assertIn("[secret]", text)
         self.assertNotIn("/Users/operator", text)
+
+    def test_the_trials_own_snapshot_is_preferred_and_the_record_says_which_source_it_came_from(self) -> None:
+        trial = self.trials[0]
+        record = self.record(trial)
+        _harness, session, agent = record["actors"][0]["key"]
+        self.write_ledger(trial, session, agent)
+        self.seeded(trial, "piece-seeded")
+        self.write_snapshot(
+            trial,
+            [
+                self.snapshot_entry(
+                    "How do I run one vitest file here?",
+                    None,
+                    [
+                        {"id": "piece-seeded", "rank": 1, "title": "The lesson", "url": "https://team-shelf.example/p/piece-seeded", "strong": True, "confidence": 0.9, "corroborated": True, "calibration": "hybrid-v1", "score": None, "match_reasons": None},
+                        {"id": "piece-real", "rank": 2, "title": "The convention piece", "url": "https://team-shelf.example/p/piece-real", "strong": False, "confidence": None, "corroborated": None, "calibration": None, "score": None, "match_reasons": None},
+                    ],
+                )
+            ],
+            ["piece-seeded"],
+        )
+        out = self.dir / "cases.jsonl"
+        with mock.patch.object(tenjin_arm, "SEARCH_ARGV", side_effect=AssertionError("a case with a snapshot is never replayed")):
+            summary = cli.do_cases(self.run_dir, self.source_dir, out)
+        self.assertEqual((summary["from_snapshot"], summary["replayed"], summary["seeded_candidates"]), (1, 1, 1))
+        prompt, failure = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual((prompt["replay"]["source"], prompt["replay"]["search_id"]), ("in_run_snapshot", "search-in-run"))
+        # The snapshot's own time, not the export's: it says when the shelf was read.
+        self.assertEqual(prompt["corpus_snapshot"]["replayed_at"], "2026-09-09T00:00:00Z")
+        self.assertEqual((prompt["replay"]["limit"], prompt["replay"]["post_floor"], prompt["replay"]["exit"]), (10, True, 0))
+        self.assertEqual([(c["rank"], c["id"], c["seeded"]) for c in prompt["replay"]["candidates"]], [(1, "piece-seeded", True), (2, "piece-real", False)])
+        self.assertIn("skipped", failure["replay"])
+
+    def test_the_seeded_flag_comes_from_the_trials_own_seed_list(self) -> None:
+        trial = self.trials[0]
+        record = self.record(trial)
+        _harness, session, agent = record["actors"][0]["key"]
+        self.write_ledger(trial, session, agent)
+        # The record says this trial seeded `piece-other`; the snapshot's own header says something else.
+        self.seeded(trial, "piece-other")
+        self.write_snapshot(
+            trial,
+            [
+                self.snapshot_entry(
+                    "How do I run one vitest file here?",
+                    None,
+                    [{"id": "piece-seeded", "rank": 1, "title": "The lesson", "url": "u", "strong": True}, {"id": "piece-other", "rank": 2, "title": "The other", "url": "u", "strong": False}],
+                )
+            ],
+            ["piece-seeded"],
+        )
+        out = self.dir / "cases.jsonl"
+        with mock.patch.object(tenjin_arm, "SEARCH_ARGV", side_effect=AssertionError("a case with a snapshot is never replayed")):
+            summary = cli.do_cases(self.run_dir, self.source_dir, out)
+        prompt = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual(prompt["seeded_piece_ids"], ["piece-other"])
+        self.assertEqual([(c["id"], c["seeded"]) for c in prompt["replay"]["candidates"]], [("piece-seeded", False), ("piece-other", True)])
+        self.assertEqual(summary["seeded_candidates"], 1)
+
+    def test_a_snapshot_that_does_not_hold_the_question_falls_back_to_a_replay(self) -> None:
+        trial = self.trials[0]
+        record = self.record(trial)
+        _harness, session, agent = record["actors"][0]["key"]
+        self.write_ledger(trial, session, agent)
+        self.write_snapshot(trial, [self.snapshot_entry("a question this trial never asked", None, [])], [])
+        (self.source_dir / "search-items.json").write_text(json.dumps([{"resourceId": "piece-real", "title": "The convention piece", "url": "u", "strong": False}]), encoding="utf-8")
+        out = self.dir / "cases.jsonl"
+        summary = cli.do_cases(self.run_dir, self.source_dir, out)
+        prompt = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+        self.assertEqual((summary["from_snapshot"], prompt["replay"]["source"], prompt["replay"]["search_id"]), (0, "post_run_replay", "search-1"))
+        # A file that is not a shortlist at all is a fall back too, never a refusal.
+        (self.run_dir / "trials" / trial / "output" / tenjin_arm.SHORTLIST_FILE).write_text("{", encoding="utf-8")
+        self.assertEqual(cli.do_cases(self.run_dir, self.source_dir, out)["from_snapshot"], 0)
 
     def test_a_dry_run_lists_the_cases_and_calls_nothing(self) -> None:
         trial = self.trials[0]
