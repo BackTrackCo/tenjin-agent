@@ -145,6 +145,95 @@ describe('the error line', () => {
     expect(errorLine(totals.join('\n'))).toBeNull();
   });
 
+  // The arm joins stdout, stderr, `error` and `text` with a newline apiece
+  // (`failureText`), so the single blank vitest prints before its summary
+  // arrives as two — and two blanks are a block boundary, which left the
+  // totals block holding nothing but totals.
+  const ENOENT_LINE = "Error: ENOENT: no such file or directory, open '/repo/fixtures/a.json'";
+  const spliced = (blanks: number): string =>
+    [
+      ' FAIL  src/thing.test.ts > loads config',
+      ENOENT_LINE,
+      '    at readFileSync (node:fs:1234:5)',
+      ...Array.from({ length: blanks }, () => ''),
+      ' Test Files  1 failed (1)',
+      '      Tests  1 failed (1)',
+      '',
+    ].join('\n');
+  const scrollback = Array.from({ length: 200 }, (_, n) => `  transform src/mod${n}.ts (ok)`);
+
+  it.each([0, 1, 2, 3, 4])(
+    'reaches the run own failure block across %i blank lines above the totals',
+    (blanks) => {
+      const found = errorLine(spliced(blanks));
+      expect(found?.line).toBe(ENOENT_LINE);
+      // The width of the gap is a splice artifact, so it must not reach the
+      // key: every width keys the same bytes, and the same bytes the
+      // one-blank output already keyed before this hop existed.
+      expect(sigV1(found?.line ?? '', found?.block ?? '')?.key).toBe('609f799adea79f63');
+    },
+  );
+
+  it('gives up past the gap: five blank lines is a different screenful', () => {
+    expect(errorLine(spliced(5))).toBeNull();
+  });
+
+  it.each([
+    [
+      'a lifecycle banner above',
+      [
+        '> api@1.0.0 test',
+        '> vitest run',
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an unrelated error 200 lines up',
+      [
+        "Error: EACCES: permission denied, open '/etc/hosts'",
+        '    at open (node:fs:9:9)',
+        ...scrollback,
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an earlier run failure block 200 lines up',
+      [
+        ' FAIL  src/old.test.ts > old',
+        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
+        '',
+        '',
+        ...scrollback,
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an earlier run failure block across a wide blank gap',
+      [
+        ' FAIL  src/old.test.ts > old',
+        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
+        ...Array.from({ length: 30 }, () => ''),
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+  ])('still yields nothing when the totals block is all there is: %s', (_name, out) => {
+    expect(errorLine(out.join('\n'))).toBeNull();
+  });
+
   it('anchors the block to the failure, so a frame from another failure cannot key it', () => {
     const two = [
       ' FAIL  src/a.test.ts > one',

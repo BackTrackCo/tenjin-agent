@@ -338,6 +338,40 @@ function blockEnd(lines: string[], at: number): number {
   return end;
 }
 
+/** How many blank lines may sit between a failure block and the totals row of
+ *  the same run. `blockStart` stops at two — correctly, two blanks are what
+ *  keep two failures apart — but the arm's `failureText` joins `stdout`,
+ *  `stderr`, `error` and `text` with a newline apiece, so a run of blanks in
+ *  front of a totals row is a splice artifact, not structure. Four covers
+ *  every splice plus the blank the runner printed itself. */
+const TOTALS_GAP_MAX = 4;
+
+/**
+ * The failure block belonging to the run whose totals block starts at
+ * `totalsStart`: the block directly above it, across nothing but blank lines,
+ * and OPENED BY A RUNNER HEADER.
+ *
+ * The header is the bound, and it is the whole reason this is not a plain
+ * `continue` in `errorLine`. Resuming the outer scan walks up to
+ * `LINE_SCAN_MAX` lines of scrollback and keys a totals-only run on whatever
+ * an earlier command left behind — exactly what the block machinery exists to
+ * prevent. One hop, into a block a runner opened, keeps "the scanner stopped
+ * one block short" apart from "this output really is totals only": free text
+ * above a totals row is still nothing.
+ */
+function precedingFailureBlock(lines: string[], totalsStart: number): [number, number] | null {
+  let j = totalsStart - 1;
+  while (j >= 0 && isBlank(lines, j)) {
+    if (totalsStart - j > TOTALS_GAP_MAX) return null;
+    j -= 1;
+  }
+  if (j < 0) return null;
+  const start = blockStart(lines, j);
+  const header = lines[start] ?? '';
+  if (!RUNNER_HEADER_RE.test(header) || isAggregateLine(header.trim())) return null;
+  return [start, j];
+}
+
 export interface ErrorLine {
   line: string;
   /** The failure block the line sits in, which is what the top frame is read
@@ -350,9 +384,12 @@ export interface ErrorLine {
  * The most informative line: the LAST error-shaped, non-frame line, because
  * runners print the real cause after pages of summary — except when that line
  * is a bare TOTAL, in which case the nearest non-aggregate marker above it in
- * the same block is what the failure is about. A block whose only marker is
- * its totals row yields nothing: a key over "2 failed" is a key every repo
- * shares.
+ * the same block is what the failure is about, and failing that, the same
+ * search over the failure block the run printed DIRECTLY above its totals,
+ * across nothing but blank lines. One hop, never a resumed scan: a totals
+ * block with free text, or nothing, above it yields nothing, because a key
+ * over "2 failed" is a key every repo shares and a key over an unrelated
+ * error in the scrollback is worse than none.
  */
 export function errorLine(text: string): ErrorLine | null {
   const lines = text.split('\n');
@@ -368,6 +405,16 @@ export function errorLine(text: string): ErrorLine | null {
       if (candidate.length === 0 || STACK_FRAME_RE.test(candidate)) continue;
       if (!hasErrorMarker(candidate) || isAggregateLine(candidate)) continue;
       return { line: candidate, block };
+    }
+    const above = precedingFailureBlock(lines, start);
+    if (above === null) return null;
+    const [aboveStart, aboveEnd] = above;
+    const aboveBlock = lines.slice(aboveStart, aboveEnd + 1).join('\n');
+    for (let j = aboveEnd; j >= aboveStart; j -= 1) {
+      const candidate = (lines[j] ?? '').trim();
+      if (candidate.length === 0 || STACK_FRAME_RE.test(candidate)) continue;
+      if (!hasErrorMarker(candidate) || isAggregateLine(candidate)) continue;
+      return { line: candidate, block: aboveBlock };
     }
     return null;
   }

@@ -1042,10 +1042,15 @@ describe('the public render did not move', () => {
   // Re-pinned once more for the same PR's mint pin: `read` signs only for the
   // shelves the config names, so tenjin-search says so and its
   // `entitlementCheck` list gains `origin_not_configured`.
+  //
+  // Re-pinned for the failure arm's text round: this machine no longer keeps an
+  // error-to-fix record, so the turn-end ask names a failure this turn HIT
+  // rather than a fix it closed, and tenjin-publish's key sentence follows it.
+  // tenjin-search is untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
       'tenjin-search': '7a4e9c74c05362b85ea8e59d219ad9bd',
-      'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
+      'tenjin-publish': '18251526058285eb9e09e0bbd1adf9e2',
     });
   });
 

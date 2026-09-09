@@ -359,8 +359,8 @@ export async function runDoctor(
 /**
  * The five files and directories the loop database replaced. Deleted by
  * `doctor --prune`, never imported: the error→fix records and the outcome
- * history in `state.db` are a record of a system that no longer exists, and a one-time
- * importer is code that lives forever to serve a week (plan 03, owner
+ * history in `state.db` are a record of a system that no longer exists, and a
+ * one-time importer is code that lives forever to serve a week (plan 03, owner
  * decision 3).
  *
  * `searches.json.lock` is in the list because the file version took an mkdir
@@ -445,12 +445,12 @@ function checkNode(): BuiltCheck {
  * Does this machine's loop database open, and what is it holding?
  *
  * The whole of the loop's state — every fire and leg, the gate marks, the
- * search record, the finding queue — is one SQLite
- * file opened through Node's built-in module. The daemon fails OPEN without
- * it, which is the right posture for a tool call and the wrong one for a
- * diagnosis: a machine whose loop has quietly stopped remembering anything
- * looks identical from the outside to one that simply had nothing to say. So
- * doctor opens it, which proves the module, the file and its shape in one go.
+ * search record, the finding queue — is one SQLite file opened through Node's
+ * built-in module. The daemon fails OPEN without it, which is the right
+ * posture for a tool call and the wrong one for a diagnosis: a machine whose
+ * loop has quietly stopped remembering anything looks identical from the
+ * outside to one that simply had nothing to say. So doctor opens it, which
+ * proves the module, the file and its shape in one go.
  *
  * THE OPEN IS THE PROBE: a separate `node:sqlite` import check answers a
  * strict subset of what opening the real file answers, so there is no second
