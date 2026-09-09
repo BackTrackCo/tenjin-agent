@@ -497,6 +497,46 @@ def do_reduce(run_dir: Path) -> dict[str, Any]:
     return reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
 
 
+def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image: str, kind: str, out: Path) -> dict[str, Any]:
+    """Write the attestation for a manifest and the data dir a run seeds from.
+
+    The network allowlist is the one thing here nobody should be typing: it is
+    the executor's required origins, the shelf and marketplace the source names,
+    and the origins the corpus reset itself reaches. Every one of them is
+    derived from the same values `live-run` checks the attestation against, so a
+    workflow states the instance it runs on and nothing that could disagree.
+    """
+    manifest = manifest_module.load(manifest_path)
+    spec = require_executor(manifest, live=True)
+    source = tenjin_arm.load_source(tenjin_source)
+    if source.shelf_secret_present:
+        raise CliError(
+            "--tenjin-source carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, "
+            "and the bench shelf is on a custom domain and needs none"
+        )
+    refuse_foreign_shelf(manifest, source)
+    origins = set(allowlist_for(spec, source))
+    if manifest.corpus is not None:
+        origins |= set(manifest.corpus.origins)
+    payload = {
+        "kind": kind,
+        "instance_id": instance_id,
+        "image": image,
+        "fresh_roots": True,
+        # Never the trial's: `--tenjin-source` copies no wallet key, so no
+        # container this run starts can sign anything.
+        "wallet_present": False,
+        "credential_seam": str(manifest.pins["credential_env"]),
+        "network_allowlist": sorted(origins),
+    }
+    # Read it back through the same loader `live-run` uses, so a file this
+    # command wrote and a file an operator wrote are refused on the same terms.
+    artifact.check_attestation(artifact.load_attestation_data(payload), tuple(sorted(origins)), payload["credential_seam"])
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
@@ -551,6 +591,21 @@ def main(argv: list[str] | None = None) -> int:
     # did without a reader piping JSON through another tool.
     summary = commands.add_parser("summary", help="read a finished run's report.json as text")
     summary.add_argument("--run", required=True, type=Path)
+    # The attestation an unwatched lane presents. It derives the allowlist from
+    # the manifest and the source rather than letting a workflow retype it.
+    attest = commands.add_parser("attest", help="write the attestation for a manifest and the data dir a run seeds from")
+    attest.add_argument("--manifest", required=True, type=Path)
+    attest.add_argument("--tenjin-source", required=True, type=Path)
+    attest.add_argument("--instance", required=True, help="what this disposable instance is called, such as a workflow run id")
+    attest.add_argument("--image", required=True, help="the image this instance booted from")
+    attest.add_argument("--kind", default="vm", choices=sorted(artifact.ATTESTATION_KINDS))
+    attest.add_argument("--out", required=True, type=Path)
+    # The readout an anonymous reader can reach. `summary` is for a log; this
+    # is the markdown a workflow puts in a check run's `output.summary`, which
+    # is the one surface on a public repository that answers without a token.
+    headline = commands.add_parser("headline", help="a finished run's report as a check run's output.summary")
+    headline.add_argument("--run", required=True, type=Path)
+    headline.add_argument("--methodology", default=report_module.METHODOLOGY, help="the URL the summary points a reader at")
     # Informational by construction: it prints and annotates, and exits 0
     # whatever it finds, so the live lane can warn without ever blocking.
     regress = commands.add_parser("regress", help="warn where a finished run is worse than the committed baseline")
@@ -575,6 +630,15 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
+    if args.command == "attest":
+        try:
+            payload = do_attest(args.manifest, args.tenjin_source, args.instance, args.image, args.kind, args.out)
+        except (CliError, artifact.IsolationError, executor.ProvisionError, manifest_module.ManifestError) as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
     if args.command == "cases":
         try:
             payload = do_cases(args.run, args.tenjin_source, args.out, dry_run=args.dry_run)
@@ -589,7 +653,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dump({key: value for key, value in payload.items() if key != "listing"}, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
-    if args.command in ("summary", "regress", "verify", "reduce", "report"):
+    if args.command in ("summary", "headline", "regress", "verify", "reduce", "report"):
         try:
             return run_reader(args)
         except (CliError, manifest_module.ManifestError, records.RecordError) as error:
@@ -634,6 +698,9 @@ def run_reader(args: argparse.Namespace) -> int:
     """The commands that read a finished run. Each refuses a run with nothing to read in one sentence."""
     if args.command == "summary":
         sys.stdout.write(report_module.render(read_run_file(args.run, "report.json")) + "\n")
+        return 0
+    if args.command == "headline":
+        sys.stdout.write(report_module.check_summary(read_run_file(args.run, "report.json"), args.methodology))
         return 0
     if args.command == "regress":
         do_regress(args.run, args.baseline)

@@ -394,6 +394,61 @@ class ShelfKnobTest(unittest.TestCase):
     def test_a_dry_run_without_a_source_is_not_this_gate(self) -> None:
         cli.refuse_foreign_shelf(self.manifest, None)
 
+class AttestCommandTest(unittest.TestCase):
+    """The attestation an unwatched lane presents: derived, not retyped."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        executor.REGISTRY[LIVE] = ExecutorSpec(
+            name=LIVE,
+            harness="claude",
+            launch=executor.REGISTRY["fake"].launch,
+            live=True,
+            required_origins=("api.provider.example",),
+        )
+        self.addCleanup(executor.REGISTRY.pop, LIVE)
+        self.manifest = support.synthetic_manifest(self.dir, executor_name=LIVE, live=True, corpus=CORPUS).path
+        self.source = support.tenjin_source(self.dir / "bench-data", base_url=f"https://{ORIGIN}")
+        self.out = self.dir / "attestation.json"
+
+    def attest(self, **kwargs) -> dict:
+        return cli.do_attest(
+            kwargs.pop("manifest", self.manifest),
+            kwargs.pop("tenjin_source", self.source),
+            "gha-1-1",
+            "ubuntu-24.04",
+            "vm",
+            self.out,
+        )
+
+    def test_the_allowlist_is_the_provider_the_two_shelves_and_the_control_plane(self) -> None:
+        payload = self.attest()
+        self.assertEqual(
+            payload["network_allowlist"],
+            sorted({"api.provider.example", ORIGIN, "tenjin.blog", corpus.API_ORIGIN}),
+        )
+        self.assertEqual((payload["fresh_roots"], payload["wallet_present"], payload["kind"]), (True, False, "vm"))
+        self.assertEqual(json.loads(self.out.read_text(encoding="utf-8")), payload)
+
+    def test_the_file_it_writes_is_one_live_run_accepts(self) -> None:
+        self.attest()
+        artifact.check_attestation(artifact.load_attestation(self.out), (ORIGIN, corpus.API_ORIGIN))
+
+    def test_a_source_naming_another_shelf_is_refused_before_a_file_exists(self) -> None:
+        other = support.tenjin_source(self.dir / "team-data", base_url="https://team-shelf.example")
+        with self.assertRaises(cli.CliError):
+            self.attest(tenjin_source=other)
+        self.assertFalse(self.out.exists())
+
+    def test_a_source_carrying_a_shelf_secret_is_refused(self) -> None:
+        secret = support.tenjin_source(self.dir / "secret-data", base_url=f"https://{ORIGIN}", shelf_secret="s3cret")
+        with self.assertRaises(cli.CliError) as caught:
+            self.attest(tenjin_source=secret)
+        self.assertIn("never publishable", str(caught.exception))
+        self.assertFalse(self.out.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

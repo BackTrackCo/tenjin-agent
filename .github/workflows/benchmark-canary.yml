@@ -1,0 +1,33 @@
+name: benchmark canary
+
+# The nightly lane. Four tasks, `off` against the shelf arm, three attempts an
+# arm: 24 attempts, about 5.69 USD a run at the 0.237 USD an attempt the pilot
+# measured. It is a health check on the whole chain against a real corpus, not
+# the evidence run; the headline lane is that.
+#
+# Schedule and manual dispatch only, never on push.
+on:
+  schedule:
+    # 07:17 UTC. Off the hour, because every workflow scheduled on one competes
+    # for the same runners and drifts.
+    - cron: '17 7 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  canary:
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/canary-manifest.json
+      lane: benchmark-canary
+      check_name: benchmark canary (nightly)
+      timeout_minutes: 180
+      budget_note: >-
+        Nightly canary: 24 attempts, budget capped at 0.75 USD an attempt, about
+        5.69 USD a run at the measured 0.237 USD an attempt. The weekly headline
+        lane runs the full core suite.

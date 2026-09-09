@@ -235,6 +235,18 @@ def project(
         row["attempts"] += 1
         row["test_run_before_fix"] += int(bool(facts.get("test_run_before_fix")))
         row["setup_read"] += int(bool(facts.get("setup_read")))
+    # An arm's own configuration, off the records rather than off the manifest,
+    # because the record is what the attempt actually ran under. `off` is the
+    # one value worth stating: the shelf arms are byte-identical otherwise.
+    fallbacks: dict[str, str] = {}
+    for record in accepted.values():
+        value = record["isolation"].get("public_fallback")
+        if value is not None:
+            fallbacks[record["arm_id"]] = value
+    arms = {
+        arm_id: arm if arm_id not in fallbacks else {**arm, "public_fallback": fallbacks[arm_id]}
+        for arm_id, arm in reduction["arms"].items()
+    }
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
@@ -254,7 +266,7 @@ def project(
         "corpus": corpus_stamp(accepted),
         "corpus_snapshot": snapshot_fields(corpus_snapshot),
         "baseline": reduction["baseline"],
-        "arms": reduction["arms"],
+        "arms": arms,
         # A headline needs complete accounting and a publishable run; the
         # reducer knows the first and only the records know the second.
         "comparisons": {
@@ -333,6 +345,60 @@ def _decomposition(report: dict[str, Any], arm_id: str, baseline: str | None, co
         + (f"{new_tokens:.3f}" if new_tokens is not None else f"none ({comparison.get('new_token_ratio_reason') or 'no shared task'})"),
         f"    {PASS_DELTA_LABEL}: " + ("none" if delta is None else f"{delta:+.3f}"),
     ]
+
+
+# GitHub caps a check run's `output.summary` here. A run that ever approached
+# it would be truncated silently by the API, which is a readout that lies about
+# its own length, so `check_summary` truncates and says it did.
+CHECK_SUMMARY_LIMIT = 65535
+METHODOLOGY = "https://github.com/BackTrackCo/tenjin-agent/blob/main/evals/benchmark/README.md"
+
+
+def check_summary(report: dict[str, Any], methodology: str = METHODOLOGY, limit: int = CHECK_SUMMARY_LIMIT) -> str:
+    """The readout an anonymous reader can reach: a check run's `output.summary`.
+
+    Measured on this public repository with no token, the artifact bytes answer
+    401, the artifact route 404, and the job logs 403, while
+    `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` answers 200 with its
+    whole `output`. So the headline, the intervals and the link to the method
+    go here, and the per-attempt records stay a workflow artifact for whoever is
+    logged in and wants to recompute.
+
+    Nothing here computes: it is `render` with a heading and a caveat a reader
+    meeting a number cold is owed.
+    """
+    verdict = (
+        "This run is publishable: every accepted attempt ran under an attestation this run built for itself."
+        if report["publishable"]
+        else f"**This run is not publishable** (`{report['isolation']}`). No number below is a result."
+    )
+    taken = report.get("corpus_snapshot")
+    corpus_line = "The corpus this run measured was not read, so this report does not say what was on the shelf."
+    if taken and not taken.get("error"):
+        corpus_line = (
+            f"The corpus was {taken['posts']} pieces on `{taken['origin']}`, read at {taken['taken_at']} "
+            f"once the run's own seed had landed (`{taken['content_hash']}`)."
+        )
+    head = "\n".join(
+        [
+            f"## {report['benchmark_version']}",
+            "",
+            verdict,
+            "",
+            corpus_line,
+            "",
+            f"Method, arms, and what this does not measure: [`evals/benchmark/README.md`]({methodology}).",
+            "",
+            "```text",
+        ]
+    )
+    tail = "\n```\n"
+    body = render(report)
+    room = limit - len(head) - len(tail) - 1
+    if len(body) > room:
+        note = "\n[truncated: the whole report is report.json in this run's artifact]"
+        body = body[: room - len(note)] + note
+    return head + "\n" + body + tail
 
 
 def render(report: dict[str, Any]) -> str:
@@ -422,6 +488,12 @@ def render(report: dict[str, Any]) -> str:
         lines.append(f"seeded pieces: {seeds['published']} published to the team shelf, {seeds['published'] - seeds['not_deleted']} deleted")
         if seeds["not_deleted"]:
             lines.append(f"WARNING: {seeds['not_deleted']} seeded piece(s) still on the team shelf: delete them by hand (isolation.seed.piece_id in the records)")
+    # The two shelf arms are byte-identical in their settings, so the reading
+    # names which one had the marketplace leg on.
+    for arm_id, arm in sorted(report["arms"].items()):
+        fallback = arm.get("public_fallback")
+        if fallback == "off":
+            lines.append(f"{arm_id}: public fallback off, so a team miss never reached the marketplace")
     origins = report.get("origins")
     if origins is not None:
         lines.append(

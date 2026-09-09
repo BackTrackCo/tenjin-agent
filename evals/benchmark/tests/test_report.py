@@ -83,7 +83,9 @@ class GuardTest(unittest.TestCase):
         report.guard({"arm_id": "a" * 64})
 
 
-class ProjectionTest(unittest.TestCase):
+class ProjectedCorpus(unittest.TestCase):
+    """The frozen attempt corpus, projected. Shared by the projection cases and the check-summary cases."""
+
     @classmethod
     def setUpClass(cls) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -118,6 +120,8 @@ class ProjectionTest(unittest.TestCase):
             for trial_id, record in self.accepted.items()
         }
 
+
+class ProjectionTest(ProjectedCorpus):
     def test_a_fake_corpus_is_publishable_and_says_so(self) -> None:
         published = self.project()
         self.assertEqual(published["publishable"], True)
@@ -357,6 +361,41 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(published["trials"][0]["public_legs"], 2)
         self.assertEqual(published["trials"][0]["other_requests"], 1)
         report.guard(published)
+
+
+class CheckSummaryTest(ProjectedCorpus):
+    """The readout an anonymous reader can reach, and the cap GitHub imposes on it."""
+
+    def test_the_summary_carries_the_headline_the_interval_and_the_method(self) -> None:
+        text = report.check_summary(self.project())
+        self.assertIn("## " + self.manifest.data["benchmark_version"], text)
+        self.assertIn("headline on:", text)
+        self.assertIn("interval [", text)
+        self.assertIn("evals/benchmark/README.md", text)
+        self.assertTrue(text.rstrip().endswith("```"), text[-40:])
+
+    def test_a_run_that_may_not_be_quoted_says_so_before_its_first_number(self) -> None:
+        published = self.project(accepted=self.stamped(live=True, publishable=False))
+        text = report.check_summary(published)
+        self.assertLess(text.index("not publishable"), text.index("headline on:"))
+
+    def test_the_corpus_reading_is_stated_or_its_absence_is(self) -> None:
+        self.assertIn("was not read", report.check_summary(self.project()))
+        published = {
+            **self.project(),
+            "corpus_snapshot": {"origin": "bench.tenjin.sh", "posts": 12, "content_hash": "sha256:ab", "taken_at": "2026-09-09T12:00:00Z"},
+        }
+        self.assertIn("12 pieces on `bench.tenjin.sh`", report.check_summary(published))
+
+    def test_a_summary_over_the_cap_is_cut_and_says_it_was(self) -> None:
+        text = report.check_summary(self.project(), limit=900)
+        self.assertLessEqual(len(text), 900)
+        self.assertIn("truncated", text)
+        self.assertTrue(text.rstrip().endswith("```"))
+
+    def test_the_cap_is_the_one_github_imposes(self) -> None:
+        self.assertEqual(report.CHECK_SUMMARY_LIMIT, 65535)
+        self.assertLess(len(report.check_summary(self.project())), report.CHECK_SUMMARY_LIMIT)
 
 
 class RecordBoundaryTest(unittest.TestCase):

@@ -40,6 +40,20 @@ IMAGE = images.Image(
     labels={"bench2.task": "task", "bench2.fixture_hash": "sha256:" + "ab" * 32},
 )
 
+def tenjin_source(path: Path, *, base_url: str, public_url: str = "https://tenjin.blog", shelf_secret: str | None = None) -> Path:
+    """A data dir `tenjin_arm.load_source` accepts: the copied config keys and the three bundles."""
+    from evals.benchmark import tenjin_arm
+
+    (path / tenjin_arm.HOOKS_DIR).mkdir(parents=True, exist_ok=True)
+    for name in tenjin_arm.BUNDLES:
+        (path / tenjin_arm.HOOKS_DIR / name).write_text(f"// placeholder {name}\n", encoding="utf-8")
+    config: dict[str, Any] = {"baseUrl": base_url, "publicShelfUrl": public_url}
+    if shelf_secret is not None:
+        config["shelfBypassSecret"] = shelf_secret
+    (path / tenjin_arm.CONFIG_FILE).write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
 def patch_live_gates(case: Any) -> None:
     """Every seam a live case would otherwise take to Docker: the image gate, the image lookup, and the run's egress.
 

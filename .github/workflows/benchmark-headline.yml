@@ -1,0 +1,39 @@
+name: benchmark headline
+
+# The evidence lane: the plan's Tier 3 full core suite over every task and every
+# arm, weekly and on a published release. Its number is the one meant to be
+# quoted, so it runs where a reader can check it: the headline, its intervals
+# and a link to the method go in a check run's `output.summary`, which answers
+# an anonymous reader over the public API, and the per-attempt records ride
+# along as a workflow artifact.
+#
+# Schedule, release, and manual dispatch only, never on push.
+on:
+  schedule:
+    # 03:41 UTC on Sunday. Off the hour and off the canary's slot, and the two
+    # lanes share one concurrency group anyway, so neither resets under the
+    # other.
+    - cron: '41 3 * * 0'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  headline:
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/local-arms-manifest.json
+      lane: benchmark-headline
+      check_name: benchmark headline (core suite)
+      timeout_minutes: 720
+      budget_note: >-
+        Full core suite: eight tasks across every arm, three attempts each, plus
+        the natural arm's producer phase. Budget capped at 0.75 USD an attempt.
+        This is the run whose number is meant to be quoted; the nightly canary
+        is the health check.
