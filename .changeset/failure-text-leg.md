@@ -10,4 +10,4 @@ The failure arm gets a second round: when neither fingerprint resolves, it asks 
 
 **A failure with an error line but no fingerprint now asks something.** `sigV1` refuses a line with no errno and no frame, and the arm used to fall silent there; it now asks in words.
 
-**The once-per-question gate now keys on the error line rather than the fingerprint**, so two failures with different messages are two questions.
+**The once-per-question gate now keys on the error line as well as the fingerprints**, so two failures with different messages are two questions, and so are two failures that print the same message from different files.

@@ -20,10 +20,11 @@ import type { Actor, Deps, KernelConfig } from './types';
 /**
  * Capture through the two arms that call it (from #298's suite, re-keyed
  * onto the kernel). Both audiences are asked once, with evidence, as context;
- * the lead is re-armed only by what its children queue; the stop after an ask
- * harvests the fence whole. The LEAD's ask also names what this session left
- * open: its unanswered searches, the errors it fixed, what its children queued
- * and published. A child's ask carries none of those.
+ * the lead is re-armed by what its children queue and by a failure newer than
+ * its ask; the stop after an ask harvests the fence whole. The LEAD's ask also
+ * names what this session left open: its unanswered searches, what its children
+ * queued and published. A child's ask carries none of those, and both carry the
+ * failures the actor itself hit that nothing answered.
  */
 
 const TEAM = kernelConfig();
@@ -67,12 +68,50 @@ function started(db: LoopDb, agentType = 'general-purpose'): void {
   setMark(db, CHILD, STARTED_MARK, agentType, NOW - 100);
 }
 
-/** One ledger row, as a fire by `actor` on `arm` would have left it. */
-function seedFire(db: LoopDb, actor: Actor, arm: string, reason: string, event = 'prompt'): void {
+/** One ledger row, as a fire by `actor` on `arm` would have left it. The
+ *  question half is what a failure leaves behind — `fires` IS the record the
+ *  turn-end ask reads back — so it is seeded here rather than in a helper of
+ *  its own. */
+function seedFire(
+  db: LoopDb,
+  actor: Actor,
+  arm: string,
+  reason: string,
+  event = 'prompt',
+  over: { questionKey?: string; question?: string; at?: number } = {},
+): void {
   db.prepare(
     `INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms,
-       elapsed_ms, reason) VALUES (?, ?, ?, ?, ?, 'claude', ?, '', 'tool', 1, 1, ?)`,
-  ).run(randomUUID(), NOW - 50, actor.session, actor.agent, arm, event, reason);
+       elapsed_ms, reason, question_key, question)
+     VALUES (?, ?, ?, ?, ?, 'claude', ?, '', 'tool', 1, 1, ?, ?, ?)`,
+  ).run(
+    randomUUID(),
+    over.at ?? NOW - 50,
+    actor.session,
+    actor.agent,
+    arm,
+    event,
+    reason,
+    over.questionKey ?? null,
+    over.question ?? null,
+  );
+}
+
+const ENOENT_LINE = "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'";
+const ENOENT_KEY = 'sig_v1:aaaabbbbccccdddd|line:' + 'f'.repeat(32);
+
+/** One failure fire the shelves had nothing for, as the arm would have left
+ *  it: the composed question key, and the masked line under it. */
+function seedFailure(
+  db: LoopDb,
+  actor: Actor,
+  over: { questionKey?: string; question?: string; reason?: string; at?: number } = {},
+): void {
+  seedFire(db, actor, 'failure', over.reason ?? 'no-hit', 'tool.after', {
+    questionKey: over.questionKey ?? ENOENT_KEY,
+    question: over.question ?? ENOENT_LINE,
+    ...(over.at === undefined ? {} : { at: over.at }),
+  });
 }
 
 /** One `searches` row, as `tenjin search` would have left it. */
@@ -287,6 +326,46 @@ describe('the child ask', () => {
     const lead = (await fire(db, leadStop()))?.context ?? '';
     expect(lead).toContain('(open-1) had no answer');
   });
+
+  it("names the failures it hit itself, and never the lead's", async () => {
+    const db = freshDb();
+    started(db);
+    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
+    seedFailure(db, CHILD);
+    seedFailure(db, LEAD, {
+      questionKey: 'line:' + '0'.repeat(32),
+      question: 'error: linting failed for the workspace',
+    });
+
+    // A failure belongs to the actor that hit it: the child is the one that can
+    // explain its own wall, and the lead never walked into it.
+    const child = (await fire(db, childStop()))?.context ?? '';
+    expect(child).toContain(
+      '- Came up this turn, and the shelf had nothing for it: `' +
+        ENOENT_LINE +
+        '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
+        '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
+    );
+    expect(child).not.toContain('linting failed');
+    // The line reports what came up. It asserts no fix, because nothing on the
+    // row says one was made.
+    expect(child).not.toContain('You fixed');
+  });
+
+  it('is asked once however many failures follow: an asked child harvests instead', async () => {
+    const db = freshDb();
+    started(db);
+    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
+    await fire(db, childStop());
+
+    // The re-arm is the lead's in practice, and this is why: `stop()` sends an
+    // already-asked child to its harvest and never reaches the ask at all.
+    seedFailure(db, CHILD, { at: NOW + 20 });
+    expect(
+      await fire(db, childStop({ lastMessage: fence('done') }), TEAM, () => NOW + 30),
+    ).toBeNull();
+    expect(findings(db)).toMatchObject([{ body: 'done' }]);
+  });
 });
 
 describe('the lead ask', () => {
@@ -440,6 +519,76 @@ describe('the lead ask', () => {
     expect(emit?.context).toContain('publish.mode is auto');
     // One wording for both shelves: the team's extra kinds ride the same sentence.
     expect(emit?.context).toContain('on the team shelf also a decision and why');
+  });
+
+  it('a failure nothing answered is evidence, and a failure that was answered is not', async () => {
+    const db = freshDb();
+    seedFailure(db, LEAD);
+    expect((await fire(db, leadStop()))?.context).toBeDefined();
+    expect(getMark(db, LEAD, 'capture:asked')).toBe('failure');
+
+    // `hit`, `cached` and `seen` are the same failure a second time, or one the
+    // shelf answered: neither is a thing to write up.
+    for (const reason of ['hit', 'cached', 'seen']) {
+      const answered = freshDb();
+      seedFailure(answered, LEAD, { reason });
+      expect(await fire(answered, leadStop()), reason).toBeNull();
+      expect(getMark(answered, LEAD, 'capture:asked'), reason).toBeNull();
+    }
+  });
+
+  it('one line per failure, deduped by key, each naming what it can be filed under', async () => {
+    const db = freshDb();
+    // The same command re-run after a failed edit is one problem, not three.
+    seedFailure(db, LEAD, { at: NOW - 50 });
+    seedFailure(db, LEAD, { at: NOW - 40 });
+    // A line too generic for `sigV1` to key: named, with no key to offer.
+    seedFailure(db, LEAD, {
+      questionKey: 'line:' + '0'.repeat(32),
+      question: 'error: linting failed for the workspace',
+      at: NOW - 30,
+    });
+    // A test identity and no error line at all: the empty `question` is a row
+    // to name, not a row to filter, and the key is the whole of it.
+    seedFailure(db, LEAD, {
+      questionKey: 'sig_v1_test:0123456789abcdef',
+      question: '',
+      at: NOW - 20,
+    });
+    const reason = (await fire(db, leadStop()))?.context ?? '';
+    const lines = reason.split('\n').filter((l) => l.startsWith('- Came up this turn'));
+    expect(lines).toEqual([
+      '- Came up this turn, and the shelf had nothing for it: `' +
+        ENOENT_LINE +
+        '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
+        '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
+      '- Came up this turn, and the shelf had nothing for it: `error: linting failed for the ' +
+        'workspace`. If you settled it and the answer would save a teammate the same hour, publish it.',
+      '- Came up this turn, and the shelf had nothing for it: A failure filed under ' +
+        '`sig_v1_test:0123456789abcdef`. If you settled it and the answer would save a teammate the ' +
+        'same hour, publish it with `--key fingerprint=sig_v1_test:0123456789abcdef`.',
+    ]);
+  });
+
+  it('is re-armed by a failure hit after the ask, and not by one hit before it', async () => {
+    const db = freshDb();
+    seedFire(db, LEAD, 'prompt', 'no-hit');
+    // Hit before the ask: the first ask already named it, so it re-arms nothing.
+    seedFailure(db, LEAD, { at: NOW - 10 });
+    expect((await fire(db, leadStop()))?.context).toContain('- Came up this turn');
+    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
+    expect(await fire(db, leadStop(), TEAM, () => NOW + 10)).toBeNull();
+
+    // A wall it had to climb out of AFTER its first stop is something new to
+    // say, and the first ask could not have named it.
+    seedFailure(db, LEAD, {
+      questionKey: 'sig_v1:1111222233334444|line:' + 'e'.repeat(32),
+      question: 'error: EADDRINUSE: address already in use :::5433',
+      at: NOW + 20,
+    });
+    const again = (await fire(db, leadStop(), TEAM, () => NOW + 30))?.context ?? '';
+    expect(again).toContain('address already in use');
+    expect(again).toContain('`--key fingerprint=sig_v1:1111222233334444`');
   });
 
   it('the second stop harvests the lead own fence; a skipped lookup is not evidence', async () => {

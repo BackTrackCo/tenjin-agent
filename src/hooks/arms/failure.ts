@@ -1,6 +1,13 @@
 import type { HookTool } from '../../adapters/types';
 import { deliver } from '../deliver';
-import { allowedHeads, errorLine, sigV1, type ErrorLine } from '../failure/signature';
+import { failureQuestionKey, SIG_LABEL, TEST_SIG_LABEL } from '../failure/keys';
+import {
+  allowedHeads,
+  errorLine,
+  sigV1,
+  type ErrorLine,
+  type Signature,
+} from '../failure/signature';
 import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-identity';
 import { getMark } from '../gates';
 import { keysLeg, searchLeg, teamOrigin } from '../legs/shelf';
@@ -30,7 +37,10 @@ import { BASH_START } from './context';
  * 150-search census of this shelf came from the team side.
  *
  * THE ARM ONLY ASKS. It writes nothing about the failure, so a fire that finds
- * nothing leaves its ledger row and no other trace.
+ * nothing leaves its ledger row and no other trace. That row IS the record: it
+ * already carries the composed question key and the masked line, which is what
+ * the turn-end ask reads back to name the failure (`capture.ts`), so there is
+ * no second store to keep in step with it.
  *
  * `tool.ok` is `decode`'s: false on `PostToolUseFailure` and on a Bash
  * `PostToolUse` whose output carries an error marker (decision 9). The arm
@@ -54,25 +64,40 @@ function failureText(tool: HookTool | undefined): string {
 /**
  * What this failure asks, or null when it has nothing to ask with.
  *
- * The error line as the runner printed it IS the question, through the same
- * `question()` every other arm goes through: masked, and keyed on its own
- * bytes. That is what makes the text round possible at all, and it is also
- * what keeps two unrelated failures apart in the once-per-question gate, which
- * the fingerprint could not — `sig_v1` normalizes a message down to 200
- * characters of shape.
+ * THE TEXT IS THE ERROR LINE as the runner printed it, through the same
+ * `question()` every other arm goes through: masked, and nothing else. That is
+ * what makes the text round possible at all.
+ *
+ * THE KEY IS NOT THE TEXT'S. `question()` keys on the line alone, and the line
+ * alone is the same bytes for a TypeError in `a.ts` and the identical TypeError
+ * in `b.ts`. Those are two failures, and under one key the second takes the
+ * first's cached miss out of the once-per-question gate (`gates.ts`,
+ * `Q_PREFIX`) and is never looked up — a real fingerprint sitting right there,
+ * unasked. So the key composes every fingerprint this failure HAS with the hash
+ * of its line ({@link failureQuestionKey}), and the line hash is the tiebreak
+ * of last resort.
  *
  * With no error line there is still a test identity, which has nothing to say
- * in words but a key the resolve leg can answer exactly. The gate is claimed
- * on that key instead. THERE IS NO EMPTY FALLBACK: a question keyed on `''`
- * would file every keyless failure on this machine under one claim
- * (`gates.ts`, `Q_PREFIX`), so the first one asked would answer — and then
- * silence — all the others for the life of the session. Null is the arm having
- * nothing at all, which is a `no-question` row and claims nothing.
+ * in words but a key the resolve leg answers exactly; the composed key is then
+ * that fingerprint alone. THERE IS NO EMPTY FALLBACK: a key of `''` would file
+ * every keyless failure on this machine under one claim, so the first one asked
+ * would answer — and then silence — all the others for the life of the session.
+ * Null is the arm having nothing at all, which is a `no-question` row and
+ * claims nothing.
  */
-function questionOf(found: ErrorLine | null, testSig: TestSignature | null): Question | null {
-  if (found !== null) return question(found.line);
-  if (testSig !== null) return { text: '', questionKey: testSig.key };
-  return null;
+function questionOf(
+  found: ErrorLine | null,
+  sig: Signature | null,
+  testSig: TestSignature | null,
+): Question | null {
+  const asked = found === null ? null : question(found.line);
+  const questionKey = failureQuestionKey({
+    ...(sig !== null ? { sig: sig.key } : {}),
+    ...(testSig !== null ? { testSig: testSig.key } : {}),
+    ...(asked !== null ? { lineKey: asked.questionKey } : {}),
+  });
+  if (questionKey === '') return null;
+  return { text: asked?.text ?? '', questionKey };
 }
 
 export const failureArm: Arm = {
@@ -113,12 +138,14 @@ export const failureArm: Arm = {
     // line is real but too generic to key — no errno, no frame, so `sigV1`
     // refuses it — is still a sentence a teammate may have written about, and
     // the text round is what reaches that write-up.
-    const q = questionOf(found, testSig);
+    const q = questionOf(found, sig, testSig);
     if (q === null) return null;
 
+    // The same two labels the composed key carries, off the same constants, so
+    // the form on the wire and the form the ask reads back cannot drift.
     const fine: string[] = [];
-    if (sig !== null) fine.push('sig_v1:' + sig.key);
-    if (testSig !== null) fine.push('sig_v1_test:' + testSig.key);
+    if (sig !== null) fine.push(SIG_LABEL + ':' + sig.key);
+    if (testSig !== null) fine.push(TEST_SIG_LABEL + ':' + testSig.key);
     // A resolve with no keys in it is a request that can only answer nothing,
     // so it is not sent; the text round is what a keyless failure has instead.
     const stages: Leg[][] = [];

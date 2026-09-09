@@ -38,6 +38,12 @@ const ENOENT =
   "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'\n    at run (src/migrate.ts:12:3)\n";
 const VITEST_FAIL =
   ' FAIL  src/date.test.ts > formatDate > handles null\nAssertionError: expected undefined to be null\n';
+/** One error line, printed off a frame the caller names: the same sentence in
+ *  two files, which is two failures and used to be one question. */
+const typeError = (file: string): string =>
+  "TypeError: Cannot read properties of undefined (reading 'id')\n    at load (" +
+  file +
+  ':12:3)\n';
 
 let db: LoopDb;
 let repo: string;
@@ -203,7 +209,8 @@ describe('the plan', () => {
     expect(plan?.question.text).toBe(
       "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
     );
-    expect(plan?.question.questionKey).toMatch(/^[0-9a-f]{32}$/);
+    // The fingerprint it has, then the line hash behind it.
+    expect(plan?.question.questionKey).toMatch(/^sig_v1:[0-9a-f]{16}\|line:[0-9a-f]{32}$/);
   });
 
   it('asks in words with no fingerprint at all, under a key of its own', async () => {
@@ -213,7 +220,8 @@ describe('the plan', () => {
     // identity either: the keys leg has nothing to resolve and is not planned.
     expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['team']]);
     expect(plan?.question.text).toBe('error: linting failed for the workspace');
-    expect(plan?.question.questionKey).toMatch(/^[0-9a-f]{32}$/);
+    // Nothing but the line to key on, and the line hash alone is the key.
+    expect(plan?.question.questionKey).toMatch(/^line:[0-9a-f]{32}$/);
   });
 
   it('gives two different failures two different question keys', async () => {
@@ -231,6 +239,10 @@ describe('the plan', () => {
     expect(row.reason).toBe('no-hit');
     expect(calls.map((c) => c.path)).toEqual(['/api/keys/resolve', '/api/search']);
     expect(keysOf(calls[0]!)).toEqual(['sig_v1', 'sig_v1_test']);
+    // Both fingerprints, in the order the resolve sent them, then the line.
+    expect(row.question_key).toMatch(
+      /^sig_v1:[0-9a-f]{16}\|sig_v1_test:[0-9a-f]{16}\|line:[0-9a-f]{32}$/,
+    );
     expect(calls[1]!.body.query).toBe(
       "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
     );
@@ -269,6 +281,10 @@ describe('the plan', () => {
     const plan = await planOf(shell({ command: 'pnpm test', ok: false, stdout: totals }));
     expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys']]);
     expect(plan?.question.text).toBe('');
+    // No line, so no line hash: the fingerprint alone is the key.
+    expect(plan?.question.questionKey).toBe(
+      'sig_v1_test:' + sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 't' }).key,
+    );
   });
 });
 
@@ -302,6 +318,33 @@ describe('what a failure asks with', () => {
     await fire(shell({ command: 'pnpm test', ok: false, stdout: VITEST_FAIL, actor: CHILD }));
     expect(resolved()[1]!.body.keys?.map((k) => k.key)).toEqual([
       'sig_v1_test:' + sigV1Test({ file: 'src/a.test.ts', suite: 's', test: 't' }).key,
+    ]);
+  });
+
+  it('is two questions when one error line comes off two frames', async () => {
+    // THE COLLISION THE COMPOSED KEY EXISTS FOR. The same TypeError in two
+    // files prints the same sentence, and a key over the sentence alone would
+    // hand the second failure the first's cached miss out of the gate — its
+    // fingerprint sitting right there, never resolved. So the call count is the
+    // assertion, not just the keys.
+    const { calls } = shelf([[]]);
+    const one = await fire(
+      shell({ command: 'pnpm test', ok: false, stderr: typeError('src/a.ts') }),
+    );
+    const two = await fire(
+      shell({ command: 'pnpm test', ok: false, stderr: typeError('src/b.ts') }),
+    );
+    expect(one.row.reason).toBe('no-hit');
+    expect(two.row.reason).toBe('no-hit');
+    expect(one.row.question_key).not.toBe(two.row.question_key);
+    // The line half is the same bytes in both; only the fingerprint differs.
+    const lineOf = (key: string | null) => String(key).split('|').pop();
+    expect(lineOf(one.row.question_key)).toBe(lineOf(two.row.question_key));
+    expect(calls.map((c) => c.path)).toEqual([
+      '/api/keys/resolve',
+      '/api/search',
+      '/api/keys/resolve',
+      '/api/search',
     ]);
   });
 

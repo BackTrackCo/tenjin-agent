@@ -117,6 +117,43 @@ export const MISS_LINE = (question: string, id: string): string =>
   id +
   ' --status regenerated`';
 
+/**
+ * A failure this actor hit that neither round had anything for, and the
+ * fingerprints it is filed under.
+ *
+ * IT ASSERTS NOTHING. "You fixed `<line>`" was a claim this machine could not
+ * make: what stood behind it was a pairing closed by the next passing run of
+ * the same command, which is "something passed later", not "you understood
+ * it". An agent told it fixed something it worked around, or that a teammate's
+ * push fixed, writes a piece about a fix that never happened. So the line
+ * states what is on the row and no more: this came up, and the shelf was empty.
+ * The publish is offered conditioned on the agent's own judgement, and the
+ * fingerprint is what makes the answer findable next time.
+ *
+ * RENDERS WITH EITHER HALF MISSING. A failure with a test identity and no error
+ * line has an empty `errorLine` and a real key — the case a fingerprint serves
+ * best, so it is named by the key instead of by text. A failure whose line is
+ * too generic for `sigV1` to key has text and no fingerprint, and is named
+ * without a publish suggestion, because there is nothing to file it under.
+ */
+export const FAILURE_LINE = (errorLine: string, keys: string[]): string => {
+  const what =
+    errorLine === ''
+      ? keys.length > 0
+        ? 'A failure filed under `' + keys.join('`, `') + '`'
+        : 'A failure'
+      : '`' + errorLine + '`';
+  // One key, not all of them: the line has to stay a command an agent can
+  // paste, and `failureQuestionKey` composes `sig_v1` first.
+  const publish =
+    keys.length > 0
+      ? ' If you settled it and the answer would save a teammate the same hour, publish it with `--key fingerprint=' +
+        (keys[0] ?? '') +
+        '`.'
+      : ' If you settled it and the answer would save a teammate the same hour, publish it.';
+  return '- Came up this turn, and the shelf had nothing for it: ' + what + '.' + publish;
+};
+
 /** What one of this session's children published, so the lead that cannot read
  *  a sidechain still learns what went out under its identity (principle 5). */
 export const CHILD_PUBLISHED_LINE = (agentType: string, agent: string, url: string): string =>
@@ -144,7 +181,8 @@ export interface QueuedLine {
 /**
  * The one ask template (decision 16): the two-paragraph block with its two
  * substitutions, then whatever this actor actually has open — its unanswered
- * searches, what its children queued, what they published.
+ * searches, the failures it hit that nothing answered, what its children queued,
+ * what they published.
  * Nothing else builds this text, and a section with nothing in it is absent
  * rather than empty.
  */
@@ -152,11 +190,12 @@ export function captureAsk(a: {
   mode: string;
   flags: string;
   misses: string[];
+  failures: string[];
   queued: QueuedLine[];
   published: string[];
 }): string {
   const lines = [CAPTURE_ASK.replace('<mode>', a.mode).replace('<flags>', a.flags)];
-  lines.push(...a.misses);
+  lines.push(...a.misses, ...a.failures);
   if (a.queued.length > 0) {
     lines.push(String(a.queued.length) + QUEUED_FINDINGS_HEAD);
     for (const q of a.queued) {

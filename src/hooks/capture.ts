@@ -5,13 +5,20 @@ import { dirname, join } from 'node:path';
 import type { Emit } from '../adapters/types';
 import { AGENT_ID_RE } from '../lib/grade';
 import { mask } from '../lib/redact';
-import { projectId } from './failure/keys';
+import { failureKeyFingerprints, projectId } from './failure/keys';
 import { STARTED_MARK } from './actor';
 import { EDITED_PREFIX } from './arms/context';
 import { factsWithPrefix, setFact } from './facts';
 import { getMark, setMark } from './gates';
 import { teamOrigin } from './legs/shelf';
-import { captureAsk, CHILD_PUBLISHED_LINE, FINDING_TAG, MISS_LINE, type QueuedLine } from './prose';
+import {
+  captureAsk,
+  CHILD_PUBLISHED_LINE,
+  FAILURE_LINE,
+  FINDING_TAG,
+  MISS_LINE,
+  type QueuedLine,
+} from './prose';
 import type { LoopDb } from './store';
 import { clean } from './text';
 import type { Actor, FireContext } from './types';
@@ -45,7 +52,8 @@ const PUBLISHED_AGENT_PREFIX = 'agent_published:';
  *  written: it has no turn left to answer an ask in (pr298, probed). */
 const WORKFLOW_AGENT_TYPE = 'workflow-subagent';
 
-type Evidence = 'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding';
+type Evidence =
+  'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding' | 'failure';
 
 /** Any WebSearch, WebFetch or Read row by the child counts (decision 2). The
  *  context arm's other row, a Bash call on `tool.before`, is not evidence. */
@@ -54,6 +62,14 @@ const CHILD_RESEARCH_SQL =
 /** The lead's own lookups that actually ran, as opposed to being skipped. */
 const LEAD_LOOKUP_SQL =
   "arm IN ('prompt', 'research', 'fetch') AND reason IN ('hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server')";
+/** A failure fire whose shelves had nothing: the two reasons that mean "asked,
+ *  and came back empty". `no-hit` is a definite miss, `no-answer` a leg that
+ *  never landed. `asked`, `cached` and `seen` are the same failure a second
+ *  time and are not a second thing to write up. Its own constant rather than
+ *  another arm in {@link LEAD_LOOKUP_SQL}, which would widen the ask to failure
+ *  `hit` rows too and give the ASKED mark a value that no longer says which
+ *  rule bit. */
+const FAILURE_MISS_SQL = "arm = 'failure' AND reason IN ('no-hit', 'no-answer')";
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   return (
@@ -77,6 +93,17 @@ function fired(db: LoopDb, actor: Actor, where: string): boolean {
     db
       .prepare(`SELECT 1 FROM fires WHERE session = ? AND agent = ? AND ${where} LIMIT 1`)
       .get(actor.session, actor.agent) !== undefined
+  );
+}
+
+/** A failure this actor hit that the shelves had nothing for, after `at`. */
+function failedSince(db: LoopDb, actor: Actor, at: number): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM fires WHERE session = ? AND agent = ? AND ${FAILURE_MISS_SQL} AND at > ? LIMIT 1`,
+      )
+      .get(actor.session, actor.agent, at) !== undefined
   );
 }
 
@@ -138,6 +165,52 @@ function missLines(db: LoopDb, session: string): string[] {
 }
 
 /**
+ * The failures this actor hit that the shelves had nothing for, oldest first,
+ * one line each. THE `fires` ROW IS THE RECORD: `fire.ts` sets the plan's
+ * question key and its masked, cut text before the gates run, and `ledger.ts`
+ * writes both on every outcome, so a failure that asked has already left
+ * everything this needs. Nothing else is stored and nothing else is joined.
+ *
+ * PER ACTOR, NOT PER SESSION (principle 5). A child's failures belong in the
+ * child's own ask: it is the one that can explain what it hit, and a lead shown
+ * a wall it never walked into cannot write the piece.
+ *
+ * DEDUPED BY `question_key`, oldest kept: a command re-run after a failed edit
+ * is one problem, not four. Deduped here rather than with a `GROUP BY` — the
+ * bare column beside a `MIN(at)` is a SQLite-only rule, the row set is a
+ * handful, and this way the `ORDER BY at, rowid` tiebreak stays explicit.
+ *
+ * A NULL `question` IS NOT A FILTER. A failure with a test identity and no
+ * error line stores the empty string, and that row is exactly the one whose
+ * fingerprint is worth publishing under; only the key is required.
+ */
+function failureLines(db: LoopDb, actor: Actor): string[] {
+  const rows = db
+    .prepare(
+      `SELECT question_key, question FROM fires
+       WHERE session = ? AND agent = ? AND ${FAILURE_MISS_SQL}
+         AND question_key IS NOT NULL AND question_key != ''
+       ORDER BY at, rowid`,
+    )
+    .all(actor.session, actor.agent) as unknown as Array<{
+    question_key?: unknown;
+    question?: unknown;
+  }>;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const row of rows) {
+    const key = typeof row.question_key === 'string' ? row.question_key : '';
+    if (key === '' || seen.has(key)) continue;
+    seen.add(key);
+    // Already masked and cut at the shelf's bound on the way into the row; the
+    // second cut here is for the line's own width and nothing else.
+    const line = clean(typeof row.question === 'string' ? row.question : '', 200);
+    out.push(FAILURE_LINE(line, failureKeyFingerprints(key)));
+  }
+  return out;
+}
+
+/**
  * What this session's children published, oldest first (principle 5).
  *
  * The queue is machine-wide, so the `started` marks are the filter: an agent
@@ -174,7 +247,15 @@ function publishedLines(db: LoopDb, session: string): string[] {
   return out;
 }
 
-/** The kind of evidence that earns this actor an ask, or null. */
+/**
+ * The kind of evidence that earns this actor an ask, or null. Each new kind is
+ * appended, never inserted, so no ASKED value a ledger already holds changes
+ * meaning.
+ *
+ * `failure` needs no team-origin guard of its own, unlike `activity`: the
+ * failure arm plans nothing at all without one (`arms/failure.ts`), so a
+ * machine with no team shelf writes no failure fire to find here.
+ */
 function evidence(ctx: FireContext): Evidence | null {
   const { db } = ctx.deps;
   const actor = ctx.actor;
@@ -182,12 +263,14 @@ function evidence(ctx: FireContext): Evidence | null {
     if (hasMark(db, actor, EDITED_PREFIX)) return 'edited';
     if (fired(db, actor, CHILD_RESEARCH_SQL)) return 'research';
     if (getMark(db, actor, HANDOFF_MISS) !== null) return 'handoff-miss';
+    if (fired(db, actor, FAILURE_MISS_SQL)) return 'failure';
     return null;
   }
   if (fired(db, actor, LEAD_LOOKUP_SQL)) return 'lookup';
   if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
     return 'activity';
   if (childFindings(db, actor.session).length > 0) return 'finding';
+  if (fired(db, actor, FAILURE_MISS_SQL)) return 'failure';
   return null;
 }
 
@@ -241,7 +324,7 @@ function agentTypeOf(ctx: FireContext): string {
 
 /**
  * The ask, or null. Once per actor (`capture:asked`, valued with the kind);
- * the lead is re-armed only by a child's finding newer than its ask, never by
+ * re-armed only by a child's finding or a failure newer than the ask, never by
  * a publish (#294). A child is asked too — the ask is context beside its stop,
  * not a decision it has to answer — but never when it is a workflow child with
  * no turn left to answer in.
@@ -253,7 +336,17 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   if (!cfg.hooks.publish) return null;
   const askedAt = markAt(db, actor, ASKED);
   const queued = audience === 'lead' ? childFindings(db, actor.session) : [];
-  if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt)) return null;
+  // A failure hit AFTER the ask re-arms it, the same shape as the queued
+  // finding beside it: an actor asked at its first stop and then sent into a
+  // wall it had to climb out of has something new to say, and the first ask
+  // could not have named it. In practice that is the lead's, because `stop()`
+  // sends an already-asked child to `harvest` and never here.
+  if (
+    askedAt !== null &&
+    !queued.some((q) => q.finding.at > askedAt) &&
+    !failedSince(db, actor, askedAt)
+  )
+    return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
   const kind = evidence(ctx);
   if (kind === null) return null;
@@ -267,6 +360,10 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
     misses: audience === 'lead' ? missLines(db, actor.session) : [],
+    // Both audiences: a failure belongs to the actor that hit it, where an open
+    // search is the lead's loop to close and a child's publish is the lead's to
+    // hear about.
+    failures: failureLines(db, actor),
     published: audience === 'lead' ? publishedLines(db, actor.session) : [],
     queued: queued.map((q): QueuedLine => ({
       id: q.id,
@@ -394,7 +491,7 @@ function harvest(ctx: FireContext): void {
  * The one stop entry for both arms: an actor not yet asked is asked; a child
  * already asked is on its answer turn and is harvested; a lead already asked
  * is harvested on its answer turn (`stopFuse`) and otherwise re-asked only if
- * a newer child finding re-arms it (`ask`).
+ * a newer child finding or a newer failure re-arms it (`ask`).
  */
 export function stop(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const asked = getMark(ctx.deps.db, ctx.actor, ASKED) !== null;
