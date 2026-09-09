@@ -662,6 +662,12 @@ learned on this machine, delivered to a later session on the same data dir. Plan
 `tenjin-notes/plans/2026-09-04-developer-token-savings-benchmark.md`, Bench-2 row and Phase 1.
 Nothing in this section runs in CI; every manifest here is an operator command.
 
+This section and its fixtures are pull request 313; the foundation under it is 308. The two
+merge together and split by ownership rather than by coverage, which **Fixtures are container
+images** states in full: 308 owns the contracts, the executor, the provisioning seam, the
+reducer and the report; 313 owns every real fixture, every real-task manifest, the arms, the
+producer phase, and the readouts.
+
 **Where the plan's wording and the product differ.** The plan and the directive that shaped
 this section speak of a Stop-hook capture with `hooks.capture` on and `publish.mode` auto
 becoming a local lesson, and of a stale lesson gated by `valid_until`. The product on `main`
