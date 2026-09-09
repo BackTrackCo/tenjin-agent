@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from evals.benchmark import artifact, claude_live, cli, manifest as manifest_module, records, schedule, toolchain
+from evals.benchmark import artifact, claude_live, cli, images, manifest as manifest_module, records, schedule, toolchain
 from evals.benchmark.claude_live import LiveExecutorError
 from evals.benchmark.records import RecordError
 from evals.benchmark.tests import support
@@ -129,7 +129,7 @@ class SeedTest(ToolchainCase):
 
 
 class LaunchTest(unittest.TestCase):
-    """What `claude_live.launch` does with the pin: seeds and records on a live launch, reports on a dry run, refuses a miss."""
+    """What a launch records about the package manager now that the fixture image holds it."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -144,31 +144,18 @@ class LaunchTest(unittest.TestCase):
         roots = artifact.create(self.dir / "run", trial.trial_id, self.manifest.fixture_path(task))
         return dataclasses.replace(claude_live.LaunchRequest(trial.trial_id, roots, task, arm, self.manifest.pins), dry_run=dry_run)
 
-    def test_a_live_launch_seeds_the_pinned_pnpm_and_records_what_runs(self) -> None:
-        environ = support.fake_toolchain(self.dir, cached=("10.23.0", "11.11.0"))
+    def test_a_launch_records_the_images_pnpm_and_seeds_nothing_on_the_host(self) -> None:
+        # The host's own pnpm, whatever it is, decides nothing: the trial runs
+        # in an image whose pnpm was installed by exact version at build time.
+        environ = support.fake_toolchain(self.dir, cached=("10.23.0",))
         request = self.request()
         with mock.patch.dict(os.environ, {**environ, "CLAUDE_CODE_OAUTH_TOKEN": "not-a-real-token"}):
             launch = claude_live.launch(request)  # type: ignore[arg-type]
-        self.assertEqual(launch.package_manager, {"kind": "corepack-shim", "version": "11.11.0"})
+        self.assertEqual(launch.package_manager, {"kind": "image", "version": images.PNPM_VERSION})
         assert launch.env is not None
-        self.assertEqual(launch.env["COREPACK_HOME"], str(request.roots.corepack_home))  # type: ignore[attr-defined]
-        self.assertEqual(launch.env["COREPACK_ENABLE_NETWORK"], "0")
-        self.assertEqual(toolchain.cached_versions(request.roots.corepack_home), ("11.11.0",))  # type: ignore[attr-defined]
-        self.assertNotIn(environ["COREPACK_HOME"], launch.env.values())
-
-    def test_a_dry_run_reports_and_neither_seeds_nor_refuses(self) -> None:
-        environ = support.fake_toolchain(self.dir, cached=("10.23.0",))
-        request = self.request(dry_run=True)
-        with mock.patch.dict(os.environ, environ):
-            launch = claude_live.launch(request)  # type: ignore[arg-type]
-        self.assertEqual(launch.package_manager, {"kind": "corepack-shim", "version": None})
+        self.assertNotIn("COREPACK_HOME", launch.env)
         self.assertFalse(request.roots.corepack_home.exists())  # type: ignore[attr-defined]
-
-    def test_a_shim_without_the_pin_cached_refuses_the_launch_naming_the_fix(self) -> None:
-        environ = support.fake_toolchain(self.dir, cached=("10.23.0",))
-        with mock.patch.dict(os.environ, environ), self.assertRaises(LiveExecutorError) as caught:
-            claude_live.launch(self.request())  # type: ignore[arg-type]
-        self.assertIn("corepack install -g pnpm@11.11.0", str(caught.exception))
+        self.assertNotIn("COREPACK_HOME", launch.container_plan["env"])
 
     def test_an_arm_cannot_reach_corepack_through_its_settings(self) -> None:
         with self.assertRaises(LiveExecutorError):

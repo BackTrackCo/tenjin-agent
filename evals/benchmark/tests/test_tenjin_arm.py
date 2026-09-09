@@ -1,8 +1,10 @@
-"""The Tenjin hooks arm: seeded data dir, one daemon per trial, stopped before the join.
+"""The Tenjin hooks arm: seeded data dir, the container's daemon report, and the shelf seed.
 
-Every daemon here is `tests/fake_daemon.py`, started and stopped inside the
-case that needs it. Nothing reads an operator's data dir: the source is a
-temp directory with two placeholder bundles and a config written by the case.
+The daemon itself is the trial container's, started and stopped by the
+entrypoint, so a case here writes the `daemon.json` that entrypoint leaves and
+proves what the host does with it. Nothing reads an operator's data dir: the
+source is a temp directory with placeholder bundles and a config written by
+the case, and no case starts a container.
 """
 
 from __future__ import annotations
@@ -21,27 +23,13 @@ import urllib.request
 from pathlib import Path
 from unittest import mock
 
-from evals.benchmark import artifact, cli, executor, reap, records, runner, schedule, signature, tenjin_arm, vendor
+from evals.benchmark import artifact, cli, container, executor, images, reap, records, runner, schedule, signature, tenjin_arm
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
 
-FAKE_DAEMON = [sys.executable, str(Path(__file__).with_name("fake_daemon.py"))]
 SECRET = "bench1-test-shelf-secret-0123456789abcdef"
 LIVE = "live_provisioned_for_this_test"
-
-
-def _gone(pid: int, deadline_s: float = 5.0) -> bool:
-    import time
-
-    end = time.monotonic() + deadline_s
-    while time.monotonic() < end:
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            return True
-        time.sleep(0.02)
-    return False
 
 
 class SourceCase(unittest.TestCase):
@@ -126,24 +114,25 @@ class SourceTest(SourceCase):
 class DaemonCase(SourceCase):
     def setUp(self) -> None:
         super().setUp()
-        self.patch = mock.patch.object(tenjin_arm, "DAEMON_ARGV", lambda roots: list(FAKE_DAEMON))
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
         self.source = tenjin_arm.load_source(self.write_source())
 
     def prepare(self, roots: artifact.TrialRoots, *, dry_run: bool = False) -> executor.Provision:
         request = ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, dry_run=dry_run)
-        provision = tenjin_arm.prepare(request)
-        started = provision.stop_state.get("started")
-        if started is not None:
-            self.addCleanup(lambda: runner.process_stop(started, roots.run_dir, 2.0))
-        return provision
+        return tenjin_arm.prepare(request)
+
+    def entrypoint(self, roots: artifact.TrialRoots, output: Path | None = None, **report: object) -> None:
+        """Stand in for the container: leave the daemon report the entrypoint writes."""
+        target = roots.output if output is None else output
+        target.mkdir(parents=True, exist_ok=True)
+        payload = {"requested": True, "started": True, "pid": 7, "port": tenjin_arm.DAEMON_PORT, "respawned": False, "wal_live": False}
+        (target / tenjin_arm.DAEMON_REPORT).write_text(json.dumps({**payload, **report}) + "\n", encoding="utf-8")
 
 
 class PrepareStopTest(DaemonCase):
-    def test_prepare_seeds_the_data_dir_starts_one_daemon_and_stop_ends_it_with_the_wal(self) -> None:
+    def test_prepare_seeds_the_data_dir_and_starts_nothing(self) -> None:
         roots = self.roots()
-        provision = self.prepare(roots)
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("prepare starts no process")):
+            provision = self.prepare(roots)
         data = roots.data_dir
         self.assertEqual(sorted(path.name for path in (data / "hooks").iterdir()), sorted(tenjin_arm.BUNDLES))
         token = (data / "daemon.token").read_text(encoding="utf-8")
@@ -151,78 +140,48 @@ class PrepareStopTest(DaemonCase):
         seeded = json.loads((data / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(seeded["shelfBypassSecret"], SECRET)
         self.assertEqual(seeded["team"], {"publicFallback": "on"})
-        pid_record = json.loads((data / "daemon.pid").read_text(encoding="utf-8"))
-        self.assertEqual(provision.values["daemon_url"], f"http://127.0.0.1:{pid_record['port']}/hook/claude")
+        # The port is the container's loopback, and the config the daemon reads
+        # inside it is the one the hook URL names.
+        self.assertEqual(seeded["loop"]["port"], tenjin_arm.DAEMON_PORT)
+        self.assertEqual(provision.values["daemon_url"], f"http://127.0.0.1:{tenjin_arm.DAEMON_PORT}/hook/claude")
         self.assertEqual(provision.values["daemon_token"], token)
         self.assertEqual(provision.values["data_dir"], str(data))
         self.assertEqual(provision.secrets, (SECRET,))
         self.assertEqual(provision.facts["shelf_origin"], "team-shelf.example")
-        self.assertTrue((data / "loop.db-wal").exists())
-        # The reaper knows the daemon under the trial's own ledger id.
-        ledger = [record.trial_id for record in reap.read_records(roots.run_dir)]
-        self.assertEqual(ledger, [f"{roots.trial_id}.daemon"])
-        # The resolved hook URL and token are what the daemon accepts.
-        request = urllib.request.Request(
-            provision.values["daemon_url"], data=b"{}", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        )
-        with urllib.request.urlopen(request, timeout=5) as response:
-            self.assertEqual(response.status, 204)
-        pid = provision.stop_state["pid"]
-        report = tenjin_arm.stop(roots, provision)
-        self.assertEqual(report, {"respawned": False, "wal_live": False})
-        self.assertTrue(_gone(pid))
-        self.assertFalse((data / "loop.db-wal").exists())
+        self.assertFalse((data / "daemon.pid").exists())
+        # Nothing of ours is running, so the ledger is empty: the container the
+        # runner starts is what the ledger will name.
         self.assertEqual(reap.read_records(roots.run_dir), [])
 
-    def test_stop_reaches_a_daemon_the_shim_respawned_through_its_own_pid_record(self) -> None:
+    def test_stop_reads_the_containers_report_and_confirms_the_wal_is_gone(self) -> None:
         roots = self.roots()
         provision = self.prepare(roots)
-        ours = provision.stop_state["pid"]
-        # A detached daemon the shim started is outside every group the
-        # runner recorded; it announces itself only through daemon.pid.
-        env = tenjin_arm.daemon_environment(roots)
-        respawned = subprocess.Popen(FAKE_DAEMON + ["--port", "0"], cwd=roots.data_dir, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(lambda: respawned.poll() is None and respawned.kill())
-        import time
-
-        end = time.monotonic() + 5
-        while time.monotonic() < end and (tenjin_arm.read_pid(roots.data_dir) or {}).get("pid") != respawned.pid:
-            time.sleep(0.02)
-        self.assertEqual(tenjin_arm.read_pid(roots.data_dir)["pid"], respawned.pid)
-        # The respawned daemon is this test's child, so it lingers as a zombie
-        # until waited on; the grace wait is shortened for that reason alone.
-        with mock.patch.object(tenjin_arm, "STOP_GRACE_S", 0.5):
-            report = tenjin_arm.stop(roots, provision)
-        self.assertTrue(report["respawned"])
-        self.assertIsNotNone(respawned.wait(timeout=5))
-        self.assertTrue(_gone(ours))
-
-    def test_a_pid_record_that_does_not_answer_for_this_data_dir_is_left_alone(self) -> None:
-        roots = self.roots()
-        provision = self.prepare(roots)
-        stranger = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
-        self.addCleanup(stranger.kill)
-        # A stale or forged record naming a live process that is not a daemon.
-        (roots.data_dir / "daemon.pid").write_text(json.dumps({"pid": stranger.pid, "port": 1, "started_at": 0, "data_dir": str(roots.data_dir)}), encoding="utf-8")
+        self.entrypoint(roots, respawned=True)
         report = tenjin_arm.stop(roots, provision)
-        self.assertFalse(report["respawned"])
-        self.assertIsNone(stranger.poll(), "a process that never answered /health for this data dir must not be signalled")
+        self.assertEqual(report, {"respawned": True, "started": True, "daemon_error": None, "wal_live": False})
 
     def test_a_wal_the_daemon_leaves_behind_is_reported_not_hidden(self) -> None:
         roots = self.roots()
-        with mock.patch.object(tenjin_arm, "DAEMON_ARGV", lambda roots: list(FAKE_DAEMON) + ["--keep-wal"]), mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
-            provision = self.prepare(roots)
+        provision = self.prepare(roots)
+        self.entrypoint(roots)
+        (roots.data_dir / "loop.db-wal").write_bytes(b"wal")
+        with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
             report = tenjin_arm.stop(roots, provision)
         self.assertTrue(report["wal_live"])
 
-    def test_a_daemon_that_never_answers_is_stopped_and_refused(self) -> None:
+    def test_a_daemon_that_never_became_healthy_is_named_in_the_report(self) -> None:
         roots = self.roots()
-        sleeper = [sys.executable, "-c", "import time; time.sleep(30)"]
-        with mock.patch.object(tenjin_arm, "DAEMON_ARGV", lambda roots: sleeper), mock.patch.object(tenjin_arm, "HEALTH_TIMEOUT_S", 0.3):
-            with self.assertRaises(ProvisionError) as caught:
-                self.prepare(roots)
-        self.assertIn("/health", str(caught.exception))
-        self.assertEqual(reap.read_records(roots.run_dir), [])
+        provision = self.prepare(roots)
+        self.entrypoint(roots, started=False, error="the daemon did not answer /health within 15000ms")
+        report = tenjin_arm.stop(roots, provision)
+        self.assertFalse(report["started"])
+        self.assertIn("/health", str(report["daemon_error"]))
+
+    def test_a_container_that_left_no_report_settles_on_the_wal_alone(self) -> None:
+        roots = self.roots()
+        provision = self.prepare(roots)
+        report = tenjin_arm.stop(roots, provision)
+        self.assertEqual(report, {"respawned": False, "started": False, "daemon_error": None, "wal_live": False})
 
     def test_a_dry_run_seeds_without_a_secret_a_token_or_a_daemon(self) -> None:
         roots = self.roots()
@@ -231,17 +190,20 @@ class PrepareStopTest(DaemonCase):
         self.assertFalse((roots.data_dir / "daemon.token").exists())
         seeded = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
         self.assertNotIn("shelfBypassSecret", seeded)
-        self.assertEqual(provision.values["daemon_url"], "http://127.0.0.1:0/hook/claude")
+        self.assertEqual(provision.values["daemon_url"], f"http://127.0.0.1:{tenjin_arm.DAEMON_PORT}/hook/claude")
         self.assertEqual(provision.values["daemon_token"], tenjin_arm.DRY_TOKEN)
         self.assertEqual(provision.stop_state, {})
-        self.assertEqual(tenjin_arm.stop(roots, provision), {"respawned": False, "wal_live": False})
+        self.assertEqual(tenjin_arm.stop(roots, provision)["started"], False)
 
-    def test_the_daemon_environment_is_the_trials_own(self) -> None:
+    def test_the_phase_change_rewrites_the_config_and_starts_nothing(self) -> None:
         roots = self.roots()
-        env = tenjin_arm.daemon_environment(roots, {"PATH": "/usr/bin", "LANG": "C", "TENJIN_WALLET_PRIVATE_KEY": "0xdead", "HOME": "/Users/operator"})
-        self.assertEqual(sorted(env), ["HOME", "LANG", "PATH", "TENJIN_DATA_DIR"])
-        self.assertEqual(env["HOME"], str(roots.home))
-        self.assertEqual(env["TENJIN_DATA_DIR"], os.path.abspath(roots.data_dir))
+        provision = self.prepare(roots)
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a phase change starts no process")):
+            consumer = tenjin_arm.start_phase(roots, provision, "consumer")
+        seeded = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(seeded["publish"], {"mode": "review"})
+        self.assertEqual(consumer.values, provision.values)
+        self.assertEqual(consumer.stop_state["mode"], "consumer")
 
 
 class SentinelTest(SourceCase):
@@ -261,10 +223,21 @@ class SentinelTest(SourceCase):
 
 
 class RunnerCase(DaemonCase):
-    """The runner's provision flow, with the fake executor's launch and the fake daemon."""
+    """The runner's provision flow, with the fake executor's launch and no container.
+
+    A live spec resolves its fixture image before any root exists, so the
+    image lookup is the one thing these cases stub; nothing else about the
+    flow is faked.
+    """
 
     def setUp(self) -> None:
         super().setUp()
+        self.image = mock.patch.object(images, "require", return_value=support.IMAGE)
+        self.image.start()
+        self.addCleanup(self.image.stop)
+        self.export = mock.patch.object(images, "export_node_modules", return_value=0)
+        self.export.start()
+        self.addCleanup(self.export.stop)
         executor.REGISTRY[LIVE] = ExecutorSpec(
             name=LIVE,
             harness="claude",
@@ -296,14 +269,16 @@ class RunnerTest(RunnerCase):
         seen: list[tuple[bool, bool]] = []
 
         def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
-            record = tenjin_arm.read_pid(roots.data_dir)
-            seen.append((record is not None, (roots.data_dir / "loop.db-wal").exists()))
+            # What the container's daemon reads was in place before the agent
+            # started, and the container reports what it did with it.
+            seen.append(((roots.data_dir / "config.json").is_file(), (roots.data_dir / "daemon.token").is_file()))
+            self.entrypoint(roots)
 
         runtime = self.runtime(spawn=support.fake_spawn(before=before))
         record = runner.run_trial(manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", runtime)
         records.validate(record)
-        # The daemon was up while the agent ran, and gone with its WAL before the join.
         self.assertEqual(seen, [(True, True)])
+        self.assertEqual(record["isolation"]["image"]["tag"], support.IMAGE.tag)
         self.assertEqual(record["outcome"], "pass")
         isolation = record["isolation"]
         self.assertEqual((isolation["publishable"], isolation["shelf_secret_present"], isolation["shelf_origin"]), (False, True, "team-shelf.example"))
@@ -337,8 +312,16 @@ class RunnerTest(RunnerCase):
 
     def test_a_wal_left_live_makes_the_attempt_invalid(self) -> None:
         manifest = self.manifest()
-        with mock.patch.object(tenjin_arm, "DAEMON_ARGV", lambda roots: list(FAKE_DAEMON) + ["--keep-wal"]), mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
-            record = runner.run_trial(manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime())
+
+        def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
+            # A store the daemon left with its write-ahead log still beside it.
+            support.write_loop_db(roots.data_dir / "loop.db", [])
+            (roots.data_dir / "loop.db-wal").write_bytes(b"wal")
+
+        with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
+            record = runner.run_trial(
+                manifest, self.trial(manifest, "tenjin_seeded"), self.run_dir, "sha256:schedule", self.runtime(spawn=support.fake_spawn(before=before))
+            )
         self.assertEqual((record["outcome"], record["invalid_reason"]), ("invalid", "delivery:wal_live"))
         self.assertEqual(reap.read_records(self.run_dir), [])
 
@@ -454,14 +437,20 @@ class CliTest(SourceCase):
         for plan in seeded:
             self.assertEqual(plan["provision"]["shelf_secret_present"], True)
             self.assertEqual(len(plan["hooks"]), 11)
-            self.assertTrue(any(hook.startswith("SubagentStart http http://127.0.0.1:0/hook/claude headers=Authorization") for hook in plan["hooks"]))
+            self.assertTrue(
+                any(hook.startswith(f"SubagentStart http http://127.0.0.1:{tenjin_arm.DAEMON_PORT}/hook/claude headers=Authorization") for hook in plan["hooks"])
+            )
             self.assertTrue(any("tenjin-shim.mjs" in hook and hook.startswith("SessionStart command") for hook in plan["hooks"]))
         self.assertIn("shelf_secret_present=true shelf_origin=team-shelf.example", printed)
-        # The vendored toolchain is named, with the host verdict, and nothing was extracted.
-        self.assertIn("vendor    vitest-3.2.4-node24-darwin-arm64 platform=darwin-arm64 node_abi=137 host=", printed)
-        self.assertIn(("extracted into repo/node_modules" if vendor.host_platform() == "darwin-arm64" else "MISMATCH"), printed)
+        # The image, the mount plan and the allowlist are printed, and nothing
+        # was built, copied or started.
+        self.assertIn("image     bench2-actor:", printed)
+        self.assertIn("container bench2-", printed)
+        self.assertIn("(internal, no route out) via proxy", printed)
+        self.assertIn("allowlist api.anthropic.com public.example team-shelf.example", printed)
         for plan in payload["trials"]:
-            self.assertEqual(plan["vendor"]["id"], "vitest-3.2.4-node24-darwin-arm64")
+            self.assertEqual(plan["container"]["image"]["resolved"], False)
+            self.assertEqual([mount["mode"] for mount in plan["container"]["mounts"]], ["rw"] * 5 + ["ro"])
             self.assertFalse((Path(plan["roots"]["cwd"]) / "node_modules" / "vitest").exists())
         self.assertNotIn(SECRET, printed)
         self.assertNotIn(tenjin_arm.DRY_TOKEN, printed)
@@ -504,6 +493,10 @@ class SeedCase(DaemonCase):
         assert self.key is not None
         (self.lessons / "fam.md").write_text("# The lesson\n\nRun the one file.\n", encoding="utf-8")
         self.write_lesson(self.key)
+        self.probed: list[tuple[str, str]] = []
+        probe = mock.patch.object(tenjin_arm, "PROBE_RUN", self.host_probe())
+        probe.start()
+        self.addCleanup(probe.stop)
         for name, value in (("PUBLISH_ARGV", lambda body, keys: [sys.executable, FAKE_CLI, *tenjin_arm.publish_argv(body, keys)[1:]]), ("DELETE_ARGV", lambda piece: [sys.executable, FAKE_CLI, *tenjin_arm.delete_argv(piece)[1:]]), ("SEARCH_ARGV", lambda query: [sys.executable, FAKE_CLI, *tenjin_arm.search_argv(query)[1:]]), ("LESSONS", self.lessons)):
             patcher = mock.patch.object(tenjin_arm, name, value)
             patcher.start()
@@ -548,8 +541,17 @@ class SeedCase(DaemonCase):
     def environment(self, roots: artifact.TrialRoots) -> dict[str, str]:
         return {"PATH": os.environ.get("PATH", ""), "HOME": str(roots.home)}
 
+    def host_probe(self):
+        """The probe seam, running the command where this suite can: on the host, in the scratch copy."""
+
+        def run(image: str, probe: Path, command: str, environment: dict[str, str]) -> subprocess.CompletedProcess:
+            self.probed.append((image, command))
+            return subprocess.run(command.split(" "), cwd=probe, env=environment, capture_output=True, text=True, shell=False, check=False)
+
+        return run
+
     def request(self, roots: artifact.TrialRoots, nonce: str | None = "20260908T000000Z-0badf00d", **overrides: object) -> ProvisionRequest:
-        base = dict(task=self.task, environment=self.environment(roots), nonce=nonce)
+        base = dict(task=self.task, environment=self.environment(roots), nonce=nonce, image=support.IMAGE.id)
         base.update(overrides)
         return ProvisionRequest(roots.trial_id, roots, {"id": "tenjin_seeded", "provision": "tenjin"}, self.source, **base)  # type: ignore[arg-type]
 
@@ -561,7 +563,6 @@ class SeedCase(DaemonCase):
         roots = self.seed_roots()
         request = self.request(roots)
         provision = tenjin_arm.prepare(request)
-        self.addCleanup(lambda: provision.stop_state.get("started") and runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         (seed,) = provision.facts["seed"]
         self.assertEqual((seed["lesson"], seed["piece_id"], seed["published"], seed["keys"], seed["deleted"]), ("fam", "piece-1", True, 1, None))
         self.assertEqual(seed["key_hashes"], [tenjin_arm.key_hash(f"sig_v1:{self.key}")])
@@ -585,7 +586,6 @@ class SeedCase(DaemonCase):
         fix_key = self.write_fix_lesson()
         roots = self.seed_roots()
         provision = tenjin_arm.prepare(self.request(roots))
-        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         seeds = provision.facts["seed"]
         self.assertEqual([(seed["lesson"], seed["piece_id"], seed["keys"]) for seed in seeds], [("fam", "piece-1", 1), ("probe-fix", "piece-2", 1)])
         self.assertEqual(seeds[1]["key_hashes"], [tenjin_arm.key_hash(f"sig_v1_test:{fix_key}")])
@@ -650,7 +650,6 @@ class SeedCase(DaemonCase):
         (Path(self.source.path) / "envelope-on-stderr").write_text("", encoding="utf-8")
         request = self.request(roots)
         provision = tenjin_arm.prepare(request)
-        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         self.assertEqual(provision.facts["seed"][0]["piece_id"], "piece-1")
         self.assertEqual(tenjin_arm.envelope_of("", '{"ok":true,"data":{"post":{"id":"p-9"}}}'), {"ok": True, "data": {"post": {"id": "p-9"}}})
         self.assertEqual(tenjin_arm.piece_id_of({"ok": True, "data": {"post": {"id": "p-9"}}}), "p-9")
@@ -721,7 +720,6 @@ class SeedCase(DaemonCase):
         roots = self.seed_roots()
         request = self.request(roots, task={"id": "x", "family": "smoke"})
         provision = tenjin_arm.prepare(request)
-        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         self.assertNotIn("seed", provision.facts)
         self.assertEqual(self.calls(), [])
 
@@ -729,9 +727,17 @@ class SeedCase(DaemonCase):
         self.write_fix_lesson()
         roots = self.seed_roots()
         request = self.request(roots)
-        request = ProvisionRequest(request.trial_id, request.roots, {**request.arm, "lessons": ["probe-fix"]}, request.source, task=request.task, environment=request.environment, nonce=request.nonce)
+        request = ProvisionRequest(
+            request.trial_id,
+            request.roots,
+            {**request.arm, "lessons": ["probe-fix"]},
+            request.source,
+            task=request.task,
+            environment=request.environment,
+            nonce=request.nonce,
+            image=support.IMAGE.id,
+        )
         provision = tenjin_arm.prepare(request)
-        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
         self.assertEqual([seed["lesson"] for seed in provision.facts["seed"]], ["probe-fix"])
         self.assertEqual(sorted(path.name for path in (roots.data_dir / "hooks").iterdir()), sorted(tenjin_arm.BUNDLES))
         self.assertIn("tenjin-vitest-reporter.mjs", tenjin_arm.BUNDLES)
@@ -785,8 +791,43 @@ def _failure_then_fix(url: str, token: str, session: str, cwd: str, command: str
     _post(url, token, {**base, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "p-pass", "tool_response": {"stdout": "1 passed", "stderr": "", "interrupted": False}})
 
 
+FAKE_DAEMON = [sys.executable, str(Path(__file__).with_name("fake_daemon.py"))]
+
+
 class ProducerTest(RunnerCase):
-    """The natural arm: a verified producer session on the same store, then the consumer on a fresh copy."""
+    """The natural arm: a verified producer session on the same store, then the consumer on a fresh copy.
+
+    The daemon a phase runs is the container's. These cases stand in for that
+    container: they start `tests/fake_daemon.py` on the mounted data dir for
+    the length of the attempt, post the phase's hook events to it, stop it, and
+    leave the `daemon.json` the entrypoint would leave.
+    """
+
+    def start_daemon(self, roots: artifact.TrialRoots) -> tuple[subprocess.Popen, str, str]:
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(roots.home), "TENJIN_DATA_DIR": os.path.abspath(roots.data_dir)}
+        process = subprocess.Popen(FAKE_DAEMON, cwd=roots.data_dir, env=env, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: process.poll() is None and process.kill())
+        end = time.monotonic() + 10
+        record: dict | None = None
+        while time.monotonic() < end:
+            try:
+                record = json.loads((roots.data_dir / "daemon.pid").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                record = None
+            if record and record.get("pid") == process.pid:
+                break
+            time.sleep(0.02)
+        assert record is not None and record.get("pid") == process.pid, "the stand-in daemon never announced itself"
+        token = (roots.data_dir / "daemon.token").read_text(encoding="utf-8")
+        return process, f"http://127.0.0.1:{record['port']}/hook/claude", token
+
+    def stop_daemon(self, roots: artifact.TrialRoots, process: subprocess.Popen) -> None:
+        process.terminate()
+        process.wait(timeout=10)
+        roots.output.mkdir(parents=True, exist_ok=True)
+        (roots.output / tenjin_arm.DAEMON_REPORT).write_text(
+            json.dumps({"requested": True, "started": True, "pid": process.pid, "respawned": False, "wal_live": False}) + "\n", encoding="utf-8"
+        )
 
     def natural_manifest(self) -> object:
         manifest = support.synthetic_manifest(self.dir, executor_name=LIVE, arms=("off", "tenjin_natural"))  # type: ignore[arg-type]
@@ -797,10 +838,8 @@ class ProducerTest(RunnerCase):
         def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             if roots.phase != "producer":
                 return
-            record = tenjin_arm.read_pid(roots.data_dir)
-            assert record is not None
-            token = (roots.data_dir / "daemon.token").read_text(encoding="utf-8")
-            url = f"http://127.0.0.1:{record['port']}/hook/claude"
+            process, url, token = self.start_daemon(roots)
+            self.daemon = process
             if capture:
                 _failure_then_fix(url, token, launch.root_session_id, str(launch.cwd), "node assertion-x.mjs", " FAIL  tests/x.test.mjs > x > case 1\nAssertionError: expected 1 to be 2\n", f"{launch.cwd}/src/x.mjs")
                 _post(url, token, {"session_id": launch.root_session_id, "cwd": str(launch.cwd), "transcript_path": "t", "hook_event_name": "Stop", "stop_hook_active": False})
@@ -808,6 +847,7 @@ class ProducerTest(RunnerCase):
         def after(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             if roots.phase != "producer":
                 return
+            self.stop_daemon(roots, self.daemon)
             if not fix:
                 (roots.repo / "answer.txt").write_text("41\n", encoding="utf-8")
             # The fake executor reuses request ids per session; a real harness mints unique ones.

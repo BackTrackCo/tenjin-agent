@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import sha256_json, sha256_text, vendor as vendor_module
+from . import images as images_module, sha256_json, sha256_text, vendor as vendor_module
 
 CANARY_PREFIX = "bench1-canary-"
 CREDENTIAL_FILE = ".benchmark-credential"
@@ -191,8 +191,9 @@ def create(
     *,
     phase: str | None = None,
     data_dir: Path | None = None,
+    image: images_module.Image | None = None,
 ) -> TrialRoots:
-    """Fresh roots, the fixture copied in, and the vendored toolchain extracted into its `node_modules`.
+    """Fresh roots, the fixture copied in, and its `node_modules` from the fixture image.
 
     A `phase` (the producer) gets its own home, profile, output, and repository
     under the consumer's base and shares the consumer's `data_dir`: the store is
@@ -220,7 +221,7 @@ def create(
     for path in (roots.home, roots.profile, roots.output):
         path.mkdir(parents=True)
     roots.data_dir.mkdir(parents=True, exist_ok=True)
-    refresh_repo(roots, fixture, vendor)
+    refresh_repo(roots, fixture, vendor, image)
     (roots.home / CREDENTIAL_FILE).write_text(
         f"# Planted by the benchmark. Nothing real depends on it.\nBENCH1_FAKE_API_KEY={roots.canary_token}\n",
         encoding="utf-8",
@@ -228,11 +229,24 @@ def create(
     return roots
 
 
-def refresh_repo(roots: TrialRoots, fixture: Path, vendor: vendor_module.Vendor | None) -> None:
-    """A fresh repository copy at the roots' repo path: the fixture and the vendored tree; an arm's `settings.overlay` is the launch's to apply."""
+def refresh_repo(
+    roots: TrialRoots, fixture: Path, vendor: vendor_module.Vendor | None, image: images_module.Image | None = None
+) -> None:
+    """A fresh repository copy at the roots' repo path: the fixture, plus the dependency tree.
+
+    The tree comes out of the task's own image, which is where `pnpm install`
+    ran, so a trial installs nothing and the host never runs those files. The
+    vendored archive is the older path and is used only when there is no image.
+    """
     if roots.repo.exists():
         shutil.rmtree(roots.repo)
     shutil.copytree(fixture, roots.repo, symlinks=False)
+    if image is not None:
+        try:
+            images_module.export_node_modules(image, roots.repo / vendor_module.TARGET)
+        except images_module.ImageError as error:
+            raise ArtifactError(error.code, error.detail) from error
+        return
     if vendor is not None:
         try:
             vendor_module.extract(vendor, roots.repo / vendor_module.TARGET)

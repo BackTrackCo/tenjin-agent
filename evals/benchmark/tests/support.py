@@ -16,6 +16,7 @@ from evals.benchmark import (
     artifact,
     claude_usage,
     executor,
+    images,
     manifest as manifest_module,
     records,
     runner,
@@ -31,6 +32,45 @@ STORE = REPO_ROOT / "src" / "hooks" / "store.ts"
 
 Edit = Callable[[list[Any]], list[Any]]
 Before = Callable[[executor.Launch, artifact.TrialRoots], None]
+
+# The image a live case runs in. Nothing here builds or inspects one: a case
+# that reaches `images.require` stubs it with this.
+IMAGE = images.Image(
+    tag="bench2-task:0123456789ab",
+    id="sha256:" + "1c" * 32,
+    labels={"bench2.task": "task", "bench2.fixture_hash": "sha256:" + "ab" * 32},
+)
+
+def patch_live_gates(case: Any) -> None:
+    """Every seam a live case would otherwise take to Docker: the image gate, the image lookup, and the run's egress.
+
+    A case that stubs these still builds the real plan and the real argv; what
+    it does not do is talk to a daemon.
+    """
+    from unittest import mock
+
+    from evals.benchmark import cli, container
+
+    patch_images(case)
+    for patcher in (
+        mock.patch.object(cli, "refuse_without_images", lambda manifest: None),
+        mock.patch.object(container, "start_egress", lambda egress, docker=None: egress),
+        mock.patch.object(container, "stop_egress", lambda egress, docker=None: {"proxy": False, "network_removed": False}),
+    ):
+        patcher.start()
+        case.addCleanup(patcher.stop)
+
+
+def patch_images(case: Any, image: "images.Image | None" = None) -> "images.Image":
+    """Stub the image lookup and the tree export for one case. No case here reaches Docker."""
+    from unittest import mock
+
+    resolved = IMAGE if image is None else image
+    for patcher in (mock.patch.object(images, "require", return_value=resolved), mock.patch.object(images, "export_node_modules", return_value=0)):
+        patcher.start()
+        case.addCleanup(patcher.stop)
+    return resolved
+
 
 ATTESTED = artifact.Attestation(
     kind="container",

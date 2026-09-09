@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, discovery, executor, loop_join, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
+from . import artifact, claude_usage, container, discovery, executor, images, loop_join, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from . import reap
 from .schedule import Trial
@@ -67,6 +67,10 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
     acts on. Nothing here, and nothing an operator or an agent has to do
     afterwards, matches a process by name: that is how a cleanup aimed at one
     trial reaches an unrelated session.
+
+    A live launch names a container. Killing the docker client's group does not
+    stop it, so the container is stopped and removed here on every path out,
+    the interrupt included, before the ledger entry is released.
     """
     roots.output.mkdir(parents=True, exist_ok=True)
     stream = roots.stream.open("w", encoding="utf-8")
@@ -82,7 +86,7 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
         start_new_session=True,
         shell=False,
     )
-    reap.register(roots.run_dir, roots.trial_id, process.pid, launch.argv[0])
+    reap.register(roots.run_dir, roots.trial_id, process.pid, launch.argv[0], container=launch.container)
     timed_out = False
     try:
         try:
@@ -101,6 +105,8 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
                 process.communicate(timeout=_ORPHAN_WAIT_S)
             except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
                 pass
+        if launch.container is not None:
+            container.stop(launch.container)
         reap.release(roots.run_dir, roots.trial_id)
         stream.close()
     return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
@@ -199,6 +205,9 @@ class Runtime:
     # shelf: the CLI dedups a body per machine by content hash, and trial ids
     # repeat across runs of one manifest, so the body has to carry the run.
     run_nonce: str | None = None
+    # The run's egress (`container.Egress`), created before the first trial and
+    # removed after the last. Every live container joins its internal network.
+    egress: Any = None
 
 
 @dataclass(frozen=True)
@@ -306,7 +315,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         shelf_origin=facts.get("shelf_origin"),
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin, vendor=manifest.vendor_for(task))
+    # The image is resolved before any root exists: a missing or drifted image
+    # is a refusal, and its id is what the record says the attempt ran in.
+    image = images.require(task, manifest.pins) if spec.live else None
+    if image is not None:
+        isolation = {**isolation, "image": image.facts}
+    roots = artifact.create(
+        run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin, vendor=manifest.vendor_for(task), image=image
+    )
     # The manifest's slice is identity of the run, stated in every record.
     if manifest.slice is not None:
         isolation = {**isolation, "slice": manifest.slice}
@@ -314,7 +330,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if provisioned:
         assert spec.prepare is not None
         try:
-            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
+            provision = spec.prepare(
+                executor.ProvisionRequest(
+                    trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce, image=None if image is None else image.id
+                )
+            )
         except executor.ProvisionError as error:
             # One trial's provisioning refused (a seed key that drifted, a
             # publish that failed, a daemon that never answered): the trial is
@@ -338,6 +358,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             pins=manifest.pins,
             fixture=manifest.fixture_path(task),
             vendor=manifest.vendor_for(task),
+            image=image,
             roots=roots,
             provision=provision,
             runtime=runtime,
@@ -347,8 +368,12 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         provision = produced.provision
         foreign_sessions = produced.foreign_sessions
         isolation = {**isolation, "producer": produced.facts}
-        artifact.refresh_repo(roots, manifest.fixture_path(task), manifest.vendor_for(task))
-    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
+        artifact.refresh_repo(roots, manifest.fixture_path(task), manifest.vendor_for(task), image)
+    launch = spec.launch(
+        executor.LaunchRequest(
+            trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress
+        )
+    )
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}
     hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)

@@ -78,6 +78,9 @@ class ProvisionRequest:
     # Minted once per `live-run` invocation and reused on resume, so what a
     # provisioner writes to a shelf differs between runs of the same schedule.
     nonce: str | None = None
+    # The fixture image a probe runs in, so a provisioner that runs the task's
+    # own commands runs them where the agent will: same image, same tree.
+    image: str | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped
@@ -104,6 +107,13 @@ class LaunchRequest:
     # The consumer by default; the natural arm's producer runs first under the
     # same trial with its own session, so the phase is part of the session id.
     phase: str | None = None
+    # The image this attempt runs in, by id once the run has resolved it. A dry
+    # run leaves it None and the spec derives the tag from the task, so
+    # building an argv never needs Docker.
+    image: str | None = None
+    # The run's egress (`container.Egress`): the network the container joins
+    # and the proxy variables it is given. None outside a live run.
+    egress: Any = None
 
 
 @dataclass(frozen=True)
@@ -119,9 +129,14 @@ class Launch:
     # declared fragment is a template resolved per trial. The record keeps it
     # under `private_hashes`: the resolved bytes hold a bearer token.
     resolved_settings_hash: str | None = None
-    # The package manager the child runs (`toolchain.PackageManager.facts`),
-    # recorded in the attempt's isolation block by a live spec.
+    # The package manager the child runs, recorded in the attempt's isolation
+    # block by a live spec. For a container trial it is the image's pnpm.
     package_manager: dict[str, Any] | None = None
+    # The container this attempt runs in, and the plan a dry run prints. The
+    # name goes into the run's process ledger, so `cleanup` and the wall-clock
+    # cap both stop it; None is a launch that starts no container.
+    container: str | None = None
+    container_plan: dict[str, Any] | None = None
 
 
 # Where a finished trial's transcripts are, given its roots and root session

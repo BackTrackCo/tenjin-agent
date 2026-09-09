@@ -570,6 +570,9 @@ class ProvisionRefusalTest(TrialCase):
 class LiveRefusalTest(TrialCase):
     def setUp(self) -> None:
         super().setUp()
+        # A live spec resolves its fixture image before any root exists; that
+        # lookup is the one thing stubbed, so no case here reaches Docker.
+        support.patch_images(self)
         executor.REGISTRY[LIVE] = ExecutorSpec(
             name=LIVE,
             harness="claude",

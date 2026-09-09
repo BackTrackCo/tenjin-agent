@@ -37,7 +37,9 @@ from . import (
     reap as reap_module,
     artifact,
     cases as cases_module,
+    container,
     executor,
+    images,
     manifest as manifest_module,
     records,
     reduce as reduce_module,
@@ -176,23 +178,29 @@ def describe_hooks(settings: Mapping[str, Any]) -> list[str]:
     return lines
 
 
-def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: Path, source: Any = None) -> dict[str, Any]:
+def allowlist_for(spec: executor.ExecutorSpec, source: Any) -> tuple[str, ...]:
+    """Every origin this run may reach: the provider, plus the arm's own two shelves."""
+    return tuple(spec.required_origins) + tuple(getattr(source, "origins", ()) or ())
+
+
+def plan_trial(
+    manifest: manifest_module.Manifest, trial: schedule.Trial, out: Path, source: Any = None, egress: container.Egress | None = None
+) -> dict[str, Any]:
     """Build one trial's roots and launch exactly as `runner.run_trial` does, then stop."""
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
     spec = executor.lookup(arm["executor"])
-    # The roots are built as the run builds them, short of the vendored
-    # toolchain: a dry run extracts nothing and starts nothing, so it states
-    # the platform verdict alone and leaves the node probe to the live run.
+    # The roots are built as the run builds them, short of the dependency tree:
+    # a dry run copies nothing out of the image and starts nothing.
     roots = artifact.create(out, trial.trial_id, manifest.fixture_path(task))
-    vendor = manifest.vendor_for(task)
-    host = vendor_module.host_facts(probe_node=False)
     provision = None
     if arm.get("provision") and spec.prepare is not None:
         # A dry run seeds the data dir and resolves the template with a port of
         # 0 and a labelled token; it starts no daemon.
         provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True, task=task))
-    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True))
+    launch = spec.launch(
+        executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True, egress=egress)
+    )
     settings = arm.get("settings") or {}
     resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
     return {
@@ -204,8 +212,8 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
         "producer": bool(arm.get("producer", False)),
         "slice": manifest.slice,
-        "vendor": None if vendor is None else {**vendor.facts, "host": host, "host_matches": vendor_module.matches(vendor, host)},
         "package_manager": launch.package_manager,
+        "container": launch.container_plan,
         "overlay": sorted((settings.get("overlay") or {}).keys()),
         "hooks": describe_hooks(resolved),
         "roots": {
@@ -231,8 +239,9 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
     lines = [
         f"live-run dry run: {len(plans)} trials from {manifest.path}",
         "nothing was started: --dry-run stops before the spawn.",
-        "env names the child allowlist and prints no value; the credential seam "
-        "variable is on that line only when this shell has it set.",
+        "client env is what the docker client runs under and agent env is what "
+        "the container gets; neither prints a value. The credential seam is "
+        "forwarded by name and is on the forward line only.",
         "arm env and arm hooks name what the arm's own settings file adds to "
         "that process, again without values.",
     ]
@@ -248,7 +257,7 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
             lines.append(f"  {'phases':10}producer (own session, same data dir, verified) then consumer on a fresh repository copy; the daemon is restarted between them")
         if plan.get("slice") is not None:
             lines.append(f"  {'slice':10}" + " ".join(f"{key}={value}" for key, value in sorted(plan["slice"].items())))
-        lines.append(f"  {'env':10}{' '.join(plan['environment'])}")
+        lines.append(f"  {'client env':10}{' '.join(plan['environment'])}")
         lines.append(f"  {'arm env':10}{' '.join(plan['settings_env']) or '(none)'}")
         lines.append(f"  {'arm hooks':10}{' '.join(plan['settings_hooks']) or '(none)'}")
         for hook in plan["hooks"]:
@@ -266,19 +275,28 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                 )
             if facts.get("daemon_mode") == "producer":
                 lines.append(f"  {'producer':10}daemon config publish.mode=auto for the producer session; the consumer's daemon restarts on the consumer config")
-        if plan["vendor"] is not None:
-            facts = plan["vendor"]
-            verdict = "extracted into repo/node_modules at trial preparation" if facts["host_matches"] else "MISMATCH: live-run refuses this host"
-            lines.append(
-                f"  {'vendor':10}{facts['id']} platform={facts['platform']} node_abi={facts['node_abi']} "
-                f"host={facts['host']['platform']} {verdict}"
-            )
         for path in plan.get("overlay") or []:
             lines.append(f"  {'overlay':10}{path} written into the repository copy from the arm's settings template ({{data_dir}} resolved)")
         if plan["package_manager"] is not None:
             manager = plan["package_manager"]
-            state = f"pnpm {manager['version']}" if manager["version"] else "not the pinned pnpm: live-run refuses"
-            lines.append(f"  {'pnpm':10}{manager['kind']} {state}; the child gets its own COREPACK_HOME with network off")
+            lines.append(f"  {'pnpm':10}pnpm {manager['version']} from the {manager['kind']}; a trial installs nothing")
+        plan_container = plan.get("container")
+        if plan_container is not None:
+            image = plan_container["image"]
+            state = "by id, resolved from the local image" if image["resolved"] else "by tag; live-run resolves it to an id and refuses a missing or drifted image"
+            lines.append(f"  {'image':10}{image['tag']} {state}")
+            lines.append(f"  {'container':10}{plan_container['container']} user={plan_container['user']} workdir={plan_container['workdir']}")
+            for mount in plan_container["mounts"]:
+                lines.append(f"  {'mount':10}{mount['host']} -> {mount['target']} ({mount['mode']})")
+            lines.append(f"  {'agent env':10}{' '.join(sorted(plan_container['env']))}")
+            lines.append(f"  {'forward':10}{' '.join(plan_container['forward'])} (by name; docker reads the value from this shell, never from an argv)")
+            if plan_container["daemon"]:
+                lines.append(f"  {'daemon':10}started inside the container on the mounted data dir, stopped before the run reads loop.db")
+            egress = plan_container["egress"]
+            if egress is not None:
+                lines.append(f"  {'network':10}{egress['network']} (internal, no route out) via proxy {egress['proxy']} from {egress['proxy_image']}")
+                lines.append(f"  {'allowlist':10}{' '.join(egress['allowlist'])}; anything else is refused at the proxy and counted")
+            lines.append(f"  {'agent':10}{shlex.join(plan_container['agent'])}")
         lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
 
@@ -312,6 +330,17 @@ def refuse_package_manager(manifest: manifest_module.Manifest, environ: Mapping[
             raise CliError(f"task {task['id']!r}: {error.detail}") from error
 
 
+def refuse_without_images(manifest: manifest_module.Manifest) -> None:
+    """Every live trial runs inside its fixture's image, so an unreachable Docker daemon or a missing image is a refusal before any spend."""
+    reason = container.unavailable()
+    if reason is not None:
+        raise CliError(f"live-run needs Docker: {reason}")
+    try:
+        images.check_all(manifest)
+    except images.ImageError as error:
+        raise CliError(f"live-run refuses this manifest: {error.detail}") from error
+
+
 def live_run(
     out: Path,
     manifest_path: Path = SMOKE_MANIFEST,
@@ -338,8 +367,12 @@ def live_run(
     if tenjin_source is not None and not provisioned:
         raise CliError("--tenjin-source is for a manifest with a provisioned arm; this one has none")
     source = None if tenjin_source is None else tenjin_arm.load_source(tenjin_source)
+    allowlist = allowlist_for(spec, source or tenjin_arm.dry_source())
     if dry_run:
-        plans = [plan_trial(manifest, trial, out, source) for trial in trials]
+        # A dry run plans the egress and starts nothing, so the printed argv is
+        # the one a real run would use, network and proxy included.
+        planned = container.plan_egress(out, allowlist, "dry-run")
+        plans = [plan_trial(manifest, trial, out, source, planned) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
         return {"dry_run": True, "trials": plans}
     if provisioned and source is None:
@@ -358,8 +391,7 @@ def live_run(
             "live-run requires --attestation, or --plumbing for a non-publishable smoke: "
             "a publishable live run states the isolation it ran under"
         )
-    refuse_foreign_vendor(manifest, environ)
-    refuse_package_manager(manifest, environ)
+    refuse_without_images(manifest)
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
     # wall-clock cap on attempts that cannot reach the provider.
@@ -372,6 +404,12 @@ def live_run(
     # is stamped non-publishable in every record, so gate 3 can prove the chain
     # end to end on a host that is not a disposable instance, and no number from
     # it can be quoted as a result.
+    # One network and one proxy for the whole run: the trial containers join the
+    # internal network only, and the proxy log is the run's sentinel. Both are
+    # in the process ledger, so `cleanup` reaches them after an interrupt, and
+    # both are removed here on every path out.
+    egress = container.start_egress(container.plan_egress(out, allowlist, run_nonce(out, manifest)))
+    reap_module.register_objects(out, "egress", container=egress.proxy, network=egress.network)
     runtime = dataclasses.replace(
         runtime or runner.Runtime(),
         attestation=attestation,
@@ -379,8 +417,14 @@ def live_run(
         ci=bool(automation),
         automated=ci_live,
         source=source,
+        egress=egress,
+        sentinel=container.ProxySentinel(egress.log, egress.proxy_url),
     )
-    return execute(manifest, trials, out, runtime)
+    try:
+        return execute(manifest, trials, out, runtime)
+    finally:
+        container.stop_egress(egress)
+        reap_module.release(out, "egress")
 
 
 def do_verify(run_dir: Path) -> dict[str, Any]:

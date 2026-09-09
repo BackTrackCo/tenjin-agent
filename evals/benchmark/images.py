@@ -99,8 +99,14 @@ def run_docker(argv: list[str], timeout_s: float = DOCKER_TIMEOUT_S, stream: Any
 Docker = Callable[..., Completed]
 
 
-def unavailable(docker: Docker = run_docker) -> str | None:
+def _docker(docker: Docker | None) -> Docker:
+    """Resolved at the call, never bound as a default: an offline case replaces `run_docker` and every path here follows."""
+    return run_docker if docker is None else docker
+
+
+def unavailable(docker: Docker | None = None) -> str | None:
     """One sentence when the daemon cannot be reached, or None. Nothing offline calls this."""
+    docker = _docker(docker)
     try:
         completed = docker(["info", "--format", "{{.ServerVersion}}"], DOCKER_TIMEOUT_S)
     except ImageError as error:
@@ -172,8 +178,9 @@ class Image:
         }
 
 
-def inspect(tag: str, docker: Docker = run_docker) -> Image | None:
+def inspect(tag: str, docker: Docker | None = None) -> Image | None:
     """The local image behind a tag, or None when there is none."""
+    docker = _docker(docker)
     completed = docker(["image", "inspect", tag, "--format", "{{json .}}"], DOCKER_TIMEOUT_S)
     if completed.returncode != 0:
         return None
@@ -185,8 +192,9 @@ def inspect(tag: str, docker: Docker = run_docker) -> Image | None:
     return Image(tag=tag, id=str(payload.get("Id", "")), labels={str(key): str(value) for key, value in labels.items()})
 
 
-def require(task: Mapping[str, Any], pins: Mapping[str, Any], docker: Docker = run_docker) -> Image:
+def require(task: Mapping[str, Any], pins: Mapping[str, Any], docker: Docker | None = None) -> Image:
     """The image this task's trials run in, or a refusal that names the command that builds it."""
+    docker = _docker(docker)
     task_id = str(task["id"])
     fixture_hash = str(task["fixture_hash"])
     tag = fixture_tag(task_id, fixture_hash)
@@ -204,7 +212,8 @@ def require(task: Mapping[str, Any], pins: Mapping[str, Any], docker: Docker = r
     return image
 
 
-def build_base(built_from: Mapping[str, str], docker: Docker = run_docker, stream: Any = None) -> Image:
+def build_base(built_from: Mapping[str, str], docker: Docker | None = None, stream: Any = None) -> Image:
+    docker = _docker(docker)
     tag = base_tag(built_from)
     argv = [
         "build",
@@ -234,8 +243,9 @@ def build_base(built_from: Mapping[str, str], docker: Docker = run_docker, strea
 
 
 def build_fixture(
-    task: Mapping[str, Any], fixture: Path, built_from: Mapping[str, str], base: Image, docker: Docker = run_docker, stream: Any = None
+    task: Mapping[str, Any], fixture: Path, built_from: Mapping[str, str], base: Image, docker: Docker | None = None, stream: Any = None
 ) -> Image:
+    docker = _docker(docker)
     task_id = str(task["id"])
     tag = fixture_tag(task_id, str(task["fixture_hash"]))
     labels = fixture_labels(task_id, str(task["fixture_hash"]), built_from, base.id)
@@ -252,8 +262,9 @@ def build_fixture(
     return image
 
 
-def export_node_modules(image: Image, destination: Path, docker: Docker = run_docker) -> int:
+def export_node_modules(image: Image, destination: Path, docker: Docker | None = None) -> int:
     """Copy the image's installed tree into the trial's repository copy. The container it needs is removed on every path."""
+    docker = _docker(docker)
     destination.mkdir(parents=True, exist_ok=True)
     created = docker(["create", image.tag, "/bin/true"], DOCKER_TIMEOUT_S)
     if created.returncode != 0:
@@ -289,8 +300,9 @@ def ledger_write(images: Mapping[str, Image], built_from: Mapping[str, str], pat
     return payload
 
 
-def build_all(manifest: Any, docker: Docker = run_docker, stream: Any = None, only: str | None = None) -> dict[str, Any]:
+def build_all(manifest: Any, docker: Docker | None = None, stream: Any = None, only: str | None = None) -> dict[str, Any]:
     """Build the base and every image the manifest's tasks name, then write the ledger."""
+    docker = _docker(docker)
     built_from = recipe(manifest.pins)
     base = build_base(built_from, docker, stream)
     images = {base.tag: base}
@@ -302,8 +314,9 @@ def build_all(manifest: Any, docker: Docker = run_docker, stream: Any = None, on
     return ledger_write(images, built_from)
 
 
-def check_all(manifest: Any, docker: Docker = run_docker) -> dict[str, Any]:
+def check_all(manifest: Any, docker: Docker | None = None) -> dict[str, Any]:
     """Every task's image, or the first refusal. What `live-run` does before it spends anything."""
+    docker = _docker(docker)
     return {str(task["id"]): require(task, manifest.pins, docker).facts for task in manifest.tasks}
 
 

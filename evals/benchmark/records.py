@@ -73,7 +73,9 @@ REQUIRED = frozenset(
 
 # Keys a record may carry and a frozen corpus record predates: null or absent on the fake path.
 OPTIONAL = frozenset({"discovery"})
-PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
+# `image` is a container trial's pnpm: installed into the fixture image at
+# build time by exact version, so nothing on the host decides which one ran.
+PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
 
 class RecordError(ValueError):

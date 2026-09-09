@@ -159,6 +159,7 @@ def run(
     pins: dict[str, Any],
     fixture: Path,
     vendor: Any,
+    image: Any,
     roots: artifact.TrialRoots,
     provision: Provision,
     runtime: Any,
@@ -168,15 +169,29 @@ def run(
     """The whole producer phase, ending with the consumer's daemon up and the consumer's repository fresh."""
     from . import runner
 
-    producer_roots = artifact.create(roots.run_dir, trial_id, fixture, public_origin=roots.public_origin, vendor=vendor, phase=PHASE, data_dir=roots.data_dir)
-    launch = spec.launch(LaunchRequest(trial_id, producer_roots, task, arm, pins, provision, phase=PHASE))
+    producer_roots = artifact.create(
+        roots.run_dir, trial_id, fixture, public_origin=roots.public_origin, vendor=vendor, phase=PHASE, data_dir=roots.data_dir, image=image
+    )
+    launch = spec.launch(
+        LaunchRequest(
+            trial_id,
+            producer_roots,
+            task,
+            arm,
+            pins,
+            provision,
+            phase=PHASE,
+            image=None if image is None else image.id,
+            egress=getattr(runtime, "egress", None),
+        )
+    )
     session_id = launch.root_session_id
     hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
     started = runtime.clock()
     try:
         completed = runtime.spawn(launch, producer_roots, wall_clock_s)
     finally:
-        between = tenjin_arm.stop_daemon(roots, provision.stop_state.get("started"))
+        between = tenjin_arm.settle_daemon(roots, producer_roots.output)
     sessions = spec.sessions(producer_roots, session_id)
     if completed.timed_out:
         result_row, unresolved = runner.scan(sessions, session_id, producer_roots.stream)

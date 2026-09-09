@@ -49,7 +49,7 @@ from typing import Any, Mapping
 
 from urllib.parse import urlsplit
 
-from . import artifact, sha256_json, tenjin_arm, toolchain, verifier
+from . import artifact, container, images, sha256_json, tenjin_arm, verifier
 from .discovery import SETUP_PATH
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest, Provision, ProvisionRequest
 
@@ -117,8 +117,15 @@ HTTP_HEADER_LIMIT = 512
 # `settings_hash` is over the template, so it names the treatment once; the
 # resolved fragment's hash goes under the record's private hashes.
 PLACEHOLDER = re.compile(r"\{(" + "|".join(tenjin_arm.PLACEHOLDERS) + r")\}")
-# The variables the CLI genuinely needs that only the parent can supply.
-INHERITED = ("PATH", "TERM", "LANG")
+# The variables the CLI genuinely needs that the image does not supply. `PATH`
+# is not among them any more: the agent, the CLI and pnpm are the image's, and
+# the operator's PATH names darwin binaries no container can run.
+INHERITED = ("LANG",)
+# What the docker client itself needs from the operator's shell: how to reach
+# the daemon, and where its own configuration is. The credential seam rides
+# here too, and `docker run --env NAME` forwards it into the container without
+# ever putting the value in an argv.
+DOCKER_INHERITED = ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
 # Variables the trial's own roots own, or that would move the model traffic,
 # the config directory, or the process loader. An arm names its treatment with
 # its own variables; it does not reach these through `settings.env`.
@@ -567,61 +574,52 @@ def refuse_project_settings(repo: Path) -> None:
                 raise LiveExecutorError(f"the task fixture carries {relative}, which --setting-sources project would load")
 
 
-def child_environment(
-    roots: artifact.TrialRoots, parent: Mapping[str, str], credential_env: str, project_dir: str
+def container_environment(
+    roots: artifact.TrialRoots, parent: Mapping[str, str], project_dir: str | None = None, egress: Any = None
 ) -> dict[str, str]:
-    """An allowlist built from the trial's own roots, plus three inherited names.
+    """The variables the container gets: the trial's own roots, and the run's proxy.
 
-    The parent environment is read for `PATH`, `TERM`, `LANG`, and the one
-    credential variable the seam names. A wallet key, a shelf secret, and the
-    operator's own `CLAUDE_CONFIG_DIR` have no way through: they are not on
-    the list, and the trial's own profile is what `CLAUDE_CONFIG_DIR` gets.
-    The arm's `settings.env` is the other way into this process, which is why
-    `_settings_env` refuses every name this function owns.
+    Everything here is a value this package computed. The credential is not:
+    it is forwarded by name, so it exists in the container's environment and in
+    no argv, no file, and no image layer. A wallet key, a shelf secret and the
+    operator's own `CLAUDE_CONFIG_DIR` have no way in either, because nothing
+    outside this list crosses, and the arm's `settings.env` is refused every
+    name this function owns.
     """
-    if credential_env not in CREDENTIAL_ENVS:
-        raise LiveExecutorError(f"{credential_env!r} is not a declared credential seam variable")
     env = roots.environment(parent.get("PATH", ""))
-    env[PROJECT_DIR_VAR] = project_dir_name(project_dir)
+    # The image owns PATH: `claude`, `tenjin`, `node` and `pnpm` are its.
+    env.pop("PATH", None)
+    if project_dir is not None:
+        env[PROJECT_DIR_VAR] = project_dir_name(project_dir)
+    env[container.OUTPUT_VAR] = str(roots.output)
     for name in INHERITED:
         value = parent.get(name)
         if value:
             env[name] = value
+    if egress is not None:
+        env.update(egress.variables())
+    return env
+
+
+def docker_environment(parent: Mapping[str, str], credential_env: str) -> dict[str, str]:
+    """What the docker client runs under: how to reach the daemon, plus the seam it forwards."""
+    if credential_env not in CREDENTIAL_ENVS:
+        raise LiveExecutorError(f"{credential_env!r} is not a declared credential seam variable")
+    env = {name: parent[name] for name in DOCKER_INHERITED if parent.get(name)}
     credential = parent.get(credential_env)
     if credential:
         env[credential_env] = credential
-    env.update(toolchain.child_variables(roots.corepack_home))
     return env
 
 
-def package_manager_for(roots: artifact.TrialRoots, parent: Mapping[str, str], dry_run: bool) -> toolchain.PackageManager | None:
-    """The pnpm this trial runs, refused unless it is the fixture's pin, and seeded into the trial's corepack home.
-
-    A fixture without a package.json (the plumbing smoke) needs no pnpm and
-    gets nothing here. A dry run probes and reports, and neither refuses nor
-    copies. Seeding is idempotent: the provisioner and the launch both call it.
-    """
-    pin = toolchain.package_manager_pin(roots.repo)
-    if pin is None:
-        return None
-    manager = toolchain.inspect(parent, pin, probe_binary=not dry_run, cwd=roots.base)
-    if dry_run:
-        return manager
-    toolchain.check(manager, pin, toolchain.corepack_home(parent))
-    if manager.kind == "corepack-shim" and pin not in toolchain.cached_versions(roots.corepack_home):
-        toolchain.seed(toolchain.corepack_home(parent), roots.corepack_home, pin)
-    return manager
+def package_manager() -> dict[str, Any]:
+    """The pnpm a trial runs: the image's, by exact version, installed at build time."""
+    return {"kind": "image", "version": images.PNPM_VERSION}
 
 
 def probe_environment(roots: artifact.TrialRoots, parent: Mapping[str, str]) -> dict[str, str]:
-    """What a command run inside the trial's repository copy sees before the agent does: the child's allowlist, no credential."""
-    env = roots.environment(parent.get("PATH", ""))
-    for name in INHERITED:
-        value = parent.get(name)
-        if value:
-            env[name] = value
-    env.update(toolchain.child_variables(roots.corepack_home))
-    return env
+    """What a probe inside the trial's repository copy sees: the trial's roots, no session, no credential, no egress."""
+    return container_environment(roots, parent)
 
 
 def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[str]:
@@ -658,8 +656,14 @@ def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[
 
 
 def launch(request: LaunchRequest) -> Launch:
-    """Validate the manifest's values, write the trial's settings, name the command."""
-    provision_of(request.arm)
+    """Validate the manifest's values, write the trial's settings, and name the container that runs them.
+
+    The whole command is one `docker run`: the trial's roots at their own paths,
+    the image by id once the run has resolved it, the entrypoint that owns the
+    daemon, and the agent's own argv after `--`. Nothing here starts anything,
+    so a dry run builds exactly this and prints it.
+    """
+    provisioned = provision_of(request.arm) is not None
     settings, resolved_hash = settings_for_launch(request)
     credential_env = credential_env_of(request.pins)
     refuse_project_settings(request.roots.repo)
@@ -668,22 +672,48 @@ def launch(request: LaunchRequest) -> Launch:
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     apply_overlay(request.roots, overlay_of(request.arm, request.roots))
     inject_cases(request.roots, request.task)
-    try:
-        manager = package_manager_for(request.roots, os.environ, request.dry_run)
-    except toolchain.ToolchainError as error:
-        raise LiveExecutorError(error.detail) from error
+    agent = build_argv(request, path, session_id)
+    tag = images.fixture_tag(str(request.task["id"]), str(request.task["fixture_hash"]))
+    reference = request.image or tag
+    name = container.container_name(request.trial_id, request.phase)
+    plan = container.mounts(request.roots, settings=path)
+    environment = container_environment(request.roots, os.environ, session_id, request.egress)
+    argv = container.run_argv(
+        image=reference,
+        name=name,
+        workdir=working_dir(request.roots),
+        plan=plan,
+        environment=environment,
+        forward=(credential_env,),
+        network=None if request.egress is None else request.egress.network,
+        daemon=provisioned,
+        command=agent,
+    )
     return Launch(
-        argv=build_argv(request, path, session_id),
+        argv=argv,
         cwd=working_dir(request.roots),
         root_session_id=session_id,
-        env=child_environment(request.roots, os.environ, credential_env, session_id),
+        env=docker_environment(os.environ, credential_env),
         resolved_settings_hash=resolved_hash,
-        package_manager=None if manager is None else manager.facts,
+        package_manager=package_manager(),
+        container=name,
+        container_plan={
+            "image": {"tag": tag, "reference": reference, "resolved": request.image is not None},
+            "container": name,
+            "user": container.user(),
+            "workdir": str(working_dir(request.roots)),
+            "mounts": [mount.to_json() for mount in plan],
+            "env": dict(environment),
+            "forward": [credential_env],
+            "daemon": provisioned,
+            "egress": None if request.egress is None else request.egress.to_json(),
+            "agent": list(agent),
+        },
     )
 
 
 def prepare(request: ProvisionRequest) -> Provision:
-    """Provision the arm, with the trial's toolchain in place so the seed probe runs the fixture's commands as the agent will."""
+    """Provision the arm. The seed probe runs the fixture's own commands in the fixture's own image."""
     if provision_of(request.arm) is None:
         raise LiveExecutorError(f"arm {request.arm.get('id')!r} declares no provision")
     # The overlay is in place before the seed probe, so the probe runs the
@@ -693,10 +723,6 @@ def prepare(request: ProvisionRequest) -> Provision:
         inject_cases(request.roots, request.task)
     if request.dry_run:
         return tenjin_arm.prepare(request)
-    try:
-        package_manager_for(request.roots, os.environ, dry_run=False)
-    except toolchain.ToolchainError as error:
-        raise LiveExecutorError(error.detail) from error
     return tenjin_arm.prepare(dataclasses.replace(request, environment=probe_environment(request.roots, os.environ)))
 
 

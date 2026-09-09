@@ -31,6 +31,8 @@ from evals.benchmark import (
     tenjin_arm,
     artifact,
     claude_live,
+    container,
+    images,
     claude_usage,
     cli,
     executor,
@@ -84,10 +86,10 @@ class LiveCase(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.run_dir = self.dir / "run"
-        # A launch reads the pnpm on PATH and the corepack cache; a case never reads the host's.
-        patcher = mock.patch.dict(os.environ, support.fake_toolchain(self.dir))
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # No case here reaches Docker: the image gate and the image lookup have
+        # their own cases, and everything else asserts a refusal, a plan, or a
+        # spawn that precedes them. The plans and argv are still the real ones.
+        support.patch_live_gates(self)
 
     def request(self, manifest: manifest_module.Manifest, index: int = 0) -> executor.LaunchRequest:
         trial = schedule.expand(manifest)[index]
@@ -118,7 +120,7 @@ class ArgvTest(LiveCase):
         launch = claude_live.launch(request)
         settings = claude_live.settings_path(request.roots)
         self.assertEqual(
-            launch.argv,
+            container.agent_argv(launch.argv),
             [
                 "claude",
                 "-p",
@@ -154,6 +156,35 @@ class ArgvTest(LiveCase):
         # Session persistence is not disabled: a child agent's usage exists
         # only in the persisted transcripts.
         self.assertNotIn("--no-session-persistence", launch.argv)
+
+    def test_the_command_is_one_docker_run_of_the_tasks_own_image(self) -> None:
+        request = self.request(smoke())
+        launch = claude_live.launch(request)
+        argv = launch.argv
+        self.assertEqual(argv[:4], ["docker", "run", "--rm", "--init"])
+        self.assertEqual(argv[argv.index("--name") + 1], f"bench2-{request.trial_id}")
+        self.assertEqual(launch.container, f"bench2-{request.trial_id}")
+        self.assertEqual(argv[argv.index("--user") + 1], f"{os.getuid()}:{os.getgid()}")
+        self.assertEqual(argv[argv.index("--workdir") + 1], str(request.roots.repo.resolve()))
+        # The image is named by tag until the run resolves it to an id.
+        image = argv[argv.index("--") - 1]
+        self.assertEqual(image, images.fixture_tag(request.task["id"], request.task["fixture_hash"]))
+        self.assertEqual(container.agent_argv(argv)[0], "claude")
+        # Every root the trial owns is mounted at its own absolute path.
+        volumes = [argv[position + 1] for position, token in enumerate(argv) if token == "--volume"]
+        for root in (request.roots.repo, request.roots.home, request.roots.profile, request.roots.data_dir, request.roots.output):
+            self.assertIn(f"{root}:{root}:rw", volumes)
+        self.assertIn(f"{claude_live.settings_path(request.roots)}:{claude_live.settings_path(request.roots)}:ro", volumes)
+
+    def test_a_provisioned_arm_asks_the_entrypoint_for_a_daemon_and_an_unprovisioned_one_does_not(self) -> None:
+        manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+        plans = {trial.arm_id: cli.plan_trial(manifest, trial, self.run_dir) for trial in schedule.expand(manifest)}
+        self.assertTrue(plans["tenjin_seeded"]["container"]["daemon"])
+        self.assertFalse(plans["off"]["container"]["daemon"])
+        # The entrypoint is asked for a daemon by one flag, before the agent's
+        # own argv, and only the provisioned arm gets it.
+        self.assertEqual(plans["tenjin_seeded"]["argv"][plans["tenjin_seeded"]["argv"].index("--") - 1], "--daemon")
+        self.assertNotIn("--daemon", plans["off"]["argv"])
 
     def test_the_arm_fragment_becomes_the_trials_own_settings_file(self) -> None:
         request = self.request(smoke())
@@ -530,7 +561,7 @@ class FixtureSettingsTest(LiveCase):
 
     def test_a_fixture_without_project_settings_launches(self) -> None:
         launch = claude_live.launch(self.request(self.live_manifest()))
-        self.assertEqual(launch.argv[0], "claude")
+        self.assertEqual(container.agent_argv(launch.argv)[0], "claude")
 
 
 class SessionIdTest(unittest.TestCase):
@@ -557,9 +588,10 @@ class SessionsResolverTest(LiveCase):
         # when that is set, and names the directory after
         # CLAUDE_CODE_PROJECT_DIR_NAME. Both come from `launch.env`, so this
         # is the CLI's own rule applied to the child's own environment.
-        config_dir = Path(launch.env["CLAUDE_CONFIG_DIR"])
-        self.assertEqual(resolved, config_dir / "projects" / launch.env[claude_live.PROJECT_DIR_VAR])
-        self.assertEqual(launch.env[claude_live.PROJECT_DIR_VAR], launch.root_session_id)
+        env = launch.container_plan["env"]
+        config_dir = Path(env["CLAUDE_CONFIG_DIR"])
+        self.assertEqual(resolved, config_dir / "projects" / env[claude_live.PROJECT_DIR_VAR])
+        self.assertEqual(env[claude_live.PROJECT_DIR_VAR], launch.root_session_id)
         # The trial's home is not the config dir, so the home tree is not it.
         self.assertNotEqual(config_dir, request.roots.home / ".claude")
         self.assertFalse(resolved.is_relative_to(request.roots.home))
@@ -615,8 +647,9 @@ class RunnerReadsTheResolverTest(LiveCase):
             # under test.
             staging = roots.base / "staging"
             executor.write_transcripts(staging, launch.root_session_id, launch.root_session_id, "off")
-            name = launch.env[claude_live.PROJECT_DIR_VAR] if pinned else slug_of(launch.cwd)
-            target = Path(launch.env["CLAUDE_CONFIG_DIR"]) / "projects" / name
+            env = launch.container_plan["env"]
+            name = env[claude_live.PROJECT_DIR_VAR] if pinned else slug_of(launch.cwd)
+            target = Path(env["CLAUDE_CONFIG_DIR"]) / "projects" / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(staging / "sessions", target)
             shutil.rmtree(staging)
@@ -716,51 +749,73 @@ class ChildEnvironmentTest(LiveCase):
         request = self.request(smoke())
         self.roots = request.roots
         self.session_id = claude_live.root_session_id(request.trial_id)
-        return claude_live.child_environment(self.roots, self.parent(), "ANTHROPIC_API_KEY", self.session_id)
+        return claude_live.container_environment(self.roots, self.parent(), self.session_id)
 
-    def test_the_child_gets_the_allowlist_and_the_trials_own_roots(self) -> None:
+    def test_the_container_gets_the_allowlist_and_the_trials_own_roots(self) -> None:
         env = self.environment()
         self.assertEqual(
             sorted(env),
             [
-                "ANTHROPIC_API_KEY",
+                "BENCH2_OUTPUT",
                 "CLAUDE_CODE_PROJECT_DIR_NAME",
                 "CLAUDE_CONFIG_DIR",
-                "COREPACK_ENABLE_NETWORK",
-                "COREPACK_HOME",
                 "HOME",
                 "LANG",
-                "PATH",
                 "TENJIN_DATA_DIR",
                 "TENJIN_PUBLISH_MODE",
-                "TERM",
             ],
         )
         self.assertEqual(env["HOME"], str(self.roots.home))
         self.assertEqual(env["TENJIN_DATA_DIR"], str(self.roots.data_dir))
-        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-operator-key")
         self.assertEqual(env[claude_live.PROJECT_DIR_VAR], self.session_id)
-        # Corepack gets the trial's own cache and no network, never the operator's cache.
-        self.assertEqual(env["COREPACK_HOME"], str(self.roots.corepack_home))
-        self.assertEqual(env["COREPACK_ENABLE_NETWORK"], "0")
+        # PATH is the image's: the agent, the CLI, node and pnpm are installed
+        # in it by exact version, and the operator's PATH names darwin binaries.
+        self.assertNotIn("PATH", env)
+        # The credential is not a value here; it crosses by name at the client.
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
 
-    def test_the_child_gets_no_wallet_no_shelf_secret_and_not_the_operators_profile(self) -> None:
+    def test_the_container_gets_no_wallet_no_shelf_secret_and_not_the_operators_profile(self) -> None:
         env = self.environment()
         for denied in ("TENJIN_WALLET_PRIVATE_KEY", "TENJIN_SHELF_TOKEN", "AWS_SECRET_ACCESS_KEY", "GITHUB_TOKEN"):
             self.assertNotIn(denied, env)
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(self.roots.profile))
         self.assertNotIn("/Users/operator", " ".join(env.values()))
 
-    def test_a_credential_variable_off_the_seam_list_is_refused(self) -> None:
+    def test_the_run_proxy_variables_are_the_only_network_the_container_is_told_about(self) -> None:
+        egress = container.plan_egress(self.dir / "run", ("api.anthropic.com",), "case")
         request = self.request(smoke())
+        env = claude_live.container_environment(request.roots, self.parent(), claude_live.root_session_id(request.trial_id), egress)
+        self.assertEqual(env["HTTPS_PROXY"], egress.proxy_url)
+        self.assertEqual(env["NODE_USE_ENV_PROXY"], "1")
+        self.assertEqual(env["NO_PROXY"], container.NO_PROXY_HOSTS)
+
+    def test_a_credential_variable_off_the_seam_list_is_refused(self) -> None:
         with self.assertRaises(LiveExecutorError):
-            claude_live.child_environment(request.roots, self.parent(), "GITHUB_TOKEN", "session")
+            claude_live.docker_environment(self.parent(), "GITHUB_TOKEN")
+
+    def test_the_credential_reaches_the_client_by_value_and_the_container_by_name(self) -> None:
+        env = claude_live.docker_environment(self.parent(), "ANTHROPIC_API_KEY")
+        # What the docker client needs, plus the seam it forwards. Nothing else
+        # of the operator's environment is on the list.
+        self.assertEqual(env["ANTHROPIC_API_KEY"], "sk-operator-key")
+        self.assertEqual(sorted(env), ["ANTHROPIC_API_KEY", "HOME", "LANG", "PATH", "TERM"])
+        request = self.request(smoke())
+        with mock.patch.dict(os.environ, self.parent(), clear=True):
+            launch = claude_live.launch(dataclasses.replace(request, pins={**request.pins, "credential_env": "ANTHROPIC_API_KEY"}))
+        # `--env NAME` with no value: docker reads it from the client's own
+        # environment, so the secret is in no argv and no file.
+        self.assertIn("ANTHROPIC_API_KEY", launch.argv)
+        self.assertNotIn("ANTHROPIC_API_KEY=sk-operator-key", launch.argv)
+        self.assertNotIn("sk-operator-key", " ".join(launch.argv))
 
     def test_the_launch_carries_the_environment_the_runner_will_use(self) -> None:
         request = self.request(smoke())
         launch = claude_live.launch(request)
         self.assertIsNotNone(launch.env)
-        self.assertEqual(launch.env["HOME"], str(request.roots.home))
+        # The runner starts a docker client, so the launch environment is the
+        # client's; the trial's own roots are the container's.
+        self.assertEqual(launch.container_plan["env"]["HOME"], str(request.roots.home))
+        self.assertNotIn("TENJIN_DATA_DIR", launch.env)
 
 
 class SpawnReached(RuntimeError):
@@ -865,7 +920,9 @@ class DryRunTest(LiveCase):
             self.assertIn(plan["roots"]["profile"], plan["roots"]["sessions"])
             # The whole argv is one copyable line, in the order the CLI receives it.
             self.assertIn(shlex.join(plan["argv"]), printed)
-            self.assertEqual(plan["argv"][0], "claude")
+            # One `docker run` per trial, with the agent's own command after it.
+            self.assertEqual(plan["argv"][0], "docker")
+            self.assertEqual(plan["container"]["agent"][0], "claude")
         self.assertIn("nothing was started", printed)
 
     def test_the_dry_run_names_the_variables_the_arms_settings_file_adds(self) -> None:
@@ -892,6 +949,28 @@ class DryRunTest(LiveCase):
             code = cli.main(["live-run", "--manifest", str(cli.SMOKE_MANIFEST), "--out", str(self.run_dir), "--dry-run"])
         self.assertEqual(code, 0)
         self.assertIn("claude", printed.getvalue())
+
+
+class ImageGateTest(unittest.TestCase):
+    """The gate every other case stubs: no Docker, or no image, is a refusal before any spend."""
+
+    def test_an_unreachable_docker_daemon_is_a_sentence_not_a_traceback(self) -> None:
+        def docker(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> images.Completed:
+            return images.Completed(returncode=1, stdout="", stderr="cannot connect")
+
+        with mock.patch.object(images, "run_docker", docker), self.assertRaises(cli.CliError) as caught:
+            cli.refuse_without_images(smoke())
+        self.assertIn("live-run needs Docker", str(caught.exception))
+
+    def test_a_manifest_whose_image_is_not_built_names_the_build_command(self) -> None:
+        def docker(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> images.Completed:
+            if argv[:2] == ["image", "inspect"]:
+                return images.Completed(returncode=1, stdout="", stderr="No such image")
+            return images.Completed(returncode=0, stdout="29.5.2", stderr="")
+
+        with mock.patch.object(images, "run_docker", docker), self.assertRaises(cli.CliError) as caught:
+            cli.refuse_without_images(smoke())
+        self.assertIn("images build", str(caught.exception))
 
 
 class LiveRunRefusalTest(LiveCase):
@@ -1028,6 +1107,7 @@ class PlumbingModeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.out = Path(tempfile.mkdtemp(prefix="bench1-plumbing-"))
         self.manifest = cli.SMOKE_MANIFEST
+        support.patch_live_gates(self)
 
     def test_a_run_without_an_attestation_is_refused_unless_it_says_plumbing(self) -> None:
         with self.assertRaises(cli.CliError) as refusal:

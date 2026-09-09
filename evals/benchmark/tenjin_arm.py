@@ -6,9 +6,14 @@ and talk to a loopback daemon that reads `daemon.token` and the bundles under
 that runs the real hooks cannot be an environment difference: it has to be a
 seeded data dir. This module builds one per trial from an operator-supplied
 source data dir (`live-run --tenjin-source`), copying exactly `COPIED_KEYS` and
-the two bundles, forcing the seeded constants in `SEEDED`, minting a fresh
-daemon token, starting one daemon on a free loopback port, and stopping it
-before the trial's `loop.db` is read.
+the two bundles, forcing the seeded constants in `SEEDED`, and minting a fresh
+daemon token.
+
+The daemon itself is the container's: the trial's entrypoint starts it on the
+mounted data dir, waits for `/health`, stops it when the agent exits, and
+leaves `daemon.json` in the trial's output root. So the port is a constant
+rather than a free host port, and what this module used to observe by
+signalling a pid it started it now reads back out of that file.
 
 The team shelf secret is one of the copied keys. It enters the trial by
 construction, so the run says so: `Source.facts` becomes part of the record's
@@ -26,18 +31,14 @@ import os
 import re
 import secrets
 import shutil
-import signal
-import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from . import FIXTURES, artifact, runner, sha256_text, signature
+from . import FIXTURES, artifact, container, sha256_text, signature
 from .executor import Provision, ProvisionError, ProvisionRequest
 
 NAME = "tenjin"
@@ -74,9 +75,11 @@ SEEDED: dict[str, Any] = {
 # shipped. `producer` is the same with the capture ask in auto mode, so the
 # natural arm's producer is told to publish rather than asked.
 MODES = ("consumer", "producer")
-HEALTH_TIMEOUT_S = 15.0
+# The daemon's port inside the trial's container, which has its own loopback.
+# A constant, because a free port on the host says nothing about that namespace.
+DAEMON_PORT = 45871
+DAEMON_REPORT = "daemon.json"
 HEALTH_POLL_S = 0.05
-STOP_GRACE_S = 5.0
 WAL_TIMEOUT_S = 5.0
 PLACEHOLDERS = ("daemon_url", "daemon_token", "data_dir")
 DRY_TOKEN = "minted-at-launch"
@@ -173,8 +176,47 @@ def lessons_for(task: dict[str, Any], lessons: Path | None = None, selected: lis
     return found
 
 
-def probe_keys(roots: artifact.TrialRoots, commands: list[str], environment: dict[str, str]) -> dict[str, dict[str, str | None]]:
-    """Run each command on a scratch copy of the trial's repository and key its output both ways the product does."""
+def probe_argv(image: str, probe: Path, command: str, environment: dict[str, str]) -> list[str]:
+    """One command from a lesson, run in the task's own image with no network at all."""
+    return container.run_argv(
+        image=image,
+        name=f"{container.TRIAL_PREFIX}probe-{secrets.token_hex(4)}",
+        workdir=probe,
+        plan=[container.Mount(probe, probe)],
+        environment={key: value for key, value in environment.items() if key != container.OUTPUT_VAR},
+        network="none",
+        command=command.split(" "),
+    )
+
+
+def probe_run(image: str, probe: Path, command: str, environment: dict[str, str]) -> "subprocess.CompletedProcess[str]":
+    """Run one probe command in its container, and stop that container whatever happens."""
+    argv = probe_argv(image, probe, command, environment)
+    name = argv[argv.index("--name") + 1]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, shell=False, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        container.stop(name)
+        raise ProvisionError(f"the seed probe could not run {command!r}: {error.__class__.__name__}") from error
+
+
+# The seam a test replaces to run a probe command directly, so the offline
+# suite proves the keying without a container. Code-owned, like the CLI argv
+# seams below: the manifest never names a program.
+PROBE_RUN: Callable[[str, Path, str, dict[str, str]], "subprocess.CompletedProcess[str]"] = probe_run
+
+
+def probe_keys(
+    roots: artifact.TrialRoots, commands: list[str], environment: dict[str, str], image: str | None
+) -> dict[str, dict[str, str | None]]:
+    """Run each command on a scratch copy of the trial's repository and key its output both ways the product does.
+
+    In the trial's own image, because the tree the commands run against is the
+    image's and the host cannot execute it. `--network none`, because a probe
+    that reached anything would be a leg the record could not name.
+    """
+    if image is None:
+        raise ProvisionError("the seed probe needs the task's image; live-run resolves it before any trial")
     probe = roots.base / PROBE_DIR
     if probe.exists():
         shutil.rmtree(probe)
@@ -184,12 +226,7 @@ def probe_keys(roots: artifact.TrialRoots, commands: list[str], environment: dic
         for command in commands:
             if command in probed:
                 continue
-            try:
-                completed = subprocess.run(
-                    command.split(" "), cwd=probe, env=environment, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, shell=False, check=False
-                )
-            except (OSError, subprocess.TimeoutExpired) as error:
-                raise ProvisionError(f"the seed probe could not run {command!r}: {error.__class__.__name__}") from error
+            completed = PROBE_RUN(image, probe, command, environment)
             text = (completed.stdout or "") + "\n" + (completed.stderr or "")
             found = signature.key_of(text)
             probed[command] = {"sig_v1": found["key"], "sig_v1_test": found["test_key"], "text": text}
@@ -490,12 +527,6 @@ def load_source(path: Path) -> Source:
     return Source(path=path, config=config, bundles=bundles)
 
 
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
 def data_dir_string(roots: artifact.TrialRoots) -> str:
     """The data dir as the product spells it: absolute, symlinks kept.
 
@@ -541,86 +572,34 @@ def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None
     return env
 
 
-def read_pid(data_dir: Path) -> dict[str, Any] | None:
+def read_report(output: Path) -> dict[str, Any] | None:
+    """What the container's entrypoint left about the daemon it ran, or None."""
     try:
-        record = json.loads((data_dir / PID_FILE).read_text(encoding="utf-8"))
+        payload = json.loads((output / DAEMON_REPORT).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(record, dict) or not isinstance(record.get("pid"), int) or not isinstance(record.get("port"), int):
-        return None
-    return record
+    return payload if isinstance(payload, dict) else None
 
 
-def health(port: int, timeout_s: float = 0.5) -> dict[str, Any] | None:
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=timeout_s) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError):
-        return None
-    if not isinstance(body, dict) or not isinstance(body.get("pid"), int) or not isinstance(body.get("data_dir"), str):
-        return None
-    return body
+def settle_daemon(roots: artifact.TrialRoots, output: Path) -> dict[str, Any]:
+    """The stopped daemon's facts, read off the entrypoint's report, with the WAL confirmed here.
 
-
-def wait_healthy(roots: artifact.TrialRoots, started: runner.Started, deadline_s: float) -> dict[str, Any]:
-    """Poll `daemon.pid` and `/health` until the daemon for this data dir answers."""
-    expected = data_dir_string(roots)
-    end = time.monotonic() + deadline_s
-    while time.monotonic() < end:
-        if started.process.poll() is not None:
-            raise ProvisionError(f"the daemon exited with {started.process.returncode} before it was healthy; see {roots.output / 'daemon.log'}")
-        record = read_pid(roots.data_dir)
-        if record is not None:
-            body = health(record["port"])
-            if body is not None and body["data_dir"] == expected and body["pid"] == started.process.pid:
-                return {"pid": body["pid"], "port": record["port"]}
-        time.sleep(HEALTH_POLL_S)
-    raise ProvisionError(f"the daemon did not answer /health within {deadline_s:.0f}s; see {roots.output / 'daemon.log'}", code="daemon_unhealthy")
-
-
-def start_daemon(roots: artifact.TrialRoots) -> tuple[runner.Started, dict[str, Any]]:
-    """One daemon for this data dir, healthy or refused."""
-    started = runner.process_start(
-        DAEMON_ARGV(roots),
-        cwd=roots.data_dir,
-        env=daemon_environment(roots),
-        roots=roots,
-        ledger_id=f"{roots.trial_id}.daemon",
-        log=roots.output / "daemon.log",
-    )
-    try:
-        live = wait_healthy(roots, started, HEALTH_TIMEOUT_S)
-    except ProvisionError:
-        runner.process_stop(started, roots.run_dir, STOP_GRACE_S)
-        raise
-    return started, live
-
-
-def stop_daemon(roots: artifact.TrialRoots, started: runner.Started | None) -> dict[str, Any]:
-    """Stop the trial's daemon, and any daemon the shim respawned for this data dir, then wait for the WAL.
-
-    The shim starts a detached daemon of its own when the one it expects is
-    not healthy, and a detached process is outside the trial's process group.
-    So this reads `daemon.pid` as it is now, confirms through `/health` that
-    the pid serves exactly this data dir, and signals that pid; a pid that
-    answers for another directory, or does not answer, is left alone.
+    The container stopped the daemon it started, and any daemon the shim
+    respawned inside it, before it exited; both are gone with the container
+    either way. What the host still has to establish is that `loop.db` has
+    settled, because it is about to be read.
     """
-    expected = data_dir_string(roots)
-    report: dict[str, Any] = {"respawned": False, "wal_live": False}
-    record = read_pid(roots.data_dir)
-    if record is not None and (started is None or record["pid"] != started.process.pid):
-        body = health(record["port"])
-        if body is not None and body["data_dir"] == expected and body["pid"] == record["pid"]:
-            report["respawned"] = True
-            _terminate(record["pid"], STOP_GRACE_S)
-    if started is not None:
-        runner.process_stop(started, roots.run_dir, STOP_GRACE_S)
+    report = read_report(output) or {}
     wal = roots.data_dir / f"{LOOP_DB}-wal"
     end = time.monotonic() + WAL_TIMEOUT_S
     while wal.exists() and time.monotonic() < end:
         time.sleep(HEALTH_POLL_S)
-    report["wal_live"] = wal.exists()
-    return report
+    return {
+        "respawned": bool(report.get("respawned", False)),
+        "started": bool(report.get("started", False)),
+        "daemon_error": report.get("error"),
+        "wal_live": wal.exists(),
+    }
 
 
 def _values(roots: artifact.TrialRoots, port: int, token: str) -> dict[str, str]:
@@ -628,22 +607,19 @@ def _values(roots: artifact.TrialRoots, port: int, token: str) -> dict[str, str]
 
 
 def start_phase(roots: artifact.TrialRoots, provision: Provision, mode: str) -> Provision:
-    """After the previous phase's daemon is stopped and settled: rewrite the config for `mode` and start a fresh daemon on a fresh port.
+    """Between phases: rewrite the config for `mode`, on the same data dir and the same token.
 
-    The data dir and the token stay; the port and the process change, so the
-    next phase's settings resolve to the new URL and its hash names it.
+    The next phase is the next container, and it starts its own daemon from
+    this config. Nothing is running between the two.
     """
     state = provision.stop_state
     source: Source = state["source"]
-    port = free_port()
-    write_config(roots, source, port, with_secret=True, mode=mode)
-    started, live = start_daemon(roots)
-    stop_state = {**state, "started": started, "pid": live["pid"], "port": live["port"], "mode": mode}
-    return dataclasses.replace(provision, values=_values(roots, live["port"], state["token"]), stop_state=stop_state)
+    write_config(roots, source, DAEMON_PORT, with_secret=True, mode=mode)
+    return dataclasses.replace(provision, values=_values(roots, DAEMON_PORT, state["token"]), stop_state={**state, "mode": mode})
 
 
 def prepare(request: ProvisionRequest) -> Provision:
-    """Seed the trial's data dir and, unless this is a dry run, start its daemon."""
+    """Seed the trial's data dir. The daemon that reads it is the container's, started by the entrypoint."""
     source = request.source
     if not isinstance(source, Source):
         raise ProvisionError(f"arm {request.arm.get('id')!r} declares provision {NAME!r}, which needs live-run --tenjin-source")
@@ -663,7 +639,9 @@ def prepare(request: ProvisionRequest) -> Provision:
         token_path = roots.data_dir / TOKEN_FILE
         token_path.write_text(token, encoding="utf-8")
         token_path.chmod(0o600)
-    port = 0 if request.dry_run else free_port()
+    # The port is the same in a dry run: it is the container's, and a plan
+    # that prints the URL a hook would post to is the point of a dry run.
+    port = DAEMON_PORT
     write_config(roots, source, port, with_secret=not request.dry_run, mode=mode)
     facts: dict[str, Any] = {**source.facts, "daemon_mode": mode}
     lessons = [] if request.task is None or mode == "producer" else lessons_for(request.task, selected=request.arm.get("lessons"))
@@ -674,7 +652,7 @@ def prepare(request: ProvisionRequest) -> Provision:
         if request.environment is None:
             raise ProvisionError("seeding needs the trial's child environment to probe the fixture's commands")
         commands = [entry.command.replace("{task}", task_id) for lesson in lessons for entry in lesson.commands]
-        probed = probe_keys(roots, commands, request.environment)
+        probed = probe_keys(roots, commands, request.environment, request.image)
         for lesson in lessons:
             check_keys(lesson, task_id, probed)
     if lessons:
@@ -699,9 +677,7 @@ def prepare(request: ProvisionRequest) -> Provision:
         facts["seed"] = seeds
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
-        started, live = start_daemon(roots)
-        port = live["port"]
-        stop_state = {"started": started, "pid": live["pid"], "port": port, "pieces": pieces, "source": source, "token": token, "mode": mode}
+        stop_state = {"port": port, "pieces": pieces, "source": source, "token": token, "mode": mode}
     return Provision(
         values=_values(roots, port, token),
         secrets=source.secrets,
@@ -711,32 +687,10 @@ def prepare(request: ProvisionRequest) -> Provision:
     )
 
 
-def _terminate(pid: int, grace_s: float) -> bool:
-    """SIGTERM one pid we identified by its own `/health`, then SIGKILL. Never by name."""
-    try:
-        if os.getpgid(pid) == os.getpgid(0):
-            return False
-        os.kill(pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        return True
-    end = time.monotonic() + grace_s
-    while time.monotonic() < end:
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            return True
-        time.sleep(HEALTH_POLL_S)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    return True
-
-
 def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
-    """Stop the trial's daemon (and any respawned one), wait for the WAL, and take the seeded pieces off the shelf."""
+    """Read the container's daemon report, wait for the WAL, and take the seeded pieces off the shelf."""
     state = provision.stop_state
-    report = stop_daemon(roots, state.get("started"))
+    report = settle_daemon(roots, roots.output)
     # The seeded piece leaves the shelf with the trial. A delete that fails is
     # a fact in the record, never a retry loop and never silence.
     pieces = state.get("pieces")

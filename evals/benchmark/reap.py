@@ -12,6 +12,11 @@ operator's own editor session, and reaching for one is exactly the accident this
 module exists to remove. Before signalling, a record is checked against the live
 process: same start time and same group, or the record is dropped unkilled,
 because a pid is reused and killing a recycled one kills a stranger.
+
+A live trial runs inside a container, which outlives the docker client that
+started it. So a record may also name a container and a network: those are
+stopped and removed by name before the group is signalled, and a record that
+names only them carries no pid to check.
 """
 
 from __future__ import annotations
@@ -24,6 +29,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from . import container as container_module
 
 LEDGER_DIR = "pids"
 # Between the polite signal and the final one. A trial's agent has nothing to
@@ -44,6 +51,8 @@ class Record:
     pgid: int
     started: str
     argv0: str
+    container: str | None = None
+    network: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -52,6 +61,8 @@ class Record:
             "pgid": self.pgid,
             "started": self.started,
             "argv0": self.argv0,
+            "container": self.container,
+            "network": self.network,
         }
 
     @staticmethod
@@ -62,12 +73,22 @@ class Record:
             pgid=int(payload["pgid"]),
             started=str(payload["started"]),
             argv0=str(payload["argv0"]),
+            container=None if payload.get("container") is None else str(payload["container"]),
+            network=None if payload.get("network") is None else str(payload["network"]),
         )
 
 
 # The seam every test replaces. Returning None means "no such process".
 Probe = Callable[[int], tuple[str, int] | None]
 Signaller = Callable[[int, int], None]
+# Stops and removes one container by name, and removes one network by name.
+# Both tolerate an object that is already gone.
+Stopper = Callable[[str], bool]
+Remover = Callable[[str], bool]
+
+
+def remove_network(name: str) -> bool:
+    return container_module.run_docker(["network", "rm", name]).returncode == 0
 
 
 def probe(pid: int) -> tuple[str, int] | None:
@@ -109,8 +130,25 @@ def record_path(run_dir: Path, trial_id: str) -> Path:
     return ledger_dir(run_dir) / f"{trial_id}.json"
 
 
-def register(run_dir: Path, trial_id: str, pid: int, argv0: str, probe_fn: Probe = probe) -> Record | None:
-    """Record a live group. A process that is already gone is not recorded."""
+def write(run_dir: Path, record: Record) -> Record:
+    directory = ledger_dir(run_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = record_path(run_dir, record.trial_id)
+    partial = path.with_suffix(".partial")
+    partial.write_text(json.dumps(record.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    partial.replace(path)
+    return record
+
+
+def register_objects(run_dir: Path, ledger_id: str, *, container: str | None = None, network: str | None = None) -> Record:
+    """Record docker objects with no process of ours behind them: the run's proxy and its network."""
+    return write(run_dir, Record(trial_id=ledger_id, pid=0, pgid=0, started="", argv0="docker", container=container, network=network))
+
+
+def register(
+    run_dir: Path, trial_id: str, pid: int, argv0: str, probe_fn: Probe = probe, container: str | None = None
+) -> Record | None:
+    """Record a live group, and the container it drives. A process that is already gone is not recorded."""
     live = probe_fn(pid)
     if live is None:
         return None
@@ -119,14 +157,7 @@ def register(run_dir: Path, trial_id: str, pid: int, argv0: str, probe_fn: Probe
         # The child is meant to lead its own session. Sharing ours means a kill
         # would reach this interpreter and everything else in the group.
         raise ReapError(f"refusing to record pid {pid}: it shares this process group")
-    record = Record(trial_id=trial_id, pid=pid, pgid=pgid, started=started, argv0=argv0)
-    directory = ledger_dir(run_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = record_path(run_dir, trial_id)
-    partial = path.with_suffix(".partial")
-    partial.write_text(json.dumps(record.to_json(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    partial.replace(path)
-    return record
+    return write(run_dir, Record(trial_id=trial_id, pid=pid, pgid=pgid, started=started, argv0=argv0, container=container))
 
 
 def release(run_dir: Path, trial_id: str) -> None:
@@ -188,6 +219,8 @@ def reap(
     sleep: Callable[[float], None] = time.sleep,
     grace_s: float = GRACE_S,
     records: Iterable[Record] | None = None,
+    stop_fn: Stopper = container_module.stop,
+    network_fn: Remover = remove_network,
 ) -> dict[str, Any]:
     """Kill every recorded group that is still the process we recorded.
 
@@ -199,8 +232,19 @@ def reap(
     should act on later.
     """
     outcomes: dict[str, str] = {}
+    containers: dict[str, bool] = {}
     pending: list[Record] = []
     for record in read_records(run_dir) if records is None else list(records):
+        # The container first: it outlives the client that started it, so
+        # signalling the group alone would leave a paid agent running.
+        if record.container is not None:
+            containers[record.container] = stop_fn(record.container)
+        if record.network is not None:
+            network_fn(record.network)
+        if record.pid <= 0:
+            outcomes[record.trial_id] = "stopped"
+            release(run_dir, record.trial_id)
+            continue
         verdict = _verify(record, probe_fn)
         outcomes[record.trial_id] = verdict
         if verdict != "kill":
@@ -224,6 +268,7 @@ def reap(
     return {
         "run": str(run_dir),
         "outcomes": outcomes,
+        "containers": dict(sorted(containers.items())),
         "killed": sorted(trial for trial, verdict in outcomes.items() if verdict == "killed"),
         "refused": sorted(
             trial for trial, verdict in outcomes.items() if verdict in ("recycled", "regrouped", "our_group", "denied")
@@ -233,4 +278,4 @@ def reap(
 
 def survivors(run_dir: Path, probe_fn: Probe = probe) -> list[Record]:
     """Recorded groups still alive. A test that leaks a process fails on this."""
-    return [record for record in read_records(run_dir) if _verify(record, probe_fn) == "kill"]
+    return [record for record in read_records(run_dir) if record.pid > 0 and _verify(record, probe_fn) == "kill"]
