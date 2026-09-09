@@ -90,16 +90,32 @@ jobs:
             exit 1
           }
 
-      # The runner makes CLI calls of its own (the seeding publish, the stamped
-      # sweep, the in-run shortlist, the delete), so `tenjin` has to be on PATH
-      # at the version the trial images install. Both come from `images.py`, so
-      # the host and the container can never be two versions.
-      - name: Install the Tenjin CLI at the image's version
+      # The runner makes CLI calls of its own: the seeding publish, the stamped
+      # sweep, the in-run shortlist and the delete. Those run THIS CHECKOUT's
+      # CLI, not a published release, because the checkout is the product under
+      # test and a release lags it. `tenjin-cli@0.1.0-alpha.15` on npm carries
+      # no `daemon` command at all while the repository at the same version
+      # string does, so installing the release failed here with
+      # `unknown command 'daemon'` after the gate had already passed.
+      #
+      # The trial IMAGES still install the pinned published version, which is
+      # deliberate and unchanged: that is the `tenjin` an agent runs in a Bash
+      # tool, and it should be what a user would have.
+      - name: Build the Tenjin CLI from this checkout
         if: steps.gate.outputs.live == 'true'
         run: |
-          version="$(python3 -c 'from evals.benchmark import images; print(images.TENJIN_VERSION)')"
-          npm install -g "tenjin-cli@${version}"
+          pnpm build
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/index.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/tenjin"
+          chmod +x "$RUNNER_TEMP/bin/tenjin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Check the CLI answers
+        if: steps.gate.outputs.live == 'true'
+        run: |
           tenjin --version
+          # The step that follows needs this command; the published release
+          # does not have it, so fail here where the reason is legible.
+          tenjin daemon --help > /dev/null
 
       # The one knob. `tenjin_arm.load_source` reads `baseUrl` from this
       # directory, and that value drives both the runner's own CLI calls and the
