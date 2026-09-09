@@ -77,6 +77,9 @@ OPTIONAL = frozenset({"discovery", "attempt_phases"})
 # build time by exact version, so nothing on the host decides which one ran.
 PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
+# The CLI build a container trial measured, under `isolation.image.cli`: the
+# packed package's content hash and the checkout commit it was built from.
+CLI_KEYS = frozenset({"build", "commit"})
 # The product's own `team.publicFallback`, stated per attempt because an arm may
 # choose it (`tenjin_arm.public_fallback_of`).
 PUBLIC_FALLBACK = frozenset({"on", "off"})
@@ -286,6 +289,21 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
+    # A container trial names the CLI build it measured, not a version string:
+    # `tenjin-cli@0.1.0-alpha.15` on npm and the repository at that same version
+    # are different builds, so the version identifies nothing. `build` is the
+    # packed package's content hash, which is also an image input; `commit` is
+    # what a reader resolves back to source.
+    image = isolation.get("image")
+    if image is not None:
+        if not isinstance(image, dict):
+            raise RecordError("isolation.image must be an object")
+        cli = image.get("cli")
+        if not isinstance(cli, dict) or set(cli) != CLI_KEYS:
+            raise RecordError("isolation.image.cli must carry exactly the CLI build fields")
+        for name in sorted(CLI_KEYS):
+            if not isinstance(cli[name], str) or not cli[name]:
+                raise RecordError(f"isolation.image.cli.{name} must name the CLI build the trial ran")
     seeds = isolation.get("seed")
     if seeds is not None and not isinstance(seeds, list):
         raise RecordError("isolation.seed must be a list, one entry per seeded lesson")

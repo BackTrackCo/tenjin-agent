@@ -90,17 +90,20 @@ jobs:
             exit 1
           }
 
-      # The runner makes CLI calls of its own: the seeding publish, the stamped
-      # sweep, the in-run shortlist and the delete. Those run THIS CHECKOUT's
-      # CLI, not a published release, because the checkout is the product under
-      # test and a release lags it. `tenjin-cli@0.1.0-alpha.15` on npm carries
-      # no `daemon` command at all while the repository at the same version
-      # string does, so installing the release failed here with
-      # `unknown command 'daemon'` after the gate had already passed.
+      # One CLI build serves the whole run. The runner makes CLI calls of its
+      # own (the seeding publish, the stamped sweep, the in-run shortlist and
+      # the delete) and `images build` packs this same `dist/` into the base
+      # image, so the `tenjin` an agent runs in a Bash tool, the daemon under
+      # test, and the runner's own calls are one build of the product. That is
+      # what makes a CLI regression redden this lane: a pinned release is
+      # frozen, so a CLI change would never reach the measured agent.
       #
-      # The trial IMAGES still install the pinned published version, which is
-      # deliberate and unchanged: that is the `tenjin` an agent runs in a Bash
-      # tool, and it should be what a user would have.
+      # The version string does not identify a build. `tenjin-cli@0.1.0-alpha.15`
+      # on npm carries no `daemon` command at all while the repository at the
+      # same version string does, so installing the release failed here with
+      # `unknown command 'daemon'` after the gate had already passed. The image
+      # recipe hashes the packed package instead, and the attempt record carries
+      # the commit under `isolation.image.cli`.
       - name: Build the Tenjin CLI from this checkout
         if: steps.gate.outputs.live == 'true'
         run: |
@@ -113,8 +116,9 @@ jobs:
         if: steps.gate.outputs.live == 'true'
         run: |
           tenjin --version
-          # The step that follows needs this command; the published release
-          # does not have it, so fail here where the reason is legible.
+          # The step that follows needs this command, and the release at the
+          # same version string does not have it, so fail here where the reason
+          # is legible rather than inside a paid trial.
           tenjin daemon --help > /dev/null
 
       # The one knob. `tenjin_arm.load_source` reads `baseUrl` from this
@@ -166,6 +170,9 @@ jobs:
             --kind vm \
             --out "$RUNNER_TEMP/attestation.json"
 
+      # This packs the `dist/` built above into the base image, so it has to run
+      # after that step. A build it cannot find is a refusal naming `pnpm build`,
+      # never a silent fall back to a release.
       - name: Build the fixture images
         if: steps.gate.outputs.live == 'true'
         run: python3 -m evals.benchmark.images build --manifest "${{ inputs.manifest }}"

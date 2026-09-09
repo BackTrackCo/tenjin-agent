@@ -33,11 +33,20 @@ Edit = Callable[[list[Any]], list[Any]]
 Before = Callable[[executor.Launch, artifact.TrialRoots], None]
 
 # The image a live case runs in. Nothing here builds or inspects one: a case
-# that reaches `images.require` stubs it with this.
+# that reaches `images.require` stubs it with this. The CLI labels are here
+# because a built image always carries them and a record whose image cannot
+# name its CLI build is refused.
+CLI_BUILD = "sha256:" + "cd" * 32
+CLI_COMMIT = "9f1c0d3e5a7b2c4d6e8f0a1b3c5d7e9f1a2b3c4d"
 IMAGE = images.Image(
     tag="bench2-task:0123456789ab",
     id="sha256:" + "1c" * 32,
-    labels={"bench2.task": "task", "bench2.fixture_hash": "sha256:" + "ab" * 32},
+    labels={
+        "bench2.task": "task",
+        "bench2.fixture_hash": "sha256:" + "ab" * 32,
+        "bench2.tenjin_cli": CLI_BUILD,
+        "bench2.cli_commit": CLI_COMMIT,
+    },
 )
 
 def tenjin_source(path: Path, *, base_url: str, public_url: str = "https://tenjin.blog", shelf_secret: str | None = None) -> Path:

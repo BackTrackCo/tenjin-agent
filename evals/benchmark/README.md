@@ -659,8 +659,8 @@ reproducibility a property of this repository's bytes on one machine (operator d
 **Images.** One base image, `bench2-base:<recipe hash>`, from `node:24-bookworm-slim` pinned by
 its multi-architecture index digest
 (`node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e`, Node 24.20),
-with `pnpm@11.11.0`, `@anthropic-ai/claude-code` at the manifest's `pins.harness_version`, and
-`tenjin-cli@0.1.0-alpha.15` installed globally by exact version, plus the `bench2-trial`
+with `pnpm@11.11.0` and `@anthropic-ai/claude-code` at the manifest's `pins.harness_version`
+installed globally by exact version, the Tenjin CLI this checkout builds, and the `bench2-trial`
 entrypoint. One image per fixture, `bench2-<task>:<fixture hash prefix>`, built from
 `docker/fixture.Dockerfile` with the fixture directory as its whole build context: the fixture
 is copied to `/opt/fixture` and `pnpm install` runs there at build time, so the fixture commits
@@ -671,11 +671,36 @@ build --manifest <path>` builds every image a manifest names, labels each with t
 hash, the base image id and the pins it was built from, and writes the ids to
 `fixtures/live/images.json`, a local build ledger that is not committed. `live-run` refuses a
 trial whose image is missing (`image_missing`, naming the build command) or whose labels
-disagree with the manifest (`image_drift`), and the record carries the image id under
-`isolation.image`. Because the install happens at build time, two builds of one fixture on two
-machines may differ in a transitive dependency: the record names the build that ran, and a
+disagree with the manifest (`image_drift`), and the record carries the image id, the CLI build
+hash and the CLI commit under `isolation.image`. Because the install happens at build time, two
+builds of one fixture on two machines may differ in a transitive dependency: the record names the build that ran, and a
 locked run builds once and keeps the image. The base image is 710 MB and a fixture image 774
 MB; a first base build is about 33s and each fixture about 20s, or 2 minutes for all eight.
+
+**The CLI under test is this checkout's build.** The `tenjin` an agent runs in a Bash tool is
+built from the repository the run checks out, not from a published release, so a CLI regression
+reddens the lane instead of passing under a frozen pin. `images.cli_build` reads `package.json`
+and every path its `files` names, `images.stage_cli` copies exactly those into the base build
+context, and the Dockerfile runs `npm pack` plus `npm install -g` there, which is what a user
+would install and so fails the build if `files` ever stops shipping the product. The build then
+proves `tenjin daemon --help` answers, where the reason is legible rather than inside a paid
+trial.
+
+Identity is content, not a version string. `tenjin-cli@0.1.0-alpha.15` on npm carries no
+`daemon` command anywhere in its dist while the repository at that same version string has it
+(measured 2026-09-09; a CI lane installing the release failed with `unknown command 'daemon'`),
+so the version identifies nothing. The recipe carries `tenjin_cli`, the sha256 of the staged
+package's contents, which puts the CLI in the base tag and in every fixture image's
+`bench2.recipe` label: a CLI change is a new tag, and a stale image can never be mistaken for
+it. The checkout's commit rides beside it as the `bench2.cli_commit` label and reaches the
+attempt record as `isolation.image.cli.commit`, with the content hash as
+`isolation.image.cli.build`; `records.validate` refuses a record whose image carries neither.
+The commit is deliberately not an image input, because a commit that leaves the packed package
+byte-identical is not a new image, and `images.UNCOMPARED` keeps it out of the drift check for
+the same reason. The environment hash does NOT cover any of this: it is the sha256 of the
+manifest's pins alone, so `isolation.image` is where a reader resolves the build back to source.
+There is no published-CLI pin left in the package; `TENJIN_VERSION` is gone rather than kept as
+a pin nothing reads.
 
 **A trial runs inside the container.** The trial's roots are built on the host as before and
 bind-mounted at the SAME absolute paths: the repository copy, `HOME`, the profile
@@ -686,9 +711,11 @@ records, the hook template resolves `{data_dir}` to an absolute path, and the tr
 Claude writes under the profile are read back by the host. `node_modules` is copied out of the
 fixture image into the trial's repository copy at preparation (`docker create` plus `docker
 cp`, 788 files in under a second); it is the image's tree, Linux natives included, and the host
-never runs it. The `claude` binary and the `tenjin` CLI come from the image, by exact version;
-the daemon, shim and reporter bundles still come from the seeded data dir, which is a mount,
-because they are the product build under test and platform-neutral JavaScript. The container
+never runs it. The `claude` binary comes from the image by exact version and the `tenjin` CLI
+from the image as this checkout's build; the daemon, shim and reporter bundles come from the
+seeded data dir, which is a mount, because they are platform-neutral JavaScript. Both are now
+one build of the product: the data dir is materialised by a `tenjin daemon start` running the
+same `dist/` the image packs (`.github/workflows/benchmark-shelf.yml`). The container
 runs as the host's uid and gid, so a file it writes stays the host's. The credential seam is
 forwarded by name (`docker run --env CLAUDE_CODE_OAUTH_TOKEN`), so its value travels through
 the docker client's own environment and appears in no argv, no file and no image layer. The
