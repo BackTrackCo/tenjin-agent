@@ -330,13 +330,19 @@ def refuse_package_manager(manifest: manifest_module.Manifest, environ: Mapping[
             raise CliError(f"task {task['id']!r}: {error.detail}") from error
 
 
-def refuse_without_images(manifest: manifest_module.Manifest) -> None:
-    """Every live trial runs inside its fixture's image, so an unreachable Docker daemon or a missing image is a refusal before any spend."""
+def refuse_without_images(manifest: manifest_module.Manifest, out: Path | None = None) -> None:
+    """Every live trial runs inside its fixture's image on mounts of its own roots.
+
+    So an unreachable Docker daemon, a missing or drifted image, and a run
+    directory the container cannot see are all refusals here, before any spend.
+    """
     reason = container.unavailable()
     if reason is not None:
         raise CliError(f"live-run needs Docker: {reason}")
     try:
-        images.check_all(manifest)
+        built = images.check_all(manifest)
+        if out is not None:
+            container.check_mount(out, next(iter(built.values()))["tag"])
     except images.ImageError as error:
         raise CliError(f"live-run refuses this manifest: {error.detail}") from error
 
@@ -386,30 +392,33 @@ def live_run(
     automation = [name for name in AUTOMATION_ENV if environ.get(name)]
     if automation and not ci_live:
         raise CliError(f"live-run refuses an automated environment: {', '.join(automation)} is set")
-    if attestation_path is None and not plumbing:
-        raise CliError(
-            "live-run requires --attestation, or --plumbing for a non-publishable smoke: "
-            "a publishable live run states the isolation it ran under"
-        )
-    refuse_without_images(manifest)
+    refuse_without_images(manifest, out)
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
     # wall-clock cap on attempts that cannot reach the provider.
     if seam is not None and not environ.get(seam):
         raise CliError(f"live-run needs the credential seam {seam} set in this shell")
-    attestation = None if attestation_path is None else artifact.load_attestation(attestation_path)
-    # The gates stay code-owned: an injected runtime supplies the clock, the
-    # settlement barrier, or the process seam, never the isolation contract.
-    # `--plumbing` buys one thing and states its price: a run with no attestation
-    # is stamped non-publishable in every record, so gate 3 can prove the chain
-    # end to end on a host that is not a disposable instance, and no number from
-    # it can be quoted as a result.
     # One network and one proxy for the whole run: the trial containers join the
     # internal network only, and the proxy log is the run's sentinel. Both are
     # in the process ledger, so `cleanup` reaches them after an interrupt, and
     # both are removed here on every path out.
     egress = container.start_egress(container.plan_egress(out, allowlist, run_nonce(out, manifest)))
     reap_module.register_objects(out, "egress", container=egress.proxy, network=egress.network)
+    # The gates stay code-owned: an injected runtime supplies the clock, the
+    # settlement barrier, or the process seam, never the isolation contract.
+    #
+    # The attestation is the run's own, built from the egress it just created:
+    # the allowlist is true by construction, because the network has no route
+    # out and the proxy refuses every other host. `--attestation <file>` still
+    # states an isolation this package cannot see (a disposable VM), and
+    # `--plumbing` still buys a run with no claim at all, stamped
+    # non-publishable in every record, for a chain check on a host that is not
+    # a disposable instance.
+    attestation = None
+    if attestation_path is not None:
+        attestation = artifact.load_attestation(attestation_path)
+    elif not plumbing:
+        attestation = artifact.load_attestation_data(container.attestation(egress, seam or ""))
     runtime = dataclasses.replace(
         runtime or runner.Runtime(),
         attestation=attestation,

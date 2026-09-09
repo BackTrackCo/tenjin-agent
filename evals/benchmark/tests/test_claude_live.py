@@ -974,11 +974,31 @@ class ImageGateTest(unittest.TestCase):
 
 
 class LiveRunRefusalTest(LiveCase):
-    def test_a_live_run_without_an_attestation_is_refused(self) -> None:
-        with NoProcess(self), self.assertRaises(cli.CliError) as caught:
+    def test_a_run_with_no_attestation_file_carries_the_one_the_run_wrote_itself(self) -> None:
+        captured: list[runner.Runtime] = []
+        with mock.patch.object(cli, "execute", lambda manifest, trials, out, rt: captured.append(rt) or {"trials": 0}):
             cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, None, environ=LIVE_ENV)
-        self.assertIn("--attestation", str(caught.exception))
-        self.assertFalse(self.run_dir.exists())
+        attestation = captured[0].attestation
+        assert attestation is not None
+        # Not a promise: the network the run created is `--internal`, so the
+        # proxy holding this allowlist is the only way out of it.
+        self.assertEqual(attestation.kind, "container")
+        self.assertTrue(attestation.instance_id.startswith("bench2-net-"))
+        self.assertEqual(attestation.image, f"{images.BASE_IMAGE}@{images.BASE_DIGEST}")
+        self.assertEqual(attestation.network_allowlist, ("127.0.0.1", "api.anthropic.com"))
+        self.assertEqual(attestation.credential_seam, "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertTrue(captured[0].publishable)
+        self.assertFalse(attestation.wallet_present)
+
+    def test_an_attestation_file_still_states_an_isolation_this_package_cannot_see(self) -> None:
+        captured: list[runner.Runtime] = []
+        with mock.patch.object(cli, "execute", lambda manifest, trials, out, rt: captured.append(rt) or {"trials": 0}):
+            cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, self.attestation_file(), environ=LIVE_ENV)
+        attestation = captured[0].attestation
+        assert attestation is not None
+        # The file's instance and image, not the run's own network and base.
+        self.assertEqual(attestation, artifact.load_attestation(self.attestation_file()))
+        self.assertNotIn("bench2-net-", attestation.instance_id)
 
     def test_a_live_run_from_a_shell_without_the_credential_seam_is_refused(self) -> None:
         with NoProcess(self), self.assertRaises(cli.CliError) as caught:
@@ -1021,7 +1041,6 @@ class LiveRunRefusalTest(LiveCase):
         # with CI set, so each refusal is asserted under the environment that
         # actually produces it rather than under whatever the shell has.
         cases = {
-            "--attestation": dict(LIVE_ENV),
             "CI": {**LIVE_ENV, "CI": "1"},
             "GITHUB_ACTIONS": {**LIVE_ENV, "GITHUB_ACTIONS": "1"},
             "CLAUDE_CODE_OAUTH_TOKEN": {},
@@ -1029,8 +1048,7 @@ class LiveRunRefusalTest(LiveCase):
         for expected, environ in cases.items():
             with self.subTest(expected):
                 argv = ["live-run", "--manifest", str(cli.SMOKE_MANIFEST), "--out", str(self.run_dir)]
-                if expected != "--attestation":
-                    argv += ["--attestation", str(self.attestation_file())]
+                argv += ["--attestation", str(self.attestation_file())]
                 stderr = io.StringIO()
                 with NoProcess(self), mock.patch.dict(os.environ, environ, clear=True), contextlib.redirect_stderr(stderr):
                     code = cli.main(argv)
@@ -1109,10 +1127,14 @@ class PlumbingModeTest(unittest.TestCase):
         self.manifest = cli.SMOKE_MANIFEST
         support.patch_live_gates(self)
 
-    def test_a_run_without_an_attestation_is_refused_unless_it_says_plumbing(self) -> None:
-        with self.assertRaises(cli.CliError) as refusal:
+    def test_plumbing_claims_no_isolation_while_a_plain_run_attests_its_own(self) -> None:
+        captured: list[runner.Runtime] = []
+        with mock.patch.object(cli, "execute", lambda manifest, trials, out, rt: captured.append(rt) or {"trials": 0}):
+            cli.live_run(self.out, self.manifest, None, plumbing=True, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
             cli.live_run(self.out, self.manifest, None, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
-        self.assertIn("--plumbing", str(refusal.exception))
+        self.assertEqual([rt.publishable for rt in captured], [False, True])
+        self.assertIsNone(captured[0].attestation)
+        self.assertIsNotNone(captured[1].attestation)
 
     def test_plumbing_still_refuses_an_automated_environment(self) -> None:
         with self.assertRaises(cli.CliError) as refusal:

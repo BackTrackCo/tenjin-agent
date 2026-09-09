@@ -134,6 +134,80 @@ class EgressTest(unittest.TestCase):
         self.assertEqual(docker.calls[0][:2], ["stop", "--time"])
 
 
+class ReadinessTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.egress = container.plan_egress(Path(self.tmp.name), ALLOW, "run")
+
+    def test_the_run_waits_for_the_proxy_to_accept_connections(self) -> None:
+        # A trial that starts first would send its CONNECT into a container
+        # with no listener, and a dropped packet on an internal network stalls.
+        answers = [Completed(returncode=1, stdout="", stderr=""), Completed(returncode=0, stdout="", stderr="")]
+        calls: list[list[str]] = []
+
+        def exec_docker(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+            calls.append(argv)
+            return answers[min(len(calls) - 1, len(answers) - 1)]
+
+        container.wait_listening(self.egress, exec_docker, sleep=lambda seconds: None)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0][:2], ["exec", self.egress.proxy])
+
+    def test_a_proxy_that_never_listens_is_stopped_and_refused(self) -> None:
+        def never(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+            return Completed(returncode=1, stdout="", stderr="") if argv[0] == "exec" else Completed(returncode=0, stdout="", stderr="")
+
+        with self.assertRaises(ImageError) as caught:
+            container.wait_listening(self.egress, never, deadline_s=0.0, sleep=lambda seconds: None)
+        self.assertEqual(caught.exception.code, "proxy_failed")
+
+
+class MountCheckTest(unittest.TestCase):
+    """A run directory the container cannot see would give a trial empty roots."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run = Path(self.tmp.name) / "run"
+
+    def test_a_visible_directory_passes_and_leaves_no_marker(self) -> None:
+        def docker(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+            return Completed(returncode=0, stdout=Path(argv[-1]).read_text(encoding="utf-8"), stderr="")
+
+        container.check_mount(self.run, "bench2-actor:abc", docker)
+        self.assertEqual(list(self.run.iterdir()), [])
+
+    def test_a_directory_the_vm_does_not_share_is_refused_by_name(self) -> None:
+        def docker(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+            return Completed(returncode=1, stdout="", stderr="No such file or directory")
+
+        with self.assertRaises(ImageError) as caught:
+            container.check_mount(self.run, "bench2-actor:abc", docker)
+        self.assertEqual(caught.exception.code, "mount_invisible")
+        self.assertIn("home directory", caught.exception.detail)
+
+
+class AttestationTest(unittest.TestCase):
+    def test_the_run_attests_the_isolation_its_own_egress_established(self) -> None:
+        egress = container.plan_egress(Path("/runs/one"), ALLOW, "run")
+        payload = container.attestation(egress, "CLAUDE_CODE_OAUTH_TOKEN")
+        attestation = artifact.load_attestation_data(payload)
+        artifact.check_attestation(attestation, ("api.anthropic.com",), "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertEqual(attestation.kind, "container")
+        self.assertEqual(attestation.instance_id, egress.network)
+        self.assertEqual(attestation.network_allowlist, ALLOW)
+        self.assertFalse(attestation.wallet_present)
+        self.assertTrue(attestation.fresh_roots)
+
+    def test_an_attestation_whose_allowlist_misses_the_provider_is_still_refused(self) -> None:
+        egress = container.plan_egress(Path("/runs/one"), ("team.example",), "run")
+        attestation = artifact.load_attestation_data(container.attestation(egress, "CLAUDE_CODE_OAUTH_TOKEN"))
+        with self.assertRaises(artifact.IsolationError) as caught:
+            artifact.check_attestation(attestation, ("api.anthropic.com",), "CLAUDE_CODE_OAUTH_TOKEN")
+        self.assertEqual(caught.exception.code, "allowlist_gap")
+
+
 class ProxySentinelTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()

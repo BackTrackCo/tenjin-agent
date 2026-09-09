@@ -325,6 +325,11 @@ def load_attestation(path: Path) -> Attestation:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise IsolationError("attestation_unreadable", f"cannot read the attestation: {error}") from error
+    return load_attestation_data(data)
+
+
+def load_attestation_data(data: Any) -> Attestation:
+    """The same checks over a payload a run built itself, so a self-written attestation is read no more kindly than a file."""
     if not isinstance(data, dict):
         raise IsolationError("attestation_shape", "the attestation must be a JSON object")
     unknown = sorted(set(data) - ATTESTATION_KEYS)

@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -42,6 +44,10 @@ PROXY_LOG_DIR = "/var/log/bench2"
 PROXY_LOG = "requests.jsonl"
 PROXY_DIR = "proxy"
 STOP_GRACE_S = 2
+PROXY_READY_S = 20.0
+PROXY_POLL_S = 0.2
+MOUNT_MARKER = ".bench2-mount"
+MOUNT_TIMEOUT_S = 60.0
 OUTPUT_VAR = "BENCH2_OUTPUT"
 # Node 24 reads the proxy variables for `fetch` only under this flag, and
 # Claude Code, the daemon's shelf legs and the CLI's reads are all `fetch`.
@@ -188,7 +194,28 @@ def start_egress(egress: Egress, docker: Docker | None = None) -> Egress:
     if joined.returncode != 0:
         stop_egress(egress, docker)
         raise ImageError("proxy_failed", f"the proxy could not join {egress.network}: {joined.stderr.strip()[-200:]}")
+    wait_listening(egress, docker)
     return egress
+
+
+def wait_listening(egress: Egress, docker: Docker | None = None, deadline_s: float = PROXY_READY_S, sleep: Any = time.sleep) -> None:
+    """Wait until the proxy is accepting connections inside its own container.
+
+    A trial that starts first would send its CONNECT into a container whose
+    listener does not exist yet, and a dropped packet on an internal network is
+    a stall rather than a refusal. The check runs inside the proxy, so it needs
+    no published port.
+    """
+    docker = images._docker(docker)
+    probe = f"import socket; socket.create_connection(('127.0.0.1', {egress.port}), 1).close()"
+    end = time.monotonic() + deadline_s
+    while True:
+        if docker(["exec", egress.proxy, "python3", "-c", probe]).returncode == 0:
+            return
+        if time.monotonic() >= end:
+            stop_egress(egress, docker)
+            raise ImageError("proxy_failed", f"{egress.proxy} was not accepting connections within {deadline_s:.0f}s")
+        sleep(PROXY_POLL_S)
 
 
 def stop_egress(egress: Egress, docker: Docker | None = None) -> dict[str, Any]:
@@ -294,6 +321,59 @@ class ProxySentinel:
     @property
     def hits(self) -> list[dict[str, Any]]:
         return [row for row in self.entries if row.get("verdict") == "refused"]
+
+
+def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None:
+    """Refuse a run directory the container cannot actually see.
+
+    Every root a trial uses is a bind mount of a host path, and on this machine
+    Docker is a Linux VM that shares only some of the host's filesystem. A run
+    directory outside that set mounts as an empty directory, which a trial
+    would discover as a missing repository or a lost transcript. So one
+    container reads one marker back before anything is spent.
+    """
+    docker = images._docker(docker)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    marker = run_dir / MOUNT_MARKER
+    token = secrets.token_hex(8)
+    marker.write_text(token, encoding="utf-8")
+    path = os.path.abspath(run_dir)
+    try:
+        completed = docker(
+            ["run", "--rm", "--network", "none", "--user", user(), "--volume", f"{path}:{path}:ro", "--entrypoint", "cat", image, f"{path}/{MOUNT_MARKER}"],
+            MOUNT_TIMEOUT_S,
+        )
+    except ImageError as error:
+        raise ImageError("mount_invisible", f"{path} could not be mounted into a container: {error.detail}") from error
+    finally:
+        marker.unlink(missing_ok=True)
+    if completed.returncode != 0 or completed.stdout.strip() != token:
+        raise ImageError(
+            "mount_invisible",
+            f"{path} is not visible inside a container, so a trial's roots would be empty; "
+            "choose a run directory under a path the Docker VM shares (on colima, your home directory)",
+        )
+
+
+def attestation(egress: Egress, seam: str) -> dict[str, Any]:
+    """The isolation this run established, stated as the attestation's own fields.
+
+    A container run does not need an operator to promise its isolation: the
+    network is `--internal`, so the only way out is the proxy, and the proxy
+    holds exactly this allowlist. The roots are built fresh per trial and no
+    wallet is ever mounted or installed, and the seam is the one variable the
+    client forwards. `instance_id` is the run's network, which names this run's
+    isolation and nothing else's; the per-trial image id is in the record.
+    """
+    return {
+        "kind": "container",
+        "instance_id": egress.network,
+        "image": f"{images.BASE_IMAGE}@{images.BASE_DIGEST}",
+        "fresh_roots": True,
+        "wallet_present": False,
+        "credential_seam": seam,
+        "network_allowlist": sorted(egress.allowlist),
+    }
 
 
 def unavailable(docker: Docker | None = None) -> str | None:

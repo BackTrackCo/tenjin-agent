@@ -28,6 +28,10 @@ import time
 from pathlib import Path
 
 BUFFER = 1 << 16
+# The runner's readiness check is a bare TCP connect from inside this
+# container. It is not a request a trial made, and counting it as one would
+# put a refusal in every run's sentinel, so a loopback client is not logged.
+LOOPBACK = ("127.0.0.1", "::1")
 CONNECT_TIMEOUT_S = 10.0
 IDLE_TIMEOUT_S = 300.0
 REQUEST_LIMIT = 8192
@@ -77,7 +81,7 @@ class Handler(socketserver.StreamRequestHandler):
     log: Log | None = None
 
     def record(self, **fields: object) -> None:
-        if self.log is not None:
+        if self.log is not None and self.client_address[0] not in LOOPBACK:
             self.log.write(client=self.client_address[0], **fields)
 
     def refuse(self, status: str, host: str, reason: str, method: str) -> None:

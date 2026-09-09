@@ -53,7 +53,7 @@ def patch_live_gates(case: Any) -> None:
 
     patch_images(case)
     for patcher in (
-        mock.patch.object(cli, "refuse_without_images", lambda manifest: None),
+        mock.patch.object(cli, "refuse_without_images", lambda manifest, out=None: None),
         mock.patch.object(container, "start_egress", lambda egress, docker=None: egress),
         mock.patch.object(container, "stop_egress", lambda egress, docker=None: {"proxy": False, "network_removed": False}),
     ):
