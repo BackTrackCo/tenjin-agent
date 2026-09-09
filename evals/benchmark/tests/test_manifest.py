@@ -51,6 +51,9 @@ class ManifestTest(unittest.TestCase):
             "lock hash": {**base, "pins": {**base["pins"], "dependency_lock_hash": "none"}},
             "zero wall clock": {**base, "pins": {**base["pins"], "wall_clock_s": 0}},
             "boolean turns": {**base, "pins": {**base["pins"], "turn_budget": True}},
+            "zero concurrency": {**base, "pins": {**base["pins"], "concurrency": 0}},
+            "boolean concurrency": {**base, "pins": {**base["pins"], "concurrency": True}},
+            "fractional concurrency": {**base, "pins": {**base["pins"], "concurrency": 2.5}},
             "zero repeats": {**base, "repeats": 0},
             "negative seed": {**base, "seed": -1},
             "unpinned product": {**base, "arms": [{**arm, "product_version": "latest"}, base["arms"][1]]},
@@ -67,6 +70,18 @@ class ManifestTest(unittest.TestCase):
         for name, data in cases.items():
             with self.subTest(name), self.assertRaises(ManifestError):
                 self.check(data)
+
+    def test_concurrency_defaults_to_one_and_rides_the_environment_hash(self) -> None:
+        # Absent is one, so every committed manifest runs exactly as it did
+        # before the pin existed, and the pin is opt-in per manifest.
+        self.assertEqual(manifest.load(cli.FAKE_MANIFEST).concurrency, 1)
+        self.assertNotIn("concurrency", self.base["pins"])
+        concurrent = {**self.base, "pins": {**self.base["pins"], "concurrency": 4}}
+        self.check(concurrent)
+        self.assertEqual(manifest.Manifest(data=concurrent, path=cli.FAKE_MANIFEST, hash="sha256:x").concurrency, 4)
+        # `environment_hash` in every record is the hash of the pins, so two
+        # runs at different degrees are already distinguishable there.
+        self.assertNotEqual(manifest.sha256_json(concurrent["pins"]), manifest.sha256_json(self.base["pins"]))
 
     def test_fixture_hash_tracks_fixture_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

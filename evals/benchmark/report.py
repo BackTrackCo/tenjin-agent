@@ -215,6 +215,10 @@ def project(
         "schedule_hash": schedule_hash,
         "seed": manifest_data["seed"],
         "repeats": manifest_data["repeats"],
+        # Every record carries this inside `environment_hash`, which is the
+        # hash of the pins. Stating it here is the same fact in the form a
+        # reader comparing two runs can act on without opening a record.
+        "concurrency": int(manifest_data["pins"].get("concurrency", 1)),
         "publishable": publishable,
         "isolation": kind,
         "shelf_secret_present": any(record["isolation"].get("shelf_secret_present", False) for record in accepted.values()),
@@ -293,7 +297,7 @@ def render(report: dict[str, Any]) -> str:
     lines = [
         f"benchmark {report['benchmark_version']}, schema {report['schema']}",
         f"manifest {report['manifest_hash'][:12]}  schedule {report['schedule_hash'][:12]}  "
-        f"seed {report['seed']}  repeats {report['repeats']}",
+        f"seed {report['seed']}  repeats {report['repeats']}  concurrency {report.get('concurrency', 1)}",
         stamp_line,
     ]
     if report.get("shelf_secret_present", False):

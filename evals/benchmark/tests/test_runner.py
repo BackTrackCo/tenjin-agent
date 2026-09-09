@@ -1,9 +1,12 @@
-"""Executing a schedule: settlement, caps, outcomes, sentinels, and resume.
+"""Executing a schedule: settlement, caps, outcomes, sentinels, resume, and concurrency.
 
 Every case injects the clock, the settlement barrier, and the process
-boundary. The one exception is the timeout case, which has to start a real
-short-lived process to prove that killing the trial's process group reaches a
-grandchild the root left behind.
+boundary. Two exceptions start a real short-lived process: the timeout case,
+which proves that killing the trial's process group reaches a grandchild the
+root left behind, and the concurrent failure case, which proves the run that
+ends on one trial's exception leaves nothing of another trial's alive. The
+concurrency cases run on the real clock, because a clock a test advances by
+hand cannot be shared by threads.
 """
 
 from __future__ import annotations
@@ -11,12 +14,13 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 import urllib.request
 from pathlib import Path
 
-from evals.benchmark import artifact, cli, executor, loop_join, records, reduce as reduce_module, runner, schedule
+from evals.benchmark import artifact, cli, executor, loop_join, reap, records, reduce as reduce_module, runner, schedule
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec
 from evals.benchmark.manifest import Manifest
@@ -622,6 +626,179 @@ class LiveRefusalTest(TrialCase):
         self.assertEqual(record["isolation"]["live"], True)
         self.assertEqual(record["isolation"]["attested_container"], True)
         self.assertEqual(record["isolation"]["attestation_hash"], ATTESTED.hash())
+
+
+class Shelf:
+    """A stand-in for the one shelf a provisioning arm seeds, searches, and clears.
+
+    `prepare` opens a seeded window and `stop` closes it, exactly where
+    `tenjin_arm.py` publishes and deletes. `peak` is how many were ever open at
+    once, which is the whole property under test, and the agent's turn holds
+    its window open long enough that a second one would land inside it.
+    """
+
+    def __init__(self, hold_s: float = 0.05) -> None:
+        self.lock = threading.Lock()
+        self.open = 0
+        self.peak = 0
+        self.events: list[str] = []
+        self.hold_s = hold_s
+
+    def prepare(self, request: executor.ProvisionRequest) -> executor.Provision:
+        with self.lock:
+            self.open += 1
+            self.peak = max(self.peak, self.open)
+            self.events.append("seed")
+        return executor.Provision()
+
+    def stop(self, roots: artifact.TrialRoots, provision: executor.Provision) -> dict:
+        with self.lock:
+            self.open -= 1
+            self.events.append("delete")
+        return {}
+
+    def spawn(self, launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+        time.sleep(self.hold_s)
+        return support.fake_spawn()(launch, roots, timeout_s)
+
+
+class ConcurrencyTest(unittest.TestCase):
+    """`pins.concurrency` trials at once, and never two inside a seeded window."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.run_dir = self.dir / "run"
+
+    def provisioning(self, shelf: Shelf) -> str:
+        name = f"provisioned_{self.id().rsplit('.', 1)[-1]}"
+        executor.REGISTRY[name] = ExecutorSpec(
+            name=name, harness="claude", launch=executor.REGISTRY["fake"].launch, prepare=shelf.prepare, stop=shelf.stop
+        )
+        self.addCleanup(executor.REGISTRY.pop, name)
+        return name
+
+    def seeded(self, manifest: Manifest) -> Manifest:
+        for arm in manifest.data["arms"]:
+            arm["provision"] = "tenjin"
+        return manifest
+
+    def execute(self, manifest: Manifest, spawn: runner.Spawn) -> list[runner.TrialResult]:
+        trials = schedule.expand(manifest)
+        return runner.run(manifest, trials, self.run_dir, "sha256:schedule", runner.Runtime(spawn=spawn, settle_cap_s=5.0))
+
+    def test_two_trials_that_seed_the_shelf_never_overlap(self) -> None:
+        shelf = Shelf()
+        manifest = self.seeded(
+            support.synthetic_manifest(self.dir, executor_name=self.provisioning(shelf), arms=("on", "on2"), repeats=3, concurrency=4)
+        )
+        results = self.execute(manifest, shelf.spawn)
+        self.assertEqual([result.outcome for result in results], ["pass"] * 6)
+        self.assertEqual(shelf.peak, 1)
+        # Six windows, one at a time: the deletion of each precedes the next seed.
+        self.assertEqual(shelf.events, ["seed", "delete"] * 6)
+
+    def test_trials_that_seed_nothing_run_at_the_same_time(self) -> None:
+        # The barrier releases only with a second trial inside it at the same
+        # moment, so a runner that serialized would fail on its timeout rather
+        # than pass on a sleep that happened to be long enough.
+        barrier = threading.Barrier(2, timeout=20)
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            barrier.wait()
+            return support.fake_spawn()(launch, roots, timeout_s)
+
+        manifest = support.synthetic_manifest(self.dir, arms=("off", "off2"), concurrency=2)
+        self.assertEqual([result.outcome for result in self.execute(manifest, spawn)], ["pass", "pass"])
+
+    def test_a_trial_that_seeds_nothing_runs_inside_another_trials_seeded_window(self) -> None:
+        shelf = Shelf()
+        barrier = threading.Barrier(2, timeout=20)
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            barrier.wait()
+            return support.fake_spawn()(launch, roots, timeout_s)
+
+        manifest = support.synthetic_manifest(self.dir, executor_name=self.provisioning(shelf), arms=("off", "on"), concurrency=2)
+        for arm in manifest.data["arms"]:
+            if arm["id"] == "on":
+                arm["provision"] = "tenjin"
+        self.assertEqual([result.outcome for result in self.execute(manifest, spawn)], ["pass", "pass"])
+        self.assertEqual(shelf.peak, 1)
+
+    def test_the_schedule_is_unchanged_and_the_results_come_back_in_its_order(self) -> None:
+        serial = support.synthetic_manifest(self.dir, arms=("off", "on"), repeats=2)
+        concurrent = support.synthetic_manifest(self.dir, arms=("off", "on"), repeats=2, concurrency=4)
+
+        def assignment(trials: list[schedule.Trial]) -> list[tuple]:
+            return [(trial.task_id, trial.arm_id, trial.repeat, trial.position) for trial in trials]
+
+        # The pin is not an input to the expansion: same seeded task order,
+        # same rotated arm order, same positions.
+        trials = schedule.expand(concurrent)
+        self.assertEqual(assignment(trials), assignment(schedule.expand(serial)))
+
+        released = threading.Event()
+        lock = threading.Lock()
+        finished: list[str] = []
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            # The first trial assigned is made to finish after another one.
+            if roots.trial_id == trials[0].trial_id:
+                released.wait(timeout=20)
+            completed = support.fake_spawn()(launch, roots, timeout_s)
+            with lock:
+                finished.append(roots.trial_id)
+            released.set()
+            return completed
+
+        results = runner.run(concurrent, trials, self.run_dir, "sha256:schedule", runner.Runtime(spawn=spawn, settle_cap_s=5.0))
+        self.assertEqual(len(finished), 4)
+        self.assertNotEqual(finished[0], trials[0].trial_id)
+        self.assertEqual([result.trial_id for result in results], [trial.trial_id for trial in trials])
+
+    def test_a_failing_trial_ends_the_run_without_stranding_another(self) -> None:
+        manifest = support.synthetic_manifest(self.dir, arms=("off", "on"), concurrency=2)
+        trials = schedule.expand(manifest)
+        doomed, healthy = trials[0].trial_id, trials[1].trial_id
+        started = threading.Event()
+
+        def spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> runner.Completed:
+            if roots.trial_id == doomed:
+                # The other trial is already inside its own attempt, so what
+                # this case proves is not a cancellation race.
+                started.wait(timeout=20)
+                raise RuntimeError("the executor seam broke")
+            started.set()
+            return runner.process_spawn(launch, roots, timeout_s)
+
+        with self.assertRaises(RuntimeError):
+            runner.run(manifest, trials, self.run_dir, "sha256:schedule", runner.Runtime(spawn=spawn, settle_cap_s=5.0))
+        # The trial that was running finished and published; the one that
+        # failed published nothing, and no process or ledger entry outlived
+        # either of them for a person to clean up by hand.
+        self.assertTrue(records.final_path(self.run_dir / "records", healthy).is_file())
+        self.assertFalse(records.final_path(self.run_dir / "records", doomed).exists())
+        self.assertEqual(reap.survivors(self.run_dir), [])
+        self.assertEqual(reap.read_records(self.run_dir), [])
+
+    def test_a_run_with_a_sentinel_refuses_more_than_one_trial_at_a_time(self) -> None:
+        # The sentinel is one server for the run and its hits name no trial, so
+        # a trial claims whatever arrived while it ran. Two overlapping trials
+        # make that the wrong trial, and a hit invalidates an attempt.
+        sentinel = start_sentinel()
+        self.addCleanup(sentinel.stop)
+        manifest = support.synthetic_manifest(self.dir, concurrency=2)
+        with self.assertRaises(runner.ConcurrencyError):
+            runner.run(
+                manifest,
+                schedule.expand(manifest),
+                self.run_dir,
+                "sha256:schedule",
+                runner.Runtime(spawn=support.fake_spawn(), sentinel=sentinel),
+            )
+        self.assertFalse(self.run_dir.exists())
 
 
 def _gone(pid: int, deadline_s: float = 5.0) -> bool:

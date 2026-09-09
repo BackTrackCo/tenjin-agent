@@ -111,6 +111,17 @@ class ProjectionTest(unittest.TestCase):
         # Nothing in the projection is a body, a path, or a transcript.
         report.guard(published)
 
+    def test_the_report_states_how_many_trials_ran_at_once(self) -> None:
+        # Two runs of one manifest are comparable only when they were run the
+        # same way, and the records carry the degree inside `environment_hash`,
+        # which a reader comparing them cannot read back.
+        self.assertEqual(self.project()["concurrency"], 1)
+        pins = {**self.manifest.data["pins"], "concurrency": 4}
+        published = self.project({**self.manifest.data, "pins": pins})
+        self.assertEqual(published["concurrency"], 4)
+        self.assertIn("concurrency 4", report.render(published))
+        report.guard(published)
+
     def stamped(self, **isolation: object) -> dict:
         """The corpus with every accepted record's isolation slice overridden."""
         return {

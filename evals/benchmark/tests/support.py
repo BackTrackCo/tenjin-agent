@@ -68,6 +68,7 @@ def synthetic_manifest(
     executor_name: str = "fake",
     verifier_name: str = "fake_answer_file",
     wall_clock_s: int = 30,
+    concurrency: int | None = None,
     auxiliary_usage: str | dict[str, str] = "none",
     live: bool = False,
     prompt: str = "Write 42 into answer.txt.",
@@ -98,6 +99,7 @@ def synthetic_manifest(
             "permission_mode": "default",
             "wall_clock_s": wall_clock_s,
             "turn_budget": 4,
+            **({} if concurrency is None else {"concurrency": concurrency}),
         },
         "price_sheet_version": "fake-2026-09",
         "tasks": [

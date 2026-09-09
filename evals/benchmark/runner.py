@@ -15,6 +15,15 @@ every case except the process-group kill runs without real time or a real
 agent. A trial with a valid final record for the current manifest and schedule
 hashes is skipped on resume, and an interrupted run publishes nothing for the
 trial it was inside.
+
+`pins.concurrency` trials run at once, defaulting to one. Trials are otherwise
+isolated from each other, but an arm that provisions seeds its lesson into the
+one shelf the operator's account owns, searches it, and deletes it at the end,
+so two seeded windows that overlapped would answer each other's searches and
+move the delivery numbers this benchmark exists to measure. `run` therefore
+admits one provisioning trial at a time and lets the rest run freely. The
+schedule is untouched: trials are assigned in its order and the results come
+back in it, whatever order they finish in.
 """
 
 from __future__ import annotations
@@ -23,7 +32,9 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -39,6 +50,10 @@ Sleep = Callable[[float], None]
 # model calls returns them as receipts for one trial. The benchmark owns the
 # receipts; nothing in the manifest or the agent's output can mint one.
 Receipts = Callable[[str, artifact.TrialRoots], list[usage.AuxiliaryReceipt]]
+
+
+class ConcurrencyError(RuntimeError):
+    """A run asked for more than one trial at once under a seam that cannot attribute one."""
 
 
 @dataclass(frozen=True)
@@ -280,6 +295,16 @@ def isolation_of(isolation: dict[str, Any], provision: executor.Provision | None
     return out
 
 
+def seeds_shelf(manifest: Manifest, trial: Trial) -> bool:
+    """Whether this trial provisions, which is decidable from the manifest before it starts.
+
+    One predicate, read by the trial that provisions and by the scheduler that
+    has to keep two of them apart.
+    """
+    arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
+    return executor.lookup(arm["executor"]).prepare is not None and bool(arm.get("provision"))
+
+
 def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str, runtime: Runtime = Runtime()) -> dict[str, Any]:
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
@@ -287,7 +312,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if spec.harness != manifest.harness:
         raise executor.ExecutorError(f"executor {spec.name!r} runs {spec.harness!r}, manifest pins {manifest.harness!r}")
     verifier_spec = verifier.lookup(task["verifier"])
-    provisioned = spec.prepare is not None and bool(arm.get("provision"))
+    provisioned = seeds_shelf(manifest, trial)
     # The isolation facts a provisioned arm brings are known before any root
     # exists: they are facts about the source, and the gate reads them first so
     # a run that would carry a shelf secret into a publishable record is
@@ -532,25 +557,88 @@ def refused_record(
     }
 
 
+def attempt(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str, runtime: Runtime) -> TrialResult:
+    """Execute one unresumed trial and publish its record.
+
+    An interruption inside a trial publishes nothing: the next run finds no
+    final record for it and executes it once, from the top.
+    """
+    record = run_trial(manifest, trial, run_dir, schedule_hash, runtime)
+    path, won = records.publish(run_dir / "records", record)
+    if not won:
+        raise records.RecordError(f"another writer published trial {trial.trial_id} first")
+    return TrialResult(trial.trial_id, record["outcome"], False, path)
+
+
+def run_concurrently(
+    manifest: Manifest, pending: list[Trial], run_dir: Path, schedule_hash: str, runtime: Runtime, degree: int
+) -> dict[str, TrialResult]:
+    """Up to `degree` trials at once, and never two that seed the shared shelf.
+
+    The gate is a plain mutual exclusion held for the whole of a provisioning
+    trial. It covers the seed the CLI publishes, every search the agent makes
+    against it, the delete that ends it, and the free port its daemon claims,
+    because those are one window and a second seeded window inside it is what
+    would answer a search with another trial's piece. Trials that provision
+    nothing take no gate and overlap with anything.
+    """
+    gate = threading.Lock()
+
+    def one(trial: Trial) -> TrialResult:
+        if not seeds_shelf(manifest, trial):
+            return attempt(manifest, trial, run_dir, schedule_hash, runtime)
+        with gate:
+            return attempt(manifest, trial, run_dir, schedule_hash, runtime)
+
+    done: dict[str, TrialResult] = {}
+    failures: list[tuple[int, BaseException]] = []
+    with ThreadPoolExecutor(max_workers=degree, thread_name_prefix="bench1-trial") as pool:
+        submitted: dict[Future[TrialResult], Trial] = {pool.submit(one, trial): trial for trial in pending}
+        for future in as_completed(submitted):
+            if future.cancelled():
+                continue
+            error = future.exception()
+            if error is None:
+                result = future.result()
+                done[result.trial_id] = result
+                continue
+            failures.append((submitted[future].position, error))
+            # A failure ends the run the way it does serially. A trial already
+            # started runs to its own end first, because the call that started
+            # it is what kills its process group and clears its ledger entry;
+            # only trials that have not begun are dropped.
+            for waiting in submitted:
+                waiting.cancel()
+    if failures:
+        # The earliest trial in the schedule owns the refusal, so what a run
+        # raises does not depend on which thread lost the race to fail.
+        failures.sort(key=lambda item: item[0])
+        raise failures[0][1]
+    return done
+
+
 def run(
     manifest: Manifest, trials: list[Trial], run_dir: Path, schedule_hash: str, runtime: Runtime = Runtime()
 ) -> list[TrialResult]:
     records_dir = run_dir / "records"
     accepted, _ = records.select(records_dir, manifest.hash, schedule_hash)
-    results: list[TrialResult] = []
-    for trial in trials:
-        if trial.trial_id in accepted:
-            results.append(
-                TrialResult(
-                    trial.trial_id, accepted[trial.trial_id]["outcome"], True, records.final_path(records_dir, trial.trial_id)
-                )
-            )
-            continue
-        # An interruption inside a trial publishes nothing: the next run finds
-        # no final record for it and executes it once, from the top.
-        record = run_trial(manifest, trial, run_dir, schedule_hash, runtime)
-        path, won = records.publish(records_dir, record)
-        if not won:
-            raise records.RecordError(f"another writer published trial {trial.trial_id} first")
-        results.append(TrialResult(trial.trial_id, record["outcome"], False, path))
-    return results
+    degree = manifest.concurrency
+    if degree > 1 and runtime.sentinel is not None:
+        # The sentinel is one server for the run and its hits carry no trial,
+        # so a trial claims the ones that arrived while it ran. That reads the
+        # wrong trial's hit the moment two overlap, and a hit invalidates an
+        # attempt, so the configuration is refused rather than measured.
+        raise ConcurrencyError("a run with a sentinel attached counts its hits per trial by delta and must run at pins.concurrency 1")
+    done = {
+        trial.trial_id: TrialResult(trial.trial_id, accepted[trial.trial_id]["outcome"], True, records.final_path(records_dir, trial.trial_id))
+        for trial in trials
+        if trial.trial_id in accepted
+    }
+    pending = [trial for trial in trials if trial.trial_id not in done]
+    if degree == 1:
+        for trial in pending:
+            done[trial.trial_id] = attempt(manifest, trial, run_dir, schedule_hash, runtime)
+    else:
+        done.update(run_concurrently(manifest, pending, run_dir, schedule_hash, runtime, degree))
+    # Schedule order, whatever order they finished in.
+    return [done[trial.trial_id] for trial in trials]

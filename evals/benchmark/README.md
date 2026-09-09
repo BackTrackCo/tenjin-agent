@@ -37,7 +37,7 @@ the suite builds.
 | --------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
 | `manifest.py`               | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                    |
 | `schedule.py`               | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                    |
-| `runner.py`                 | execution: fresh roots, settlement, caps, sentinels, resume       | `test_runner.py`, `test_fake_run.py`  |
+| `runner.py`                 | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py`  |
 | `executor.py`               | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                    |
 | `claude_live.py`            | the live executor: argv, minted session id, per-trial settings    | `test_claude_live.py`                 |
 | `tenjin_arm.py`             | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                  |
@@ -300,6 +300,30 @@ outside every `fixture_hash`; an agent that reads them anyway is counted by
 `discovery.setup_read` and `discovery.test_run_before_fix`, which `summary` prints per arm. A
 seeded arm may also read the shelf by hand through arm-level `settings.permissions.allow`, and
 `loop_join` reports those as `delivery.cli_searches`, apart from the hooks' own fires.
+
+## Running trials at once
+
+`pins.concurrency` is how many trials may be in flight, and it defaults to one, so a manifest
+that does not name it runs exactly as it always has. It is a pin because `environment_hash` is
+the hash of the pins: two runs at different degrees are already distinguishable in every record,
+and `report.json` states the number so a reader comparing two runs does not have to open one.
+
+The measurement is in tokens, so wall clock is overhead, but only trials that provision nothing
+may overlap. A provisioning arm seeds its lesson into the one shelf the operator's account owns,
+searches it through the product, and deletes it at the end; two seeded windows inside each other
+would let one trial's search answer with the other's piece, a duplicate for two trials of one
+task and a false positive for two tasks, in exactly the delivery numbers this benchmark exists to
+measure. A failed publish is worse still: `sweep_stamped` clears by title rather than by stamp,
+so it would delete a concurrent trial's live seed. So `runner.run` holds one mutual exclusion for
+the whole of a provisioning trial, covering the publish, the agent's searches, the delete, and
+the free port its daemon claimed, and lets everything else run freely. A four-arm matrix with one
+unprovisioned arm converges on the time its provisioned arms take alone, and the gain is the
+unprovisioned quarter hiding inside that.
+
+The schedule is untouched: trials are assigned in its order, the results come back in it whatever
+order they finish in, and no trial id, hash, or balance property depends on the degree. A run
+with a sentinel attached is refused above one, because the sentinel is one server for the whole
+run and its hits name no trial, so a trial claims whatever arrived while it ran.
 
 ## Cleanup
 
