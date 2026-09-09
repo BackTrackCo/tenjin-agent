@@ -1,0 +1,23 @@
+# The offline self-test's only dependency, and the whole of it. The package
+# itself stays standard-library: nothing under evals/benchmark/ outside the
+# suite imports pytest, so `cli.py` runs on a bare interpreter.
+#
+# Pinned exactly and by hash, with every transitive dependency listed, because
+# the required CI job installs this: a floating resolve would make a required
+# check depend on whatever the index served that minute. Install with
+#
+#   python3 -m pip install --require-hashes --only-binary=:all: \
+#     -r evals/benchmark/requirements-test.txt
+#
+# To move the pin, bump the version and regenerate the hashes with
+# `pip download --only-binary=:all:` followed by `pip hash` on each wheel.
+pytest==9.1.1 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+iniconfig==2.3.0 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pluggy==1.6.0 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+pygments==2.21.0 \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9

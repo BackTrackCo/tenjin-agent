@@ -1,8 +1,10 @@
-"""Bench-1: trustworthy benchmark foundation (eval-only, stdlib-only).
+"""Bench-1: trustworthy benchmark foundation (eval-only).
 
 The package measures trials, not transcripts. Every module is a seam the plan
 freezes: manifest -> schedule -> executor -> verifier -> immutable record ->
-reducer -> report. `cli.py fake-run` drives the whole chain offline.
+reducer -> report. `cli.py fake-run` drives the whole chain offline. Every
+shipped command runs on the standard library alone; `selftest.py` is the one
+module that imports anything installed, and what it imports is pytest.
 """
 
 from __future__ import annotations

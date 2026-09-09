@@ -1,9 +1,11 @@
 # Benchmark (Bench-1)
 
-Trustworthy measurement infrastructure for the developer token-savings benchmark. Eval-only,
-stdlib Python only. This package measures trials: for one task and one quality bar, how many
-model tokens did the complete agent run consume with and without a knowledge system. It does not
-itself produce a savings number, and nothing here touches the product runtime.
+Trustworthy measurement infrastructure for the developer token-savings benchmark. Eval-only.
+Every shipped command is standard-library Python; the offline suite is the one part that
+installs anything, and it installs exactly pytest. This package measures trials: for one task and
+one quality bar, how many model tokens did the complete agent run consume with and without a
+knowledge system. It does not itself produce a savings number, and nothing here touches the
+product runtime.
 
 **What this layer owns.** Bench-1 owns the frozen contracts, the executor and the live executor,
 the provisioning seam and daemon lifecycle, isolation, attestation, the corpus reset and
@@ -65,11 +67,15 @@ task, mounted only into the verifier's copy).
 ## Its CI lanes
 
 The offline suite is a step of the required `CI` workflow, on every pull request with no path
-filter: the interpreter floor, `python3 evals/benchmark/selftest.py`, then the fake manifest
-driven to a published report, the hidden verifiers re-run over it, and `summary` printed to the
-run page. It installs nothing (standard library on the runner's own `python3`, floor 3.11, and a
-runner below the floor fails rather than skips, because a skipped gate reads like a passing one),
-takes about 20 seconds, and the step's own timeout bounds it.
+filter: the interpreter floor, one pinned pytest installed into a throwaway venv,
+`selftest.py` run from that venv, then the fake manifest driven to a published report, the hidden
+verifiers re-run over it, and `summary` printed to the run page. It runs on the runner's own
+`python3`, floor 3.11, and a runner below the floor fails rather than skips, because a skipped
+gate reads like a passing one. The one install is `requirements-test.txt`: pytest at an exact
+version with every transitive dependency pinned by hash, so the required check never depends on
+what the index served that minute. Nothing else in the package needs it, so the `fake-run`,
+`verify` and `summary` steps beside it still call a bare interpreter. The whole chain takes about
+20 seconds, and each step's own timeout bounds it.
 
 The live plumbing smoke is `benchmark-live.yml`, on a pull request touching `evals/benchmark/**`
 and on dispatch: a pinned Claude Code, `live-run --plumbing --ci-live` over the smoke manifest
@@ -85,7 +91,11 @@ run is meant to be seen; on a fork the secret is absent and the live steps skip.
 python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
 python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake
 python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake
+# The suite alone needs pytest. Once, into a venv of your choosing:
+#   python3 -m pip install --require-hashes --only-binary=:all: \
+#     -r evals/benchmark/requirements-test.txt
 python3 evals/benchmark/selftest.py
+pytest evals/benchmark/tests            # the same cases, with pytest's own selection flags
 ```
 
 `fake-run` loads `fixtures/fake/manifest.json`, writes the expanded schedule and its SHA-256,
