@@ -33,6 +33,19 @@ export default [
     },
   },
   {
+    // The Bench-2 container entrypoint: it runs inside the fixture image on
+    // Node 24, with no bundler and no TS compiler behind it.
+    files: ['evals/benchmark/docker/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        fetch: 'readonly',
+        AbortSignal: 'readonly',
+        setTimeout: 'readonly',
+      },
+    },
+  },
+  {
     // Dep-free maintenance scripts (no TS compiler behind them): declare the Node
     // globals they use so no-undef stays a real typo check rather than being off.
     files: ['scripts/**/*.mjs'],

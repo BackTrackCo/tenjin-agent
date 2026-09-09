@@ -9,6 +9,10 @@ __pycache__/
 # artifact of the most recent local `vitest run`, never something to commit.
 .vitest-report.json
 
+# The Bench-2 image ledger: which local image id each fixture tag names on
+# this machine. `images build` rewrites it; nothing reads it across machines.
+evals/benchmark/fixtures/live/images.json
+
 # Bench-1 task fixtures track only the hand-written vitest shim under
 # node_modules; the tree itself is evals/benchmark/fixtures/live/vendor/,
 # one archive extracted into each trial.

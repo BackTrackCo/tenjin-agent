@@ -39,6 +39,7 @@ SUBJECTS = {
     "test_claude_usage": "Claude JSONL adapter: request grouping, retries, ambiguity",
     "test_discovery": "discovery facts off the transcripts: the injected setup file read, a failing run before the fix",
     "test_fake_run": "the fake path end to end, manifest to report",
+    "test_images": "fixture images: tag identity, labels, the build argv, and the missing-or-drifted refusals",
     "test_loop_join": "Loop 2 delivery join on the exact actor, read-only, WAL refusal",
     "test_manifest": "manifest validation, hashing, and pin rules",
     "test_output": "what the lane prints: module table, step summary, report reading",
