@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -305,6 +306,29 @@ class BuildTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, "base_build_failed")
 
 
+class StagingDocker(FakeDocker):
+    """A `docker cp` that writes an installed tree into the staging directory it was given."""
+
+    def __init__(self, link: tuple[str, str] | None = None) -> None:
+        super().__init__({"create": Completed(returncode=0, stdout="c0ffee\n", stderr="")})
+        self.link = link
+
+    def __call__(self, argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+        answer = super().__call__(argv, timeout_s, stream)
+        if argv[:1] == ["cp"]:
+            staging = Path(argv[-1])
+            (staging / "package.json").write_text("{}\n", encoding="utf-8")
+            tree = staging / images.NODE_MODULES / "vitest"
+            tree.mkdir(parents=True, exist_ok=True)
+            (tree / "index.js").write_text("runner\n", encoding="utf-8")
+            if self.link is not None:
+                name, target = self.link
+                made = staging / images.NODE_MODULES / name
+                made.parent.mkdir(parents=True, exist_ok=True)
+                made.symlink_to(target)
+        return answer
+
+
 class ExportTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -325,12 +349,66 @@ class ExportTest(unittest.TestCase):
         self.assertEqual(docker.calls[-1], ["rm", "--force", "c0ffee"])
 
     def test_the_copy_reads_the_image_tree_into_the_destination(self) -> None:
-        docker = FakeDocker({"create": Completed(returncode=0, stdout="c0ffee\n", stderr="")})
+        docker = StagingDocker()
         count = images.export_node_modules(self.image, self.destination, docker)
-        self.assertEqual(count, 0)
-        self.assertTrue(self.destination.is_dir())
-        self.assertEqual(docker.calls[1][:2], ["cp", "c0ffee:/opt/fixture/node_modules/."])
+        self.assertEqual(count, 1)
+        self.assertEqual((self.destination / "vitest" / "index.js").read_text(encoding="utf-8"), "runner\n")
+        # Staged from the fixture root, not from `node_modules`, and only the
+        # installed tree is moved on: the trial's own fixture files are the
+        # copy the runner made and never the image's.
+        self.assertEqual(docker.calls[1][:2], ["cp", "c0ffee:/opt/fixture/."])
+        self.assertFalse((self.destination / "package.json").exists())
+        self.assertEqual([path.name for path in self.destination.parent.iterdir()], ["node_modules"])
         self.assertEqual(docker.calls[-1], ["rm", "--force", "c0ffee"])
+
+    def test_a_workspace_link_out_of_node_modules_survives_the_copy(self) -> None:
+        """`docker cp` refuses a link that leaves the directory it copies, so the copy starts a level up.
+
+        Measured 2026-09-09 on the `shadow` fixture: copying `node_modules`
+        itself failed with `invalid symlink ... -> ../../packages/range`, which
+        is the link every workspace consumer resolves through.
+        """
+        docker = StagingDocker(link=("@fixture/range", "../../packages/range"))
+        images.export_node_modules(self.image, self.destination, docker)
+        link = self.destination / "@fixture" / "range"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), "../../packages/range")
+
+    def test_an_image_with_no_installed_tree_is_a_refusal_rather_than_an_empty_copy(self) -> None:
+        docker = FakeDocker({"create": Completed(returncode=0, stdout="c0ffee\n", stderr="")})
+        with self.assertRaises(ImageError) as caught:
+            images.export_node_modules(self.image, self.destination, docker)
+        self.assertEqual(caught.exception.code, "export_failed")
+        self.assertEqual(docker.calls[-1], ["rm", "--force", "c0ffee"])
+
+
+class QuirkCheckTest(unittest.TestCase):
+    """A task whose difficulty is a runtime behaviour states it, and the build proves the image still has it."""
+
+    def test_a_task_with_no_hidden_check_runs_no_container(self) -> None:
+        docker = FakeDocker()
+        self.assertIsNone(images.quirk_check("actor", "bench2-actor:abc", docker))
+        self.assertEqual(docker.calls, [])
+
+    def test_a_declared_check_runs_in_the_image_read_only_and_off_the_network(self) -> None:
+        docker = FakeDocker({"run": Completed(returncode=0, stdout="still there\n", stderr="")})
+        self.assertEqual(images.quirk_check("ambient", "bench2-ambient:abc", docker), "still there")
+        argv = docker.calls[0]
+        self.assertEqual(argv[:2], ["run", "--rm"])
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        self.assertEqual(argv[argv.index("--volume") + 1], f"{images.HIDDEN / 'ambient'}:{images.CHECK_PATH}:ro")
+        self.assertEqual(argv[-1], f"{images.CHECK_PATH}/{images.QUIRK_CHECK}")
+
+    def test_an_image_that_lost_the_quirk_fails_the_build_by_name(self) -> None:
+        docker = FakeDocker({"run": Completed(returncode=1, stdout="", stderr="AssertionError: Intl no longer renders 9")})
+        with self.assertRaises(ImageError) as caught:
+            images.quirk_check("ambient", "bench2-ambient:abc", docker)
+        self.assertEqual(caught.exception.code, "image_quirk_absent")
+        self.assertIn("Intl no longer renders", caught.exception.detail)
+
+    def test_the_ambient_check_is_the_task_that_declares_one(self) -> None:
+        declared = sorted(path.parent.name for path in images.HIDDEN.glob(f"*/{images.QUIRK_CHECK}"))
+        self.assertEqual(declared, ["ambient"])
 
 
 class LedgerTest(unittest.TestCase):

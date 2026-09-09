@@ -224,14 +224,17 @@ class VerifierRegistryTest(unittest.TestCase):
 
     def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer(self) -> None:
         live = verifier.HIDDEN.parent / "fixtures" / "live"
-        for task, package in verifier.TASK_PACKAGES.items():
+        for task in verifier.TASK_PACKAGES:
             with self.subTest(task=task):
                 spec = verifier.lookup(f"node_test_{task}")
-                # Only the unfixed source matters here; the 24 MB vitest tree is not copied eight times.
-                source_only = self.dir / f"source-{task}"
-                source = (live / task / package if package else live / task) / "src"
-                shutil.copytree(source, (source_only / package if package else source_only) / "src")
-                roots = artifact.create(self.run_dir, f"trial-{task}", source_only)
+                # The committed fixture without its dependency tree: a hidden
+                # test imports the source, or the workspace package a consumer
+                # imports, and never a dependency, so the 24 MB vitest tree an
+                # image holds is not needed and is not copied ten times.
+                copy = self.dir / f"fixture-{task}"
+                shutil.copytree(live / task, copy, ignore=shutil.ignore_patterns("node_modules"))
+                roots = artifact.create(self.run_dir, f"trial-{task}", copy)
+                support.link_workspace_packages(roots.repo)
                 roots.mark_stopped()
                 verdict = verifier.run(spec, roots.hidden_copy(spec.hidden_layer), self.run_dir)
                 self.assertEqual((verdict.outcome, verdict.exit_code), ("fail", 1))

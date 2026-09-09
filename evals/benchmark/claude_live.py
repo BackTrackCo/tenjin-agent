@@ -440,7 +440,12 @@ def inject_cases(roots: artifact.TrialRoots, task: Mapping[str, Any]) -> Path | 
     target = (roots.repo / package if package else roots.repo) / SETUP_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     payload = {str(task["id"]): json.loads(cases.read_text(encoding="utf-8"))}
-    target.write_text("// Written by the benchmark runner at launch; the test reads it through globalThis.\n" f"globalThis.__bench1Cases = {json.dumps(payload)};\n", encoding="utf-8")
+    # `ensure_ascii=False`, because an escape here would be a leak. A task whose
+    # expected value differs from the natural one by an invisible character
+    # (`ambient`) hides that character in exactly the way its failure diff does:
+    # escaped, the setup file would spell out the answer the run is meant to
+    # cost. Every ASCII expectation is written byte for byte as it was before.
+    target.write_text("// Written by the benchmark runner at launch; the test reads it through globalThis.\n" f"globalThis.__bench1Cases = {json.dumps(payload, ensure_ascii=False)};\n", encoding="utf-8")
     return target
 
 

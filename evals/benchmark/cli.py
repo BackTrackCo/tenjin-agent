@@ -67,6 +67,7 @@ KEYS_SMOKE_MANIFEST = FIXTURES / "live" / "keys-smoke-manifest.json"
 REAL_MANIFEST = FIXTURES / "live" / "real-manifest.json"
 LOCAL_ARMS_MANIFEST = FIXTURES / "live" / "local-arms-manifest.json"
 CANARY_MANIFEST = FIXTURES / "live" / "canary-manifest.json"
+HIGH_DISCOVERY_MANIFEST = FIXTURES / "live" / "high-discovery-manifest.json"
 SLICE_MANIFESTS = {"recursive": FIXTURES / "live" / "recursive-manifest.json"}
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job

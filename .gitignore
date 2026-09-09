@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# One exception, and it is the whole of a benchmark task: `shadow` hides the
+# fact that its consumers import a package's committed build output, so that
+# artifact is a fixture file rather than a build product. It is covered by the
+# task's `fixture_hash`, which a run refuses to start without.
+!evals/benchmark/fixtures/live/shadow/packages/range/dist/
 *.log
 *.tgz
 .eslintcache

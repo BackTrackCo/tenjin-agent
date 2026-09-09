@@ -397,6 +397,21 @@ class HooksArmTest(LiveCase):
         self.assertIn("setupFiles: ['./.bench1/cases.setup.mjs']", (fixture / "vitest.config.mjs").read_text(encoding="utf-8"))
         self.assertIsNone(claude_live.inject_cases(request.roots, {"id": "answer-file"}))
 
+    def test_an_invisible_expected_value_reaches_the_setup_file_as_the_character_rather_than_an_escape(self) -> None:
+        """`ambient` hides one byte, and an escaped setup file would spell out the answer the run is meant to cost."""
+        roots = artifact.create(self.run_dir, "cases-ambient", cli.FIXTURES / "live" / "ambient")
+        target = claude_live.inject_cases(roots, {"id": "ambient"})
+        assert target is not None
+        setup = target.read_text(encoding="utf-8")
+        self.assertIn("\u00a0", setup)
+        self.assertNotIn("\\u00a0", setup)
+        # And the ASCII expectations every other task holds are written exactly as before.
+        actor_roots = artifact.create(self.run_dir, "cases-actor", cli.FIXTURES / "live" / "actor")
+        actor_target = claude_live.inject_cases(actor_roots, {"id": "actor"})
+        assert actor_target is not None
+        actor = json.loads((verifier.HIDDEN / "actor" / "cases.json").read_text(encoding="utf-8"))
+        self.assertIn(json.dumps({"actor": actor}), actor_target.read_text(encoding="utf-8"))
+
     def test_an_overlay_is_bounded_to_the_repository_and_the_data_dir_placeholder(self) -> None:
         for name, overlay in (("absolute", {"/etc/x": "a"}), ("escape", {"../x": "a"}), ("empty", {}), ("foreign placeholder", {"a.mjs": "{daemon_token}"}), ("not text", {"a.mjs": 1})):
             with self.subTest(name), self.assertRaises(LiveExecutorError):
@@ -501,9 +516,63 @@ class HooksArmTest(LiveCase):
         self.assertEqual(manifest.tasks, [task for task in core.tasks if task["transfer_distance"] == "same_task"])
         self.assertEqual(manifest.pins, core.pins)
 
+    HIGH_DISCOVERY = {
+        "shadow": ("stale-build-artifact", "packages/range/src/range.mjs"),
+        "ambient": ("invisible-whitespace-mismatch", "src/price.mjs"),
+    }
+    # What each new lesson says, which its prompt may not.
+    HIGH_DISCOVERY_PHRASES = ("dist", "built", "build", "artifact", "rebuild", "code point", "no-break", "U+00A0", "Intl", "separator", "locale", "whitespace", "invisible")
+
+    def test_the_high_discovery_manifest_is_the_two_task_pilot_with_the_caps_raised(self) -> None:
+        """The pilot of `tenjin-notes` plans/2026-09-10: two shapes designed for round trips, on their own manifest."""
+        manifest = manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST)
+        canary = manifest_module.load(cli.CANARY_MANIFEST)
+        trials = schedule.expand(manifest)
+        self.assertEqual((len(trials), manifest.data["benchmark_version"]), (12, "bench2-high-discovery-1"))
+        schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
+        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded"])
+        # The arms are the canary's, unedited: the treatment is the same and the tasks are what changed.
+        self.assertEqual(manifest.arms, canary.arms)
+        self.assertEqual([task["id"] for task in manifest.tasks], list(self.HIGH_DISCOVERY))
+        # Only the caps differ from the canary's pins, and each is raised. A
+        # capped attempt is not rejected by this harness, it is truncated, and
+        # it is the baseline arm that does the extra work, so a ceiling sized
+        # for 7.5 requests would censor the quantity these tasks exist to move.
+        raised = {"wall_clock_s": 1500, "turn_budget": 80, "max_budget_usd": 2.50}
+        self.assertEqual(manifest.pins, {**canary.pins, **raised})
+        for key, value in raised.items():
+            self.assertGreater(value, canary.pins[key])
+        for task in manifest.tasks:
+            family, source = self.HIGH_DISCOVERY[task["id"]]
+            with self.subTest(task["id"]):
+                self.assertEqual((task["family"], task["transfer_distance"]), (family, "same_task"))
+                self.assertEqual(verifier.TASK_SOURCES[task["id"]], source)
+                fixture = manifest.fixture_path(task)
+                claude_live.refuse_project_settings(fixture)
+                spec = verifier.lookup(task["verifier"])
+                self.assertTrue((spec.hidden_layer / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs").is_file())
+                self.assertFalse((fixture / verifier.HIDDEN_TESTS).exists())
+                support.assert_vitest_fixture(self, fixture, task["id"], trap=False)
+                for phrase in self.LESSON_PHRASES + self.HIGH_DISCOVERY_PHRASES:
+                    self.assertNotIn(phrase.lower(), task["prompt"].lower(), (task["id"], phrase))
+                # One lesson each, the mechanism, and no `<task>-fix` beside it:
+                # what each fixture still gets wrong lives only in the injected
+                # cases, so a fix lesson would be the answer rather than the way in.
+                self.assertEqual([lesson.id for lesson in tenjin_arm.lessons_for(task)], [family])
+                self.assertIsNone(tenjin_arm.lesson_named(f"{task['id']}-fix"))
+
+    def test_the_pilot_tasks_are_additions_and_the_control_corpus_is_untouched(self) -> None:
+        """The four convention tasks stay: without the low-discovery end of the range a ratio cannot be read against cost."""
+        core = manifest_module.load(cli.LOCAL_ARMS_MANIFEST)
+        self.assertEqual([task["id"] for task in core.tasks], list(self.BENCH2))
+        pilot = {task["id"] for task in manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST).tasks}
+        self.assertEqual(pilot & set(self.BENCH2), set())
+        # Its own manifest, so its own environment hash: `pins` differ, and records from the two never pool.
+        self.assertNotEqual(manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST).pins, core.pins)
+
     def test_every_real_task_manifest_resets_the_bench_corpus_and_names_no_other_shelf(self) -> None:
         """The one knob is `--tenjin-source`; this is what stops a manifest drifting off the bench shelf."""
-        for path in (cli.REAL_MANIFEST, cli.LOCAL_ARMS_MANIFEST, cli.CANARY_MANIFEST, *cli.SLICE_MANIFESTS.values()):
+        for path in (cli.REAL_MANIFEST, cli.LOCAL_ARMS_MANIFEST, cli.CANARY_MANIFEST, cli.HIGH_DISCOVERY_MANIFEST, *cli.SLICE_MANIFESTS.values()):
             with self.subTest(path.name):
                 corpus = manifest_module.load(path).corpus
                 self.assertIsNotNone(corpus, f"{path.name} names no corpus, so a run would measure whatever else is on the shelf")

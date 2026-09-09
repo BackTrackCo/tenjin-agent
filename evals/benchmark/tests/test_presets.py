@@ -23,6 +23,7 @@ MANIFESTS = (
     cli.REAL_MANIFEST,
     cli.LOCAL_ARMS_MANIFEST,
     cli.CANARY_MANIFEST,
+    cli.HIGH_DISCOVERY_MANIFEST,
     *cli.SLICE_MANIFESTS.values(),
 )
 # The digest of the hook block the manifests inlined before it became a preset.

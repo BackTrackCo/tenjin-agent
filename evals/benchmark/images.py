@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import FIXTURES, PACKAGE_ROOT, REPO_ROOT, sha256_file, sha256_json
+from .verifier import HIDDEN
 
 DOCKER = "docker"
 DOCKER_DIR = PACKAGE_ROOT / "docker"
@@ -71,6 +72,14 @@ LABEL = "bench2."
 TAG_LENGTH = 12
 NODE_MODULES = "node_modules"
 FIXTURE_PATH = "/opt/fixture"
+# A task whose difficulty rests on a runtime behaviour rather than on its own
+# files states that behaviour as a check in its hidden layer, and the build
+# runs it inside the image it just built. Without it a base bump that moved
+# the behaviour would turn a hard task into a trivial one and the corpus would
+# go on reporting the old number. The layer is mounted read-only and the
+# check is code-owned, so a fixture cannot supply one.
+QUIRK_CHECK = "image-check.mjs"
+CHECK_PATH = "/opt/bench2/check"
 
 # The checkout the image's CLI is built from, its package manifest, the entry
 # point a build must have produced, and the directory the base build context
@@ -431,11 +440,46 @@ def build_fixture(
     image = inspect(tag, docker)
     if image is None:
         raise ImageError("fixture_build_failed", f"{tag} is not present after its build")
+    quirk_check(task_id, tag, docker)
     return image
 
 
+def quirk_check(task_id: str, tag: str, docker: Docker | None = None) -> str | None:
+    """Run the task's hidden image check inside its image, or None when it declares none.
+
+    The check reads the task's own frozen cases and asserts the runtime still
+    produces them, so its failure names the fact that went rather than a test
+    that broke. `--network none`: a check that reached anything would be
+    measuring something other than this image.
+    """
+    layer = HIDDEN / task_id
+    if not (layer / QUIRK_CHECK).is_file():
+        return None
+    docker = _docker(docker)
+    completed = docker(
+        ["run", "--rm", "--network", "none", "--entrypoint", "node", "--volume", f"{layer}:{CHECK_PATH}:ro", tag, f"{CHECK_PATH}/{QUIRK_CHECK}"],
+        DOCKER_TIMEOUT_S,
+    )
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()[-400:]
+        raise ImageError("image_quirk_absent", f"{task_id} declares a runtime quirk this image does not have: {detail}")
+    return completed.stdout.strip()[-200:]
+
+
 def export_node_modules(image: Image, destination: Path, docker: Docker | None = None) -> int:
-    """Copy the image's installed tree into the trial's repository copy. The container it needs is removed on every path."""
+    """Copy the image's installed tree into the trial's repository copy. The container it needs is removed on every path.
+
+    Staged from the fixture root rather than taken out of `node_modules`
+    directly. A workspace fixture's installed tree links out of `node_modules`
+    into the package it links (`@fixture/range -> ../../packages/range`), and
+    `docker cp` refuses to write a link that leaves the directory being copied:
+    measured 2026-09-09 as `invalid symlink`, with the whole export failing.
+    Staged from `/opt/fixture` that link resolves inside the copy and is
+    written, and moving `node_modules` on alone leaves the trial's own fixture
+    files untouched. The staging directory is inside the repository copy, so
+    the move is a rename rather than a second traversal of 780 files, and it is
+    gone before the trial's roots are handed to anything.
+    """
     docker = _docker(docker)
     destination.mkdir(parents=True, exist_ok=True)
     created = docker(["create", image.tag, "/bin/true"], DOCKER_TIMEOUT_S)
@@ -443,9 +487,15 @@ def export_node_modules(image: Image, destination: Path, docker: Docker | None =
         raise ImageError("export_failed", f"`docker create {image.tag}` exited {created.returncode}: {created.stderr.strip()[-200:]}")
     container = created.stdout.strip().splitlines()[-1].strip()
     try:
-        copied = docker(["cp", f"{container}:{FIXTURE_PATH}/{NODE_MODULES}/.", str(destination)], EXPORT_TIMEOUT_S)
-        if copied.returncode != 0:
-            raise ImageError("export_failed", f"`docker cp` out of {image.tag} exited {copied.returncode}: {copied.stderr.strip()[-200:]}")
+        with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
+            copied = docker(["cp", f"{container}:{FIXTURE_PATH}/.", staging], EXPORT_TIMEOUT_S)
+            if copied.returncode != 0:
+                raise ImageError("export_failed", f"`docker cp` out of {image.tag} exited {copied.returncode}: {copied.stderr.strip()[-200:]}")
+            staged = Path(staging) / NODE_MODULES
+            if not staged.is_dir():
+                raise ImageError("export_failed", f"{image.tag} carries no {FIXTURE_PATH}/{NODE_MODULES} to export")
+            for entry in staged.iterdir():
+                shutil.move(str(entry), str(destination / entry.name))
     finally:
         docker(["rm", "--force", container], DOCKER_TIMEOUT_S)
     return sum(1 for path in destination.rglob("*") if path.is_file())

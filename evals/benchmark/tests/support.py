@@ -585,6 +585,26 @@ BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
 
 
+def link_workspace_packages(repo: Path) -> list[str]:
+    """The workspace links `pnpm install` would make, for a check that runs without the image.
+
+    A fixture commits no `node_modules` and the installed tree comes out of the
+    task's image, but a workspace fixture's hidden test resolves its package by
+    specifier. This is the one link that resolution goes through and none of
+    the dependency tree, so an offline case can judge the fixture.
+    """
+    made = []
+    for manifest in sorted(repo.glob("packages/*/package.json")):
+        name = json.loads(manifest.read_text(encoding="utf-8")).get("name")
+        if not name:
+            continue
+        link = repo / "node_modules" / name
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(os.path.relpath(manifest.parent, link.parent))
+        made.append(str(name))
+    return made
+
+
 def assert_vitest_fixture(case: Any, fixture: Path, task: str, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
     """A live task fixture is a real Vitest project that commits none of its toolchain.
 

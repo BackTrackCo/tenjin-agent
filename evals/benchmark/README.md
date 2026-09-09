@@ -476,6 +476,68 @@ the plan's near/far split waits for Bench-3's history-derived pairs. `lessons/` 
 `actor-fix-keyonly` for the foundation's keys smoke. The new fixtures carry no trap, guard, or
 shards: their one real failure is the family's.
 
+**The high-discovery pilot** (`high-discovery-manifest.json`, `bench2-high-discovery-1`): two
+tasks added to the corpus, replacing nothing. Plan: `tenjin-notes`
+`plans/2026-09-10-high-discovery-tasks.md`. The 2026-09-09 CI run measured `off` at 7.50 model
+requests an attempt and `tenjin_seeded` at 6.83, a `request_ratio` of 0.927 against a headline of
+0.969, with `new_token_ratio` 1.471: the seeded arm sent 47% more genuinely new tokens and still
+came out ahead, because it went back to the model fewer times. A lesson pays when it removes a
+round trip, and a corpus whose worst task is four commands has almost none to remove. These two
+put round trips in.
+
+| Task      | Family                          | What is hidden                                                                                                                    | The only green path                                                    |
+| --------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| `shadow`  | `stale-build-artifact`          | that the test imports `packages/range`'s committed `dist/range.js`, so an edit to its `src` is silently a no-op                   | edit the source, `node scripts/build.mjs`, run the one file            |
+| `ambient` | `invisible-whitespace-mismatch` | one byte: the expected values are `Intl` output whose group separator is U+00A0, where a hand-written implementation types U+0020 | emit U+00A0, through `Intl` or as an explicit escape, run the one file |
+
+Both fail by assertion diff and never by a thrown error, which is the rule these shapes are built
+on: a stack frame names the file that actually ran and would hand over the hidden fact at hop one.
+Measured on the pinned Vitest 3.2.4 inside the image. `shadow` prints `expected '7-7' to be '7'`
+with a code frame naming only `tests/shadow.test.mjs` and no path to the module that resolved, and
+an edit to `packages/range/src/range.mjs` changes nothing the next run prints but its
+milliseconds. `ambient` prints `expected '12 345,67' to be '12 345,67'`, two sides that are
+byte-identical on screen; the printer escapes U+202F and U+FEFF and prints U+00A0, U+2009 and
+U+200B raw, and of the raw ones U+00A0 is the only one that is a property of the runtime rather
+than a character planted in a file, which one `cat -A` would find.
+
+Two rules beyond the corpus's own three. **No task's difficulty may live in a behaviour that plain
+`node` and Vitest disagree about**, because `verifier.py` runs the hidden test under `node` while
+the fixture runs under Vitest: the two resolve conditional `imports` maps differently, and a design
+built on one would judge an agent wrong for something it could not observe. `shadow` hides behind a
+committed artifact rather than a resolver for that reason, and both runners were measured resolving
+`@fixture/range` to the same file. **The lesson names the mechanism, never the patch**: each of
+these tasks seeds one lesson, its family's, with no `<task>-fix` beside it, because what the
+fixture still gets wrong lives only in the injected cases and a fix lesson there would be the
+answer rather than the way in.
+
+`ambient` needs an honesty device the others do not, because its whole difficulty is one byte of
+one library's output. `hidden/ambient/image-check.mjs` asserts against the image that `Intl` still
+renders every frozen case and that no case carries U+0020, and `images build` refuses an image that
+fails it (`image_quirk_absent`). ICU 72 moved several locales to U+202F and on this runtime
+`fr-FR` already groups with U+202F, so this is a dated fact a base bump could delete in silence.
+The injected setup file writes an expected value as the character rather than as an escape
+(`claude_live.inject_cases`, `ensure_ascii=False`), so the anti-hardcoding device stays exactly
+what it was for every ASCII task without becoming the leak for this one; reading it is still
+counted by `discovery.setup_read`.
+
+The caps are raised, and that is a correctness decision rather than a performance one. This harness
+does not reject a capped attempt: it keeps the spend and scores the outcome, so a ceiling throws
+away no correct work. What it does instead is truncate the token count of the arm doing the extra
+work, which is the baseline, and push the measured ratio toward 1. Against tasks designed for 12 to
+17 requests where the corpus measures 7.50, `wall_clock_s` is 1500, `turn_budget` 80 and
+`max_budget_usd` 2.50; the code ceiling is 25.0, so the last is a manifest choice. Pre-registered
+beside them: **an `off` attempt that ends `capped` takes its task's cell out of the headline, and
+the caps are raised before the run is repeated**, which turns a silent censoring into a loud
+refusal. `environment_hash` is the sha256 of `pins`, so this manifest is a different environment by
+construction and its records never pool with the eight-task runs; a comparison across the two is a
+comparison across environments and has to be labelled as one.
+
+The four `test-harness-convention` tasks stay, and their role becomes control rather than corpus:
+they are the low-discovery end of the range at three to five commands, and without them a result on
+these two cannot be told apart from a change in the harness, the model or the caps. A task enters
+this corpus only once its `off` arm measures at least 13 requests an attempt over three dry-run
+attempts; below that it is not a high-discovery task, whatever its design says.
+
 **The slices.** The scale slice (N distractor records beside the real one) and the stale slice
 (an expired lesson the local leg must refuse) were built on the local seed and retired with it;
 they return when the product holds a local record a seed can write and an expiry it can gate
@@ -539,15 +601,17 @@ that publishes, and the three bundles `tenjin daemon start` writes. `live-run` r
 whose shelf is not the one the manifest's corpus serves, so the old mistake is now a stop rather
 than a number.
 
-| Manifest                   | Version                | Shape                                                                                     | Attempts        |
-| -------------------------- | ---------------------- | ----------------------------------------------------------------------------------------- | --------------- |
-| `canary-manifest.json`     | `bench2-canary-1`      | the four same-task transfers, one per lesson family, `off` and `tenjin_seeded`, 3 repeats | 24              |
-| `local-arms-manifest.json` | `bench2-core-suite-2`  | the core suite: 8 tasks x 5 arms x 3 repeats                                              | 120 + producers |
-| `real-manifest.json`       | `bench2-local-pilot-3` | the Phase 1 pilot: 8 tasks x (`off`, `tenjin_natural`) x 3                                | 48 + producers  |
-| `recursive-manifest.json`  | `bench2-recursive-5`   | the recursive slice: one delegating task across four arms                                 | 12 + producers  |
+| Manifest                       | Version                   | Shape                                                                                     | Attempts        |
+| ------------------------------ | ------------------------- | ----------------------------------------------------------------------------------------- | --------------- |
+| `canary-manifest.json`         | `bench2-canary-1`         | the four same-task transfers, one per lesson family, `off` and `tenjin_seeded`, 3 repeats | 24              |
+| `local-arms-manifest.json`     | `bench2-core-suite-2`     | the core suite: 8 tasks x 5 arms x 3 repeats                                              | 120 + producers |
+| `real-manifest.json`           | `bench2-local-pilot-3`    | the Phase 1 pilot: 8 tasks x (`off`, `tenjin_natural`) x 3                                | 48 + producers  |
+| `recursive-manifest.json`      | `bench2-recursive-5`      | the recursive slice: one delegating task across four arms                                 | 12 + producers  |
+| `high-discovery-manifest.json` | `bench2-high-discovery-1` | the pilot: `shadow` and `ambient`, `off` and `tenjin_seeded`, 3 repeats, caps raised      | 12              |
 
-`max_budget_usd` stays 0.75 an attempt, producer attempts included. At the 0.237 USD an attempt
-the pilot measured, the canary is about 5.69 USD a run and the core suite about four times that.
+`max_budget_usd` stays 0.75 an attempt on the eight-task manifests, producer attempts included.
+At the 0.237 USD an attempt the pilot measured, the canary is about 5.69 USD a run and the core
+suite about four times that. The high-discovery manifest is the one exception and says why above.
 
 ```bash
 # the nightly lane's manifest, by hand
@@ -701,6 +765,22 @@ the same reason. The environment hash does NOT cover any of this: it is the sha2
 manifest's pins alone, so `isolation.image` is where a reader resolves the build back to source.
 There is no published-CLI pin left in the package; `TENJIN_VERSION` is gone rather than kept as
 a pin nothing reads.
+
+**A task may declare a runtime quirk, and the build proves the image still has it.** A fixture's
+own bytes are covered by `fixture_hash`; a behaviour of the runtime under it is not, so a task
+whose difficulty rests on one (`ambient`) states it as `hidden/<task>/image-check.mjs`, and
+`images.quirk_check` runs that file inside the image it just built, read-only and off the network.
+A check that fails is `image_quirk_absent` and the build stops there, which is the only place a
+base bump that turned a hard task into a trivial one would be visible. The check is code-owned and
+lives in the hidden layer, so a fixture cannot supply one and an agent never sees it.
+
+**The installed tree is staged from the fixture root, not lifted out of `node_modules`.** A
+workspace fixture's tree links out of `node_modules` into the package it links (`@fixture/range ->
+../../packages/range`), and `docker cp` refuses to write a link that leaves the directory it is
+copying: measured 2026-09-09 as `invalid symlink`, with the whole export failing. Copying
+`/opt/fixture` instead resolves that link inside the copy, and only `node_modules` is moved on, so
+a trial's fixture files stay the ones the runner copied. The staging directory sits inside the
+repository copy, so the move is a rename rather than a second traversal of 780 files.
 
 **A trial runs inside the container.** The trial's roots are built on the host as before and
 bind-mounted at the SAME absolute paths: the repository copy, `HOME`, the profile
@@ -872,6 +952,9 @@ an arm that cannot expose that spend declares `auxiliary_usage: unexposed` rathe
 estimated from text length. `cli.py cases` exports the labelled search-intent records the
 teammate's plan asks for (`tenjin-notes` `loop-redesign/14-search-intent.md`) after settlement,
 masked and post-floor, and changes no record.
+
+A task whose difficulty is a behaviour of the runtime rather than of its own files adds one more
+file, `hidden/<task>/image-check.mjs`, which the fixture build runs inside the image and fails on.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
