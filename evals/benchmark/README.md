@@ -690,7 +690,7 @@ containers in sequence on one data dir. The container name goes into the run's p
 so `cli.py cleanup`, the wall-clock cap and an interrupt all stop and remove it.
 
 **Network.** Per run the runner creates one Docker network with `--internal` (no route out and
-no DNS for an outside name: a lookup fails with `EAI_AGAIN`, proven on this machine's colima
+no DNS for an outside name: resolution fails with `EAI_AGAIN`, proven on this machine's colima
 29.5.2) and one egress proxy container on both that network and the default bridge: a Python
 `CONNECT` proxy from `python:3.12-slim` pinned by index digest, holding the run's allowlist and
 logging every request with its verdict to `<run>/proxy/requests.jsonl`. The run waits until the
