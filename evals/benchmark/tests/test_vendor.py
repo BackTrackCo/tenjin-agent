@@ -235,23 +235,6 @@ class SeamTest(VendorCase):
             with self.assertRaises(ManifestError):
                 manifest_module.validate({**data, "tasks": [{**task, "fixture_hash": manifest_module.fixture_hash(self.fixture)}]}, self.base)
 
-    def test_the_live_manifests_name_the_one_archive_and_its_record_agrees_with_the_fixture(self) -> None:
-        manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
-        ids = {task["vendor"] for task in manifest.tasks}
-        self.assertEqual(len(ids), 1)
-        built = manifest.vendor_for(manifest.tasks[0])
-        assert built is not None
-        self.assertEqual(built.archive.parent.name, vendor.DIR)
-        self.assertLess(built.archive.stat().st_size, 10 << 20)
-        self.assertEqual(built.record["platform"], "darwin-arm64")
-        self.assertEqual(built.record["node_abi"], "137")
-        for task in manifest.tasks:
-            fixture = manifest.fixture_path(task)
-            self.assertEqual(built.record["lock_sha256"], "sha256:" + vendor.sha256_file(fixture / "pnpm-lock.yaml"))
-            self.assertEqual([path.name for path in (fixture / "node_modules").iterdir()], [".bin"])
-        smoke = manifest_module.load(cli.SMOKE_MANIFEST)
-        self.assertIsNone(smoke.vendor_for(smoke.tasks[0]))
-
 
 if __name__ == "__main__":
     unittest.main()

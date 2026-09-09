@@ -41,8 +41,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "vendor": "vitest-3.2.4-node24-darwin-arm64",
-      "fixture_hash": "sha256:d19a2b57fa7f2ffa1bf3da4629a5d1835cdcbcf3d209404e4c121dd242a94118",
+      "fixture_hash": "sha256:bbd562347f5f7ba2ddebe8cf84013f746dd6da92549fad6ddc16226e3eeed67f",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }

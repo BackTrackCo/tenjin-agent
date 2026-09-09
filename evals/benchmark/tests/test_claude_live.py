@@ -342,9 +342,7 @@ class HooksArmTest(LiveCase):
         for task in manifest.tasks:
             claude_live.refuse_project_settings(manifest.fixture_path(task))
             self.assertEqual(verifier.lookup(task["verifier"]).hidden_layer, verifier.HIDDEN / task["id"])
-            vendored = manifest.vendor_for(task)
-            assert vendored is not None
-            support.assert_vitest_fixture(self, manifest.fixture_path(task), task["id"], vendored)
+            support.assert_vitest_fixture(self, manifest.fixture_path(task), task["id"])
             # The prompt states the task and never the lesson.
             for phrase in ("pnpm test --", "pnpm exec", "vitest", "wrong set"):
                 self.assertNotIn(phrase, task["prompt"])
@@ -424,10 +422,7 @@ class HooksArmTest(LiveCase):
             self.assertTrue((spec.hidden_layer / verifier.HIDDEN_TESTS / f"{task['id']}.test.mjs").is_file())
             self.assertFalse((fixture / verifier.HIDDEN_TESTS).exists())
             self.assertEqual("--package" in spec.argv(fixture), bool(package_dir))
-            vendored = manifest.vendor_for(task)
-            assert vendored is not None
-            self.assertEqual(vendored.id, "vitest-3.2.4-node24-darwin-arm64")
-            support.assert_vitest_fixture(self, fixture, task["id"], vendored, trap=trap, package_dir=package_dir, test_ext=ext)
+            support.assert_vitest_fixture(self, fixture, task["id"], trap=trap, package_dir=package_dir, test_ext=ext)
             # The prompt states the goal and never the lesson.
             for phrase in self.LESSON_PHRASES:
                 self.assertNotIn(phrase.lower(), task["prompt"].lower(), (task["id"], phrase))

@@ -496,23 +496,22 @@ BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
 PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
 
 
-def assert_vitest_fixture(case: Any, fixture: Path, task: str, vendored: vendor.Vendor, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
-    """A live task fixture is a real, frozen Vitest project whose only green path is the lesson.
+def assert_vitest_fixture(case: Any, fixture: Path, task: str, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
+    """A live task fixture is a real Vitest project that commits none of its toolchain.
 
-    Its `node_modules` is derived: the committed tree holds the shim alone, and
-    the pinned vitest is the one inside the vendored archive the task names.
-    `trap` is the Bench-0 family's barrier (the wrapper script, the pnpm guard,
-    the failing shards); a Bench-2 family carries its own real failure instead
-    and no barrier. `package_dir` is the workspace package the tests live in.
+    Its dependency tree is the image's: `pnpm install` ran there at build time,
+    so the fixture states the runner it pins and nothing about how it is
+    installed. No lockfile, no `.npmrc`, no `node_modules`, no vendored
+    archive. `trap` is the Bench-0 family's barrier (the wrapper script, the
+    pnpm guard, the failing shards); a Bench-2 family carries its own real
+    failure instead and no barrier. `package_dir` is the workspace package the
+    tests live in.
     """
     root = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
     pinned = root["devDependencies"]["vitest"]
     case.assertRegex(pinned, EXACT_VERSION)
-    installed = json.loads(vendor.read_member(vendored, "vitest/package.json").decode("utf-8"))
-    case.assertEqual((installed["version"], vendored.record["vitest"]), (pinned, pinned))
-    case.assertTrue((fixture / "pnpm-lock.yaml").is_file())
-    case.assertEqual(vendored.record["lock_sha256"], "sha256:" + sha256_file(fixture / "pnpm-lock.yaml"))
-    case.assertEqual([path.relative_to(fixture).as_posix() for path in (fixture / "node_modules").rglob("*") if path.is_file()], ["node_modules/.bin/vitest"])
+    for absent in ("pnpm-lock.yaml", ".npmrc", "node_modules"):
+        case.assertFalse((fixture / absent).exists(), f"{task} commits {absent}, which the image owns")
     project = fixture / package_dir if package_dir else fixture
     package = json.loads((project / "package.json").read_text(encoding="utf-8"))
     config = (project / "vitest.config.mjs").read_text(encoding="utf-8")
