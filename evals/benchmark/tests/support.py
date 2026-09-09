@@ -276,36 +276,54 @@ def reduction_record(
     reconciliation: str = "matched",
     deliveries: int = 0,
     manifest_hash: str = REDUCE_MANIFEST_HASH,
+    requests: int = 1,
+    preamble: int | None = None,
 ) -> dict[str, Any]:
     """A valid attempt record with exactly the token total a reducer case needs.
 
     The reducer cases are about arithmetic and weighting, so this builds the
     record directly rather than parsing a session; the parse path has its own
     cases in `test_claude_usage.py`.
+
+    `preamble` is the fixed text every request after the first replays: a pure
+    cache read, so each extra `requests` adds to the attempt's token total and
+    nothing to what the provider had to take in for the first time. That is
+    what the round-trip and new-token cases are about, and it needs the
+    categories exposed; left alone the record is one request that exposes none,
+    as a provider that hides them does.
     """
+    if requests > 1 and preamble is None:
+        raise ValueError("a record with more than one request needs the preamble each one after the first replays")
     trial = schedule.trial_id(manifest_hash, task_id, arm_id, repeat, position)
     session = f"fake-{trial}"
     lead = ["claude", session, ""]
     input_total = tokens * 2 // 3
-    usage = [
-        {
+    output_total = tokens - input_total
+    replays = 0 if preamble is None else (requests - 1) * preamble
+    if replays >= input_total:
+        raise ValueError("the replayed preamble is the whole attempt's input; give the first request something of its own")
+
+    def row(index: int, input_count: int, cached: int, output_count: int) -> dict[str, Any]:
+        return {
             "adapter": "claude",
             "adapter_version": "1",
             "trial_id": trial,
             "actor_key": lead,
-            "native_request_id": "req_1",
-            "input_total": input_total,
-            "uncached_input": None,
-            "cache_read": None,
-            "cache_write": None,
-            "output_total": tokens - input_total,
-            "reasoning_output_subset": reasoning,
+            "native_request_id": f"req_{index + 1}",
+            "input_total": input_count,
+            "uncached_input": None if preamble is None else input_count - cached,
+            "cache_read": None if preamble is None else cached,
+            "cache_write": None if preamble is None else 0,
+            "output_total": output_count,
+            "reasoning_output_subset": reasoning if index == 0 else (None if reasoning is None else 0),
             "provider_total": None,
             "native_request_cost": None,
             "completion_state": "complete" if outcome in ("pass", "fail") else "partial",
             "source_hash": "sha256:source",
         }
-    ]
+
+    usage = [row(0, input_total - replays, 0, output_total)]
+    usage += [row(index, preamble or 0, preamble or 0, 0) for index in range(1, requests)]
     fires = [
         {
             "fire_id": f"fire-{index}",

@@ -301,6 +301,44 @@ class ProjectionTest(unittest.TestCase):
         self.assertIn("headline on: 0.688", report.render(plumbing))
         self.assertIn("NOT headline eligible", report.render(plumbing).splitlines()[headline])
 
+    def test_every_ratio_is_printed_beside_what_it_decomposes_into(self) -> None:
+        """Round trips, unique ingestion, and the pass rate, under the headline and labelled apart from it."""
+        accepted = support.accept(
+            support.reduction_record("t1", "off", 0, 0, 108000, "pass", requests=8, preamble=9000),
+            support.reduction_record("t1", "on", 0, 1, 99000, "fail", requests=7, preamble=9000),
+        )
+        manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1}
+        reduction = reduce_module.reduce(accepted, [], baseline="off")
+        projected = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+        report.guard(projected)
+        lines = report.render(projected).splitlines()
+        headline = next(index for index, line in enumerate(lines) if line.startswith("  headline on: "))
+        rows = lines[headline : headline + 8]
+        requests = next(line for line in rows if report.REQUESTS_LABEL in line)
+        new_tokens = next(line for line in rows if report.NEW_TOKENS_LABEL in line)
+        delta = next(line for line in rows if report.PASS_DELTA_LABEL in line)
+        self.assertIn("7.00 versus    8.00, ratio 0.875", requests)
+        # The arm spent 9,000 fewer tokens and sent nothing new less: the whole
+        # gap is one request that replayed the preamble.
+        self.assertIn("45000.0 versus    45000.0, ratio 1.000", new_tokens)
+        self.assertIn("-1.000", delta)
+        # Each one says what it is, and none of them claims to be the headline.
+        for line in (requests, new_tokens, delta):
+            self.assertIn("decomposition" if line is not delta else "the other axis", line)
+            self.assertNotIn(report.HEADLINE_LABEL, line)
+
+    def test_a_hidden_category_prints_a_reason_where_the_new_token_ratio_would_be(self) -> None:
+        accepted = support.accept(
+            support.reduction_record("t1", "off", 0, 0, 10000, "pass"),
+            support.reduction_record("t1", "on", 0, 1, 8000, "pass"),
+        )
+        manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1}
+        reduction = reduce_module.reduce(accepted, [], baseline="off")
+        projected = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+        text = report.render(projected)
+        self.assertIn(report.NEW_TOKENS_LABEL + ":       none versus       none, ratio none (categories_unexposed)", text)
+        self.assertIn(report.REQUESTS_LABEL + ":    1.00 versus    1.00, ratio 1.000", text)
+
     def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(self) -> None:
         accepted = {}
         for trial_id, record in self.accepted.items():

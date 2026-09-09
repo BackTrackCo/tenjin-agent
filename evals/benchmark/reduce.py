@@ -7,6 +7,13 @@ and named rather than scored. Every task weighs the same regardless of repeats
 or token size, which is why every arm figure is a mean over task cells and
 never a sum over attempts.
 
+Every ratio is stated beside what it decomposes into: requests per attempt,
+new tokens per attempt (uncached input, cache writes, and output), and their
+ratios. A fixed preamble is replayed on every request, so a ratio of token
+totals moves with the number of round trips; the new-token ratio is the same
+arms over ingestion nobody had paid for before, and only the two together say
+whether an arm sent less or merely sent fewer times.
+
 Pass rate and token ratio are separate axes. A cheaper arm that solves less is
 not a better arm, so nothing here folds the two into one number.
 `tokens_per_verified_resolution` reports null with a reason instead of
@@ -118,6 +125,21 @@ def attempt_phase_tokens(records: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def new_tokens(per_attempt: list[dict[str, Any]], auxiliary: int) -> int | None:
+    """Ingestion nobody had already paid for: uncached input, cache writes, and output.
+
+    A cache read is the same bytes replayed on the next request of the same
+    attempt, so it belongs in the token total and not here. What is left is the
+    unique text an arm made the provider take in and produce, which is the
+    figure a token ratio is often read as. Null when a record hid a category,
+    because a zero there would read as an observation. An auxiliary receipt
+    exposes no cache split, so all of it counts as new.
+    """
+    if any(summed["uncached_input"] is None or summed["cache_write"] is None for summed in per_attempt):
+        return None
+    return sum(summed["uncached_input"] + summed["cache_write"] + summed["output_total"] for summed in per_attempt) + auxiliary
+
+
 def child_usage(record: dict[str, Any]) -> tuple[int, int]:
     """Tokens and requests of the attempt's descendants (every actor but the lead), for the recursive slice's per-actor reading."""
     tokens = requests = 0
@@ -172,6 +194,8 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     children = [child_usage(record) for record in records]
     locals_ = [local_legs(record) for record in records]
     overhead = sum(overhead_tokens(record) for record in records)
+    requests = sum(summed["requests"] for summed in per_attempt)
+    new = new_tokens(per_attempt, auxiliary)
     return {
         "attempts": attempts,
         "passes": passes,
@@ -179,7 +203,15 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
         "phase_tokens": phase_tokens(records),
         "producers": producers_of(records),
         "capture_per_producer": {phase: _round(value) for phase, value in per_producer(records).items()},
-        "requests": sum(summed["requests"] for summed in per_attempt),
+        "requests": requests,
+        # Round trips and unique ingestion, beside the total the headline uses.
+        # A ratio of totals moves with the number of requests, because a fixed
+        # preamble is replayed on every one of them; these two say how much of
+        # it was round trips and how much was text nobody had sent before.
+        "requests_per_attempt": _round(requests / attempts),
+        "new_tokens": new,
+        "new_tokens_per_attempt": None if new is None else _round(new / attempts),
+        "new_tokens_reason": None if new is not None else "categories_unexposed",
         "tokens": tokens,
         "tokens_per_attempt": _round(tokens / attempts),
         # The same attempts with the product's own turn-end nudge and the CLI
@@ -277,6 +309,22 @@ def paired_bootstrap(
     }
 
 
+def per_task_ratio(arm: dict[str, Any], base: dict[str, Any], shared: list[str], field: str) -> tuple[float | None, str | None]:
+    """The task-equal mean of one per-attempt field's ratio, or null with the reason it has none."""
+    if not shared:
+        return None, "no_shared_task"
+    ratios: list[float] = []
+    for task_id in shared:
+        divisor = base["tasks"][task_id][field]
+        numerator = arm["tasks"][task_id][field]
+        if divisor is None or numerator is None:
+            return None, "categories_unexposed"
+        if not divisor:
+            return None, "baseline_zero"
+        ratios.append(numerator / divisor)
+    return _mean(ratios), None
+
+
 def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, Any]:
     shared = sorted(set(arm["tasks"]) & set(base["tasks"]))
     ratios: list[float] = []
@@ -333,10 +381,20 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         if arm["pass_rate"] is None or base["pass_rate"] is None
         else _round(arm["pass_rate"] - base["pass_rate"])
     )
+    # What the token ratio decomposes into. A removed request takes the fixed
+    # preamble with it, so the ratio above tracks round trips; the new-token
+    # ratio is the same arms over unique ingestion alone, and the two together
+    # say whether an arm sent less or merely sent fewer times.
+    request_ratio, request_reason = per_task_ratio(arm, base, shared, "requests_per_attempt")
+    new_token_ratio, new_token_reason = per_task_ratio(arm, base, shared, "new_tokens_per_attempt")
     return {
         "tasks": len(shared),
         "token_ratio": ratio,
         "token_ratio_reason": reason,
+        "request_ratio": request_ratio,
+        "request_ratio_reason": request_reason,
+        "new_token_ratio": new_token_ratio,
+        "new_token_ratio_reason": new_token_reason,
         "retrieval_only_token_ratio": _mean(retrieval),
         "retrieval_only_token_ratio_reason": retrieval_reason,
         "pass_rate_delta": pass_delta,
@@ -413,6 +471,11 @@ def reduce(
         arm["tokens"] = sum(task["tokens"] for task in tasks)
         arm["pass_rate"] = _mean([task["pass_rate"] for task in tasks])
         arm["tokens_per_attempt"] = _mean([task["tokens_per_attempt"] for task in tasks])
+        arm["requests_per_attempt"] = _mean([task["requests_per_attempt"] for task in tasks])
+        per_new = [task["new_tokens_per_attempt"] for task in tasks]
+        exposed = bool(per_new) and all(value is not None for value in per_new)
+        arm["new_tokens_per_attempt"] = _mean(per_new) if exposed else None  # type: ignore[arg-type]
+        arm["new_tokens_reason"] = None if exposed else "categories_unexposed"
         per_task = [task["tokens_per_verified_resolution"] for task in tasks]
         if not per_task or any(value is None for value in per_task):
             arm["tokens_per_verified_resolution"] = None

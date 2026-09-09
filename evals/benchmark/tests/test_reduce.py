@@ -272,6 +272,76 @@ class AccountingTest(unittest.TestCase):
         self.assertTrue(arm["headline_eligible"])
 
 
+class DecompositionTest(unittest.TestCase):
+    """What a token ratio is made of: round trips, unique ingestion, and the pass rate.
+
+    The arms here are the shape the 2026-09-09 four-arm run measured. Every
+    request replays a 9,000-token preamble, so the arm that makes one fewer
+    request spends 9,000 fewer tokens without sending one token less that the
+    provider had not already been given.
+    """
+
+    PREAMBLE = 9000
+
+    def setUp(self) -> None:
+        self.accepted = support.accept(
+            support.reduction_record("t1", "off", 0, 0, 108000, "pass", requests=8, preamble=self.PREAMBLE),
+            support.reduction_record("t1", "on", 0, 1, 99000, "pass", requests=7, preamble=self.PREAMBLE),
+        )
+        self.reduction = reduce_module.reduce(self.accepted, [], "off")
+
+    def test_requests_per_attempt_and_the_request_ratio_are_reported(self) -> None:
+        self.assertEqual(self.reduction["arms"]["off"]["requests_per_attempt"], 8)
+        self.assertEqual(self.reduction["arms"]["on"]["requests_per_attempt"], 7)
+        comparison = self.reduction["comparisons"]["on"]
+        self.assertEqual(comparison["request_ratio"], 0.875)
+        self.assertIsNone(comparison["request_ratio_reason"])
+
+    def test_new_tokens_count_uncached_input_cache_writes_and_output_only(self) -> None:
+        off, on = self.reduction["arms"]["off"], self.reduction["arms"]["on"]
+        # 108,000 tokens, of which 63,000 are the preamble replayed seven times.
+        self.assertEqual(off["tasks"]["t1"]["tokens_per_attempt"], 108000)
+        self.assertEqual(off["new_tokens_per_attempt"], 45000)
+        self.assertEqual(on["new_tokens_per_attempt"], 45000)
+        self.assertIsNone(off["new_tokens_reason"])
+
+    def test_the_token_ratio_here_is_entirely_the_removed_request(self) -> None:
+        comparison = self.reduction["comparisons"]["on"]
+        # The whole 9,000-token gap is one request's replayed preamble: the
+        # headline moves, and not one token of unique ingestion was saved.
+        self.assertEqual(comparison["token_ratio"], round(99000 / 108000, 12))
+        self.assertEqual(comparison["new_token_ratio"], 1.0)
+        self.assertIsNone(comparison["new_token_ratio_reason"])
+        self.assertEqual(comparison["pass_rate_delta"], 0.0)
+
+    def test_a_provider_that_hides_the_categories_gets_a_reason_and_not_a_zero(self) -> None:
+        accepted = support.accept(
+            support.reduction_record("t1", "off", 0, 0, 10000, "pass"),
+            support.reduction_record("t1", "on", 0, 1, 8000, "pass"),
+        )
+        reduction = reduce_module.reduce(accepted, [], "off")
+        arm = reduction["arms"]["on"]
+        self.assertIsNone(arm["tasks"]["t1"]["new_tokens"])
+        self.assertIsNone(arm["new_tokens_per_attempt"])
+        self.assertEqual(arm["new_tokens_reason"], "categories_unexposed")
+        comparison = reduction["comparisons"]["on"]
+        self.assertIsNone(comparison["new_token_ratio"])
+        self.assertEqual(comparison["new_token_ratio_reason"], "categories_unexposed")
+        # Round trips are counted whatever the provider exposes.
+        self.assertEqual(comparison["request_ratio"], 1.0)
+
+    def test_each_task_weighs_the_same_in_both_new_figures(self) -> None:
+        accepted = support.accept(
+            support.reduction_record("big", "on", 0, 0, 108000, "pass", requests=8, preamble=self.PREAMBLE),
+            support.reduction_record("big", "on", 1, 1, 108000, "pass", requests=8, preamble=self.PREAMBLE),
+            support.reduction_record("small", "on", 0, 2, 30000, "pass", requests=2, preamble=self.PREAMBLE),
+        )
+        arm = reduce_module.reduce(accepted, [])["arms"]["on"]
+        # Two repeats of the big task do not outweigh the one small task.
+        self.assertEqual(arm["requests_per_attempt"], 5)
+        self.assertEqual(arm["new_tokens_per_attempt"], (45000 + 21000) / 2)
+
+
 class BootstrapTest(unittest.TestCase):
     def setUp(self) -> None:
         self.golden = json.loads(GOLDEN.read_text(encoding="utf-8"))

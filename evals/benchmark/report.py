@@ -32,6 +32,11 @@ CAPTURE_FREE_LABEL = "capture-free (future: capture on an operator-run model)"
 # answers a narrower question; it is a decomposition, and it says so wherever
 # it appears.
 RETRIEVAL_ONLY_LABEL = "retrieval only, decomposition: the turn-end nudge and the CLI search subtracted from both arms"
+# What the headline decomposes into, printed under every ratio and never as
+# one: round trips, unique ingestion, and the axis a token ratio never states.
+REQUESTS_LABEL = "requests, decomposition: model requests per attempt"
+NEW_TOKENS_LABEL = "new tokens, decomposition: uncached input plus cache writes plus output, per attempt"
+PASS_DELTA_LABEL = "pass rate delta, the other axis: not a token figure"
 # How a run was isolated, weakest first. A report takes the weakest kind any
 # accepted record carries, so one plumbing record marks the whole run.
 ISOLATION_KINDS = ("team_shelf_secret", "automated_plumbing", "operator_plumbing", "attested", "fake")
@@ -270,6 +275,32 @@ def plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+def _pair(report: dict[str, Any], arm_id: str, baseline: str | None, field: str, spec: str) -> str:
+    """One per-attempt figure for the arm and for the baseline, in that order."""
+    arms = report["arms"]
+    base = None if baseline is None else arms.get(baseline, {}).get(field)
+    return f"{_number(arms[arm_id].get(field), spec)} versus {_number(base, spec)}"
+
+
+def _decomposition(report: dict[str, Any], arm_id: str, baseline: str | None, comparison: dict[str, Any]) -> list[str]:
+    """What the ratios above decompose into: round trips, unique ingestion, and the pass rate.
+
+    Printed under every ratio because the headline is a ratio of token totals,
+    and a reader who sees only that cannot tell an arm that sent less from an
+    arm that made fewer requests carrying the same replayed preamble.
+    """
+    requests = comparison.get("request_ratio")
+    new_tokens = comparison.get("new_token_ratio")
+    delta = comparison.get("pass_rate_delta")
+    return [
+        f"    {REQUESTS_LABEL}: {_pair(report, arm_id, baseline, 'requests_per_attempt', '7.2f')}, ratio "
+        + (f"{requests:.3f}" if requests is not None else f"none ({comparison.get('request_ratio_reason') or 'no shared task'})"),
+        f"    {NEW_TOKENS_LABEL}: {_pair(report, arm_id, baseline, 'new_tokens_per_attempt', '10.1f')}, ratio "
+        + (f"{new_tokens:.3f}" if new_tokens is not None else f"none ({comparison.get('new_token_ratio_reason') or 'no shared task'})"),
+        f"    {PASS_DELTA_LABEL}: " + ("none" if delta is None else f"{delta:+.3f}"),
+    ]
+
+
 def render(report: dict[str, Any]) -> str:
     """A finished report as text, for a log or a step summary.
 
@@ -380,6 +411,7 @@ def render(report: dict[str, Any]) -> str:
             amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
             if any(value is not None for value in amortized.values()):
                 lines.append(f"    diagnostic, the producer's own work charged too, reuse 1/10: {_number(amortized.get(1), '5.3f')}/{_number(amortized.get(10), '5.3f')}")
+            lines += _decomposition(report, arm_id, baseline, comparison)
     else:
         lines.append(f"no comparison: {baseline} is the only arm with a result")
     outcomes: dict[str, int] = {}

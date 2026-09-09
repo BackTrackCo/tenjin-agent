@@ -327,8 +327,9 @@ published under its key, which is the shape of the "Fix:" posts on the shelf). B
 starts, `prepare` loads each lesson's `.md` (in this benchmark's own words) and the `.json`
 beside it, which freezes the keys the fixture's failing commands yield, each with its `kind`
 (`sig_v1` or `sig_v1_test`); copies
-the trial's repository to a scratch directory and runs those commands in the task's own image
-with `--network none`, which is where that tree can run; keys each output with
+the trial's repository to a scratch directory, symlinks kept, and runs those commands in the
+task's own image with `--network none`, which is where that tree can run, through the image's
+entrypoint with a probe output root of its own beside the copy; keys each output with
 `signature.py`, the product's formula ported byte for byte (`error_line`, `normalize_for_sig`,
 `errno_of`, `top_frame_file`, `sig_v1`, and the `sig_v1_test` lane's `identity_from_console`
 and `sig_v1_test` from `test-identity.ts`; `src/hooks/failure/signature.parity.test.ts` runs
@@ -365,8 +366,12 @@ line is a runner header that ends the block. The product keys that failure on th
 ` FAIL  <file> > <suite> > <test>` header names them, read off the console when no reporter
 artifact exists, and stable by construction. That is the fix lesson's key, `502b90852a1505e3`
 for `actor`, the value run seven's fires table recorded as the question key; the port reproduces
-it byte for byte. The prepare probe re-derives every command every trial. The operator's next
-run is the proof; nothing here was run against a shelf.
+it byte for byte. The prepare probe re-derives every command every trial. Every key above was
+re-derived inside the fixture images on 2026-09-09 and none of them moved: the first
+in-container smoke refused on `seed key drift` because the probe container never ran its
+command (no output root, so the entrypoint printed its usage, which keys to nothing) and
+because the scratch copy dereferenced the pnpm tree's symlinks, which breaks `pnpm exec`. Both
+are fixed above; the guard itself was right.
 
 **Keys smoke.** `fixtures/live/keys-smoke-manifest.json` (`bench1-keys-smoke-1`) is a one-hour
 test of the failure path's test-identity key end to end, because no ledger row anywhere has
@@ -1365,6 +1370,21 @@ is not counted.
   back through `amortization` at reuse 1, 2, 5, and 10; `phase_tokens` keeps the two phases
   apart and `amortization_capture_only` charges the capture phase alone (the plan's rule: the
   producer's own work would have happened anyway).
+- Every cell, arm, and comparison states what its token ratio decomposes into:
+  `requests_per_attempt` with `request_ratio`, `new_tokens_per_attempt`
+  (uncached input plus cache writes plus output, so a cache read is in the total and not here)
+  with `new_token_ratio`, and `pass_rate_delta`. `summary` prints all three under every ratio,
+  each labelled a decomposition, and the reason a figure is null (`categories_unexposed` when a
+  provider hid a category, `baseline_zero`, `no_shared_task`) rather than a zero.
+  They exist because of what a decomposition of the 2026-09-09 four-arm run found: the fixed
+  first-request preamble is 8,851 tokens and is replayed on every request, so it is 61.4 percent
+  of the 110,446-token baseline attempt; model output is 2.1 percent of it and tool results
+  across a whole attempt are 5.5 percent. One removed request is therefore worth 14,104 tokens,
+  12.8 percent of the baseline, and the flat arm's 0.851 is exactly its 1.71 fewer requests. New
+  tokens were 14,685 for `off` against 14,682 for `flat`, a ratio of 1.000: the free lesson
+  removed no unique ingestion at all. So a headline ratio here is largely a statement about
+  round trips and harness overhead, and a reader who is shown only the ratio cannot tell that
+  from an arm that sent less.
 - `comparisons[arm]` pairs each task against the baseline arm (the first arm in the manifest),
   reports the mean per-task ratio, and attaches a `task_paired_percentile` interval from
   `paired_bootstrap`: `random.Random(seed)`, 2000 resamples of the task set with replacement, a
