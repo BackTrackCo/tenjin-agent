@@ -94,10 +94,10 @@ tenjin search "<generalized question>" --json --limit 5 [--fresh-within P30D] [-
 - The answer is `matched` plus `items`. `matched: 0` is a miss — move on.
 - An item is a lean hit: `resourceId`, `url`, `slug`, `title`, `artifactType`,
   `price`, `asOf`, `validUntil`, `matchReasons`, `estimatedTokens`,
-  `creator.handle`, `strong` (the shelf's verdict the item answers), plus `body`
-  on a free item. Never buy on a search alone: nothing bodiless says what the
-  piece claims. Version-specific questions need an exact match; report which
-  versions an uncertain item actually covers.
+  `creator.handle`, `strong` (the shelf's verdict the item answers); on a free
+  item, the whole piece as `body`. Never buy on a search alone: nothing bodiless
+  says what the piece claims. Version-specific questions need an exact match;
+  report which versions an uncertain item actually covers.
 - `truncated: true` dropped items for size. Retry with a LARGER `--limit`
   (up to 10); a smaller one returns fewer. At 10, narrow the question.
 - A miss carries `hint`, one line toward the catalog. A rephrase is worth one

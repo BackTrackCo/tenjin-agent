@@ -1051,13 +1051,14 @@ describe('the public render did not move', () => {
   // Re-pinned for the tenjin-search tighten (same PR): 228 to 207 lines with no
   // fact dropped — compressed bullets (matched/item/miss, read refusal taxonomy,
   // outcome id lines, publish-handoff close), a shorter team-privacy bullet and
-  // description examples, and the fund line folded into the buy list. Every
-  // pinned invariant (firing gate pairs, leak refusal, denial rule and its
+  // description examples, and the fund line folded into the buy list. The item
+  // bullet keeps the `` `body`. `` terminator the wire-schema test parses on.
+  // Every pinned invariant (firing gate pairs, leak refusal, denial rule and its
   // five-sentence cap, untrusted-data verbatim, mode handoff, no trust-scope
   // language) holds in both renders; only the digest moved.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': 'c35f1bd9796f33640b80eeea15072875',
+      'tenjin-search': '9e0ec8e8600955353d1e902a60e83c4e',
       'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });
