@@ -219,7 +219,20 @@ actually passes. `--ci-live` is valid only with `--plumbing` and never with `--a
 stamps `isolation.automated: true` into every record, so a CI run is distinguishable from an
 operator's plumbing run and can never be published.
 
-### The attestation file
+### The attestation
+
+A container run does not ask an operator to promise its isolation: `live-run` builds the
+attestation from the egress it just created, because the network is `--internal` and the proxy
+holding the allowlist is the only way out of it. `kind` is `container`, the instance is the
+run's own network, the image is the base image by digest, `fresh_roots` is true because every
+trial's roots are built fresh, `wallet_present` is false because nothing mounts or installs
+one, the seam is the variable the docker client forwards, and the allowlist is the one the
+proxy enforces. Its hash goes into every record, so a published result names the isolation it
+ran under, and the per-trial image id sits beside it under `isolation.image`.
+
+`--attestation <file>` still exists, for an isolation this package cannot see (a disposable VM
+around the whole run); it replaces the run's own claim and is read no more kindly. `--plumbing`
+still claims nothing and stamps every record non-publishable.
 
 ```json
 {
@@ -233,22 +246,24 @@ operator's plumbing run and can never be published.
 }
 ```
 
-Every field is stated; none is defaulted. `kind` is `container` or `vm`, `fresh_roots` must be
-true, `wallet_present` must be false, the allowlist may be neither empty, nor a wildcard, nor
-missing an origin the executor requires (`api.anthropic.com` for `claude_live`), and
-`credential_seam` must be the variable `pins.credential_env` names. The attestation's hash goes
-into every record, so a published result names the isolation it ran under.
+Every field is stated; none is defaulted, in a file or in the one the run writes. `kind` is
+`container` or `vm`, `fresh_roots` must be true, `wallet_present` must be false, the allowlist
+may be neither empty, nor a wildcard, nor missing an origin the executor requires
+(`api.anthropic.com` for `claude_live`, plus a provisioned arm's shelf hosts), and
+`credential_seam` must be the variable `pins.credential_env` names.
 
 ### What the operator prepares
 
-- a disposable container or VM that is thrown away after the run, booted from a pinned image;
-- fresh home, profile, data, repository, and output roots, which the run directory owns;
+- Docker running (this machine runs colima), and `python3 -m evals.benchmark.images build
+--manifest <path>` once, which builds the base image and every image the manifest names;
+- a run directory (`--out`) under a path the Docker VM shares, which on colima means the
+  operator's home; `live-run` reads a marker back out of a container and refuses otherwise;
 - no wallet anywhere in the image or the environment, and no shelf secret except the one
   `--tenjin-source` seeds on purpose, which makes the run non-publishable;
 - the model credential in exactly one allowlisted variable (`ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`), named by `pins.credential_env`;
-- network allowlisted to the provider plus the arm under test, matching the attestation, which
-  for a provisioned arm has to list the seeded shelf's host as well; and
+- nothing about the network: the run creates the internal network and the proxy that holds the
+  allowlist, and the attestation states what it enforced; and
 - `pins.image`, `pins.harness_version`, and `pins.model` set to the image, the CLI version, and
   the model this instance actually runs.
 
@@ -696,8 +711,17 @@ becoming a local lesson, and of a stale lesson gated by `valid_until`. The produ
   `stop`, the shelf-read permissions allowed, the same hook template and daemon as the
   natural arm's consumer. It measures Tenjin's retrieval, delivery, and use of an approved
   lesson through the shelf, with capture variance excluded; local pairing replay is retired
-  (above).
-- `tenjin_natural`: `producer: true`. A producer session runs first (`producer.py`): its own
+  (above). This arm is Tenjin **with the publish nudge disabled**: its seeded config sets
+  `hooks.publish` false, which is a configuration a user can choose with `tenjin hooks disable
+publish`, and the record says so in `isolation.hooks_disabled`. The reason is the operator's
+  ruling of 2026-09-09 (tenjin-agent#316), and it is a product rule as much as a benchmark
+  one: the nudge belongs off wherever capture is off, and a consumption arm captures nothing,
+  so the turn it costs buys nothing here. Every other hook arm the product ships stays on. The
+  pilot of 2026-09-08 measured this arm with the nudge on, and its records remain the
+  shipped-default comparison.
+- `tenjin_natural`: `producer: true`. Capture is this arm's subject, so it keeps every hook arm
+  the product ships on, the publish nudge included, and `hooks_disabled` is refused on an arm
+  that runs a producer phase. A producer session runs first (`producer.py`): its own
   home, profile, output, transcripts, and canary, the same pins, the same repository path
   (the product scopes local records by cwd hash), the same data dir, the daemon on the
   `producer` config (`publish.mode` auto). When it exits the daemon is stopped and its WAL has
@@ -890,81 +914,118 @@ on the retired local seed's consistency check and restarts from a fresh run dire
 
 ## Fixtures are container images
 
-Design, stated before the code (operator directive of 2026-09-08 after the review of the
-foundation at `11c64f4`: a container image per task on a pinned base image replaces the vendored
-darwin toolchain archive, the committed per-fixture lockfiles, and the corepack seeding). What
-follows is the contract the build implements; where the code lands, the sentence that describes
-it points at the file.
+A live trial runs inside its task's own image. That replaced a vendored darwin toolchain
+archive, a committed lockfile per fixture, and a corepack seeding step, which together made
+reproducibility a property of this repository's bytes on one machine (operator directive of
+2026-09-08, after the review of the foundation at `11c64f4`).
 
-**Images.** One base image, `bench2-base`, from `node:24-bookworm-slim` pinned by digest
-(`node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e`, Node 24.20,
-arm64 on the operator's machine), with `pnpm@11.11.0`, `@anthropic-ai/claude-code@2.1.263`
-(the manifest's `harness_version`), and `tenjin-cli@0.1.0-alpha.15` installed globally by exact
-version, plus a `bench2-trial` entrypoint. One image per fixture, `bench2-<task>:<fixture hash
-prefix>`, from the base: the fixture copied to `/opt/fixture` and `pnpm install` run there at
-build time, so the fixture commits a `package.json` with `vitest` pinned to an exact version
-and nothing else of the toolchain: no lockfile, no `node_modules/.bin/vitest` shim, no vendor
-archive, no `.npmrc`. Reproducibility is the image, not the lockfile: `images build` builds
-every image a manifest names, labels each with the fixture hash, the base digest, and the
-pins it was built from, and writes the image id into `fixtures/live/images.json`; `live-run`
-refuses a trial whose image is missing (`build it with images build`) or whose labels disagree
-with the manifest (the fixture changed since the build), and the record carries the image id
-under `isolation.image`. Because the install happens at build time, two builds of the same
-fixture on two machines may differ in a transitive dependency; the record names the build that
-ran, and a locked run builds once and keeps the image.
+**Images.** One base image, `bench2-base:<recipe hash>`, from `node:24-bookworm-slim` pinned by
+its multi-architecture index digest
+(`node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e`, Node 24.20),
+with `pnpm@11.11.0`, `@anthropic-ai/claude-code` at the manifest's `pins.harness_version`, and
+`tenjin-cli@0.1.0-alpha.15` installed globally by exact version, plus the `bench2-trial`
+entrypoint. One image per fixture, `bench2-<task>:<fixture hash prefix>`, built from
+`docker/fixture.Dockerfile` with the fixture directory as its whole build context: the fixture
+is copied to `/opt/fixture` and `pnpm install` runs there at build time, so the fixture commits
+a `package.json` with `vitest` pinned and nothing else of the toolchain. There is one fixture
+Dockerfile rather than eight identical ones; the per-task difference is the context and the
+labels. Reproducibility is the image, not the lockfile: `python3 -m evals.benchmark.images
+build --manifest <path>` builds every image a manifest names, labels each with the fixture
+hash, the base image id and the pins it was built from, and writes the ids to
+`fixtures/live/images.json`, a local build ledger that is not committed. `live-run` refuses a
+trial whose image is missing (`image_missing`, naming the build command) or whose labels
+disagree with the manifest (`image_drift`), and the record carries the image id under
+`isolation.image`. Because the install happens at build time, two builds of one fixture on two
+machines may differ in a transitive dependency: the record names the build that ran, and a
+locked run builds once and keeps the image. The base image is 710 MB and a fixture image 774
+MB; a first base build is about 33s and each fixture about 20s, or 2 minutes for all eight.
 
-**A trial runs inside the container.** The trial's roots are built on the host as today and
-bind-mounted into the container at the SAME absolute paths: the repository copy, `HOME`, the
-profile (`CLAUDE_CONFIG_DIR`), and `TENJIN_DATA_DIR`. Same paths, because the product hashes the
-working directory into its local records, the hook template resolves `{data_dir}` to an
-absolute path, and the transcripts Claude writes under the profile are read back by the host.
-`node_modules` is copied out of the fixture image into the trial's repository copy at
-preparation (`docker create` plus `docker cp`), replacing the archive extraction; it is the
-image's tree, Linux natives included, and the host never runs it. The `claude` binary and the
-`tenjin` CLI come from the image, by exact version, because a darwin binary cannot run in the
-container and a mounted host install would not be pinned; the daemon, shim, and reporter
-bundles come from the seeded data dir as today (`tenjin_arm` copies them from the operator's
-source data dir into the trial's, which is a bind mount), because they are the product build
-under test and platform-neutral JavaScript. The container runs as the host's uid so the mounts
-stay the host's files (colima's virtiofs maps them either way; the record says which uid ran).
-The credential seam (`CLAUDE_CODE_OAUTH_TOKEN`) is passed to the container as an environment
-variable and nowhere else: never into a file, never into the image. The daemon runs inside the
-container on the same data dir: the entrypoint starts it (a provisioned arm), waits for
-`/health`, runs `claude` with the argv the runner built, stops the daemon, waits for the WAL to
-vanish, and exits with claude's code; the runner then reads the settled `loop.db` on the host as
-today. The natural arm's two phases are two containers in sequence on one data dir. The reaper
-stops the container: its id goes into the run's pids ledger, `cleanup` runs `docker stop` on it,
-and the wall-clock cap does the same.
+**A trial runs inside the container.** The trial's roots are built on the host as before and
+bind-mounted at the SAME absolute paths: the repository copy, `HOME`, the profile
+(`CLAUDE_CONFIG_DIR`), `TENJIN_DATA_DIR`, the output root the entrypoint writes its daemon
+report to, and the arm's settings file read-only, because `--settings` names a path outside
+every other root. Same paths, because the product hashes the working directory into its local
+records, the hook template resolves `{data_dir}` to an absolute path, and the transcripts
+Claude writes under the profile are read back by the host. `node_modules` is copied out of the
+fixture image into the trial's repository copy at preparation (`docker create` plus `docker
+cp`, 788 files in under a second); it is the image's tree, Linux natives included, and the host
+never runs it. The `claude` binary and the `tenjin` CLI come from the image, by exact version;
+the daemon, shim and reporter bundles still come from the seeded data dir, which is a mount,
+because they are the product build under test and platform-neutral JavaScript. The container
+runs as the host's uid and gid, so a file it writes stays the host's. The credential seam is
+forwarded by name (`docker run --env CLAUDE_CODE_OAUTH_TOKEN`), so its value travels through
+the docker client's own environment and appears in no argv, no file and no image layer. The
+daemon runs inside the container on the same data dir: the entrypoint (`docker/trial.mjs`)
+starts it, waits for `/health`, runs `claude` with the argv the runner built, stops the daemon
+and any daemon the shim respawned, waits for the WAL to vanish, writes `daemon.json` into the
+output root, and exits with claude's code; the host reads that file instead of signalling a
+pid, and `tenjin_arm` no longer starts a process at all. The natural arm's two phases are two
+containers in sequence on one data dir. The container name goes into the run's process ledger,
+so `cli.py cleanup`, the wall-clock cap and an interrupt all stop and remove it.
 
 **Network.** Per run the runner creates one Docker network with `--internal` (no route out and
-no DNS for outside names: a name lookup fails with `EAI_AGAIN`, proven on this machine's colima
-29.5.2), and one egress proxy container on both that network and the default bridge: a Python
-`CONNECT` proxy from a pinned `python:3.12-slim` digest, holding the run's allowlist, logging
-every `CONNECT` with its host and verdict to a file under `<run>/proxy/`. Every trial container
-joins the internal network only and gets `HTTPS_PROXY`/`HTTP_PROXY` pointing at the proxy plus
-`NODE_USE_ENV_PROXY=1` (Node 24 reads the proxy variables for `fetch` under that flag), so
-Claude Code, the daemon's shelf legs, and the CLI's shelf reads all go through the proxy, and
+no DNS for an outside name: a lookup fails with `EAI_AGAIN`, proven on this machine's colima
+29.5.2) and one egress proxy container on both that network and the default bridge: a Python
+`CONNECT` proxy from `python:3.12-slim` pinned by index digest, holding the run's allowlist and
+logging every request with its verdict to `<run>/proxy/requests.jsonl`. The run waits until the
+proxy is accepting connections before any trial starts, because a CONNECT into a container with
+no listener stalls on an internal network rather than being refused. Every trial container
+joins the internal network only and gets `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY=127.0.0.1,
+localhost` and `NODE_USE_ENV_PROXY=1` (Node 24 reads the proxy variables for `fetch` under that
+flag), so Claude Code, the daemon's shelf legs and the CLI's reads all go through the proxy and
 nothing else can leave. The allowlist is `api.anthropic.com` plus the seeded config's team and
-public shelf hosts, and a `CONNECT` to any other host is refused and counted as that trial's
-`sentinel.public_requests` (the proxy log replaces the loopback sentinel, which a container
-cannot reach). That is the allowlist enforced by construction: a live run can then carry an
-attestation the runner writes itself (`kind: container`, the container id, the image id, fresh
-roots, no wallet, the seam, the allowlist) and be publishable when nothing else forbids it (a
-seeded team shelf secret still does). What colima cannot enforce, and the record says: nothing
-at the packet level inside the container beyond "no route out" (a process in the container can
-still talk to the proxy, which is the point), and nothing about the host side of a bind mount.
+public shelf hosts; a request to any other host is refused with 403 and counted as that trial's
+`sentinel.public_requests` through `container.ProxySentinel`, which reads the log the runner
+already counts deltas on. The proxy does not log a request from its own loopback, because the
+readiness check is not a request a trial made.
 
-**What goes.** `vendor.py`, the archive and its record, `toolchain.py` (the pnpm pin probe and
-the corepack seeding: pnpm is in the image), the `.bin/vitest` shims, the lockfiles, and the
-`.npmrc` files, with their tests and README text. The fake path and the offline self-test never
-touch Docker; the live executor checks `docker info` first and refuses with one sentence when
-the daemon is not reachable. The darwin-native path is not kept behind a flag: the four-arm run
-in flight executes from its own checkout, its records are immutable and reduce on their own
-manifest, and nothing here rewrites them.
+Proven on 2026-09-09, on the base image with the run's own egress: `fetch` to
+`https://api.anthropic.com/v1/models` returned 401 (the provider answered; the log line says
+`verdict: allowed`), `fetch` to `https://example.com/` failed and the log line says `verdict:
+refused, reason: not on the allowlist`, and the same fetch with no proxy variables failed with
+`EAI_AGAIN`. So the allowlist is enforced by construction, and a live run carries an
+attestation the runner writes itself (`kind: container`, the run's network as the instance,
+the base image by digest, `fresh_roots: true`, `wallet_present: false`, the seam, the
+allowlist). What colima cannot enforce, and the record does not claim: nothing at the packet
+level inside the container beyond "no route out" (a process there can still talk to the proxy,
+which is the point), and nothing about the host side of a bind mount.
 
-**Dry runs** print the image tag and id, the mount plan (host path to container path, mode), the
-network plan (internal network name, proxy image, allowlist), and the entrypoint argv, and start
-no container. Manifests bump with the new fixture hashes.
+**Where the plan and the code differ.** Three places, each because the machine said so:
+
+- The plan said the four roots are mounted; the code mounts six. The output root and the
+  settings file are the two the process cannot run without.
+- The plan put the base image at the tag `bench2-base`; the tag carries the recipe hash, so a
+  changed pin can never reuse a stale base.
+- The plan said nothing about where a run directory may live. On colima the Docker daemon is a
+  Linux VM that shares only part of the host filesystem, and a run directory outside that set
+  mounts as an empty directory: a trial would find no repository. `live-run` writes a marker
+  into the run directory and reads it back from a container before anything is spent, and
+  refuses with `mount_invisible` naming the fix (a run directory under your home).
+
+The offline paths lost nothing to any of this: the fake path and the self-test never touch
+Docker, every docker call is a seam a case replaces, and `live-run` checks `docker info` first
+and refuses in one sentence when the daemon is not reachable.
+
+**What went.** `vendor.py`, the archive and its record and rebuild script, `toolchain.py` and
+the per-trial corepack home, the `.bin/vitest` shims, the lockfiles, the `.npmrc` files and the
+`packageManager` pins, with their tests and README sections, and the runner's helper-process
+seam, which existed only for the host daemon. The darwin-native path was not kept behind a
+flag: the four-arm run in flight executes from its own checkout, its records are immutable and
+reduce on their own manifest, and nothing here rewrites them.
+
+**Dry runs** print the image tag, the container name, the uid, the mount plan (host path to
+container path, mode), the container's environment names, the forwarded seam, the network plan
+(internal network, proxy image, allowlist), the daemon line for a provisioned arm, and the
+agent's own argv, and start nothing. The manifests carry the new fixture hashes.
+
+**This section and PR 308.** The two pull requests merge together and split by ownership, not
+by coverage. 308 owns the frozen contracts, the executor and the live executor, the
+provisioning seam and the daemon lifecycle, isolation, attestation and sentinels, the reducer,
+the report and its headline rule, verify, cases and regress, plus one plumbing smoke that needs
+no repository. 313 owns every real fixture as a container image, every real-task manifest
+including the hooks and keys smokes, the four arms, the producer phase and the readouts; with
+the container fixtures green it also takes the `actor` fixture and the hooks-smoke and
+keys-smoke manifests, so 308's follow-up deletion leaves it with the plumbing smoke alone.
 
 ## Cleanup
 
@@ -1210,10 +1271,10 @@ exactly for `invalid`; verifier verdict and patch hash; stop reason (`exit` | `t
 `interrupted` | `budget` | `turns`), wall time, unresolved actors, turns, tool counts, cost;
 delivery projection with its per-shelf leg counts, its class counts, and its public summary;
 sentinel counts and the isolation block (`live`, `publishable`,
-`fresh_roots`, `attested_container`, `attestation_hash`, `automated`, `shelf_secret_present`,
-`shelf_origin`, and `daemon_respawned` for a provisioned arm, `slice` when the manifest names
-one, and `producer` for a natural arm, see **Bench-2:
-local reuse**); and hashes of private inputs (`root_transcript`, `executor_stderr`,
+`fresh_roots`, `attested_container`, `attestation_hash`, `image` (the fixture image the trial
+ran in), `automated`, `shelf_secret_present`, `shelf_origin`, `hooks_disabled` and
+`daemon_respawned` for a provisioned arm, `slice` when the manifest names one, and `producer`
+for a natural arm, see **Bench-2: local reuse**); `attempt_phases`, below; and hashes of private inputs (`root_transcript`, `executor_stderr`,
 `resolved_settings`), never their bodies or host paths.
 
 `records.validate` refuses unknown keys, a record that seeded a shelf secret and claims to be
@@ -1228,6 +1289,32 @@ and fsyncs it, then hard-links the final path; a second writer for the same `tri
 and keeps its partial file as evidence. `records.select` returns final records matching the
 current manifest and schedule hashes and excludes everything else with a reason: `partial`,
 `stale`, `misnamed`, `duplicate`, `invalid`, `foreign`.
+
+### What the attempt's own requests went to
+
+`attempt_phases` splits the attempt's own usage three ways, by the store's own marks rather
+than by reading the transcript afterwards (`phases.py`):
+
+- `nudge`: every request from the session's first `turn.end` fire on. That fire is the Stop
+  hook; what the model does after it is the capture ask's cost. The pilot's decomposition put
+  it at a mean of about 16,000 tokens, roughly 14% of an attempt.
+- `cli_search`: the first request at or after each of the session's CLI search rows
+  (`searches.source = 'cli'`), when that request is not already the nudge's. One request per
+  search: the turn that carried the results back. The pilot saw it in 5 attempts of 24.
+- `consumer`: everything else, which is the task.
+
+Each phase carries `requests`, `input_total` and `output_total`, and `records.validate` holds
+them to a partition: they sum to the attempt's own usage exactly, so this is a decomposition
+and never an addition. A request the transcript never stamped, and every request of an arm with
+no store, falls to `consumer`, so an arm without hooks reads as all task. The field is optional,
+because the records of earlier runs are immutable and still have to reduce; an attempt without
+it is undecomposed.
+
+The reducer carries `attempt_phase_tokens` per cell and a `retrieval_only_tokens_per_attempt`
+beside the real `tokens_per_attempt`, and the report prints a `retrieval only, decomposition`
+ratio beside the headline. **The as-shipped number is the one to quote as Tenjin.** The
+subtracted one answers a narrower question, is labelled wherever it appears, and is never a
+headline.
 
 ## Delivery join contract
 

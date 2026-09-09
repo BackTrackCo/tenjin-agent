@@ -108,5 +108,33 @@ class ManifestTest(unittest.TestCase):
                 manifest.load(Path(tmp) / "missing.json")
 
 
+class HooksDisabledTest(unittest.TestCase):
+    """Who may turn a product hook arm off, and who may not."""
+
+    def manifest(self, **arm: object) -> dict:
+        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data["arms"][1].update(arm)
+        return data
+
+    def test_a_provisioned_consumption_arm_may_disable_a_hook_arm(self) -> None:
+        manifest.validate(self.manifest(hooks_disabled=["publish"]), cli.HOOKS_SMOKE_MANIFEST.parent)
+
+    def test_an_arm_that_captures_may_not_disable_one(self) -> None:
+        with self.assertRaises(ManifestError) as caught:
+            manifest.validate(self.manifest(hooks_disabled=["publish"], producer=True), cli.HOOKS_SMOKE_MANIFEST.parent)
+        self.assertIn("captures", str(caught.exception))
+
+    def test_an_unprovisioned_arm_has_no_seeded_config_to_write_it_into(self) -> None:
+        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data["arms"][0]["hooks_disabled"] = ["publish"]
+        with self.assertRaises(ManifestError) as caught:
+            manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
+        self.assertIn("provisioned arm", str(caught.exception))
+
+    def test_an_empty_list_is_not_a_choice(self) -> None:
+        with self.assertRaises(ManifestError):
+            manifest.validate(self.manifest(hooks_disabled=[]), cli.HOOKS_SMOKE_MANIFEST.parent)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -206,6 +206,41 @@ class PrepareStopTest(DaemonCase):
         self.assertEqual(consumer.stop_state["mode"], "consumer")
 
 
+class HooksDisabledTest(DaemonCase):
+    """A consumption arm runs the product with the publish nudge off, and says so in the record."""
+
+    def prepare_with(self, arm: dict) -> executor.Provision:
+        roots = self.roots()
+        request = ProvisionRequest(roots.trial_id, roots, arm, self.source)
+        provision = tenjin_arm.prepare(request)
+        self.seeded = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
+        return provision
+
+    def test_the_seeded_arm_runs_no_publish_nudge_and_the_record_names_it(self) -> None:
+        provision = self.prepare_with({"id": "tenjin_seeded", "provision": "tenjin", "hooks_disabled": ["publish"]})
+        self.assertEqual(self.seeded["hooks"]["publish"], False)
+        # Every other arm the product ships is still on: this is one switch, not a quieter product.
+        self.assertEqual([arm for arm, on in self.seeded["hooks"].items() if not on], ["publish"])
+        self.assertEqual(provision.facts["hooks_disabled"], ["publish"])
+
+    def test_the_natural_arm_keeps_every_arm_the_product_ships_on(self) -> None:
+        provision = self.prepare_with({"id": "tenjin_natural", "provision": "tenjin", "producer": True})
+        self.assertEqual(self.seeded["hooks"], {arm: True for arm in tenjin_arm.HOOK_ARMS})
+        self.assertEqual(provision.facts["hooks_disabled"], [])
+
+    def test_the_consumer_config_of_a_producer_arm_keeps_the_arms_its_producer_ran(self) -> None:
+        provision = self.prepare_with({"id": "tenjin_natural", "provision": "tenjin", "producer": True})
+        roots = self.roots("trial-a")
+        consumer = tenjin_arm.start_phase(roots, provision, "consumer")
+        self.assertEqual(consumer.stop_state["mode"], "consumer")
+        self.assertEqual(json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))["hooks"]["publish"], True)
+
+    def test_an_arm_that_names_a_hook_the_product_does_not_have_is_refused(self) -> None:
+        with self.assertRaises(ProvisionError) as caught:
+            self.prepare_with({"id": "tenjin_seeded", "provision": "tenjin", "hooks_disabled": ["capture"]})
+        self.assertIn("no arm for", str(caught.exception))
+
+
 class SentinelTest(SourceCase):
     def test_the_seeded_secret_is_a_canary_everywhere_but_the_seeded_config(self) -> None:
         roots = self.roots()

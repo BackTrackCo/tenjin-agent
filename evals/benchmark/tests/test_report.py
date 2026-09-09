@@ -288,7 +288,10 @@ class ProjectionTest(unittest.TestCase):
         self.assertIn("headline eligible", lines[headline])
         self.assertTrue(lines[headline + 1].startswith("    reuse 2/5/10: 0.594/0.537/0.519"))
         self.assertTrue(lines[headline + 2].startswith("    " + report.CAPTURE_FREE_LABEL + ": 0.500  interval"))
-        self.assertTrue(lines[headline + 3].startswith("    diagnostic, the producer's own work charged too, reuse 1/10: 1.688/0.619"))
+        # The retrieval-only decomposition sits between the capture-free line
+        # and the producer diagnostic, labelled where it is printed.
+        self.assertIn("retrieval only, decomposition", lines[headline + 3])
+        self.assertTrue(lines[headline + 4].startswith("    diagnostic, the producer's own work charged too, reuse 1/10: 1.688/0.619"))
         self.assertEqual(report.CAPTURE_FREE_LABEL, "capture-free (future: capture on an operator-run model)")
         # A non-publishable run keeps the number and loses the claim, on the headline line.
         for record_ in accepted.values():

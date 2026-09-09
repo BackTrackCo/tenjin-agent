@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-local-arms-2",
+  "benchmark_version": "bench2-local-arms-3",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -296,7 +296,8 @@
       },
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
-      "auxiliary_usage": "none"
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"]
     },
     {
       "executor": "claude_live",

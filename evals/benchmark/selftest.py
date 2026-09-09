@@ -43,6 +43,7 @@ SUBJECTS = {
     "test_images": "fixture images: tag identity, labels, the build argv, and the missing-or-drifted refusals",
     "test_loop_join": "Loop 2 delivery join on the exact actor, read-only, WAL refusal",
     "test_manifest": "manifest validation, hashing, and pin rules",
+    "test_phases": "the attempt's own decomposition: the task, the turn-end nudge, the CLI search",
     "test_output": "what the lane prints: module table, step summary, report reading",
     "test_reap": "deterministic cleanup: kill by recorded identity, never by name",
     "test_records": "immutable records, publish without overwrite, resume selection",

@@ -27,6 +27,11 @@ REPORT_SCHEMA = "bench1.report.v1"
 # ratio is the secondary line.
 HEADLINE_LABEL = "capture-only amortized, reuse 1: every capture token charged to one consumer"
 CAPTURE_FREE_LABEL = "capture-free (future: capture on an operator-run model)"
+# The as-shipped number is the one to quote as Tenjin. This one takes the
+# product's own turn-end nudge and the primer's CLI search out of both arms and
+# answers a narrower question; it is a decomposition, and it says so wherever
+# it appears.
+RETRIEVAL_ONLY_LABEL = "retrieval only, decomposition: the turn-end nudge and the CLI search subtracted from both arms"
 # How a run was isolated, weakest first. A report takes the weakest kind any
 # accepted record carries, so one plumbing record marks the whole run.
 ISOLATION_KINDS = ("team_shelf_secret", "automated_plumbing", "operator_plumbing", "attested", "fake")
@@ -323,6 +328,12 @@ def render(report: dict[str, Any]) -> str:
                 f"{producer['findings']} finding(s) harvested, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
             )
         diagnostics = [task.get("diagnostics", {}) for task in arm.get("tasks", {}).values()]
+        spent = {phase: sum(item.get("attempt_phase_tokens", {}).get(phase, 0) for item in diagnostics) for phase in ("consumer", "nudge", "cli_search")}
+        if spent["nudge"] or spent["cli_search"]:
+            lines.append(
+                f"{arm_id} attempt phases: task {spent['consumer']}, turn-end nudge {spent['nudge']}, CLI search {spent['cli_search']} "
+                "(the product as shipped; the nudge and the search are inside the arm's total)"
+            )
         local_hits = sum(item.get("local_hits", 0) for item in diagnostics)
         local_legs = sum(item.get("local_legs", 0) for item in diagnostics)
         child_tokens = sum(item.get("child_tokens", 0) for item in diagnostics)
@@ -361,6 +372,11 @@ def render(report: dict[str, Any]) -> str:
                     f"    {CAPTURE_FREE_LABEL}: {ratio:.3f}  interval [{free_interval['low']:.3f}, {free_interval['high']:.3f}] "
                     f"at {free_interval['confidence']:.0%} over {plural(free_interval['tasks'], 'task')}"
                 )
+            retrieval = comparison.get("retrieval_only_token_ratio")
+            if retrieval is None:
+                lines.append(f"    {RETRIEVAL_ONLY_LABEL}: none ({comparison.get('retrieval_only_token_ratio_reason') or 'no phase decomposition'})")
+            else:
+                lines.append(f"    {RETRIEVAL_ONLY_LABEL}: {retrieval:.3f}")
             amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
             if any(value is not None for value in amortized.values()):
                 lines.append(f"    diagnostic, the producer's own work charged too, reuse 1/10: {_number(amortized.get(1), '5.3f')}/{_number(amortized.get(10), '5.3f')}")

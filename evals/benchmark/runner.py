@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, container, discovery, executor, images, loop_join, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
+from . import artifact, claude_usage, container, discovery, executor, images, loop_join, phases as phases_module, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from . import reap
 from .schedule import Trial
@@ -447,6 +447,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         outcome = "invalid"
 
     root_transcript = sessions / f"{launch.root_session_id}.jsonl"
+    # What the attempt's own requests went to: the task, the turn-end nudge the
+    # Stop hook asked for, and a CLI search the primer sent the agent on. A
+    # decomposition of the usage above, never an addition to it.
+    attempt_phases = phases_module.split(
+        [] if session is None else session.records,
+        producer_module.request_times(root_transcript),
+        phases_module.read_marks(roots.data_dir / "loop.db", launch.root_session_id),
+    )
     usage_fields = (
         {
             "native_root_id": launch.root_session_id,
@@ -482,6 +490,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
         "unresolved_actors": settlement.unresolved,
+        "attempt_phases": attempt_phases,
         "delivery": delivery,
         "discovery": discovery.derive(sessions, trial.task_id, verifier.TASK_SOURCES.get(trial.task_id)) if spec.live else None,
         "sentinel": sentinel.counts(),
@@ -526,6 +535,7 @@ def refused_record(
         "stop_reason": "exit",
         "wall_time_s": 0.0,
         "unresolved_actors": [],
+        "attempt_phases": phases_module.empty(),
         "delivery": loop_join.unavailable(),
         "discovery": None,
         "sentinel": {"public_requests": 0, "credential_exposures": 0},

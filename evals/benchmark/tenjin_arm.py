@@ -59,11 +59,13 @@ COPIED_KEYS = ("baseUrl", "publicShelfUrl", "shelfBypassSecret")
 SECRET_KEY = "shelfBypassSecret"
 # Forced whatever the source says. Every hook arm on, which is the product as
 # shipped (`hooks.capture` is not a product key; the turn-end capture ask is
-# the `publish` arm); review mode so the consumer's capture ask can never
-# publish from a trial; public fallback on because that is the product as
-# shipped and as Bench-3 runs it (a team miss then reaches the public
-# marketplace, which is a named origin and a counted leg); and a short idle
-# exit so a daemon this module lost track of ends itself.
+# the `publish` arm), except the arms the manifest's `hooks_disabled` names:
+# a consumption arm runs no publish nudge, because it captures nothing and the
+# nudge is a real cost with nothing to show for it there. Review mode so the
+# consumer's capture ask can never publish from a trial; public fallback on
+# because that is the product as shipped and as Bench-3 runs it (a team miss
+# then reaches the public marketplace, which is a named origin and a counted
+# leg); and a short idle exit so a daemon this module lost track of ends itself.
 HOOK_ARMS = ("prompt", "web-search", "web-fetch", "subagent", "failure", "publish", "primer")
 SEEDED: dict[str, Any] = {
     "publish": {"mode": "review"},
@@ -448,6 +450,19 @@ def seed_facts(lesson: Lesson, source: Source, piece_id: str | None, probed: dic
     }
 
 
+def disabled_arms(arm: dict[str, Any]) -> tuple[str, ...]:
+    """The product hook arms this benchmark arm runs with off, in the product's own order.
+
+    A name the product has no arm for is refused rather than dropped: a
+    silently ignored switch is a record that says the wrong thing.
+    """
+    named = set(arm.get("hooks_disabled") or ())
+    unknown = sorted(named - set(HOOK_ARMS))
+    if unknown:
+        raise ProvisionError(f"hooks_disabled names {', '.join(unknown)}, which the product's config has no arm for")
+    return tuple(name for name in HOOK_ARMS if name in named)
+
+
 def dry_source() -> "Source":
     """What a dry run without `--tenjin-source` provisions from: no bundles, no secret, a loopback shelf."""
     return Source(path=Path("."), config={"baseUrl": "http://127.0.0.1", "publicShelfUrl": "http://127.0.0.1"}, bundles={})
@@ -537,19 +552,24 @@ def data_dir_string(roots: artifact.TrialRoots) -> str:
     return os.path.abspath(roots.data_dir)
 
 
-def seeded_config(source: Source, port: int, *, with_secret: bool = True, mode: str = "consumer") -> dict[str, Any]:
+def seeded_config(source: Source, port: int, *, with_secret: bool = True, mode: str = "consumer", disabled: tuple[str, ...] = ()) -> dict[str, Any]:
     if mode not in MODES:
         raise ProvisionError(f"unknown daemon config mode {mode!r}")
+    unknown = sorted(set(disabled) - set(HOOK_ARMS))
+    if unknown:
+        raise ProvisionError(f"hooks_disabled names {', '.join(unknown)}, which the product's config has no arm for")
     config = {key: value for key, value in source.config.items() if with_secret or key != SECRET_KEY}
-    seeded = {**config, **SEEDED, "loop": {**SEEDED["loop"], "port": port}}
+    seeded = {**config, **SEEDED, "hooks": {arm: arm not in disabled for arm in HOOK_ARMS}, "loop": {**SEEDED["loop"], "port": port}}
     if mode == "producer":
         seeded["publish"] = {"mode": "auto"}
     return seeded
 
 
-def write_config(roots: artifact.TrialRoots, source: Source, port: int, *, with_secret: bool, mode: str) -> None:
+def write_config(roots: artifact.TrialRoots, source: Source, port: int, *, with_secret: bool, mode: str, disabled: tuple[str, ...] = ()) -> None:
     config_path = roots.data_dir / CONFIG_FILE
-    config_path.write_text(json.dumps(seeded_config(source, port, with_secret=with_secret, mode=mode), indent=2) + "\n", encoding="utf-8")
+    config_path.write_text(
+        json.dumps(seeded_config(source, port, with_secret=with_secret, mode=mode, disabled=disabled), indent=2) + "\n", encoding="utf-8"
+    )
     config_path.chmod(0o600)
 
 
@@ -614,7 +634,7 @@ def start_phase(roots: artifact.TrialRoots, provision: Provision, mode: str) -> 
     """
     state = provision.stop_state
     source: Source = state["source"]
-    write_config(roots, source, DAEMON_PORT, with_secret=True, mode=mode)
+    write_config(roots, source, DAEMON_PORT, with_secret=True, mode=mode, disabled=state.get("disabled", ()))
     return dataclasses.replace(provision, values=_values(roots, DAEMON_PORT, state["token"]), stop_state={**state, "mode": mode})
 
 
@@ -642,8 +662,9 @@ def prepare(request: ProvisionRequest) -> Provision:
     # The port is the same in a dry run: it is the container's, and a plan
     # that prints the URL a hook would post to is the point of a dry run.
     port = DAEMON_PORT
-    write_config(roots, source, port, with_secret=not request.dry_run, mode=mode)
-    facts: dict[str, Any] = {**source.facts, "daemon_mode": mode}
+    disabled = disabled_arms(request.arm)
+    write_config(roots, source, port, with_secret=not request.dry_run, mode=mode, disabled=disabled)
+    facts: dict[str, Any] = {**source.facts, "daemon_mode": mode, "hooks_disabled": list(disabled)}
     lessons = [] if request.task is None or mode == "producer" else lessons_for(request.task, selected=request.arm.get("lessons"))
     task_id = str(request.task["id"]) if request.task is not None else ""
     pieces: list[str] = []
@@ -677,7 +698,7 @@ def prepare(request: ProvisionRequest) -> Provision:
         facts["seed"] = seeds
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
-        stop_state = {"port": port, "pieces": pieces, "source": source, "token": token, "mode": mode}
+        stop_state = {"port": port, "pieces": pieces, "source": source, "token": token, "mode": mode, "disabled": disabled}
     return Provision(
         values=_values(roots, port, token),
         secrets=source.secrets,

@@ -55,8 +55,11 @@ OPTIONAL_TASK_KEYS = frozenset({"prompt", "tools", "allowed_tools"})
 # `lessons` names exactly which lessons a provisioned arm seeds on the team
 # shelf (the default is the task's family lesson and its own fix), and
 # `producer` runs a producer phase in the same data dir before the consumer.
+# `hooks_disabled` names product hook arms the seeded config turns off; the
+# provisioner owns which names exist, because they are the product's, not this
+# package's.
 # An arm's static files are `settings.overlay`, validated by the live executor.
-OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "producer"})
+OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "producer", "hooks_disabled"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
 SLICE_KINDS = frozenset({"recursive"})
 SLICE_KEYS = {"recursive": frozenset({"kind"})}
@@ -165,6 +168,15 @@ def _require_optional_shapes(name: str, item: dict[str, Any]) -> None:
         raise ManifestError(f"{name}.producer must be true or false")
     if "producer" in item and not item.get("provision"):
         raise ManifestError(f"{name}.producer needs a provisioned arm")
+    if "hooks_disabled" in item:
+        if not isinstance(item["hooks_disabled"], list) or not item["hooks_disabled"]:
+            raise ManifestError(f"{name}.hooks_disabled must be a non-empty list of product hook arm names")
+        for arm in item["hooks_disabled"]:
+            _require_id(f"{name} hooks_disabled", arm)
+        if not item.get("provision"):
+            raise ManifestError(f"{name}.hooks_disabled needs a provisioned arm: there is no seeded config to write it into")
+        if item.get("producer"):
+            raise ManifestError(f"{name} runs a producer phase, so it captures: an arm that captures keeps every hook arm the product ships on")
     budget = item.get("max_budget_usd")
     if "max_budget_usd" in item and (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0):
         raise ManifestError(f"{name}.max_budget_usd must be a positive number")

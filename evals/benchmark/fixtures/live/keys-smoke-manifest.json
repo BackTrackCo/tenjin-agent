@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench1-keys-smoke-1",
+  "benchmark_version": "bench1-keys-smoke-2",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260907,
@@ -220,7 +220,8 @@
       },
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
-      "auxiliary_usage": "none"
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"]
     },
     {
       "id": "tenjin_keyed_reporter",
@@ -389,7 +390,8 @@
       },
       "settings_hash": "sha256:d59639bcd699b9b8c6749fa94e505cbbda7ee1a53e651c53a4e436e60e7f2afb",
       "memory_snapshot_hash": "sha256:empty",
-      "auxiliary_usage": "none"
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"]
     }
   ]
 }

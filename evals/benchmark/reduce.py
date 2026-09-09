@@ -27,6 +27,7 @@ import random
 import statistics
 from typing import Any
 
+from . import phases as phases_module
 from .records import Excluded
 from .usage import from_json, totals
 
@@ -104,6 +105,19 @@ def per_producer(cells: list[dict[str, Any]]) -> dict[str, float]:
     return {phase: (float(totals[phase]) / count if count else 0.0) for phase in totals}
 
 
+def overhead_tokens(record: dict[str, Any]) -> int:
+    """The attempt's turn-end nudge and CLI search, as the store marked them. Zero for an undecomposed attempt."""
+    return phases_module.tokens(record.get("attempt_phases"), phases_module.NUDGE, phases_module.SEARCH)
+
+
+def attempt_phase_tokens(records: list[dict[str, Any]]) -> dict[str, int]:
+    """Tokens per attempt phase over the cell, so a reader sees what the arm's own requests went to."""
+    return {
+        phase: sum(phases_module.tokens(record.get("attempt_phases"), phase) for record in records)
+        for phase in phases_module.PHASES
+    }
+
+
 def child_usage(record: dict[str, Any]) -> tuple[int, int]:
     """Tokens and requests of the attempt's descendants (every actor but the lead), for the recursive slice's per-actor reading."""
     tokens = requests = 0
@@ -157,6 +171,7 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     reasoning = None if any(value is None for value in subsets) else sum(subsets)
     children = [child_usage(record) for record in records]
     locals_ = [local_legs(record) for record in records]
+    overhead = sum(overhead_tokens(record) for record in records)
     return {
         "attempts": attempts,
         "passes": passes,
@@ -167,12 +182,17 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
         "requests": sum(summed["requests"] for summed in per_attempt),
         "tokens": tokens,
         "tokens_per_attempt": _round(tokens / attempts),
+        # The same attempts with the product's own turn-end nudge and the CLI
+        # search the primer sent the agent on taken out. A decomposition of the
+        # number above, never a replacement for it.
+        "retrieval_only_tokens_per_attempt": _round((tokens - overhead) / attempts),
         "tokens_per_verified_resolution": None if passes == 0 else _round(tokens / passes),
         "tokens_per_verified_resolution_reason": "no_verified_resolution" if passes == 0 else None,
         "outcomes": {name: sum(1 for record in records if record["outcome"] == name) for name in SCORED},
         "diagnostics": {
             # Named beside the total, never inside it.
             "auxiliary_consumer_tokens": auxiliary,
+            "attempt_phase_tokens": attempt_phase_tokens(records),
             "reasoning_output_subset": reasoning,
             "reasoning_unavailable": sum(summed["unavailable"]["reasoning_output_subset"] for summed in per_attempt),
             "deliveries": sum(len(record["delivery"]["fires"]) for record in records),
@@ -271,6 +291,18 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
     if not shared:
         reason = "no_shared_task"
     ratio = _mean(ratios)
+    # The same ratio with each arm's nudge and CLI-search phases subtracted
+    # from both sides. It answers "what did retrieval alone cost", and it is
+    # labelled as a decomposition everywhere it is printed.
+    retrieval: list[float] = []
+    retrieval_reason = reason
+    for task_id in shared:
+        divisor = base["tasks"][task_id]["retrieval_only_tokens_per_attempt"]
+        if not divisor:
+            retrieval_reason = retrieval_reason or "baseline_zero_tokens"
+            retrieval = []
+            break
+        retrieval.append(arm["tasks"][task_id]["retrieval_only_tokens_per_attempt"] / divisor)
     # Amortization is per lesson, task-equal like everything else: each shared
     # task's consumer tokens plus that task's per-producer one-time cost over
     # `reuse` uses, against the baseline's, then the mean of the ratios. The
@@ -305,6 +337,8 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         "tasks": len(shared),
         "token_ratio": ratio,
         "token_ratio_reason": reason,
+        "retrieval_only_token_ratio": _mean(retrieval),
+        "retrieval_only_token_ratio_reason": retrieval_reason,
         "pass_rate_delta": pass_delta,
         "interval": paired_bootstrap(ratios, seed),
         "amortized_token_ratio": capture_ratio,

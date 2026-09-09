@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import loop_join, usage
+from . import loop_join, phases as phases_module, usage
 from .schedule import trial_id as derive_trial_id
 
 RECORD_SCHEMA = "bench1.attempt.v1"
@@ -72,7 +72,7 @@ REQUIRED = frozenset(
 
 
 # Keys a record may carry and a frozen corpus record predates: null or absent on the fake path.
-OPTIONAL = frozenset({"discovery"})
+OPTIONAL = frozenset({"discovery", "attempt_phases"})
 # `image` is a container trial's pnpm: installed into the fixture image at
 # build time by exact version, so nothing on the host decides which one ran.
 PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
@@ -238,6 +238,24 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError(
                 f"outcome {record['outcome']!r} cannot carry usage_reconciliation {reconciliation['status']!r}"
             )
+    # Optional, because the records of every run before it are immutable and
+    # still have to reduce: an attempt with no decomposition is undecomposed,
+    # never invalid.
+    attempt = record.get("attempt_phases")
+    if attempt is not None and (not isinstance(attempt, dict) or set(attempt) != set(phases_module.PHASES)):
+        raise RecordError(f"attempt_phases must name exactly {', '.join(phases_module.PHASES)}")
+    for phase, entry in (attempt or {}).items():
+        if not isinstance(entry, dict) or set(entry) != {"requests", "input_total", "output_total"}:
+            raise RecordError(f"attempt_phases.{phase} must carry requests, input_total and output_total")
+        if not all(_count(entry[name]) for name in entry):
+            raise RecordError(f"attempt_phases.{phase} counts must be non-negative integers")
+    # The phases partition the attempt's own usage, so their sum is that usage
+    # and never an addition to it.
+    if attempt is not None:
+        counted = sum(entry["input_total"] + entry["output_total"] for entry in attempt.values())
+        own = sum(item["input_total"] + item["output_total"] for item in record["usage"])
+        if counted != own:
+            raise RecordError(f"attempt_phases sum to {counted} tokens and the attempt's usage is {own}")
     delivery = record["delivery"]
     if not isinstance(delivery, dict) or delivery.get("status") not in loop_join.STATUSES:
         raise RecordError("delivery must carry a known status")
@@ -280,6 +298,9 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("isolation.seed.deleted must be null or a boolean")
         if seed["published"] and (seed["piece_id"] is None or seed["nonce"] is None):
             raise RecordError("a seed that published names its piece and its run nonce")
+    off = isolation.get("hooks_disabled")
+    if off is not None and (not isinstance(off, list) or not all(isinstance(name, str) and name for name in off)):
+        raise RecordError("isolation.hooks_disabled must be a list of product hook arm names")
     if "producer" in isolation and not isinstance(isolation["producer"], dict):
         raise RecordError("isolation.producer must be an object")
     if "producer" in isolation and isolation["producer"].get("outcome") not in OUTCOMES:
