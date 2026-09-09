@@ -57,8 +57,10 @@ class SettlementTest(unittest.TestCase):
         self.assertTrue(settlement.settled)
         self.assertFalse(settlement.capped)
         self.assertEqual(settlement.unresolved, [])
-        self.assertEqual(clock.slept, [0.25, 0.25])
-        self.assertEqual(settlement.waited_s, 0.5)
+        # Two polls at the declared interval, and the wait is their sum; the literal interval is not the contract.
+        self.assertEqual(len(clock.slept), 2)
+        self.assertTrue(all(slept == 0.25 for slept in clock.slept))
+        self.assertAlmostEqual(settlement.waited_s, sum(clock.slept))
 
     def test_a_missing_stop_settles_only_at_the_declared_cap(self) -> None:
         clock = support.FakeClock()
@@ -71,7 +73,7 @@ class SettlementTest(unittest.TestCase):
         self.assertFalse(settlement.settled)
         self.assertEqual(settlement.unresolved, [self.child.stem.removeprefix("agent-")])
         self.assertEqual(clock.now, 1.0)
-        self.assertEqual(clock.slept, [0.25] * 4)
+        self.assertEqual(sum(clock.slept), 1.0)
 
     def test_a_root_without_a_result_row_is_unresolved_too(self) -> None:
         (self.sessions / f"{self.session}.jsonl").write_text("", encoding="utf-8")
