@@ -52,10 +52,12 @@ jobs:
             echo "::error title=python::evals/benchmark needs Python 3.11 or later"
             exit 1
           }
-      # selftest.py enforces its own 60-second budget and exits non-zero when it
-      # runs long. `--groups` gives each module a collapsible log section and
-      # `--summary` puts the per-module table on the run page.
+      # The suite is stdlib unittest discovery and takes about 20 seconds; the
+      # step's own timeout is what bounds it, so the runner owns the clock and
+      # the suite owns the result. `--groups` collapses the log section and
+      # `--summary` puts the verdict on the run page.
       - name: Bench-1 offline self-test
+        timeout-minutes: 2
         run: |
           python3 evals/benchmark/selftest.py \
             --verbosity 2 --groups --summary "$GITHUB_STEP_SUMMARY"
@@ -63,6 +65,7 @@ jobs:
       # published report, hidden verifiers re-run over the finished run, the
       # report printed as text. Synthetic numbers throughout.
       - name: Bench-1 fake run, manifest to report
+        timeout-minutes: 5
         run: |
           set -o pipefail
           run="$RUNNER_TEMP/bench1-fake"

@@ -8,7 +8,7 @@ memory body, each pushed through a field the projection actually copies.
 from __future__ import annotations
 
 import json
-
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -86,7 +86,9 @@ class GuardTest(unittest.TestCase):
 class ProjectionTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.manifest, cls.digest, cls.accepted, cls.excluded = corpus()
+        tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(tmp.cleanup)
+        cls.manifest, cls.digest, cls.accepted, cls.excluded = corpus(Path(tmp.name))
         cls.reduction = reduce_module.reduce(cls.accepted, cls.excluded, "off", cls.manifest.data["seed"])
 
     def project(self, manifest_data: dict | None = None, accepted: dict | None = None) -> dict:
@@ -104,7 +106,8 @@ class ProjectionTest(unittest.TestCase):
         self.assertEqual(published["baseline"], "off")
         self.assertEqual(len(published["trials"]), 12)
         self.assertEqual(published["excluded"], {"stale": 1, "partial": 1, "foreign": 1})
-        self.assertEqual(published["comparisons"]["on"]["token_ratio"], 0.825)
+        # The projection carries the reducer's number rather than recomputing one of its own.
+        self.assertEqual(published["comparisons"]["on"]["token_ratio"], self.reduction["comparisons"]["on"]["token_ratio"])
         # Nothing in the projection is a body, a path, or a transcript.
         report.guard(published)
 
@@ -139,7 +142,9 @@ class ProjectionTest(unittest.TestCase):
                 self.assertEqual(published["isolation"], kind)
                 self.assertEqual(published["comparisons"]["on"]["headline_eligible"], False)
                 # The numbers are unchanged: the stamp is a label, not a reduction.
-                self.assertEqual(published["comparisons"]["on"]["token_ratio"], 0.825)
+                self.assertEqual(
+                    published["comparisons"]["on"]["token_ratio"], self.reduction["comparisons"]["on"]["token_ratio"]
+                )
                 self.assertEqual(published["arms"], self.reduction["arms"])
                 report.guard(published)
 

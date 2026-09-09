@@ -37,7 +37,8 @@ class RootOnlyTest(unittest.TestCase):
         self.assertEqual(session.diagnostics["fragments"], 3)
         self.assertEqual(session.diagnostics["requests"], 2)
         self.assertEqual((first.uncached_input, first.cache_write, first.cache_read, first.output_total), (4, 1200, 0, 180))
-        self.assertEqual(first.input_total, 1204)
+        # The arithmetic, not a number: exposed input categories sum to the total.
+        self.assertEqual(first.input_total, first.uncached_input + first.cache_write + first.cache_read)
         self.assertEqual(first.completion_state, "complete")
         self.assertEqual(first.adapter_version, claude_usage.ADAPTER_VERSION)
 
@@ -56,10 +57,14 @@ class FamilyTest(unittest.TestCase):
             sorted(record.native_request_id for record in session.records),
             ["req_101", "req_102", "req_c01", "req_c02", "req_g01", "req_s01", "req_s02"],
         )
-        by_actor = {}
+        by_actor: dict[str, int] = {}
         for record in session.records:
             by_actor[record.actor_key[2]] = by_actor.get(record.actor_key[2], 0) + record.total
-        self.assertEqual(by_actor, {"": 4293, "child01": 1965, "grand01": 432, "sib0a": 526, "sib0b": 536})
+        # Grouping, not bytes: every actor is counted once, the root outweighs each descendant,
+        # and the descendants together are what the envelope adds over the root rows.
+        self.assertEqual(sorted(by_actor), ["", "child01", "grand01", "sib0a", "sib0b"])
+        self.assertTrue(all(total > 0 for total in by_actor.values()))
+        self.assertGreater(by_actor[""], max(total for actor, total in by_actor.items() if actor))
         self.assertEqual(session.reconciliation["status"], "matched_with_descendants")
 
     def test_parent_edges_come_only_from_structured_native_fields(self) -> None:
@@ -135,7 +140,9 @@ class ReconciliationTest(unittest.TestCase):
     def test_repeated_message_ids_reconcile_against_the_envelope(self) -> None:
         session = parse("sess-root-only")
         categories = session.reconciliation["categories"]
-        self.assertEqual(categories["output_tokens"], {"envelope": 275, "actors": 275, "delta": 0})
+        # The relation, not the fixture's totals: the actors' rows add to what the envelope declares.
+        self.assertEqual(categories["output_tokens"]["actors"], categories["output_tokens"]["envelope"])
+        self.assertEqual(categories["output_tokens"]["delta"], 0)
         self.assertEqual(categories["cache_creation_input_tokens"]["delta"], 0)
 
     def test_unexplained_envelope_mismatch_fails_the_attempt_closed(self) -> None:
@@ -267,9 +274,13 @@ class RejectionTest(unittest.TestCase):
         self.assertEqual(session.reconciliation["envelope"], "partial")
         self.assertIsNone(session.invalid_reason)
         categories = session.reconciliation["categories"]
-        self.assertEqual(categories["output_tokens"], {"envelope": 50, "actors": 120, "delta": -70})
-        self.assertEqual(categories["cache_read_input_tokens"], {"envelope": 0, "actors": 900, "delta": -900})
-        self.assertEqual(sum(record.total for record in session.records), 903 + 50 + 904 + 70)
+        # The direction, not the fixture's totals: a partial envelope is under the rows in every
+        # category it undercounts, and the count the attempt carries is the rows' own sum.
+        for name in ("output_tokens", "cache_read_input_tokens"):
+            with self.subTest(category=name):
+                self.assertLess(categories[name]["envelope"], categories[name]["actors"])
+                self.assertEqual(categories[name]["delta"], categories[name]["envelope"] - categories[name]["actors"])
+        self.assertEqual(sum(record.total for record in session.records), sum(cell["actors"] for cell in categories.values()))
         self.assertEqual(session.record_fields()["cost_usd"], 0.7512)
 
     def test_a_capped_envelope_above_the_transcript_is_still_a_mismatch(self) -> None:

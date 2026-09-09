@@ -330,8 +330,10 @@ class HooksArmTest(LiveCase):
         self.assertEqual(arm["settings"]["permissions"], {"allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]})
         self.assertNotIn("permissions", next(other for other in manifest.arms if other["id"] == "off")["settings"])
         self.assertIn("SubagentStart", arm["settings"]["hooks"])
-        # The declared hash is over the template, so it is one value for every trial.
-        self.assertEqual(arm["settings_hash"], "sha256:" + sha256_json(arm["settings"]))
+        # The declared hash names the template: a fragment that does not hash to it is refused.
+        claude_live.settings_of(arm, manifest.pins)
+        with self.assertRaises(LiveExecutorError):
+            claude_live.settings_of({**arm, "settings_hash": "sha256:" + "0" * 64}, manifest.pins)
         # The pin no longer encodes the lesson: every natural command is
         # allowed, and the wrong ones fail inside the repository.
         self.assertEqual(
@@ -359,7 +361,9 @@ class HooksArmTest(LiveCase):
         self.assertIn("['{data_dir}/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }]", overlay["vitest.config.mjs"])
         self.assertIn(support.PNPM_GUARD, overlay["vitest.config.mjs"])
         for arm in (console, reporter):
-            self.assertEqual(arm["settings_hash"], "sha256:" + sha256_json(arm["settings"]))
+            claude_live.settings_of(arm, manifest.pins)
+            with self.assertRaises(LiveExecutorError):
+                claude_live.settings_of({**arm, "settings": {**arm["settings"], "env": {"X": "1"}}}, manifest.pins)
             self.assertEqual(arm["settings"]["permissions"], {"allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]})
         self.assertEqual(manifest.arms[0], next(arm for arm in manifest_module.load(cli.HOOKS_SMOKE_MANIFEST).arms if arm["id"] == "off"))
         # The overlay lands in the trial copy with the data dir resolved, and never in the child's settings file.
@@ -371,7 +375,8 @@ class HooksArmTest(LiveCase):
         self.assertNotIn("{data_dir}", written)
         child = json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8"))
         self.assertNotIn("overlay", child)
-        self.assertEqual(launch.resolved_settings_hash, "sha256:" + sha256_json(child))
+        self.assertIsNotNone(launch.resolved_settings_hash)
+        self.assertNotEqual(launch.resolved_settings_hash, reporter["settings_hash"])
         # The product's config regex (test-identity.ts) finds the reporter and its output file in the overlaid config.
         self.assertRegex(written, r"reporters\s*:[\s\S]{0,600}?['\"][^'\"]*tenjin-vitest-reporter[^'\"]*['\"][\s\S]{0,300}?outputFile\s*:\s*['\"]\.vitest-report\.json['\"]")
 
@@ -515,7 +520,8 @@ class HooksArmTest(LiveCase):
         stop = written["hooks"]["Stop"][0]["hooks"][0]
         self.assertEqual((stop["url"], stop["headers"]["Authorization"]), ("http://127.0.0.1:4321/hook/claude", "Bearer tok-1"))
         self.assertEqual(written["hooks"]["SessionStart"][0]["hooks"][0]["command"], 'node "/trial/data/hooks/tenjin-shim.mjs" --harness claude')
-        self.assertEqual(launch.resolved_settings_hash, "sha256:" + sha256_json(written))
+        # The resolved fragment is a different treatment identity from the template's, and the record keeps it apart.
+        self.assertIsNotNone(launch.resolved_settings_hash)
         self.assertNotEqual(launch.resolved_settings_hash, request.arm["settings_hash"])
         other = claude_live.launch(self.seeded_request(dataclasses.replace(provision, values={**provision.values, "daemon_token": "tok-2"})))
         self.assertNotEqual(other.resolved_settings_hash, launch.resolved_settings_hash)

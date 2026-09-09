@@ -107,9 +107,10 @@ def synthetic_manifest(
     executor_name: str = "fake",
     verifier_name: str = "fake_answer_file",
     wall_clock_s: int = 30,
-    auxiliary_usage: str = "none",
+    auxiliary_usage: str | dict[str, str] = "none",
     live: bool = False,
     prompt: str = "Write 42 into answer.txt.",
+    corpus: dict[str, str] | None = None,
 ) -> manifest_module.Manifest:
     """A manifest object for runner and schedule cases, with a disposable fixture.
 
@@ -157,11 +158,13 @@ def synthetic_manifest(
                 "product_version": "none",
                 "settings_hash": f"sha256:{arm}",
                 "memory_snapshot_hash": "sha256:empty",
-                "auxiliary_usage": auxiliary_usage,
+                "auxiliary_usage": auxiliary_usage[arm] if isinstance(auxiliary_usage, dict) else auxiliary_usage,
             }
             for arm in arms
         ],
     }
+    if corpus is not None:
+        data["corpus"] = corpus
     if live:
         data["pins"].update(
             {
@@ -278,6 +281,7 @@ def reduction_record(
     manifest_hash: str = REDUCE_MANIFEST_HASH,
     requests: int = 1,
     preamble: int | None = None,
+    schedule_hash: str = REDUCE_SCHEDULE_HASH,
 ) -> dict[str, Any]:
     """A valid attempt record with exactly the token total a reducer case needs.
 
@@ -341,7 +345,7 @@ def reduction_record(
         "schema": records.RECORD_SCHEMA,
         "trial_id": trial,
         "manifest_hash": manifest_hash,
-        "schedule_hash": REDUCE_SCHEDULE_HASH,
+        "schedule_hash": schedule_hash,
         "task_id": task_id,
         "arm_id": arm_id,
         "repeat": repeat,
@@ -398,6 +402,71 @@ def accept(*built: dict[str, Any]) -> dict[str, dict[str, Any]]:
         records.validate(record)
         accepted[record["trial_id"]] = record
     return accepted
+
+
+# One attempt per (task, arm, repeat): its scored tokens, its outcome, and how
+# its usage reconciled. Both arms carry a cap they declare, the treatment arm
+# carries one infrastructure-invalid attempt, and every task resolves at least
+# once in each arm, so a reduction over this corpus exercises every branch.
+CORPUS_CELLS: dict[tuple[str, str, int], tuple[int, str, str]] = {
+    ("task-0", "off", 0): (10000, "pass", "matched"),
+    ("task-0", "off", 1): (10000, "pass", "matched"),
+    ("task-1", "off", 0): (12000, "pass", "matched"),
+    ("task-1", "off", 1): (12000, "fail", "matched"),
+    ("task-2", "off", 0): (8000, "pass", "matched"),
+    ("task-2", "off", 1): (4000, "interrupted", "no_envelope"),
+    ("task-0", "on", 0): (8000, "pass", "matched"),
+    ("task-0", "on", 1): (8000, "pass", "matched"),
+    ("task-1", "on", 0): (9000, "pass", "matched"),
+    ("task-1", "on", 1): (9000, "invalid", "mismatch"),
+    ("task-2", "on", 0): (3000, "capped", "no_envelope"),
+    ("task-2", "on", 1): (6000, "pass", "matched"),
+}
+
+
+def fake_corpus(tmp: Path) -> tuple[manifest_module.Manifest, str, Path]:
+    """A finished offline run on disk: manifest, schedule hash, and a records directory.
+
+    Built through the same builders the unit cases use rather than checked in,
+    so regenerating it moves the reducer's input and its expected arithmetic
+    together. Alongside the twelve attempts it writes the three files
+    `records.select` has to refuse: another manifest's record, an unfinished
+    write, and a file that is not a record at all.
+    """
+    manifest = synthetic_manifest(tmp, tasks=3, repeats=2, seed=20260907, auxiliary_usage={"off": "none", "on": "exposed"})
+    trials = schedule.expand(manifest)
+    digest = schedule.schedule_hash(trials)
+    records_dir = tmp / "records"
+    for trial in trials:
+        tokens, outcome, reconciliation = CORPUS_CELLS[(trial.task_id, trial.arm_id, trial.repeat)]
+        auxiliary: tuple[dict[str, Any], ...] = ()
+        if trial.arm_id == "on":
+            auxiliary = (receipt("observer", "consumer", f"aux-obs-{trial.trial_id}", 400, 100),)
+            # One capture pays for the whole treatment arm, whichever attempt records it.
+            if (trial.task_id, trial.repeat) == ("task-0", 0):
+                auxiliary += (receipt("compressor", "capture", "aux-capture-1", 4000, 1000),)
+        records.publish(
+            records_dir,
+            reduction_record(
+                trial.task_id,
+                trial.arm_id,
+                trial.repeat,
+                trial.position,
+                tokens,
+                outcome,
+                auxiliary=auxiliary,
+                reconciliation=reconciliation,
+                deliveries=1 if trial.arm_id == "on" and outcome != "invalid" else 0,
+                manifest_hash=manifest.hash,
+                schedule_hash=digest,
+            ),
+        )
+    stale = reduction_record("task-0", "off", 0, 0, 10000, "pass", manifest_hash="0" * 64, schedule_hash=digest)
+    records.publish(records_dir, stale)
+    partial = records.final_path(records_dir, trials[0].trial_id).read_text(encoding="utf-8")
+    (records_dir / f"{trials[0].trial_id}.partial.0f0f0f0f.json").write_text(partial, encoding="utf-8")
+    (records_dir / "notes.txt").write_text("Not a record. The reducer excludes it as foreign.\n", encoding="utf-8")
+    return manifest, digest, records_dir
 
 
 def read_rows(path: Path) -> list[Any]:

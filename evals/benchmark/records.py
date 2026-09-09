@@ -77,6 +77,8 @@ OPTIONAL = frozenset({"discovery", "attempt_phases"})
 # build time by exact version, so nothing on the host decides which one ran.
 PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
+# The corpus stamp a reset wrote into the attestation (`artifact.CorpusStamp`).
+CORPUS_KEYS = frozenset({"provider", "project_id", "branch_id", "parent_id", "origin", "api_origin", "reset_at"})
 
 class RecordError(ValueError):
     pass
@@ -307,6 +309,12 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("isolation.producer must carry an outcome")
     if "slice" in isolation and (not isinstance(isolation["slice"], dict) or not isinstance(isolation["slice"].get("kind"), str)):
         raise RecordError("isolation.slice must name a kind")
+    corpus = isolation.get("corpus")
+    if corpus is not None:
+        if not isinstance(corpus, dict) or set(corpus) != CORPUS_KEYS:
+            raise RecordError("isolation.corpus must carry exactly the corpus fields")
+        if not all(isinstance(value, str) and value for value in corpus.values()):
+            raise RecordError("isolation.corpus fields must each be a non-empty string")
     manager = isolation.get("package_manager")
     if manager is not None:
         if not isinstance(manager, dict) or set(manager) != {"kind", "version"} or manager["kind"] not in PACKAGE_MANAGER_KINDS:

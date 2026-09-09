@@ -11,11 +11,18 @@ refuse each other's manifests, so neither can quietly run the other's
 executor. `--dry-run` prints the argv and the roots each trial would use and
 starts nothing, which is the only part of the live path CI may exercise and is
 how a reviewer reads the real command without running it. Without `--dry-run`
-it requires an isolation attestation, refuses an automated environment, and
-refuses a shell that does not have the credential seam variable set, on top of
-the refusals `artifact.require_isolation` already owns. `--ci-live --plumbing`
-is the one automated exception: the plumbing smoke in its own CI lane, stamped
-automated and non-publishable in every record.
+it requires an isolation attestation, refuses an automated environment that
+names neither lane below, and refuses a shell that does not have the credential
+seam variable set, on top of the refusals `artifact.require_isolation` owns.
+
+Two lanes may run unwatched, and they are different commands rather than one
+flag with two meanings. `--ci-live --plumbing` is the plumbing smoke in its own
+CI lane: no attestation, no provisioned arm, non-publishable in every record.
+`--automated --attestation <file>` is a measured run a schedule started: it
+presents the isolation it ran under, so it is publishable on the attestation's
+strength rather than on who launched it, and every record still says automated.
+A manifest that names a corpus resets that database branch before the first
+trial, and a reset that does not happen refuses the run.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from . import (
     artifact,
     cases as cases_module,
     container,
+    corpus as corpus_module,
     executor,
     images,
     manifest as manifest_module,
@@ -159,6 +167,8 @@ def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], ou
 def fake_run(out: Path, manifest_path: Path = FAKE_MANIFEST, runtime: runner.Runtime | None = None) -> dict[str, Any]:
     manifest = manifest_module.load(manifest_path)
     require_executor(manifest, live=False)
+    if manifest.corpus is not None:
+        raise CliError("fake-run refuses a manifest that names a corpus: the offline lane touches no database and would measure an unreset one")
     return execute(manifest, schedule.expand(manifest), out, runtime or runner.Runtime())
 
 
@@ -243,6 +253,12 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
         "arm env and arm hooks name what the arm's own settings file adds to "
         "that process, again without values.",
     ]
+    if manifest.corpus is not None:
+        facts = manifest.corpus.facts
+        lines.append(
+            f"corpus: branch {facts['branch_id']} of {facts['provider']} project {facts['project_id']} would be reset from "
+            f"{facts['parent_id']} before the first trial, serving {facts['origin']}; a dry run calls nothing"
+        )
     for index, plan in enumerate(plans, start=1):
         lines.append("")
         lines.append(
@@ -324,10 +340,12 @@ def live_run(
     dry_run: bool = False,
     plumbing: bool = False,
     ci_live: bool = False,
+    automated: bool = False,
     environ: Mapping[str, str] | None = None,
     stream: Any = None,
     runtime: runner.Runtime | None = None,
     tenjin_source: Path | None = None,
+    corpus_api: corpus_module.Api | None = None,
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
     # The product compares data dir strings, so every root has to be spelled
@@ -349,18 +367,27 @@ def live_run(
         planned = container.plan_egress(out, allowlist, "dry-run")
         plans = [plan_trial(manifest, trial, out, source, planned) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
-        return {"dry_run": True, "trials": plans}
+        return {"dry_run": True, "trials": plans, "corpus": None if manifest.corpus is None else manifest.corpus.facts}
     if provisioned and source is None:
         raise CliError(f"arm {provisioned[0]!r} is provisioned: live-run needs --tenjin-source <data dir>")
     if source is not None and source.shelf_secret_present and attestation_path is not None:
         raise CliError("--attestation refuses a source that carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, run it with --plumbing")
+    if ci_live and automated:
+        raise CliError("--ci-live and --automated are different lanes: the first is the unattested plumbing smoke, the second an attested measured run")
     if ci_live and not plumbing:
-        raise CliError("--ci-live is valid only with --plumbing: an automated live run is never publishable")
+        raise CliError("--ci-live is valid only with --plumbing: it is the unattested smoke lane, and --automated is the lane that measures")
     if ci_live and attestation_path is not None:
-        raise CliError("--ci-live refuses --attestation: an automated live run claims no isolation")
+        raise CliError("--ci-live refuses --attestation: the smoke lane claims no isolation, and --automated is the flag for a run that does")
+    if automated and plumbing:
+        raise CliError("--automated refuses --plumbing: a run nobody watches states the isolation it ran under or does not run")
+    if automated and attestation_path is None:
+        raise CliError("--automated requires --attestation: publishability follows the attestation, so a run without one has nothing to publish")
     automation = [name for name in AUTOMATION_ENV if environ.get(name)]
-    if automation and not ci_live:
-        raise CliError(f"live-run refuses an automated environment: {', '.join(automation)} is set")
+    if automation and not (ci_live or automated):
+        raise CliError(
+            f"live-run refuses an automated environment: {', '.join(automation)} is set; "
+            "--ci-live --plumbing runs the smoke, --automated --attestation a measured run"
+        )
     refuse_without_images(manifest, out)
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
@@ -373,36 +400,46 @@ def live_run(
     # both are removed here on every path out.
     egress = container.start_egress(container.plan_egress(out, allowlist, run_nonce(out, manifest)))
     reap_module.register_objects(out, "egress", container=egress.proxy, network=egress.network)
-    # The gates stay code-owned: an injected runtime supplies the clock, the
-    # settlement barrier, or the process seam, never the isolation contract.
-    #
-    # The attestation is the run's own, built from the egress it just created:
-    # the allowlist is true by construction, because the network has no route
-    # out and the proxy refuses every other host. `--attestation <file>` still
-    # states an isolation this package cannot see (a disposable VM), and
-    # `--plumbing` still buys a run with no claim at all, stamped
-    # non-publishable in every record, for a chain check on a host that is not
-    # a disposable instance.
-    attestation = None
-    if attestation_path is not None:
-        attestation = artifact.load_attestation(attestation_path)
-    elif not plumbing:
-        attestation = artifact.load_attestation_data(container.attestation(egress, seam or ""))
-    runtime = dataclasses.replace(
-        runtime or runner.Runtime(),
-        attestation=attestation,
-        publishable=not plumbing,
-        ci=bool(automation),
-        automated=ci_live,
-        source=source,
-        egress=egress,
-        sentinel=container.ProxySentinel(egress.log, egress.proxy_url),
-    )
     try:
-        return execute(manifest, trials, out, runtime)
+        # The gates stay code-owned: an injected runtime supplies the clock, the
+        # settlement barrier, or the process seam, never the isolation contract.
+        #
+        # The attestation is the run's own, built from the egress it just created:
+        # the allowlist is true by construction, because the network has no route
+        # out and the proxy refuses every other host. `--attestation <file>` still
+        # states an isolation this package cannot see (a disposable VM), and
+        # `--plumbing` still buys a run with no claim at all, stamped
+        # non-publishable in every record, for a chain check on a host that is not
+        # a disposable instance.
+        attestation = None
+        if attestation_path is not None:
+            attestation = artifact.load_attestation(attestation_path)
+        elif not plumbing:
+            attestation = artifact.load_attestation_data(container.attestation(egress, seam or ""))
+        # The last thing before the first trial, and after every refusal that costs
+        # nothing: the corpus a run measures is the one this reset left behind, so a
+        # reset that does not happen ends the run here rather than in the numbers.
+        stamp = None
+        if manifest.corpus is not None:
+            api = corpus_module.HttpApi.from_env(environ) if corpus_api is None else corpus_api
+            stamp = corpus_module.reset(manifest.corpus, api)
+            if attestation is not None:
+                attestation = artifact.with_corpus(attestation, stamp)
+        runtime = dataclasses.replace(
+            runtime or runner.Runtime(),
+            attestation=attestation,
+            publishable=not plumbing,
+            ci=bool(automation),
+            automated=ci_live or automated,
+            source=source,
+            egress=egress,
+            sentinel=container.ProxySentinel(egress.log, egress.proxy_url),
+        )
+        payload = execute(manifest, trials, out, runtime)
     finally:
         container.stop_egress(egress)
         reap_module.release(out, "egress")
+    return payload if stamp is None else {**payload, "corpus": dataclasses.asdict(stamp)}
 
 
 def do_verify(run_dir: Path) -> dict[str, Any]:
@@ -470,6 +507,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="allow an automated environment; only with --plumbing, and every record is stamped automated",
     )
+    live.add_argument(
+        "--automated",
+        action="store_true",
+        help="an attested run started by a schedule: requires --attestation, refuses --plumbing, and stamps every record automated",
+    )
     live.add_argument("--dry-run", action="store_true", help="print each trial's argv and roots, start nothing")
     live.add_argument(
         "--tenjin-source",
@@ -536,9 +578,10 @@ def main(argv: list[str] | None = None) -> int:
                 dry_run=args.dry_run,
                 plumbing=args.plumbing,
                 ci_live=args.ci_live,
+                automated=args.automated,
                 tenjin_source=args.tenjin_source,
             )
-        except (CliError, executor.ProvisionError) as error:
+        except (CliError, corpus_module.CorpusError, executor.ProvisionError) as error:
             sys.stderr.write(f"{error}\n")
             return 2
         if args.dry_run:
