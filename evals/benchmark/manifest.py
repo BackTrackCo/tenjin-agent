@@ -4,6 +4,9 @@ Manifest values are data. Executor and verifier names select code-owned argv
 in `executor.py` and `verifier.py`; no field here is ever shell-evaluated.
 Validation runs before any spend, so a bad manifest costs nothing, and the
 manifest hash covers every byte the schedule and trial ids derive from.
+
+`load` expands `presets.py` first, so validation and the hash both see the
+settings that actually run rather than the shorthand that named them.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import corpus as corpus_module, sha256_dir, sha256_json
+from . import corpus as corpus_module, presets, sha256_dir, sha256_json
 from .usage import HARNESSES
 
 SCHEMA_VERSION = 1
@@ -61,6 +64,11 @@ OPTIONAL_TASK_KEYS = frozenset({"prompt", "tools", "allowed_tools"})
 # decides whether a team miss then reaches the public marketplace; it defaults
 # to the product's own `on`, so an arm that omits it is the product as shipped.
 # An arm's static files are `settings.overlay`, validated by the live executor.
+# An arm may also name a `presets.PRESET_KEY` instead of inlining the block:
+# `load` expands it into `settings` before this validation and before the hash,
+# so no arm reaches here still carrying the name. An inline `settings` beside a
+# preset is legal and wins key by key, which is where a real difference between
+# two arms stays visible; an inline block with no preset is unchanged.
 OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "producer", "hooks_disabled", "public_fallback"})
 # The product's own values for `team.publicFallback`. `off` is the exact string
 # `src/hooks/ask.ts` reads to drop the public-only legs.
@@ -301,5 +309,9 @@ def load(path: Path) -> Manifest:
         raise ManifestError(f"cannot read manifest: {error}") from error
     if not isinstance(data, dict):
         raise ManifestError("manifest must be a JSON object")
+    try:
+        data = presets.expand(data)
+    except presets.PresetError as error:
+        raise ManifestError(str(error)) from error
     validate(data, path.parent)
     return Manifest(data=data, path=path, hash=sha256_json(data))

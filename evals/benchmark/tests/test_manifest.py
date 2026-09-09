@@ -8,8 +8,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from evals.benchmark import cli, manifest
+from evals.benchmark import cli, manifest, presets
 from evals.benchmark.manifest import ManifestError
+
+
+def committed(path: Path) -> dict:
+    """A committed manifest as `load` hands it on: presets expanded, which is what `validate` is defined over."""
+    return presets.expand(json.loads(path.read_text(encoding="utf-8")))
 
 
 class ManifestTest(unittest.TestCase):
@@ -112,7 +117,7 @@ class HooksDisabledTest(unittest.TestCase):
     """Who may turn a product hook arm off, and who may not."""
 
     def manifest(self, **arm: object) -> dict:
-        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data = committed(cli.HOOKS_SMOKE_MANIFEST)
         data["arms"][1].update(arm)
         return data
 
@@ -125,7 +130,7 @@ class HooksDisabledTest(unittest.TestCase):
         self.assertIn("captures", str(caught.exception))
 
     def test_an_unprovisioned_arm_has_no_seeded_config_to_write_it_into(self) -> None:
-        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data = committed(cli.HOOKS_SMOKE_MANIFEST)
         data["arms"][0]["hooks_disabled"] = ["publish"]
         with self.assertRaises(ManifestError) as caught:
             manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
@@ -140,7 +145,7 @@ class PublicFallbackTest(unittest.TestCase):
     """The product's `team.publicFallback` as an arm's choice, and the default that keeps every old manifest true."""
 
     def manifest(self, **arm: object) -> dict:
-        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data = committed(cli.HOOKS_SMOKE_MANIFEST)
         data["arms"][1].update(arm)
         return data
 
@@ -149,7 +154,7 @@ class PublicFallbackTest(unittest.TestCase):
         manifest.validate(self.manifest(public_fallback="on"), cli.HOOKS_SMOKE_MANIFEST.parent)
 
     def test_an_arm_that_names_nothing_is_still_valid(self) -> None:
-        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data = committed(cli.HOOKS_SMOKE_MANIFEST)
         self.assertNotIn("public_fallback", data["arms"][1])
         manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
 
@@ -161,7 +166,7 @@ class PublicFallbackTest(unittest.TestCase):
                 self.assertIn("public_fallback", str(caught.exception))
 
     def test_an_unprovisioned_arm_has_no_seeded_config_to_write_it_into(self) -> None:
-        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data = committed(cli.HOOKS_SMOKE_MANIFEST)
         data["arms"][0]["public_fallback"] = "off"
         with self.assertRaises(ManifestError) as caught:
             manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)

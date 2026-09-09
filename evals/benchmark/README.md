@@ -36,6 +36,7 @@ the suite builds.
 | Module                     | What it owns                                                      | Held by                              |
 | -------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
 | `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
+| `presets.py`               | named arm settings, expanded at load, an inline block over them   | `test_presets.py`                    |
 | `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
 | `runner.py`                | execution: fresh roots, settlement, caps, sentinels, resume       | `test_runner.py`, `test_fake_run.py` |
 | `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
@@ -58,6 +59,16 @@ the suite builds.
 | `reap.py`                  | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
 | `snapshot.py`              | the per-run corpus reading: post count and content hash           | `test_snapshot.py`                   |
 | `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
+
+An arm's treatment is its `settings`, and most arms run the same one, so an arm may name a preset
+instead: `"settings_preset": "tenjin-hooks-and-cli-reads"` is the product's whole hook wiring plus
+permission to run the CLI's read verbs by hand, defined once in `presets.py`. An arm may still
+inline a block, and one written beside a preset wins key by key, which is where a real difference
+between two arms stays visible in the manifest rather than folded into a preset. `manifest.load`
+expands the name before it validates and before it hashes, so the hash stays over the settings
+that actually run: the seven committed manifests hash today exactly what they hashed with the
+block inlined, and the schema `validate` enforces is unchanged, which is why this is shorthand
+rather than a benchmark version bump.
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
 bootstrap golden), `fixtures/live/` (the smoke and real-task manifests, one frozen Vitest project
