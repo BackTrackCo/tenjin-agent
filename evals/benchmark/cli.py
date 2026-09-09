@@ -48,8 +48,6 @@ from . import (
     runner,
     schedule,
     tenjin_arm,
-    toolchain,
-    vendor as vendor_module,
     verifier,
 )
 
@@ -299,35 +297,6 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
             lines.append(f"  {'agent':10}{shlex.join(plan_container['agent'])}")
         lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
-
-
-def refuse_foreign_vendor(manifest: manifest_module.Manifest, environ: Mapping[str, str]) -> None:
-    """A vendored toolchain built for another platform is refused before any root exists."""
-    vendors = [(task, manifest.vendor_for(task)) for task in manifest.tasks]
-    if not any(vendor is not None for _task, vendor in vendors):
-        return
-    host = vendor_module.host_facts(environ)
-    for task, vendor in vendors:
-        if vendor is None:
-            continue
-        try:
-            vendor_module.check_platform(vendor, host)
-        except vendor_module.VendorError as error:
-            raise CliError(f"task {task['id']!r}: {error.detail}") from error
-
-
-def refuse_package_manager(manifest: manifest_module.Manifest, environ: Mapping[str, str]) -> None:
-    """The pnpm on PATH must be each pinning fixture's pin, or the run would fetch one; refused before any root."""
-    for task in manifest.tasks:
-        fixture = manifest.fixture_path(task)
-        try:
-            pin = toolchain.package_manager_pin(fixture)
-            if pin is None:
-                continue
-            manager = toolchain.inspect(environ, pin, probe_binary=True, cwd=fixture.parent)
-            toolchain.check(manager, pin, toolchain.corepack_home(environ))
-        except toolchain.ToolchainError as error:
-            raise CliError(f"task {task['id']!r}: {error.detail}") from error
 
 
 def refuse_without_images(manifest: manifest_module.Manifest, out: Path | None = None) -> None:

@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import images as images_module, sha256_json, sha256_text, vendor as vendor_module
+from . import images as images_module, sha256_json, sha256_text
 
 CANARY_PREFIX = "bench1-canary-"
 CREDENTIAL_FILE = ".benchmark-credential"
@@ -122,11 +122,6 @@ class TrialRoots:
         return self.base / "verify"
 
     @property
-    def corepack_home(self) -> Path:
-        """The trial's own corepack cache: one pinned pnpm, no network, nothing of the operator's."""
-        return self.base / "corepack"
-
-    @property
     def agent_roots(self) -> tuple[Path, ...]:
         """Roots the agent writes to. The verifier mount is not one of them."""
         return (self.repo, self.output, self.data_dir)
@@ -187,7 +182,6 @@ def create(
     trial_id: str,
     fixture: Path,
     public_origin: str | None = None,
-    vendor: vendor_module.Vendor | None = None,
     *,
     phase: str | None = None,
     data_dir: Path | None = None,
@@ -221,7 +215,7 @@ def create(
     for path in (roots.home, roots.profile, roots.output):
         path.mkdir(parents=True)
     roots.data_dir.mkdir(parents=True, exist_ok=True)
-    refresh_repo(roots, fixture, vendor, image)
+    refresh_repo(roots, fixture, image)
     (roots.home / CREDENTIAL_FILE).write_text(
         f"# Planted by the benchmark. Nothing real depends on it.\nBENCH1_FAKE_API_KEY={roots.canary_token}\n",
         encoding="utf-8",
@@ -229,28 +223,20 @@ def create(
     return roots
 
 
-def refresh_repo(
-    roots: TrialRoots, fixture: Path, vendor: vendor_module.Vendor | None, image: images_module.Image | None = None
-) -> None:
+def refresh_repo(roots: TrialRoots, fixture: Path, image: images_module.Image | None = None) -> None:
     """A fresh repository copy at the roots' repo path: the fixture, plus the dependency tree.
 
     The tree comes out of the task's own image, which is where `pnpm install`
-    ran, so a trial installs nothing and the host never runs those files. The
-    vendored archive is the older path and is used only when there is no image.
+    ran, so a trial installs nothing, nothing is committed, and the host never
+    runs those files. An arm's `settings.overlay` is the launch's to apply.
     """
     if roots.repo.exists():
         shutil.rmtree(roots.repo)
     shutil.copytree(fixture, roots.repo, symlinks=False)
     if image is not None:
         try:
-            images_module.export_node_modules(image, roots.repo / vendor_module.TARGET)
+            images_module.export_node_modules(image, roots.repo / images_module.NODE_MODULES)
         except images_module.ImageError as error:
-            raise ArtifactError(error.code, error.detail) from error
-        return
-    if vendor is not None:
-        try:
-            vendor_module.extract(vendor, roots.repo / vendor_module.TARGET)
-        except vendor_module.VendorError as error:
             raise ArtifactError(error.code, error.detail) from error
 
 

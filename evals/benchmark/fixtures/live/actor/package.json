@@ -2,7 +2,6 @@
   "name": "bench1-actor",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.11.0",
   "scripts": {
     "test": "node scripts/all-tests.mjs"
   },

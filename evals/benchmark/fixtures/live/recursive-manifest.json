@@ -44,7 +44,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "fixture_hash": "sha256:bbd562347f5f7ba2ddebe8cf84013f746dd6da92549fad6ddc16226e3eeed67f",
+      "fixture_hash": "sha256:71649359979d59bf3801e65594740dc5741ec67faea726e973c1ddfb0553670b",
       "verifier": "node_test_actor",
       "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
       "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],

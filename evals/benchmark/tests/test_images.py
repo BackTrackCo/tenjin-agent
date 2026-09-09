@@ -180,6 +180,50 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual(images.ledger_read(Path("/nonexistent/images.json")), {})
 
 
+class PackageManagerTest(unittest.TestCase):
+    """The pnpm a trial runs is the image's, and the record says so."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def test_a_launch_records_the_images_pnpm_and_seeds_nothing_on_the_host(self) -> None:
+        from evals.benchmark import artifact, claude_live, cli, manifest as manifest_module, schedule
+
+        manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+        trial = next(item for item in schedule.expand(manifest) if item.arm_id == "off")
+        task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
+        arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
+        roots = artifact.create(self.dir / "run", trial.trial_id, manifest.fixture_path(task))
+        launch = claude_live.launch(claude_live.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins))
+        self.assertEqual(launch.package_manager, {"kind": "image", "version": images.PNPM_VERSION})
+        assert launch.env is not None
+        # Nothing of the host's package manager reaches the trial: no corepack
+        # home, no cache seeded beside the roots, no version probed.
+        self.assertNotIn("COREPACK_HOME", launch.env)
+        self.assertNotIn("COREPACK_HOME", launch.container_plan["env"])
+        self.assertFalse((roots.base / "corepack").exists())
+
+    def test_an_arm_cannot_reach_the_package_manager_through_its_settings(self) -> None:
+        from evals.benchmark import claude_live
+
+        for name in ("COREPACK_HOME", "NODE_OPTIONS", "PATH"):
+            with self.subTest(name), self.assertRaises(claude_live.LiveExecutorError):
+                claude_live._settings_env({name: "/elsewhere"})
+
+    def test_the_record_keeps_the_package_manager_in_its_isolation_block(self) -> None:
+        from evals.benchmark import records
+        from evals.benchmark.tests import support
+
+        record = support.attempt_record(support.parse("sess-family"))
+        record["isolation"] = {**record["isolation"], "package_manager": {"kind": "image", "version": images.PNPM_VERSION}}
+        records.validate(record)
+        for bad in ({"kind": "npm", "version": "1"}, {"kind": "image"}, {"kind": "image", "version": ""}, "image"):
+            with self.subTest(str(bad)), self.assertRaises(records.RecordError):
+                records.validate({**record, "isolation": {**record["isolation"], "package_manager": bad}})
+
+
 class AvailabilityTest(unittest.TestCase):
     def test_a_daemon_that_does_not_answer_is_one_sentence(self) -> None:
         docker = FakeDocker({"info": Completed(returncode=1, stdout="", stderr="cannot connect")})

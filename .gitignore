@@ -13,9 +13,3 @@ __pycache__/
 # this machine. `images build` rewrites it; nothing reads it across machines.
 evals/benchmark/fixtures/live/images.json
 
-# Bench-1 task fixtures track only the hand-written vitest shim under
-# node_modules; the tree itself is evals/benchmark/fixtures/live/vendor/,
-# one archive extracted into each trial.
-!evals/benchmark/fixtures/live/*/node_modules/
-evals/benchmark/fixtures/live/*/node_modules/*
-!evals/benchmark/fixtures/live/*/node_modules/.bin/

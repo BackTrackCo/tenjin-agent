@@ -127,60 +127,6 @@ def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> No
 
 
 @dataclass(frozen=True)
-class Started:
-    """A helper process an arm's provisioning owns for the length of one trial."""
-
-    process: subprocess.Popen[Any]
-    ledger_id: str
-
-
-def process_start(
-    argv: list[str], *, cwd: Path, env: dict[str, str], roots: artifact.TrialRoots, ledger_id: str, log: Path
-) -> Started:
-    """Start a helper the way the agent is started: own session, no shell, in the ledger.
-
-    The one other place a process begins. It exists for a provisioned arm's
-    daemon, which has to outlive the launch call and die before `loop.db` is
-    read, so it cannot be a child of the agent's group; its own group is
-    recorded under the trial's ledger id with a suffix, and `cli.py cleanup`
-    reaches it the same way.
-    """
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a", encoding="utf-8") as handle:
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            shell=False,
-        )
-    reap.register(roots.run_dir, ledger_id, process.pid, argv[0])
-    return Started(process=process, ledger_id=ledger_id)
-
-
-def process_stop(started: Started, run_dir: Path, grace_s: float) -> int | None:
-    """SIGTERM the helper's group, wait, SIGKILL what is left, and clear its ledger entry."""
-    process = started.process
-    try:
-        if process.poll() is None:
-            _kill_group(process, signal.SIGTERM)
-            try:
-                process.wait(timeout=grace_s)
-            except subprocess.TimeoutExpired:
-                _kill_group(process)
-                try:
-                    process.wait(timeout=_ORPHAN_WAIT_S)
-                except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
-                    pass
-    finally:
-        reap.release(run_dir, started.ledger_id)
-    return process.returncode
-
-
-@dataclass(frozen=True)
 class Runtime:
     clock: Clock = time.monotonic
     sleep: Sleep = time.sleep
@@ -320,9 +266,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     image = images.require(task, manifest.pins) if spec.live else None
     if image is not None:
         isolation = {**isolation, "image": image.facts}
-    roots = artifact.create(
-        run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin, vendor=manifest.vendor_for(task), image=image
-    )
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin, image=image)
     # The manifest's slice is identity of the run, stated in every record.
     if manifest.slice is not None:
         isolation = {**isolation, "slice": manifest.slice}
@@ -357,7 +301,6 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             arm=arm,
             pins=manifest.pins,
             fixture=manifest.fixture_path(task),
-            vendor=manifest.vendor_for(task),
             image=image,
             roots=roots,
             provision=provision,
@@ -368,7 +311,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         provision = produced.provision
         foreign_sessions = produced.foreign_sessions
         isolation = {**isolation, "producer": produced.facts}
-        artifact.refresh_repo(roots, manifest.fixture_path(task), manifest.vendor_for(task), image)
+        artifact.refresh_repo(roots, manifest.fixture_path(task), image)
     launch = spec.launch(
         executor.LaunchRequest(
             trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress

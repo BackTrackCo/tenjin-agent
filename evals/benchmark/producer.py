@@ -158,7 +158,6 @@ def run(
     arm: dict[str, Any],
     pins: dict[str, Any],
     fixture: Path,
-    vendor: Any,
     image: Any,
     roots: artifact.TrialRoots,
     provision: Provision,
@@ -170,7 +169,7 @@ def run(
     from . import runner
 
     producer_roots = artifact.create(
-        roots.run_dir, trial_id, fixture, public_origin=roots.public_origin, vendor=vendor, phase=PHASE, data_dir=roots.data_dir, image=image
+        roots.run_dir, trial_id, fixture, public_origin=roots.public_origin, phase=PHASE, data_dir=roots.data_dir, image=image
     )
     launch = spec.launch(
         LaunchRequest(
