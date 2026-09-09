@@ -594,6 +594,45 @@ class SeedCase(DaemonCase):
         path = Path(self.source.path) / "cli-calls.jsonl"
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
 
+    def test_the_probe_argv_carries_what_the_image_entrypoint_needs_to_start(self) -> None:
+        """The entrypoint refuses without an output root, and refuses a container command that is not after `--`."""
+        probe = self.dir / "probe"
+        output = self.dir / "probe-output"
+        argv = tenjin_arm.probe_argv(
+            "sha256:image", probe, "pnpm exec vitest run tests/a.test.mjs", {"HOME": str(self.dir), container.OUTPUT_VAR: str(output)}
+        )
+        self.assertIn(f"{container.OUTPUT_VAR}={output}", argv)
+        # Mounted as well as named: nothing outside a mount exists in there.
+        self.assertIn(f"{output}:{output}:rw", argv)
+        self.assertIn(f"{probe}:{probe}:rw", argv)
+        self.assertEqual(argv[argv.index("--network") + 1], "none")
+        self.assertEqual(argv[argv.index("--") + 1 :], ["pnpm", "exec", "vitest", "run", "tests/a.test.mjs"])
+
+    def test_the_probe_gets_its_own_output_root_and_a_copy_that_keeps_its_symlinks(self) -> None:
+        roots = self.seed_roots()
+        (roots.repo / "bin").mkdir()
+        (roots.repo / "bin" / "runner").symlink_to(Path("..") / "probe-probe.mjs")
+        seen: dict[str, object] = {}
+
+        def run(image: str, probe: Path, command: str, environment: dict[str, str]) -> subprocess.CompletedProcess:
+            link = probe / "bin" / "runner"
+            seen.update(output=environment[container.OUTPUT_VAR], symlink=link.is_symlink(), target=str(link.resolve()))
+            return subprocess.run(["node", str(link)], cwd=probe, env=environment, capture_output=True, text=True, shell=False, check=False)
+
+        with mock.patch.object(tenjin_arm, "PROBE_RUN", run):
+            probed = tenjin_arm.probe_keys(roots, ["node probe-probe.mjs"], self.environment(roots), support.IMAGE.id)
+        # The probe's own output root, never the attempt's.
+        self.assertEqual(seen["output"], str(roots.base / tenjin_arm.PROBE_OUTPUT_DIR))
+        self.assertNotEqual(seen["output"], str(roots.output))
+        # A dereferenced copy puts every relative link's target somewhere else,
+        # which is how a pnpm `.bin` shim stops finding its own entry point.
+        self.assertTrue(seen["symlink"])
+        self.assertEqual(seen["target"], str((roots.base / tenjin_arm.PROBE_DIR / "probe-probe.mjs").resolve()))
+        self.assertEqual(probed["node probe-probe.mjs"]["sig_v1"], self.key)
+        # Both scratch roots leave with the probe.
+        self.assertFalse((roots.base / tenjin_arm.PROBE_DIR).exists())
+        self.assertFalse((roots.base / tenjin_arm.PROBE_OUTPUT_DIR).exists())
+
     def test_prepare_probes_publishes_with_the_key_and_stop_deletes(self) -> None:
         roots = self.seed_roots()
         request = self.request(roots)

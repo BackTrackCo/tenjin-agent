@@ -97,6 +97,7 @@ KEY_KINDS = frozenset({"sig_v1", "sig_v1_test"})
 FIX_SUFFIX = "-fix"
 CLI = "tenjin"
 PROBE_DIR = "probe"
+PROBE_OUTPUT_DIR = "probe-output"
 SEED_DIR = "seed"
 PROBE_TIMEOUT_S = 120
 CLI_TIMEOUT_S = 180
@@ -179,13 +180,19 @@ def lessons_for(task: dict[str, Any], lessons: Path | None = None, selected: lis
 
 
 def probe_argv(image: str, probe: Path, command: str, environment: dict[str, str]) -> list[str]:
-    """One command from a lesson, run in the task's own image with no network at all."""
+    """One command from a lesson, run in the task's own image with no network at all.
+
+    Through the image's entrypoint, which is what a trial runs under, so it
+    needs an output root: the probe's own, beside the repository copy, never
+    the trial's, and mounted because nothing outside a mount exists in there.
+    """
+    output = Path(environment[container.OUTPUT_VAR])
     return container.run_argv(
         image=image,
         name=f"{container.TRIAL_PREFIX}probe-{secrets.token_hex(4)}",
         workdir=probe,
-        plan=[container.Mount(probe, probe)],
-        environment={key: value for key, value in environment.items() if key != container.OUTPUT_VAR},
+        plan=[container.Mount(probe, probe), container.Mount(output, output)],
+        environment=environment,
         network="none",
         command=command.split(" "),
     )
@@ -222,7 +229,16 @@ def probe_keys(
     probe = roots.base / PROBE_DIR
     if probe.exists():
         shutil.rmtree(probe)
-    shutil.copytree(roots.repo, probe, symlinks=False)
+    # Symlinks kept: a pnpm tree is symlinks, all of them relative, and
+    # dereferencing them copies each `.bin` shim out of the directory its own
+    # relative import resolves from, so `pnpm exec` fails to find its entry
+    # point instead of running the fixture's failure.
+    shutil.copytree(roots.repo, probe, symlinks=True)
+    # The entrypoint's output root, the probe's own: what a command writes
+    # there is not the attempt's, and the copy leaves with the probe.
+    output = roots.base / PROBE_OUTPUT_DIR
+    output.mkdir(parents=True, exist_ok=True)
+    environment = {**environment, container.OUTPUT_VAR: str(output)}
     probed: dict[str, dict[str, str | None]] = {}
     try:
         for command in commands:
@@ -234,6 +250,7 @@ def probe_keys(
             probed[command] = {"sig_v1": found["key"], "sig_v1_test": found["test_key"], "text": text}
     finally:
         shutil.rmtree(probe, ignore_errors=True)
+        shutil.rmtree(output, ignore_errors=True)
     return probed
 
 
