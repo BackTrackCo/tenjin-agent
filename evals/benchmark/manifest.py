@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import sha256_dir, sha256_json, vendor as vendor_module
+from . import corpus as corpus_module, sha256_dir, sha256_json, vendor as vendor_module
 from .usage import HARNESSES
 
 SCHEMA_VERSION = 1
@@ -32,7 +32,7 @@ TOP_KEYS = frozenset(
         "arms",
     }
 )
-OPTIONAL_TOP_KEYS = frozenset({"phases"})
+OPTIONAL_TOP_KEYS = frozenset({"phases", "corpus"})
 PIN_KEYS = frozenset(
     {
         "model",
@@ -106,6 +106,13 @@ class Manifest:
 
     def fixture_path(self, task: dict[str, Any]) -> Path:
         return (self.path.parent / task["fixture"]).resolve()
+
+    @property
+    def corpus(self) -> corpus_module.Corpus | None:
+        """The database branch a run resets before its first trial, when it names one."""
+        if "corpus" not in self.data:
+            return None
+        return corpus_module.parse(self.data["corpus"])
 
     def vendor_for(self, task: dict[str, Any]) -> vendor_module.Vendor | None:
         """The archive a task's trials extract into `node_modules`, when it names one."""
@@ -196,6 +203,11 @@ def validate(data: dict[str, Any], base: Path) -> None:
     _require_count("pins.turn_budget", pins["turn_budget"], 1)
     if "concurrency" in pins:
         _require_count("pins.concurrency", pins["concurrency"], 1)
+    if "corpus" in data:
+        try:
+            corpus_module.parse(data["corpus"])
+        except corpus_module.CorpusError as error:
+            raise ManifestError(error.detail) from error
     if "phases" in data:
         _require_keys("phases", data["phases"], PHASE_KEYS)
         for key in PHASE_KEYS:

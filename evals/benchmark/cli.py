@@ -21,6 +21,8 @@ CI lane: no attestation, no provisioned arm, non-publishable in every record.
 `--automated --attestation <file>` is a measured run a schedule started: it
 presents the isolation it ran under, so it is publishable on the attestation's
 strength rather than on who launched it, and every record still says automated.
+A manifest that names a corpus resets that database branch before the first
+trial, and a reset that does not happen refuses the run.
 """
 
 from __future__ import annotations
@@ -41,6 +43,8 @@ from . import (
     FIXTURES,
     reap as reap_module,
     artifact,
+    cases as cases_module,
+    corpus as corpus_module,
     executor,
     manifest as manifest_module,
     records,
@@ -160,6 +164,8 @@ def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], ou
 def fake_run(out: Path, manifest_path: Path = FAKE_MANIFEST, runtime: runner.Runtime | None = None) -> dict[str, Any]:
     manifest = manifest_module.load(manifest_path)
     require_executor(manifest, live=False)
+    if manifest.corpus is not None:
+        raise CliError("fake-run refuses a manifest that names a corpus: the offline lane touches no database and would measure an unreset one")
     return execute(manifest, schedule.expand(manifest), out, runtime or runner.Runtime())
 
 
@@ -235,6 +241,12 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
         "arm env and arm hooks name what the arm's own settings file adds to "
         "that process, again without values.",
     ]
+    if manifest.corpus is not None:
+        facts = manifest.corpus.facts
+        lines.append(
+            f"corpus: branch {facts['branch_id']} of {facts['provider']} project {facts['project_id']} would be reset from "
+            f"{facts['parent_id']} before the first trial, serving {facts['origin']}; a dry run calls nothing"
+        )
     for index, plan in enumerate(plans, start=1):
         lines.append("")
         lines.append(
@@ -318,6 +330,7 @@ def live_run(
     stream: Any = None,
     runtime: runner.Runtime | None = None,
     tenjin_source: Path | None = None,
+    corpus_api: corpus_module.Api | None = None,
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
     # The product compares data dir strings, so every root has to be spelled
@@ -335,7 +348,7 @@ def live_run(
     if dry_run:
         plans = [plan_trial(manifest, trial, out, source) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
-        return {"dry_run": True, "trials": plans}
+        return {"dry_run": True, "trials": plans, "corpus": None if manifest.corpus is None else manifest.corpus.facts}
     if provisioned and source is None:
         raise CliError(f"arm {provisioned[0]!r} is provisioned: live-run needs --tenjin-source <data dir>")
     if source is not None and source.shelf_secret_present and attestation_path is not None:
@@ -369,6 +382,15 @@ def live_run(
     if seam is not None and not environ.get(seam):
         raise CliError(f"live-run needs the credential seam {seam} set in this shell")
     attestation = None if attestation_path is None else artifact.load_attestation(attestation_path)
+    # The last thing before the first trial, and after every refusal that costs
+    # nothing: the corpus a run measures is the one this reset left behind, so a
+    # reset that does not happen ends the run here rather than in the numbers.
+    stamp = None
+    if manifest.corpus is not None:
+        api = corpus_module.HttpApi.from_env(environ) if corpus_api is None else corpus_api
+        stamp = corpus_module.reset(manifest.corpus, api)
+        if attestation is not None:
+            attestation = artifact.with_corpus(attestation, stamp)
     # The gates stay code-owned: an injected runtime supplies the clock, the
     # settlement barrier, or the process seam, never the isolation contract.
     # `--plumbing` buys one thing and states its price: a run with no attestation
@@ -383,7 +405,8 @@ def live_run(
         automated=ci_live or automated,
         source=source,
     )
-    return execute(manifest, trials, out, runtime)
+    payload = execute(manifest, trials, out, runtime)
+    return payload if stamp is None else {**payload, "corpus": dataclasses.asdict(stamp)}
 
 
 def do_verify(run_dir: Path) -> dict[str, Any]:
@@ -481,9 +504,30 @@ def main(argv: list[str] | None = None) -> int:
     # relatives, also matches an operator's unrelated sessions; do not.
     cleanup = commands.add_parser("cleanup", help="kill any process this run started and left behind")
     cleanup.add_argument("--run", required=True, type=Path)
+    # Case records for the search-intent experiment: after settlement only,
+    # one JSONL row per hook fire, each question replayed through the shelf.
+    cases = commands.add_parser("cases", help="export a settled run's hook fires as search-intent case records")
+    cases.add_argument("--run", required=True, type=Path)
+    cases.add_argument("--tenjin-source", type=Path, help="the data dir whose team shelf the questions are replayed on")
+    cases.add_argument("--out", type=Path, help="the JSONL file to write")
+    cases.add_argument("--dry-run", action="store_true", help="list the cases that would be replayed and call nothing")
     args = parser.parse_args(argv)
     if args.command == "cleanup":
         json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+    if args.command == "cases":
+        try:
+            payload = do_cases(args.run, args.tenjin_source, args.out, dry_run=args.dry_run)
+        except (CliError, cases_module.CasesError, executor.ProvisionError, manifest_module.ManifestError, records.RecordError) as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        if args.dry_run:
+            for row in payload["listing"]:
+                sys.stdout.write(f"{row['case_id']} {row['trigger']} {row['question'] or row['command_head'] or '(key only)'}\n")
+            sys.stdout.write(f"cases dry run: {payload['cases']} case(s) across {payload['trials']} trial(s); nothing replayed, nothing written\n")
+            return 0
+        json.dump({key: value for key, value in payload.items() if key != "listing"}, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
     if args.command in ("summary", "regress", "verify", "reduce", "report"):
@@ -504,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
                 automated=args.automated,
                 tenjin_source=args.tenjin_source,
             )
-        except (CliError, executor.ProvisionError) as error:
+        except (CliError, corpus_module.CorpusError, executor.ProvisionError) as error:
             sys.stderr.write(f"{error}\n")
             return 2
         if args.dry_run:
@@ -514,6 +558,17 @@ def main(argv: list[str] | None = None) -> int:
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
+
+def do_cases(run_dir: Path, source_path: Path | None, out: Path | None, *, dry_run: bool = False, replay: Any = None) -> dict[str, Any]:
+    """The search-intent case export: refuses a run that is not settled, and a replay without a source or an output file."""
+    manifest, digest = load_run(run_dir)
+    if not dry_run and out is None:
+        raise CliError("cases needs --out <file.jsonl> unless --dry-run")
+    if not dry_run and source_path is None:
+        raise CliError("cases needs --tenjin-source <data dir> to replay each question on the team shelf, or --dry-run")
+    source = None if source_path is None else tenjin_arm.load_source(source_path)
+    return cases_module.export(manifest, digest, run_dir, out, source, dry_run=dry_run, replay=replay)
 
 
 def run_reader(args: argparse.Namespace) -> int:

@@ -23,7 +23,7 @@ from unittest import mock
 
 import pytest
 
-from evals.benchmark import artifact, cli, executor, manifest as manifest_module, reap, records, runner, schedule, signature, tenjin_arm, vendor, verifier
+from evals.benchmark import artifact, cases, cli, executor, manifest as manifest_module, reap, records, runner, schedule, signature, tenjin_arm, vendor, verifier
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -870,6 +870,19 @@ def actor_failure_key() -> str:
     identity = signature.identity_from_console(f" FAIL  tests/{test_file.name} > {template.group(1).replace('%#', str(index))}")
     assert identity is not None
     return f"sig_v1_test:{signature.sig_v1_test(identity)}"
+
+
+def test_the_key_only_lesson_shares_no_file_name_with_the_prompt() -> None:
+    live = tenjin_arm.FIXTURES / "live" / "lessons"
+    lesson = tenjin_arm.lesson_named("actor-fix-keyonly", live)
+    assert lesson is not None
+    prompt = next(task for task in json.loads(cli.KEYS_SMOKE_MANIFEST.read_text(encoding="utf-8"))["tasks"])["prompt"]
+    text = lesson.title + "\n" + lesson.body.read_text(encoding="utf-8")
+    assert cases.shared_file_names(prompt, text) == []
+    for word in ("actor", "actorKey", "src/actor.mjs", "tests/actor.test.mjs"):
+        assert word.lower() not in text.lower()
+    assert lesson.keys == (actor_failure_key(),)
+    assert cases.shared_file_names(prompt, "edit src/actor.mjs") == ["actor", "actor.mjs"]
 
 
 def test_the_live_lesson_is_loadable_and_its_keys_are_the_fixture_failures() -> None:

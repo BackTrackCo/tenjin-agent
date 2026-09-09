@@ -7,15 +7,14 @@ one quality bar, how many model tokens did the complete agent run consume with a
 knowledge system. It does not itself produce a savings number, and nothing here touches the
 product runtime.
 
-**What this layer owns.** Bench-1 ships as three stacked layers. The first is the offline chain
-(frozen contracts, disposable roots and attestation, the record, the reducer, the report). This
-one is the live half that runs on top of it: the live executor and its argv, the vendored
-toolchain and pinned offline pnpm a real repository needs, the provisioning seam and daemon
-lifecycle, the Tenjin hooks arm, the node verifier and its hidden layer, and the real-repository
-fixtures. The layer above adds the corpus reset and the search-intent case export. Bench-2 (PR 313) then owns every real fixture as a container image, every real-task manifest including the
-hooks and keys smokes, the four arms, the producer phase, and the readouts; the fixtures under
-`fixtures/live/` sit on this side of that line only until the first image-backed fixture is
-green.
+**What this layer owns.** Bench-1 owns the frozen contracts, the executor and the live executor,
+the provisioning seam and daemon lifecycle, isolation, attestation, the corpus reset and
+sentinels, the reducer,
+the report and its headline rule, `verify`, `cases` and `regress`, and one fake plumbing smoke
+that needs no repository. Bench-2 (PR 313) owns every real fixture as a container image, every
+real-task manifest including the hooks and keys smokes, the four arms, the producer phase, and
+the readouts. The real-repository fixtures under `fixtures/live/` sit on this side of that line
+only until the first image-backed fixture is green.
 
 Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. Run history through 2026-09-08,
 which is where the smoke runs, the retrieval findings, the corepack saga, and the pilot readout
@@ -46,6 +45,7 @@ the suite builds.
 | `tenjin_arm.py`             | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                  |
 | `signature.py`              | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                   |
 | `artifact.py`               | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                    |
+| `corpus.py`                 | the corpus branch: the pre-run reset, its guard, its stamp        | `test_corpus.py`                      |
 | `verifier.py`               | hidden verifier registry, hidden layer, the run marker            | `test_verifier.py`                    |
 | `vendor.py`, `toolchain.py` | the vendored archive and the trial's pinned, offline pnpm         | `test_vendor.py`, `test_toolchain.py` |
 | `usage.py`                  | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                       |
@@ -54,7 +54,7 @@ the suite builds.
 | `loop_join.py`              | read-only delivery join on exact actor keys                       | `test_loop_join.py`                   |
 | `reduce.py`                 | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                      |
 | `report.py`, `regress.py`   | publishable projection, redaction guard, regression warnings      | `test_report.py`, `test_regress.py`   |
-| `discovery.py`              | the discovery counters read off a settled trial                   | `test_discovery.py`                   |
+| `cases.py`, `discovery.py`  | the search-intent export and the discovery counters               | `test_cases.py`, `test_discovery.py`  |
 | `reap.py`                   | cleanup by recorded identity, never by process name               | `test_reap.py`                        |
 | `cli.py`, `selftest.py`     | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                    |
 
@@ -191,6 +191,29 @@ that a laptop was quiet. The two lanes stay separate commands: `--ci-live` is va
 `--plumbing`, never with `--attestation`, and never with a provisioned arm, which keeps it the
 unattested smoke it has always been; `--automated` requires `--attestation`, refuses `--plumbing`,
 and is the lane a scheduled measured run uses.
+
+### The corpus a run measures
+
+A manifest may name a `corpus`: `provider` (`neon`), `project_id`, `branch_id`, `parent_id`, and
+the `origin` that database serves. `live-run` then resets that branch from its parent before the
+first trial, so the corpus a run measures is the one it seeded rather than whatever else reached
+the shelf since. A reset that does not happen ends the run there; `fake-run` refuses such a
+manifest outright, because the offline lane touches no database.
+
+The reset is destructive and it runs inside the project holding the team's knowledge, so
+`corpus.guard` reads the branch the provider returns, never the manifest's claim, and refuses a
+default branch, a protected branch, a branch whose id is not the one the manifest names, and a
+branch whose parent is not the parent the manifest names. `corpus.Api` is the seam: two calls, an
+`HttpApi` against Neon, and a fake in every test, so the guard is testable before the branches
+exist. `HttpApi` waits for the restore's operations, because a started reset is not a finished
+one.
+
+What was reset is then a machine-built field of the attestation (`artifact.CorpusStamp`: the
+provider, the project, the branch, its parent, the origin, the control-plane host, and the reset
+time). An operator cannot write it into the attestation file, which refuses unknown keys; it
+reaches every record through `isolation.corpus` and the attestation hash, and the report carries
+it, so a reader sees which corpus a number came from. Both of its origins join the ones the
+network allowlist must name.
 
 ### The attestation, and what the operator prepares
 
@@ -396,7 +419,9 @@ one module returning `usage.UsageRecord` per native request, with nulls for cate
 provider does not expose, plus its id in `usage.HARNESSES`. A memory product that spends tokens
 of its own emits `usage.AuxiliaryReceipt` values through the `runner.Runtime.receipts` seam, and
 an arm that cannot expose that spend declares `auxiliary_usage: unexposed` rather than having it
-estimated from text length.
+estimated from text length. `cli.py cases` exports the labelled search-intent records the
+teammate's plan asks for (`tenjin-notes` `loop-redesign/14-search-intent.md`) after settlement,
+masked and post-floor, and changes no record.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
