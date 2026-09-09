@@ -53,9 +53,10 @@ the suite builds.
 | `records.py`                | the immutable attempt record, publish, select                     | `test_records.py`                     |
 | `loop_join.py`              | read-only delivery join on exact actor keys                       | `test_loop_join.py`                   |
 | `reduce.py`                 | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                      |
-| `report.py`, `regress.py`   | publishable projection, redaction guard, regression warnings      | `test_report.py`, `test_regress.py`   |
+| `report.py`, `regress.py`   | publishable projection, redaction guard, the check-run summary    | `test_report.py`, `test_regress.py`   |
 | `cases.py`, `discovery.py`  | the search-intent export and the discovery counters               | `test_cases.py`, `test_discovery.py`  |
 | `reap.py`                   | cleanup by recorded identity, never by process name               | `test_reap.py`                        |
+| `snapshot.py`               | the per-run corpus reading: post count and content hash           | `test_snapshot.py`                    |
 | `cli.py`, `selftest.py`     | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                    |
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
@@ -80,6 +81,33 @@ and `report.json` uploaded alone. Every record is stamped automated and non-publ
 lane is evidence that the chain runs on a real agent and never a number anyone may quote. It is
 informational: not required, never blocking, and not `continue-on-error` either, because a red
 run is meant to be seen; on a fork the secret is absent and the live steps skip.
+
+### The two measured lanes
+
+Two lanes run measured attempts against the bench shelf, on a schedule and on manual dispatch,
+never on push: each run spends model budget, and a per-push trigger would spend it on every
+review round. `benchmark-canary.yml` runs the canary manifest nightly, 24 attempts, about 5.69
+USD. `benchmark-headline.yml` runs the core suite weekly and on a published release, and its
+number is the one meant to be quoted. Both call `benchmark-shelf.yml`, which holds every step,
+so a canary and a headline can never drift into measuring different things two ways.
+
+They share one concurrency group and a queued run waits rather than cancelling a paid one,
+because the reset is destructive and the bench branch is one branch: two runs at once would empty
+the corpus under each other and neither number would mean anything. Each needs three repository
+secrets (`CLAUDE_CODE_OAUTH_TOKEN`, `NEON_API_KEY`, `TENJIN_BENCH_WALLET`), and a lane missing
+one skips and says so on the run page rather than publishing a check run for a run that measured
+nothing.
+
+Each publishes its headline, its intervals and a link to this file as the `output.summary` of a
+**check run** on the commit it ran from. That is the one surface a signed-out reader can reach:
+measured on this public repository with no token, the artifact bytes answer 401, the artifact
+route 404 and the job logs 403, while `GET /repos/{owner}/{repo}/commits/{sha}/check-runs`
+answers 200 with its whole `output`. `output.summary` caps at 65,535 characters, which
+`report.check_summary` enforces and says when it has; `cli.py headline` prints exactly what the
+workflow posts. The per-attempt records stay a workflow artifact, for whoever is logged in and
+wants to recompute. The conclusion is `success` when the run is publishable with a
+headline-eligible comparison, `neutral` when it produced a number nobody may quote, and
+`failure` when it produced no report at all; the lanes are not required checks and block nothing.
 
 ## The fake command
 
@@ -207,6 +235,17 @@ reaches every record through `isolation.corpus` and the attestation hash, and th
 it, so a reader sees which corpus a number came from. Both of its origins join the ones the
 network allowlist must name.
 
+The stamp says which branch was emptied and when. What was standing on it afterwards is the
+run's own reading (`snapshot.py`): once the first trial's seed has reached the shelf, the run
+walks the deployment's public discovery feed and records a post count and a content hash over a
+fixed projection of every listed piece, in id order. Page order and the read counts the feed
+folds on cannot move that hash. It is taken once, whatever a run's later trials seed and delete,
+because a run has one corpus and a per-trial reading would be a different fact. A reading that
+fails is a recorded refusal and not an ended run: the reset is the gate that protects the
+measurement, and this is the readout beside it. `report.corpus_snapshot` carries the count, the
+hash, the origin and the time, and `summary` and the check run say when there is no reading at
+all, because a report that cannot name its corpus should say so rather than look complete.
+
 ### The attestation, and what the operator prepares
 
 ```json
@@ -292,9 +331,11 @@ a secret, `records.validate` a record claiming both, `--attestation` a source ca
 the output, the data dir except the seeded config, and the profile.
 
 **Origins are classed, and discovery is counted rather than forbidden.** The seeded config names
-the team shelf and the public marketplace, both join the origins the attestation must list, and
-every delivery leg is classed by its `shelf` column as `team`, `public` (a fallback leg, and a
-`keys` leg, which the public host also serves), `local` (never leaves the process), or `other`.
+the shelf the run measures and the public marketplace, both join the origins the attestation must
+list, and every delivery leg is classed by its `shelf` column as `team`, `public` (a fallback leg,
+and a `keys` leg, which the public host also serves), `local` (never leaves the process), or
+`other`. An arm with `public_fallback: "off"` still lists the marketplace as an allowed origin and
+simply never reaches it, so `public_legs` at zero is a measurement rather than a blocked request.
 Only `other` reaches the sentinel's `public_requests` and invalidates, so the plan's canary gate
 is two counts judged on their own: unknown requests zero and public hits zero. A task's expected
 values live in the hidden layer and reach the trial's repository copy at launch, derived and
@@ -470,30 +511,61 @@ the slice, one producer line per arm, and the local legs and descendant
 tokens. The regress baseline is untouched: nothing
 here has run, so nothing here has a baseline.
 
-**Manifests and cost.** `real-manifest.json` (`bench2-local-pilot-1`) is the plan's Phase 1
-local pilot: 8 tasks x (`off`, `tenjin_natural`) x 3 repeats = 48 consumer attempts plus 24
-producer attempts. `local-arms-manifest.json` (`bench2-local-arms-2`) is 8 x (`off`, `flat`,
-`tenjin_seeded`, `tenjin_natural`) x 3 = 96 consumer attempts plus 24 producer attempts, and
-the seeded arm publishes two pieces per trial to the team shelf and deletes them at stop. The
-recursive manifest (`bench2-recursive-2`) is 9 consumer attempts plus 3 producer attempts.
-`max_budget_usd` stays 0.75 per attempt, producer attempts included, so the caps are 54 USD
-(pilot), 90 USD (arms), and 9 USD (recursive); at the 0.14 to 0.36 USD the hooks smokes observed per attempt, expect
-roughly 10 to 26 USD for the pilot and 17 to 43 USD for the arms manifest. Every run needs
-`--plumbing --tenjin-source <tenjin data dir>` (the seeded config still names the team
-shelf, so no run here is publishable), and the source data dir has to hold the three bundles
-(`tenjin daemon start` writes them):
+**The manifests, and how a run is pointed at the bench shelf.** Every real-task manifest names
+the bench corpus and so runs against `bench.tenjin.sh`, which is a deployment of the same app on
+its own Neon branch, reset from an emptied parent before the first trial. Runs no longer use the
+shared team shelf, and a run that publishes to it is a refusal rather than a footnote.
+
+**One knob points a run, and it is the one that used to point it wrong.**
+`tenjin_arm.load_source` reads `baseUrl` from the directory `--tenjin-source` names, and that one
+value drives both the runner's own CLI calls (the seeding publish, the stamped sweep, the in-run
+shortlist, the delete) and the config injected into every trial. Pointing it at the operator's own
+`~/.tenjin` is what sent every earlier run to the team shelf. So a run points it at a bench data
+dir instead: a `config.json` holding `baseUrl` `https://bench.tenjin.sh`, `publicShelfUrl`
+`https://tenjin.blog`, **no** `shelfBypassSecret` (the bench deployment is on a custom domain and
+is exempt from the account's `all_except_custom_domains` protection, so it has none), the wallet
+that publishes, and the three bundles `tenjin daemon start` writes. `live-run` refuses a source
+whose shelf is not the one the manifest's corpus serves, so the old mistake is now a stop rather
+than a number.
+
+| Manifest                       | Version              | Shape                                                                                       | Attempts       |
+| ------------------------------ | -------------------- | ------------------------------------------------------------------------------------------- | -------------- |
+| `canary-manifest.json`         | `bench2-canary-1`    | the four same-task transfers, one per lesson family, `off` and `tenjin_seeded`, 3 repeats     | 24             |
+| `local-arms-manifest.json`     | `bench2-core-suite-2`| the core suite: 8 tasks x 5 arms x 3 repeats                                                  | 120 + producers |
+| `real-manifest.json`           | `bench2-local-pilot-3`| the Phase 1 pilot: 8 tasks x (`off`, `tenjin_natural`) x 3                                   | 48 + producers |
+| `recursive-manifest.json`      | `bench2-recursive-5` | the recursive slice: one delegating task across four arms                                     | 12 + producers |
+
+`max_budget_usd` stays 0.75 an attempt, producer attempts included. At the 0.237 USD an attempt
+the pilot measured, the canary is about 5.69 USD a run and the core suite about four times that.
 
 ```bash
-# the Phase 1 local pilot: off versus tenjin_natural, 48 attempts
-python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/real-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
-# the full local comparison: off, flat, tenjin_seeded, tenjin_natural, 96 attempts
-python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/local-arms-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
-# the recursive slice
-python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/recursive-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
-# after any of them
+# the nightly lane's manifest, by hand
+python3 -m evals.benchmark.cli attest --manifest evals/benchmark/fixtures/live/canary-manifest.json \
+  --tenjin-source <bench data dir> --instance <what this instance is called> --image <what it booted from> \
+  --out <dir>/attestation.json
+python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/canary-manifest.json \
+  --out <dir> --attestation <dir>/attestation.json --tenjin-source <bench data dir>
+# after any run
 python3 -m evals.benchmark.cli verify --run <dir>
 python3 -m evals.benchmark.cli summary --run <dir>
 ```
+
+`attest` derives the network allowlist from the manifest and the source rather than letting an
+operator or a workflow retype it: the executor's required origins, the shelf and the marketplace
+the source names, and the two origins the corpus reset itself reaches. It refuses a source
+carrying a shelf secret and a source naming another shelf, before a file exists.
+
+**The two shelf arms.** `tenjin_seeded` runs the product as shipped, so a team miss then reaches
+the public marketplace. `tenjin_seeded_no_public` is the same arm with `public_fallback: "off"`,
+which is the product's `team.publicFallback` and the exact string `src/hooks/ask.ts` reads to drop
+the public-only legs. The reason it is an arm rather than a footnote: the bench shelf is reset and
+snapshotted per run, so its corpus is exactly what the run seeded, while the public marketplace is
+the real one and moves underneath a measurement. Reporting public hits apart is honest; running
+without them is what tells a reader how much of an effect is the shelf and how much is the
+marketplace. The two arms' Claude settings are byte-identical and so is their `settings_hash`, so
+`isolation.public_fallback` is what tells them apart in a record, and `summary` names the arm that
+ran with the leg off. An arm that says nothing gets `"on"`, so every manifest written before this
+key behaves as it always did.
 
 **Pilot 1 readout** (`bench2-local-pilot-1`, 2026-09-08, the operator's machine,
 `--plumbing --tenjin-source`, so `team_shelf_secret`: NOT PUBLISHABLE, plumbing plus the first
