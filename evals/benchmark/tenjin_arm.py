@@ -300,13 +300,23 @@ ENVELOPE_KEYS = frozenset({"ok", "data", "resourceId", "postId", "deleted", "can
 SEED_NOTE = "seed.json"
 CANDIDATE_FIELDS = ("confidence", "corroborated", "calibration", "score")
 SHORTLIST_FILE = "shortlist.json"
+# The CLI asks npm for its own dist-tags once a day. On a run whose only route
+# out is the allowlist proxy that request is refused, the refusal is what the
+# sentinel counts, and the trial is thrown away for an egress the arm never
+# wanted. The product's own opt-out (`update-check.ts`) turns it off.
+NO_UPDATE_CHECK = "TENJIN_NO_UPDATE_CHECK"
 SHORTLIST_FIRE_COLUMNS = ("id", "at", "arm", "event", "question", "question_key")
 
 
 def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dict[str, str]:
     """The operator's own data dir (its wallet signs the publish), and nothing else of the operator's."""
     parent = os.environ if parent is None else parent
-    env = {"PATH": parent.get("PATH", ""), "HOME": parent.get("HOME", ""), "TENJIN_DATA_DIR": os.path.abspath(source.path)}
+    env = {
+        "PATH": parent.get("PATH", ""),
+        "HOME": parent.get("HOME", ""),
+        "TENJIN_DATA_DIR": os.path.abspath(source.path),
+        NO_UPDATE_CHECK: "1",
+    }
     for name in ("LANG", "TMPDIR"):
         if parent.get(name):
             env[name] = parent[name]
@@ -708,7 +718,12 @@ DAEMON_ARGV: Callable[[artifact.TrialRoots], list[str]] = daemon_argv
 def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None = None) -> dict[str, str]:
     """The daemon's allowlist: the trial's own roots and the locale names, nothing of the operator's."""
     parent = os.environ if parent is None else parent
-    env = {"PATH": parent.get("PATH", ""), "HOME": str(roots.home), "TENJIN_DATA_DIR": data_dir_string(roots)}
+    env = {
+        "PATH": parent.get("PATH", ""),
+        "HOME": str(roots.home),
+        "TENJIN_DATA_DIR": data_dir_string(roots),
+        NO_UPDATE_CHECK: "1",
+    }
     for name in ("LANG", "TMPDIR"):
         if parent.get(name):
             env[name] = parent[name]

@@ -1119,5 +1119,24 @@ class ProducerTest(RunnerCase):
         self.assertEqual(producer.request_times(transcript), {"r1": 1788825601500})
 
 
+class UpdateCheckTest(unittest.TestCase):
+    """The CLI's daily npm check is off in every trial process.
+
+    Left on, it makes one request to a host no arm asked for. The proxy refuses
+    it, the sentinel counts the refusal, and a trial that did its work correctly
+    is thrown away.
+    """
+
+    def test_the_cli_and_the_daemon_environments_both_turn_the_npm_check_off(self) -> None:
+        source = tenjin_arm.dry_source()
+        cli = tenjin_arm.cli_environment(source, {"PATH": "/usr/bin", "HOME": "/home/u"})
+        self.assertEqual(cli[tenjin_arm.NO_UPDATE_CHECK], "1")
+        fixture = Path(tempfile.mkdtemp())
+        (fixture / "keep.txt").write_text("x", encoding="utf-8")
+        roots = artifact.create(Path(tempfile.mkdtemp()), "t1", fixture)
+        daemon = tenjin_arm.daemon_environment(roots, {"PATH": "/usr/bin"})
+        self.assertEqual(daemon[tenjin_arm.NO_UPDATE_CHECK], "1")
+
+
 if __name__ == "__main__":
     unittest.main()
