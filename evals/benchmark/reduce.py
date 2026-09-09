@@ -102,11 +102,16 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     passes = sum(1 for record in records if record["outcome"] == "pass")
     subsets = [summed["reasoning_output_subset"] for summed in per_attempt]
     reasoning = None if any(value is None for value in subsets) else sum(subsets)
+    requests = sum(summed["requests"] for summed in per_attempt)
     return {
         "attempts": attempts,
         "passes": passes,
         "pass_rate": _round(passes / attempts),
-        "requests": sum(summed["requests"] for summed in per_attempt),
+        "requests": requests,
+        # Round trips beside the token total. The corpus readout orders tasks
+        # by this figure in the baseline arm, which is what a task cost to
+        # work out with nothing carried in.
+        "requests_per_attempt": _round(requests / attempts),
         "tokens": tokens,
         "tokens_per_attempt": _round(tokens / attempts),
         "tokens_per_verified_resolution": None if passes == 0 else _round(tokens / passes),

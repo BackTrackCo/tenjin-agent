@@ -101,6 +101,15 @@ the aggregates and the projection from the immutable records alone; `summary` re
 `report.json` as text and computes nothing, printing every arm rather than the best one, because
 an arm shown alone is a claim rather than a result.
 
+The readout ends with the corpus every number above was measured on: one row per task carrying
+its family, transfer distance, verifier and fixture hash from the manifest, and its round trips,
+tokens per attempt and pass rate in each arm from the reduction. The rows are ordered by
+discovery cost, the baseline arm's requests per attempt, most expensive first, which is what says
+whether the corpus holds an expensive task at all. It prints at most `report.CORPUS_ROWS` of
+them, because a check run's `output.summary` is capped at 65,535 characters and truncates
+silently past it; a corpus longer than that ends with a line naming how many cheaper tasks were
+left out, and `report.json` carries all of them under `corpus_tasks`.
+
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only, plus the run's isolation stamp: `publishable`, `isolation` (`fake`,
 `attested`, `operator_plumbing`, `automated_plumbing`, or `team_shelf_secret`),

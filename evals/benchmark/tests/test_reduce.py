@@ -54,6 +54,20 @@ def test_an_infrastructure_invalid_record_never_enters_a_result_silently() -> No
     assert reduction["excluded"] == [{"path": "stale.json", "reason": "stale"}]
 
 
+def test_round_trips_are_reported_per_attempt_beside_the_token_total() -> None:
+    """Requests per attempt is what the corpus readout calls a task's discovery cost."""
+    accepted = support.accept(
+        support.reduction_record("t1", "off", 0, 0, 6000, "pass"),
+        support.reduction_record("t1", "off", 1, 1, 9000, "fail"),
+        # Named and never scored, so it moves neither the count nor the divisor.
+        support.reduction_record("t1", "off", 2, 2, 3000, "invalid"),
+    )
+    cell = reduce_module.reduce(accepted, [])["arms"]["off"]["tasks"]["t1"]
+    # One usage row per attempt in this builder, so two attempts are two requests.
+    assert (cell["requests"], cell["attempts"]) == (2, 2)
+    assert cell["requests_per_attempt"] == 1.0
+
+
 def test_every_task_weighs_the_same_regardless_of_repeats_or_token_size() -> None:
     accepted = support.accept(
         # A big task with many repeats, and a small task with one.
