@@ -1266,5 +1266,66 @@ class UpdateCheckTest(unittest.TestCase):
         self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
 
 
+class CallerUserAgentTest(unittest.TestCase):
+    """The run's identity to the product, and the two host environments that carry it.
+
+    A public leg the marketplace cannot tell from a person's question is counted
+    as demand and ranks on a public page. The field that separates them is the
+    User-Agent, and the only client label the server reads is the LEADING
+    product, so every case here judges the head of the field.
+    """
+
+    NONCE = "20260909T010203Z-deadbeef"
+
+    def roots(self, trial_id: str) -> artifact.TrialRoots:
+        fixture = Path(tempfile.mkdtemp())
+        (fixture / "keep.txt").write_text("x", encoding="utf-8")
+        return artifact.create(Path(tempfile.mkdtemp()), trial_id, fixture)
+
+    def test_the_leading_product_is_the_eval_product_and_the_version_names_the_run(self) -> None:
+        value = tenjin_arm.caller_user_agent(self.NONCE)
+        name, version = tenjin_arm.leading_product(value)
+        self.assertEqual(name, tenjin_arm.EVAL_PRODUCT)
+        self.assertEqual(version, f"{tenjin_arm.BENCH_PRODUCT}-{self.NONCE}")
+        self.assertTrue(tenjin_arm.leads_with_eval(value))
+
+    def test_the_version_still_fits_the_field_the_server_keeps_it_in(self) -> None:
+        """32 characters survive there and this value fills exactly that, so a longer nonce truncates silently."""
+        _, version = tenjin_arm.leading_product(tenjin_arm.caller_user_agent(self.NONCE))
+        self.assertLessEqual(len(version or ""), tenjin_arm.PRODUCT_VERSION_LIMIT)
+
+    def test_the_nonce_a_run_mints_survives_inside_a_product_token(self) -> None:
+        """A character the server's token alphabet excludes would cut the field short, so the two shapes are pinned together."""
+        self.assertTrue(cli.NONCE.match(self.NONCE))
+        self.assertTrue(tenjin_arm.leads_with_eval(tenjin_arm.caller_user_agent(self.NONCE)))
+
+    def test_an_absent_or_wrongly_led_field_is_not_the_eval_product(self) -> None:
+        composed = f"tenjin-cli/0.1.0-alpha.15 {tenjin_arm.caller_user_agent(self.NONCE)} (+https://tenjin.blog)"
+        # `composed` is the field the product's own handoff produces today: the
+        # CLI's identity leads and the eval product rides behind it, which the
+        # server reads as `tenjin-cli`. See the README section on the gap.
+        for value in (None, "", "tenjin-cli/0.1.0-alpha.15", composed, "tenjin-evaluation/1", " tenjin-eval/1"):
+            self.assertFalse(tenjin_arm.leads_with_eval(value), value)
+
+    def test_the_eval_product_is_matched_the_way_the_demand_gate_matches_it(self) -> None:
+        """The gate lowers the stored token, so a capitalised spelling is the same client, not a different one."""
+        self.assertTrue(tenjin_arm.leads_with_eval("Tenjin-Eval/1"))
+
+    def test_the_seeding_cli_environment_carries_it(self) -> None:
+        value = tenjin_arm.caller_user_agent(self.NONCE)
+        parent = {"PATH": "/usr/bin", "HOME": "/home/u", tenjin_arm.CALLER_USER_AGENT: value}
+        self.assertEqual(tenjin_arm.cli_environment(tenjin_arm.dry_source(), parent)[tenjin_arm.CALLER_USER_AGENT], value)
+
+    def test_the_daemon_environment_carries_it(self) -> None:
+        value = tenjin_arm.caller_user_agent(self.NONCE)
+        parent = {"PATH": "/usr/bin", tenjin_arm.CALLER_USER_AGENT: value}
+        self.assertEqual(tenjin_arm.daemon_environment(self.roots("ua1"), parent)[tenjin_arm.CALLER_USER_AGENT], value)
+
+    def test_neither_environment_invents_one_the_parent_does_not_have(self) -> None:
+        """A default here would name every run the same and hide the case the refusals exist for."""
+        self.assertNotIn(tenjin_arm.CALLER_USER_AGENT, tenjin_arm.cli_environment(tenjin_arm.dry_source(), {"PATH": "/usr/bin"}))
+        self.assertNotIn(tenjin_arm.CALLER_USER_AGENT, tenjin_arm.daemon_environment(self.roots("ua2"), {"PATH": "/usr/bin"}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -601,6 +601,14 @@ def container_environment(
     # check is one request to a host no arm asked for, the proxy refuses it,
     # and the refusal is what invalidates the trial.
     env[tenjin_arm.NO_UPDATE_CHECK] = "1"
+    # The same three processes, and the reason is the same shape: an unnamed leg
+    # is counted as public demand on the marketplace. The value is the run's
+    # (`live_run` arms it), and it crosses here so the agent's Bash `tenjin`
+    # inherits it from the container; the daemon and any daemon the shim
+    # respawns get it from `docker/trial.mjs`, which forwards this name.
+    caller = parent.get(tenjin_arm.CALLER_USER_AGENT)
+    if caller:
+        env[tenjin_arm.CALLER_USER_AGENT] = caller
     # The agent has an updater and a telemetry path of its own, and they reach
     # npm and the vendor from inside the trial. Neither is the arm's traffic,
     # and each is one refused request the sentinel reads as a public one. The
@@ -694,6 +702,15 @@ def launch(request: LaunchRequest) -> Launch:
     name = container.container_name(request.trial_id, request.phase)
     plan = container.mounts(request.roots, settings=path)
     environment = container_environment(request.roots, os.environ, session_id, request.egress)
+    # An attempt with an egress can reach the marketplace, so it does not start
+    # unnamed. The failure this refuses is silent: the run succeeds and only the
+    # marketplace's demand tables show it, so the check is here, at the seam that
+    # builds the environment, rather than in a comment above it.
+    if request.egress is not None and not tenjin_arm.leads_with_eval(environment.get(tenjin_arm.CALLER_USER_AGENT)):
+        raise LiveExecutorError(
+            f"this attempt's environment does not lead with {tenjin_arm.EVAL_PRODUCT!r} in "
+            f"{tenjin_arm.CALLER_USER_AGENT}, so its public requests would count as demand"
+        )
     argv = container.run_argv(
         image=reference,
         name=name,

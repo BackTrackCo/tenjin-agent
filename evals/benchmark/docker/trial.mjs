@@ -97,6 +97,9 @@ const FORWARDED = [
   // The CLI's daily npm check is one request to a host no arm asked for; the
   // proxy refuses it and the refusal is what invalidates the trial.
   'TENJIN_NO_UPDATE_CHECK',
+  // The daemon's shelf and marketplace legs are most of a trial's public
+  // traffic, and an unnamed one counts as public demand.
+  'TENJIN_CALLER_USER_AGENT',
 ];
 
 async function startDaemon(dataDir, output) {

@@ -37,7 +37,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, MutableMapping
 
 from . import (
     FIXTURES,
@@ -148,6 +148,30 @@ def run_nonce(out: Path, manifest: manifest_module.Manifest) -> str:
     out.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(json.dumps({"path": str(manifest.path), "hash": manifest.hash, "nonce": nonce}, indent=2) + "\n", encoding="utf-8")
     return nonce
+
+
+def arm_caller_user_agent(nonce: str, environ: MutableMapping[str, str]) -> str:
+    """Name every tenjin process this run starts `tenjin-eval`, and refuse the run if the name is not that.
+
+    This process is the launcher the product documents, so the value goes in its
+    own environment and every child inherits it: the seeding CLI directly, and
+    the trial's agent, its Bash `tenjin`, its daemon and its shim through the
+    container environment and `docker/trial.mjs`.
+
+    The refusal reads back what the environment now reports, judged by the
+    server's own leading-product rule. What it buys is a loud failure instead of
+    a silent one: a run whose legs are not named still succeeds, still measures
+    correctly, and the damage appears only in the marketplace's public demand
+    tables, days later and attributed to nobody.
+    """
+    environ[tenjin_arm.CALLER_USER_AGENT] = tenjin_arm.caller_user_agent(nonce)
+    settled = environ.get(tenjin_arm.CALLER_USER_AGENT)
+    if not tenjin_arm.leads_with_eval(settled):
+        raise CliError(
+            f"live-run needs {tenjin_arm.CALLER_USER_AGENT} to lead with {tenjin_arm.EVAL_PRODUCT!r} so the "
+            f"marketplace does not count this run as public demand; it is {settled!r}"
+        )
+    return settled
 
 
 def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
@@ -365,7 +389,9 @@ def live_run(
     plumbing: bool = False,
     ci_live: bool = False,
     automated: bool = False,
-    environ: Mapping[str, str] | None = None,
+    # Written to as well as read: the run's product identity goes in this
+    # process's own environment, which is what every child inherits it from.
+    environ: MutableMapping[str, str] | None = None,
     stream: Any = None,
     runtime: runner.Runtime | None = None,
     tenjin_source: Path | None = None,
@@ -388,7 +414,10 @@ def live_run(
     allowlist = allowlist_for(spec, source or tenjin_arm.dry_source())
     if dry_run:
         # A dry run plans the egress and starts nothing, so the printed argv is
-        # the one a real run would use, network and proxy included.
+        # the one a real run would use, network and proxy included. The run
+        # identity is armed under the same label the egress uses, because a
+        # reviewer reads this plan to see what a trial process is given.
+        arm_caller_user_agent("dry-run", environ)
         planned = container.plan_egress(out, allowlist, "dry-run")
         plans = [plan_trial(manifest, trial, out, source, planned) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
@@ -424,7 +453,11 @@ def live_run(
     # internal network only, and the proxy log is the run's sentinel. Both are
     # in the process ledger, so `cleanup` reaches them after an interrupt, and
     # both are removed here on every path out.
-    egress = container.start_egress(container.plan_egress(out, allowlist, run_nonce(out, manifest)))
+    # The run's nonce is its identity to the marketplace as well as its egress
+    # names, and the refusal here is the last one that costs nothing.
+    nonce = run_nonce(out, manifest)
+    arm_caller_user_agent(nonce, environ)
+    egress = container.start_egress(container.plan_egress(out, allowlist, nonce))
     reap_module.register_objects(out, "egress", container=egress.proxy, network=egress.network)
     try:
         # The gates stay code-owned: an injected runtime supplies the clock, the

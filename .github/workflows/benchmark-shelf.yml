@@ -165,6 +165,10 @@ jobs:
           CONFIG
           printf '%s' "$TENJIN_BENCH_WALLET" > "$data/wallet.json"
           chmod 600 "$data/wallet.json"
+          # The CLI calls below are the benchmark's traffic too, and this step
+          # runs outside `live-run`, which arms the identity for a trial itself.
+          TENJIN_CALLER_USER_AGENT="$(python3 -c 'import sys; from evals.benchmark import tenjin_arm; print(tenjin_arm.caller_user_agent(sys.argv[1]))' "gha${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}")"
+          export TENJIN_CALLER_USER_AGENT
           # The only path that materializes the three hook bundles is a daemon
           # start. It is stopped again on the next line: this run wants the
           # files, and every trial starts a daemon of its own inside its image.

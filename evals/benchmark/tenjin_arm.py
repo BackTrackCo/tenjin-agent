@@ -311,6 +311,23 @@ SHORTLIST_FILE = "shortlist.json"
 # sentinel counts, and the trial is thrown away for an egress the arm never
 # wanted. The product's own opt-out (`update-check.ts`) turns it off.
 NO_UPDATE_CHECK = "TENJIN_NO_UPDATE_CHECK"
+# The product's documented handoff for an agent that launches the CLI
+# (`src/lib/client-meta.ts`, `CALLER_USER_AGENT_ENV`). A benchmark leg is not
+# public demand, and the marketplace drops a row whose LEADING User-Agent
+# product is `tenjin-eval` (tenjin `lib/search/gates.ts` notProbe, off
+# `lib/search/client-names.ts`), so this field is what separates a measured run
+# from a person asking a question. See the README section this names: the
+# handoff composes BEHIND the CLI's own product, so today it identifies the run
+# without yet reaching that gate.
+CALLER_USER_AGENT = "TENJIN_CALLER_USER_AGENT"
+EVAL_PRODUCT = "tenjin-eval"
+# This benchmark, in the version half: the run's own identity travels where the
+# server keeps a version (tenjin `lib/client-product.ts`), so a row names the
+# run that produced it without a product change. 32 characters survive there
+# and `bench1-<nonce>` fills exactly that, so a longer nonce would lose hex
+# digits silently; `test_tenjin_arm.py` pins the length.
+BENCH_PRODUCT = "bench1"
+PRODUCT_VERSION_LIMIT = 32
 # The product's headless seam for opening the wallet (`src/lib/wallet/passphrase.ts`).
 # Every CLI call below signs with the source's wallet, and a keystore's passphrase
 # is not in the keystore: an operator machine answers from the OS keychain, and a
@@ -323,6 +340,28 @@ WALLET_PASSPHRASE = "TENJIN_WALLET_PASSPHRASE"
 # like the versions in `images.py`: if the product's default moves, this moves.
 PRODUCT_PUBLIC_ORIGIN = "https://tenjin.blog"
 SHORTLIST_FIRE_COLUMNS = ("id", "at", "arm", "event", "question", "question_key")
+# The server's own leading-product parse (tenjin `lib/client-product.ts`
+# FIRST_PRODUCT_RE), so this package judges the field by the rule that decides
+# `client_name` rather than by a resemblance to it.
+PRODUCT_TOKEN = r"[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+FIRST_PRODUCT = re.compile(rf"^({PRODUCT_TOKEN})(?:/({PRODUCT_TOKEN}))?(?:\s|\Z)")
+
+
+def caller_user_agent(nonce: str) -> str:
+    """The run's identity to the product: the eval product, then this benchmark and the run's nonce."""
+    return f"{EVAL_PRODUCT}/{BENCH_PRODUCT}-{nonce}"
+
+
+def leading_product(value: str | None) -> tuple[str | None, str | None]:
+    """The client name and version the server would read off this field, or two Nones."""
+    match = None if value is None else FIRST_PRODUCT.match(value)
+    return (None, None) if match is None else (match.group(1), match.group(2))
+
+
+def leads_with_eval(value: str | None) -> bool:
+    """True when the leading product is the eval product, compared as the demand gate compares it."""
+    name, _ = leading_product(value)
+    return name is not None and name.lower() == EVAL_PRODUCT
 
 
 def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dict[str, str]:
@@ -334,7 +373,10 @@ def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dic
         "TENJIN_DATA_DIR": os.path.abspath(source.path),
         NO_UPDATE_CHECK: "1",
     }
-    for name in ("LANG", "TMPDIR"):
+    # The run's seeding publish, sweep, search and delete are CLI calls too, and
+    # in team mode a search asks the public marketplace after the shelf, so they
+    # count as demand unless they carry the run's identity like every other leg.
+    for name in ("LANG", "TMPDIR", CALLER_USER_AGENT):
         if parent.get(name):
             env[name] = parent[name]
     if source.wallet_passphrase:
@@ -812,7 +854,12 @@ def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None
         "TENJIN_DATA_DIR": data_dir_string(roots),
         NO_UPDATE_CHECK: "1",
     }
-    for name in ("LANG", "TMPDIR", *PROXY_NAMES):
+    # CALLER_USER_AGENT rides with them: the daemon's shelf and marketplace legs
+    # are the bulk of a trial's public traffic, and this environment has already
+    # dropped a variable the daemon needed twice (the proxy names above, and the
+    # update-check opt-out), so anything the trial's other processes get is
+    # listed here in the same change or it goes missing here.
+    for name in ("LANG", "TMPDIR", CALLER_USER_AGENT, *PROXY_NAMES):
         if parent.get(name):
             env[name] = parent[name]
     return env

@@ -908,6 +908,36 @@ class ChildEnvironmentTest(LiveCase):
         self.assertEqual(env["NODE_USE_ENV_PROXY"], "1")
         self.assertEqual(env["NO_PROXY"], container.NO_PROXY_HOSTS)
 
+    def test_the_run_identity_reaches_the_container_and_the_daemon_inside_it(self) -> None:
+        """One value, three process paths: the agent's Bash `tenjin`, the daemon, and the daemon the shim respawns.
+
+        The container carries it (here), the agent inherits the container's
+        environment because the entrypoint spawns it without one of its own, and
+        the daemon is spawned with an explicit allowlist, so it only has what
+        that list names. Nothing else in this package can prove the last hop, and
+        that list is where two variables the daemon needed have gone missing.
+        """
+        value = tenjin_arm.caller_user_agent("20260909T010203Z-deadbeef")
+        request = self.request(smoke())
+        env = claude_live.container_environment(
+            request.roots, {**self.parent(), tenjin_arm.CALLER_USER_AGENT: value}, claude_live.root_session_id(request.trial_id)
+        )
+        self.assertEqual(env[tenjin_arm.CALLER_USER_AGENT], value)
+        entrypoint = images.TRIAL_SCRIPT.read_text(encoding="utf-8")
+        forwarded = entrypoint[entrypoint.index("const FORWARDED") : entrypoint.index("async function startDaemon")]
+        self.assertIn(f"'{tenjin_arm.CALLER_USER_AGENT}'", forwarded)
+
+    def test_an_attempt_that_can_reach_the_marketplace_does_not_start_unnamed(self) -> None:
+        """The failure this refuses is silent: the run succeeds, its numbers are right, and only the public demand tables show it."""
+        egress = container.plan_egress(self.dir / "run", ("api.anthropic.com",), "case")
+        request = dataclasses.replace(self.request(smoke()), egress=egress)
+        for value in (None, "tenjin-cli/0.1.0-alpha.15"):
+            environ = {} if value is None else {tenjin_arm.CALLER_USER_AGENT: value}
+            with mock.patch.dict(os.environ, environ, clear=True):
+                with self.assertRaises(LiveExecutorError) as caught:
+                    claude_live.launch(request)
+            self.assertIn(tenjin_arm.CALLER_USER_AGENT, str(caught.exception))
+
     def test_a_credential_variable_off_the_seam_list_is_refused(self) -> None:
         with self.assertRaises(LiveExecutorError):
             claude_live.docker_environment(self.parent(), "GITHUB_TOKEN")
@@ -1092,6 +1122,13 @@ class ImageGateTest(unittest.TestCase):
         self.assertIn("images build", str(caught.exception))
 
 
+class DroppingEnviron(dict):
+    """A mapping that accepts a write and does not keep it: what the refusal reads back to catch."""
+
+    def __setitem__(self, key: str, value: str) -> None:
+        return None
+
+
 class LiveRunRefusalTest(LiveCase):
     def test_a_run_with_no_attestation_file_carries_the_one_the_run_wrote_itself(self) -> None:
         captured: list[runner.Runtime] = []
@@ -1132,6 +1169,33 @@ class LiveRunRefusalTest(LiveCase):
                 with NoProcess(self), self.assertRaises(cli.CliError) as caught:
                     cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, self.attestation_file(), environ=environ)
                 self.assertIn(name, str(caught.exception))
+
+    def test_a_live_run_names_itself_to_the_marketplace_before_it_starts(self) -> None:
+        """Every child of this process inherits the field, so `live-run` sets it in its own environment."""
+        environ = dict(LIVE_ENV)
+        with mock.patch.object(cli, "execute", lambda manifest, trials, out, rt: {"trials": 0}):
+            cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, None, environ=environ)
+        value = environ[tenjin_arm.CALLER_USER_AGENT]
+        self.assertTrue(tenjin_arm.leads_with_eval(value))
+        nonce = json.loads((self.run_dir / "manifest.json").read_text(encoding="utf-8"))["nonce"]
+        self.assertEqual(value, tenjin_arm.caller_user_agent(nonce))
+
+    def test_a_dry_run_prints_the_identity_a_real_run_would_send(self) -> None:
+        environ: dict[str, str] = {}
+        cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, dry_run=True, environ=environ, stream=io.StringIO())
+        self.assertTrue(tenjin_arm.leads_with_eval(environ[tenjin_arm.CALLER_USER_AGENT]))
+
+    def test_a_run_whose_identity_would_not_lead_with_the_eval_product_is_refused(self) -> None:
+        """The value is computed, so this fires on a change to how it is built, which is the regression worth a guard."""
+        with mock.patch.object(tenjin_arm, "caller_user_agent", lambda nonce: f"tenjin-cli/1 tenjin-eval/{nonce}"):
+            with NoProcess(self), self.assertRaises(cli.CliError) as caught:
+                cli.live_run(self.run_dir, cli.SMOKE_MANIFEST, self.attestation_file(), environ=dict(LIVE_ENV))
+        self.assertIn(tenjin_arm.CALLER_USER_AGENT, str(caught.exception))
+
+    def test_an_environment_that_does_not_take_the_value_is_refused(self) -> None:
+        """A mapping that silently drops the write is the failure the refusal reads back for."""
+        with self.assertRaises(cli.CliError):
+            cli.arm_caller_user_agent("20260909T010203Z-deadbeef", DroppingEnviron())
 
     def test_live_run_refuses_a_fake_executor_manifest(self) -> None:
         with NoProcess(self), self.assertRaises(cli.CliError) as caught:
