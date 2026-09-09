@@ -452,13 +452,21 @@ class HooksArmTest(LiveCase):
         self.assertEqual(manifest.pins["max_budget_usd"], 0.75)
         self.assert_bench2_tasks(manifest)
 
-    def test_the_local_arms_manifest_runs_the_four_arms_over_the_eight_tasks(self) -> None:
+    def test_the_core_suite_runs_the_five_arms_over_the_eight_tasks(self) -> None:
         manifest = manifest_module.load(cli.LOCAL_ARMS_MANIFEST)
         trials = schedule.expand(manifest)
-        self.assertEqual(len(trials), 96)
+        self.assertEqual(len(trials), 120)
         schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
-        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "flat", "tenjin_seeded", "tenjin_natural"])
-        off, flat, seeded, natural = manifest.arms
+        self.assertEqual(
+            [arm["id"] for arm in manifest.arms],
+            ["off", "flat", "tenjin_seeded", "tenjin_seeded_no_public", "tenjin_natural"],
+        )
+        off, flat, seeded, no_public, natural = manifest.arms
+        # The two shelf arms differ in one value and nothing else, so any gap
+        # between them is the marketplace leg and cannot be anything else.
+        self.assertEqual({**no_public, "id": seeded["id"], "public_fallback": "on"}, {**seeded, "public_fallback": "on"})
+        self.assertEqual((seeded.get("public_fallback"), no_public["public_fallback"]), (None, "off"))
+        self.assertEqual(seeded["settings_hash"], no_public["settings_hash"])
         # The seeded arm is the shelf arm exactly as the hooks smoke runs it: no local replay.
         self.assertEqual((seeded["provision"], natural["producer"]), ("tenjin", True))
         self.assertNotIn("seed", seeded)
@@ -515,13 +523,16 @@ class HooksArmTest(LiveCase):
                 kind = manifest.slice["kind"]
                 if True:
                     self.assertEqual(kind, "recursive")
-                    self.assertEqual(len(trials), 9)
+                    self.assertEqual(len(trials), 12)
                     (task,) = manifest.tasks
                     self.assertEqual(task["id"], "actor")
                     self.assertIn("Agent", task["tools"])
                     self.assertIn("Agent", task["allowed_tools"])
                     self.assertIn("subagent", task["prompt"])
-                    self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded", "tenjin_natural"])
+                    self.assertEqual(
+                        [arm["id"] for arm in manifest.arms],
+                        ["off", "tenjin_seeded", "tenjin_seeded_no_public", "tenjin_natural"],
+                    )
                     for arm in manifest.arms[1:]:
                         self.assertEqual(arm["lessons"], ["test-harness-convention", "actor-fix"])
                     # The other manifests never hand a task the subagent tool.

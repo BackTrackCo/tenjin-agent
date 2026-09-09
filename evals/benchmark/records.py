@@ -77,6 +77,9 @@ OPTIONAL = frozenset({"discovery", "attempt_phases"})
 # build time by exact version, so nothing on the host decides which one ran.
 PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
+# The product's own `team.publicFallback`, stated per attempt because an arm may
+# choose it (`tenjin_arm.public_fallback_of`).
+PUBLIC_FALLBACK = frozenset({"on", "off"})
 # The corpus stamp a reset wrote into the attestation (`artifact.CorpusStamp`).
 CORPUS_KEYS = frozenset({"provider", "project_id", "branch_id", "parent_id", "origin", "api_origin", "reset_at"})
 
@@ -303,6 +306,11 @@ def validate(record: dict[str, Any]) -> None:
     off = isolation.get("hooks_disabled")
     if off is not None and (not isinstance(off, list) or not all(isinstance(name, str) and name for name in off)):
         raise RecordError("isolation.hooks_disabled must be a list of product hook arm names")
+    # The two shelf arms carry byte-identical settings, so this is the only
+    # field that tells them apart in a record.
+    fallback = isolation.get("public_fallback")
+    if fallback is not None and fallback not in PUBLIC_FALLBACK:
+        raise RecordError("isolation.public_fallback must be on or off")
     if "producer" in isolation and not isinstance(isolation["producer"], dict):
         raise RecordError("isolation.producer must be an object")
     if "producer" in isolation and isolation["producer"].get("outcome") not in OUTCOMES:

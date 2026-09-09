@@ -136,5 +136,37 @@ class HooksDisabledTest(unittest.TestCase):
             manifest.validate(self.manifest(hooks_disabled=[]), cli.HOOKS_SMOKE_MANIFEST.parent)
 
 
+class PublicFallbackTest(unittest.TestCase):
+    """The product's `team.publicFallback` as an arm's choice, and the default that keeps every old manifest true."""
+
+    def manifest(self, **arm: object) -> dict:
+        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data["arms"][1].update(arm)
+        return data
+
+    def test_a_provisioned_arm_may_turn_the_marketplace_leg_off(self) -> None:
+        manifest.validate(self.manifest(public_fallback="off"), cli.HOOKS_SMOKE_MANIFEST.parent)
+        manifest.validate(self.manifest(public_fallback="on"), cli.HOOKS_SMOKE_MANIFEST.parent)
+
+    def test_an_arm_that_names_nothing_is_still_valid(self) -> None:
+        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        self.assertNotIn("public_fallback", data["arms"][1])
+        manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
+
+    def test_a_value_the_product_has_no_setting_for_is_refused(self) -> None:
+        for value in ("false", "", True, None):
+            with self.subTest(value=value):
+                with self.assertRaises(ManifestError) as caught:
+                    manifest.validate(self.manifest(public_fallback=value), cli.HOOKS_SMOKE_MANIFEST.parent)
+                self.assertIn("public_fallback", str(caught.exception))
+
+    def test_an_unprovisioned_arm_has_no_seeded_config_to_write_it_into(self) -> None:
+        data = json.loads(Path(cli.HOOKS_SMOKE_MANIFEST).read_text(encoding="utf-8"))
+        data["arms"][0]["public_fallback"] = "off"
+        with self.assertRaises(ManifestError) as caught:
+            manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
+        self.assertIn("provisioned arm", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -243,6 +243,48 @@ class HooksDisabledTest(DaemonCase):
         self.assertIn("no arm for", str(caught.exception))
 
 
+class PublicFallbackTest(DaemonCase):
+    """The one seeded value an arm may choose: whether a team miss reaches the marketplace.
+
+    The bench shelf is reset and snapshotted per run; the public marketplace is
+    the real one and moves underneath a measurement. An arm with the leg off is
+    what separates the shelf's effect from the marketplace's.
+    """
+
+    def prepare_with(self, arm: dict) -> executor.Provision:
+        roots = self.roots()
+        provision = tenjin_arm.prepare(ProvisionRequest(roots.trial_id, roots, arm, self.source))
+        self.roots_used = roots
+        self.seeded = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
+        return provision
+
+    def test_an_arm_that_names_nothing_runs_the_product_as_shipped(self) -> None:
+        provision = self.prepare_with({"id": "tenjin_seeded", "provision": "tenjin"})
+        self.assertEqual(self.seeded["team"], {"publicFallback": "on"})
+        self.assertEqual(provision.facts["public_fallback"], "on")
+
+    def test_the_arms_value_reaches_the_written_config_and_the_record(self) -> None:
+        provision = self.prepare_with({"id": "tenjin_seeded_no_public", "provision": "tenjin", "public_fallback": "off"})
+        # `src/hooks/ask.ts` reads exactly this string to drop the public legs.
+        self.assertEqual(self.seeded["team"], {"publicFallback": "off"})
+        self.assertEqual(provision.facts["public_fallback"], "off")
+        # Nothing else moved: the two shelf arms differ in this and in nothing else.
+        as_shipped = tenjin_arm.seeded_config(self.source, self.seeded["loop"]["port"])
+        self.assertEqual({**self.seeded, "team": as_shipped["team"]}, as_shipped)
+
+    def test_the_next_phase_keeps_the_value_its_first_phase_ran_under(self) -> None:
+        provision = self.prepare_with({"id": "tenjin_natural", "provision": "tenjin", "producer": True, "public_fallback": "off"})
+        consumer = tenjin_arm.start_phase(self.roots_used, provision, "consumer")
+        self.assertEqual(consumer.stop_state["public_fallback"], "off")
+        written = json.loads((self.roots_used.data_dir / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["team"], {"publicFallback": "off"})
+
+    def test_a_value_the_product_has_no_setting_for_is_refused(self) -> None:
+        with self.assertRaises(ProvisionError) as caught:
+            self.prepare_with({"id": "tenjin_seeded", "provision": "tenjin", "public_fallback": "false"})
+        self.assertIn("public_fallback", str(caught.exception))
+
+
 class SentinelTest(SourceCase):
     def test_the_seeded_secret_is_a_canary_everywhere_but_the_seeded_config(self) -> None:
         roots = self.roots()

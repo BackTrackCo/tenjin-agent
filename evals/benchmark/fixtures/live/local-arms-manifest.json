@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-core-suite-1",
+  "benchmark_version": "bench2-core-suite-2",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -318,6 +318,179 @@
       "hooks_disabled": [
         "publish"
       ]
+    },
+    {
+      "id": "tenjin_seeded_no_public",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings": {
+        "permissions": {
+          "allow": [
+            "Bash(tenjin search:*)",
+            "Bash(tenjin read:*)",
+            "Bash(tenjin inspect:*)"
+          ]
+        },
+        "hooks": {
+          "SessionStart": [
+            {
+              "matcher": "startup|clear|compact",
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "UserPromptSubmit": [
+            {
+              "hooks": [
+                {
+                  "type": "command",
+                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PreToolUse": [
+            {
+              "matcher": "WebSearch|WebFetch",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Agent|Task",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Edit|Write|MultiEdit|Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUse": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            },
+            {
+              "matcher": "Read",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "PostToolUseFailure": [
+            {
+              "matcher": "Bash",
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStart": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "SubagentStop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ],
+          "Stop": [
+            {
+              "hooks": [
+                {
+                  "type": "http",
+                  "url": "{daemon_url}",
+                  "headers": {
+                    "Authorization": "Bearer {daemon_token}"
+                  },
+                  "timeout": 5
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "hooks_disabled": [
+        "publish"
+      ],
+      "public_fallback": "off"
     },
     {
       "executor": "claude_live",

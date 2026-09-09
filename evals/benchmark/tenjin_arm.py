@@ -69,15 +69,21 @@ SECRET_KEY = "shelfBypassSecret"
 # the `publish` arm), except the arms the manifest's `hooks_disabled` names:
 # a consumption arm runs no publish nudge, because it captures nothing and the
 # nudge is a real cost with nothing to show for it there. Review mode so the
-# consumer's capture ask can never publish from a trial; public fallback on
-# because that is the product as shipped and as Bench-3 runs it (a team miss
-# then reaches the public marketplace, which is a named origin and a counted
-# leg); and a short idle exit so a daemon this module lost track of ends itself.
+# consumer's capture ask can never publish from a trial; and a short idle exit
+# so a daemon this module lost track of ends itself.
+#
+# Public fallback is the one value here an arm may choose, because it is the
+# one input to a number this benchmark cannot reset. The bench shelf is emptied
+# and snapshotted per run; the public marketplace is the real one and moves
+# underneath us, so an arm that turns the leg off is what separates the team
+# shelf's effect from the marketplace's. The default is the product's own `on`,
+# so an arm that says nothing runs the product as shipped.
 HOOK_ARMS = ("prompt", "web-search", "web-fetch", "subagent", "failure", "publish", "primer")
+PUBLIC_FALLBACK = ("on", "off")
+DEFAULT_PUBLIC_FALLBACK = "on"
 SEEDED: dict[str, Any] = {
     "publish": {"mode": "review"},
     "hooks": {arm: True for arm in HOOK_ARMS},
-    "team": {"publicFallback": "on"},
     "loop": {"idle_exit_min": 2},
 }
 # The two configs a trial's daemon runs under. `consumer` is the arm as
@@ -599,6 +605,19 @@ def disabled_arms(arm: dict[str, Any]) -> tuple[str, ...]:
     return tuple(name for name in HOOK_ARMS if name in named)
 
 
+def public_fallback_of(arm: dict[str, Any]) -> str:
+    """Whether this arm's trials let a team miss reach the public marketplace.
+
+    Defaulted to the product's own `on`, so an arm that names nothing is the
+    product as shipped and every manifest written before this key behaves as it
+    always did.
+    """
+    value = arm.get("public_fallback", DEFAULT_PUBLIC_FALLBACK)
+    if value not in PUBLIC_FALLBACK:
+        raise ProvisionError(f"public_fallback must be one of {', '.join(PUBLIC_FALLBACK)}, not {value!r}")
+    return str(value)
+
+
 def dry_source() -> "Source":
     """What a dry run without `--tenjin-source` provisions from: no bundles, no secret, a loopback shelf."""
     return Source(path=Path("."), config={"baseUrl": "http://127.0.0.1", "publicShelfUrl": "http://127.0.0.1"}, bundles={})
@@ -697,24 +716,48 @@ def data_dir_string(roots: artifact.TrialRoots) -> str:
     return os.path.abspath(roots.data_dir)
 
 
-def seeded_config(source: Source, port: int, *, with_secret: bool = True, mode: str = "consumer", disabled: tuple[str, ...] = ()) -> dict[str, Any]:
+def seeded_config(
+    source: Source,
+    port: int,
+    *,
+    with_secret: bool = True,
+    mode: str = "consumer",
+    disabled: tuple[str, ...] = (),
+    public_fallback: str = DEFAULT_PUBLIC_FALLBACK,
+) -> dict[str, Any]:
     if mode not in MODES:
         raise ProvisionError(f"unknown daemon config mode {mode!r}")
     unknown = sorted(set(disabled) - set(HOOK_ARMS))
     if unknown:
         raise ProvisionError(f"hooks_disabled names {', '.join(unknown)}, which the product's config has no arm for")
+    if public_fallback not in PUBLIC_FALLBACK:
+        raise ProvisionError(f"public_fallback must be one of {', '.join(PUBLIC_FALLBACK)}, not {public_fallback!r}")
     config = {key: value for key, value in source.config.items() if with_secret or key != SECRET_KEY}
-    seeded = {**config, **SEEDED, "hooks": {arm: arm not in disabled for arm in HOOK_ARMS}, "loop": {**SEEDED["loop"], "port": port}}
+    seeded = {
+        **config,
+        **SEEDED,
+        "hooks": {arm: arm not in disabled for arm in HOOK_ARMS},
+        "team": {"publicFallback": public_fallback},
+        "loop": {**SEEDED["loop"], "port": port},
+    }
     if mode == "producer":
         seeded["publish"] = {"mode": "auto"}
     return seeded
 
 
-def write_config(roots: artifact.TrialRoots, source: Source, port: int, *, with_secret: bool, mode: str, disabled: tuple[str, ...] = ()) -> None:
+def write_config(
+    roots: artifact.TrialRoots,
+    source: Source,
+    port: int,
+    *,
+    with_secret: bool,
+    mode: str,
+    disabled: tuple[str, ...] = (),
+    public_fallback: str = DEFAULT_PUBLIC_FALLBACK,
+) -> None:
     config_path = roots.data_dir / CONFIG_FILE
-    config_path.write_text(
-        json.dumps(seeded_config(source, port, with_secret=with_secret, mode=mode, disabled=disabled), indent=2) + "\n", encoding="utf-8"
-    )
+    config = seeded_config(source, port, with_secret=with_secret, mode=mode, disabled=disabled, public_fallback=public_fallback)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     config_path.chmod(0o600)
 
 
@@ -801,7 +844,15 @@ def start_phase(roots: artifact.TrialRoots, provision: Provision, mode: str) -> 
     """
     state = provision.stop_state
     source: Source = state["source"]
-    write_config(roots, source, DAEMON_PORT, with_secret=True, mode=mode, disabled=state.get("disabled", ()))
+    write_config(
+        roots,
+        source,
+        DAEMON_PORT,
+        with_secret=True,
+        mode=mode,
+        disabled=state.get("disabled", ()),
+        public_fallback=state.get("public_fallback", DEFAULT_PUBLIC_FALLBACK),
+    )
     return dataclasses.replace(provision, values=_values(roots, DAEMON_PORT, state["token"]), stop_state={**state, "mode": mode})
 
 
@@ -830,8 +881,17 @@ def prepare(request: ProvisionRequest) -> Provision:
     # that prints the URL a hook would post to is the point of a dry run.
     port = DAEMON_PORT
     disabled = disabled_arms(request.arm)
-    write_config(roots, source, port, with_secret=not request.dry_run, mode=mode, disabled=disabled)
-    facts: dict[str, Any] = {**source.facts, "daemon_mode": mode, "hooks_disabled": list(disabled)}
+    public_fallback = public_fallback_of(request.arm)
+    write_config(roots, source, port, with_secret=not request.dry_run, mode=mode, disabled=disabled, public_fallback=public_fallback)
+    # The two shelf arms differ only in this value: their Claude settings are
+    # byte-identical and so is their `settings_hash`, so without the field a
+    # reader cannot tell them apart from the artifacts alone.
+    facts: dict[str, Any] = {
+        **source.facts,
+        "daemon_mode": mode,
+        "hooks_disabled": list(disabled),
+        "public_fallback": public_fallback,
+    }
     lessons = [] if request.task is None or mode == "producer" else lessons_for(request.task, selected=request.arm.get("lessons"))
     task_id = str(request.task["id"]) if request.task is not None else ""
     pieces: list[str] = []
@@ -865,7 +925,15 @@ def prepare(request: ProvisionRequest) -> Provision:
         facts["seed"] = seeds
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
-        stop_state = {"port": port, "pieces": pieces, "source": source, "token": token, "mode": mode, "disabled": disabled}
+        stop_state = {
+            "port": port,
+            "pieces": pieces,
+            "source": source,
+            "token": token,
+            "mode": mode,
+            "disabled": disabled,
+            "public_fallback": public_fallback,
+        }
     return Provision(
         values=_values(roots, port, token),
         secrets=source.secrets,

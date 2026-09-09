@@ -57,9 +57,14 @@ OPTIONAL_TASK_KEYS = frozenset({"prompt", "tools", "allowed_tools"})
 # `producer` runs a producer phase in the same data dir before the consumer.
 # `hooks_disabled` names product hook arms the seeded config turns off; the
 # provisioner owns which names exist, because they are the product's, not this
-# package's.
+# package's. `public_fallback` is the product's `team.publicFallback`, which
+# decides whether a team miss then reaches the public marketplace; it defaults
+# to the product's own `on`, so an arm that omits it is the product as shipped.
 # An arm's static files are `settings.overlay`, validated by the live executor.
-OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "producer", "hooks_disabled"})
+OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "producer", "hooks_disabled", "public_fallback"})
+# The product's own values for `team.publicFallback`. `off` is the exact string
+# `src/hooks/ask.ts` reads to drop the public-only legs.
+PUBLIC_FALLBACK = frozenset({"on", "off"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
 SLICE_KINDS = frozenset({"recursive"})
 SLICE_KEYS = {"recursive": frozenset({"kind"})}
@@ -184,6 +189,11 @@ def _require_optional_shapes(name: str, item: dict[str, Any]) -> None:
             raise ManifestError(f"{name}.hooks_disabled needs a provisioned arm: there is no seeded config to write it into")
         if item.get("producer"):
             raise ManifestError(f"{name} runs a producer phase, so it captures: an arm that captures keeps every hook arm the product ships on")
+    if "public_fallback" in item:
+        if item["public_fallback"] not in PUBLIC_FALLBACK:
+            raise ManifestError(f"{name}.public_fallback must be one of {', '.join(sorted(PUBLIC_FALLBACK))}")
+        if not item.get("provision"):
+            raise ManifestError(f"{name}.public_fallback needs a provisioned arm: there is no seeded config to write it into")
     budget = item.get("max_budget_usd")
     if "max_budget_usd" in item and (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0):
         raise ManifestError(f"{name}.max_budget_usd must be a positive number")

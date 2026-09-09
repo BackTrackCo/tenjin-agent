@@ -33,6 +33,18 @@ class RecordShapeTest(unittest.TestCase):
         with self.assertRaises(RecordError):
             records.validate(attempt_record(self.root_only, invalid_reason="oops"))
 
+    def test_the_marketplace_leg_is_stated_per_attempt_or_not_at_all(self) -> None:
+        # The two shelf arms carry byte-identical settings, so this field is the
+        # only thing in a record that tells them apart.
+        base = attempt_record(self.family)
+        for value in ("on", "off"):
+            with self.subTest(value=value):
+                records.validate({**base, "isolation": {**base["isolation"], "public_fallback": value}})
+        records.validate(base)
+        for value in ("false", "", True):
+            with self.subTest(bad=value), self.assertRaises(RecordError):
+                records.validate({**base, "isolation": {**base["isolation"], "public_fallback": value}})
+
     def test_a_scored_outcome_cannot_carry_unreconciled_usage(self) -> None:
         # The invariant lives in the record, not only in the runner that built
         # it: a file the reducer reads from disk cannot claim a pass over usage
