@@ -208,7 +208,7 @@ def test_discovery_is_counted_per_arm(corpus, project: Project) -> None:
     published = project(accepted_records=records_in)
     assert published["discovery"][arm] == {"attempts": 1, "test_run_before_fix": 0, "setup_read": 1}
     assert f"discovery {arm}: ran the test before the fix 0/1, read the setup file 1/1" in report.render(published)
-    assert "discovery" not in report.render(project())
+    assert "ran the test before the fix" not in report.render(project())
 
 
 def test_the_failure_key_lane_and_keys_leg_verdict_are_summed_per_arm(corpus, project: Project) -> None:
@@ -333,3 +333,118 @@ def test_a_record_may_hold_what_the_report_may_not() -> None:
     # private-input slice, so a projection that wants any of it has to give
     # it a public name rather than forward the field.
     assert refusal(record).code == "private_field"
+
+
+# The corpus section. Its input is the projection, so the cases below build a
+# projection rather than reduce a run to reach the one cell they are about;
+# the case that reads a real one is `test_the_corpus_section_reads_the_run`.
+Figures = tuple[float, float, float] | None
+
+
+def corpus_report(cells: dict[str, dict[str, Figures]], baseline: str | None = "off") -> dict[str, Any]:
+    """A report whose only content is a corpus: per-arm figures, or none for a task an arm never scored."""
+    arms: dict[str, Any] = {}
+    for task_id, row in cells.items():
+        for arm_id, figures in row.items():
+            arm = arms.setdefault(arm_id, {"tasks": {}})
+            if figures is not None:
+                arm["tasks"][task_id] = dict(zip(report.CELL_KEYS, figures))
+    return {
+        "arms": arms,
+        "baseline": baseline,
+        "corpus_tasks": [
+            {
+                "task_id": task_id,
+                "family": "fam",
+                "transfer_distance": "same_task",
+                "verifier": "fake_answer_file",
+                "fixture_hash": "sha256:" + "a" * 64,
+            }
+            for task_id in cells
+        ],
+    }
+
+
+def task_order(lines: list[str]) -> list[str]:
+    """The task id of each rendered row, in the order the section printed them."""
+    return [line.split(" ", 1)[0] for line in lines[3:] if not line.startswith("...")]
+
+
+def test_the_corpus_section_orders_tasks_by_discovery_cost() -> None:
+    # Round trips in the baseline arm, most expensive first: the ordering is
+    # the section's point, because it is what says whether the corpus holds an
+    # expensive task at all. The token totals deliberately disagree with it.
+    section = report.corpus_section(
+        corpus_report(
+            {
+                "core": {"off": (6.33, 90000.0, 0.5), "on": (7.10, 80000.0, 0.5)},
+                "level": {"off": (9.00, 10000.0, 1.0), "on": (2.33, 9000.0, 1.0)},
+                "alias": {"off": (7.00, 50000.0, 0.0), "on": (6.00, 40000.0, 0.5)},
+            }
+        )
+    )
+    assert task_order(section) == ["level", "alias", "core"]
+    assert section[0] == "corpus: 3 tasks, most expensive first by discovery cost, requests per attempt in off"
+    assert "off (baseline)" in section[1] and "on" in section[1]
+    assert section[2].split() == ["task", "family", "distance", "verifier", "fixture", "reqs", "tokens", "pass", "reqs", "tokens", "pass"]
+    assert section[3].split()[5:] == ["9.00", "10000.0", "1.000", "2.33", "9000.0", "1.000"]
+
+
+def test_a_task_with_no_valid_attempt_renders_rather_than_crashing() -> None:
+    # The 2026-09-09 run: every attempt in one arm invalid, and one task the
+    # baseline never scored either. A run that produced a report must print.
+    section = report.corpus_section(
+        corpus_report({"scored": {"off": (4.00, 1000.0, 1.0), "on": None}, "unscored": {"off": None, "on": None}})
+    )
+    assert task_order(section) == ["scored", "unscored"]
+    # An unscored cell is `none` under every column, never a zero.
+    assert section[3].split()[5:] == ["4.00", "1000.0", "1.000", "none", "none", "none"]
+    assert section[4].split()[5:] == ["none", "none", "none", "none", "none", "none"]
+
+
+def test_a_baseline_with_no_scored_task_says_the_order_is_not_a_ranking() -> None:
+    section = report.corpus_section(corpus_report({"b": {"off": None, "on": (3.0, 10.0, 1.0)}, "a": {"off": None, "on": None}}))
+    assert section[0] == "corpus: 2 tasks, ordered by task id: off scored no attempt, so no discovery cost is known"
+    assert task_order(section) == ["a", "b"]
+
+
+def test_a_one_arm_run_renders_the_corpus_section() -> None:
+    section = report.corpus_section(corpus_report({"only": {"off": (5.0, 200.0, 1.0)}}))
+    assert section[1].split() == ["off", "(baseline)"]
+    assert section[2].split() == ["task", "family", "distance", "verifier", "fixture", "reqs", "tokens", "pass"]
+    assert section[3].split()[5:] == ["5.00", "200.0", "1.000"]
+    assert len(section) == 4
+
+
+def test_the_corpus_section_caps_its_rows_and_says_how_many_it_dropped() -> None:
+    # A corpus large enough to blow a check run's 65,535-character body is
+    # truncated here rather than by the API, which cuts without saying so.
+    over = report.CORPUS_ROWS + 7
+    section = report.corpus_section(corpus_report({f"task-{index:03d}": {"off": (float(index), 10.0, 1.0)} for index in range(over)}))
+    assert task_order(section) == [f"task-{index:03d}" for index in range(over - 1, over - 1 - report.CORPUS_ROWS, -1)]
+    assert section[-1] == f"... 7 cheaper tasks not shown; all {over} are in report.json under corpus_tasks"
+    assert len("\n".join(section)) < 65535
+
+
+def test_the_corpus_section_reads_the_run(corpus, project: Project) -> None:
+    manifest, _digest, _accepted, _excluded = corpus
+    published = project()
+    # The metadata only the manifest holds, projected so `summary` needs one file.
+    assert published["corpus_tasks"] == [
+        {
+            "task_id": task["id"],
+            "family": task["family"],
+            "transfer_distance": task["transfer_distance"],
+            "verifier": task["verifier"],
+            "fixture_hash": task["fixture_hash"],
+        }
+        for task in manifest.tasks
+    ]
+    report.guard(published)
+    section = report.corpus_section(published)
+    assert task_order(section) == sorted(task["id"] for task in manifest.tasks)
+    # Every figure is the reducer's own cell, never a number this reading made.
+    cell = published["arms"]["off"]["tasks"]["task-0"]
+    assert f"{cell['requests_per_attempt']:7.2f} {cell['tokens_per_attempt']:10.1f}" in "\n".join(section)
+    # The readout ends with it: it is the only block a cut may reach.
+    assert report.render(published).endswith("\n".join(section))
