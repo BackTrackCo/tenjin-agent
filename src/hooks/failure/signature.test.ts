@@ -4,7 +4,6 @@ import {
   commandHeads,
   errnoOf,
   errorLine,
-  filesInError,
   normalizeForSig,
   sigV1,
   topFrameFile,
@@ -288,6 +287,26 @@ describe('sig_v1', () => {
     expect(sigV1('ERROR: 2 tests failed', 'ERROR: 2 tests failed')).toBeNull();
   });
 
+  it('keys a bundler-generated frame the same on two builds', () => {
+    // The chunk name carries the build's own content hash, so the raw frame
+    // made every rebuild of one failure a key the shelf had never been asked.
+    const first = sigV1(
+      'TypeError: e.map is not a function',
+      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-4f2a91.js:1:2048)',
+    );
+    const second = sigV1(
+      'TypeError: e.map is not a function',
+      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-9b7c03.js:1:5100)',
+    );
+    expect(first?.key).toMatch(HEX16);
+    expect(first?.key).toBe(second?.key);
+    // Reduced, not dropped: a hand-written file still separates two failures
+    // that print the same message.
+    expect(
+      sigV1('TypeError: e.map is not a function', '    at render (src/list.tsx:9:1)')?.key,
+    ).not.toBe(first?.key);
+  });
+
   it('clears the floor on the frame alone, with no errno', () => {
     const sig = sigV1(
       'AssertionError: expected 1 to be 2',
@@ -320,13 +339,5 @@ describe('sig_v1', () => {
     expect(normalizeForSig('ERR_MODULE_NOT_FOUND at /a/b/c.js:12 on host.acme.io')).toBe(
       'e at @/:n on h',
     );
-  });
-
-  it('names the files the error itself did, and never an evaluated string', () => {
-    expect(
-      filesInError(
-        'src/app.ts(12,3): error\n    at run (src/migrate.ts:12:3)\n  File "<string>", line 1',
-      ),
-    ).toEqual(['app.ts', 'migrate.ts']);
   });
 });

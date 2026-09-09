@@ -12,4 +12,4 @@ The turn-end ask names the failures this turn HIT, off the ledger row the failur
 
 **A child's failures go to the child, not to the lead** (principle 5): the actor that hit the wall is the one that can explain it. The lead no longer sees what its children hit.
 
-**The ask re-arms on a new failure.** An actor asked at its first stop and then sent into a wall it had to climb out of is asked again, the same way a child's newer finding re-arms the lead. In practice that is the lead's: an already-asked child is on its answer turn and is harvested instead.
+**The ask re-arms on a new failure, and only on a new one.** An actor asked at its first stop and then sent into a wall it had to climb out of is asked again, the same way a child's newer finding re-arms the lead. In practice that is the lead's: an already-asked child is on its answer turn and is harvested instead. A failure the last ask already named is not repeated and does not re-arm anything, however many times the same command is re-run — the line says a failure came up this turn, and re-offering its `--key fingerprint=` would ask for a publish the agent may already have made.

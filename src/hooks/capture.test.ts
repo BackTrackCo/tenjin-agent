@@ -589,6 +589,23 @@ describe('the lead ask', () => {
     const again = (await fire(db, leadStop(), TEAM, () => NOW + 30))?.context ?? '';
     expect(again).toContain('address already in use');
     expect(again).toContain('`--key fingerprint=sig_v1:1111222233334444`');
+    // And only that one. The ENOENT did not come up this turn, and repeating
+    // its `--key fingerprint=` offers a publish the agent may already have
+    // made off the first ask.
+    expect(again).not.toContain(ENOENT_LINE);
+  });
+
+  it('names a failure that keeps recurring once, and is not re-armed by its repeat', async () => {
+    const db = freshDb();
+    // `no-answer` is a leg that never landed, so the fire releases its
+    // once-per-question claim: a shelf that cannot be reached writes a fresh
+    // row behind every run of the same failing command.
+    seedFailure(db, LEAD, { reason: 'no-answer', at: NOW - 10 });
+    expect((await fire(db, leadStop()))?.context).toContain(ENOENT_LINE);
+    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
+
+    seedFailure(db, LEAD, { reason: 'no-answer', at: NOW + 20 });
+    expect(await fire(db, leadStop(), TEAM, () => NOW + 30)).toBeNull();
   });
 
   it('the second stop harvests the lead own fence; a skipped lookup is not evidence', async () => {

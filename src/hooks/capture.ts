@@ -96,17 +96,6 @@ function fired(db: LoopDb, actor: Actor, where: string): boolean {
   );
 }
 
-/** A failure this actor hit that the shelves had nothing for, after `at`. */
-function failedSince(db: LoopDb, actor: Actor, at: number): boolean {
-  return (
-    db
-      .prepare(
-        `SELECT 1 FROM fires WHERE session = ? AND agent = ? AND ${FAILURE_MISS_SQL} AND at > ? LIMIT 1`,
-      )
-      .get(actor.session, actor.agent, at) !== undefined
-  );
-}
-
 /** What `finding:<uid>` holds. `publish --finding` reads it from E on. */
 interface Finding {
   title: string;
@@ -183,11 +172,21 @@ function missLines(db: LoopDb, session: string): string[] {
  * A NULL `question` IS NOT A FILTER. A failure with a test identity and no
  * error line stores the empty string, and that row is exactly the one whose
  * fingerprint is worth publishing under; only the key is required.
+ *
+ * NOTHING OLDER THAN THE LAST ASK, which is also what re-arms one. The line
+ * says a failure came up this turn, and on a re-armed ask the rows from before
+ * the previous ask did not: naming them again repeats a `--key fingerprint=`
+ * the agent may already have published under. The dedupe runs over the actor's
+ * whole history and `since` filters after it, so a failure that keeps
+ * recurring is still one named failure — a `no-answer` releases its
+ * once-per-question claim, so a shelf that cannot be reached re-asks and
+ * re-writes the row behind every run of the same failing command, and matching
+ * on the key's FIRST row is what keeps that from re-arming the ask every turn.
  */
-function failureLines(db: LoopDb, actor: Actor): string[] {
+function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] {
   const rows = db
     .prepare(
-      `SELECT question_key, question FROM fires
+      `SELECT question_key, question, at FROM fires
        WHERE session = ? AND agent = ? AND ${FAILURE_MISS_SQL}
          AND question_key IS NOT NULL AND question_key != ''
        ORDER BY at, rowid`,
@@ -195,6 +194,7 @@ function failureLines(db: LoopDb, actor: Actor): string[] {
     .all(actor.session, actor.agent) as unknown as Array<{
     question_key?: unknown;
     question?: unknown;
+    at?: unknown;
   }>;
   const seen = new Set<string>();
   const out: string[] = [];
@@ -202,6 +202,7 @@ function failureLines(db: LoopDb, actor: Actor): string[] {
     const key = typeof row.question_key === 'string' ? row.question_key : '';
     if (key === '' || seen.has(key)) continue;
     seen.add(key);
+    if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
     // Already masked and cut at the shelf's bound on the way into the row; the
     // second cut here is for the line's own width and nothing else.
     const line = clean(typeof row.question === 'string' ? row.question : '', 200);
@@ -324,10 +325,10 @@ function agentTypeOf(ctx: FireContext): string {
 
 /**
  * The ask, or null. Once per actor (`capture:asked`, valued with the kind);
- * re-armed only by a child's finding or a failure newer than the ask, never by
- * a publish (#294). A child is asked too — the ask is context beside its stop,
- * not a decision it has to answer — but never when it is a workflow child with
- * no turn left to answer in.
+ * re-armed only by a child's finding newer than the ask or a failure the ask
+ * did not already name, never by a publish (#294). A child is asked too — the
+ * ask is context beside its stop, not a decision it has to answer — but never
+ * when it is a workflow child with no turn left to answer in.
  */
 function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const cfg = ctx.deps.config();
@@ -336,16 +337,18 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   if (!cfg.hooks.publish) return null;
   const askedAt = markAt(db, actor, ASKED);
   const queued = audience === 'lead' ? childFindings(db, actor.session) : [];
+  // Both audiences: a failure belongs to the actor that hit it, where an open
+  // search is the lead's loop to close and a child's publish is the lead's to
+  // hear about.
+  const failures = failureLines(db, actor, askedAt);
   // A failure hit AFTER the ask re-arms it, the same shape as the queued
   // finding beside it: an actor asked at its first stop and then sent into a
   // wall it had to climb out of has something new to say, and the first ask
   // could not have named it. In practice that is the lead's, because `stop()`
-  // sends an already-asked child to `harvest` and never here.
-  if (
-    askedAt !== null &&
-    !queued.some((q) => q.finding.at > askedAt) &&
-    !failedSince(db, actor, askedAt)
-  )
+  // sends an already-asked child to `harvest` and never here. The re-arm is
+  // the lines themselves rather than a second query: an ask re-armed by a
+  // failure it would then have nothing to say about is an ask for nothing.
+  if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt) && failures.length === 0)
     return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
   const kind = evidence(ctx);
@@ -360,10 +363,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
     misses: audience === 'lead' ? missLines(db, actor.session) : [],
-    // Both audiences: a failure belongs to the actor that hit it, where an open
-    // search is the lead's loop to close and a child's publish is the lead's to
-    // hear about.
-    failures: failureLines(db, actor),
+    failures,
     published: audience === 'lead' ? publishedLines(db, actor.session) : [],
     queued: queued.map((q): QueuedLine => ({
       id: q.id,

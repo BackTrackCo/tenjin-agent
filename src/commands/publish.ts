@@ -129,8 +129,8 @@ export interface PublishArgs {
    * Exact-match keys this piece answers resolve-by-key lookups on, each spelled
    * `<kind>=<value>` (`fingerprint=sig_v1:…`, `package_version=zod@4.1.0`,
    * `command_head=pnpm`, `repo=owner/name`). Repeatable, up to 32. Always sent
-   * unverified: `verified` is the close rule's claim (two independent fixes),
-   * not a flag a hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
+   * unverified: `verified` is the shelf's own claim about a key, not a flag a
+   * hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
    */
   key?: string[];
 }

@@ -533,26 +533,20 @@ export interface Signature {
  * the SPECIFICITY FLOOR: no errno and no top frame means "N tests failed"
  * normalizes to the same bytes in every repo on earth, and a key sent on it
  * would resolve somebody else's fix at everybody.
+ *
+ * THE FRAME GOES THROUGH THE SAME REDUCTION AS THE MESSAGE. A bundler builds
+ * the file it points at, and names it after the content: a stack through
+ * Vite's `chunk-4f2a91.js` keys the identical failure differently on every
+ * rebuild, so the shelf never sees the same hash twice and the fingerprint
+ * resolves nothing it was published under. `normalizeForSig` folds the hex run
+ * and the digits out of the basename, which is the same trade the message
+ * already makes: `main2.rs` and `main3.rs` collapse together, and erring
+ * toward a match is the direction a fingerprint is for.
  */
 export function sigV1(line: string, block: string): Signature | null {
   const message = normalizeForSig(line);
   const errno = errnoOf(line);
   const frame = topFrameFile(block);
   if (errno === '' && frame === '') return null;
-  return { key: shortHash('sig_v1|' + message + '|' + errno + '|' + frame) };
-}
-
-/** Traceback locations that are not files: an evaluated string or a piped
- *  stdin. Nothing a tracked edit could ever be matched against. */
-const NOT_A_FILE = new Set(['<string>', '<stdin>']);
-
-/** File basenames the error itself named — what the close rule checks a
- *  change against. Frames, tsc/rustc locations, and Python tracebacks. */
-export function filesInError(text: string): string[] {
-  const found = new Set<string>();
-  for (const m of text.matchAll(/([A-Za-z0-9_.+-]+\.[A-Za-z]{1,5})[:(]\d+/g)) found.add(m[1] ?? '');
-  for (const m of text.matchAll(/File "([^"]+)", line \d+/g)) {
-    found.add((m[1] ?? '').split(/[/\\]/).pop() ?? '');
-  }
-  return [...found].filter((f) => f.length > 0 && f.length <= 80 && !NOT_A_FILE.has(f));
+  return { key: shortHash('sig_v1|' + message + '|' + errno + '|' + normalizeForSig(frame)) };
 }

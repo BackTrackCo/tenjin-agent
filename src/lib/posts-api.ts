@@ -961,7 +961,7 @@ function keysRefusal(res: HttpResponse, keys: PostKeyWire[] | undefined): CliErr
     'PUBLISH_FAILED',
     `${what} is already verified on ${where}; publish it unverified.`,
     {
-      fix: 'Publish the key unverified (`--key` never claims verified; the close rule does), or wait until outcomes demote that piece.',
+      fix: 'Publish the key unverified (`--key` never claims verified; the shelf does, by its own rule), or wait until outcomes demote that piece.',
       details,
     },
   );

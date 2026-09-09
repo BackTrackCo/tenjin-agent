@@ -6,6 +6,10 @@ The failure arm gets a second round: when neither fingerprint resolves, it asks 
 
 **Two rounds, ordered, never merged.** Round one is `/api/keys/resolve` under `sig_v1` and `sig_v1_test`. Round two runs only when round one answered nothing (the kernel already stops at the first stage that answers) and sends the error line as the runner printed it, masked, to `/api/search`. A key resolves a failure someone already published a key for; the write-up a teammate wrote about the same error in prose carries no fingerprint at all and used to be unreachable from a failing command.
 
+**A round-one answer this actor has already been shown still ends the plan.** The kernel stops at the first stage that answers, and it discovers the piece was already injected once only afterwards, so that failure gets no words round and is not named at turn end either. It is the kernel's own selection rule rather than the arm's, and it is unchanged here.
+
+**`sig_v1` normalizes the frame it keys on.** The message half was already reduced — hex runs to `H`, digits to `N` — and the top-frame basename was concatenated raw, so a stack through a bundler-generated file (`chunk-4f2a91.js`) keyed the identical failure differently on every rebuild and resolved nothing it had been published under. The frame now goes through the same reduction, which also folds `main2.rs` and `main3.rs` together: a piece published under a `sig_v1` whose frame carried digits has to be re-keyed to resolve again.
+
 **The team shelf only.** There is no public leg in either round: the marketplace holds none of this team's errors, and every hit in a 150-search census of this shelf came from the team side. The verdict is unchanged too — the shelf's own `strong`, no relaxed acceptance rule.
 
 **A failure with an error line but no fingerprint now asks something.** `sigV1` refuses a line with no errno and no frame, and the arm used to fall silent there; it now asks in words.

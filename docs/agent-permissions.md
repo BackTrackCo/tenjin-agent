@@ -448,14 +448,18 @@ and mention a tested answer if one exists. Six things leave the machine, each
 with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
 WebSearch query, a WebFetch address and the prompt beside it, the work order a
 subagent is dispatched with, and — to the team shelf only — the fingerprint of a
-failed command and, when nothing on that shelf is filed under the fingerprint,
-the failed command's error line as the runner printed it. Nothing else does.
-That sixth one is the only one of the six you did not type: an error line can
-carry a path, a host, or an internal package name, and `tenjin hooks disable
-failure` is how you keep it here. The files you read and edit are recorded
-locally and asked about nowhere; the publish arm reads that record to know your
-turn did work, and the failure arm keeps only the time of your last command, so
-it can tell that command's output from the one before it.
+failed command and, when that fingerprint round comes back with no answer, the
+failed command's error line as the runner printed it. Nothing else does. A
+failure too generic to fingerprint at all has no first round to lose, so for
+that one the error line is the only thing sent. That sixth one is the only one
+of the six you did not type: an error line can carry a path, a host, or an
+internal package name, and `tenjin hooks disable failure` is how you keep it
+here. The files you read and edit are recorded locally and asked about nowhere;
+the publish arm reads that record to know your turn did work. What the failure
+arm leaves on `~/.tenjin/loop.db` is the row it already wrote to ask: the
+masked error line and its fingerprint, which is what lets your turn's last
+message name the failure back to you, plus the time of your last command, so it
+can tell that command's output from the one before it.
 
 The seven arms, in the order `tenjin hooks` prints them:
 
@@ -470,13 +474,14 @@ The seven arms, in the order `tenjin hooks` prints them:
   order goes to both shelves at dispatch; you are told nothing, and whatever it
   found opens the subagent's first turn instead. The start itself sends nothing.
 - **failure** — a shell command fails. Its fingerprint, a hash rather than your
-  error text, goes to the team shelf first; if no piece is filed under that
-  hash, the error line itself follows as a question, in the runner's words
-  rather than yours, so a teammate's write-up that carries no fingerprint is
-  still reachable. Both rounds are the team shelf, never the public one, and
-  with no team shelf configured nothing leaves at all. This machine keeps no
-  record of the errors it has fixed, and nothing here pairs a failure with a
-  later pass.
+  error text, goes to the team shelf first; if that round answers nothing —
+  because no piece is filed under the hash, or because the request never landed
+  — the error line itself follows as a question, in the runner's words rather
+  than yours, so a teammate's write-up that carries no fingerprint is still
+  reachable. A failure with no fingerprint to send skips straight to the words.
+  Both rounds are the team shelf, never the public one, and with no team shelf
+  configured nothing leaves at all. This machine keeps no record of the errors
+  it has fixed, and nothing here pairs a failure with a later pass.
 - **publish** — your turn ends, and each subagent's turn ends. If there is
   something worth writing up, you are asked once whether to publish it, and the
   answer is kept here. It sends nothing: publishing is `tenjin publish`, which

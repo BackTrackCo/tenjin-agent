@@ -10,6 +10,6 @@ The failure arm's mechanical error-to-fix record is deleted. It only asks now.
 
 **The `local` shelf and its opener are gone**, so nothing is ever injected as a record from this machine. A parked handoff still reaches a starting child, under the shelf its own answer came off.
 
-**The turn-end ask no longer names fixed-but-unwritten errors**, and `doctor` no longer counts them. `tenjin publish --key fingerprint=sig_v1:<hash>` survives as a hand flag for the server-side key registry that round one resolves against — but nothing on the machine hands an agent a key any more, so it is a flag a person spells out.
+**The turn-end ask no longer names fixed-but-unwritten errors**, and `doctor` no longer counts them: a fix this machine inferred was never a fix to begin with. `tenjin publish --key fingerprint=sig_v1:<hash>` survives as the hand flag for the server-side key registry that round one resolves against, and the ask now fills it in from the failure's own ledger row rather than from a record of its own.
 
 **`~/.tenjin/loop.db` is still kept by uninstall**, for the search record and the outcome history.
