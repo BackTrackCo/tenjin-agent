@@ -27,7 +27,8 @@ import {
   shadowedCliSkills,
 } from '../lib/skill-wiring';
 import { skillMaterialize } from '../lib/skill-materialize';
-import type { HarnessTarget, HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
+import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
+import type { Harness } from '../adapters/types';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
 import { loadRawConfig, resolveSettings } from '../lib/config';
 import {
@@ -49,8 +50,6 @@ import {
 } from '../lib/harness-permissions';
 import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
-import { codexHome } from '../adapters/codex';
-import { trustedEntries } from '../lib/codex-trust';
 import { existsSync } from 'node:fs';
 import { health, readPid } from '../hooks/shim';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
@@ -793,7 +792,7 @@ function hasSearchPath(json: unknown): boolean {
 async function checkSkills(
   home: string,
   which: (bin: string) => boolean,
-  requested: readonly HarnessTarget[],
+  requested: readonly Harness[],
   bazaarPay: boolean,
   skillsSourceDir: string | undefined,
   teamMode: boolean,
@@ -1048,7 +1047,7 @@ function reasonFor(w: HarnessWiring, name: string): NotInvocableReason | undefin
 /**
  * A fix that can actually clear the warning. A bare `tenjin install` only targets
  * the directories detection picks, so a problem in ~/.agents/skills on a
- * Claude-only machine needs `--harness shared` spelled out.
+ * Claude-only machine needs `--harness codex` spelled out.
  */
 function fixFor(home: string, dirs: HarnessWiring[]): string {
   const flags = [...new Set(dirs.map((w) => harnessFlagFor(home, w.dir)))];
@@ -1202,11 +1201,10 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
  * `entries` is Claude's file itself: how many of ours are registered, and its
  * mode, because that file carries the daemon token as a literal.
  *
- * `codex hooks` keeps three facts apart that a file listing would blur:
- * configured (entries of ours in hooks.json), trusted (a `[hooks.state]`
- * record in config.toml, which only the operator's `/hooks` writes), and
- * observed (fires the daemon actually recorded from Codex this week). A
- * configured entry is not an active one until Codex has been told to trust it.
+ * `codex hooks` keeps two durable facts apart: configured (entries of ours in
+ * hooks.json) and observed (fires the daemon recorded from Codex this week).
+ * Install already carries the registrar's one-time `/hooks` activation step;
+ * doctor does not parse Codex's private, versioned trust-ledger grammar.
  */
 async function checkHooks(
   homeDir: string,
@@ -1241,20 +1239,10 @@ async function checkHooks(
     });
   }
   if (codex.entries > 0) {
-    const trust = await trustedEntries(codexHome(homeDir, env), codex.path, codex.positions);
     const observed = codexFiresThisWeek(dataDir, open);
-    const facts = `${codex.entries} in ${codex.path}; ${trust.trusted} of ${codex.entries} trusted in Codex; ${observed} fire${observed === 1 ? '' : 's'} observed in ${WEEK_DAYS}d`;
+    const facts = `${codex.entries} in ${codex.path}; ${observed} fire${observed === 1 ? '' : 's'} observed in ${WEEK_DAYS}d`;
     out.push({
-      result:
-        trust.untrusted.length > 0
-          ? {
-              name: 'codex hooks',
-              status: 'warn',
-              required: false,
-              detail: `${facts} — Codex runs an entry only once it is trusted`,
-              fix: 'Open Codex, run /hooks, and enable the tenjin entries.',
-            }
-          : { name: 'codex hooks', status: 'ok', required: false, detail: facts },
+      result: { name: 'codex hooks', status: 'ok', required: false, detail: facts },
     });
   }
   return out;
@@ -1296,7 +1284,7 @@ async function checkDaemon(port: number | null, dataDir: string): Promise<BuiltC
         name: 'daemon',
         status: 'ok',
         required: false,
-        detail: `127.0.0.1:${port}, pid ${live.pid}, v${live.version}`,
+        detail: `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}`,
       },
     };
   }
@@ -1573,7 +1561,7 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
 const CHECK_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Environment', ['node', 'store', 'config', 'data-dir']],
   ['Shelf', ['api', 'read', 'search', 'team shelf']],
-  ['Hooks', ['daemon', 'entries', 'skills', 'pairings']],
+  ['Hooks', ['daemon', 'entries', 'codex hooks', 'skills', 'pairings']],
   ['Wallet', ['wallet', 'wallet-custody', 'balance']],
 ];
 

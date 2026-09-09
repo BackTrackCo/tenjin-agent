@@ -44,7 +44,6 @@ const LOOP_URL_RE = new RegExp(`^http://127\\.0\\.0\\.1:\\d+/hook/(?:${HARNESSES
 export const HOOK_TIMEOUT_SECONDS = HARNESS_MS / 1000;
 
 export type HooksSkipReason =
-  | 'no-hook-harness'
   | 'declined'
   | 'dry-run'
   | 'daemon-down'
@@ -119,8 +118,6 @@ export function hooksSkipped(
  */
 function fixFor(reason: HooksSkipReason): string {
   switch (reason) {
-    case 'no-hook-harness':
-      return `Hooks are wired for ${HARNESSES.join(' and ')}. Re-run \`tenjin install --harness <one of them>\` on a machine that has it.`;
     case 'declined':
     case 'dry-run':
       return 'Wire them with `tenjin install`.';
@@ -368,9 +365,6 @@ export interface RegisteredHooks {
   /** The port our `http` entries name, or null when none does: a `command`
    *  entry carries no port, and neither does an absent file. */
   port: number | null;
-  /** `<event>:<index>` of each entry of ours, the position Codex keys its
-   *  trust state on. */
-  positions: Array<{ event: string; index: number }>;
 }
 
 /**
@@ -386,14 +380,13 @@ export async function registeredHooks(
 ): Promise<RegisteredHooks> {
   const path = adapter.registrar.configPath(homeDir, env);
   const hooks = await readHooksObject(path);
-  const out: RegisteredHooks = { path, entries: 0, port: null, positions: [] };
+  const out: RegisteredHooks = { path, entries: 0, port: null };
   if (hooks === null) return out;
-  for (const [event, list] of Object.entries(hooks)) {
+  for (const list of Object.values(hooks)) {
     if (!Array.isArray(list)) continue;
-    list.forEach((entry, index) => {
+    list.forEach((entry) => {
       if (!ownsHookEntry(entry, dataDir)) return;
       out.entries += 1;
-      out.positions.push({ event, index });
       for (const handler of (entry as { hooks: unknown[] }).hooks) {
         // OURS ONLY, and parsed defensively even then: a handler someone
         // hand-merged beside ours may carry a relative `url` that would

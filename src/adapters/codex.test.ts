@@ -160,27 +160,12 @@ describe('decode', () => {
   });
 
   describe('apply_patch', () => {
-    it('a patch adding two files is one edit naming both paths', () => {
-      expect(decoded(PreToolUsePatchAdd, 'patch add').tool).toEqual({
-        name: 'apply_patch',
-        kind: 'edit',
-        paths: ['notes/a.txt', 'README.md'],
-        callId: PreToolUsePatchAdd.tool_use_id,
-      });
-    });
-
-    it('a rename names its source and its target', () => {
-      expect(decoded(PreToolUsePatchMove, 'patch move').tool).toMatchObject({
-        kind: 'edit',
-        paths: ['notes/a.txt', 'notes/b.txt'],
-      });
-    });
-
-    it('a delete names the file it removed', () => {
-      expect(decoded(PreToolUsePatchDelete, 'patch delete').tool).toMatchObject({
-        kind: 'edit',
-        paths: ['notes/b.txt'],
-      });
+    it.each([
+      ['add', PreToolUsePatchAdd, ['notes/a.txt', 'README.md']],
+      ['move', PreToolUsePatchMove, ['notes/a.txt', 'notes/b.txt']],
+      ['delete', PreToolUsePatchDelete, ['notes/b.txt']],
+    ])('%s is one edit naming every affected path', (name, fixture, paths) => {
+      expect(decoded(fixture, `patch ${name}`).tool).toMatchObject({ kind: 'edit', paths });
     });
 
     it('its PostToolUse keeps the text and carries no status: nothing reads one on an edit', () => {

@@ -238,8 +238,8 @@ describe('install block', () => {
   });
 
   it('reads back the recorded targets', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'shared'] } }));
-    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'shared']);
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'codex'] } }));
+    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'codex']);
   });
 
   it('reads back a recorded free-verb decline as the exact declined rules', async () => {

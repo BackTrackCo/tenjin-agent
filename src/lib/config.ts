@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
-import { HARNESS_TARGETS } from './skill-wiring';
+import { HARNESSES } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -188,15 +188,13 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
 }
 
 /**
- * What `install` recorded about its OWN targets. `harness` is the explicit
- * `--harness` set of the last install that passed the flag, and it exists so
- * `doctor` keeps judging a directory the user named by hand: detection cannot see a
- * harness this CLI does not probe for, and without the record such a directory is a
- * target for one run and invisible to every later check. Written by `install`, not a
- * `config set` key.
+ * What `install` recorded about its own targets. `harness` is the last settled
+ * prompt or explicit `--harness` selection, so `doctor` keeps judging every
+ * directory the operator chose even when later detection cannot see it. Written
+ * by `install`, not a `config set` key.
  */
 const InstallConfigSchema = z.object({
-  harness: z.array(z.enum(HARNESS_TARGETS)),
+  harness: z.array(z.enum(HARNESSES)),
   /**
    * The EXACT rule strings still pending the last time an install explicitly
    * declined the free-verb allowlist (`--no-allow-free-verbs`), so `--refresh`

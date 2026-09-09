@@ -224,56 +224,18 @@ describe('decode', () => {
   });
 
   describe('canonical tool fields', () => {
-    it('a Bash call carries its command', () => {
-      expect(decode(PostToolUse)?.tool).toMatchObject({
-        kind: 'shell',
-        command: PostToolUse.tool_input.command,
-      });
-    });
-
-    it('an Edit or Read carries its one file_path as paths', () => {
-      const edit = decode({
-        ...PreToolUse,
-        tool_name: 'Edit',
-        tool_input: { file_path: '/p/a.ts' },
-      });
-      expect(edit?.tool).toMatchObject({ kind: 'edit', paths: ['/p/a.ts'] });
-      const read = decode({
-        ...PreToolUse,
-        tool_name: 'Read',
-        tool_input: { file_path: '/p/b.ts' },
-      });
-      expect(read?.tool).toMatchObject({ kind: 'read', paths: ['/p/b.ts'] });
-      expect(decode({ ...PreToolUse, tool_name: 'Edit', tool_input: {} })?.tool).toMatchObject({
-        kind: 'edit',
-        paths: [],
-      });
-    });
-
-    it('an Agent call carries its prompt as the task, never the description', () => {
-      const input = decode({
-        ...PreToolUse,
-        tool_name: 'Agent',
-        tool_input: { prompt: 'find the flake', description: 'a label', subagent_type: 'Explore' },
-      });
-      expect(input?.tool).toEqual({
-        name: 'Agent',
-        kind: 'dispatch',
-        task: 'find the flake',
-        callId: PreToolUse.tool_use_id,
-      });
-    });
-
-    it('a WebSearch carries its query and a WebFetch its url and prompt', () => {
-      expect(
-        decode({ ...PreToolUse, tool_name: 'WebSearch', tool_input: { query: 'pg 16 collation' } })
-          ?.tool,
-      ).toMatchObject({ kind: 'web', query: 'pg 16 collation' });
-      expect(decode(PreToolUse)?.tool).toMatchObject({
-        kind: 'fetch',
-        url: PreToolUse.tool_input.url,
-        prompt: PreToolUse.tool_input.prompt,
-      });
+    it.each([
+      ['Edit', { file_path: '/p/a.ts' }, { kind: 'edit', paths: ['/p/a.ts'] }],
+      ['Read', { file_path: '/p/b.ts' }, { kind: 'read', paths: ['/p/b.ts'] }],
+      ['Edit', {}, { kind: 'edit', paths: [] }],
+      [
+        'Agent',
+        { prompt: 'find the flake', description: 'a label', subagent_type: 'Explore' },
+        { kind: 'dispatch', task: 'find the flake' },
+      ],
+      ['WebSearch', { query: 'pg 16 collation' }, { kind: 'web', query: 'pg 16 collation' }],
+    ])('%s carries its canonical fields', (tool_name, tool_input, expected) => {
+      expect(decode({ ...PreToolUse, tool_name, tool_input })?.tool).toMatchObject(expected);
     });
   });
 

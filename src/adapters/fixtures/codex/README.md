@@ -54,3 +54,19 @@ off, and the public shelf as the only shelf:
   marked under that id, its SubagentStop carried the capture ask with
   `--agent <id>`, and the fused SubagentStop harvested. No `daemon-down` line was
   written in either session.
+
+## Observed through the installed home-level registrar (2026-09-09)
+
+An isolated `HOME` ran the built `tenjin install --harness codex`, producing the
+process home file `~/.codex/hooks.json` with exactly seven entries. The throwaway
+git checkout had no project `.codex/hooks.json`. On the first Codex 0.153.4
+startup, Codex presented all seven home hooks as new or changed; choosing
+`Trust all and continue` recorded seven `hooks.state` entries for that home file
+in `~/.codex/config.toml`.
+
+A subsequent `codex exec -s workspace-write` in the hook-free project reached
+the installed shim and built daemon through that home file. One prompt that used
+`apply_patch` and Bash recorded one `session.start`, one `prompt`, two
+`tool.before`, one `tool.after`, and two `turn.end` fires under the `codex`
+harness. The first Stop was blocked and the fused Stop completed; no
+`daemon-down` line was written.

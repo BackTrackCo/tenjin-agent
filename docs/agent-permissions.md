@@ -445,7 +445,7 @@ machine only, authorized by a token in that file, which is why it is written mod
 the turn's first tool call. With Codex installed, seven entries in
 `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`) all run that shim and carry
 no token; Codex runs them only after you enable them in `/hooks`, and `tenjin
-doctor` reports configured, trusted and observed entries as three separate facts.
+doctor` reports configured and observed entries as separate facts.
 A Codex shell result carries no exit status, so the failure arm learns of a
 failure only from an error marker and never closes a pairing on Codex; a Codex
 spawn's task is opaque on the wire, so no work order is looked up for a child. No arm can block or change a tool call; every one of

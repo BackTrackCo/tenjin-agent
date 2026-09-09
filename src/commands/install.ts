@@ -17,7 +17,6 @@ import { resolveSkillsSource, OPTIONAL_PAY_SKILL, SKILL_NAMES } from '../lib/ski
 import { placeOptionalSkill } from '../lib/skill-placement';
 import {
   CLI_SKILL_NAMES,
-  HARNESS_TARGETS,
   HOSTED_SKILL_NAME,
   harnessDetectedBy,
   harnessTargetDir,
@@ -25,7 +24,6 @@ import {
   onPath,
   readSkillFile,
 } from '../lib/skill-wiring';
-import type { HarnessTarget } from '../lib/skill-wiring';
 import {
   CONFIG_DEFAULTS,
   HOOK_ARMS,
@@ -59,20 +57,16 @@ import {
 import type { PermissionsResult } from '../lib/harness-permissions';
 import { hasHooks, hooksSkipped, writeHooks } from '../lib/harness-hooks';
 import type { WriteHooksOptions } from '../lib/harness-hooks';
-import { ADAPTERS, adapterFor } from '../adapters/registry';
+import { ADAPTERS } from '../adapters/registry';
+import { HARNESSES } from '../adapters/types';
+import type { Harness } from '../adapters/types';
 import { healWiredSkills } from '../lib/skill-heal';
 import type { HealOutcome } from '../lib/skill-heal';
 import type { HooksResult } from '../lib/harness-hooks';
-import { confirmChoice, intro as clackIntro, selectOne } from '../lib/clack';
+import { confirmChoice, intro as clackIntro, selectMany, selectOne } from '../lib/clack';
 import { sanitizeForTerminal } from '../lib/output';
 import type { Io } from '../lib/output';
 import type { CommandContext, CommandResult } from '../context';
-
-// The `--harness` vocabulary and its directory mapping are single-sourced in
-// skill-wiring beside the detection probes, because `doctor` maps a persisted choice
-// back to a directory with the same rules.
-const HARNESSES = HARNESS_TARGETS;
-type Harness = HarnessTarget;
 
 const InstallInputSchema = z.object({
   harness: z.array(z.string()).optional(),
@@ -113,6 +107,14 @@ export type InstallInput = z.infer<typeof InstallInputSchema>;
  * in-process and never render a prompt.
  */
 export type PromptPublishModeFn = () => Promise<PublishMode | null>;
+
+/** Select the real harnesses to wire; `null` means the operator cancelled. */
+export type PromptHarnessesFn = (choices: readonly HarnessChoice[]) => Promise<Harness[] | null>;
+
+export interface HarnessChoice {
+  harness: Harness;
+  detectedBy: string[];
+}
 
 /** A yes/no seam, same shape as buy's `confirm`. */
 export type ConfirmFn = (label: string) => Promise<boolean>;
@@ -223,6 +225,8 @@ export interface InstallDeps {
   doctorDeps?: DoctorDeps;
   /** The publish-mode select; defaults to the clack list. */
   promptPublishMode?: PromptPublishModeFn;
+  /** The harness multiselect; defaults to the clack list. */
+  promptHarnesses?: PromptHarnessesFn;
   /** What a real run WOULD write, for `--dry-run`; defaults to the read-only plan pass. */
   planPermissions?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
   /** Whether the allowlist has anything left to grant; defaults to reading settings.json. */
@@ -256,10 +260,10 @@ export interface InstallDeps {
 }
 
 /**
- * `tenjin install`: detect the installed harness(es), copy the packaged skills
- * into each one's skills directory, ask TWO questions (publishing, wallet), then
- * run the doctor checks over the machine those answers just produced and print
- * ten rows. Everything else is a flag.
+ * `tenjin install`: detect the installed harness(es), confirm which to wire, copy
+ * the packaged skills into their skills directories, ask TWO consent questions
+ * (publishing, wallet), then run doctor over the machine those answers just
+ * produced and print ten rows. Everything else is a flag.
  *
  * ONE PROMPT CARRIES ONE CONSENT. The publish-mode select is the consent moment
  * for the harness allowlist too, because `auto` is what puts `tenjin publish` and
@@ -384,19 +388,18 @@ async function runInstallRefresh(
   // surface nobody asked for.
   const hooks: HooksResult[] = [];
   for (const adapter of Object.values(ADAPTERS)) {
+    if (!(await hasHooks(adapter, home, ctx.dataDir, env))) continue;
     hooks.push(
-      (await hasHooks(adapter, home, ctx.dataDir, env))
-        ? await writeHooks({
-            adapter,
-            homeDir: home,
-            dataDir: ctx.dataDir,
-            env,
-            ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
-          })
-        : hooksSkipped(adapter.id, home, ctx.dataDir, 'declined', env),
+      await writeHooks({
+        adapter,
+        homeDir: home,
+        dataDir: ctx.dataDir,
+        env,
+        ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
+      }),
     );
   }
-  const wired = hooks.some((h) => h.skipped !== 'declined');
+  const wired = hooks.length > 0;
 
   // `pending` is exactly the set a real install WOULD add, which is exactly the
   // set this run must not. Reported so the operator can see what an explicit
@@ -585,14 +588,36 @@ async function installBody(
   const humanOutput = ctx.flags.json === true ? false : (deps.isInteractive ?? ctx.io.isTTY);
   const canPrompt = humanOutput && (deps.isInteractive ?? Boolean(process.stdin.isTTY));
 
+  const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
+  const detected = HARNESSES.map((harness) => ({
+    harness,
+    detectedBy: harnessDetectedBy(home, harness, which),
+  }));
+  let selectedHarnesses: Harness[];
+  if (explicitHarness) {
+    selectedHarnesses = uniqueHarnesses(parsed.data.harness!.map(validateHarness));
+  } else if (canPrompt) {
+    await (deps.intro ?? clackIntro)('tenjin install');
+    const answer = await (deps.promptHarnesses ?? promptHarnesses)(detected);
+    if (answer === null || answer.length === 0) {
+      throw new CliError('REFUSED', 'Install cancelled before anything was written.', {
+        fix: `Re-run and select at least one harness, or pass ${HARNESSES.map((h) => `\`--harness ${h}\``).join(' or ')}.`,
+      });
+    }
+    selectedHarnesses = uniqueHarnesses(answer);
+  } else {
+    throw new CliError('USAGE', 'A non-interactive install needs an explicit harness.', {
+      fix: `Pass one or more of: ${HARNESSES.map((h) => `\`--harness ${h}\``).join(', ')}.`,
+    });
+  }
+
   const skillsSource =
     deps.skillsSourceDir ?? resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
   await assertSkillsSource(skillsSource);
 
-  const plans = resolvePlans(parsed.data.harness, home, which);
-  // Same condition resolvePlans treats as an override, so what gets recorded below is
-  // exactly what overrode detection.
-  const explicitHarness = parsed.data.harness !== undefined && parsed.data.harness.length > 0;
+  // Skills are destinations, hooks are harnesses. Several harnesses may share one
+  // skills directory, so only the former may be collapsed.
+  const plans = resolvePlans(selectedHarnesses, detected, home);
   const harnesses: HarnessResult[] = [];
   // Unlocked. What makes concurrent writers safe here is the per-file atomic
   // rename, not serialization: the rm-then-write this used to be had two runs
@@ -611,23 +636,15 @@ async function installBody(
   }
   await assertSkillsLanded(plans, dryRun);
   if (!dryRun) markPhase('wired');
-  // An explicit --harness is REMEMBERED, before the embedded doctor run so this run's
-  // own check already honours it. Detection cannot see a harness we do not probe for,
-  // so without the record a directory the user named by hand is a target for one run
-  // and then invisible to every later doctor — including for the #35 shadowing defect
-  // it was chosen to hold. `--dry-run` records nothing, like the publish-mode write.
-  if (explicitHarness && !dryRun) {
-    await underDataDir(ctx.dataDir, () =>
-      persistInstallHarness(
-        ctx.dataDir,
-        plans.map((p) => p.harness),
-      ),
-    );
+  // Remember the operator's selection before the embedded doctor run so that run
+  // already judges every chosen directory, including a harness not detected here.
+  // `--dry-run` records nothing, like the publish-mode write.
+  if (!dryRun) {
+    await underDataDir(ctx.dataDir, () => persistInstallHarness(ctx.dataDir, selectedHarnesses));
   }
-  // The two questions, in order, with everything a flag settles between them.
-  // The frame opens the questions, so a dry run — which settles both without
-  // asking — never opens one and leaves it hanging over the walkthrough.
-  if (canPrompt && !dryRun) await (deps.intro ?? clackIntro)('tenjin install');
+  // The two remaining questions, in order, with everything a flag settles
+  // between them. The frame opened before harness selection; a dry run settles
+  // all choices through flags and never opens it.
   const publishMode = await underDataDir(ctx.dataDir, () =>
     resolvePublishMode(publishModeFlag, ctx, deps, dryRun, canPrompt),
   );
@@ -643,7 +660,7 @@ async function installBody(
     }),
   );
   const hooks = await underDataDir(ctx.dataDir, () =>
-    resolveHooks({ plans, home, ctx, deps, noHooks, dryRun }),
+    resolveHooks({ harnesses: selectedHarnesses, home, ctx, deps, noHooks, dryRun }),
   );
 
   // On BOTH paths: the loop this command sets up needs a key, so a headless run
@@ -908,7 +925,6 @@ function hooksValue(h: HooksResult, enabled: number): string {
   if (h.skipped === undefined) {
     return `${enabled} enabled; change: tenjin hooks disable <arm>`;
   }
-  if (h.skipped === 'no-hook-harness') return 'not wired (no hook-capable harness targeted)';
   if (h.skipped === 'dry-run') return `${h.entries} entries unchanged (dry run)`;
   if (h.skipped === 'declined') return 'none registered (--no-hooks)';
   if (h.skipped === 'daemon-down') {
@@ -1304,15 +1320,13 @@ async function resolvePermissions(args: {
           ...(result.path === undefined ? { path: retractedFrom } : {}),
         };
 
-  // Only Claude Code has a settings file with this shape. Codex and the shared
-  // Agent Skills location gate permissions elsewhere, so there is nothing here to
+  // Only Claude Code has a settings file with this shape. Codex gates permissions
+  // elsewhere, so there is nothing here to
   // write for them, and guessing at another harness's config would be the kind of
   // uninvited write this whole module is careful about.
   const hasClaude = plans.some((p) => p.harness === 'claude');
   if (!hasClaude) {
-    return withRetraction(
-      permissionsSkipped(plans[0]?.harness ?? 'shared', home, 'harness-not-claude'),
-    );
+    return withRetraction(permissionsSkipped(plans[0]!.harness, home, 'harness-not-claude'));
   }
 
   // Read ahead of the decline guard (rather than only on the branches that go
@@ -1363,23 +1377,20 @@ async function resolvePermissions(args: {
  * so there is nothing for install to ask or persist here.
  */
 async function resolveHooks(args: {
-  plans: HarnessPlan[];
+  harnesses: Harness[];
   home: string;
   ctx: CommandContext;
   deps: InstallDeps;
   noHooks: boolean;
   dryRun: boolean;
 }): Promise<HooksResult[]> {
-  const { plans, home, ctx, deps, noHooks, dryRun } = args;
+  const { harnesses, home, ctx, deps, noHooks, dryRun } = args;
   const dataDir = ctx.dataDir;
   const env = deps.env ?? process.env;
 
-  // Every targeted harness with an adapter gets its own entries and its own
-  // outcome; a skills-only target (`shared`) has nothing to register.
-  const adapters = plans.map((p) => adapterFor(p.harness)).filter((a) => a !== undefined);
-  if (adapters.length === 0) {
-    return [hooksSkipped(plans[0]?.harness ?? 'shared', home, dataDir, 'no-hook-harness', env)];
-  }
+  // Hook targets stay at harness granularity even when their skills share a
+  // destination. Collapsing skill directories must never erase a registrar.
+  const adapters = harnesses.map((harness) => ADAPTERS[harness]);
   const out: HooksResult[] = [];
   for (const adapter of adapters) {
     // `--no-hooks` is a decision about THIS RUN and writes no config, so a
@@ -1412,33 +1423,20 @@ interface HarnessPlan {
 }
 
 /**
- * Turn detection (or an explicit --harness override) into the ordered, de-duped
- * list of targets to write. Codex and the shared fallback both land in
- * ~/.agents/skills (the harness-shared Agent Skills location), so a request for
- * both collapses to one target keyed by that directory.
+ * Turn the selected harnesses into the ordered, de-duped skill destinations to
+ * write. Hook planning keeps the full harness list and never calls this helper.
  */
 function resolvePlans(
-  override: string[] | undefined,
+  harnesses: readonly Harness[],
+  detected: readonly HarnessChoice[],
   home: string,
-  which: (bin: string) => boolean,
 ): HarnessPlan[] {
-  if (override !== undefined && override.length > 0) {
-    const plans = override.map((v) => planFor(validateHarness(v), ['override'], true, home));
-    return dedupeBySkillsDir(plans);
-  }
-
-  const plans: HarnessPlan[] = [];
-  // Same two probes doctor's skills check gates its per-directory verdicts on.
-  const claudeBy = harnessDetectedBy(home, 'claude', which);
-  const codexBy = harnessDetectedBy(home, 'codex', which);
-  if (claudeBy.length > 0) plans.push(planFor('claude', claudeBy, true, home));
-  if (codexBy.length > 0) plans.push(planFor('codex', codexBy, true, home));
-  if (plans.length === 0) {
-    // Nothing detected: the shared Agent Skills location is the fallback target, so
-    // a harness installed later still finds the skills.
-    plans.push(planFor('shared', ['fallback'], false, home));
-  }
-  return dedupeBySkillsDir(plans);
+  return dedupeBySkillsDir(
+    harnesses.map((harness) => {
+      const detectedBy = detected.find((choice) => choice.harness === harness)?.detectedBy ?? [];
+      return planFor(harness, detectedBy, detectedBy.length > 0, home);
+    }),
+  );
 }
 
 function planFor(
@@ -1473,6 +1471,33 @@ function validateHarness(value: string): Harness {
   if ((HARNESSES as readonly string[]).includes(value)) return value as Harness;
   throw new CliError('USAGE', `Unknown harness "${value}"`, {
     fix: `--harness must be one of: ${HARNESSES.join(', ')}.`,
+  });
+}
+
+function uniqueHarnesses(values: readonly Harness[]): Harness[] {
+  const requested = new Set(values);
+  return HARNESSES.filter((harness) => requested.has(harness));
+}
+
+async function promptHarnesses(choices: readonly HarnessChoice[]): Promise<Harness[] | null> {
+  const found = choices.filter((choice) => choice.detectedBy.length > 0);
+  const foundSummary =
+    found.length === 0
+      ? 'none detected'
+      : found
+          .map((choice) => `${harnessLabel(choice.harness)} (${choice.detectedBy.join(', ')})`)
+          .join(', ');
+  return selectMany({
+    message: `Harnesses found: ${foundSummary}. Which should Tenjin wire?`,
+    choices: choices.map((choice) => ({
+      value: choice.harness,
+      label: harnessLabel(choice.harness),
+      hint:
+        choice.detectedBy.length > 0
+          ? `detected by ${choice.detectedBy.join(' and ')}`
+          : 'not detected',
+    })),
+    initialValues: found.map((choice) => choice.harness),
   });
 }
 

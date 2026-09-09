@@ -510,20 +510,6 @@ describe('writeHooks (codex): seven command entries in hooks.json', () => {
     expect(existsSync(codexHooksPath())).toBe(false);
   });
 
-  it('registeredHooks names each entry’s position, which is what Codex keys trust on', async () => {
-    await writeCodex();
-    const { positions } = await registeredHooks(codexAdapter, home, data, {});
-    expect(positions).toEqual([
-      { event: 'SessionStart', index: 0 },
-      { event: 'UserPromptSubmit', index: 0 },
-      { event: 'PreToolUse', index: 0 },
-      { event: 'PostToolUse', index: 0 },
-      { event: 'SubagentStart', index: 0 },
-      { event: 'SubagentStop', index: 0 },
-      { event: 'Stop', index: 0 },
-    ]);
-  });
-
   it('both harnesses on one machine: two files, one daemon, one hooks dir', async () => {
     const claude = await write();
     const codex = await writeCodex();
