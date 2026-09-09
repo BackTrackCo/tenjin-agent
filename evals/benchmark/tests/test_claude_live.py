@@ -349,9 +349,12 @@ def test_the_hooks_smoke_manifest_is_the_installed_hook_set_as_a_template() -> N
     claude_live.settings_of(arm, manifest.pins)
     with pytest.raises(LiveExecutorError):
         claude_live.settings_of({**arm, "settings_hash": "sha256:" + "0" * 64}, manifest.pins)
-    # The pin no longer encodes the lesson: every natural command is
-    # allowed, and the wrong ones fail inside the repository.
-    assert [rule for rule in manifest.pins["allowed_tools"] if rule.startswith("Bash(")] == ["Bash(pnpm:*)", "Bash(npx:*)", "Bash(node:*)", "Bash(ls:*)", "Bash(cat:*)"]
+    # The pin no longer encodes the lesson: every rule opens a whole binary
+    # rather than one command line, so the wrong commands fail inside the
+    # repository and not at the permission gate. The rule shape rather than
+    # the roster, because allowing another binary is not a regression.
+    bash = [rule for rule in manifest.pins["allowed_tools"] if rule.startswith("Bash(")]
+    assert bash and all(re.fullmatch(r"Bash\([a-z0-9_-]+:\*\)", rule) for rule in bash)
     assert "WebFetch" not in manifest.pins["tools"]
     for task in manifest.tasks:
         claude_live.refuse_project_settings(manifest.fixture_path(task))

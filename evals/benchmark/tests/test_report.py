@@ -7,6 +7,7 @@ memory body, each pushed through a field the projection actually copies.
 
 from __future__ import annotations
 
+import collections
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -117,12 +118,15 @@ def stamped(corpus) -> Stamped:
     return run
 
 
-def test_the_corpus_projects_to_counts_enums_ids_and_hashes(project: Project, reduction: dict) -> None:
+def test_the_corpus_projects_to_counts_enums_ids_and_hashes(corpus, project: Project, reduction: dict) -> None:
+    _manifest, _digest, accepted, excluded = corpus
     published = project()
     assert published["schema"] == report.REPORT_SCHEMA
     assert published["baseline"] == "off"
-    assert len(published["trials"]) == 12
-    assert published["excluded"] == {"stale": 1, "partial": 1, "foreign": 1}
+    # One row per accepted attempt, and the refused files tallied by their
+    # own reasons: both sides come off the corpus the case was handed.
+    assert len(published["trials"]) == len(accepted)
+    assert published["excluded"] == collections.Counter(item.reason for item in excluded)
     # The projection carries the reducer's number rather than recomputing one of its own.
     assert published["comparisons"]["on"]["token_ratio"] == reduction["comparisons"]["on"]["token_ratio"]
     # Nothing in the projection is a body, a path, or a transcript.

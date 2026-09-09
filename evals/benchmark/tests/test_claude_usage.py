@@ -9,13 +9,30 @@ import pytest
 
 from evals.benchmark import claude_usage
 from evals.benchmark.claude_usage import ClaudeUsageError
-from evals.benchmark.tests.support import SESSIONS, copy_session, parse
+from evals.benchmark.tests.support import SESSIONS, copy_session, parse, read_rows
 
 Edit = Callable[[list[Any]], list[Any]]
 
 
 def _assistant_rows(rows: list[Any]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and row.get("type") == "assistant"]
+
+
+def counted(session: str) -> list[dict[str, Any]]:
+    """Each request's own final usage block, read off the fixture the case was handed.
+
+    A case that is about a number the fixture happens to hold states the
+    arithmetic over these instead, so regenerating a session moves the
+    expectation with it and only an adapter change can open a gap.
+    """
+    last: dict[str, dict[str, Any]] = {}
+    for row in _assistant_rows(read_rows(SESSIONS / f"{session}.jsonl")):
+        last[row.get("requestId") or row["message"]["id"]] = row["message"]["usage"]
+    return list(last.values())
+
+
+def spend(session: str) -> int:
+    return sum(sum(value for value in usage.values() if isinstance(value, int)) for usage in counted(session))
 
 
 def edited(tmp_path: Path, session: str, edit: Edit | None = None, children: dict[str, Edit] | None = None) -> claude_usage.SessionUsage:
@@ -50,7 +67,8 @@ def test_partial_and_final_rows_select_the_final_row(root_only_session: claude_u
 def test_message_id_is_the_documented_fallback_key() -> None:
     session = parse("sess-fallback")
     assert [record.native_request_id for record in session.records] == ["msg_601", "msg_602"]
-    assert session.records[0].output_total == 60
+    # The final row under that key, never the partial one above it.
+    assert session.records[0].output_total == counted("sess-fallback")[0]["output_tokens"]
     assert session.reconciliation["status"] == "matched"
 
 
@@ -142,11 +160,15 @@ def test_repeated_message_ids_reconcile_against_the_envelope(root_only_session: 
 
 def test_unexplained_envelope_mismatch_fails_the_attempt_closed() -> None:
     session = parse("sess-mismatch")
+    output = session.reconciliation["categories"]["output_tokens"]
     assert session.reconciliation["status"] == "mismatch"
-    assert session.reconciliation["categories"]["output_tokens"]["delta"] == 1
+    # A gap in either direction that no cap and no side model names, stated
+    # as the relation rather than as this fixture's own size.
+    assert output["delta"] != 0
+    assert output["delta"] == output["envelope"] - output["actors"]
     assert session.invalid_reason == "usage:mismatch"
     # The records are still there for the cost appendix; they just never score.
-    assert session.records[0].output_total == 180
+    assert session.records[0].output_total == counted("sess-mismatch")[0]["output_tokens"]
 
 
 def test_envelope_counting_only_the_root_still_matches_with_children(tmp_path: Path) -> None:
@@ -160,7 +182,13 @@ def test_envelope_counting_only_the_root_still_matches_with_children(tmp_path: P
 def test_side_model_usage_explains_a_remainder_without_apportioning() -> None:
     session = parse("sess-side-models")
     assert session.reconciliation["status"] == "explained_by_side_models"
-    assert session.reconciliation["unattributed"] == {"input_tokens": 40, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 12, "models": 1}
+    # The remainder is what the envelope holds over the actors' rows,
+    # category by category, and one model beside the harness's own carries it.
+    categories = session.reconciliation["categories"]
+    assert session.reconciliation["unattributed"] == {
+        **{name: cell["envelope"] - cell["actors"] for name, cell in categories.items()},
+        "models": 1,
+    }
     assert len(session.records) == 1
     assert session.invalid_reason is None
 
@@ -205,7 +233,7 @@ def test_cache_output_and_reasoning_categories() -> None:
     assert record.uncached_input == 7
     assert record.cache_write == 1500
     assert record.cache_read == 250
-    assert record.input_total == 1757
+    assert record.input_total == record.uncached_input + record.cache_write + record.cache_read
     assert record.output_total == 400
     assert record.reasoning_output_subset == 150
     assert record.provider_total is None
@@ -226,9 +254,10 @@ def test_null_versus_zero_categories() -> None:
     hidden, zeros = parse("sess-null-zero").records
     assert hidden.cache_read is None
     assert hidden.cache_write is None
-    assert hidden.input_total == 5
     assert (zeros.cache_read, zeros.cache_write) == (0, 0)
-    assert zeros.input_total == 5
+    # Two shapes, one total: an absent category is unknown, never a zero
+    # that changes the count.
+    assert hidden.input_total == zeros.input_total == zeros.uncached_input
     reconciliation = parse("sess-null-zero").reconciliation
     assert reconciliation["status"] == "matched"
     assert reconciliation["categories"]["cache_read_input_tokens"]["delta"] is None
@@ -244,7 +273,8 @@ def test_a_transcript_the_adapter_cannot_count_once_is_rejected(session: str, co
 def test_capped_transcript_keeps_partial_usage() -> None:
     session = parse("sess-capped")
     assert {record.native_request_id: record.completion_state for record in session.records} == {"req_901": "complete", "req_902": "partial"}
-    assert sum(record.total for record in session.records) == 903 + 50 + 904 + 1
+    # Every category of every request the transcript did emit, cap or no cap.
+    assert sum(record.total for record in session.records) == spend("sess-capped")
 
 
 def test_turn_budget_cap_is_visible_on_the_envelope() -> None:
@@ -279,8 +309,10 @@ def test_a_budget_stop_leaves_a_partial_envelope_that_is_not_a_mismatch() -> Non
 def test_a_capped_envelope_above_the_transcript_is_still_a_mismatch(tmp_path: Path) -> None:
     # Partial means the envelope shows less, never more: an envelope that
     # counts a request the transcript lacks is a gap the cap does not name.
+    over = sum(usage["output_tokens"] for usage in counted("sess-capped-budget")) + 1
+
     def edit(rows: list[Any]) -> list[Any]:
-        rows[-1]["usage"]["output_tokens"] = 121
+        rows[-1]["usage"]["output_tokens"] = over
         return rows
 
     session = edited(tmp_path, "sess-capped-budget", edit)

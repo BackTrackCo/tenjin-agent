@@ -147,7 +147,7 @@ def test_a_dry_run_lists_the_cases_and_calls_nothing(fake_run: Path, trials: lis
     with mock.patch.object(tenjin_arm, "SEARCH_ARGV", side_effect=AssertionError("a dry run calls nothing")), contextlib.redirect_stdout(stdout):
         code = cli.main(["cases", "--run", str(fake_run), "--dry-run"])
     assert code == 0
-    assert "cases dry run: 2 case(s) across 2 trial(s); nothing replayed, nothing written" in stdout.getvalue()
+    assert f"cases dry run: 2 case(s) across {len(trials)} trial(s); nothing replayed, nothing written" in stdout.getvalue()
     assert "failure pnpm" in stdout.getvalue()
     assert not (tmp_path / "cases.jsonl").exists()
 
@@ -176,8 +176,9 @@ def test_a_run_that_is_not_settled_or_a_replay_without_a_source_is_refused(
     assert "the run did not start" in stderr.getvalue()
 
 
-def test_a_trial_without_a_ledger_yields_no_case(fake_run: Path, source_dir: Path, tmp_path: Path) -> None:
+def test_a_trial_without_a_ledger_yields_no_case(fake_run: Path, source_dir: Path, trials: list[str], tmp_path: Path) -> None:
     out = tmp_path / "empty.jsonl"
     summary = cli.do_cases(fake_run, source_dir, out)
-    assert (summary["cases"], summary["trials"]) == (0, 2)
+    # Every trial in the run was read, and none of them held a ledger.
+    assert (summary["cases"], summary["trials"]) == (0, len(trials))
     assert out.read_text(encoding="utf-8") == ""

@@ -23,7 +23,7 @@ from unittest import mock
 
 import pytest
 
-from evals.benchmark import artifact, cases, cli, executor, reap, records, runner, schedule, signature, tenjin_arm, vendor
+from evals.benchmark import artifact, cases, cli, executor, manifest as manifest_module, reap, records, runner, schedule, signature, tenjin_arm, vendor, verifier
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -518,12 +518,23 @@ def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_
     with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
         payload = cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, dry_run=True, stream=stream, environ={}, tenjin_source=write_source())
     printed = stream.getvalue()
-    assert len(payload["trials"]) == 4
+    installed = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    trials = schedule.expand(installed)
+    handlers = [
+        handler
+        for arm in installed.arms
+        if arm["id"] == "tenjin_seeded"
+        for entries in arm["settings"]["hooks"].values()
+        for entry in entries
+        for handler in entry["hooks"]
+    ]
+    assert len(payload["trials"]) == len(trials)
     seeded = [plan for plan in payload["trials"] if plan["arm_id"] == "tenjin_seeded"]
-    assert len(seeded) == 2
+    assert len(seeded) == len([trial for trial in trials if trial.arm_id == "tenjin_seeded"])
     for plan in seeded:
         assert plan["provision"]["shelf_secret_present"] is True
-        assert len(plan["hooks"]) == 11
+        # One resolved line per installed handler: the whole set, never a subset.
+        assert len(plan["hooks"]) == len(handlers)
         assert any(hook.startswith("SubagentStart http http://127.0.0.1:0/hook/claude headers=Authorization") for hook in plan["hooks"])
         assert any("tenjin-shim.mjs" in hook and hook.startswith("SessionStart command") for hook in plan["hooks"])
     assert "shelf_secret_present=true shelf_origin=team-shelf.example" in printed
@@ -842,6 +853,25 @@ def test_an_arm_may_name_exactly_the_lessons_it_seeds(lessons: Path, seed_roots,
         tenjin_arm.lessons_for({"id": "probe", "family": "fam"}, selected=["absent"])
 
 
+def actor_failure_key() -> str:
+    """The `sig_v1_test` key the actor fixture's own failing case yields.
+
+    Unfixed, `actorKey` interpolates a missing agent, so the hidden case
+    that passes no agent is the one vitest names in its FAIL header. The
+    file, the title template and the case index all come off the fixture,
+    and the product's own console rule turns the header into the key, so a
+    regenerated fixture moves the lesson and this expectation together.
+    """
+    test_file = tenjin_arm.FIXTURES / "live" / "actor" / "tests" / "actor.test.mjs"
+    template = re.search(r"test\.each\(cases\)\('([^']+)'", test_file.read_text(encoding="utf-8"))
+    hidden = json.loads((verifier.HIDDEN / "actor" / "cases.json").read_text(encoding="utf-8"))
+    assert template is not None
+    index = next(position for position, case in enumerate(hidden) if len(case["args"]) == 1)
+    identity = signature.identity_from_console(f" FAIL  tests/{test_file.name} > {template.group(1).replace('%#', str(index))}")
+    assert identity is not None
+    return f"sig_v1_test:{signature.sig_v1_test(identity)}"
+
+
 def test_the_key_only_lesson_shares_no_file_name_with_the_prompt() -> None:
     live = tenjin_arm.FIXTURES / "live" / "lessons"
     lesson = tenjin_arm.lesson_named("actor-fix-keyonly", live)
@@ -851,7 +881,7 @@ def test_the_key_only_lesson_shares_no_file_name_with_the_prompt() -> None:
     assert cases.shared_file_names(prompt, text) == []
     for word in ("actor", "actorKey", "src/actor.mjs", "tests/actor.test.mjs"):
         assert word.lower() not in text.lower()
-    assert lesson.keys == ("sig_v1_test:502b90852a1505e3",)
+    assert lesson.keys == (actor_failure_key(),)
     assert cases.shared_file_names(prompt, "edit src/actor.mjs") == ["actor", "actor.mjs"]
 
 
@@ -864,7 +894,7 @@ def test_the_live_lesson_is_loadable_and_its_keys_are_the_fixture_failures() -> 
     assert [entry.command for entry in convention.commands if entry.check and entry.key is None] == ["pnpm test -- tests/{task}.test.mjs"]
     assert "pnpm exec vitest run" in convention.body.read_text(encoding="utf-8")
     # The fix lesson carries the key run seven's fires table recorded for this failure.
-    assert fix.keys == ("sig_v1_test:502b90852a1505e3",)
+    assert fix.keys == (actor_failure_key(),)
     assert tenjin_arm.key_hash("sig_v1:ee9fd96defcffbeb") == "ed094b3427f6e7e2"
     assert "s9" not in fix.body.read_text(encoding="utf-8")
     assert tenjin_arm.lessons_for({"id": "answer-file", "family": "smoke"}, live) == []

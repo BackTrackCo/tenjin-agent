@@ -267,7 +267,7 @@ def test_the_corpus_matches_the_manifest_and_its_schedule(corpus) -> None:
     # Re-expanding the manifest reproduces the schedule its records were written under.
     trials = schedule.expand(manifest)
     assert schedule.schedule_hash(trials) == digest
-    assert len(accepted) == 12
+    assert len(accepted) == len(trials)
     assert sorted(accepted) == sorted(trial.trial_id for trial in trials)
     for record in accepted.values():
         records.validate(record)

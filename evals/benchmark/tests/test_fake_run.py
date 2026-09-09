@@ -12,6 +12,13 @@ from evals.benchmark.manifest import ManifestError
 
 Run = tuple[Path, dict, dict]
 
+# The shipped fake manifest's own shape. Every count below is stated against
+# it, so adding a task or a repeat moves the manifest and the expectations
+# together and only a runner change can open a gap.
+FAKE = manifest.load(cli.FAKE_MANIFEST)
+TRIALS = len(schedule.expand(FAKE))
+TASKS = len(FAKE.tasks)
+
 
 @pytest.fixture(scope="module")
 def run(tmp_path_factory: pytest.TempPathFactory) -> Run:
@@ -26,7 +33,7 @@ def test_schedule_and_hash_are_written(run: Run) -> None:
     digest = (out / "schedule.sha256").read_text().strip()
     assert payload["schedule_hash"] == digest
     assert first["schedule_hash"] == digest
-    assert len(payload["trials"]) == 2
+    assert len(payload["trials"]) == TRIALS
 
 
 def test_every_trial_passes_and_counts_each_request_once(run: Run) -> None:
@@ -54,7 +61,7 @@ def test_every_trial_passes_and_counts_each_request_once(run: Run) -> None:
 def test_resume_skips_every_published_record(run: Run) -> None:
     _, first, second = run
     assert first["resumed"] == 0
-    assert second["resumed"] == 2
+    assert second["resumed"] == TRIALS
     assert first["outcomes"] == second["outcomes"]
 
 
@@ -112,18 +119,18 @@ def test_run_interrupt_resume_verify_reduce_and_report(tmp_path: Path) -> None:
     with pytest.raises(KeyboardInterrupt):
         cli.fake_run(out, runtime=runner.Runtime(spawn=spawn))
     records_dir = out / "records"
-    # The interrupted trial published nothing; the finished one is final.
-    assert len(list(records_dir.glob("*.json"))) == 1
+    # The interrupted trial published nothing; the ones before it are final.
+    assert len(list(records_dir.glob("*.json"))) == len(spawns) - 1
     assert list(records_dir.glob("*.partial.*")) == []
     assert not (out / "report.json").exists()
     first = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
 
     resumed = cli.fake_run(out)
-    assert resumed["trials"] == 2
-    assert resumed["resumed"] == 1
+    assert resumed["trials"] == TRIALS
+    assert resumed["resumed"] == len(spawns) - 1
     assert set(resumed["outcomes"].values()) == {"pass"}
     after = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
-    assert len(after) == 2
+    assert len(after) == TRIALS
     for name, value in first.items():
         assert after[name] == value, f"{name} was rewritten on resume"
 
@@ -138,7 +145,7 @@ def test_run_interrupt_resume_verify_reduce_and_report(tmp_path: Path) -> None:
     report.guard(published)
     assert published["baseline"] == "off"
     assert published["comparisons"]["on"]["token_ratio"] < 1.0
-    assert published["comparisons"]["on"]["interval"]["tasks"] == 1
+    assert published["comparisons"]["on"]["interval"]["tasks"] == TASKS
 
 
 def test_same_seed_reproduces_the_schedule() -> None:
