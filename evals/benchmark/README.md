@@ -355,6 +355,84 @@ outside every `fixture_hash`; an agent that reads them anyway is counted by
 seeded arm may also read the shelf by hand through arm-level `settings.permissions.allow`, and
 `loop_join` reports those as `delivery.cli_searches`, apart from the hooks' own fires.
 
+### A public leg says it is a benchmark
+
+A measured leg reaching the marketplace is not somebody asking a question, and the field that
+separates the two is the User-Agent. `live-run` mints the run nonce, arms
+`TENJIN_CALLER_USER_AGENT=tenjin-eval/bench1-<nonce>` in its own environment before it starts the
+egress, and refuses the run if that value does not lead with `tenjin-eval`. Every tenjin process
+the run starts then inherits it: the seeding publish, sweep, search and delete through
+`cli_environment`; the trial container through `container_environment`; the agent, its Bash
+`tenjin` and the shim because the entrypoint spawns the agent with no environment of its own; and
+the trial's daemon, plus any daemon the shim respawns, through `FORWARDED` in `docker/trial.mjs`.
+`claude_live.launch` refuses an attempt that has an egress and no such value, because the failure
+it prevents is silent: the run succeeds, its numbers are right, and only the marketplace's demand
+tables show the damage. `benchmark-shelf.yml` arms the same value, keyed on the workflow run and
+attempt, for the one CI step that runs the CLI outside `live-run`.
+
+The product name is what the demand gates read (`notProbe` in tenjin `lib/search/gates.ts`, off
+`lib/search/client-names.ts`); the version half is this benchmark and the run, because the server
+keeps a leading product's name and version in separate columns and holds 32 characters of the
+version, which `bench1-<nonce>` fills exactly. So a row names the run that produced it without
+any product change.
+
+**Two product gaps keep this from being the whole fix, and neither is fixable here.** First, the
+documented handoff composes BEHIND the CLI's own identity: `composeUserAgent` in
+`src/lib/client-meta.ts` returns `tenjin-cli/<version> tenjin-eval/bench1-<nonce>
+(+https://tenjin.blog)`, and the server attributes on the FIRST product, so `client_name` is
+`tenjin-cli` and `notProbe` does not drop the row. Run against the shipped bundle to check, not
+inferred. Today the field therefore IDENTIFIES a benchmark row in the 90-day raw sink and does not
+yet exclude it from demand; closing that needs an environment-settable leading product in the CLI,
+whose `product` option has no call site outside its own module. Second, `daemonEnv` in
+`src/hooks/shim.ts` is an explicit allowlist that carries neither this field nor
+`NODE_USE_ENV_PROXY` nor `TENJIN_NO_UPDATE_CHECK`, so a daemon the shim respawns inside a trial
+(`isolation.daemon_respawned`) is unnamed and unproxied whatever this package sets.
+
+### What the runs before this contributed, and why it is left alone
+
+Measured off the run directories on this machine and the public marketplace's own endpoints. No
+database was read.
+
+**Volume.** 95 public-marketplace legs across every local run whose records survive here
+(`records/*.json`, `delivery.legs[].shelf == "public"`): 48 in the 96-attempt `bench2-arms` run, 23
+in `bench2-pilot`, 2 in each of the eight container runs, 4 in an aborted run, and 2 each in the
+two smoke runs. Only the eight container runs have a proxy log, and it holds 6 `tenjin.blog`
+tunnels, 4 allowed and 2 refused. Two CI canary runs on 2026-09-09 ran the seeded arm against a
+config naming the marketplace as its public shelf and sent legs of their own; their proxy logs are
+not retained, so those are counted from the workflow rather than from a log.
+
+**Per term, which is the half that decides it.** The hook's public leg is `POST /api/search`
+carrying `question: cut(text, 512)`, which the server records as a `decision` view with
+`capture: "always"`, so the text is stored as `lookups.generalized_query` and the rows join the
+QUESTION tier population rather than the term tiers. The one query string any run artifact still
+holds is `shortlist.json`'s question, byte identical to the `actor` task's prompt; twelve distinct
+prompts exist across the live manifests, ten of them of the form `Fix src/<file> so that
+tests/<file> passes. Run only that one test file...`, and they run 93 to 232 characters, so every
+one of them clears the question tiers' 256-character display cap and none would clear the terms' 80. On such a term we are effectively 100 percent of its rows, and the question tiers carry no
+distinct-requester floor, so neither length nor volume excludes them. Three
+things bound it instead: `QUESTIONS_MAX_PER_REQUESTER` is 2 of a 50-row page and every local leg
+shares one egress hash, `QUESTIONS_WINDOW_DAYS` is 7 so an entry ages off on its own, and
+publication waits on a cached judge verdict that fails closed behind a 24-hour delay.
+
+**Checked rather than assumed.** On 2026-09-09 `GET https://tenjin.blog/api/trending` returned
+empty `top` and `unmet`, and the rendered `/trending` page carried both question sections and other
+publishers' questions but none of the fixture substrings (`spawn subagents`, `so that tests`,
+`tests/actor`, `answer.txt`, `@fixture/range`, each of the `src/*.mjs` names). That is the display
+surface and it is cached, not the stored rows.
+
+**The permanent aggregate is the one place a retraction could not reach.** `demand_daily` applies
+`notProbe` at INSERT and recomputes only a trailing 7 days with no backfill, so a day outside that
+window keeps the counts it recorded and no display-time exclusion changes them. It carries counts
+by dimension tuple with no query text, and nothing reads it today.
+
+**Verdict: acceptable as noise, because it stops.** No fixture prompt is on the page, the surface
+expires its own entries in seven days, and the permanent residue is a per-day count with no text
+and no reader. The number that would flip this is one fixture prompt visible on `/trending`, since
+we would be all of it; that is worth re-checking against the stored rows if the question ever
+matters more than it does here. It is acceptable only on the condition above: without the identity
+this section arms, every future run re-adds rows under the same single hash and re-arms the same
+seven-day window.
+
 ## Bench-2: local reuse
 
 Bench-2 measures the product's LOCAL reuse path with no shelf deployment: a lesson one session
