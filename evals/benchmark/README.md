@@ -679,6 +679,13 @@ on it too, because its worktree is final, and the verdict is recorded beside the
 diagnostic (a pass-with-cap is not a pass). A root that exits while a child is live is not a
 complete attempt.
 
+A provisioned arm whose `prepare` refuses one trial (a seed key that drifted, a publish that
+failed, a daemon that never answered) makes that trial `invalid` under `provision:<code>`, with
+the refusal's text under the trial's `output/provision-refusal.txt` and only its hash in the
+record, and the run goes on to the next trial; what the provisioner half-did it has already
+undone (a piece published before the refusal is deleted). A run-wide condition (the credential
+seam, the platform, the pnpm pin, the manifest) is refused by `live-run` before any trial.
+
 `pass` and `fail` come from the hidden verifier and nothing else; a verifier exit that is
 neither 0 nor 1 means the measurement broke, so the attempt is `invalid`. A `capped` attempt
 carries the verifier's verdict as well (`verifier.exit_code`), and `verify` re-reads it against
@@ -686,7 +693,7 @@ that verdict rather than against the cap. An executor exit
 code, a usage or delivery rejection, a symlink escape, and a sentinel hit are all `invalid`
 with a machine-readable reason (`executor:exit_N`, `usage:<code>`, `delivery:<code>`,
 `isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`,
-`auxiliary:<code>`).
+`auxiliary:<code>`, `provision:<code>`).
 
 The verifier runs after shutdown, never before: `artifact.TrialRoots.hidden_copy` refuses
 until the roots are marked stopped, copies the worktree with links kept as links, mounts the

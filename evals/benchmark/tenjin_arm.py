@@ -201,7 +201,8 @@ def check_keys(lesson: Lesson, task_id: str, probed: dict[str, dict[str, str | N
         found = probed.get(command, {}).get(entry.kind)
         if found != entry.key:
             raise ProvisionError(
-                f"seed key drift: {command!r} keys to {entry.kind} {found!r}, the lesson records {entry.key!r}; re-derive {lesson.id}.json before seeding"
+                f"seed key drift: {command!r} keys to {entry.kind} {found!r}, the lesson records {entry.key!r}; re-derive {lesson.id}.json before seeding",
+                code="seed_key_drift",
             )
 
 
@@ -369,7 +370,7 @@ def publish_lesson(source: Source, roots: artifact.TrialRoots, lesson: Lesson, n
             f"seeding the lesson failed: tenjin publish exited 0 but no piece id could be read ({tail or 'no output'}); "
             f"swept the shelf by title: {sweep['matched']} matched, {len(sweep['deleted'])} deleted, {len(sweep['failed'])} failed; see {roots.output / SEED_NOTE}"
         )
-    raise ProvisionError(f"seeding the lesson failed: tenjin publish exited {code}: {tail or 'no output'}")
+    raise ProvisionError(f"seeding the lesson failed: tenjin publish exited {code}: {tail or 'no output'}", code="seed_publish")
 
 
 def delete_lesson(source: Source, piece_id: str) -> str | None:
@@ -557,7 +558,7 @@ def wait_healthy(roots: artifact.TrialRoots, started: runner.Started, deadline_s
             if body is not None and body["data_dir"] == expected and body["pid"] == started.process.pid:
                 return {"pid": body["pid"], "port": record["port"]}
         time.sleep(HEALTH_POLL_S)
-    raise ProvisionError(f"the daemon did not answer /health within {deadline_s:.0f}s; see {roots.output / 'daemon.log'}")
+    raise ProvisionError(f"the daemon did not answer /health within {deadline_s:.0f}s; see {roots.output / 'daemon.log'}", code="daemon_unhealthy")
 
 
 def prepare(request: ProvisionRequest) -> Provision:

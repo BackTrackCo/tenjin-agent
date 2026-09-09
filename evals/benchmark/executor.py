@@ -36,7 +36,11 @@ HANG_S = 300
 
 
 class ProvisionError(ValueError):
-    pass
+    """A provisioner's refusal of one trial. `code` is the machine-readable half the record carries as `provision:<code>`."""
+
+    def __init__(self, message: str, code: str = "refused") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)

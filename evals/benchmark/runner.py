@@ -310,7 +310,17 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     provision = None
     if provisioned:
         assert spec.prepare is not None
-        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
+        try:
+            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
+        except executor.ProvisionError as error:
+            # One trial's provisioning refused (a seed key that drifted, a
+            # publish that failed, a daemon that never answered): the trial is
+            # invalid under that reason and the run goes on. Whatever the
+            # provisioner half-did it has already undone, fail-closed. A
+            # run-wide condition (credential, platform, manifest) is refused
+            # before any trial by `live-run`, never here.
+            (roots.output / "provision-refusal.txt").write_text(str(error) + "\n", encoding="utf-8")
+            return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", str(error))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}
@@ -479,6 +489,46 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None,
             "resolved_settings": None if launch.resolved_settings_hash is None else launch.resolved_settings_hash,
         },
+    }
+
+
+def refused_record(
+    manifest: Manifest, trial: Trial, schedule_hash: str, spec: executor.ExecutorSpec, arm: dict[str, Any], isolation: dict[str, Any], reason: str, detail: str
+) -> dict[str, Any]:
+    """An attempt that never started: no root, no usage, no delivery, invalid under the refusal's reason. The detail's hash, never its text."""
+    return {
+        "schema": records.RECORD_SCHEMA,
+        "trial_id": trial.trial_id,
+        "manifest_hash": manifest.hash,
+        "schedule_hash": schedule_hash,
+        "task_id": trial.task_id,
+        "arm_id": trial.arm_id,
+        "repeat": trial.repeat,
+        "position": trial.position,
+        "settings_hash": arm["settings_hash"],
+        "environment_hash": "sha256:" + sha256_json(manifest.pins),
+        "harness": spec.harness,
+        "native_root_id": f"unstarted-{trial.trial_id}",
+        "actors": [],
+        "parent_edges": [],
+        "usage": [],
+        "usage_reconciliation": {"status": "unparsed"},
+        "tool_counts": {},
+        "turns": None,
+        "cost_usd": None,
+        "auxiliary": [],
+        "outcome": "invalid",
+        "invalid_reason": reason,
+        "verifier": None,
+        "patch_hash": None,
+        "stop_reason": "exit",
+        "wall_time_s": 0.0,
+        "unresolved_actors": [],
+        "delivery": loop_join.unavailable(),
+        "discovery": None,
+        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "isolation": isolation,
+        "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(detail) if detail else None, "resolved_settings": None},
     }
 
 

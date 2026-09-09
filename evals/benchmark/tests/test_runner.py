@@ -536,6 +536,37 @@ class AuxiliaryReceiptTest(TrialCase):
         self.assertEqual(record["invalid_reason"], "auxiliary:duplicate_request")
 
 
+class ProvisionRefusalTest(TrialCase):
+    """One trial's provisioning refused: that trial is invalid under the reason, and the next trial runs."""
+
+    def test_a_refused_prepare_invalidates_its_trial_and_the_run_goes_on(self) -> None:
+        name = "provisioned_only_for_this_test"
+        prepared: list[str] = []
+
+        def prepare(request: executor.ProvisionRequest) -> executor.Provision:
+            prepared.append(request.trial_id)
+            if len(prepared) == 1:
+                raise executor.ProvisionError("seed key drift: the lesson records another key", code="seed_key_drift")
+            return executor.Provision()
+
+        executor.REGISTRY[name] = ExecutorSpec(name=name, harness="claude", launch=executor.REGISTRY["fake"].launch, prepare=prepare)
+        self.addCleanup(executor.REGISTRY.pop, name)
+        manifest = support.synthetic_manifest(self.dir, executor_name=name, arms=("on", "on2"))
+        for arm in manifest.data["arms"]:
+            arm["provision"] = "tenjin"
+        trials = schedule.expand(manifest)
+        results = runner.run(manifest, trials, self.run_dir, "sha256:schedule", self.runtime())
+        self.assertEqual([result.outcome for result in results], ["invalid", "pass"])
+        self.assertEqual(len(prepared), 2)
+        first = json.loads(results[0].path.read_text(encoding="utf-8"))
+        records.validate(first)
+        self.assertEqual((first["invalid_reason"], first["usage"], first["actors"], first["stop_reason"]), ("provision:seed_key_drift", [], [], "exit"))
+        self.assertIn("seed key drift", (self.run_dir / "trials" / results[0].trial_id / "output" / "provision-refusal.txt").read_text(encoding="utf-8"))
+        self.assertNotIn("seed key drift", json.dumps(first))
+        # The default code, for a provisioner that names none.
+        self.assertEqual(executor.ProvisionError("plain").code, "refused")
+
+
 class LiveRefusalTest(TrialCase):
     def setUp(self) -> None:
         super().setUp()
