@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-local-pilot-2",
+  "benchmark_version": "bench2-local-pilot-3",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -15,7 +15,14 @@
     "turn_budget": 40,
     "max_budget_usd": 0.75,
     "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
-    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "tools": [
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Glob",
+      "Grep"
+    ],
     "allowed_tools": [
       "Bash(pnpm:*)",
       "Bash(npx:*)",
@@ -34,6 +41,13 @@
     "producer": "natural",
     "capture": "local-store",
     "consumer": "local"
+  },
+  "corpus": {
+    "provider": "neon",
+    "project_id": "weathered-paper-24312028",
+    "branch_id": "br-ancient-dream-ave43t84",
+    "parent_id": "br-shiny-mountain-av1jfsuq",
+    "origin": "bench.tenjin.sh"
   },
   "tasks": [
     {
@@ -125,7 +139,11 @@
       "provision": "tenjin",
       "settings": {
         "permissions": {
-          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
+          "allow": [
+            "Bash(tenjin search:*)",
+            "Bash(tenjin read:*)",
+            "Bash(tenjin inspect:*)"
+          ]
         },
         "hooks": {
           "SessionStart": [

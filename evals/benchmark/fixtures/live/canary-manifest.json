@@ -1,8 +1,8 @@
 {
-  "benchmark_version": "bench2-recursive-4",
+  "benchmark_version": "bench2-canary-1",
   "schema_version": 1,
   "harness": "claude",
-  "seed": 20260908,
+  "seed": 20260909,
   "repeats": 3,
   "pins": {
     "model": "claude-opus-5",
@@ -42,9 +42,6 @@
     "capture": "local-store",
     "consumer": "local"
   },
-  "slice": {
-    "kind": "recursive"
-  },
   "corpus": {
     "provider": "neon",
     "project_id": "weathered-paper-24312028",
@@ -54,35 +51,40 @@
   },
   "tasks": [
     {
-      "id": "actor",
-      "family": "test-harness-convention",
-      "transfer_distance": "same_family",
-      "fixture": "actor",
-      "fixture_hash": "sha256:71649359979d59bf3801e65594740dc5741ec67faea726e973c1ddfb0553670b",
-      "verifier": "node_test_actor",
-      "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "Glob",
-        "Grep",
-        "Agent"
-      ],
-      "allowed_tools": [
-        "Bash(pnpm:*)",
-        "Bash(npx:*)",
-        "Bash(node:*)",
-        "Bash(ls:*)",
-        "Bash(cat:*)",
-        "Read(./**)",
-        "Edit(./**)",
-        "Write(./**)",
-        "Glob(./**)",
-        "Grep(./**)",
-        "Agent"
-      ]
+      "id": "alias",
+      "family": "vitest-path-alias",
+      "transfer_distance": "same_task",
+      "fixture": "alias",
+      "fixture_hash": "sha256:a55879c23cb5a8ca370836d70d64c13f809fa1313a4aa5b0f8d9cb87575c8414",
+      "verifier": "node_test_alias",
+      "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "level",
+      "family": "node-type-stripping",
+      "transfer_distance": "same_task",
+      "fixture": "level",
+      "fixture_hash": "sha256:e6d1aac9eb50f375646068c8d57a6a1417b64a5151d203fd0e44203879491c56",
+      "verifier": "node_test_level",
+      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "money",
+      "family": "esm-cjs-interop",
+      "transfer_distance": "same_task",
+      "fixture": "money",
+      "fixture_hash": "sha256:4f36ad3354281cc88fa87b0d5129deb323894e6e32dad622ac653300e5f7fd11",
+      "verifier": "node_test_money",
+      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "core",
+      "family": "pnpm-workspace",
+      "transfer_distance": "same_task",
+      "fixture": "core",
+      "fixture_hash": "sha256:5fdf92945afa2e9cb61bee34ffb4c7e2657a9d9bd4d890ea63e30755416fd84c",
+      "verifier": "node_test_core",
+      "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }
   ],
   "arms": [
@@ -263,186 +265,8 @@
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
       "auxiliary_usage": "none",
-      "lessons": [
-        "test-harness-convention",
-        "actor-fix"
-      ],
       "hooks_disabled": [
         "publish"
-      ]
-    },
-    {
-      "executor": "claude_live",
-      "product_version": "operator-installed",
-      "provision": "tenjin",
-      "settings": {
-        "permissions": {
-          "allow": [
-            "Bash(tenjin search:*)",
-            "Bash(tenjin read:*)",
-            "Bash(tenjin inspect:*)"
-          ]
-        },
-        "hooks": {
-          "SessionStart": [
-            {
-              "matcher": "startup|clear|compact",
-              "hooks": [
-                {
-                  "type": "command",
-                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "UserPromptSubmit": [
-            {
-              "hooks": [
-                {
-                  "type": "command",
-                  "command": "node \"{data_dir}/hooks/tenjin-shim.mjs\" --harness claude",
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "PreToolUse": [
-            {
-              "matcher": "WebSearch|WebFetch",
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            },
-            {
-              "matcher": "Agent|Task",
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            },
-            {
-              "matcher": "Edit|Write|MultiEdit|Bash",
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "PostToolUse": [
-            {
-              "matcher": "Bash",
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            },
-            {
-              "matcher": "Read",
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "PostToolUseFailure": [
-            {
-              "matcher": "Bash",
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "SubagentStart": [
-            {
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "SubagentStop": [
-            {
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            }
-          ],
-          "Stop": [
-            {
-              "hooks": [
-                {
-                  "type": "http",
-                  "url": "{daemon_url}",
-                  "headers": {
-                    "Authorization": "Bearer {daemon_token}"
-                  },
-                  "timeout": 5
-                }
-              ]
-            }
-          ]
-        }
-      },
-      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
-      "memory_snapshot_hash": "sha256:empty",
-      "auxiliary_usage": "exposed",
-      "id": "tenjin_natural",
-      "producer": true,
-      "lessons": [
-        "test-harness-convention",
-        "actor-fix"
       ]
     }
   ]

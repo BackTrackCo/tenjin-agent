@@ -438,7 +438,7 @@ class HooksArmTest(LiveCase):
     def test_the_real_manifest_is_the_phase_one_local_pilot(self) -> None:
         manifest = manifest_module.load(cli.REAL_MANIFEST)
         trials = schedule.expand(manifest)
-        self.assertEqual((len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]), (48, 3, "bench2-local-pilot-2"))
+        self.assertEqual((len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]), (48, 3, "bench2-local-pilot-3"))
         schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
         self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_natural"])
         off, natural = manifest.arms
@@ -474,6 +474,35 @@ class HooksArmTest(LiveCase):
         self.assertIn("read LESSONS.md", flat["settings"]["overlay"]["CLAUDE.md"])
         claude_live._settings_overlay(flat["settings"]["overlay"])
         self.assertEqual(manifest.tasks, manifest_module.load(cli.REAL_MANIFEST).tasks)
+
+    def test_the_canary_manifest_is_the_four_same_task_transfers_off_against_the_shelf_arm(self) -> None:
+        """The nightly lane's manifest: one task per lesson family, three attempts an arm."""
+        manifest = manifest_module.load(cli.CANARY_MANIFEST)
+        core = manifest_module.load(cli.LOCAL_ARMS_MANIFEST)
+        trials = schedule.expand(manifest)
+        self.assertEqual((len(trials), manifest.data["benchmark_version"]), (24, "bench2-canary-1"))
+        schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
+        self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded"])
+        self.assertEqual([task["id"] for task in manifest.tasks], ["alias", "level", "money", "core"])
+        # Every task is a same-task transfer, and no two share a lesson family,
+        # so 24 attempts still touch every delivery path the core suite has.
+        self.assertEqual({task["transfer_distance"] for task in manifest.tasks}, {"same_task"})
+        self.assertEqual(len({task["family"] for task in manifest.tasks}), len(manifest.tasks))
+        # The canary is a subset of the core suite, never a second definition of it.
+        self.assertEqual(manifest.arms, [arm for arm in core.arms if arm["id"] in ("off", "tenjin_seeded")])
+        self.assertEqual(manifest.tasks, [task for task in core.tasks if task["transfer_distance"] == "same_task"])
+        self.assertEqual(manifest.pins, core.pins)
+
+    def test_every_real_task_manifest_resets_the_bench_corpus_and_names_no_other_shelf(self) -> None:
+        """The one knob is `--tenjin-source`; this is what stops a manifest drifting off the bench shelf."""
+        for path in (cli.REAL_MANIFEST, cli.LOCAL_ARMS_MANIFEST, cli.CANARY_MANIFEST, *cli.SLICE_MANIFESTS.values()):
+            with self.subTest(path.name):
+                corpus = manifest_module.load(path).corpus
+                self.assertIsNotNone(corpus, f"{path.name} names no corpus, so a run would measure whatever else is on the shelf")
+                self.assertEqual((corpus.provider, corpus.origin), ("neon", "bench.tenjin.sh"))
+                self.assertEqual(corpus.branch_id, "br-ancient-dream-ave43t84")
+                self.assertEqual(corpus.parent_id, "br-shiny-mountain-av1jfsuq")
+                self.assertNotEqual(corpus.branch_id, corpus.parent_id)
 
     def test_the_slice_manifests_state_one_variation_each(self) -> None:
         pilot = manifest_module.load(cli.REAL_MANIFEST)

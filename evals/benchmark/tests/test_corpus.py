@@ -355,5 +355,45 @@ class Stream:
         self.text = text
 
 
+class ShelfKnobTest(unittest.TestCase):
+    """`--tenjin-source` is the only thing that says where a run publishes and searches.
+
+    A manifest that resets a corpus names the shelf that database serves, so a
+    source naming any other shelf would empty the bench branch and then measure
+    somewhere else. Pointing a run at the operator's own `~/.tenjin` is exactly
+    that, so it is a refusal.
+    """
+
+    class Source:
+        def __init__(self, host: str | None) -> None:
+            self.shelf_origin = host
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.manifest = manifest_module.load(support.synthetic_manifest(self.dir, live=True, corpus=CORPUS).path)
+        self.plain = manifest_module.load(support.synthetic_manifest(self.dir / "plain", live=True).path)
+
+    def test_a_source_naming_the_bench_shelf_passes(self) -> None:
+        cli.refuse_foreign_shelf(self.manifest, self.Source(ORIGIN))
+
+    def test_a_source_naming_the_team_shelf_is_refused(self) -> None:
+        with self.assertRaises(cli.CliError) as caught:
+            cli.refuse_foreign_shelf(self.manifest, self.Source("tenjin-shelf-backtrack.vercel.app"))
+        self.assertIn(ORIGIN, str(caught.exception))
+        self.assertIn("--tenjin-source", str(caught.exception))
+
+    def test_a_source_with_no_shelf_at_all_is_refused(self) -> None:
+        with self.assertRaises(cli.CliError):
+            cli.refuse_foreign_shelf(self.manifest, self.Source(None))
+
+    def test_a_manifest_that_resets_nothing_is_not_this_gate(self) -> None:
+        cli.refuse_foreign_shelf(self.plain, self.Source("anything.example"))
+
+    def test_a_dry_run_without_a_source_is_not_this_gate(self) -> None:
+        cli.refuse_foreign_shelf(self.manifest, None)
+
+
 if __name__ == "__main__":
     unittest.main()

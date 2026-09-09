@@ -55,6 +55,7 @@ from . import (
     report as report_module,
     runner,
     schedule,
+    snapshot as snapshot_module,
     tenjin_arm,
     verifier,
 )
@@ -65,6 +66,7 @@ HOOKS_SMOKE_MANIFEST = FIXTURES / "live" / "hooks-smoke-manifest.json"
 KEYS_SMOKE_MANIFEST = FIXTURES / "live" / "keys-smoke-manifest.json"
 REAL_MANIFEST = FIXTURES / "live" / "real-manifest.json"
 LOCAL_ARMS_MANIFEST = FIXTURES / "live" / "local-arms-manifest.json"
+CANARY_MANIFEST = FIXTURES / "live" / "canary-manifest.json"
 SLICE_MANIFESTS = {"recursive": FIXTURES / "live" / "recursive-manifest.json"}
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job
@@ -315,6 +317,27 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
     return "\n".join(lines)
 
 
+def refuse_foreign_shelf(manifest: manifest_module.Manifest, source: Any) -> None:
+    """One knob, and this is what checks it was turned.
+
+    `--tenjin-source` is the only thing that says where a run publishes and
+    where its trials search: the runner's own CLI calls and every trial's
+    injected config both read that directory's `baseUrl`. A manifest that names
+    a corpus names the shelf that database serves, so a source pointed anywhere
+    else would reset the bench branch and then measure a different shelf. That
+    is what pointing a run at the operator's own `~/.tenjin` does, so it is a
+    refusal rather than a warning.
+    """
+    if manifest.corpus is None or source is None:
+        return
+    shelf = getattr(source, "shelf_origin", None)
+    if shelf != manifest.corpus.origin:
+        raise CliError(
+            f"--tenjin-source names shelf {shelf!r}, and this manifest's corpus serves {manifest.corpus.origin!r}: "
+            "point --tenjin-source at the bench data dir, whose config.json baseUrl is the bench shelf"
+        )
+
+
 def refuse_without_images(manifest: manifest_module.Manifest, out: Path | None = None) -> None:
     """Every live trial runs inside its fixture's image on mounts of its own roots.
 
@@ -346,6 +369,7 @@ def live_run(
     runtime: runner.Runtime | None = None,
     tenjin_source: Path | None = None,
     corpus_api: corpus_module.Api | None = None,
+    corpus_snapshot: Any = None,
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
     # The product compares data dir strings, so every root has to be spelled
@@ -370,6 +394,7 @@ def live_run(
         return {"dry_run": True, "trials": plans, "corpus": None if manifest.corpus is None else manifest.corpus.facts}
     if provisioned and source is None:
         raise CliError(f"arm {provisioned[0]!r} is provisioned: live-run needs --tenjin-source <data dir>")
+    refuse_foreign_shelf(manifest, source)
     if source is not None and source.shelf_secret_present and attestation_path is not None:
         raise CliError("--attestation refuses a source that carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, run it with --plumbing")
     if ci_live and automated:
@@ -427,6 +452,7 @@ def live_run(
                 attestation = artifact.with_corpus(attestation, stamp)
         runtime = dataclasses.replace(
             runtime or runner.Runtime(),
+            snapshot=None if manifest.corpus is None else (corpus_snapshot or snapshot_module.Once(out, manifest.corpus.origin)),
             attestation=attestation,
             publishable=not plumbing,
             ci=bool(automation),
@@ -475,7 +501,7 @@ def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
-    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted)
+    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir))
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
