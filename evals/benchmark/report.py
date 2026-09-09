@@ -19,6 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from . import canonical_json
 from .artifact import CANARY_PREFIX
 
 REPORT_SCHEMA = "bench1.report.v1"
@@ -126,6 +127,20 @@ def isolation_kind(record: dict[str, Any]) -> str:
     return "automated_plumbing" if isolation.get("automated", False) else "operator_plumbing"
 
 
+def corpus_stamp(accepted: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    """The one corpus every accepted attempt measured, or a refusal.
+
+    Attempts against different corpora are not comparable, so a mixed run is
+    refused as a unit rather than published with the difference left out.
+    """
+    if not accepted:
+        return None
+    stamps = {canonical_json(record["isolation"].get("corpus")) for record in accepted.values()}
+    if len(stamps) > 1:
+        raise ReportError("corpus_mixed", "report.corpus", "the accepted attempts measured more than one corpus")
+    return next(iter(accepted.values()))["isolation"].get("corpus")
+
+
 def stamp(accepted: dict[str, dict[str, Any]]) -> tuple[bool, str]:
     """`(publishable, isolation kind)` for the run: one non-publishable record decides."""
     publishable = bool(accepted) and all(record["isolation"]["publishable"] for record in accepted.values())
@@ -203,6 +218,11 @@ def project(
         "publishable": publishable,
         "isolation": kind,
         "shelf_secret_present": any(record["isolation"].get("shelf_secret_present", False) for record in accepted.values()),
+        # Who started the run, stated rather than judged: an attested run is
+        # publishable whether a person or a schedule launched it, and a reader
+        # is entitled to know which.
+        "automated": any(record["isolation"].get("automated", False) for record in accepted.values()),
+        "corpus": corpus_stamp(accepted),
         "baseline": reduction["baseline"],
         "arms": reduction["arms"],
         # A headline needs complete accounting and a publishable run; the
@@ -268,6 +288,8 @@ def render(report: dict[str, Any]) -> str:
         if report["publishable"]
         else f"isolation {report['isolation']}: NOT PUBLISHABLE, plumbing evidence only, no number here is a result"
     )
+    if report.get("automated", False):
+        stamp_line += ", automated: no person watched this run"
     lines = [
         f"benchmark {report['benchmark_version']}, schema {report['schema']}",
         f"manifest {report['manifest_hash'][:12]}  schedule {report['schedule_hash'][:12]}  "
@@ -276,6 +298,12 @@ def render(report: dict[str, Any]) -> str:
     ]
     if report.get("shelf_secret_present", False):
         lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
+    corpus = report.get("corpus")
+    if corpus:
+        lines.append(
+            f"corpus {corpus['provider']} project {corpus['project_id']} branch {corpus['branch_id']} "
+            f"reset from {corpus['parent_id']} at {corpus['reset_at']}, serving {corpus['origin']}"
+        )
     lines += [
         "",
         f"{'arm'.ljust(width)} {'attempts':>8s} {'passes':>7s} {'pass rate':>9s} {'tokens':>10s} "

@@ -22,11 +22,12 @@ python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake     # read that re
 python3 evals/benchmark/selftest.py                              # the offline suite the required CI runs
 ```
 
-`live-run` is the operator's command and the only one that reaches a live executor. A real live
-run refuses an automated environment and requires a disposable container or VM attestation; the
-two exceptions are `--dry-run`, which prints the argv and the roots each trial would use and
-starts no process, and `--plumbing --ci-live`, the non-publishable smoke the informational
-`benchmark-live.yml` lane runs. The benchmark README's live section is the whole rule.
+`live-run` is the only command that reaches a live executor, and publishing anything from one
+requires a disposable container or VM attestation. `--dry-run` prints the argv and the roots each
+trial would use and starts no process; `--plumbing --ci-live` is the non-publishable smoke the
+informational `benchmark-live.yml` lane runs; `--automated --attestation <file>` is a scheduled
+run, publishable on that attestation's strength, with every record still stamped automated. The
+benchmark README's live section is the whole rule.
 
 What the README covers: the manifest, attempt, usage, verifier, and invalid-run contracts; the
 reduction and interval rules; the private versus publishable artifact boundary; and how

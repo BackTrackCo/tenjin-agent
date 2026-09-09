@@ -168,6 +168,7 @@ class IsolationTest(unittest.TestCase):
                 "automated": False,
                 "shelf_secret_present": False,
                 "shelf_origin": None,
+                "corpus": None,
             },
         )
 
@@ -183,24 +184,44 @@ class IsolationTest(unittest.TestCase):
             artifact.require_isolation(live=True, publishable=False, attestation=None, ci=True, automated=True, shelf_secret_present=True)
         self.assertEqual(caught.exception.code, "automated_shelf_secret")
 
-    def test_ci_never_runs_a_live_executor_unless_it_is_automated_plumbing(self) -> None:
+    def test_a_live_run_in_ci_is_refused_unless_it_is_stamped_automated(self) -> None:
+        # The stamp is what a reader checks the run against, so the one thing
+        # CI may not do is let a record say a person watched it.
         with self.assertRaises(IsolationError) as caught:
             artifact.require_isolation(live=True, publishable=False, attestation=ATTESTED, ci=True)
-        self.assertEqual(caught.exception.code, "live_in_ci")
+        self.assertEqual(caught.exception.code, "automated_unstamped")
         isolation = artifact.require_isolation(live=True, publishable=False, attestation=None, ci=True, automated=True)
         self.assertEqual(isolation["automated"], True)
         self.assertEqual(isolation["publishable"], False)
         self.assertEqual(isolation["attested_container"], False)
 
-    def test_an_automated_live_run_can_be_neither_publishable_nor_attested(self) -> None:
-        cases = {
-            "publishable": dict(publishable=True, attestation=None),
-            "attested": dict(publishable=False, attestation=ATTESTED),
-        }
-        for name, claim in cases.items():
-            with self.subTest(name), self.assertRaises(IsolationError) as caught:
-                artifact.require_isolation(live=True, ci=True, automated=True, **claim)
-            self.assertEqual(caught.exception.code, "automated_publishable")
+    def test_an_automated_run_is_publishable_on_its_attestation_and_stays_stamped(self) -> None:
+        # Publishability follows the attestation, not the launcher: the same
+        # claim a person's run makes is the claim a scheduled run makes, and
+        # `automated` remains in the record either way.
+        isolation = artifact.require_isolation(
+            live=True,
+            publishable=True,
+            attestation=ATTESTED,
+            required_origins=("api.provider.example",),
+            ci=True,
+            automated=True,
+        )
+        self.assertEqual((isolation["publishable"], isolation["automated"], isolation["attested_container"]), (True, True, True))
+        self.assertEqual(isolation["attestation_hash"], ATTESTED.hash())
+
+    def test_an_automated_run_without_an_attestation_is_never_publishable(self) -> None:
+        with self.assertRaises(IsolationError) as caught:
+            artifact.require_isolation(live=True, publishable=True, attestation=None, ci=True, automated=True)
+        self.assertEqual(caught.exception.code, "attestation_missing")
+
+    def test_an_automated_run_whose_attestation_is_invalid_is_refused(self) -> None:
+        # Valid, not merely present: the attestation is the whole of the claim,
+        # so an unchecked one would make the new contract weaker than the old.
+        loose = Attestation(**{**ATTESTED.__dict__, "network_allowlist": ("*",)})
+        with self.assertRaises(IsolationError) as caught:
+            artifact.require_isolation(live=True, publishable=True, attestation=loose, ci=True, automated=True)
+        self.assertEqual(caught.exception.code, "open_network")
 
     def test_the_shipped_executor_registry_has_no_live_entry(self) -> None:
         # The live Claude executor registers itself when its module is imported, and it is the only live spec there can be.

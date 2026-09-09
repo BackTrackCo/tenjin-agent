@@ -588,10 +588,10 @@ class LiveRefusalTest(TrialCase):
         self.assertEqual(caught.exception.code, "attestation_missing")
         self.assertFalse((self.run_dir / "trials").exists())
 
-    def test_a_live_executor_is_refused_in_ci(self) -> None:
+    def test_a_live_run_in_ci_that_is_not_stamped_automated_is_refused(self) -> None:
         with self.assertRaises(IsolationError) as caught:
             self.one_trial(self.manifest_live, self.runtime(publishable=False, ci=True, attestation=None))
-        self.assertEqual(caught.exception.code, "live_in_ci")
+        self.assertEqual(caught.exception.code, "automated_unstamped")
 
     def test_an_automated_plumbing_run_is_allowed_in_ci_and_stamped(self) -> None:
         record = self.one_trial(self.manifest_live, self.runtime(publishable=False, ci=True, automated=True))
@@ -600,11 +600,22 @@ class LiveRefusalTest(TrialCase):
         self.assertEqual(record["isolation"]["automated"], True)
         self.assertEqual(record["isolation"]["attested_container"], False)
 
-    def test_an_automated_run_that_claims_publishable_is_refused_before_any_root_exists(self) -> None:
+    def test_an_automated_run_that_claims_publishable_without_an_attestation_is_refused_before_any_root_exists(self) -> None:
         with self.assertRaises(IsolationError) as caught:
             self.one_trial(self.manifest_live, self.runtime(publishable=True, ci=True, automated=True))
-        self.assertEqual(caught.exception.code, "automated_publishable")
+        self.assertEqual(caught.exception.code, "attestation_missing")
         self.assertFalse((self.run_dir / "trials").exists())
+
+    def test_an_attested_automated_run_is_publishable_and_still_stamped_automated(self) -> None:
+        # The contract the bench lane rests on: the attestation carries
+        # publishability, and `automated` stays in the record as a fact a
+        # reader sees rather than as a bar on the run.
+        record = self.one_trial(self.manifest_live, self.runtime(publishable=True, ci=True, automated=True, attestation=ATTESTED))
+        self.assertEqual(record["isolation"]["publishable"], True)
+        self.assertEqual(record["isolation"]["automated"], True)
+        self.assertEqual(record["isolation"]["attested_container"], True)
+        self.assertEqual(record["isolation"]["attestation_hash"], ATTESTED.hash())
+        records.validate(record)
 
     def test_an_attested_live_run_records_its_attestation(self) -> None:
         record = self.one_trial(self.manifest_live, self.runtime(publishable=True, ci=False, attestation=ATTESTED))

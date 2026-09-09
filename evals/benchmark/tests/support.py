@@ -71,6 +71,7 @@ def synthetic_manifest(
     auxiliary_usage: str | dict[str, str] = "none",
     live: bool = False,
     prompt: str = "Write 42 into answer.txt.",
+    corpus: dict[str, str] | None = None,
 ) -> manifest_module.Manifest:
     """A manifest object for runner and schedule cases, with a disposable fixture.
 
@@ -123,6 +124,8 @@ def synthetic_manifest(
             for arm in arms
         ],
     }
+    if corpus is not None:
+        data["corpus"] = corpus
     if live:
         data["pins"].update(
             {

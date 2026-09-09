@@ -12,6 +12,12 @@ a credential that walks into a trial artifact is visible as a count rather
 than as trust. Second, a publishable live run needs an external isolation
 attestation (container or VM id, fresh roots, no wallet, an explicit
 credential seam, and a network allowlist); without one it is refused.
+
+Publishability follows that attestation and nothing else. Who launched a run
+is a fact about the run, not a claim about its isolation, so `automated` is
+stamped in every record and decides nothing: an attested run measures the same
+thing whether a person or a schedule started it, and an unattested one is
+non-publishable either way.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -256,6 +262,34 @@ def scan_sentinels(
 
 
 @dataclass(frozen=True)
+class CorpusStamp:
+    """Which corpus a run measured: the project, the branch, and the reset time.
+
+    Machine-built rather than declared: `load_attestation` refuses an unknown
+    key, so an operator cannot write this into the file. It is what the run did
+    (`corpus.reset`), and it rides in the attestation so its bytes reach every
+    record through the attestation hash.
+    """
+
+    provider: str
+    project_id: str
+    branch_id: str
+    parent_id: str
+    origin: str
+    api_origin: str
+    reset_at: str
+
+    @property
+    def origins(self) -> tuple[str, ...]:
+        """The shelf the corpus backs and the control plane the reset called.
+
+        Both are egress the run creates, so the network allowlist has to name
+        them: an attestation that does not is describing a different run.
+        """
+        return (self.origin, self.api_origin)
+
+
+@dataclass(frozen=True)
 class Attestation:
     """The external isolation contract a publishable live run must present."""
 
@@ -266,11 +300,17 @@ class Attestation:
     wallet_present: bool
     credential_seam: str
     network_allowlist: tuple[str, ...] = field(default_factory=tuple)
+    corpus: CorpusStamp | None = None
 
     def hash(self) -> str:
         payload = asdict(self)
         payload["network_allowlist"] = sorted(self.network_allowlist)
         return "sha256:" + sha256_json(payload)
+
+
+def with_corpus(attestation: Attestation, stamp: CorpusStamp) -> Attestation:
+    """The attestation as the run's reset left it, hash included."""
+    return replace(attestation, corpus=stamp)
 
 
 def load_attestation(path: Path) -> Attestation:
@@ -322,7 +362,10 @@ def check_attestation(attestation: Attestation, required_origins: tuple[str, ...
         raise IsolationError("open_network", "the attestation carries no network allowlist")
     if any(entry.strip().lower() in WILDCARDS for entry in allowlist):
         raise IsolationError("open_network", "the network allowlist names a wildcard")
-    missing = sorted(origin for origin in required_origins if origin not in allowlist)
+    # The corpus a run reset is egress the run itself created, so its origins
+    # join the executor's and the arm's rather than being trusted separately.
+    required = tuple(required_origins) + (() if attestation.corpus is None else attestation.corpus.origins)
+    missing = sorted(origin for origin in required if origin not in allowlist)
     if missing:
         raise IsolationError("allowlist_gap", f"the network allowlist is missing {', '.join(missing)}")
     # The seam is the one variable that crosses into the child. An attestation
@@ -348,20 +391,28 @@ def require_isolation(
 ) -> dict[str, Any]:
     """The isolation slice of an attempt record, or a refusal to run at all.
 
-    `automated` is the `--ci-live` stamp: a live run nobody is watching, which
-    CI may host only as non-publishable plumbing with no attestation to claim.
-    `shelf_secret_present` says a provisioned arm seeds a team shelf secret
-    into the trial; such a run is non-publishable by construction, so asking
-    for a publishable one is a refusal rather than a downgrade.
+    Three rules, and the order is the argument.
+
+    A run that seeds a team shelf secret is never publishable: the secret is in
+    the trial by design, so asking for a publishable run is a refusal rather
+    than a downgrade, and an unwatched run never seeds one at all.
+
+    A live run under CI is stamped `automated`, because a record that says a
+    person watched a run nobody watched is the one claim no reader can check.
+    The stamp is a fact and not a verdict: it bars nothing.
+
+    A publishable live run needs a valid attestation, and that is the whole of
+    publishability. The attestation is machine-built from the container, the
+    network and the egress the run created, which is a stronger claim than a
+    launcher's identity ever was; a run without one is non-publishable whoever
+    started it.
     """
-    if automated and (publishable or attestation is not None):
-        raise IsolationError("automated_publishable", "an automated live run is never publishable and never attested")
-    if automated and shelf_secret_present:
-        raise IsolationError("automated_shelf_secret", "an automated live run never seeds a team shelf secret")
     if shelf_secret_present and publishable:
         raise IsolationError("shelf_secret_publishable", "a run that seeds a team shelf secret is never publishable")
+    if automated and shelf_secret_present:
+        raise IsolationError("automated_shelf_secret", "an automated live run never seeds a team shelf secret")
     if live and ci and not automated:
-        raise IsolationError("live_in_ci", "CI runs a live executor only as automated plumbing")
+        raise IsolationError("automated_unstamped", "a live run in CI is stamped automated, so every record says nobody watched it")
     if not live:
         return {
             "live": False,
@@ -372,6 +423,7 @@ def require_isolation(
             "automated": automated,
             "shelf_secret_present": False,
             "shelf_origin": None,
+            "corpus": None,
         }
     if publishable and attestation is None:
         raise IsolationError("attestation_missing", "a publishable live run requires an isolation attestation")
@@ -386,4 +438,7 @@ def require_isolation(
         "automated": automated,
         "shelf_secret_present": shelf_secret_present,
         "shelf_origin": shelf_origin,
+        # The corpus reaches the record as fields rather than as a hash alone,
+        # so a reader sees which corpus the run measured without the file.
+        "corpus": None if attestation is None or attestation.corpus is None else asdict(attestation.corpus),
     }

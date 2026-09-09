@@ -75,6 +75,8 @@ REQUIRED = frozenset(
 OPTIONAL = frozenset({"discovery"})
 PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
+# The corpus stamp a reset wrote into the attestation (`artifact.CorpusStamp`).
+CORPUS_KEYS = frozenset({"provider", "project_id", "branch_id", "parent_id", "origin", "api_origin", "reset_at"})
 
 class RecordError(ValueError):
     pass
@@ -278,6 +280,12 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("isolation.seed.deleted must be null or a boolean")
         if seed["published"] and (seed["piece_id"] is None or seed["nonce"] is None):
             raise RecordError("a seed that published names its piece and its run nonce")
+    corpus = isolation.get("corpus")
+    if corpus is not None:
+        if not isinstance(corpus, dict) or set(corpus) != CORPUS_KEYS:
+            raise RecordError("isolation.corpus must carry exactly the corpus fields")
+        if not all(isinstance(value, str) and value for value in corpus.values()):
+            raise RecordError("isolation.corpus fields must each be a non-empty string")
     manager = isolation.get("package_manager")
     if manager is not None:
         if not isinstance(manager, dict) or set(manager) != {"kind", "version"} or manager["kind"] not in PACKAGE_MANAGER_KINDS:

@@ -6,7 +6,8 @@ model tokens did the complete agent run consume with and without a knowledge sys
 itself produce a savings number, and nothing here touches the product runtime.
 
 **What this layer owns.** Bench-1 owns the frozen contracts, the executor and the live executor,
-the provisioning seam and daemon lifecycle, isolation, attestation and sentinels, the reducer,
+the provisioning seam and daemon lifecycle, isolation, attestation, the corpus reset and
+sentinels, the reducer,
 the report and its headline rule, `verify`, `cases` and `regress`, and one fake plumbing smoke
 that needs no repository. Bench-2 (PR 313) owns every real fixture as a container image, every
 real-task manifest including the hooks and keys smokes, the four arms, the producer phase, and
@@ -42,6 +43,7 @@ the suite builds.
 | `tenjin_arm.py`             | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                  |
 | `signature.py`              | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                   |
 | `artifact.py`               | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                    |
+| `corpus.py`                 | the corpus branch: the pre-run reset, its guard, its stamp        | `test_corpus.py`                      |
 | `verifier.py`               | hidden verifier registry, hidden layer, the run marker            | `test_verifier.py`                    |
 | `vendor.py`, `toolchain.py` | the vendored archive and the trial's pinned, offline pnpm         | `test_vendor.py`, `test_toolchain.py` |
 | `usage.py`                  | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                       |
@@ -99,11 +101,12 @@ an arm shown alone is a claim rather than a result.
 
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only, plus the run's isolation stamp: `publishable`, `isolation` (`fake`,
-`attested`, `operator_plumbing`, `automated_plumbing`, or `team_shelf_secret`), and
-`shelf_secret_present`. One non-publishable record makes the whole report non-publishable and no
-comparison in it headline eligible, and `summary` says so in its header.
+`attested`, `operator_plumbing`, `automated_plumbing`, or `team_shelf_secret`),
+`shelf_secret_present`, `automated`, and the `corpus` a reset stamped. One non-publishable record
+makes the whole report non-publishable and no comparison in it headline eligible, and `summary`
+says so in its header.
 
-## The operator-only live command
+## The live command and its two unwatched lanes
 
 `claude_live` is the only executor in the registry that starts a real agent, and `live-run` is
 the only command that reaches it. The two commands refuse each other's manifests, so neither path
@@ -113,9 +116,13 @@ can quietly run the other's executor.
 # what it would run. No process starts, nothing is spent.
 python3 -m evals.benchmark.cli live-run --manifest <live manifest> --out ~/bench1-live --dry-run
 
-# the real run, operator side only, inside the disposable instance
+# the real run, inside the disposable instance
 python3 -m evals.benchmark.cli live-run --manifest <live manifest> --out ~/bench1-live \
   --attestation ~/bench1-attestation.json
+
+# the same run on a schedule: an automated environment, still attested
+python3 -m evals.benchmark.cli live-run --manifest <live manifest> --out ./bench1-run \
+  --attestation ./attestation.json --automated
 ```
 
 `--dry-run` builds each trial's roots and its argv exactly as `runner.run_trial` would, prints
@@ -160,12 +167,43 @@ channel no record names. And the child environment is an allowlist: the trial's 
 operator's own config have no way through, by the spawn or by `settings.env`.
 
 Without `--dry-run` the command requires `--attestation` (or `--plumbing`), refuses an automated
-environment unless `--ci-live` is given, and refuses a shell without `pins.credential_env` set,
-on top of the refusals `artifact.require_isolation` owns: a live executor in CI that is not
-automated plumbing, a publishable live run with no attestation, an automated run claiming to be
-publishable or attested, and an attestation whose `credential_seam` is not the variable the run
-passes. `--ci-live` is valid only with `--plumbing`, never with `--attestation`, and stamps
-`isolation.automated: true` into every record, so a CI run can never be published.
+environment unless `--ci-live` or `--automated` is given, and refuses a shell without
+`pins.credential_env` set, on top of the refusals `artifact.require_isolation` owns: a live run
+in CI that is not stamped automated, a publishable live run with no attestation, a run that seeds
+a team shelf secret and claims to be publishable, and an attestation whose `credential_seam` is
+not the variable the run passes.
+
+Publishability follows the attestation and not the launcher. Who started a run is a fact about
+the run rather than a claim about its isolation, so `isolation.automated: true` is stamped in
+every record of both unwatched lanes and bars nothing by itself; a machine-built attestation over
+the container, the network and the egress a run created is a stronger claim than a person's word
+that a laptop was quiet. The two lanes stay separate commands: `--ci-live` is valid only with
+`--plumbing`, never with `--attestation`, and never with a provisioned arm, which keeps it the
+unattested smoke it has always been; `--automated` requires `--attestation`, refuses `--plumbing`,
+and is the lane a scheduled measured run uses.
+
+### The corpus a run measures
+
+A manifest may name a `corpus`: `provider` (`neon`), `project_id`, `branch_id`, `parent_id`, and
+the `origin` that database serves. `live-run` then resets that branch from its parent before the
+first trial, so the corpus a run measures is the one it seeded rather than whatever else reached
+the shelf since. A reset that does not happen ends the run there; `fake-run` refuses such a
+manifest outright, because the offline lane touches no database.
+
+The reset is destructive and it runs inside the project holding the team's knowledge, so
+`corpus.guard` reads the branch the provider returns, never the manifest's claim, and refuses a
+default branch, a protected branch, a branch whose id is not the one the manifest names, and a
+branch whose parent is not the parent the manifest names. `corpus.Api` is the seam: two calls, an
+`HttpApi` against Neon, and a fake in every test, so the guard is testable before the branches
+exist. `HttpApi` waits for the restore's operations, because a started reset is not a finished
+one.
+
+What was reset is then a machine-built field of the attestation (`artifact.CorpusStamp`: the
+provider, the project, the branch, its parent, the origin, the control-plane host, and the reset
+time). An operator cannot write it into the attestation file, which refuses unknown keys; it
+reaches every record through `isolation.corpus` and the attestation hash, and the report carries
+it, so a reader sees which corpus a number came from. Both of its origins join the ones the
+network allowlist must name.
 
 ### The attestation, and what the operator prepares
 
