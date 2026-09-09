@@ -14,6 +14,19 @@ on:
       - 'evals/benchmark/**'
       - '.github/workflows/benchmark-live.yml'
   workflow_dispatch:
+    inputs:
+      lane:
+        description: >-
+          Which lane to run on the dispatched ref. `plumbing` is this
+          workflow's own smoke. `canary` runs the shelf lane instead, which is
+          how a branch runs it before its own workflow is registered: GitHub
+          keys `workflow_dispatch` on registration against the DEFAULT branch,
+          not on the file being present in the ref, so a new workflow cannot be
+          dispatched until it has merged. This workflow is already registered,
+          and a dispatch runs the ref's copy of it.
+        type: choice
+        default: plumbing
+        options: [plumbing, canary]
 
 concurrency:
   group: benchmark-live-${{ github.workflow }}-${{ github.ref }}
@@ -23,7 +36,27 @@ concurrency:
 permissions: {}
 
 jobs:
+  # The shelf lane, on demand, for a ref whose own workflow is not registered
+  # yet. It spends model budget, so it runs only when the dispatcher asks for it
+  # by name; a schedule or a push can never reach it.
+  canary:
+    if: inputs.lane == 'canary'
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/canary-manifest.json
+      lane: benchmark-live-canary
+      check_name: benchmark canary (dispatched)
+      timeout_minutes: 180
+      budget_note: >-
+        Dispatched canary: 24 attempts, budget capped at 0.75 USD an attempt,
+        about 5.69 USD a run at the measured 0.237 USD an attempt.
+
   live:
+    if: inputs.lane != 'canary'
     name: benchmark live (plumbing smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 15
