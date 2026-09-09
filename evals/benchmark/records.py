@@ -278,9 +278,8 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("isolation.seed.deleted must be null or a boolean")
         if seed["published"] and (seed["piece_id"] is None or seed["nonce"] is None):
             raise RecordError("a seed that published names its piece and its run nonce")
-    for name in ("producer", "local_seed"):
-        if name in isolation and not isinstance(isolation[name], dict):
-            raise RecordError(f"isolation.{name} must be an object")
+    if "producer" in isolation and not isinstance(isolation["producer"], dict):
+        raise RecordError("isolation.producer must be an object")
     if "producer" in isolation and isolation["producer"].get("outcome") not in OUTCOMES:
         raise RecordError("isolation.producer must carry an outcome")
     if "slice" in isolation and (not isinstance(isolation["slice"], dict) or not isinstance(isolation["slice"].get("kind"), str)):

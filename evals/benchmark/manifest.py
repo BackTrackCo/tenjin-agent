@@ -52,17 +52,14 @@ ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "mem
 # into argv owns the flag and value allowlists (`claude_live.py`).
 OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env"})
 OPTIONAL_TASK_KEYS = frozenset({"prompt", "vendor", "tools", "allowed_tools"})
-# `lessons` names exactly which lessons a provisioned arm seeds (the default is
-# the task's family lesson and its own fix). `seed` says how they reach the
-# product (`shelf`: published to the team shelf through the CLI; `local`:
-# replayed into the trial's own store through the daemon), and `producer` runs
-# a producer phase in the same data dir before the consumer. An arm's static
-# files are `settings.overlay`, validated by the live executor.
-OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "seed", "producer"})
+# `lessons` names exactly which lessons a provisioned arm seeds on the team
+# shelf (the default is the task's family lesson and its own fix), and
+# `producer` runs a producer phase in the same data dir before the consumer.
+# An arm's static files are `settings.overlay`, validated by the live executor.
+OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons", "producer"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
-SEED_PATHS = frozenset({"shelf", "local"})
-SLICE_KINDS = frozenset({"stale", "scale", "recursive"})
-SLICE_KEYS = {"stale": frozenset({"kind", "age_days"}), "scale": frozenset({"kind", "distractors"}), "recursive": frozenset({"kind"})}
+SLICE_KINDS = frozenset({"recursive"})
+SLICE_KEYS = {"recursive": frozenset({"kind"})}
 SUBAGENT_TOOL = "Agent"
 TRANSFER_DISTANCES = frozenset({"none", "same_task", "same_family", "cross_family"})
 # What an arm's memory product can prove about its own model spend. `none` is a
@@ -173,13 +170,10 @@ def _require_optional_shapes(name: str, item: dict[str, Any]) -> None:
             raise ManifestError(f"{name}.lessons must be a non-empty list of lesson ids")
         for lesson in item["lessons"]:
             _require_id(f"{name} lesson", lesson)
-    if "seed" in item and item["seed"] not in SEED_PATHS:
-        raise ManifestError(f"{name}.seed must be one of {', '.join(sorted(SEED_PATHS))}")
     if "producer" in item and not isinstance(item["producer"], bool):
         raise ManifestError(f"{name}.producer must be true or false")
-    for key in ("seed", "producer"):
-        if key in item and not item.get("provision"):
-            raise ManifestError(f"{name}.{key} needs a provisioned arm")
+    if "producer" in item and not item.get("provision"):
+        raise ManifestError(f"{name}.producer needs a provisioned arm")
     budget = item.get("max_budget_usd")
     if "max_budget_usd" in item and (isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0):
         raise ManifestError(f"{name}.max_budget_usd must be a positive number")
@@ -193,10 +187,6 @@ def _validate_slice(data: dict[str, Any]) -> None:
     kind = item["kind"]
     if set(item) != SLICE_KEYS[kind]:
         raise ManifestError(f"slice {kind!r} carries exactly {', '.join(sorted(SLICE_KEYS[kind]))}")
-    if kind == "stale":
-        _require_count("slice.age_days", item["age_days"], 1)
-    if kind == "scale":
-        _require_count("slice.distractors", item["distractors"])
     if kind == "recursive" and not any(SUBAGENT_TOOL in task.get("tools", []) for task in data["tasks"]):
         raise ManifestError(f"a recursive slice needs a task whose tools include {SUBAGENT_TOOL}")
 

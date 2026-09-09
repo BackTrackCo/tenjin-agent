@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-local-arms-1",
+  "benchmark_version": "bench2-local-arms-2",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -31,7 +31,7 @@
   },
   "price_sheet_version": "real-2026-09",
   "phases": {
-    "producer": "natural-or-seeded",
+    "producer": "natural-or-shelf-seeded",
     "capture": "local-store",
     "consumer": "local"
   },
@@ -304,8 +304,7 @@
       },
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
-      "auxiliary_usage": "none",
-      "seed": "local"
+      "auxiliary_usage": "none"
     },
     {
       "executor": "claude_live",

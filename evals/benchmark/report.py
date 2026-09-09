@@ -322,9 +322,6 @@ def render(report: dict[str, Any]) -> str:
                 f"{arm_id} producer phases: {producer['attempts']} run, {producer['passes']} passed, {producer['captured']} left a closed local record, "
                 f"{producer['findings']} finding(s) harvested, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
             )
-        seeded = arm.get("local_seed")
-        if seeded:
-            lines.append(f"{arm_id} local seed: {seeded['attempts']} store(s) seeded through the daemon, {seeded['pairings']} closed record(s), {seeded['empty']} empty, {seeded['distractors']} distractor(s) beside each")
         diagnostics = [task.get("diagnostics", {}) for task in arm.get("tasks", {}).values()]
         local_hits = sum(item.get("local_hits", 0) for item in diagnostics)
         local_legs = sum(item.get("local_legs", 0) for item in diagnostics)

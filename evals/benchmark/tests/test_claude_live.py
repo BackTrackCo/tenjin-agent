@@ -428,7 +428,10 @@ class HooksArmTest(LiveCase):
         schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
         self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "flat", "tenjin_seeded", "tenjin_natural"])
         off, flat, seeded, natural = manifest.arms
-        self.assertEqual((seeded["seed"], seeded["provision"], natural["producer"]), ("local", "tenjin", True))
+        # The seeded arm is the shelf arm exactly as the hooks smoke runs it: no local replay.
+        self.assertEqual((seeded["provision"], natural["producer"]), ("tenjin", True))
+        self.assertNotIn("seed", seeded)
+        self.assertEqual(seeded["settings"], manifest_module.load(cli.HOOKS_SMOKE_MANIFEST).arms[1]["settings"])
         # The flat arm is the same lessons as static Markdown, through the foundation's overlay, hashed into its settings.
         self.assertEqual(sorted(flat["settings"]), ["overlay"])
         self.assertEqual(sorted(flat["settings"]["overlay"]), ["CLAUDE.md", "LESSONS.md"])
@@ -450,14 +453,7 @@ class HooksArmTest(LiveCase):
                 schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
                 self.assertEqual(manifest.pins, pilot.pins)
                 kind = manifest.slice["kind"]
-                if kind == "scale":
-                    self.assertEqual((len(trials), manifest.slice["distractors"]), (48, int(name.split("-")[1])))
-                    self.assertEqual([arm["id"] for arm in manifest.arms], ["off", "tenjin_seeded"])
-                    self.assertEqual(manifest.tasks, pilot.tasks)
-                elif kind == "stale":
-                    self.assertEqual((len(trials), manifest.slice["age_days"]), (48, 400))
-                    self.assertEqual(manifest.tasks, pilot.tasks)
-                else:
+                if True:
                     self.assertEqual(kind, "recursive")
                     self.assertEqual(len(trials), 9)
                     (task,) = manifest.tasks
@@ -471,29 +467,18 @@ class HooksArmTest(LiveCase):
                     # The other manifests never hand a task the subagent tool.
                     self.assertTrue(all("tools" not in task for task in pilot.tasks))
 
-    def test_the_lessons_and_the_distractor_corpus_are_loadable_and_keyed_apart(self) -> None:
-        from evals.benchmark import local_seed, signature
-
-        lesson_keys: set[str] = set()
+    def test_every_lesson_is_loadable_and_keyed_apart_from_the_others(self) -> None:
+        keys: dict[str, str] = {}
         for path in sorted(tenjin_arm.LESSONS.glob("*.json")):
             lesson = tenjin_arm.lesson_named(path.stem)
             assert lesson is not None
-            lesson_keys.update(lesson.keys)
-            if lesson.fix is not None:
-                self.assertEqual(lesson.fix["command"].split(" ")[0], "pnpm")
-        # The fix lessons the local seed can replay name a fix; the convention lesson cannot be held locally and names none.
-        self.assertIsNone(tenjin_arm.lesson_named("test-harness-convention").fix)
-        self.assertIsNone(tenjin_arm.lesson_named("alias-fix").fix)
-        for name in ("actor-fix", "budget-fix", "candidate-fix", "slug-fix", "level-fix", "money-fix", "core-fix"):
-            self.assertIsNotNone(tenjin_arm.lesson_named(name).fix, name)
-        corpus = local_seed.load_distractors()
-        self.assertEqual(len(corpus), 200)
-        keys = [signature.key_of(item["error"])["test_key"] for item in corpus]
-        self.assertTrue(all(keys))
-        self.assertEqual(len(set(keys)), 200)
-        self.assertEqual({f"sig_v1_test:{key}" for key in keys} & lesson_keys, set())
-        text = json.dumps(corpus)
-        self.assertNotIn("http", text)
+            self.assertNotIn("http", lesson.body.read_text(encoding="utf-8"))
+            for key in set(lesson.keys):
+                # One key, one lesson; the keys smoke's key-only lesson shares the actor fix's key on purpose.
+                if key in keys and not (lesson.id.startswith("actor-fix") and keys[key].startswith("actor-fix")):
+                    self.fail(f"{lesson.id} and {keys[key]} share key {key}")
+                keys.setdefault(key, lesson.id)
+        self.assertEqual(len(keys) >= 10, True)
 
     def test_the_template_resolves_per_trial_and_the_child_reads_the_resolved_fragment(self) -> None:
         provision = executor.Provision(values={"daemon_url": "http://127.0.0.1:4321/hook/claude", "daemon_token": "tok-1", "data_dir": "/trial/data"})

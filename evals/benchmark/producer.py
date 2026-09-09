@@ -27,10 +27,43 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import artifact, claude_usage, local_seed, sha256_dir, sha256_file, sha256_text, tenjin_arm, usage, verifier
+from . import artifact, claude_usage, sha256_dir, sha256_file, sha256_text, tenjin_arm, usage, verifier
 from .executor import ExecutorSpec, LaunchRequest, Provision, ProvisionError
 
 PHASE = artifact.PRODUCER_PHASE
+PAIRING_STATUSES = ("open", "unverified", "verified")
+
+
+def project_id(cwd: str) -> str:
+    """The product's `projectId`: sha256 of the cwd string, first 16 hex characters (`src/hooks/failure/keys.ts`)."""
+    import hashlib
+
+    return hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:16]
+
+
+def pairings_of(loop_db: Path, project: str) -> list[dict[str, Any]]:
+    """The project's pairing rows as the record may carry them: kind, key hash, status, closes; never the error line."""
+    if not loop_db.is_file():
+        return []
+    uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
+    try:
+        connection = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as error:
+        raise ProvisionError(f"cannot open loop.db read-only: {error}") from error
+    try:
+        rows = connection.execute("SELECT kind, key, status, closes FROM pairings WHERE project IS ? ORDER BY id", (project,)).fetchall()
+    except sqlite3.Error as error:
+        raise ProvisionError(f"loop.db has no readable pairings table: {error}") from error
+    finally:
+        connection.close()
+    return [{"kind": kind, "key_hash": sha256_text(f"{kind}:{key}")[:16], "status": status, "closes": int(closes or 0)} for kind, key, status, closes in rows]
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in PAIRING_STATUSES}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    return counts
 COMPONENT = "producer"
 CAPTURE_PHASE = "capture"
 FINDING_PREFIX = "finding:"
@@ -69,11 +102,11 @@ def request_times(transcript: Path) -> dict[str, int]:
 
 def store_facts(loop_db: Path, session: str, project: str) -> dict[str, Any]:
     """What the producer left in the settled store: pairings for the project, harvested findings, and its own fires."""
-    facts: dict[str, Any] = {"pairings": local_seed.summarize([]), "pairing_key_hashes": [], "findings": 0, "fires": 0, "turn_end_fires": 0, "first_turn_end_at": None}
+    facts: dict[str, Any] = {"pairings": summarize([]), "pairing_key_hashes": [], "findings": 0, "fires": 0, "turn_end_fires": 0, "first_turn_end_at": None}
     if not loop_db.is_file():
         return facts
-    rows = local_seed.pairings_of(loop_db, project)
-    facts["pairings"] = local_seed.summarize(rows)
+    rows = pairings_of(loop_db, project)
+    facts["pairings"] = summarize(rows)
     facts["pairing_key_hashes"] = sorted({row["key_hash"] for row in rows if row["status"] != "open"})
     uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
@@ -171,7 +204,7 @@ def run(
         "actors": 0,
         "usage_reconciliation": {"status": "unparsed"},
         "phase_tokens": {PHASE: 0, CAPTURE_PHASE: 0},
-        "capture": store_facts(roots.data_dir / tenjin_arm.LOOP_DB, session_id, local_seed.project_id(str(launch.cwd))),
+        "capture": store_facts(roots.data_dir / tenjin_arm.LOOP_DB, session_id, project_id(str(launch.cwd))),
         "sentinel": {"public_requests": 0, "credential_exposures": 0},
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None},
     }

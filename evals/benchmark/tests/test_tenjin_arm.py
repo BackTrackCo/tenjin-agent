@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -115,14 +116,11 @@ class SourceTest(SourceCase):
         self.assertEqual(seeded["shelfBypassSecret"], SECRET)
         self.assertNotIn("wallet", seeded)
         self.assertNotIn("shelfBypassSecret", tenjin_arm.seeded_config(source, 1, with_secret=False))
-        # The producer's daemon tells the capture ask to publish; the seed daemon sees no team origin and carries no secret.
+        # The producer's daemon tells the capture ask to publish; there is no other mode.
         producer = tenjin_arm.seeded_config(source, 1, mode="producer")
         self.assertEqual((producer["publish"], producer["baseUrl"]), ({"mode": "auto"}, "https://team-shelf.example"))
-        seed = tenjin_arm.seeded_config(source, 1, mode="seed")
-        self.assertEqual((seed["baseUrl"], seed["publish"]), ("https://public.example", {"mode": "review"}))
-        self.assertNotIn("shelfBypassSecret", seed)
         with self.assertRaises(ProvisionError):
-            tenjin_arm.seeded_config(source, 1, mode="other")
+            tenjin_arm.seeded_config(source, 1, mode="seed")
 
 
 class DaemonCase(SourceCase):
@@ -527,14 +525,12 @@ class SeedCase(DaemonCase):
             encoding="utf-8",
         )
 
-    def write_fix_lesson(self, fix: dict | None = None) -> str:
+    def write_fix_lesson(self) -> str:
         """The task's own fix, keyed on the test identity vitest's FAIL header names."""
         identity = signature.TestIdentity(file="tests/probe.test.mjs", suite="probeKey", test="case 1")
         key = signature.sig_v1_test(identity)
         (self.lessons / "probe-fix.md").write_text("# The fix\n\nDefault the agent.\n", encoding="utf-8")
         record = {"id": "probe-fix", "title": "The fix", "commands": [{"command": "node assertion-{task}.mjs", "kind": "sig_v1_test", "key": key, "check": True, "reason": "header"}]}
-        if fix is not None:
-            record["fix"] = fix
         (self.lessons / "probe-fix.json").write_text(json.dumps(record), encoding="utf-8")
         return key
 
@@ -771,105 +767,22 @@ class SeedCase(DaemonCase):
         self.assertEqual(tenjin_arm.lessons_for({"id": "answer-file", "family": "smoke"}, live), [])
 
 
-FIX = {"file": "src/probe.mjs", "command": "node assertion-{task}.mjs"}
+def _post(url: str, token: str, payload: dict) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, method="POST", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        assert response.status in (200, 204)
+    time.sleep(0.005)
 
 
-class LocalSeedTest(SeedCase):
-    """The local seed: the lesson replayed into the trial's store through the daemon, never through the CLI."""
-
-    def local_request(self, roots: artifact.TrialRoots, **overrides: object) -> ProvisionRequest:
-        request = self.request(roots, **overrides)
-        return ProvisionRequest(request.trial_id, request.roots, {"id": "tenjin_seeded", "provision": "tenjin", "seed": "local"}, request.source, dry_run=request.dry_run, task=request.task, environment=request.environment, nonce=request.nonce, slice=request.slice)
-
-    def test_prepare_replays_the_fix_lesson_and_leaves_the_consumer_daemon_on_the_consumer_config(self) -> None:
-        self.write_fix_lesson(FIX)
-        roots = self.seed_roots()
-        provision = tenjin_arm.prepare(self.local_request(roots))
-        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
-        seed = provision.facts["local_seed"]
-        self.assertEqual((seed["path"], seed["distractors"], seed["events"]), ("local", 0, 5))
-        self.assertEqual([lesson["lesson"] for lesson in seed["lessons"]], ["fam", "probe-fix"])
-        # The family lesson has no fix the product could hold; the task's fix is replayed and closed.
-        self.assertEqual(seed["lessons"][0]["commands"], [{"command": "node probe-probe.mjs", "kind": "sig_v1", "replayed": False, "reason": "no_fix_file"}])
-        self.assertEqual(seed["lessons"][1]["commands"], [{"command": "node assertion-probe.mjs", "kind": "sig_v1_test", "replayed": True, "reason": None}])
-        self.assertEqual(seed["pairings"], {"open": 0, "unverified": 1, "verified": 0})
-        self.assertEqual(len(seed["pairing_key_hashes"]), 1)
-        self.assertEqual((provision.facts["seed_path"], provision.facts["daemon_mode"]), ("local", "consumer"))
-        self.assertNotIn("seed", provision.facts)
-        self.assertEqual(self.calls(), [])
-        config = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
-        self.assertEqual((config["baseUrl"], config["shelfBypassSecret"], config["publish"]), ("https://team-shelf.example", SECRET, {"mode": "review"}))
-        self.assertEqual(provision.values["daemon_url"], f"http://127.0.0.1:{provision.stop_state['port']}/hook/claude")
-        self.assertEqual(reap.read_records(roots.run_dir)[0].trial_id, f"{roots.trial_id}.daemon")
-        # A re-failure under the seeded key is a local hit, which is what the consumer's daemon answers.
-        from evals.benchmark import local_seed
-
-        replay = local_seed.Replay(provision.values["daemon_url"], provision.values["daemon_token"], "consumer-session", str(roots.repo.resolve()), "t", sleep=lambda _s: None)
-        replay.post({"hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": "node assertion-probe.mjs"}, "tool_use_id": "c1", "error": (roots.repo / "assertion-probe.mjs").read_text(encoding="utf-8").replace("console.log('", "").replace("');", "")})
-        report = tenjin_arm.stop(roots, provision)
-        self.assertEqual(report["wal_live"], False)
-        projection = loop_join_project(roots.data_dir / "loop.db", [("claude", "consumer-session", "")], foreign_sessions=(replay.session + "-none",))
-        self.assertEqual(projection["classes"]["local"], 1)
-        # The seed session's fires are a phase, not a stray, when the join is told about them.
-        seeded_session = __import__("evals.benchmark.claude_live", fromlist=["root_session_id"]).root_session_id(roots.trial_id, "seed")
-        scoped = loop_join_project(roots.data_dir / "loop.db", [("claude", "consumer-session", "")], foreign_sessions=(seeded_session,))
-        self.assertEqual((scoped["unmatched_fires"], scoped["phase_fires"]), ([], {seeded_session: 1}))
-
-    def test_a_scale_slice_seeds_the_distractors_beside_the_lesson(self) -> None:
-        self.write_fix_lesson(FIX)
-        corpus = self.dir / "distractors.json"
-        corpus.write_text(
-            json.dumps(
-                [
-                    {"id": f"noise-{index}", "command": f"node noise-{index}.mjs", "file": f"src/noise-{index}.mjs", "error": f" FAIL  tests/noise-{index}.test.mjs > noise > case {index}\nAssertionError: expected {index} to be 0\n"}
-                    for index in range(3)
-                ]
-            ),
-            encoding="utf-8",
-        )
-        from evals.benchmark import local_seed
-
-        with mock.patch.object(local_seed, "DISTRACTORS", corpus):
-            roots = self.seed_roots()
-            provision = tenjin_arm.prepare(self.local_request(roots, slice={"kind": "scale", "distractors": 2}))
-        self.addCleanup(lambda: runner.process_stop(provision.stop_state["started"], roots.run_dir, 2.0))
-        seed = provision.facts["local_seed"]
-        self.assertEqual((seed["distractors"], seed["events"], seed["pairings"]["unverified"]), (2, 15, 3))
-        with mock.patch.object(local_seed, "DISTRACTORS", corpus), self.assertRaises(ProvisionError):
-            tenjin_arm.prepare(self.local_request(self.seed_roots(), slice={"kind": "scale", "distractors": 4}))
-
-    def test_the_stale_slice_is_refused_with_the_product_reason_and_stated_on_a_dry_run(self) -> None:
-        self.write_fix_lesson(FIX)
-        roots = self.seed_roots()
-        with self.assertRaises(ProvisionError) as refused:
-            tenjin_arm.prepare(self.local_request(roots, slice={"kind": "stale", "age_days": 400}))
-        self.assertIn("valid_until", str(refused.exception))
-        self.assertEqual(reap.read_records(roots.run_dir), [])
-        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
-            provision = tenjin_arm.prepare(self.local_request(roots, nonce=None, dry_run=True, environment=None, slice={"kind": "stale", "age_days": 400}))
-        self.assertIn("valid_until", provision.facts["stale_refusal"])
-        self.assertEqual(provision.facts["local_seed"]["lessons"][1]["commands"][0]["replayed"], True)
-
-    def test_a_dry_run_states_the_replay_and_a_cross_command_fix_is_not_seedable(self) -> None:
-        self.write_fix_lesson({"file": "src/probe.mjs", "command": "pnpm exec vitest run tests/{task}.test.mjs"})
-        roots = self.seed_roots()
-        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
-            provision = tenjin_arm.prepare(self.local_request(roots, nonce=None, dry_run=True, environment=None))
-        plan = provision.facts["local_seed"]
-        self.assertEqual(plan["path"], "local")
-        self.assertEqual([entry["reason"] for lesson in plan["lessons"] for entry in lesson["commands"]], ["no_fix_file", "cross_command"])
-        self.assertEqual(self.calls(), [])
-
-    def test_a_lesson_fix_block_is_checked(self) -> None:
-        self.write_fix_lesson({"file": "src/probe.mjs"})
-        with self.assertRaises(ProvisionError):
-            tenjin_arm.lesson_named("probe-fix", self.lessons)
-
-
-def loop_join_project(loop_db: Path, actors: list, foreign_sessions: tuple = ()) -> dict:
-    from evals.benchmark import loop_join
-
-    return loop_join.project(loop_db, actors, foreign_sessions)
+def _failure_then_fix(url: str, token: str, session: str, cwd: str, command: str, failure_text: str, edited_file: str) -> None:
+    """The five hook events a producer's fix looks like to the daemon: a failing Bash call, an edit, the same call passing."""
+    base = {"session_id": session, "cwd": cwd, "transcript_path": "t"}
+    _post(url, token, {**base, "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "p-fail"})
+    _post(url, token, {**base, "hook_event_name": "PostToolUseFailure", "tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "p-fail", "error": failure_text, "is_interrupt": False})
+    _post(url, token, {**base, "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": {"file_path": edited_file}, "tool_use_id": "p-edit"})
+    _post(url, token, {**base, "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "p-pass"})
+    _post(url, token, {**base, "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": command}, "tool_use_id": "p-pass", "tool_response": {"stdout": "1 passed", "stderr": "", "interrupted": False}})
 
 
 class ProducerTest(RunnerCase):
@@ -881,18 +794,16 @@ class ProducerTest(RunnerCase):
         return manifest
 
     def producer_spawn(self, *, fix: bool = True, capture: bool = True) -> runner.Spawn:
-        from evals.benchmark import local_seed
-
         def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             if roots.phase != "producer":
                 return
             record = tenjin_arm.read_pid(roots.data_dir)
             assert record is not None
             token = (roots.data_dir / "daemon.token").read_text(encoding="utf-8")
-            replay = local_seed.Replay(f"http://127.0.0.1:{record['port']}/hook/claude", token, launch.root_session_id, str(launch.cwd), "t", sleep=lambda _s: None)
+            url = f"http://127.0.0.1:{record['port']}/hook/claude"
             if capture:
-                local_seed.failure_then_fix(replay, "node assertion-x.mjs", " FAIL  tests/x.test.mjs > x > case 1\nAssertionError: expected 1 to be 2\n", f"{launch.cwd}/src/x.mjs", "1 passed", "p")
-                replay.post({"hook_event_name": "Stop", "stop_hook_active": False})
+                _failure_then_fix(url, token, launch.root_session_id, str(launch.cwd), "node assertion-x.mjs", " FAIL  tests/x.test.mjs > x > case 1\nAssertionError: expected 1 to be 2\n", f"{launch.cwd}/src/x.mjs")
+                _post(url, token, {"session_id": launch.root_session_id, "cwd": str(launch.cwd), "transcript_path": "t", "hook_event_name": "Stop", "stop_hook_active": False})
 
         def after(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
             if roots.phase != "producer":

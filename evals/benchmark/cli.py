@@ -57,12 +57,7 @@ HOOKS_SMOKE_MANIFEST = FIXTURES / "live" / "hooks-smoke-manifest.json"
 KEYS_SMOKE_MANIFEST = FIXTURES / "live" / "keys-smoke-manifest.json"
 REAL_MANIFEST = FIXTURES / "live" / "real-manifest.json"
 LOCAL_ARMS_MANIFEST = FIXTURES / "live" / "local-arms-manifest.json"
-SLICE_MANIFESTS = {
-    "scale-50": FIXTURES / "live" / "scale-50-manifest.json",
-    "scale-200": FIXTURES / "live" / "scale-200-manifest.json",
-    "stale": FIXTURES / "live" / "stale-manifest.json",
-    "recursive": FIXTURES / "live" / "recursive-manifest.json",
-}
+SLICE_MANIFESTS = {"recursive": FIXTURES / "live" / "recursive-manifest.json"}
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job
 # timeout, and gives up any claim to a publishable number in return.
@@ -196,9 +191,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
     if arm.get("provision") and spec.prepare is not None:
         # A dry run seeds the data dir and resolves the template with a port of
         # 0 and a labelled token; it starts no daemon.
-        provision = spec.prepare(
-            executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True, task=task, slice=manifest.slice)
-        )
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True, task=task))
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True))
     settings = arm.get("settings") or {}
     resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
@@ -271,15 +264,6 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
                     f"  {'seed':10}{seed['lesson']} \"{seed['title']}\" keys={seed['keys']} key_hashes={','.join(seed['key_hashes'])} "
                     "published through tenjin publish --key at prepare, deleted at stop; a dry run publishes nothing"
                 )
-            local = facts.get("local_seed")
-            if local is not None:
-                for lesson in local["lessons"]:
-                    for entry in lesson["commands"]:
-                        verdict = "replayed through the daemon as failure, edit, and pass" if entry["replayed"] else f"not seedable ({entry['reason']})"
-                        lines.append(f"  {'seed':10}{lesson['lesson']} {entry['kind']} key_hash={entry['key_hash']} {entry['command']!r}: {verdict}")
-                lines.append(f"  {'seed':10}local store: {local['distractors']} distractor(s) beside the lesson; the seed daemon is stopped and settled before the consumer's starts; a dry run replays nothing")
-            if facts.get("stale_refusal"):
-                lines.append(f"  {'REFUSED':10}{facts['stale_refusal']}")
             if facts.get("daemon_mode") == "producer":
                 lines.append(f"  {'producer':10}daemon config publish.mode=auto for the producer session; the consumer's daemon restarts on the consumer config")
         if plan["vendor"] is not None:
@@ -360,8 +344,6 @@ def live_run(
         return {"dry_run": True, "trials": plans}
     if provisioned and source is None:
         raise CliError(f"arm {provisioned[0]!r} is provisioned: live-run needs --tenjin-source <data dir>")
-    if manifest.slice is not None and manifest.slice.get("kind") == "stale":
-        raise CliError(tenjin_arm.STALE_REASON.format(age_days=manifest.slice.get("age_days")))
     if source is not None and source.shelf_secret_present and attestation_path is not None:
         raise CliError("--attestation refuses a source that carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, run it with --plumbing")
     if ci_live and not plumbing:

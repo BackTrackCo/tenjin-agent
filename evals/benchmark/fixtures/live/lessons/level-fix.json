@@ -9,9 +9,5 @@
       "check": true,
       "reason": "vitest's FAIL header names the file and the case; the test-identity lane keys on it"
     }
-  ],
-  "fix": {
-    "file": "src/level.ts",
-    "command": "pnpm exec vitest run tests/level.test.mjs"
-  }
+  ]
 }

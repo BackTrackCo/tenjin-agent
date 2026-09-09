@@ -31,7 +31,6 @@ evals/benchmark/
   usage.py         UsageRecord and AuxiliaryReceipt contracts, arithmetic, null-vs-zero, dedupe, totals
   claude_usage.py  Claude JSONL usage adapter (group by requestId, select one row, reconcile)
   loop_join.py     read-only projection of a stopped trial's loop.db onto exact actor keys
-  local_seed.py    Bench-2: seed the trial's own store through the daemon, the way a producer session writes it
   producer.py      Bench-2: the natural arm's producer phase, verified, its usage as producer/capture receipts
   runner.py        executes a schedule: fresh roots, settlement, caps, sentinels, resume
   executor.py      executor registry (code-owned argv, shell=False) and the fake executors;
@@ -672,8 +671,17 @@ becoming a local lesson, and of a stale lesson gated by `valid_until`. The produ
   retention (`src/daemon/retention.ts`) prunes `fires`, `marks`, and unclaimed `handoff` only.
 - A lesson whose fix is a DIFFERENT command (the test-harness convention: `node tests/x`
   fails, `pnpm exec vitest run` passes) has no local record in the product, because a pairing
-  closes only on a pass with the same command head. The seed says so (`cross_command`,
-  `no_fix_file`) instead of faking one.
+  closes only on a pass with the same command head.
+- The seeded-LOCAL arm is retired. Bench-2 first defined `tenjin_seeded` as the trial's own
+  store pre-populated through the daemon (the five hook events of a fix replayed with the
+  probe's real failure output, so the product wrote its own `pairings` row), with the stale
+  and scale slices built on it. The operator retired it on 2026-09-08: tenjin-agent#326's
+  proposed resolution removes local pairing replay and automatic closure, so an arm built on
+  closed pairings measures a mechanism that is going away, and the arm's consistency check
+  ("the store holds 2 closed pairings, the seed replayed 1") aborted the four-arm run at trial
+  11 of 96. `tenjin_seeded` is now the shelf-seeded arm exactly as the foundation's hooks
+  smoke runs it, below; the local-seed code, its distractor corpus, and the scale and stale
+  manifests are gone with it (the stale slice had been a refusal anyway: nothing local expires).
 
 **The four arms** (`local-arms-manifest.json`):
 
@@ -684,21 +692,13 @@ becoming a local lesson, and of a stale lesson gated by `valid_until`. The produ
   to the lesson files) and a `CLAUDE.md` that tells the agent to read it. The overlay is
   hashed into `settings_hash`, written into the repository copy at launch, and never enters
   the child's settings file. No hooks, no daemon.
-- `tenjin_seeded` with `seed: local`: the trial's own store pre-populated through the product's
-  write path. `prepare` starts the daemon on the `seed` config (`baseUrl` set to the public
-  shelf, so the product sees no team origin and the failure arm runs its local leg alone: the
-  replay is offline), replays each seedable lesson as the five hook events a fix looks like
-  (`PreToolUse` Bash, `PostToolUseFailure` Bash with the probe's real output under `error`,
-  `PreToolUse` Edit of the lesson's `fix.file`, `PreToolUse` and `PostToolUse` Bash passing on
-  the same command), under a session id derived from the trial, at the consumer's own cwd, so
-  the daemon's own code opens and closes the pairing under the key the probe re-derived.
-  Then it stops that daemon, requires the WAL gone, reads `pairings` read-only (the record's
-  `isolation.local_seed`: per lesson which commands were replayed or why not, the status
-  counts, key hashes, event count, distractor count), refuses when the closed count is not
-  the replayed count, and starts the consumer's daemon on the consumer config. A lesson's
-  `.json` names its `fix` (`file`, `command`) to be seedable; the seven fix lessons do, the
-  convention lesson and `alias-fix` cannot (see above). The shelf path (`seed: shelf`, the
-  hooks smoke) is unchanged.
+- `tenjin_seeded`: the shelf-seeded arm exactly as the foundation's hooks smoke runs it (**The
+  seeded lessons** above): the task's family lesson and its fix (or the arm's `lessons` list)
+  published through `tenjin publish --key` under the run nonce at `prepare`, deleted at
+  `stop`, the shelf-read permissions allowed, the same hook template and daemon as the
+  natural arm's consumer. It measures Tenjin's retrieval, delivery, and use of an approved
+  lesson through the shelf, with capture variance excluded; local pairing replay is retired
+  (above).
 - `tenjin_natural`: `producer: true`. A producer session runs first (`producer.py`): its own
   home, profile, output, transcripts, and canary, the same pins, the same repository path
   (the product scopes local records by cwd hash), the same data dir, the daemon on the
@@ -748,18 +748,11 @@ the plan's near/far split waits for Bench-3's history-derived pairs. `lessons/` 
 `actor-fix-keyonly` for the foundation's keys smoke. The new fixtures carry no trap, guard, or
 shards: their one real failure is the family's.
 
-**The slices**, one manifest each so the operator runs one at a time:
+**The slices.** The scale slice (N distractor records beside the real one) and the stale slice
+(an expired lesson the local leg must refuse) were built on the local seed and retired with it;
+they return when the product holds a local record a seed can write and an expiry it can gate
+on. One slice remains, its own manifest:
 
-- `scale-50-manifest.json`, `scale-200-manifest.json`: `slice: {kind: scale, distractors: N}`.
-  The local seed replays N unrelated failure-then-fix records from `fixtures/live/distractors.json`
-  (200 committed neutral entries, keyed apart from every lesson, a test holds that) beside the
-  real one, in the same project; the record and the report carry N. N = 0 is the
-  `tenjin_seeded` arm of `local-arms-manifest.json`.
-- `stale-manifest.json`: `slice: {kind: stale, age_days: 400}`. Refused, with the reason, by
-  `live-run` before any root and by `prepare` on every trial, and stated on a dry run: the
-  product has no local expiry (above), and aging a row would mean writing `loop.db` by hand,
-  which the seed never does. The manifest stays so the refusal is what the operator sees; it
-  runs once the product carries an expiry it can gate on.
 - `recursive-manifest.json`: `slice: {kind: recursive}`. One task (`actor`) whose prompt
   delegates the diagnosis to a subagent, with `Agent` in that task's own `tools` and
   `allowed_tools` (a task-level override the manifest allows only under this slice), under
@@ -787,9 +780,9 @@ choosing it before the first number exists is what keeps the choice from being t
 
 **The reducer and the report.** Per arm: `phase_tokens` (`producer`, `capture`, once per native
 request id; also per task cell), `amortization` (the foundation's, charging producer and capture
-together) and `amortization_capture_only` (the capture's incremental cost alone), `producer`
-(phases run, passed, captured a closed record, findings harvested, invalid, WAL live) and
-`local_seed` (stores seeded, closed records, empty stores, distractors). Per comparison:
+together) and `amortization_capture_only` (the capture's incremental cost alone), and
+`producer` (phases run, passed, captured a closed record, findings harvested, invalid, WAL
+live). Per comparison:
 `headline`, `headline_rule`, `headline_interval`, `headline_eligible`, `token_ratio`
 (consumer-only), `amortized_token_ratio`, and `amortized_capture_only_token_ratio` at reuse 1,
 2, 5, 10 (task-equal). `summary` prints, per comparison, the headline line first with its label
@@ -797,18 +790,18 @@ and interval, then the capture-only reuse curve at 2/5/10, then the capture-free
 producer's-own-work diagnostic. Per cell diagnostics: `local_legs`,
 `local_hits`, `child_tokens`, `child_requests`, `actors`. The report carries `slice`, and each
 trial row `producer_outcome`, `producer_tokens`, `local_hits`, `child_tokens`; `summary` prints
-the slice, one producer line and one local-seed line per arm, and the local legs and descendant
+the slice, one producer line per arm, and the local legs and descendant
 tokens. The regress baseline is untouched: nothing
 here has run, so nothing here has a baseline.
 
-**Manifests and cost.** `real-manifest.json` (`bench2-local-pilot-0`) is the plan's Phase 1
+**Manifests and cost.** `real-manifest.json` (`bench2-local-pilot-1`) is the plan's Phase 1
 local pilot: 8 tasks x (`off`, `tenjin_natural`) x 3 repeats = 48 consumer attempts plus 24
-producer attempts. `local-arms-manifest.json` (`bench2-local-arms-0`) is 8 x (`off`, `flat`,
-`tenjin_seeded`, `tenjin_natural`) x 3 = 96 consumer attempts plus 24 producer attempts. The
-scale and stale manifests are 8 x (`off`, `tenjin_seeded`) x 3 = 48; the recursive one is 9
-consumer attempts plus 3 producer attempts. `max_budget_usd` stays 0.75 per attempt, producer
-attempts included, so the caps are 54 USD (pilot), 90 USD (arms), 36 USD (a scale manifest),
-and 9 USD (recursive); at the 0.14 to 0.36 USD the hooks smokes observed per attempt, expect
+producer attempts. `local-arms-manifest.json` (`bench2-local-arms-2`) is 8 x (`off`, `flat`,
+`tenjin_seeded`, `tenjin_natural`) x 3 = 96 consumer attempts plus 24 producer attempts, and
+the seeded arm publishes two pieces per trial to the team shelf and deletes them at stop. The
+recursive manifest (`bench2-recursive-2`) is 9 consumer attempts plus 3 producer attempts.
+`max_budget_usd` stays 0.75 per attempt, producer attempts included, so the caps are 54 USD
+(pilot), 90 USD (arms), and 9 USD (recursive); at the 0.14 to 0.36 USD the hooks smokes observed per attempt, expect
 roughly 10 to 26 USD for the pilot and 17 to 43 USD for the arms manifest. Every run needs
 `--plumbing --tenjin-source <tenjin data dir>` (the seeded config still names the team
 shelf, so no run here is publishable), and the source data dir has to hold the three bundles
@@ -819,11 +812,8 @@ shelf, so no run here is publishable), and the source data dir has to hold the t
 python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/real-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
 # the full local comparison: off, flat, tenjin_seeded, tenjin_natural, 96 attempts
 python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/local-arms-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
-# one slice at a time
-python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/scale-50-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
-python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/scale-200-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
+# the recursive slice
 python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/recursive-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>
-python3 -m evals.benchmark.cli live-run --manifest evals/benchmark/fixtures/live/stale-manifest.json --out <dir> --plumbing --tenjin-source <tenjin data dir>   # refused, by design
 # after any of them
 python3 -m evals.benchmark.cli verify --run <dir>
 python3 -m evals.benchmark.cli summary --run <dir>
@@ -895,9 +885,10 @@ A close that matches on the command head plus the file argument, or on the pairi
 recurring green, would have closed them. Filing is the operator's call; nothing was filed.
 
 `--dry-run` on each prints, per trial, the phases line for a producer arm, one `seed` line per
-lesson command (replayed, or why not) and the distractor count for a local seed, the
-`overlay` files for `flat`, the `slice`, and the stale refusal, and starts nothing. None of
-these manifests has run on any head; the numbers above are caps and expectations, not results.
+lesson for a seeded arm, the `overlay` files for `flat`, and the `slice`, and starts nothing.
+Only the pilot has run (**Pilot 1 readout** above); the first four-arm run aborted at trial 11
+on the retired local seed's consistency check and restarts from a fresh run directory under
+`bench2-local-arms-2`.
 
 ## Cleanup
 
@@ -1025,7 +1016,7 @@ task failure gets no free retry unless the same rule applies to every arm.
 `manifest.py` accepts exactly these keys and nothing else: `benchmark_version`,
 `schema_version` (1), `harness`, `seed`, `repeats`, `pins`, `price_sheet_version`, `tasks`,
 `arms`, and optionally `phases` with `producer`, `capture`, `consumer` labels, and `slice`
-(`kind` `stale` with `age_days`, `scale` with `distractors`, or `recursive`). Pins are
+(`kind` `recursive`; the stale and scale kinds retired with the local seed). Pins are
 `model`, `harness_version`, `effort`, `image`, `dependency_lock_hash`, `permission_mode`,
 `wall_clock_s`, `turn_budget`. A task is `id`, `family`, `transfer_distance`, `fixture`,
 `fixture_hash`, `verifier`, optionally `prompt` and `vendor` (the id of an archive under
@@ -1148,7 +1139,7 @@ delivery projection with its per-shelf leg counts, its class counts, and its pub
 sentinel counts and the isolation block (`live`, `publishable`,
 `fresh_roots`, `attested_container`, `attestation_hash`, `automated`, `shelf_secret_present`,
 `shelf_origin`, and `daemon_respawned` for a provisioned arm, `slice` when the manifest names
-one, `local_seed` for a locally seeded arm, and `producer` for a natural arm, see **Bench-2:
+one, and `producer` for a natural arm, see **Bench-2:
 local reuse**); and hashes of private inputs (`root_transcript`, `executor_stderr`,
 `resolved_settings`), never their bodies or host paths.
 

@@ -710,7 +710,6 @@ SPEC = ExecutorSpec(
     credential_seam=credential_env_of,
     prepare=prepare,
     stop=tenjin_arm.stop,
-    session_of=root_session_id,
 )
 
 REGISTRY[NAME] = SPEC

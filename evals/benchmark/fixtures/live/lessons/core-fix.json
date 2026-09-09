@@ -9,9 +9,5 @@
       "check": true,
       "reason": "run inside the package, vitest's FAIL header names tests/core.test.mjs and the case"
     }
-  ],
-  "fix": {
-    "file": "packages/core/src/core.mjs",
-    "command": "pnpm --filter core exec vitest run tests/core.test.mjs"
-  }
+  ]
 }

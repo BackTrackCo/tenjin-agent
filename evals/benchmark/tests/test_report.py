@@ -262,19 +262,19 @@ class ProjectionTest(unittest.TestCase):
         self.assertNotIn("private_hashes", trial)
         self.assertNotIn("delivery", trial)
 
-    def test_the_slice_the_producer_and_the_local_seed_reach_the_report_and_its_reading(self) -> None:
+    def test_the_slice_and_the_producer_reach_the_report_and_its_reading(self) -> None:
         record = support.reduction_record("t1", "on", 0, 1, 400, auxiliary=(support.receipt("producer", "producer", "p_1", 600, 200), support.receipt("producer", "capture", "p_2", 100, 50)))
-        record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 0}, "phase_tokens": {"producer": 800, "capture": 150}, "wal_live_between_phases": False}, "slice": {"kind": "scale", "distractors": 50}}
+        record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 0}, "phase_tokens": {"producer": 800, "capture": 150}, "wal_live_between_phases": False}, "slice": {"kind": "recursive"}}
         off = support.reduction_record("t1", "off", 0, 0, 800)
         accepted = support.accept(off, record)
-        manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1, "slice": {"kind": "scale", "distractors": 50}}
+        manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1, "slice": {"kind": "recursive"}}
         reduction = reduce_module.reduce(accepted, [], baseline="off")
         projected = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
-        self.assertEqual(projected["slice"], {"kind": "scale", "distractors": 50})
+        self.assertEqual(projected["slice"], {"kind": "recursive"})
         row = next(trial for trial in projected["trials"] if trial["arm_id"] == "on")
         self.assertEqual((row["producer_outcome"], row["producer_tokens"], row["local_hits"], row["child_tokens"]), ("pass", 950, 0, 0))
         text = report.render(projected)
-        self.assertIn("slice: distractors=50 kind=scale", text)
+        self.assertIn("slice: kind=recursive", text)
         self.assertIn("on producer phases: 1 run, 1 passed, 1 left a closed local record", text)
         # The pre-registered headline: capture-only amortized at reuse 1, first, with its own
         # task-paired interval; the reuse curve; the consumer-only ratio as the secondary line;

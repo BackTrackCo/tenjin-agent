@@ -147,7 +147,6 @@ class AmortizationTest(unittest.TestCase):
         self.assertEqual([point["token_ratio"] for point in comparison["amortized_capture_only_token_ratio"]], [round((400 + 150) / 800, 12), round((400 + 75) / 800, 12), round((400 + 30) / 800, 12), round((400 + 15) / 800, 12)])
         self.assertEqual(comparison["amortized_token_ratio"][0]["token_ratio"], round((400 + 950) / 800, 12))
         self.assertIsNone(arm["producer"])
-        self.assertIsNone(arm["local_seed"])
         cell = arm["tasks"]["t1"]["diagnostics"]
         self.assertEqual((cell["local_legs"], cell["local_hits"], cell["child_tokens"], cell["child_requests"], cell["actors"]), (0, 0, 0, 0, 1))
 
@@ -180,17 +179,15 @@ class AmortizationTest(unittest.TestCase):
         self.assertEqual(arm["amortization"][0]["tokens_per_attempt"], 2000.0)
         self.assertEqual(reduction["arms"]["off"]["amortization"][0], {"reuse": 1, "capture_tokens_per_use": 0.0, "tokens_per_attempt": 800.0})
 
-    def test_producer_and_local_seed_facts_are_summarised_per_arm(self) -> None:
+    def test_producer_facts_and_local_hits_are_summarised_per_arm(self) -> None:
         record = support.reduction_record("t1", "on", 0, 1, 400)
         record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 2}, "wal_live_between_phases": False}}
         other = support.reduction_record("t2", "on", 0, 3, 400, outcome="invalid")
         other["isolation"] = {**other["isolation"], "producer": {"outcome": "invalid", "capture": {"pairings": {"open": 1, "unverified": 0, "verified": 0}, "findings": 0}, "wal_live_between_phases": True}}
         seeded = support.reduction_record("t1", "seeded", 0, 0, 500)
-        seeded["isolation"] = {**seeded["isolation"], "local_seed": {"pairings": {"open": 0, "unverified": 2, "verified": 0}, "distractors": 50}}
         seeded["delivery"] = {**seeded["delivery"], "legs": [{"fire_id": "f", "stage": 0, "shelf": "local", "status": "ok", "outcome": "hit", "actor": ["claude", seeded["native_root_id"], ""]}]}
         reduction = reduce_module.reduce(support.accept(record, other, seeded), [])
         self.assertEqual(reduction["arms"]["on"]["producer"], {"attempts": 2, "passes": 1, "captured": 1, "findings": 2, "invalid": 1, "wal_live": 1})
-        self.assertEqual(reduction["arms"]["seeded"]["local_seed"], {"attempts": 1, "pairings": 2, "empty": 0, "distractors": 50})
         self.assertEqual(reduction["arms"]["seeded"]["tasks"]["t1"]["diagnostics"]["local_hits"], 1)
 
     def test_capture_spend_is_counted_once_however_many_attempts_record_it(self) -> None:

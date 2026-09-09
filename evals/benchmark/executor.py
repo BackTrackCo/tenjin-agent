@@ -78,9 +78,6 @@ class ProvisionRequest:
     # Minted once per `live-run` invocation and reused on resume, so what a
     # provisioner writes to a shelf differs between runs of the same schedule.
     nonce: str | None = None
-    # The manifest's slice, when it names one: a provisioner that seeds locally
-    # reads the distractor count and the stale age from it.
-    slice: dict[str, Any] | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped
@@ -154,9 +151,6 @@ class ExecutorSpec:
     credential_seam: CredentialSeam | None = None
     prepare: Prepare | None = None
     stop: Stop | None = None
-    # The root session id a phase of a trial runs under (the local seed replay
-    # is one), so the delivery join can tell that phase's fires from a stray.
-    session_of: Callable[[str, str], str] | None = None
 
 
 class ExecutorError(ValueError):

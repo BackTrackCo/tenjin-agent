@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from . import FIXTURES, artifact, local_seed, runner, sha256_text, signature
+from . import FIXTURES, artifact, runner, sha256_text, signature
 from .executor import Provision, ProvisionError, ProvisionRequest
 
 NAME = "tenjin"
@@ -70,15 +70,10 @@ SEEDED: dict[str, Any] = {
     "team": {"publicFallback": "on"},
     "loop": {"idle_exit_min": 2},
 }
-# The three configs a trial's daemon runs under. `consumer` is the arm as
+# The two configs a trial's daemon runs under. `consumer` is the arm as
 # shipped. `producer` is the same with the capture ask in auto mode, so the
-# natural arm's producer is told to publish rather than asked. `seed` is the
-# local replay: `baseUrl` is set to the public shelf so the product sees no
-# team origin and the failure arm runs its local leg alone, which keeps the
-# replay off the network; the consumer's daemon is then restarted on the
-# consumer config.
-MODES = ("consumer", "producer", "seed")
-SEED_PATHS = ("shelf", "local")
+# natural arm's producer is told to publish rather than asked.
+MODES = ("consumer", "producer")
 HEALTH_TIMEOUT_S = 15.0
 HEALTH_POLL_S = 0.05
 STOP_GRACE_S = 5.0
@@ -92,11 +87,6 @@ DRY_TOKEN = "minted-at-launch"
 # on a scratch copy of the trial's repository, so drift is a refusal.
 LESSONS = FIXTURES / "live" / "lessons"
 LESSON_KEYS = frozenset({"id", "title", "commands"})
-# `fix` names the file the fix touches and the command that passes afterwards,
-# which is what the product's local record holds; a lesson without one can be
-# published to a shelf and cannot be seeded locally.
-OPTIONAL_LESSON_KEYS = frozenset({"fix"})
-FIX_KEYS = frozenset({"file", "command"})
 COMMAND_KEYS = frozenset({"command", "kind", "key", "check", "reason"})
 KEY_KINDS = frozenset({"sig_v1", "sig_v1_test"})
 FIX_SUFFIX = "-fix"
@@ -127,12 +117,11 @@ class Lesson:
     title: str
     body: Path
     commands: tuple[LessonCommand, ...]
-    fix: dict[str, str] | None = None
 
     @property
     def keys(self) -> tuple[str, ...]:
         """`<kind>:<key>` for every keyed command, the exact `--key fingerprint=` values the piece is bound to."""
-        return tuple(entry.kind_key for entry in self.commands if entry.kind_key is not None)
+        return tuple(dict.fromkeys(entry.kind_key for entry in self.commands if entry.kind_key is not None))
 
     @property
     def key_hashes(self) -> list[str]:
@@ -154,11 +143,8 @@ def lesson_named(name: str, lessons: Path | None = None) -> Lesson | None:
         data = json.loads(record.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ProvisionError(f"lesson {name!r} is unreadable: {error.__class__.__name__}") from error
-    if not isinstance(data, dict) or not LESSON_KEYS <= set(data) <= LESSON_KEYS | OPTIONAL_LESSON_KEYS or data["id"] != name or not body.is_file():
+    if not isinstance(data, dict) or set(data) != LESSON_KEYS or data["id"] != name or not body.is_file():
         raise ProvisionError(f"lesson {name!r} must be {record.name} with id, title, commands, and {body.name} beside it")
-    fix = data.get("fix")
-    if fix is not None and (not isinstance(fix, dict) or set(fix) != FIX_KEYS or not all(isinstance(fix[key], str) and fix[key] for key in FIX_KEYS)):
-        raise ProvisionError(f"lesson {name!r} fix must carry file and command")
     commands = []
     for entry in data["commands"]:
         if not isinstance(entry, dict) or set(entry) != COMMAND_KEYS or not isinstance(entry["check"], bool) or entry["kind"] not in KEY_KINDS:
@@ -166,7 +152,7 @@ def lesson_named(name: str, lessons: Path | None = None) -> Lesson | None:
         if entry["key"] is not None and not re.fullmatch(r"[0-9a-f]{16}", str(entry["key"])):
             raise ProvisionError(f"lesson {name!r} names a key that is not 16 hex characters")
         commands.append(LessonCommand(str(entry["command"]), str(entry["kind"]), entry["key"], entry["check"], str(entry["reason"])))
-    return Lesson(id=name, title=str(data["title"]), body=body, commands=tuple(commands), fix=fix)
+    return Lesson(id=name, title=str(data["title"]), body=body, commands=tuple(commands))
 
 
 def lessons_for(task: dict[str, Any], lessons: Path | None = None, selected: list[str] | None = None) -> list[Lesson]:
@@ -527,9 +513,6 @@ def seeded_config(source: Source, port: int, *, with_secret: bool = True, mode: 
     seeded = {**config, **SEEDED, "loop": {**SEEDED["loop"], "port": port}}
     if mode == "producer":
         seeded["publish"] = {"mode": "auto"}
-    if mode == "seed":
-        seeded["baseUrl"] = config.get("publicShelfUrl") or config.get("baseUrl")
-        seeded.pop(SECRET_KEY, None)
     return seeded
 
 
@@ -593,37 +576,6 @@ def wait_healthy(roots: artifact.TrialRoots, started: runner.Started, deadline_s
                 return {"pid": body["pid"], "port": record["port"]}
         time.sleep(HEALTH_POLL_S)
     raise ProvisionError(f"the daemon did not answer /health within {deadline_s:.0f}s; see {roots.output / 'daemon.log'}", code="daemon_unhealthy")
-
-
-def seed_mode_of(request: ProvisionRequest) -> str:
-    """`shelf` (the CLI publish, today's path) or `local` (the daemon replay); an arm that runs a producer seeds nothing."""
-    if request.arm.get("producer"):
-        return "none"
-    mode = request.arm.get("seed", "shelf")
-    if mode not in SEED_PATHS:
-        raise ProvisionError(f"arm {request.arm.get('id')!r} names an unknown seed path {mode!r}")
-    return mode
-
-
-def refuse_stale(request: ProvisionRequest) -> str | None:
-    """Why the stale slice cannot run against this product, or None.
-
-    The product's local record has no expiry: `pairings` carries no
-    `valid_until`, `findPairing` has no time term, and retention never prunes
-    the table (`src/hooks/failure/pairings.ts`, `src/daemon/retention.ts`).
-    Aging a row would need a direct write to `loop.db`, which this seed never
-    does. So the slice is stated in the manifest and refused here, with the
-    reason, until the product carries an expiry it can gate on.
-    """
-    if request.slice is None or request.slice.get("kind") != "stale":
-        return None
-    return STALE_REASON.format(age_days=request.slice.get("age_days"))
-
-
-STALE_REASON = (
-    "the stale slice (age_days={age_days}) cannot be seeded through the product: the local record has no valid_until and its read has "
-    "no time term, so a lesson never expires; seeding an aged row would mean writing loop.db by hand, which the seed refuses"
-)
 
 
 def start_daemon(roots: artifact.TrialRoots) -> tuple[runner.Started, dict[str, Any]]:
@@ -690,69 +642,6 @@ def start_phase(roots: artifact.TrialRoots, provision: Provision, mode: str) -> 
     return dataclasses.replace(provision, values=_values(roots, live["port"], state["token"]), stop_state=stop_state)
 
 
-def local_seed_plan(request: ProvisionRequest, lessons: list[Lesson], task_id: str) -> dict[str, Any]:
-    """What the local seed would replay: per lesson, the keyed commands the product can hold and the ones it cannot."""
-    plan = {"path": "local", "lessons": [], "distractors": 0}
-    for lesson in lessons:
-        commands = []
-        for entry in lesson.commands:
-            if entry.key is None:
-                continue
-            command = entry.command.replace("{task}", task_id)
-            reason = None
-            if lesson.fix is None:
-                reason = "no_fix_file"
-            elif command.split(" ")[0] != lesson.fix["command"].replace("{task}", task_id).split(" ")[0]:
-                reason = "cross_command"
-            commands.append({"command": command, "kind": entry.kind, "key_hash": key_hash(entry.kind_key or ""), "replayed": reason is None, "reason": reason})
-        plan["lessons"].append({"lesson": lesson.id, "title": lesson.title, "commands": commands})
-    if request.slice is not None and request.slice.get("kind") == "scale":
-        plan["distractors"] = int(request.slice["distractors"])
-    return plan
-
-
-def seed_locally(request: ProvisionRequest, roots: artifact.TrialRoots, source: Source, lessons: list[Lesson], probed: dict[str, dict[str, str | None]], token: str, task_id: str) -> dict[str, Any]:
-    """Replay the lessons (and the slice's distractors) into the trial's store through a daemon on the seed config, then settle it."""
-    from . import claude_live
-
-    port = free_port()
-    write_config(roots, source, port, with_secret=False, mode="seed")
-    started, live = start_daemon(roots)
-    cwd = str(claude_live.working_dir(roots))
-    replay = local_seed.Replay(
-        url=f"http://127.0.0.1:{live['port']}{HOOK_PATH}",
-        token=token,
-        session=claude_live.root_session_id(request.trial_id, "seed"),
-        cwd=cwd,
-        transcript=str(roots.output / "seed-transcript.jsonl"),
-    )
-    facts: dict[str, Any] = {"path": "local", "lessons": [], "distractors": 0, "events": 0}
-    try:
-        outputs = {command: str(found.get("text") or "") for command, found in probed.items()}
-        for lesson in lessons:
-            facts["lessons"].append(local_seed.seed_lesson(replay, lesson, task_id, outputs, cwd))
-        if request.slice is not None and request.slice.get("kind") == "scale":
-            count = int(request.slice["distractors"])
-            facts["distractors"] = local_seed.seed_distractors(replay, local_seed.load_distractors(), count, cwd)
-    except local_seed.LocalSeedError as error:
-        raise ProvisionError(f"the local seed failed: {error}") from error
-    finally:
-        report = stop_daemon(roots, started)
-    facts["events"] = len(replay.calls)
-    if report["wal_live"]:
-        raise ProvisionError("loop.db WAL is still live after the seed daemon stopped; the seeded store did not settle")
-    rows = local_seed.pairings_of(roots.data_dir / LOOP_DB, local_seed.project_id(cwd))
-    facts["pairings"] = local_seed.summarize(rows)
-    facts["pairing_key_hashes"] = sorted({row["key_hash"] for row in rows if row["status"] != "open"})
-    expected = sum(1 for lesson in facts["lessons"] for entry in lesson["commands"] if entry["replayed"]) + facts["distractors"]
-    closed = facts["pairings"]["unverified"] + facts["pairings"]["verified"]
-    if closed != expected:
-        raise ProvisionError(
-            f"the local seed replayed {expected} fix(es) but the store holds {closed} closed pairing(s) for this project; the product did not record the lesson the way a producer's session would"
-        )
-    return facts
-
-
 def prepare(request: ProvisionRequest) -> Provision:
     """Seed the trial's data dir and, unless this is a dry run, start its daemon."""
     source = request.source
@@ -763,27 +652,21 @@ def prepare(request: ProvisionRequest) -> Provision:
     hooks.mkdir(parents=True, exist_ok=True)
     for name, bundle in source.bundles.items():
         (hooks / name).write_bytes(bundle.read_bytes())
-    seed_mode = seed_mode_of(request)
+    # A producer arm seeds nothing: what its consumer finds is what its
+    # producer left. Every other provisioned arm seeds the task's lessons on
+    # the team shelf.
     mode = "producer" if request.arm.get("producer") else "consumer"
-    stale = refuse_stale(request)
     # A dry run mints nothing: its settings file may be read by anyone
     # reviewing the plan, so the token there is a label and not a secret.
     token = DRY_TOKEN if request.dry_run else secrets.token_hex(32)
     if not request.dry_run:
-        if stale is not None:
-            raise ProvisionError(stale)
         token_path = roots.data_dir / TOKEN_FILE
         token_path.write_text(token, encoding="utf-8")
         token_path.chmod(0o600)
     port = 0 if request.dry_run else free_port()
     write_config(roots, source, port, with_secret=not request.dry_run, mode=mode)
-    # The lesson: keyed, published through the CLI (or replayed into the
-    # store) before the consumer's daemon starts. A dry run states the title
-    # and the key hashes and publishes nothing.
-    facts: dict[str, Any] = {**source.facts, "daemon_mode": mode, "seed_path": seed_mode}
-    if stale is not None:
-        facts["stale_refusal"] = stale
-    lessons = [] if request.task is None or seed_mode == "none" else lessons_for(request.task, selected=request.arm.get("lessons"))
+    facts: dict[str, Any] = {**source.facts, "daemon_mode": mode}
+    lessons = [] if request.task is None or mode == "producer" else lessons_for(request.task, selected=request.arm.get("lessons"))
     task_id = str(request.task["id"]) if request.task is not None else ""
     pieces: list[str] = []
     probed: dict[str, dict[str, str | None]] | None = None
@@ -794,7 +677,7 @@ def prepare(request: ProvisionRequest) -> Provision:
         probed = probe_keys(roots, commands, request.environment)
         for lesson in lessons:
             check_keys(lesson, task_id, probed)
-    if lessons and seed_mode == "shelf":
+    if lessons:
         # The lesson: keyed, published through the CLI before the daemon
         # starts, so a publish that fails costs no daemon and no spend. A dry
         # run states the title and the key hashes and publishes nothing.
@@ -814,14 +697,6 @@ def prepare(request: ProvisionRequest) -> Provision:
                 pieces.append(piece_id)
             seeds.append(seed_facts(lesson, source, piece_id, probed, request.nonce, task_id))
         facts["seed"] = seeds
-    if lessons and seed_mode == "local":
-        if request.dry_run or stale is not None:
-            facts["local_seed"] = local_seed_plan(request, lessons, task_id)
-        else:
-            assert probed is not None
-            facts["local_seed"] = seed_locally(request, roots, source, lessons, probed, token, task_id)
-            # The seed daemon ran on the seed config; the consumer's runs on its own.
-            write_config(roots, source, port, with_secret=True, mode=mode)
     stop_state: dict[str, Any] = {}
     if not request.dry_run:
         started, live = start_daemon(roots)

@@ -314,7 +314,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if provisioned:
         assert spec.prepare is not None
         try:
-            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce, slice=manifest.slice))
+            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
         except executor.ProvisionError as error:
             # One trial's provisioning refused (a seed key that drifted, a
             # publish that failed, a daemon that never answered): the trial is
@@ -348,9 +348,6 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         foreign_sessions = produced.foreign_sessions
         isolation = {**isolation, "producer": produced.facts}
         artifact.refresh_repo(roots, manifest.fixture_path(task), manifest.vendor_for(task))
-    if provision is not None and provision.facts.get("local_seed"):
-        isolation = {**isolation, "local_seed": provision.facts["local_seed"]}
-        foreign_sessions = foreign_sessions + (spec.session_of(trial.trial_id, "seed"),) if spec.session_of is not None else foreign_sessions
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}

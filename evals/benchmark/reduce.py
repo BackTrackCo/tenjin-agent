@@ -135,19 +135,6 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     }
 
 
-def local_seed_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
-    seeds = [record["isolation"]["local_seed"] for record in records if isinstance(record["isolation"].get("local_seed"), dict)]
-    if not seeds:
-        return None
-    closed = [sum(seed.get("pairings", {}).get(status, 0) for status in ("unverified", "verified")) for seed in seeds]
-    return {
-        "attempts": len(seeds),
-        "pairings": sum(closed),
-        "empty": sum(1 for count in closed if count == 0),
-        "distractors": max((int(seed.get("distractors", 0)) for seed in seeds), default=0),
-    }
-
-
 def _accounting(record: dict[str, Any]) -> str:
     if record["outcome"] in PARTIAL_OUTCOMES:
         return "partial_by_cap"
@@ -388,7 +375,6 @@ def reduce(
         arm["capture_tokens"] = capture_tokens(scored)
         arm["phase_tokens"] = phase_tokens(scored)
         arm["producer"] = producer_summary(all_by_arm.get(arm_id, []))
-        arm["local_seed"] = local_seed_summary(all_by_arm.get(arm_id, []))
         tasks = list(arm["tasks"].values())
         arm["tokens"] = sum(task["tokens"] for task in tasks)
         arm["pass_rate"] = _mean([task["pass_rate"] for task in tasks])
