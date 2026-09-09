@@ -1137,6 +1137,25 @@ class UpdateCheckTest(unittest.TestCase):
         daemon = tenjin_arm.daemon_environment(roots, {"PATH": "/usr/bin"})
         self.assertEqual(daemon[tenjin_arm.NO_UPDATE_CHECK], "1")
 
+    def test_the_daemon_environment_carries_the_run_proxy_and_the_flag_that_makes_it_count(self) -> None:
+        fixture = Path(tempfile.mkdtemp())
+        (fixture / "keep.txt").write_text("x", encoding="utf-8")
+        roots = artifact.create(Path(tempfile.mkdtemp()), "t2", fixture)
+        parent = {
+            "PATH": "/usr/bin",
+            "HTTPS_PROXY": "http://proxy:8888",
+            "https_proxy": "http://proxy:8888",
+            "NO_PROXY": "127.0.0.1,localhost",
+            "NODE_USE_ENV_PROXY": "1",
+            "AWS_SECRET_ACCESS_KEY": "nope",
+        }
+        env = tenjin_arm.daemon_environment(roots, parent)
+        self.assertEqual(env["HTTPS_PROXY"], "http://proxy:8888")
+        self.assertEqual(env["https_proxy"], "http://proxy:8888")
+        self.assertEqual(env["NO_PROXY"], "127.0.0.1,localhost")
+        self.assertEqual(env["NODE_USE_ENV_PROXY"], "1")
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -592,6 +592,10 @@ def container_environment(
     if project_dir is not None:
         env[PROJECT_DIR_VAR] = project_dir_name(project_dir)
     env[container.OUTPUT_VAR] = str(roots.output)
+    # Every tenjin process in the trial, the shim included: the CLI's daily npm
+    # check is one request to a host no arm asked for, the proxy refuses it,
+    # and the refusal is what invalidates the trial.
+    env[tenjin_arm.NO_UPDATE_CHECK] = "1"
     for name in INHERITED:
         value = parent.get(name)
         if value:

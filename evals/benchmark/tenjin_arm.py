@@ -715,8 +715,25 @@ def daemon_argv(roots: artifact.TrialRoots) -> list[str]:
 DAEMON_ARGV: Callable[[artifact.TrialRoots], list[str]] = daemon_argv
 
 
+# The run's only route out is the allowlist proxy, and a daemon told nothing
+# about it dials each host directly. On an `--internal` network that reaches
+# nothing, so every shelf leg fails as a bare `error` with no search id and the
+# arm delivers nothing while the run still reports four healthy attempts. Node
+# 24 reads the addresses for `fetch` only under `NODE_USE_ENV_PROXY`, so the
+# flag travels with them or none of them count.
+PROXY_NAMES = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "NODE_USE_ENV_PROXY",
+)
+
+
 def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None = None) -> dict[str, str]:
-    """The daemon's allowlist: the trial's own roots and the locale names, nothing of the operator's."""
+    """The daemon's allowlist: the trial's own roots, the run's proxy and the locale names, nothing of the operator's."""
     parent = os.environ if parent is None else parent
     env = {
         "PATH": parent.get("PATH", ""),
@@ -724,7 +741,7 @@ def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None
         "TENJIN_DATA_DIR": data_dir_string(roots),
         NO_UPDATE_CHECK: "1",
     }
-    for name in ("LANG", "TMPDIR"):
+    for name in ("LANG", "TMPDIR", *PROXY_NAMES):
         if parent.get(name):
             env[name] = parent[name]
     return env

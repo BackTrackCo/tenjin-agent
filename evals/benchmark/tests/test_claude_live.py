@@ -757,9 +757,13 @@ class ChildEnvironmentTest(LiveCase):
                 "HOME",
                 "LANG",
                 "TENJIN_DATA_DIR",
+                "TENJIN_NO_UPDATE_CHECK",
                 "TENJIN_PUBLISH_MODE",
             ],
         )
+        # The CLI's daily npm check would be one refused request at the proxy,
+        # and the refusal is what throws the trial away.
+        self.assertEqual(env["TENJIN_NO_UPDATE_CHECK"], "1")
         self.assertEqual(env["HOME"], str(self.roots.home))
         self.assertEqual(env["TENJIN_DATA_DIR"], str(self.roots.data_dir))
         self.assertEqual(env[claude_live.PROJECT_DIR_VAR], self.session_id)
