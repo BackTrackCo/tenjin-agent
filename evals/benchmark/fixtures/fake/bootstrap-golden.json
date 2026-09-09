@@ -1,0 +1,56 @@
+{
+  "note": "Frozen output of evals.benchmark.reduce.paired_bootstrap. Regenerate only with a benchmark version bump.",
+  "cases": [
+    {
+      "name": "single_task",
+      "seed": 1,
+      "ratios": [0.8],
+      "expected": {
+        "method": "task_paired_percentile",
+        "point": 0.8,
+        "low": 0.8,
+        "high": 0.8,
+        "tasks": 1,
+        "resamples": 2000,
+        "confidence": 0.95,
+        "seed": 1
+      }
+    },
+    {
+      "name": "three_task_corpus",
+      "seed": 20260907,
+      "ratios": [0.85, 0.7916666666666666, 0.8333333333333334],
+      "expected": {
+        "method": "task_paired_percentile",
+        "point": 0.825,
+        "low": 0.791666666667,
+        "high": 0.85,
+        "tasks": 3,
+        "resamples": 2000,
+        "confidence": 0.95,
+        "seed": 20260907
+      }
+    },
+    {
+      "name": "eight_task_mixed",
+      "seed": 424242,
+      "ratios": [0.62, 0.71, 0.79, 0.83, 0.9, 0.97, 1.06, 1.21],
+      "expected": {
+        "method": "task_paired_percentile",
+        "point": 0.88625,
+        "low": 0.76875,
+        "high": 1.01,
+        "tasks": 8,
+        "resamples": 2000,
+        "confidence": 0.95,
+        "seed": 424242
+      }
+    },
+    {
+      "name": "no_task",
+      "seed": 7,
+      "ratios": [],
+      "expected": null
+    }
+  ]
+}
