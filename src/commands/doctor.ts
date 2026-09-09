@@ -60,7 +60,6 @@ import type {
 } from '../lib/wallet';
 import type { CommandContext, CommandResult } from '../context';
 import { openLoopDbForCli } from '../lib/loop-db';
-import type { LoopDb } from '../hooks/store';
 import { runRetention } from '../daemon/retention';
 
 /**
@@ -237,7 +236,7 @@ export async function collectDoctorChecks(
   const built: BuiltCheck[] = [
     checkNode(),
     // One open, two facts: the file opens, and what it holds that is waiting.
-    ...checkLoopDb(ctx.dataDir, deps.openLoopDb ?? openLoopDbForCli, teamMode),
+    ...checkLoopDb(ctx.dataDir, deps.openLoopDb ?? openLoopDbForCli),
   ];
   // Only when there is something to say: a machine on the default data dir is
   // the ordinary case and gets no line about it.
@@ -359,8 +358,8 @@ export async function runDoctor(
 
 /**
  * The five files and directories the loop database replaced. Deleted by
- * `doctor --prune`, never imported: the pairings and the outcome history in
- * `state.db` are a record of a system that no longer exists, and a one-time
+ * `doctor --prune`, never imported: the error→fix records and the outcome
+ * history in `state.db` are a record of a system that no longer exists, and a one-time
  * importer is code that lives forever to serve a week (plan 03, owner
  * decision 3).
  *
@@ -446,7 +445,7 @@ function checkNode(): BuiltCheck {
  * Does this machine's loop database open, and what is it holding?
  *
  * The whole of the loop's state — every fire and leg, the gate marks, the
- * error→fix pairings, the search record, the finding queue — is one SQLite
+ * search record, the finding queue — is one SQLite
  * file opened through Node's built-in module. The daemon fails OPEN without
  * it, which is the right posture for a tool call and the wrong one for a
  * diagnosis: a machine whose loop has quietly stopped remembering anything
@@ -454,18 +453,15 @@ function checkNode(): BuiltCheck {
  * doctor opens it, which proves the module, the file and its shape in one go.
  *
  * THE OPEN IS THE PROBE: a separate `node:sqlite` import check answers a
- * strict subset of what opening the real file answers. The same open serves
- * the `pairings` line below, so the diagnosis costs one handle, not two.
+ * strict subset of what opening the real file answers, so there is no second
+ * check and no second handle.
  */
-function checkLoopDb(dir: string, open: typeof openLoopDbForCli, teamMode: boolean): BuiltCheck[] {
+function checkLoopDb(dir: string, open: typeof openLoopDbForCli): BuiltCheck[] {
   const path = loopDbPath(dir);
   try {
     const db = open(dir);
     try {
-      return [
-        { result: { name: 'store', status: 'ok', required: true, detail: `${path} open` } },
-        ...(teamMode ? [checkPairings(db)] : []),
-      ];
+      return [{ result: { name: 'store', status: 'ok', required: true, detail: `${path} open` } }];
     } finally {
       db.close();
     }
@@ -489,41 +485,6 @@ function checkLoopDb(dir: string, open: typeof openLoopDbForCli, teamMode: boole
       },
     ];
   }
-}
-
-/**
- * Fixes this machine worked out that no piece explains yet.
- *
- * A closed code-scope pairing with no `post_id` is an error someone already
- * solved here and nowhere else: the turn-end ask names each one with its key,
- * and `publish --key` stamps the pairing when the write-up lands. So this is a
- * count of what the shelf is still missing, never a defect — `ok` either way,
- * with no fix line, because the remedy is a piece only the agent that made the
- * fix can write.
- *
- * TEAM MODE ONLY: on the public marketplace there is no shelf for a teammate to
- * find the answer on, so the number would be a standing reproach with nowhere
- * to send it.
- */
-function checkPairings(db: LoopDb): BuiltCheck {
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM pairings
-       WHERE post_id IS NULL AND scope = 'code' AND closed_at IS NOT NULL`,
-    )
-    .get() as unknown as { n?: unknown };
-  const waiting = typeof row?.n === 'number' ? row.n : 0;
-  return {
-    result: {
-      name: 'pairings',
-      status: 'ok',
-      required: false,
-      detail:
-        waiting === 0
-          ? 'none waiting for the shelf'
-          : `${waiting} fixed, not yet written up (the turn-end ask names them)`,
-    },
-  };
 }
 
 /**
@@ -1505,13 +1466,13 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
  *
  * Four questions an operator actually asks — is this machine able to run the
  * CLI, can it reach the shelf, is the loop wired, can it pay — instead of one
- * flat list of fifteen. A check whose name is missing here would not render, so
+ * flat list of fourteen. A check whose name is missing here would not render, so
  * the doctor test walks a full run and asserts every name is placed.
  */
 const CHECK_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Environment', ['node', 'store', 'config', 'data-dir']],
   ['Shelf', ['api', 'read', 'search', 'team shelf']],
-  ['Hooks', ['daemon', 'entries', 'skills', 'pairings']],
+  ['Hooks', ['daemon', 'entries', 'skills']],
   ['Wallet', ['wallet', 'wallet-custody', 'balance']],
 ];
 

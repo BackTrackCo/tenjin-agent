@@ -34,7 +34,8 @@ import type { CommandContext, CommandResult } from '../context';
  */
 
 /** The prefix `fires.delivered` carries when the fire actually showed a piece;
- *  the rest of the value is the resource id, empty for a local pairing. */
+ *  the rest of the value is the resource id, empty for an answer that names no
+ *  marketplace resource (a parked handoff a dispatch wrote itself). */
 const INJECTED = 'inject:';
 
 function all(db: LoopDb, sql: string, params: Array<number | string>): Row[] {
@@ -46,10 +47,9 @@ function str(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-/** The piece behind a delivered fire. A local pairing carries one too:
- *  `pairingAnswer` delivers it under `pairing:<id>`, so a delivered pairing
- *  counts as a finding like any shelf piece. Only a bare `inject:` names
- *  nothing, and only a uuid is a marketplace resource the shelf will take. */
+/** The piece behind a delivered fire. Only a bare `inject:` names nothing, and
+ *  only a uuid is a marketplace resource the shelf will take — an id in any
+ *  other spelling is this machine's own and goes no further. */
 function resourceIdOf(delivered: unknown): string | null {
   if (typeof delivered !== 'string' || !delivered.startsWith(INJECTED)) return null;
   return str(delivered.slice(INJECTED.length));
@@ -531,7 +531,7 @@ async function postGraded(
   // already recorded is owed to the shelf whenever it was made, and the NULL
   // stamp is the whole debt. So a hand `--label` on a fire older than `--since`
   // is posted here, and a leg whose post failed last run is retried forever.
-  // A leg with no search id (a local pairing, this machine's own record) has no
+  // A leg with no search id (a parked handoff, read off this machine) has no
   // shelf to owe and is never selected, so it cannot pile up as "not routed".
   const rows = all(
     db,
@@ -565,7 +565,7 @@ async function postGraded(
       const item = buildOutcomeItem({
         status: wireStatus(verdict.outcome, verdict.by),
         // Only a uuid: the server drops an outcome naming a non-candidate, and a
-        // local pairing has no marketplace resource at all.
+        // parked local answer has no marketplace resource at all.
         ...(UUID_RE.test(resourceId) ? { resourceId } : {}),
       });
       await postOutcomes(searchId, [item], {

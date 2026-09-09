@@ -57,8 +57,8 @@ const HOOK_FILES = ['tenjin-daemon.mjs', 'tenjin-shim.mjs', VITEST_REPORTER_FILE
  * `~/.tenjin/hooks/*.mjs`, which `install` writes and rewrites.
  *
  * `~/.tenjin/loop.db` IS KEPT. It reads like hook state and is written by the
- * daemon, but what it HOLDS is the operator's: the error→fix pairings this
- * machine worked out for itself, its search record and its outcome history.
+ * daemon, but what it HOLDS is the operator's: its search record and its
+ * outcome history.
  * That is the same class as the wallet, the config and the library — their own
  * record, unrecoverable if deleted, and `install` did not create it. The
  * `-wal`/`-shm` sidecars stay with it; they are meaningless apart from it.
@@ -136,7 +136,7 @@ export type SettingsSkipReason =
 export function keptItems(hasShelfSecret: boolean): string[] {
   return [
     'your wallet, config (publish.mode included, so a later install resumes it), and library under ~/.tenjin',
-    'the loop database ~/.tenjin/loop.db — the error→fix pairings this machine worked out, your search record and your outcome history; a later install picks it up as it is',
+    'the loop database ~/.tenjin/loop.db — your search record and your outcome history; a later install picks it up as it is',
     ...(hasShelfSecret
       ? [
           'the team shelf’s shelfBypassSecret, in that config — a shared credential, so clear it before handing the machine on: `tenjin config set shelfBypassSecret ""`',

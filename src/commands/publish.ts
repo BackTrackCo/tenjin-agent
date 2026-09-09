@@ -49,7 +49,6 @@ import { describeWallet, resolveWalletProvider, type WalletProvider } from '../l
 import { describeChildFinding, readChildFinding, type ChildFinding } from '../lib/child-findings';
 import { AGENT_ID_RE } from '../lib/grade';
 import { projectId } from '../hooks/failure/keys';
-import { withLoopDb } from '../lib/loop-db';
 import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
 import { readRegularUtf8File } from '../lib/regular-file';
 import type { CommandContext, CommandResult } from '../context';
@@ -269,8 +268,8 @@ export async function runPublish(
    * BEFORE THAT. The queue is machine-wide and `publish.mode` resolves from the
    * CURRENT directory, so without this a finding harvested in a private repo
    * under `review` is publishable from an unrelated `full-auto` repo, inside the
-   * window, with no confirm anywhere: the same cross-project bug class `pairings`
-   * binds `project IS ?` against. `--yes` rather than the consent cascade,
+   * window, with no confirm anywhere: a finding written about one checkout going
+   * out as if it were about another. `--yes` rather than the consent cascade,
    * because `full-auto` clears the cascade and this is the one gate that must
    * survive it.
    *
@@ -583,7 +582,6 @@ export async function runPublish(
       agentId,
       ...(finding === undefined ? {} : { findingId: finding.id }),
     });
-    stampPairings(ctx.dataDir, keys, result.resourceId);
   }
   // Park the named claims on the draft (record's own spelling: the store matches
   // ids by exact string), so the promotion can send what this create withheld.
@@ -641,34 +639,6 @@ export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
     parsed.push({ kind: flag.slice(0, eq) as PostKeyKind, key: flag.slice(eq + 1) });
   }
   return normalizePostKeys(parsed, '--key');
-}
-
-/**
- * The fix this piece explains, named once. The turn-end ask hands the agent
- * `--key fingerprint=sig_v1:<hash>`; a `pairings` row stores the hash alone, so
- * the stamp matches on the part after the prefix, and only where nothing has
- * claimed the row yet — a second piece under the same key does not displace the
- * first, and re-running the same publish is not a second stamp.
- *
- * NOT ON A DRAFT, which is why the call sits under the same `!parksPrivately`
- * guard as the dedup record: a draft answered nobody, so the pairing is still
- * owed a write-up and must stay on offer until the promotion publishes one.
- *
- * BEST EFFORT, BECAUSE THE PUBLISH HAS ALREADY LANDED. A `loop.db` that cannot
- * be opened or written costs one repeat of the ask at the next turn end;
- * failing the command here would report a piece that is up as a failure.
- */
-function stampPairings(dataDir: string, keys: PostKeyInput[], postId: string): void {
-  const fingerprints = keys.filter((k) => k.kind === 'fingerprint');
-  if (fingerprints.length === 0) return;
-  try {
-    withLoopDb(dataDir, (db) => {
-      const stamp = db.prepare('UPDATE pairings SET post_id = ? WHERE key = ? AND post_id IS NULL');
-      for (const { key } of fingerprints) stamp.run(postId, key.slice(key.indexOf(':') + 1));
-    });
-  } catch {
-    // See above: the ask names the fix again next turn.
-  }
 }
 
 function warnUnrecorded(

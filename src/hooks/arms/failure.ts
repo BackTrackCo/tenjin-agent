@@ -1,40 +1,20 @@
-import { basename } from 'node:path';
 import type { HookTool } from '../../adapters/types';
-import { mask } from '../../lib/redact';
 import { deliver } from '../deliver';
-import { projectId } from '../failure/keys';
-import {
-  closeOpenPairings,
-  findPairing,
-  openPairing,
-  pairingAnswer,
-  pairingIdOf,
-  rememberReplay,
-} from '../failure/pairings';
-import {
-  allowedHeads,
-  errorLine,
-  filesInError,
-  sigV1,
-  type ErrorLine,
-  type Signature,
-} from '../failure/signature';
+import { allowedHeads, errorLine, sigV1, type ErrorLine } from '../failure/signature';
 import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-identity';
 import { getMark } from '../gates';
-import { localLeg } from '../legs/local';
 import { keysLeg, searchLeg, teamOrigin } from '../legs/shelf';
 import { question } from '../question';
-import type { Arm, FireContext, Leg, Question } from '../types';
+import type { Arm, Leg, Question } from '../types';
 import { BASH_START } from './context';
 
 /**
  * The failure arm (13-pr-d-local-arms.md, "failure"). An agent's command
  * fails, and the arm asks about it in two rounds.
  *
- * ROUND ONE IS THE FINGERPRINTS: this machine's own error-to-fix record and
- * the team shelf's keys, both under the failure's `sig_v1` and `sig_v1_test`,
- * the teammate's piece first and the local record as the fallback (decision
- * 13).
+ * ROUND ONE IS THE FINGERPRINTS: the team shelf's keys, under the failure's
+ * `sig_v1` and `sig_v1_test`, both sent in the one resolve request so the
+ * server picks between them.
  *
  * ROUND TWO ASKS THE SAME SHELF IN WORDS, with the error line as the runner
  * printed it, and runs only when round one answered nothing (`ask.ts` stops at
@@ -49,28 +29,13 @@ import { BASH_START } from './context';
  * leg: the marketplace holds none of this team's errors, and every hit in a
  * 150-search census of this shelf came from the team side.
  *
- * Else a pairing opens so this agent's next passing run can close it, and a
- * pass closes whatever this agent had open on the same head under the #269
- * rule.
+ * THE ARM ONLY ASKS. It writes nothing about the failure, so a fire that finds
+ * nothing leaves its ledger row and no other trace.
  *
  * `tool.ok` is `decode`'s: false on `PostToolUseFailure` and on a Bash
  * `PostToolUse` whose output carries an error marker (decision 9). The arm
  * never reads text to decide WHETHER something failed, only WHAT.
  */
-
-/** What `plan` derived, kept for `after` under the same fire: `after` must
- *  write what was ASKED, and the test-identity read is not repeatable. */
-interface Failure {
-  head: string;
-  cwd: string;
-  command: string;
-  errorLine: string;
-  errorFiles: string[];
-  sig: Signature | null;
-  testSig: TestSignature | null;
-}
-
-const planned = new WeakMap<FireContext, Failure>();
 
 function commandOf(tool: HookTool | undefined): string {
   const command = tool?.input.command;
@@ -115,26 +80,18 @@ export const failureArm: Arm = {
   wait: 'tool',
   on: [{ event: 'tool.after', kind: 'shell' }],
 
-  /** A pass: close what this agent had open on the same head. */
-  before(ctx) {
-    if (!ctx.deps.config().hooks.failure) return;
-    const tool = ctx.input.tool;
-    if (tool?.ok !== true) return;
-    const command = commandOf(tool);
-    const heads = allowedHeads(command);
-    if (heads.length === 0) return;
-    closeOpenPairings(ctx.deps.db, ctx.actor, ctx.input.cwd, command, heads, ctx.deps.clock());
-  },
-
   async plan(ctx) {
     const cfg = ctx.deps.config();
     if (!cfg.hooks.failure) return null;
+    // Both rounds go to a team origin or nowhere: there is no public resolve,
+    // and no public leg by decision. A machine with no team shelf therefore has
+    // nothing to ask however the failure reads, and asking that here is what
+    // keeps it from paying for the test-report read below to learn it.
+    if (teamOrigin(cfg) === null) return null;
     const tool = ctx.input.tool;
     if (tool?.ok !== false) return null;
     const command = commandOf(tool);
-    const heads = allowedHeads(command);
-    const head = heads[heads.length - 1];
-    if (head === undefined) return null;
+    if (allowedHeads(command).length === 0) return null;
     const { db } = ctx.deps;
     const cwd = ctx.input.cwd;
     const text = failureText(tool);
@@ -158,128 +115,23 @@ export const failureArm: Arm = {
     // the text round is what reaches that write-up.
     const q = questionOf(found, testSig);
     if (q === null) return null;
-    const project = projectId(cwd);
-    planned.set(ctx, {
-      head,
-      cwd,
-      command: mask(command),
-      // The masked line off the question, not a second `mask` of the same
-      // text: one masking path means the row and the query can never disagree
-      // about what was stubbed.
-      errorLine: q.text,
-      errorFiles: found === null ? [] : filesInError(found.block),
-      sig,
-      testSig,
-    });
 
-    const local = localLeg('local', () => {
-      // THE TEST KEY IS ASKED FIRST. `sig_v1_test` keys on what the runner
-      // itself declared — file, suite, test — so it names one failure and no
-      // other. `sig_v1` is a hash of console text, and every failure whose
-      // message normalizes to the same 200 bytes collapses onto one value; if
-      // it answered first, a record earned by one of those failures would be
-      // replayed at all of them, on a run where the runner had already said
-      // exactly which test broke.
-      for (const key of [testSig?.key, sig?.key]) {
-        if (key === undefined) continue;
-        const match = findPairing(db, project, key);
-        if (match !== null) return pairingAnswer(match);
-      }
-      return null;
-    });
     const fine: string[] = [];
     if (sig !== null) fine.push('sig_v1:' + sig.key);
     if (testSig !== null) fine.push('sig_v1_test:' + testSig.key);
-    // Both shelf legs go to a team origin or nowhere: there is no public
-    // resolve, and no public leg by decision. A resolve with no keys in it is
-    // a request that can only answer nothing, so it is not sent; the text
-    // round is what a keyless failure has instead.
-    const team = teamOrigin(cfg) !== null;
-    const stages: Leg[][] = [team && fine.length > 0 ? [local, keysLeg(cfg, fine)] : [local]];
-    if (team && q.text.length > 0) stages.push([searchLeg('team', 'failure', cfg)]);
+    // A resolve with no keys in it is a request that can only answer nothing,
+    // so it is not sent; the text round is what a keyless failure has instead.
+    const stages: Leg[][] = [];
+    if (fine.length > 0) stages.push([keysLeg(cfg, fine)]);
+    if (q.text.length > 0) stages.push([searchLeg('team', 'failure', cfg)]);
+    // A plan with no stage in it would run no leg and still be filed as a
+    // `no-hit` fire: a miss the ledger records against a shelf nothing was ever
+    // asked. Null is the honest `no-question` instead.
+    if (stages.length === 0) return null;
     return { question: q, stages };
   },
 
   deliver(answer) {
     return deliver(answer, answer.shelf);
-  },
-
-  /**
-   * Every local write, on any outcome but `deadline` (which never reaches
-   * here). A local hit is remembered so this agent's later pass can be its
-   * second closer; a shelf hit opens a pairing even with no file, so this
-   * machine's later close is recorded too; anything else opens the rows the
-   * failure earned. A question another fire of this actor already holds or
-   * answered (`asked`, `cached`, `seen`) opened its rows then: a re-run is one
-   * problem, not two.
-   *
-   * A FIRE MAY HAVE ASKED WITH NO FINGERPRINT AT ALL, since the text round
-   * needs only an error line. There is then no key to open a row under and
-   * nothing to close later, so both blocks below fall through and the fire
-   * leaves the ledger row it already has and nothing else. That is the honest
-   * outcome: a pairing under no key could never be found again.
-   */
-  after(ctx, result, question) {
-    const failure = planned.get(ctx);
-    if (question === null || failure === undefined) return null;
-    const { db, clock } = ctx.deps;
-    const now = clock();
-    const answer = result.answer;
-    if (answer?.shelf === 'local') {
-      const id = pairingIdOf(answer.resourceId);
-      if (id !== null) rememberReplay(db, ctx.actor, failure.head, id, now);
-      return null;
-    }
-    if (result.reason === 'asked' || result.reason === 'cached' || result.reason === 'seen') {
-      return null;
-    }
-    // A shelf answered: the keys leg in round one, or the team shelf in round
-    // two. Both handed this agent somebody else's fix for THIS failure, so
-    // both earn the row that its next pass closes — the case where a
-    // teammate's piece actually worked is exactly the one the local record
-    // must not miss.
-    const post = answer?.shelf === 'keys' || answer?.shelf === 'team' ? answer : null;
-    const base = {
-      session: ctx.actor.session,
-      cwd: failure.cwd,
-      cmdHead: failure.head,
-      cmd: failure.command,
-      errorLine: failure.errorLine,
-    };
-    const opened: number[] = [];
-    if (failure.sig !== null && (failure.errorFiles.length > 0 || post !== null)) {
-      opened.push(
-        openPairing(
-          db,
-          {
-            ...base,
-            kind: 'sig_v1',
-            key: failure.sig.key,
-            errorFiles: failure.errorFiles,
-          },
-          now,
-        ),
-      );
-    }
-    if (failure.testSig !== null) {
-      opened.push(
-        openPairing(
-          db,
-          {
-            ...base,
-            kind: 'sig_v1_test',
-            key: failure.testSig.key,
-            // The basename: the close rule compares basenames, and the key
-            // already keeps the directory apart.
-            errorFiles: [basename(failure.testSig.file)],
-          },
-          now,
-        ),
-      );
-    }
-    if (post !== null) {
-      for (const id of opened) rememberReplay(db, ctx.actor, failure.head, id, now);
-    }
-    return null;
   },
 };

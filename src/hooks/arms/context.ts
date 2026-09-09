@@ -55,15 +55,16 @@ export const contextArm: Arm = {
     { event: 'tool.after', kind: 'read' },
   ],
   /**
-   * EVERY edited path is marked whatever its extension: the close rule asks
-   * "did a tracked file change since this pairing opened", and a hook cannot
+   * EVERY edited path is marked whatever its extension: the reader asks "did
+   * this actor edit anything at all" (`capture.ts`, `hasMark(db, actor,
+   * EDITED_PREFIX)`, the publish arm's `edited` evidence), and a hook cannot
    * ask git that in front of a tool call.
    */
   before(ctx) {
     const { db, clock } = ctx.deps;
-    // Bookkeeping for the failure and publish arms — the marks are read by
-    // their close rule and their evidence test — so it runs while either is on
-    // and stops when both are off.
+    // Bookkeeping for the failure and publish arms — the shell stamp is the
+    // failure arm's, the edit marks are the publish arm's evidence test — so it
+    // runs while either is on and stops when both are off.
     const { hooks } = ctx.deps.config();
     if (!hooks.failure && !hooks.publish) return;
     const kind = ctx.input.tool?.kind;

@@ -2488,59 +2488,6 @@ describe('runDoctor — the grouped page', () => {
 });
 
 /**
- * The `pairings` line: fixes this machine worked out that no piece explains yet.
- * Never a defect and never a fix line — the write-up is the agent's to make, and
- * the turn-end ask is where it is asked for.
- */
-describe('runDoctor — pending pairings', () => {
-  const TEAM = { baseUrl: 'https://backtrack.tenjin.sh', shelfBypassSecret: 'shelf-secret-abc' };
-
-  async function pairing(post_id: string | null, scope = 'code', closed = 1): Promise<void> {
-    const db = openLoopDb(dir);
-    db.prepare(
-      `INSERT INTO pairings (uid, at, session, machine, kind, key, scope, status, closes, closed_at, post_id)
-       VALUES (?, 1, 's', 'm', 'sig_v1', 'sig_v1:abc', ?, 'unverified', 1, ?, ?)`,
-    ).run(`p-${Math.random()}`, scope, closed === 1 ? 2 : null, post_id);
-    db.close();
-  }
-
-  async function pairingsCheck(): Promise<CheckResult | undefined> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
-    return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'pairings');
-  }
-
-  it('says nothing on a machine that is not on a team shelf', async () => {
-    await pairing(null);
-    expect(await pairingsCheck()).toBeUndefined();
-  });
-
-  it('counts the closed code-scope fixes no piece explains yet', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify(TEAM));
-    await pairing(null);
-    await pairing(null);
-    const check = await pairingsCheck();
-    expect(check?.status).toBe('ok');
-    expect(check?.detail).toBe('2 fixed, not yet written up (the turn-end ask names them)');
-    expect(check?.fix).toBeUndefined();
-  });
-
-  it('counts neither a stamped pairing, a user-scope one, nor an open one', async () => {
-    await writeFile(join(dir, 'config.json'), JSON.stringify(TEAM));
-    await pairing('post-1');
-    await pairing(null, 'user');
-    await pairing(null, 'code', 0);
-    const check = await pairingsCheck();
-    expect(check?.detail).toBe('none waiting for the shelf');
-  });
-});
-
-/**
  * `tenjin doctor --prune`: the retention rule by hand, plus the retired store.
  *
  * NAMED ENTRIES ONLY. The data dir also holds the wallet, the config and the

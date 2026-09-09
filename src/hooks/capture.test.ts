@@ -93,33 +93,6 @@ function seedSearch(
   );
 }
 
-/** One pairing this session opened and closed, as the failure arm leaves it. */
-function seedPairing(
-  db: LoopDb,
-  over: { key: string; kind?: string; scope?: string; postId?: string | null },
-): void {
-  const id = db
-    .prepare(
-      `INSERT INTO pairings (uid, at, session, project, machine, kind, key, error_line,
-         error_files, scope, status, closes, closed_at, post_id)
-       VALUES (?, ?, 's1', NULL, 'm', ?, ?, ?, '[]', ?, 'unverified', 1, ?, ?) RETURNING id`,
-    )
-    .get(
-      randomUUID(),
-      NOW - 30,
-      over.kind ?? 'sig_v1_test',
-      over.key,
-      'AssertionError: expected 3 to be 4',
-      over.scope ?? 'code',
-      NOW - 20,
-      over.postId ?? null,
-    ) as { id: number };
-  db.prepare(
-    `INSERT INTO pairing_closes (pairing_id, session, at, fix_cmd, fix_files, scope)
-     VALUES (?, 's1', ?, 'vitest', '["src/http.ts"]', ?)`,
-  ).run(id.id, NOW - 20, over.scope ?? 'code');
-}
-
 function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW - 10): string {
   const id = randomUUID();
   setFact(
@@ -297,26 +270,22 @@ describe('the child ask', () => {
     expect(findings(db)).toMatchObject([{ body: 'first', searchId: SEARCH_ID }]);
   });
 
-  it('carries no miss or fix line, though the lead in the same session gets both', async () => {
+  it('carries no miss line, though the lead in the same session gets one', async () => {
     const db = freshDb();
     started(db);
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
     seedSearch(db, { id: 'open-1' });
-    seedPairing(db, { key: 'ab12' });
 
-    // The open search and the closed pairing are the session's, and only the
-    // lead can act on either: a child must not be handed them.
+    // The open search is the session's, and only the lead can act on it: a
+    // child must not be handed it.
     const child = (await fire(db, childStop()))?.context ?? '';
     expect(child.startsWith('Tenjin: this turn did work worth a second look.')).toBe(true);
     expect(child).not.toContain('had no answer');
     expect(child).not.toContain('open-1');
-    expect(child).not.toContain('You fixed');
-    expect(child).not.toContain('ab12');
 
     seedFire(db, LEAD, 'research', 'hit');
     const lead = (await fire(db, leadStop()))?.context ?? '';
     expect(lead).toContain('(open-1) had no answer');
-    expect(lead).toContain('`--key fingerprint=sig_v1_test:ab12`');
   });
 });
 
@@ -423,23 +392,6 @@ describe('the lead ask', () => {
     expect(reason).toContain('(legacy-1)');
     expect(reason).not.toContain('closed-1');
     expect(reason).not.toContain('hit-1');
-  });
-
-  it('names a closed code-scope fix with its key, but not a user-scope or an already-published one', async () => {
-    const db = freshDb();
-    seedFire(db, LEAD, 'research', 'hit');
-    seedPairing(db, { key: 'ab12' });
-    seedPairing(db, { key: 'usr9', scope: 'user' });
-    seedPairing(db, { key: 'done7', postId: 'post_1' });
-    seedPairing(db, { key: 'cd34', kind: 'sig_v1' });
-    const reason = (await fire(db, leadStop()))?.context ?? '';
-    expect(reason).toContain(
-      '- You fixed `AssertionError: expected 3 to be 4` (key `sig_v1_test:ab12`): ' +
-        'publish the explanation with `--key fingerprint=sig_v1_test:ab12`',
-    );
-    expect(reason).toContain('`--key fingerprint=sig_v1:cd34`');
-    expect(reason).not.toContain('usr9');
-    expect(reason).not.toContain('done7');
   });
 
   it("names what this session's children published, and not another session's child", async () => {

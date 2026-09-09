@@ -11,14 +11,7 @@ import { EDITED_PREFIX } from './arms/context';
 import { factsWithPrefix, setFact } from './facts';
 import { getMark, setMark } from './gates';
 import { teamOrigin } from './legs/shelf';
-import {
-  captureAsk,
-  CHILD_PUBLISHED_LINE,
-  FINDING_TAG,
-  FIX_LINE,
-  MISS_LINE,
-  type QueuedLine,
-} from './prose';
+import { captureAsk, CHILD_PUBLISHED_LINE, FINDING_TAG, MISS_LINE, type QueuedLine } from './prose';
 import type { LoopDb } from './store';
 import { clean } from './text';
 import type { Actor, FireContext } from './types';
@@ -140,35 +133,6 @@ function missLines(db: LoopDb, session: string): string[] {
     const id = typeof row.search_id === 'string' ? row.search_id : '';
     const question = clean(typeof row.question === 'string' ? row.question : '', 200);
     if (id !== '' && question !== '') out.push(MISS_LINE(question, id));
-  }
-  return out;
-}
-
-/**
- * The errors this session closed that no piece explains yet, oldest first.
- * THE LEAD'S ASK ONLY, like the misses: the session's closed pairings are not
- * a child's to write up.
- *
- * CODE SCOPE ONLY: a `user`-scope pairing is a typo in a command, and its fix
- * teaches nobody. A row with a `post_id` has already been written up, so it is
- * named once and never again — that stamp is what `publish --key` writes.
- */
-function fixLines(db: LoopDb, session: string): string[] {
-  const rows = db
-    .prepare(
-      `SELECT p.kind, p.key, p.error_line FROM pairings p
-       JOIN pairing_closes c ON c.pairing_id = p.id
-       WHERE c.session = ? AND p.post_id IS NULL AND p.scope = 'code'
-         AND p.closed_at IS NOT NULL AND p.error_line IS NOT NULL
-       ORDER BY p.closed_at, p.id`,
-    )
-    .all(session) as unknown as Array<{ kind?: unknown; key?: unknown; error_line?: unknown }>;
-  const out: string[] = [];
-  for (const row of rows) {
-    const kind = typeof row.kind === 'string' ? row.kind : '';
-    const key = typeof row.key === 'string' ? row.key : '';
-    const line = clean(typeof row.error_line === 'string' ? row.error_line : '', 200);
-    if (kind !== '' && key !== '' && line !== '') out.push(FIX_LINE(line, kind, key));
   }
   return out;
 }
@@ -303,7 +267,6 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
     misses: audience === 'lead' ? missLines(db, actor.session) : [],
-    fixes: audience === 'lead' ? fixLines(db, actor.session) : [],
     published: audience === 'lead' ? publishedLines(db, actor.session) : [],
     queued: queued.map((q): QueuedLine => ({
       id: q.id,

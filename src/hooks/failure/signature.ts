@@ -14,7 +14,7 @@ import { shortHash } from './keys';
 
 /**
  * The heads this arm may fire behind: only a toolchain command is a failure
- * worth pairing. NOT GIT: every historical false positive (14 of 14,
+ * worth asking about. NOT GIT: every historical false positive (14 of 14,
  * tenjin-agent#212) was `git show … | grep ENOENT`, source that MENTIONS an
  * errno read through a pipe. A git failure that matters surfaces behind the
  * head that ran it.
@@ -237,7 +237,7 @@ export function commandHeads(command: string): CommandHead[] {
 
 /** The heads in this line the arm may fire behind, in order. Any, not all: in
  *  `pnpm test && echo done` the failure belongs to the FIRST half, which is
- *  why a pairing keys on an allowlisted head rather than on whichever segment
+ *  why the arm gates on an allowlisted head rather than on whichever segment
  *  ran last. */
 export function allowedHeads(command: string): string[] {
   const out: string[] = [];
@@ -484,8 +484,8 @@ export interface Signature {
 /**
  * The `sig_v1` key for one failure — message + errno + frame — or null below
  * the SPECIFICITY FLOOR: no errno and no top frame means "N tests failed"
- * normalizes to the same bytes in every repo on earth, and a pairing keyed on
- * it would replay somebody else's fix at everybody.
+ * normalizes to the same bytes in every repo on earth, and a key sent on it
+ * would resolve somebody else's fix at everybody.
  */
 export function sigV1(line: string, block: string): Signature | null {
   const message = normalizeForSig(line);

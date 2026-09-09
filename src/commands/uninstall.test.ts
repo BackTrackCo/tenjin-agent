@@ -534,9 +534,9 @@ describe('runUninstall — the loop daemon', () => {
     const { report, text } = await run();
 
     expect(report.settings.hooks).toContain('UserPromptSubmit');
-    // It holds the operator's own record — the pairings this machine worked out,
-    // its search record, its outcome history — so it is kept for the same reason
-    // the wallet and the config are, and a later install picks it up as it is.
+    // It holds the operator's own record — its search record, its outcome
+    // history — so it is kept for the same reason the wallet and the config
+    // are, and a later install picks it up as it is.
     expect(existsSync(join(data, 'loop.db'))).toBe(true);
     expect(existsSync(join(data, 'config.json'))).toBe(true);
     // And SAID so: the receipt names it under Kept, never under Removed.
