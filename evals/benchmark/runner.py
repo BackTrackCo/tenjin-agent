@@ -222,6 +222,12 @@ def isolation_of(isolation: dict[str, Any], provision: executor.Provision | None
     if provision is None:
         return isolation
     out = {**isolation, "daemon_respawned": bool((stop or {}).get("respawned", False))}
+    # Which product hook arms the seeded config turned off, on every
+    # provisioned attempt and not only where the manifest named one: an empty
+    # list is the arm as shipped, and no key at all means no provisioning.
+    off = provision.facts.get("hooks_disabled")
+    if off is not None:
+        out["hooks_disabled"] = list(off)
     seeds = provision.facts.get("seed")
     if seeds is not None:
         deleted = (stop or {}).get("seed_deleted") or {}

@@ -565,6 +565,31 @@ class ProvisionRefusalTest(TrialCase):
         self.assertNotIn("seed key drift", json.dumps(first))
         # The default code, for a provisioner that names none.
         self.assertEqual(executor.ProvisionError("plain").code, "refused")
+        # A refused attempt never provisioned, so it claims nothing about the
+        # hook arms: the field belongs to the attempts that got past prepare.
+        self.assertNotIn("hooks_disabled", first["isolation"])
+
+    def test_a_provisioned_attempt_records_the_hook_arms_its_config_turned_off(self) -> None:
+        name = "provisioned_hooks_for_this_test"
+
+        def prepare(request: executor.ProvisionRequest) -> executor.Provision:
+            return executor.Provision(facts={"hooks_disabled": list(request.arm.get("hooks_disabled") or ())})
+
+        executor.REGISTRY[name] = ExecutorSpec(name=name, harness="claude", launch=executor.REGISTRY["fake"].launch, prepare=prepare)
+        self.addCleanup(executor.REGISTRY.pop, name)
+        manifest = support.synthetic_manifest(self.dir, executor_name=name, arms=("off_nudge", "as_shipped"))
+        for arm in manifest.data["arms"]:
+            arm["provision"] = "tenjin"
+        manifest.data["arms"][0]["hooks_disabled"] = ["publish"]
+        results = runner.run(manifest, schedule.expand(manifest), self.run_dir, "sha256:schedule", self.runtime())
+        written = {}
+        for result in results:
+            record = json.loads(result.path.read_text(encoding="utf-8"))
+            records.validate(record)
+            written[record["arm_id"]] = record["isolation"].get("hooks_disabled", "absent")
+        # The arm that runs the product as shipped says so with an empty list,
+        # rather than leaving a reader to read absence as either.
+        self.assertEqual(written, {"off_nudge": ["publish"], "as_shipped": []})
 
 
 class LiveRefusalTest(TrialCase):
