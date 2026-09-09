@@ -129,6 +129,11 @@ export function daemonEnv(
     'http_proxy',
     'https_proxy',
     'no_proxy',
+    // Node 24 reads the proxy variables for `fetch` ONLY under this flag, so it
+    // rides with them. A daemon that inherits the addresses without it dials
+    // every host directly, and on a network whose only route out is that proxy
+    // each shelf leg then fails as a bare `error` with no search id.
+    'NODE_USE_ENV_PROXY',
   ];
   const out: NodeJS.ProcessEnv = {};
   for (const k of keep) if (env[k] !== undefined) out[k] = env[k];

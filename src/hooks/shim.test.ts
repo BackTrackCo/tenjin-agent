@@ -257,6 +257,7 @@ describe('daemonEnv', () => {
       HOME: '/home/u',
       HTTPS_PROXY: 'http://p:1',
       no_proxy: 'localhost',
+      NODE_USE_ENV_PROXY: '1',
       NODE_OPTIONS: '--require=/tmp/instrument.js',
       CLAUDE_CODE_SESSION_ID: 'sess-1',
       TENJIN_DATA_DIR: '/somewhere/else',
@@ -268,6 +269,7 @@ describe('daemonEnv', () => {
       HOME: '/home/u',
       HTTPS_PROXY: 'http://p:1',
       no_proxy: 'localhost',
+      NODE_USE_ENV_PROXY: '1',
       TENJIN_DATA_DIR: dir,
     });
   });
