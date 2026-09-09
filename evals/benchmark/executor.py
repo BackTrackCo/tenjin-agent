@@ -6,11 +6,11 @@ grandchild into the trial output root and never spawn a real tool, so CI
 exercises the whole chain, recursion included, with zero spend. The rows
 follow the shapes `claude_usage.py` freezes.
 
-`live` marks a spec that would start a real agent. Nothing shipped here sets
-it: this package is the offline chain, and `DEFERRED` is the seam a live
-executor registers through when one arrives. `artifact.require_isolation`
-refuses a publishable live run without an isolation attestation, and refuses
-any live run under CI.
+`live` marks a spec that would start a real agent. The one entry that sets it
+is `claude_live`, which lives in its own module and is imported only when a
+manifest names it; CI reaches it through `cli.py live-run --dry-run` and
+nowhere else. `artifact.require_isolation` refuses a publishable live run
+without an isolation attestation, and refuses any live run under CI.
 """
 
 from __future__ import annotations
@@ -188,9 +188,8 @@ REGISTRY: dict[str, ExecutorSpec] = {
 # An executor whose implementation is its own module registers itself when that
 # module is imported. Naming the module here keeps `lookup` the single entry
 # point without importing a live executor into every process that loads this
-# one, and without a circular import back from that module. Nothing offline
-# needs the seam, so it ships empty and an unknown name still fails closed.
-DEFERRED: dict[str, str] = {}
+# one, and without a circular import back from that module.
+DEFERRED = {"claude_live": "evals.benchmark.claude_live"}
 
 
 def lookup(name: str) -> ExecutorSpec:

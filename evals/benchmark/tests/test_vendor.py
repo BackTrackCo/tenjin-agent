@@ -282,3 +282,20 @@ def test_a_vendored_tasks_hash_is_not_the_bare_directory_hash(vendored_manifest,
     data, _built = vendored_manifest
     with pytest.raises(ManifestError):
         manifest_module.validate({**data, "tasks": [{**data["tasks"][0], "fixture_hash": manifest_module.fixture_hash(fixture)}]}, base)
+
+
+def test_the_live_manifests_name_the_one_archive_and_its_record_agrees_with_the_fixture() -> None:
+    manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    assert len({task["vendor"] for task in manifest.tasks}) == 1
+    built = manifest.vendor_for(manifest.tasks[0])
+    assert built is not None
+    assert built.archive.parent.name == vendor.DIR
+    assert built.archive.stat().st_size < 10 << 20
+    assert built.record["platform"] == "darwin-arm64"
+    assert built.record["node_abi"] == "137"
+    for task in manifest.tasks:
+        path = manifest.fixture_path(task)
+        assert built.record["lock_sha256"] == "sha256:" + vendor.sha256_file(path / "pnpm-lock.yaml")
+        assert [item.name for item in (path / "node_modules").iterdir()] == [".bin"]
+    smoke = manifest_module.load(cli.SMOKE_MANIFEST)
+    assert smoke.vendor_for(smoke.tasks[0]) is None

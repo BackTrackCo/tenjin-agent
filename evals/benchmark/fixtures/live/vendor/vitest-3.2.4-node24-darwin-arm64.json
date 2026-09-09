@@ -1,0 +1,12 @@
+{
+  "id": "vitest-3.2.4-node24-darwin-arm64",
+  "archive": "vitest-3.2.4-node24-darwin-arm64.tar.gz",
+  "archive_sha256": "sha256:a1c55230908e6ad737ac20f06381c23fdc6a2f080488809992dad751ae5317b3",
+  "tree_sha256": "sha256:91e29b7611b78ea237af5c76f4704ea02dbd7a1ad0b8743fb8685f83ca4d6276",
+  "files": 781,
+  "platform": "darwin-arm64",
+  "node_abi": "137",
+  "vitest": "3.2.4",
+  "lock_sha256": "sha256:85656dff4780b105a00b592827c292a4de16c8dd19bdb706d78b0f26d2709542",
+  "pnpm": "11.11.0"
+}

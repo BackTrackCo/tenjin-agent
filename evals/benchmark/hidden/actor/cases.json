@@ -1,0 +1,4 @@
+[
+  { "args": ["s1", "a7"], "expected": "s1:a7" },
+  { "args": ["s1"], "expected": "s1:root" }
+]

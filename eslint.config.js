@@ -3,7 +3,15 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**'] },
+  // Bench-1 task fixtures and hidden layers are agent-visible task code, not this package's.
+  {
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'evals/benchmark/fixtures/**',
+      'evals/benchmark/hidden/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   prettier,

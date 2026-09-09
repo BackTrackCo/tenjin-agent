@@ -7,17 +7,15 @@ one quality bar, how many model tokens did the complete agent run consume with a
 knowledge system. It does not itself produce a savings number, and nothing here touches the
 product runtime.
 
-**What this layer owns.** Bench-1 ships as three stacked layers, and this is the first: the
-whole offline chain. The frozen contracts (manifest, schedule, immutable record, usage), the
-executor and verifier registries with their fake specs, disposable roots, sentinels and the
-isolation attestation, the reducer, the report and its headline rule, and the `verify`,
-`reduce`, `report`, `summary`, `regress` and `cleanup` commands. `fake-run` drives all of it end
-to end with no model, no network and no spend, which is what the required CI lane runs and what
-this layer is for: the measurement machinery has to be trustworthy before anything real runs
-through it. The layer above adds the live executor, the vendored toolchain it needs and the
-Tenjin hooks arm; the one above that adds the corpus reset and the search-intent case export.
-Bench-2 (PR 313) then owns every real fixture as a container image, the four arms, the producer
-phase, and the readouts.
+**What this layer owns.** Bench-1 ships as three stacked layers. The first is the offline chain
+(frozen contracts, disposable roots and attestation, the record, the reducer, the report). This
+one is the live half that runs on top of it: the live executor and its argv, the vendored
+toolchain and pinned offline pnpm a real repository needs, the provisioning seam and daemon
+lifecycle, the Tenjin hooks arm, the node verifier and its hidden layer, and the real-repository
+fixtures. The layer above adds the corpus reset and the search-intent case export. Bench-2 (PR 313) then owns every real fixture as a container image, every real-task manifest including the
+hooks and keys smokes, the four arms, the producer phase, and the readouts; the fixtures under
+`fixtures/live/` sit on this side of that line only until the first image-backed fixture is
+green.
 
 Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. Run history through 2026-09-08,
 which is where the smoke runs, the retrieval findings, the corepack saga, and the pilot readout
@@ -38,31 +36,33 @@ Each contract is stated once, in the module that owns it, and held by the test m
 The tests are the specification to reach for: each names its rule and holds to it on a fixture
 the suite builds.
 
-| Module                    | What it owns                                                      | Held by                              |
-| ------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
-| `manifest.py`             | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
-| `schedule.py`             | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
-| `runner.py`               | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py` |
-| `executor.py`             | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
-| `signature.py`            | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                  |
-| `artifact.py`             | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                   |
-| `verifier.py`             | hidden verifier registry, code-owned argv, the hidden layer       | `test_verifier.py`                   |
-| `vendor.py`               | the vendored archive a task's trials extract into `node_modules`  | `test_vendor.py`                     |
-| `usage.py`                | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                      |
-| `claude_usage.py`         | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`               |
-| `records.py`              | the immutable attempt record, publish, select                     | `test_records.py`                    |
-| `loop_join.py`            | read-only delivery join on exact actor keys                       | `test_loop_join.py`                  |
-| `reduce.py`               | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                     |
-| `report.py`, `regress.py` | publishable projection, redaction guard, regression warnings      | `test_report.py`, `test_regress.py`  |
-| `discovery.py`            | the discovery counters read off a settled trial                   | `test_discovery.py`                  |
-| `reap.py`                 | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
-| `cli.py`, `selftest.py`   | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
+| Module                      | What it owns                                                      | Held by                               |
+| --------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
+| `manifest.py`               | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                    |
+| `schedule.py`               | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                    |
+| `runner.py`                 | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py`  |
+| `executor.py`               | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                    |
+| `claude_live.py`            | the live executor: argv, minted session id, per-trial settings    | `test_claude_live.py`                 |
+| `tenjin_arm.py`             | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                  |
+| `signature.py`              | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                   |
+| `artifact.py`               | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                    |
+| `verifier.py`               | hidden verifier registry, hidden layer, the run marker            | `test_verifier.py`                    |
+| `vendor.py`, `toolchain.py` | the vendored archive and the trial's pinned, offline pnpm         | `test_vendor.py`, `test_toolchain.py` |
+| `usage.py`                  | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                       |
+| `claude_usage.py`           | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`                |
+| `records.py`                | the immutable attempt record, publish, select                     | `test_records.py`                     |
+| `loop_join.py`              | read-only delivery join on exact actor keys                       | `test_loop_join.py`                   |
+| `reduce.py`                 | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                      |
+| `report.py`, `regress.py`   | publishable projection, redaction guard, regression warnings      | `test_report.py`, `test_regress.py`   |
+| `discovery.py`              | the discovery counters read off a settled trial                   | `test_discovery.py`                   |
+| `reap.py`                   | cleanup by recorded identity, never by process name               | `test_reap.py`                        |
+| `cli.py`, `selftest.py`     | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                    |
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
-bootstrap golden), `fixtures/claude/` (sanitized synthetic Claude sessions; no real transcript),
-and `fixtures/live/baseline.json` (the per-arm figures `regress` warns against). The
-real-repository fixtures, their vendored archive and the code-owned hidden layers arrive with
-the live executor in the layer above.
+bootstrap golden), `fixtures/live/` (the smoke manifests, the frozen Vitest task fixture and its
+vendored archive, the seeded lessons, the regression baseline), `fixtures/claude/` (sanitized
+synthetic Claude sessions; no real transcript), and `hidden/` (code-owned hidden layers, one per
+task, mounted only into the verifier's copy).
 
 ## Its CI lanes
 
@@ -76,6 +76,14 @@ version with every transitive dependency pinned by hash, so the required check n
 what the index served that minute. Nothing else in the package needs it, so the `fake-run`,
 `verify` and `summary` steps beside it still call a bare interpreter. The whole chain takes about
 20 seconds, and each step's own timeout bounds it.
+
+The live plumbing smoke is `benchmark-live.yml`, on a pull request touching `evals/benchmark/**`
+and on dispatch: a pinned Claude Code, `live-run --plumbing --ci-live` over the smoke manifest
+with `CLAUDE_CODE_OAUTH_TOKEN` on that one step, then `verify`, `summary`, `regress`, `cleanup`,
+and `report.json` uploaded alone. Every record is stamped automated and non-publishable, so the
+lane is evidence that the chain runs on a real agent and never a number anyone may quote. It is
+informational: not required, never blocking, and not `continue-on-error` either, because a red
+run is meant to be seen; on a fork the secret is absent and the live steps skip.
 
 ## The fake command
 
@@ -108,7 +116,83 @@ opaque ids, and hashes only, plus the run's isolation stamp: `publishable`, `iso
 makes the whole report non-publishable and no comparison in it headline eligible, and `summary`
 says so in its header.
 
-## The isolation attestation, and what an operator prepares
+## The live command and its two unwatched lanes
+
+`claude_live` is the only executor in the registry that starts a real agent, and `live-run` is
+the only command that reaches it. The two commands refuse each other's manifests, so neither path
+can quietly run the other's executor.
+
+```bash
+# what it would run. No process starts, nothing is spent.
+python3 -m evals.benchmark.cli live-run --manifest <live manifest> --out ~/bench1-live --dry-run
+
+# the real run, inside the disposable instance
+python3 -m evals.benchmark.cli live-run --manifest <live manifest> --out ~/bench1-live \
+  --attestation ~/bench1-attestation.json
+
+# the same run on a schedule: an automated environment, still attested
+python3 -m evals.benchmark.cli live-run --manifest <live manifest> --out ./bench1-run \
+  --attestation ./attestation.json --automated
+```
+
+`--dry-run` builds each trial's roots and its argv exactly as `runner.run_trial` would, prints
+the roots, the names (never the values) in the child environment, and one copyable argv line,
+then stops before the spawn. It is how a reviewer reads the real command without paying for it,
+and the only live-path behavior an automated environment reaches without `--ci-live`.
+
+```text
+claude -p '<the task prompt>' --output-format stream-json --verbose --include-hook-events
+  --model <pins.model> --max-budget-usd 0.50 --strict-mcp-config
+  --setting-sources project --settings <run>/trials/<trial_id>/settings.json
+  --tools Read,Edit,Write,Glob,Grep
+  --allowedTools 'Read(./**)' 'Edit(./**)' 'Write(./**)' 'Glob(./**)' 'Grep(./**)'
+  --permission-mode dontAsk --session-id <uuid5 of the trial id>
+```
+
+Every flag there is a literal in `claude_live.py`; the manifest supplies values only, and each is
+checked against a declared allowlist before it becomes an argument (a model id shaped like a
+flag, a tool outside the declared set, an allowed-tool rule carrying a shell fragment, a budget
+above the ceiling, a prompt that is not a plain string, and an undeclared settings key are all
+refused). Nothing is quoted or escaped, because none of it reaches a shell: `process_spawn` runs
+the list with `shell=False`.
+
+Five properties of a live trial carry the isolation, and `claude_live.py` states each one where
+it is enforced. The session id is minted rather than read back (`uuid5` of the trial id), so a
+resumed schedule names the same session. Session persistence stays on, because a child agent's
+usage exists only in the persisted transcripts: a trial sets `CLAUDE_CONFIG_DIR` to its profile
+root and `CLAUDE_CODE_PROJECT_DIR_NAME`, so the tree is at `<profile>/projects/<root session>/`
+in the layout the fake path also writes and the usage adapter is unchanged. The arm is a settings
+file, checked to the leaf (`env` may not name a variable the trial's roots or the credential seam
+own, `permissions` may narrow the flag pins but never widen them, an `http` hook may name only
+loopback) and hashed against the arm's declared `settings_hash`, which proves the fragment is the
+treatment the record names and proves nothing about whether it is safe; a provisioned arm's
+fragment is a template, so the declared hash is over the template and the resolved fragment's
+hash is private, because the resolved bytes hold the daemon token. A hook `command` is
+operator-authored code the child runs through a shell, which is what a hooks arm is for, so the
+manifest hash and the `settings_hash` name which commands ran and the attested container is what
+contains them; a task fixture may not carry a `.claude` directory, which would be a settings
+channel no record names. And the child environment is an allowlist: the trial's own `HOME`,
+`CLAUDE_CONFIG_DIR`, `TENJIN_DATA_DIR`, and `CLAUDE_CODE_PROJECT_DIR_NAME` plus inherited `PATH`,
+`TERM`, `LANG`, and the one named credential variable, so a wallet key, a shelf secret, and the
+operator's own config have no way through, by the spawn or by `settings.env`.
+
+Without `--dry-run` the command requires `--attestation` (or `--plumbing`), refuses an automated
+environment unless `--ci-live` or `--automated` is given, and refuses a shell without
+`pins.credential_env` set, on top of the refusals `artifact.require_isolation` owns: a live run
+in CI that is not stamped automated, a publishable live run with no attestation, a run that seeds
+a team shelf secret and claims to be publishable, and an attestation whose `credential_seam` is
+not the variable the run passes.
+
+Publishability follows the attestation and not the launcher. Who started a run is a fact about
+the run rather than a claim about its isolation, so `isolation.automated: true` is stamped in
+every record of both unwatched lanes and bars nothing by itself; a machine-built attestation over
+the container, the network and the egress a run created is a stronger claim than a person's word
+that a laptop was quiet. The two lanes stay separate commands: `--ci-live` is valid only with
+`--plumbing`, never with `--attestation`, and never with a provisioned arm, which keeps it the
+unattested smoke it has always been; `--automated` requires `--attestation`, refuses `--plumbing`,
+and is the lane a scheduled measured run uses.
+
+### The attestation, and what the operator prepares
 
 ```json
 {
@@ -129,12 +213,80 @@ goes into every record, so a published result names the isolation it ran under.
 
 The operator prepares a disposable container or VM booted from a pinned image and thrown away
 after the run; fresh home, profile, data, repository, and output roots, which the run directory
-owns; no wallet in the image or the environment, and no shelf secret; the model credential in exactly one allowlisted variable
+owns; no wallet in the image or the environment, and no shelf secret except the one
+`--tenjin-source` seeds on purpose; the model credential in exactly one allowlisted variable
 named by `pins.credential_env`; network allowlisted to the provider plus the arm under test,
 matching the attestation; and `pins.image`, `pins.harness_version`, and `pins.model` set to what
 this instance actually runs. Project-scoped tool permissions and transcript redaction are
 retention controls, not an operating-system sandbox, and a temp directory does not isolate a
 keychain (tenjin-agent#71).
+
+### The smoke manifests
+
+`fixtures/live/smoke-manifest.json` is a plumbing smoke, not a task set: one trivial task under
+the fixed hidden verifier, two arms differing by a marker in their settings, two repeats. Gate 3
+of the plan is four to eight live attempts of it, and what they prove is plumbing (disposable
+isolation, recursive settlement, usage capture from real transcripts, verifier execution after
+shutdown, the sentinels), never a savings claim; `fixtures/live/baseline.json` holds the last
+operator run's per-arm figures and the 25% tolerance `regress` warns against. The two
+real-repository smokes, `hooks-smoke-manifest.json` and `keys-smoke-manifest.json`, one per
+delivery path, move to Bench-2 with the container images; an operator runs them with `live-run
+--manifest <manifest> --out <dir> --plumbing --tenjin-source <tenjin data dir>`, and neither ever
+runs in CI, a refusal that lives in code rather than in the workflow.
+
+## The Tenjin hooks arm
+
+The product's hooks are not an environment difference: the CLI reads
+`<TENJIN_DATA_DIR>/config.json` and nothing else for `baseUrl`, `publicShelfUrl`, and
+`shelfBypassSecret`, the `command` hooks run the shim bundle under that directory, the `http`
+hooks POST to a loopback daemon that reads `daemon.token` from it, and the daemon ignores the
+environment. So the arm is a seeded data dir plus a daemon, and `tenjin_arm.py` builds one per
+trial from the operator's own data dir, which `--tenjin-source` names and which has no default.
+`tests/test_tenjin_arm.py` holds the seam; four of its rules are worth stating here.
+
+**Provisioning and stop.** An arm declaring `provision: "tenjin"` is prepared after its roots
+exist and before its launch: the bundles are copied, exactly `COPIED_KEYS` are copied from the
+source config, the constants in `SEEDED` are forced, a fresh `daemon.token` and a free loopback
+port are minted, and one daemon starts under `process_start` in its own session with its group in
+the pids ledger. `prepare` waits for `/health` to name this data dir and this pid and refuses the
+trial otherwise; nothing wallet-related is copied. `stop` ends the daemon once the agent has
+exited and waits for `loop.db-wal` to disappear, and because the shim may have spawned a detached
+daemon outside the trial's group it also reads `daemon.pid` as it is then, confirms through
+`/health` that it serves exactly this data dir, and signals it too
+(`isolation.daemon_respawned`). A live WAL after the wait is `delivery:wal_live` and the attempt
+is invalid; a refused prepare invalidates its own trial under `provision:<code>`, undoes what it
+half-did, and leaves the rest of the run alone.
+
+**Seeding is honest only if a lesson reached the shelf the way a producer's would**: published
+through the CLI, under the failure key the consumer's failure fire resolves on. `prepare` freezes
+each lesson's keys from its `.json`, re-derives them by running the fixture's failing commands in
+a scratch copy under the child's own environment, keys each output with `signature.py` (the
+product's formula ported byte for byte and held to the TypeScript by
+`src/hooks/failure/signature.parity.test.ts`), refuses the trial on `seed key drift`, and
+publishes each body with `--key fingerprint=<kind>:<key>` under the source data dir, whose wallet
+signs it, with a per-run nonce because the CLI dedups a body it already published. At `stop`
+every piece is deleted, and `isolation.seed` records each lesson's title, key hashes, origin,
+piece id, probe, and deletion result.
+
+**The shelf secret is a canary.** `shelfBypassSecret` is copied because the team leg is an
+unsigned POST carrying it as a header, so every record says so: `isolation.shelf_secret_present`
+true, `publishable` false, `report.isolation` `team_shelf_secret`, and `summary` printing `team
+shelf secret present: NOT PUBLISHABLE`. `require_isolation` refuses a publishable run that seeds
+a secret, `records.validate` a record claiming both, `--attestation` a source carrying one, and
+`--ci-live` any manifest with a provisioned arm. `scan_sentinels` counts the value in the repo,
+the output, the data dir except the seeded config, and the profile.
+
+**Origins are classed, and discovery is counted rather than forbidden.** The seeded config names
+the team shelf and the public marketplace, both join the origins the attestation must list, and
+every delivery leg is classed by its `shelf` column as `team`, `public` (a fallback leg, and a
+`keys` leg, which the public host also serves), `local` (never leaves the process), or `other`.
+Only `other` reaches the sentinel's `public_requests` and invalidates, so the plan's canary gate
+is two counts judged on their own: unknown requests zero and public hits zero. A task's expected
+values live in the hidden layer and reach the trial's repository copy at launch, derived and
+outside every `fixture_hash`; an agent that reads them anyway is counted by
+`discovery.setup_read` and `discovery.test_run_before_fix`, which `summary` prints per arm. A
+seeded arm may also read the shelf by hand through arm-level `settings.permissions.allow`, and
+`loop_join` reports those as `delivery.cli_searches`, apart from the hooks' own fires.
 
 ## Running trials at once
 
@@ -215,18 +367,22 @@ method. Everything else the offline suite needs is built: `tests/support.py` wri
 sessions, records, and a whole finished run (`fake_corpus`) through the same code paths a real
 run uses, so regenerating a fixture moves its expectation with it.
 
-`fixtures/live/baseline.json` holds the per-arm figures `regress` warns against at its 25%
-tolerance. The operator-side manifests, the frozen Vitest task fixture, the seeded lessons and
-the code-owned hidden layers under `hidden/<task>/hidden-tests/` arrive with the live executor
-in the layer above.
+`fixtures/live/` holds the operator-side manifests, `repo/` for the plumbing smoke, one frozen
+Vitest project per task, the seeded lessons (arm-side data, never copied into a trial), and the
+regression baseline. Frozen means no run artefacts, and `manifest.fixture_hash` covers every
+committed file plus the vendor archive's digest; hidden layers live in
+`hidden/<task>/hidden-tests/` as plain Node assert files.
 
-A trial's `node_modules` is derived, never committed. `vendor.py` extracts one deterministic
-archive per toolchain and platform into the trial's fixture copy offline, checking the archive
-against the record beside it (`archive_sha256`, `tree_sha256`, `files`, `platform`, `node_abi`,
-`vitest`, `lock_sha256`, `pnpm`) and the host against the platform pin, then the extracted tree
-against `tree_sha256`; `manifest.fixture_hash` covers every committed file plus that digest. CI
-never extracts a committed archive, because the offline suite packs a tiny one of its own.
-**This whole path is the darwin pin Bench-2 replaces with a container image per task.**
+A trial's `node_modules` is derived, never committed. `fixtures/live/vendor/` holds one
+deterministic archive per toolchain and platform with a record beside it (`archive_sha256`,
+`tree_sha256`, `files`, `platform`, `node_abi`, `vitest`, `lock_sha256`, `pnpm`), and
+`artifact.create` extracts it into the trial's fixture copy offline, checking the archive against
+its record and the host against the platform pin, then the extracted tree against `tree_sha256`.
+`live-run` refuses a manifest whose vendor was built for another platform or node ABI before any
+root exists; CI never extracts it, because the offline suite packs a tiny archive of its own.
+**This whole path is the darwin pin Bench-2 replaces with a container image per task**: when the
+first image-backed fixture is green, `vendor.py`, the archive, the lockfiles, the corepack
+seeding, and the actor fixture leave this package with the two real-repository smokes.
 
 ## Extending the foundation
 
