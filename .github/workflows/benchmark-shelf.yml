@@ -65,7 +65,7 @@ jobs:
         env:
           MODEL: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           NEON: ${{ secrets.NEON_API_KEY != '' }}
-          WALLET: ${{ secrets.TENJIN_BENCH_WALLET != '' }}
+          WALLET: ${{ secrets.TENJIN_BENCH_WALLET != '' && secrets.TENJIN_BENCH_WALLET_PASSPHRASE != '' }}
         run: |
           if [ "$MODEL" = "true" ] && [ "$NEON" = "true" ] && [ "$WALLET" = "true" ]; then
             echo "live=true" >> "$GITHUB_OUTPUT"
@@ -75,7 +75,7 @@ jobs:
               echo "## ${{ inputs.lane }}: skipped"
               echo
               echo "This lane needs three repository secrets and does not have all of them:"
-              echo "\`CLAUDE_CODE_OAUTH_TOKEN\` present: $MODEL, \`NEON_API_KEY\` present: $NEON, \`TENJIN_BENCH_WALLET\` present: $WALLET."
+              echo "\`CLAUDE_CODE_OAUTH_TOKEN\` present: $MODEL, \`NEON_API_KEY\` present: $NEON, \`TENJIN_BENCH_WALLET\` and its passphrase present: $WALLET."
               echo
               echo "No attempt ran, nothing was reset, and no number was published."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -113,6 +113,12 @@ jobs:
         if: steps.gate.outputs.live == 'true'
         env:
           TENJIN_BENCH_WALLET: ${{ secrets.TENJIN_BENCH_WALLET }}
+          # `wallet.json` is an encrypted keystore whose passphrase lives in the
+          # OS keychain, not in the file, so the file alone opens nothing on a
+          # runner. `TENJIN_WALLET_PASSPHRASE` is the product's headless seam
+          # (`src/lib/wallet/passphrase.ts`), and the wallet in the secret was
+          # created with this passphrase rather than an interactive one.
+          TENJIN_WALLET_PASSPHRASE: ${{ secrets.TENJIN_BENCH_WALLET_PASSPHRASE }}
         run: |
           set -euo pipefail
           data="$RUNNER_TEMP/bench-data"
@@ -159,6 +165,10 @@ jobs:
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          # The run's own CLI calls seed and delete pieces on the bench shelf,
+          # and each one opens the wallet. Without this the publish fails after
+          # the reset has already happened.
+          TENJIN_WALLET_PASSPHRASE: ${{ secrets.TENJIN_BENCH_WALLET_PASSPHRASE }}
         run: |
           python3 -m evals.benchmark.cli live-run \
             --manifest "${{ inputs.manifest }}" \
