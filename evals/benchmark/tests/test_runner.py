@@ -542,6 +542,18 @@ class AuxiliaryReceiptTest(TrialCase):
 class ProvisionRefusalTest(TrialCase):
     """One trial's provisioning refused: that trial is invalid under the reason, and the next trial runs."""
 
+    def test_the_quoted_refusal_masks_every_secret_the_source_holds_and_stays_bounded(self) -> None:
+        secrets = ("shelf-secret-value", "wallet-passphrase-value")
+        detail = runner.refusal_detail("publish failed:\n  token shelf-secret-value\n  opened with wallet-passphrase-value", secrets)
+        self.assertEqual(detail, "publish failed: token [secret] opened with [secret]")
+        for secret in secrets:
+            self.assertNotIn(secret, detail)
+        # A provisioner that dumps a transcript into its message does not make
+        # the record one: the tail is dropped and the cut says so.
+        long = runner.refusal_detail("x" * (records.DETAIL_LIMIT * 2), ())
+        self.assertEqual(len(long), records.DETAIL_LIMIT)
+        self.assertTrue(long.endswith("..."))
+
     def test_a_refused_prepare_invalidates_its_trial_and_the_run_goes_on(self) -> None:
         name = "provisioned_only_for_this_test"
         prepared: list[str] = []
@@ -565,7 +577,9 @@ class ProvisionRefusalTest(TrialCase):
         records.validate(first)
         self.assertEqual((first["invalid_reason"], first["usage"], first["actors"], first["stop_reason"]), ("provision:seed_key_drift", [], [], "exit"))
         self.assertIn("seed key drift", (self.run_dir / "trials" / results[0].trial_id / "output" / "provision-refusal.txt").read_text(encoding="utf-8"))
-        self.assertNotIn("seed key drift", json.dumps(first))
+        # The roots die with the runner, so the record quotes the refusal too: a
+        # reason code alone cannot say what the publish, or the probe, saw.
+        self.assertEqual(first["invalid_detail"], "seed key drift: the lesson records another key")
         # The default code, for a provisioner that names none.
         self.assertEqual(executor.ProvisionError("plain").code, "refused")
         # A refused attempt never provisioned, so it claims nothing about the

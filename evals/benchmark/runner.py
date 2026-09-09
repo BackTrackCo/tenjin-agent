@@ -295,8 +295,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             # provisioner half-did it has already undone, fail-closed. A
             # run-wide condition (credential, platform, manifest) is refused
             # before any trial by `live-run`, never here.
-            (roots.output / "provision-refusal.txt").write_text(str(error) + "\n", encoding="utf-8")
-            return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", str(error))
+            #
+            # The roots die with the runner, so the record is the only place the
+            # refusal survives to. It carries the text masked: a refusal that
+            # costs a whole arm has to say what it saw, and the reason code alone
+            # made `provision:seed_publish` mean "the publish failed somehow".
+            detail = refusal_detail(str(error), tuple(getattr(runtime.source, "secrets", ()) or ()))
+            (roots.output / "provision-refusal.txt").write_text(detail + "\n", encoding="utf-8")
+            return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", detail)
         # The seed is on the shelf now, so this is the corpus every trial of
         # this run searches. Asked once; `Once` ignores every later ask.
         if runtime.snapshot is not None:
@@ -516,10 +522,24 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     }
 
 
+def refusal_detail(text: str, secrets: tuple[str, ...]) -> str:
+    """A refusal's own words, with every secret the source holds replaced and the length bounded.
+
+    Masking is the same substitution the provisioner already applies to a CLI
+    tail, applied again here because the record is written by this module and a
+    provisioner that forgot would leak into a file the run keeps.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[secret]")
+    text = " ".join(text.split())
+    return text if len(text) <= records.DETAIL_LIMIT else text[: records.DETAIL_LIMIT - 3] + "..."
+
+
 def refused_record(
     manifest: Manifest, trial: Trial, schedule_hash: str, spec: executor.ExecutorSpec, arm: dict[str, Any], isolation: dict[str, Any], reason: str, detail: str
 ) -> dict[str, Any]:
-    """An attempt that never started: no root, no usage, no delivery, invalid under the refusal's reason. The detail's hash, never its text."""
+    """An attempt that never started: no root, no usage, no delivery, invalid under the refusal's reason, which it quotes."""
     return {
         "schema": records.RECORD_SCHEMA,
         "trial_id": trial.trial_id,
@@ -543,6 +563,7 @@ def refused_record(
         "auxiliary": [],
         "outcome": "invalid",
         "invalid_reason": reason,
+        "invalid_detail": detail or None,
         "verifier": None,
         "patch_hash": None,
         "stop_reason": "exit",

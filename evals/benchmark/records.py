@@ -72,7 +72,12 @@ REQUIRED = frozenset(
 
 
 # Keys a record may carry and a frozen corpus record predates: null or absent on the fake path.
-OPTIONAL = frozenset({"discovery", "attempt_phases"})
+OPTIONAL = frozenset({"discovery", "attempt_phases", "invalid_detail"})
+# `invalid_detail` is the refusal in its own words, for a reason code that
+# cannot carry them: `provision:seed_publish` says a publish failed and not what
+# it answered. Written masked by whoever refuses; private, like a transcript, so
+# `report.py` never projects it.
+DETAIL_LIMIT = 1024
 # `image` is a container trial's pnpm: installed into the fixture image at
 # build time by exact version, so nothing on the host decides which one ran.
 PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
@@ -172,6 +177,14 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("an invalid attempt must carry invalid_reason")
     if record["outcome"] != "invalid" and reason is not None:
         raise RecordError("only an invalid attempt carries invalid_reason")
+    detail = record.get("invalid_detail")
+    if detail is not None:
+        if not isinstance(detail, str) or not detail:
+            raise RecordError("invalid_detail must be a non-empty string or null")
+        if len(detail) > DETAIL_LIMIT:
+            raise RecordError(f"invalid_detail must be at most {DETAIL_LIMIT} characters")
+        if record["outcome"] != "invalid":
+            raise RecordError("only an invalid attempt carries invalid_detail")
     if record["stop_reason"] not in STOP_REASONS:
         raise RecordError(f"unknown stop_reason {record['stop_reason']!r}")
 

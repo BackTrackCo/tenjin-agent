@@ -33,6 +33,17 @@ class RecordShapeTest(unittest.TestCase):
         with self.assertRaises(RecordError):
             records.validate(attempt_record(self.root_only, invalid_reason="oops"))
 
+    def test_a_refusal_may_quote_itself_and_only_a_refusal_may(self) -> None:
+        """`invalid_reason` is the enum a reducer groups by; `invalid_detail` is what the refusal actually said."""
+        invalid = attempt_record(parse("sess-mismatch"), outcome="invalid", invalid_reason="provision:seed_publish", verifier=None)
+        records.validate({**invalid, "invalid_detail": "tenjin publish exited 1: No wallet passphrase is available."})
+        records.validate({**invalid, "invalid_detail": None})
+        for bad in ("", 7, "x" * (records.DETAIL_LIMIT + 1)):
+            with self.subTest(bad=bad), self.assertRaises(RecordError):
+                records.validate({**invalid, "invalid_detail": bad})
+        with self.assertRaises(RecordError):
+            records.validate({**attempt_record(self.family), "invalid_detail": "a scored attempt started"})
+
     def test_the_marketplace_leg_is_stated_per_attempt_or_not_at_all(self) -> None:
         # The two shelf arms carry byte-identical settings, so this field is the
         # only thing in a record that tells them apart.

@@ -311,6 +311,14 @@ SHORTLIST_FILE = "shortlist.json"
 # sentinel counts, and the trial is thrown away for an egress the arm never
 # wanted. The product's own opt-out (`update-check.ts`) turns it off.
 NO_UPDATE_CHECK = "TENJIN_NO_UPDATE_CHECK"
+# The product's headless seam for opening the wallet (`src/lib/wallet/passphrase.ts`).
+# Every CLI call below signs with the source's wallet, and a keystore's passphrase
+# is not in the keystore: an operator machine answers from the OS keychain, and a
+# runner has no keychain, so without this the publish exits non-zero with
+# "No wallet passphrase is available." after the corpus reset has already
+# happened. Read once, at `load_source`, so the string the child is given and the
+# string the tails mask are the same one.
+WALLET_PASSPHRASE = "TENJIN_WALLET_PASSPHRASE"
 # The product's default `publicShelfUrl` (`src/lib/production-origin.ts`). A pin,
 # like the versions in `images.py`: if the product's default moves, this moves.
 PRODUCT_PUBLIC_ORIGIN = "https://tenjin.blog"
@@ -318,7 +326,7 @@ SHORTLIST_FIRE_COLUMNS = ("id", "at", "arm", "event", "question", "question_key"
 
 
 def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dict[str, str]:
-    """The operator's own data dir (its wallet signs the publish), and nothing else of the operator's."""
+    """The operator's own data dir and the passphrase that opens its wallet, and nothing else of the operator's."""
     parent = os.environ if parent is None else parent
     env = {
         "PATH": parent.get("PATH", ""),
@@ -329,6 +337,8 @@ def cli_environment(source: Source, parent: dict[str, str] | None = None) -> dic
     for name in ("LANG", "TMPDIR"):
         if parent.get(name):
             env[name] = parent[name]
+    if source.wallet_passphrase:
+        env[WALLET_PASSPHRASE] = source.wallet_passphrase
     return env
 
 
@@ -630,6 +640,11 @@ class Source:
     path: Path
     config: dict[str, Any]
     bundles: dict[str, Path]
+    # The environment's answer to `WALLET_PASSPHRASE`, empty where the machine
+    # has none. It never reaches a trial: only `cli_environment` carries it, and
+    # that builds the environment for the run's own publish, sweep, search and
+    # delete, which are the calls the source's wallet has to sign.
+    wallet_passphrase: str = ""
 
     @property
     def shelf_secret(self) -> str:
@@ -671,7 +686,8 @@ class Source:
 
     @property
     def secrets(self) -> tuple[str, ...]:
-        return (self.shelf_secret,) if self.shelf_secret_present else ()
+        """Every string that must never survive into a tail, a note, or a record."""
+        return tuple(value for value in (self.shelf_secret, self.wallet_passphrase) if value)
 
 
 def _host(url: Any) -> str | None:
@@ -703,7 +719,7 @@ def load_source(path: Path) -> Source:
     missing = sorted(name for name, bundle in bundles.items() if not bundle.is_file())
     if missing:
         raise ProvisionError(f"--tenjin-source has no {', '.join(missing)} under {HOOKS_DIR}/; run `tenjin daemon start` there")
-    return Source(path=path, config=config, bundles=bundles)
+    return Source(path=path, config=config, bundles=bundles, wallet_passphrase=os.environ.get(WALLET_PASSPHRASE, ""))
 
 
 def data_dir_string(roots: artifact.TrialRoots) -> str:

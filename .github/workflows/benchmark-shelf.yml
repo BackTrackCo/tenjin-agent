@@ -224,6 +224,21 @@ jobs:
           echo "::endgroup::"
           python3 -m evals.benchmark.cli summary --run "$run"
           python3 -m evals.benchmark.cli headline --run "$run" >> "$GITHUB_STEP_SUMMARY"
+          # `report.json` is publishable, so it carries reason codes and no free
+          # text. An attempt that never started says why only in its own record,
+          # and a whole arm can be lost to one repeated refusal, so the distinct
+          # ones go in the log rather than only in the artifact.
+          python3 - "$run" <<'PY'
+          import collections, json, pathlib, sys
+
+          seen = collections.Counter()
+          for path in sorted((pathlib.Path(sys.argv[1]) / "records").glob("*.json")):
+              detail = json.loads(path.read_text(encoding="utf-8")).get("invalid_detail")
+              if detail:
+                  seen[detail] += 1
+          for detail, count in seen.most_common():
+              print(f"::warning title=refused::{count} attempt(s): {detail}")
+          PY
 
       - name: Clean up whatever the run started
         if: always() && steps.gate.outputs.live == 'true'

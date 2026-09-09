@@ -30,6 +30,7 @@ from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequ
 from evals.benchmark.tests import support
 
 SECRET = "bench1-test-shelf-secret-0123456789abcdef"
+PASSPHRASE = "bench1-test-wallet-passphrase-fedcba9876543210"
 QUESTION = "How do I run one vitest file here?"
 LIVE = "live_provisioned_for_this_test"
 
@@ -40,6 +41,10 @@ class SourceCase(unittest.TestCase):
         self.dir = Path(self.tmp.name)
         self.addCleanup(self.tmp.cleanup)
         self.run_dir = self.dir / "run"
+        # `load_source` reads the wallet passphrase from the environment, so a
+        # machine that has one set must not decide what these cases see.
+        self.enterContext(mock.patch.dict(os.environ))
+        os.environ.pop(tenjin_arm.WALLET_PASSPHRASE, None)
 
     def write_source(self, config: dict | None = None, bundles: bool = True) -> Path:
         source = self.dir / "source"
@@ -76,6 +81,32 @@ class SourceTest(SourceCase):
         self.assertEqual(source.origins, ("team-shelf.example", "public.example"))
         self.assertEqual(source.secrets, (SECRET,))
         self.assertNotIn(SECRET, json.dumps(source.facts))
+
+    def test_the_wallet_passphrase_reaches_the_runs_own_cli_calls_and_stays_out_of_everything_else(self) -> None:
+        """The one credential the runner's own publish needs, and the one place it goes.
+
+        A keystore does not hold the passphrase that opens it. An operator's
+        machine answers from the OS keychain, a runner has no keychain, and
+        `cli_environment` builds the child environment from scratch, so before
+        this the CI publish exited non-zero with "No wallet passphrase is
+        available." and every seeded attempt was refused at
+        `provision:seed_publish` after the corpus reset. Nothing in a trial
+        signs anything, so the value reaches the runner's own CLI calls only.
+        """
+        with mock.patch.dict(os.environ, {tenjin_arm.WALLET_PASSPHRASE: PASSPHRASE}):
+            source = tenjin_arm.load_source(self.write_source())
+        self.assertEqual(tenjin_arm.cli_environment(source, {"PATH": "/usr/bin"})[tenjin_arm.WALLET_PASSPHRASE], PASSPHRASE)
+        # A tail, a case, or a scanned trial root carrying it is an exposure.
+        self.assertEqual(source.secrets, (SECRET, PASSPHRASE))
+        self.assertNotIn(PASSPHRASE, json.dumps(source.facts) + json.dumps(tenjin_arm.seeded_config(source, 1)))
+        # The seeded run stays publishable on its own terms: a wallet's
+        # passphrase is not the team shelf secret.
+        self.assertEqual(source.facts["shelf_secret_present"], True)
+
+    def test_a_machine_with_no_passphrase_sends_none(self) -> None:
+        source = tenjin_arm.load_source(self.write_source())
+        self.assertEqual(source.wallet_passphrase, "")
+        self.assertNotIn(tenjin_arm.WALLET_PASSPHRASE, tenjin_arm.cli_environment(source, {"PATH": "/usr/bin"}))
 
     def test_a_source_without_a_secret_is_public_mode(self) -> None:
         source = tenjin_arm.load_source(self.write_source({"baseUrl": "https://tenjin.blog"}))
@@ -745,6 +776,21 @@ class SeedCase(DaemonCase):
             records.validate({**record, "isolation": {**record["isolation"], "seed": [{**isolation["seed"][0], "piece_id": None}]}})
         with self.assertRaises(records.RecordError):
             records.validate({**record, "isolation": {**record["isolation"], "seed": isolation["seed"][0]}})
+
+    def test_the_seeding_publish_is_given_the_passphrase_that_opens_the_wallet(self) -> None:
+        """End to end, because the gap was between the workflow's environment and the child's.
+
+        The workflow set `TENJIN_WALLET_PASSPHRASE` for `live-run` and
+        `cli_environment` did not forward it, so every seeded attempt of run
+        34394026777 was refused at `provision:seed_publish`. The fake CLI logs
+        the names in its environment; the passphrase's presence there is what
+        a real `tenjin publish` needs to sign.
+        """
+        with mock.patch.dict(os.environ, {tenjin_arm.WALLET_PASSPHRASE: PASSPHRASE}):
+            self.source = tenjin_arm.load_source(Path(self.source.path))
+        tenjin_arm.prepare(self.request(self.seed_roots()))
+        publish = next(call for call in self.calls() if call["argv"][0] == "publish")
+        self.assertIn(tenjin_arm.WALLET_PASSPHRASE, publish["env"])
 
     def test_key_drift_and_a_failed_publish_refuse_the_trial_before_the_daemon_and_mask_the_secret(self) -> None:
         roots = self.seed_roots()
