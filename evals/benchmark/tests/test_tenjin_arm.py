@@ -1119,6 +1119,27 @@ class ProducerTest(RunnerCase):
         self.assertEqual(producer.request_times(transcript), {"r1": 1788825601500})
 
 
+class PublicOriginTest(unittest.TestCase):
+    def test_a_config_without_a_public_shelf_url_still_allowlists_the_product_default(self) -> None:
+        """Silence in the config is not silence on the wire.
+
+        The product falls back to its production origin, so an allowlist built
+        from the config alone refused the public leg and the refusal threw the
+        trial away as a public request.
+        """
+        source = tenjin_arm.Source(path=Path("."), config={"baseUrl": "https://shelf.example"}, bundles={})
+        self.assertEqual(source.public_origin, "tenjin.blog")
+        self.assertEqual(source.origins, ("shelf.example", "tenjin.blog"))
+
+    def test_a_named_public_shelf_url_wins(self) -> None:
+        source = tenjin_arm.Source(
+            path=Path("."),
+            config={"baseUrl": "https://shelf.example", "publicShelfUrl": "https://public.example"},
+            bundles={},
+        )
+        self.assertEqual(source.origins, ("shelf.example", "public.example"))
+
+
 class UpdateCheckTest(unittest.TestCase):
     """The CLI's daily npm check is off in every trial process.
 

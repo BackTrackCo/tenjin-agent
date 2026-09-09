@@ -305,6 +305,9 @@ SHORTLIST_FILE = "shortlist.json"
 # sentinel counts, and the trial is thrown away for an egress the arm never
 # wanted. The product's own opt-out (`update-check.ts`) turns it off.
 NO_UPDATE_CHECK = "TENJIN_NO_UPDATE_CHECK"
+# The product's default `publicShelfUrl` (`src/lib/production-origin.ts`). A pin,
+# like the versions in `images.py`: if the product's default moves, this moves.
+PRODUCT_PUBLIC_ORIGIN = "https://tenjin.blog"
 SHORTLIST_FIRE_COLUMNS = ("id", "at", "arm", "event", "question", "question_key")
 
 
@@ -628,7 +631,16 @@ class Source:
 
     @property
     def public_origin(self) -> str | None:
-        return _host(self.config.get("publicShelfUrl"))
+        """The public marketplace the arm will reach, config or product default.
+
+        A config that names no `publicShelfUrl` does not mean the arm makes no
+        public request: the product falls back to its own production origin. The
+        allowlist is built from this, so reading only the config left the origin
+        the public leg actually used off the list. The proxy then refused it, and
+        the refusal invalidated the trial as a public request the arm never made
+        on purpose. Found 2026-09-09.
+        """
+        return _host(self.config.get("publicShelfUrl") or PRODUCT_PUBLIC_ORIGIN)
 
     @property
     def facts(self) -> dict[str, Any]:

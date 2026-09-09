@@ -79,19 +79,42 @@ async function waitHealthy(dataDir, child, deadline) {
   throw new Error(`the daemon did not answer /health within ${HEALTH_TIMEOUT_MS}ms`);
 }
 
+// The run's only route out is the allowlist proxy, and this container is on an
+// `--internal` network. A daemon told nothing about the proxy dials each host
+// directly and reaches nothing, so every shelf leg fails as a bare `error` with
+// no search id while the attempt still passes its verifier and the run reports
+// a plausible ratio. Node reads the addresses for `fetch` only under
+// NODE_USE_ENV_PROXY, so the flag is one of them. Found 2026-09-09.
+const FORWARDED = [
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NO_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'no_proxy',
+  'NODE_USE_ENV_PROXY',
+  'LANG',
+  // The CLI's daily npm check is one request to a host no arm asked for; the
+  // proxy refuses it and the refusal is what invalidates the trial.
+  'TENJIN_NO_UPDATE_CHECK',
+];
+
 async function startDaemon(dataDir, output) {
   const bundle = join(dataDir, 'hooks', 'tenjin-daemon.mjs');
   if (!existsSync(bundle)) throw new Error(`no tenjin-daemon.mjs under ${dataDir}/hooks`);
   const log = openSync(join(output, 'daemon.log'), 'a');
+  const env = {
+    PATH: process.env.PATH ?? '',
+    HOME: process.env.HOME ?? '',
+    TENJIN_DATA_DIR: dataDir,
+  };
+  for (const name of FORWARDED) {
+    if (process.env[name]) env[name] = process.env[name];
+  }
   const child = spawn(process.execPath, [bundle], {
     cwd: dataDir,
     stdio: ['ignore', log, log],
-    env: {
-      PATH: process.env.PATH ?? '',
-      HOME: process.env.HOME ?? '',
-      TENJIN_DATA_DIR: dataDir,
-      ...(process.env.LANG ? { LANG: process.env.LANG } : {}),
-    },
+    env,
   });
   const live = await waitHealthy(dataDir, child, Date.now() + HEALTH_TIMEOUT_MS);
   return { child, ...live };

@@ -63,6 +63,21 @@ class IdentityTest(unittest.TestCase):
         self.assertTrue(first.startswith("bench2-base:"))
         self.assertNotEqual(first, second)
 
+    def test_the_base_tag_changes_with_the_dockerfile_and_the_entrypoint(self) -> None:
+        """An edit to either is an image change, or a run reuses a stale one.
+
+        On 2026-09-09 the recipe named only versions, so a fix to the trial
+        entrypoint left the tag unchanged and two four-attempt runs silently
+        used the image built before it.
+        """
+        base = images.recipe(PINS)
+        self.assertIn("dockerfile", base)
+        self.assertIn("entrypoint", base)
+        for name, path in (("dockerfile", images.BASE_DOCKERFILE), ("entrypoint", images.TRIAL_SCRIPT)):
+            self.assertEqual(base[name], images.file_hash(path))
+            changed = {**base, name: "sha256:" + "0" * 64}
+            self.assertNotEqual(images.base_tag(base), images.base_tag(changed))
+
     def test_a_recipe_without_a_harness_version_is_refused(self) -> None:
         with self.assertRaises(ImageError) as caught:
             images.recipe({})

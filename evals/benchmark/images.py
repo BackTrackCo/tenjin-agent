@@ -27,6 +27,7 @@ import argparse
 import json
 import subprocess
 import sys
+import hashlib
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +40,7 @@ DOCKER_DIR = PACKAGE_ROOT / "docker"
 BASE_DOCKERFILE = DOCKER_DIR / "base.Dockerfile"
 FIXTURE_DOCKERFILE = DOCKER_DIR / "fixture.Dockerfile"
 PROXY_SCRIPT = DOCKER_DIR / "proxy.py"
+TRIAL_SCRIPT = DOCKER_DIR / "trial.mjs"
 LEDGER = FIXTURES / "live" / "images.json"
 
 # The base, by digest. This is the multi-architecture index digest, so the same
@@ -116,8 +118,20 @@ def unavailable(docker: Docker | None = None) -> str | None:
     return None
 
 
+def file_hash(path: Path) -> str:
+    """One file's content, for the recipe."""
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def recipe(pins: Mapping[str, Any]) -> dict[str, str]:
-    """What the base image is built from. The harness version is the manifest's, so a pin change is a rebuild."""
+    """What the base image is built from. The harness version is the manifest's, so a pin change is a rebuild.
+
+    The Dockerfile and the entrypoint are in here by content. They are as much
+    the image as any pinned version is, and while they were not, an edit to
+    either left the tag unchanged and the run silently reused a stale image. On
+    2026-09-09 that hid a fix to the entrypoint through two four-attempt runs
+    whose numbers looked plausible.
+    """
     version = pins.get("harness_version")
     if not isinstance(version, str) or not version.strip():
         raise ImageError("recipe_pins", "pins.harness_version must name the Claude Code version the image installs")
@@ -127,6 +141,8 @@ def recipe(pins: Mapping[str, Any]) -> dict[str, str]:
         "pnpm": PNPM_VERSION,
         "claude": version,
         "tenjin": TENJIN_VERSION,
+        "dockerfile": file_hash(BASE_DOCKERFILE),
+        "entrypoint": file_hash(TRIAL_SCRIPT),
     }
 
 
