@@ -596,6 +596,13 @@ def container_environment(
     # check is one request to a host no arm asked for, the proxy refuses it,
     # and the refusal is what invalidates the trial.
     env[tenjin_arm.NO_UPDATE_CHECK] = "1"
+    # The agent has an updater and a telemetry path of its own, and they reach
+    # npm and the vendor from inside the trial. Neither is the arm's traffic,
+    # and each is one refused request the sentinel reads as a public one. The
+    # attempt's model calls are untouched: these turn off what a measured run
+    # never wanted.
+    env["DISABLE_AUTOUPDATER"] = "1"
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     for name in INHERITED:
         value = parent.get(name)
         if value:

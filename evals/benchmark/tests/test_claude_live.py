@@ -752,8 +752,10 @@ class ChildEnvironmentTest(LiveCase):
             sorted(env),
             [
                 "BENCH2_OUTPUT",
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
                 "CLAUDE_CODE_PROJECT_DIR_NAME",
                 "CLAUDE_CONFIG_DIR",
+                "DISABLE_AUTOUPDATER",
                 "HOME",
                 "LANG",
                 "TENJIN_DATA_DIR",
@@ -761,9 +763,12 @@ class ChildEnvironmentTest(LiveCase):
                 "TENJIN_PUBLISH_MODE",
             ],
         )
-        # The CLI's daily npm check would be one refused request at the proxy,
-        # and the refusal is what throws the trial away.
+        # Three background callers reach a host no arm asked for: the CLI's daily
+        # npm check, the agent's updater and its telemetry. Each is one refused
+        # request at the proxy, and the refusal is what throws the trial away.
         self.assertEqual(env["TENJIN_NO_UPDATE_CHECK"], "1")
+        self.assertEqual(env["DISABLE_AUTOUPDATER"], "1")
+        self.assertEqual(env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"], "1")
         self.assertEqual(env["HOME"], str(self.roots.home))
         self.assertEqual(env["TENJIN_DATA_DIR"], str(self.roots.data_dir))
         self.assertEqual(env[claude_live.PROJECT_DIR_VAR], self.session_id)
