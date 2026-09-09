@@ -15,14 +15,7 @@
     "turn_budget": 40,
     "max_budget_usd": 0.75,
     "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
-    "tools": [
-      "Bash",
-      "Read",
-      "Edit",
-      "Write",
-      "Glob",
-      "Grep"
-    ],
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "allowed_tools": [
       "Bash(pnpm:*)",
       "Bash(npx:*)",
@@ -61,15 +54,7 @@
       "fixture_hash": "sha256:71649359979d59bf3801e65594740dc5741ec67faea726e973c1ddfb0553670b",
       "verifier": "node_test_actor",
       "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Edit",
-        "Write",
-        "Glob",
-        "Grep",
-        "Agent"
-      ],
+      "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],
       "allowed_tools": [
         "Bash(pnpm:*)",
         "Bash(npx:*)",
@@ -102,11 +87,7 @@
       "provision": "tenjin",
       "settings": {
         "permissions": {
-          "allow": [
-            "Bash(tenjin search:*)",
-            "Bash(tenjin read:*)",
-            "Bash(tenjin inspect:*)"
-          ]
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
         },
         "hooks": {
           "SessionStart": [
@@ -263,13 +244,8 @@
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
       "auxiliary_usage": "none",
-      "lessons": [
-        "test-harness-convention",
-        "actor-fix"
-      ],
-      "hooks_disabled": [
-        "publish"
-      ]
+      "lessons": ["test-harness-convention", "actor-fix"],
+      "hooks_disabled": ["publish"]
     },
     {
       "id": "tenjin_seeded_no_public",
@@ -278,11 +254,7 @@
       "provision": "tenjin",
       "settings": {
         "permissions": {
-          "allow": [
-            "Bash(tenjin search:*)",
-            "Bash(tenjin read:*)",
-            "Bash(tenjin inspect:*)"
-          ]
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
         },
         "hooks": {
           "SessionStart": [
@@ -439,13 +411,8 @@
       "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
       "memory_snapshot_hash": "sha256:empty",
       "auxiliary_usage": "none",
-      "lessons": [
-        "test-harness-convention",
-        "actor-fix"
-      ],
-      "hooks_disabled": [
-        "publish"
-      ],
+      "lessons": ["test-harness-convention", "actor-fix"],
+      "hooks_disabled": ["publish"],
       "public_fallback": "off"
     },
     {
@@ -454,11 +421,7 @@
       "provision": "tenjin",
       "settings": {
         "permissions": {
-          "allow": [
-            "Bash(tenjin search:*)",
-            "Bash(tenjin read:*)",
-            "Bash(tenjin inspect:*)"
-          ]
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
         },
         "hooks": {
           "SessionStart": [
@@ -617,10 +580,7 @@
       "auxiliary_usage": "exposed",
       "id": "tenjin_natural",
       "producer": true,
-      "lessons": [
-        "test-harness-convention",
-        "actor-fix"
-      ]
+      "lessons": ["test-harness-convention", "actor-fix"]
     }
   ]
 }

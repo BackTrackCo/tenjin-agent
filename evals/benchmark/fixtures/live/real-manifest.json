@@ -15,14 +15,7 @@
     "turn_budget": 40,
     "max_budget_usd": 0.75,
     "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
-    "tools": [
-      "Bash",
-      "Read",
-      "Edit",
-      "Write",
-      "Glob",
-      "Grep"
-    ],
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "allowed_tools": [
       "Bash(pnpm:*)",
       "Bash(npx:*)",
@@ -139,11 +132,7 @@
       "provision": "tenjin",
       "settings": {
         "permissions": {
-          "allow": [
-            "Bash(tenjin search:*)",
-            "Bash(tenjin read:*)",
-            "Bash(tenjin inspect:*)"
-          ]
+          "allow": ["Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"]
         },
         "hooks": {
           "SessionStart": [

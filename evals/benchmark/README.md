@@ -33,31 +33,31 @@ Each contract is stated once, in the module that owns it, and held by the test m
 The tests are the specification to reach for: each names its rule and holds to it on a fixture
 the suite builds.
 
-| Module                      | What it owns                                                      | Held by                               |
-| --------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
-| `manifest.py`               | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                    |
-| `schedule.py`               | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                    |
-| `runner.py`                 | execution: fresh roots, settlement, caps, sentinels, resume       | `test_runner.py`, `test_fake_run.py`  |
-| `executor.py`               | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                    |
-| `claude_live.py`            | the live executor: argv, minted session id, per-trial settings    | `test_claude_live.py`                 |
-| `tenjin_arm.py`             | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                  |
-| `signature.py`              | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                   |
-| `artifact.py`               | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                    |
-| `corpus.py`                 | the corpus branch: the pre-run reset, its guard, its stamp        | `test_corpus.py`                      |
-| `verifier.py`               | hidden verifier registry, hidden layer, the run marker            | `test_verifier.py`                    |
-| `images.py`                 | one pinned base image, one image per fixture, build and drift     | `test_images.py`                      |
-| `container.py`              | a trial inside its image: mounts, argv, the run's egress proxy    | `test_container.py`                   |
-| `producer.py`               | the natural arm's producer phase and its receipts                 | `test_phases.py`                      |
-| `usage.py`                  | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                       |
-| `claude_usage.py`           | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`                |
-| `records.py`                | the immutable attempt record, publish, select                     | `test_records.py`                     |
-| `loop_join.py`              | read-only delivery join on exact actor keys                       | `test_loop_join.py`                   |
-| `reduce.py`                 | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                      |
-| `report.py`, `regress.py`   | publishable projection, redaction guard, the check-run summary    | `test_report.py`, `test_regress.py`   |
-| `cases.py`, `discovery.py`  | the search-intent export and the discovery counters               | `test_cases.py`, `test_discovery.py`  |
-| `reap.py`                   | cleanup by recorded identity, never by process name               | `test_reap.py`                        |
-| `snapshot.py`               | the per-run corpus reading: post count and content hash           | `test_snapshot.py`                    |
-| `cli.py`, `selftest.py`     | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                    |
+| Module                     | What it owns                                                      | Held by                              |
+| -------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
+| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
+| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
+| `runner.py`                | execution: fresh roots, settlement, caps, sentinels, resume       | `test_runner.py`, `test_fake_run.py` |
+| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
+| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings    | `test_claude_live.py`                |
+| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                 |
+| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                  |
+| `artifact.py`              | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                   |
+| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp        | `test_corpus.py`                     |
+| `verifier.py`              | hidden verifier registry, hidden layer, the run marker            | `test_verifier.py`                   |
+| `images.py`                | one pinned base image, one image per fixture, build and drift     | `test_images.py`                     |
+| `container.py`             | a trial inside its image: mounts, argv, the run's egress proxy    | `test_container.py`                  |
+| `producer.py`              | the natural arm's producer phase and its receipts                 | `test_phases.py`                     |
+| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                      |
+| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`               |
+| `records.py`               | the immutable attempt record, publish, select                     | `test_records.py`                    |
+| `loop_join.py`             | read-only delivery join on exact actor keys                       | `test_loop_join.py`                  |
+| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                     |
+| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary    | `test_report.py`, `test_regress.py`  |
+| `cases.py`, `discovery.py` | the search-intent export and the discovery counters               | `test_cases.py`, `test_discovery.py` |
+| `reap.py`                  | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
+| `snapshot.py`              | the per-run corpus reading: post count and content hash           | `test_snapshot.py`                   |
+| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
 bootstrap golden), `fixtures/live/` (the smoke and real-task manifests, one frozen Vitest project
@@ -528,12 +528,12 @@ that publishes, and the three bundles `tenjin daemon start` writes. `live-run` r
 whose shelf is not the one the manifest's corpus serves, so the old mistake is now a stop rather
 than a number.
 
-| Manifest                       | Version              | Shape                                                                                       | Attempts       |
-| ------------------------------ | -------------------- | ------------------------------------------------------------------------------------------- | -------------- |
-| `canary-manifest.json`         | `bench2-canary-1`    | the four same-task transfers, one per lesson family, `off` and `tenjin_seeded`, 3 repeats     | 24             |
-| `local-arms-manifest.json`     | `bench2-core-suite-2`| the core suite: 8 tasks x 5 arms x 3 repeats                                                  | 120 + producers |
-| `real-manifest.json`           | `bench2-local-pilot-3`| the Phase 1 pilot: 8 tasks x (`off`, `tenjin_natural`) x 3                                   | 48 + producers |
-| `recursive-manifest.json`      | `bench2-recursive-5` | the recursive slice: one delegating task across four arms                                     | 12 + producers |
+| Manifest                   | Version                | Shape                                                                                     | Attempts        |
+| -------------------------- | ---------------------- | ----------------------------------------------------------------------------------------- | --------------- |
+| `canary-manifest.json`     | `bench2-canary-1`      | the four same-task transfers, one per lesson family, `off` and `tenjin_seeded`, 3 repeats | 24              |
+| `local-arms-manifest.json` | `bench2-core-suite-2`  | the core suite: 8 tasks x 5 arms x 3 repeats                                              | 120 + producers |
+| `real-manifest.json`       | `bench2-local-pilot-3` | the Phase 1 pilot: 8 tasks x (`off`, `tenjin_natural`) x 3                                | 48 + producers  |
+| `recursive-manifest.json`  | `bench2-recursive-5`   | the recursive slice: one delegating task across four arms                                 | 12 + producers  |
 
 `max_budget_usd` stays 0.75 an attempt, producer attempts included. At the 0.237 USD an attempt
 the pilot measured, the canary is about 5.69 USD a run and the core suite about four times that.
