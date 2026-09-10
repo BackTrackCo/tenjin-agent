@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator
 from unittest import mock
 
 import pytest
+from inline_snapshot import snapshot
 
 from evals.benchmark import artifact, cases, cli, container, executor, manifest as manifest_module, producer, reap, records, runner, schedule, signature, tenjin_arm, usage, verifier
 from evals.benchmark.artifact import IsolationError
@@ -1163,10 +1164,12 @@ def test_the_shortlist_is_taken_before_the_delete_and_names_the_live_seeded_ids(
     search = payload["entries"][0]["search"]
     assert (search["exit"], search["error"], search["post_floor"], search["limit"], search["search_id"]) == (0, None, True, 10, "search-1")
     # The seeded piece is in the shortlist, which it can only be while it is still on the shelf.
-    assert [(c["rank"], c["id"], c["title"], c["strong"], c["confidence"], c["corroborated"]) for c in search["candidates"]] == [
-        (1, "piece-1", "The lesson", True, 0.9, True),
-        (2, "piece-real", "The convention piece", False, None, None),
-    ]
+    assert [(c["rank"], c["id"], c["title"], c["strong"], c["confidence"], c["corroborated"]) for c in search["candidates"]] == snapshot(
+        [
+            (1, "piece-1", "The lesson", True, 0.9, True),
+            (2, "piece-real", "The convention piece", False, None, None),
+        ]
+    )
     argv = [call["argv"] for call in calls()]
     assert [call[0] for call in argv] == ["publish", "search", "search", "delete"]
     assert argv[1] == ["search", QUESTION, "--json", "--limit", "10"]
