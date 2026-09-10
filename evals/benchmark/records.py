@@ -263,6 +263,8 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
+    if isolation.get("wal_checkpoint") is not None and (not isinstance(isolation["wal_checkpoint"], str) or not isolation["wal_checkpoint"]):
+        raise RecordError("isolation.wal_checkpoint must be null or the reason the ledger's WAL did not close")
     seeds = isolation.get("seed")
     if seeds is not None and not isinstance(seeds, list):
         raise RecordError("isolation.seed must be a list, one entry per seeded lesson")

@@ -5,7 +5,8 @@ It does what the real daemon does at the seam this package touches: reads
 loopback, writes `daemon.pid`, answers `/health` with its pid and data dir,
 accepts a bearer-authenticated POST on `/hook/claude`, keeps a `loop.db-wal`
 file while it runs, and removes it on SIGTERM. `--keep-wal` leaves the WAL
-behind, which is the settlement failure the runner has to refuse; `--port`
+behind, which is the daemon that never closed its database and what the stop
+path's checkpoint has to settle without waiting; `--port`
 overrides the configured port, which is how a case stands in for a daemon the
 shim respawned.
 """
