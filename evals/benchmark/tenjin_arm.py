@@ -288,6 +288,10 @@ def publish_argv(body: Path, keys: tuple[str, ...]) -> list[str]:
     return argv
 
 
+def profile_argv() -> list[str]:
+    return [CLI, "profile", "--json"]
+
+
 def delete_argv(piece_id: str) -> list[str]:
     return [CLI, "delete", piece_id, "--yes", "--json"]
 
@@ -301,6 +305,7 @@ def search_argv(query: str) -> list[str]:
 PUBLISH_ARGV: Callable[[Path, tuple[str, ...]], list[str]] = publish_argv
 DELETE_ARGV: Callable[[str], list[str]] = delete_argv
 SEARCH_ARGV: Callable[[str], list[str]] = search_argv
+PROFILE_ARGV: Callable[[], list[str]] = profile_argv
 SEARCH_LIMIT = 10
 ENVELOPE_KEYS = frozenset({"ok", "data", "resourceId", "postId", "deleted", "candidates"})
 SEED_NOTE = "seed.json"
@@ -448,6 +453,26 @@ def _run_cli(argv: list[str], env: dict[str, str], secrets_: tuple[str, ...]) ->
         return 1, None, f"{argv[0]} could not run: {error.__class__.__name__}"
     tail = _mask(("stderr: " + (completed.stderr or "").strip() + " stdout: " + (completed.stdout or "").strip()).strip(), secrets_)[-OUTPUT_LIMIT:]
     return completed.returncode, envelope_of(completed.stdout, completed.stderr), tail
+
+
+def check_signing_identity(source: Source) -> str:
+    """The address the source's wallet signs as, or a ProvisionError naming the mismatch.
+
+    Every seed publish, sweep and delete signs with this keystore. When the
+    passphrase in the environment opens a different one -- two bench profiles,
+    one passphrase -- nothing says so until the first publish, and each trial
+    fails one at a time. A 2026-09-09 corpus run lost all 30 seeded trials that
+    way. Ask once, before any trial starts.
+    """
+    code, payload, tail = _run_cli(PROFILE_ARGV(), cli_environment(source), source.secrets)
+    address = _find(payload, "address")
+    if code != 0 or not isinstance(address, str) or not address:
+        raise ProvisionError(
+            f"--tenjin-source {source.path} cannot sign: {tail or 'the CLI returned no address'}; "
+            f"{WALLET_PASSPHRASE} must open {source.path / 'wallet.json'}",
+            code="source_wallet",
+        )
+    return address
 
 
 def seed_body(lesson: Lesson, roots: artifact.TrialRoots, nonce: str, trial_id: str) -> Path:

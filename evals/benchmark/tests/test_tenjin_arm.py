@@ -103,6 +103,38 @@ class SourceTest(SourceCase):
         # passphrase is not the team shelf secret.
         self.assertEqual(source.facts["shelf_secret_present"], True)
 
+    def test_the_preflight_names_the_address_the_source_signs_as(self) -> None:
+        source = tenjin_arm.load_source(self.write_source())
+        with mock.patch.object(tenjin_arm, "PROFILE_ARGV", lambda: [sys.executable, FAKE_CLI, "profile", "--json"]):
+            self.assertEqual(tenjin_arm.check_signing_identity(source), "0x0a3B118D0261b5b772d613DB32446FEE7b7208bC")
+
+    def test_a_passphrase_that_opens_another_keystore_fails_the_run_not_each_trial(self) -> None:
+        """One passphrase, two bench profiles: the 2026-09-09 corpus run lost all 30 seeded trials to this.
+
+        Nothing before this asked the wallet a question, so the mismatch first
+        showed up at the first seed publish, as `provision:seed_publish` on one
+        trial after another while the baseline arm kept passing.
+        """
+        path = self.write_source()
+        (path / "wrong-passphrase").touch()
+        source = tenjin_arm.load_source(path)
+        with mock.patch.object(tenjin_arm, "PROFILE_ARGV", lambda: [sys.executable, FAKE_CLI, "profile", "--json"]):
+            with self.assertRaises(tenjin_arm.ProvisionError) as caught:
+                tenjin_arm.check_signing_identity(source)
+        self.assertEqual(caught.exception.code, "source_wallet")
+        self.assertIn("wallet.json", str(caught.exception))
+
+    def test_the_preflight_masks_the_secrets_it_could_echo(self) -> None:
+        path = self.write_source()
+        (path / "wrong-passphrase").touch()
+        with mock.patch.dict(os.environ, {tenjin_arm.WALLET_PASSPHRASE: PASSPHRASE}):
+            source = tenjin_arm.load_source(path)
+        with mock.patch.object(tenjin_arm, "PROFILE_ARGV", lambda: [sys.executable, FAKE_CLI, "profile", "--json"]):
+            with self.assertRaises(tenjin_arm.ProvisionError) as caught:
+                tenjin_arm.check_signing_identity(source)
+        self.assertNotIn(PASSPHRASE, str(caught.exception))
+        self.assertNotIn(SECRET, str(caught.exception))
+
     def test_a_machine_with_no_passphrase_sends_none(self) -> None:
         source = tenjin_arm.load_source(self.write_source())
         self.assertEqual(source.wallet_passphrase, "")

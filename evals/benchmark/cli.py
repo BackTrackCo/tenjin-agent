@@ -449,6 +449,15 @@ def live_run(
     # wall-clock cap on attempts that cannot reach the provider.
     if seam is not None and not environ.get(seam):
         raise CliError(f"live-run needs the credential seam {seam} set in this shell")
+    # Last of the cheap gates, and the one that asks the wallet a question: a
+    # passphrase that opens some other keystore is silent until the first seed
+    # publish, and then it refuses one seeded trial after another while the
+    # baseline arm keeps passing. Ask once, before any container starts.
+    if provisioned and source is not None:
+        try:
+            tenjin_arm.check_signing_identity(source)
+        except tenjin_arm.ProvisionError as error:
+            raise CliError(str(error)) from error
     # One network and one proxy for the whole run: the trial containers join the
     # internal network only, and the proxy log is the run's sentinel. Both are
     # in the process ledger, so `cleanup` reaches them after an interrupt, and
