@@ -6,7 +6,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
@@ -760,35 +760,51 @@ describe('the daemon, cold-started from the real bundle', () => {
  * path install gave it. So what has to hold is that the built module loads on
  * its own — importing nothing but `node:fs` — and writes the artifact in the
  * exact shape `hooks/failure/test-identity.ts` reads back.
+ *
+ * DRIVEN IN A REAL NODE SUBPROCESS, not by an `await import()` from inside this
+ * test. Vitest serves every dynamic import through Vite's module runner, so an
+ * in-test import proves that `vite:import-analysis` can parse the bundle — a
+ * claim about our own dev toolchain, not about the artifact we ship. It also
+ * made this case fail intermittently across every branch when the transform
+ * refused the built file. `node <driver>` is what a user's vitest process
+ * actually does with the path, and it is the only thing worth asserting.
  */
 describe('the built vitest reporter bundle', () => {
   it('writes .vitest-report.json in the shape test-identity.ts reads', async () => {
     const path = vitestReporterPath(dataDir);
     expect(existsSync(path)).toBe(true);
-    // No node_modules beside it and no bundler: a bare dynamic import is the
-    // same thing vitest does with the path in a repo's own config.
-    const mod = (await import(pathToFileURL(path).href)) as {
-      default: new (options?: { outputFile?: string }) => {
-        onInit(): void;
-        onTestRunEnd(modules: unknown[], unhandled: unknown[]): void;
-      };
-    };
     const outputFile = join(dataDir, 'smoke-report.json');
-    const reporter = new mod.default({ outputFile });
-    reporter.onInit();
-    reporter.onTestRunEnd(
-      [
-        {
-          moduleId: join(dataDir, 'src/lib/http.test.ts'),
-          children: {
-            allTests: () => [
-              { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
-            ],
-          },
-        },
-      ],
-      [],
+    const moduleId = join(dataDir, 'src/lib/http.test.ts');
+    // No node_modules beside it and no bundler, in a plain Node process: the
+    // driver is the whole of what a repo's vitest config does with this path.
+    const driver = join(dataDir, 'drive-reporter.mjs');
+    await writeFile(
+      driver,
+      `import { pathToFileURL } from 'node:url';
+const [reporterPath, outputFile, moduleId] = process.argv.slice(2);
+const mod = await import(pathToFileURL(reporterPath).href);
+const reporter = new mod.default({ outputFile });
+reporter.onInit();
+reporter.onTestRunEnd(
+  [
+    {
+      moduleId,
+      children: {
+        allTests: () => [
+          { name: 'gives up after three', parent: { type: 'suite', fullName: 'retries' } },
+        ],
+      },
+    },
+  ],
+  [],
+);
+`,
     );
+    const run = await runNode([driver, path, outputFile, moduleId], process.env);
+    // A non-zero exit or anything on stderr is the bundle failing to load
+    // standalone, which is exactly the breakage this case exists to catch.
+    expect(run.stderr, run.stderr).toBe('');
+    expect(run.code).toBe(0);
 
     const report = JSON.parse(await readFile(outputFile, 'utf8')) as {
       startTime: number;
@@ -800,11 +816,7 @@ describe('the built vitest reporter bundle', () => {
     expect(report.startTime).toBeGreaterThan(0);
     expect(report.endTime).toBeGreaterThanOrEqual(report.startTime);
     expect(report.failed).toEqual([
-      {
-        file: join(dataDir, 'src/lib/http.test.ts'),
-        suite: 'retries',
-        test: 'gives up after three',
-      },
+      { file: moduleId, suite: 'retries', test: 'gives up after three' },
     ]);
   });
 });
