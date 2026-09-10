@@ -1,6 +1,8 @@
-import { lstat, readFile, realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
+import { codexRulesPath, grantedPrefixes, rulesFileBody, verifyPrefixAllowed } from './codex-rules';
+export { removeCodexGrant } from './codex-rules';
 import type { PublishMode } from './config';
 
 /**
@@ -63,6 +65,271 @@ import type { PublishMode } from './config';
 /** Claude Code's user-level settings file, the only file this module writes. */
 export function claudeSettingsPath(homeDir: string): string {
   return join(homeDir, '.claude', 'settings.json');
+}
+
+/**
+ * Where each harness keeps a persistent, command-scoped grant an installer may
+ * write. One entry per harness, each a claim about that HARNESS rather than
+ * about this code — the thing that went wrong was reporting the absence of a
+ * writer as a property of our implementation (`harness-not-claude`) while
+ * rendering Claude's rules to a Codex operator anyway (tenjin-agent#342).
+ *
+ * `writable` is a promise this module keeps: the fixed tiers above, in that
+ * harness's own grammar, and nothing else. Both shipped harnesses are
+ * `writable`, so `absent` claims nothing today.
+ *
+ * Codex's search is recorded because four plausible candidates are wrong and
+ * one is right (`codex-cli 0.154.0`, openai/codex at `rust-v0.154.0`):
+ *
+ *  - RIGHT: `$CODEX_HOME/rules/*.rules`, the user exec-policy layer, where
+ *    Codex's own "don't ask again for commands that start with ..." persists.
+ *  - `approved_command_prefixes` is a world-state field shown to the model.
+ *  - `requirements.toml` does carry exec `prefix_rules`, at
+ *    `/etc/codex/requirements.toml` or by MDM. It needs root, and writing it
+ *    would be the same forgery as writing a `trusted_hash`.
+ *  - A permission profile has no exec member, only filesystem and network.
+ *  - `approval_policy = "never"` and project `trust_level` are user-writable
+ *    and BLANKET: they clear every command rather than `tenjin publish`, so
+ *    writing either would grant far more than the mode consents to. This CLI
+ *    writes neither.
+ */
+/**
+ * WHICH writer owns a harness's grant. Named rather than inferred, because
+ * "writable" alone is not enough to route on: Codex has a real surface and
+ * Claude's writer must still never touch it. Selecting on `kind` alone sent a
+ * Codex-only install down the Claude writer, which would have created a
+ * `~/.claude/settings.json` on a machine with no Claude on it.
+ */
+export type GrantWriter = 'claude-settings' | 'codex-rules';
+
+export type GrantSurface =
+  | {
+      kind: 'writable';
+      writer: GrantWriter;
+      path(homeDir: string, env?: NodeJS.ProcessEnv): string;
+    }
+  | {
+      kind: 'absent';
+      /** One line naming what the harness does instead. */
+      why: string;
+      /** What a person can do about it, or the empty list when nothing helps. */
+      operatorSteps: string[];
+    };
+
+export const GRANT_SURFACE: Readonly<Record<string, GrantSurface>> = {
+  claude: { kind: 'writable', writer: 'claude-settings', path: claudeSettingsPath },
+  codex: { kind: 'writable', writer: 'codex-rules', path: codexRulesPath },
+};
+
+/** Does `harness` keep its grant in the file `writer` owns? */
+export function usesGrantWriter(harness: string, writer: GrantWriter): boolean {
+  const surface = grantSurfaceFor(harness);
+  return surface.kind === 'writable' && surface.writer === writer;
+}
+
+/** The grant surface for `harness`, or `absent` for one we know nothing about. */
+export function grantSurfaceFor(harness: string): GrantSurface {
+  return (
+    GRANT_SURFACE[harness] ?? {
+      kind: 'absent',
+      why: `This build knows no permission surface for ${harness}.`,
+      operatorSteps: [],
+    }
+  );
+}
+
+/**
+ * What a harness's grant state IS, in the four words `doctor` reports it with.
+ * Deliberately separate from {@link PermissionsSkipReason}, which is about one
+ * WRITE; this is about a machine.
+ */
+export type PermissionState = 'granted' | 'pending' | 'unsupported' | 'skipped' | 'unknown';
+
+export interface HarnessPermissions {
+  harness: string;
+  state: PermissionState;
+  /** The file consulted, absent when the harness has none. */
+  path?: string;
+  /** Rules of ours in force there. Always empty for an `absent` surface, which
+   *  is the point: a Codex machine has no `Bash(...)` rules to list. */
+  rules: string[];
+  /** Rules this machine's mode calls for and does not have. */
+  missing: string[];
+  /** One line an operator can act on. */
+  detail: string;
+  fix?: string;
+}
+
+/**
+ * Read one harness's grant state, without writing anything.
+ *
+ * PER HARNESS, INDEPENDENTLY. `doctor` used to read Claude's settings file and
+ * print it under a heading naming no harness, so a Codex-only machine was told
+ * `Bash(tenjin publish:*)` was in effect while Codex's approval layer denied
+ * every `tenjin publish` (tenjin-agent#342).
+ */
+export async function inspectHarnessPermissions(
+  harness: string,
+  homeDir: string,
+  mode: PublishMode,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<HarnessPermissions> {
+  const surface = grantSurfaceFor(harness);
+  if (surface.kind === 'absent') {
+    return {
+      harness,
+      state: 'unsupported',
+      rules: [],
+      missing: [],
+      detail: surface.why,
+      ...(surface.operatorSteps.length > 0 ? { fix: surface.operatorSteps[0] } : {}),
+    };
+  }
+  // Codex keeps its grant in its own grammar and its own file, so it gets its
+  // own reader. Reporting it through the Claude allowlist reader is exactly
+  // the conflation #342 is about.
+  if (harness === 'codex') return await inspectCodexGrant(homeDir, mode, env);
+  const found = await inspectAllowlist(homeDir, mode);
+  if ('result' in found) {
+    const refused = found.result;
+    return {
+      harness,
+      state: 'unknown',
+      ...(refused.path !== undefined ? { path: refused.path } : {}),
+      rules: [],
+      missing: [],
+      detail: refused.warning ?? `${surface.path(homeDir)} could not be read.`,
+      ...(refused.fix !== undefined ? { fix: refused.fix } : {}),
+    };
+  }
+  const missing = [...found.added];
+  return {
+    harness,
+    state: missing.length === 0 ? 'granted' : 'pending',
+    path: found.path,
+    rules: [...found.alreadyPresent],
+    missing,
+    detail:
+      missing.length === 0
+        ? `${found.alreadyPresent.length} rules in ${found.path}`
+        : `${missing.length} of this mode's rules are missing from ${found.path}`,
+    ...(missing.length === 0 ? {} : { fix: 'tenjin install' }),
+  };
+}
+
+/**
+ * Codex's grant, read back and then PUT TO CODEX.
+ *
+ * Two questions, and the second settles it: does the file say what this mode
+ * calls for, and does the binary agree it grants that. A `.rules` file that
+ * fails to parse is silent until a session runs, so a reader that stopped at
+ * "the file matches" would report `granted` over a file Codex is discarding.
+ * With no `codex` to ask, the file's answer stands and the detail says so.
+ */
+async function inspectCodexGrant(
+  homeDir: string,
+  mode: PublishMode,
+  env: NodeJS.ProcessEnv,
+): Promise<HarnessPermissions> {
+  const path = codexRulesPath(homeDir, env);
+  const writable = rulesForPublishMode(mode);
+  const want = rulesFileBody(writable);
+  const rules = grantedPrefixes(writable).map((tokens) => tokens.join(' '));
+  const found = await readFile(path, 'utf8').catch(() => null);
+  if (found !== want) {
+    return {
+      harness: 'codex',
+      state: 'pending',
+      path,
+      rules: [],
+      missing: rules,
+      detail:
+        found === null
+          ? `no grant is installed at ${path}`
+          : `${path} does not match what publish.mode ${mode} calls for`,
+      fix: 'tenjin install',
+    };
+  }
+  // One representative prefix, not all eleven: they come from one generated
+  // body, so they parse or fail together, and a self-test that spawns eleven
+  // processes on every `doctor` is a cost with no extra answer in it. The one
+  // asked about is the consequential one — the mode-gated `publish` where the
+  // mode carries it.
+  const probe = grantedPrefixes(writable).at(-1);
+  const agreed = probe === undefined ? null : await verifyPrefixAllowed(path, probe, env);
+  if (agreed === false) {
+    return {
+      harness: 'codex',
+      state: 'pending',
+      path,
+      rules: [],
+      missing: rules,
+      detail: `${path} is installed but Codex does not read it as granting \`${probe?.join(' ')}\``,
+      fix: 'tenjin install',
+    };
+  }
+  return {
+    harness: 'codex',
+    state: 'granted',
+    path,
+    rules,
+    missing: [],
+    detail:
+      agreed === true
+        ? `${rules.length} prefixes in ${path}, confirmed by codex execpolicy`
+        : `${rules.length} prefixes in ${path} (codex could not be asked to confirm)`,
+  };
+}
+
+/** What one Codex grant write did. */
+export interface CodexGrantResult {
+  path: string;
+  /** The prefixes now granted there, as space-joined command prefixes. */
+  granted: string[];
+  /** True when this run changed the file. */
+  wrote: boolean;
+  /** Present when nothing could be written; the file was left as found. */
+  error?: string;
+}
+
+/**
+ * Write Codex's grant for `mode`, whole.
+ *
+ * TAKES A MODE, NOT RULES, exactly as {@link wireFreeVerbAllowlist} does: the
+ * two fixed constants are all either writer can produce, so no caller and no
+ * future flag can widen one. lib/codex-rules.ts only spells the result.
+ *
+ * Idempotent by construction, the body being a pure function of the mode. And
+ * `review` regenerates it WITHOUT the mode-gated pair, which IS the retraction
+ * — no separate remove path to forget, because narrowing and widening are one
+ * operation.
+ */
+export async function wireCodexGrant(
+  homeDir: string,
+  mode: PublishMode,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<CodexGrantResult> {
+  const path = codexRulesPath(homeDir, env);
+  const rules = rulesForPublishMode(mode);
+  const body = rulesFileBody(rules);
+  const granted = grantedPrefixes(rules).map((t) => t.join(' '));
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    const current = await readFile(path, 'utf8').catch(() => null);
+    if (current === body) return { path, granted, wrote: false };
+    // 0600 for the same reason the hooks file gets it: this is a standing
+    // decision about which commands run without asking, and a file another
+    // account can append to is a file that can widen it.
+    await writeFileAtomic(path, body, { mode: 0o600 });
+    return { path, granted, wrote: true };
+  } catch (err) {
+    return {
+      path,
+      granted: [],
+      wrote: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /**
@@ -207,7 +474,22 @@ export const FORBIDDEN_VERB_FRAGMENTS: readonly string[] = [
  * never a partial write: the writer either appends all missing rules or none.
  */
 export type PermissionsSkipReason =
-  | 'harness-not-claude'
+  /**
+   * The harness has no supported surface for a persistent, command-scoped
+   * grant, so there is nothing to write and no operator step that would make
+   * one appear. NOT `harness-not-claude`, which is what this was called: that
+   * name describes our implementation rather than the harness, and it let
+   * every reader downstream assume a Claude-shaped grant was in force anyway
+   * (tenjin-agent#342). See {@link GRANT_SURFACE}.
+   */
+  | 'harness-unsupported'
+  /**
+   * The harness DOES have a grant, in a file this writer does not own, and it
+   * is reported on its own row. Distinct from `harness-unsupported` (no grant
+   * anywhere): conflating them told a Codex operator their permissions were
+   * "not wired" on the run that wired them (tenjin-agent#342).
+   */
+  | 'harness-elsewhere'
   | 'not-requested'
   | 'declined'
   | 'dry-run'
@@ -342,11 +624,25 @@ export interface PermissionsResult {
 /**
  * The command that turns a skip into a write. Kept beside the reason vocabulary
  * so a new reason cannot ship without one.
+ *
+ * `harness-unsupported` is the exception that proves it: no command turns it
+ * into a write, so its `fix` says what the harness itself does instead. Naming
+ * `tenjin doctor` there, as this used to, sent an operator to a page of Claude
+ * rules and let them read those as their own (tenjin-agent#342).
  */
-function fixFor(reason: PermissionsSkipReason): string {
+function fixFor(reason: PermissionsSkipReason, harness = 'claude'): string {
   switch (reason) {
-    case 'harness-not-claude':
-      return 'This allowlist is Claude Code only. Run `tenjin doctor` for the lines your harness needs.';
+    case 'harness-unsupported': {
+      const surface = grantSurfaceFor(harness);
+      return surface.kind === 'absent' && surface.operatorSteps.length > 0
+        ? (surface.operatorSteps[0] as string)
+        : `No permission rules were written: ${harness} has no surface for them.`;
+    }
+    case 'harness-elsewhere': {
+      const surface = grantSurfaceFor(harness);
+      const where = surface.kind === 'writable' ? ` See ${surface.path('~')}.` : '';
+      return `These rules are Claude Code's; ${harness} keeps its own grant elsewhere.${where}`;
+    }
     case 'not-requested':
     case 'declined':
     case 'dry-run':
@@ -393,7 +689,7 @@ function skip(
     alreadyPresentFree: [],
     skipped: reason,
     ...(warning !== undefined ? { warning } : {}),
-    fix: fixFor(reason),
+    fix: fixFor(reason, harness),
   };
 }
 
@@ -403,7 +699,14 @@ export function permissionsSkipped(
   homeDir: string,
   reason: PermissionsSkipReason,
 ): PermissionsResult {
-  const path = harness === 'claude' ? claudeSettingsPath(homeDir) : undefined;
+  // A PermissionsResult is THIS writer's receipt, so its `path` is this
+  // writer's file or nothing. Naming ~/.claude/settings.json to a Codex
+  // operator points them at a file that is nothing to do with their harness;
+  // naming Codex's rules file here would be worse, because the sentence around
+  // it is about rules that never went there (tenjin-agent#342).
+  const path = usesGrantWriter(harness, 'claude-settings')
+    ? claudeSettingsPath(homeDir)
+    : undefined;
   return skip(harness, path, reason);
 }
 

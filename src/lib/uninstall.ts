@@ -77,6 +77,8 @@ export interface UninstallReport {
   hookFiles: SettingsOutcome[];
   /** How the loop daemon ended, from `stopDaemon`. */
   daemon: string;
+  /** Codex's command grant file, present only when this run deleted one. */
+  codexGrant?: string;
   skills: string[];
   scripts: string[];
   hooksDir?: string;

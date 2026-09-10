@@ -202,6 +202,7 @@ function realWalletCreate(exec?: ExecFn): Partial<InstallDeps> {
 const okChecks: DoctorChecks = {
   publishMode: 'review',
   missingModeGated: [],
+  grantable: true,
   checks: [{ name: 'stub', status: 'ok', required: true, detail: 'ok' }],
 };
 
@@ -653,6 +654,7 @@ describe('runInstall: doctor as the final step', () => {
     const failing: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
+      grantable: true,
       checks: [{ name: 'api', status: 'fail', required: true, detail: 'down' }],
       failure: {
         code: 'API_UNREACHABLE',
@@ -717,6 +719,7 @@ describe('runInstall: output ordering', () => {
   const warning: DoctorChecks = {
     publishMode: 'review',
     missingModeGated: [],
+    grantable: true,
     checks: [
       {
         name: 'search',
@@ -1416,6 +1419,7 @@ describe('runInstall: the ten rows', () => {
     const mixed: DoctorChecks = {
       publishMode: 'review',
       missingModeGated: [],
+      grantable: true,
       checks: [
         { name: 'node', status: 'ok', required: true, detail: '24.4.0' },
         { name: 'balance', status: 'warn', required: false, detail: '$0.00 USDC' },
@@ -1679,8 +1683,13 @@ describe('runInstall: permissions decision', () => {
     );
     expect(wiredOf(dry.data).fix).toContain('tenjin install');
 
+    // Codex's is the exception that proves the contract: no `tenjin` command
+    // turns this skip into a Claude write, because Codex's grant landed in its
+    // own file. Naming `tenjin doctor` here sent operators to a page of Claude
+    // rules and let them read those as their own (tenjin-agent#342).
     const codex = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
-    expect(wiredOf(codex.data).fix).toContain('tenjin doctor');
+    expect(wiredOf(codex.data).fix).toMatch(/codex/i);
+    expect(wiredOf(codex.data).fix).not.toContain('tenjin doctor');
   });
 
   // The old headless arm returned an empty pair whatever the file held, so a
@@ -1904,11 +1913,16 @@ describe('runInstall: permissions decision', () => {
     expect(human(res)).toContain('unchanged (dry run)');
   });
 
-  it('skips a codex-only install, and says why', async () => {
+  it('writes no Claude rules on a codex-only install, and grants Codex its own', async () => {
+    // The Claude writer must not create a settings.json on a machine with no
+    // Claude on it, and the envelope must not read as though it did. Codex is
+    // not ungranted here: its grant is a file of its own (tenjin-agent#342).
     const res = await runInstall({ harness: ['codex'] }, makeCtx(), deps({ isInteractive: true }));
-    expect(wiredOf(res.data)).toMatchObject({ harness: 'codex', skipped: 'harness-not-claude' });
+    expect(wiredOf(res.data)).toMatchObject({ harness: 'codex', skipped: 'harness-elsewhere' });
     expect(await allowList()).toBeUndefined();
-    expect(human(res)).toContain('Claude Code only');
+    const grant = (res.data as { codexGrant?: { granted: string[]; path: string } }).codexGrant;
+    expect(grant?.granted.length).toBeGreaterThan(0);
+    expect(await readFile(grant?.path ?? '', 'utf8')).toContain('prefix_rule(pattern=["tenjin"');
   });
 
   it('sanitizes the warning, which quotes bytes out of the file', async () => {
@@ -2247,9 +2261,14 @@ describe('runInstall: permissions decision', () => {
         makeCtx({ json: true }),
         deps(),
       );
-      expect(wiredOf(res.data).skipped).toBe('harness-not-claude');
+      expect(wiredOf(res.data).skipped).toBe('harness-elsewhere');
       expect(wiredOf(res.data).removed).toEqual([...MODE_GATED_RULES]);
       expect(await allowList()).toEqual([]);
+      // And the retraction reaches the harness this run actually targeted:
+      // `review` regenerates Codex's grant without the mode-gated pair.
+      const grant = (res.data as { codexGrant?: { granted: string[] } }).codexGrant;
+      expect(grant?.granted).not.toContain('tenjin publish');
+      expect(grant?.granted).not.toContain('tenjin edit');
     });
 
     /**
@@ -3311,7 +3330,7 @@ describe('runInstall: harness hooks', () => {
       wrote: boolean;
       url?: string;
       daemon?: { pid: number; port: number; version: string };
-      activation?: string;
+      activation?: string[];
       removed: string[];
       skipped?: string;
       fix?: string;
@@ -3417,7 +3436,7 @@ describe('runInstall: harness hooks', () => {
     expect(h.skipped).toBeUndefined();
     expect(h.path).toBe(join(home, '.codex', 'hooks.json'));
     expect(h.url).toBeUndefined();
-    expect(h.activation).toContain('/hooks');
+    expect(h.activation?.some((step) => step.includes('/hooks'))).toBe(true);
     expect(existsSync(join(data, 'hooks'))).toBe(true);
     expect(existsSync(claudeSettingsPath(home))).toBe(false);
     const file = JSON.parse(await readFile(h.path ?? '', 'utf8')) as {

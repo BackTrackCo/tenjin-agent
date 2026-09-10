@@ -1815,6 +1815,12 @@ describe('runDoctor — the rule the publish mode carries', () => {
   let home: string;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'tenjin-doc-home-'));
+    // These rules are Claude Code's grammar, and the pointer that names them is
+    // suppressed where they could never apply — a Codex-only machine was being
+    // told to add two rules its harness has never heard of (tenjin-agent#342).
+    // So every case here states the precondition it is actually about: a
+    // machine whose install targeted Claude.
+    await mkdir(join(home, '.claude'), { recursive: true });
   });
   afterEach(async () => {
     await rm(home, { recursive: true, force: true });
@@ -2470,7 +2476,13 @@ describe('runDoctor — Codex loop hook wiring', () => {
     };
   }
 
-  it('reports configured entries and only recent Codex fires, including on the human page', async () => {
+  /**
+   * Configured, trusted and observed are three checks, not one line, because
+   * they fail separately and each has a different remedy. Rolled together, a
+   * Codex install that was written but never trusted read as `ok` and an
+   * operator spent an afternoon finding out otherwise (tenjin-agent#342).
+   */
+  it('separates configured, trusted and observed, and counts only recent fires', async () => {
     await wireCodex();
     const now = Date.now();
     addFire('recent-codex', 'codex', now);
@@ -2478,12 +2490,48 @@ describe('runDoctor — Codex loop hook wiring', () => {
     addFire('recent-claude', 'claude', now);
 
     const result = await page();
-    const hooks = find(result.checks, 'codex hooks');
-    expect(hooks).toMatchObject({ status: 'ok', required: false });
-    expect(hooks.detail).toBe(`2 in ${codexHooksPath()}; 1 fire observed in 7d`);
-    expect(hooks.fix).toBeUndefined();
-    expect(result.text).toContain('codex hooks');
-    expect(result.text).toContain(hooks.detail);
+    const configured = find(result.checks, 'codex configured');
+    expect(configured).toMatchObject({ status: 'ok', required: false });
+    expect(configured.detail).toBe(`2 entries in ${codexHooksPath()}`);
+
+    // Nothing has trusted these, and `codex` is not reachable with env {}, so
+    // the config file settles it: no rows, therefore inert.
+    const trusted = find(result.checks, 'codex trusted');
+    expect(trusted.status).toBe('warn');
+    expect(trusted.fix).toContain('/hooks');
+
+    const observed = find(result.checks, 'codex observed');
+    expect(observed).toMatchObject({ status: 'ok', required: false });
+    expect(observed.detail).toBe('1 fire in 7d');
+    expect(result.text).toContain('codex configured');
+    expect(result.text).toContain(configured.detail);
+  });
+
+  /**
+   * The state the whole issue turns on: entries present, nothing trusted,
+   * nothing observed. Every one of those has to be visible and separately
+   * remediable, and none of them may read as a working loop.
+   */
+  it('an installed-but-untrusted Codex reads as inert, with the /hooks step on it', async () => {
+    await wireCodex();
+    const result = await page();
+    expect(find(result.checks, 'codex configured').status).toBe('ok');
+    const trusted = find(result.checks, 'codex trusted');
+    expect(trusted.status).toBe('warn');
+    expect(trusted.detail).toMatch(/inert/);
+    const observed = find(result.checks, 'codex observed');
+    expect(observed.status).toBe('warn');
+    expect(observed.fix).toContain('/hooks');
+  });
+
+  /**
+   * And Codex's permission state is Codex's own file, never Claude's rules.
+   */
+  it("reports Codex permissions against Codex's own grant file", async () => {
+    await wireCodex();
+    const perms = find((await page()).checks, 'codex permissions');
+    expect(perms.detail).not.toContain('Bash(');
+    expect(perms.detail).toMatch(/tenjin\.rules|no grant is installed/);
   });
 
   it('probes a Codex-only daemon through daemon.pid and reports that port', async () => {

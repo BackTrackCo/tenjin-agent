@@ -69,8 +69,9 @@ export interface HooksResult {
   daemon?: { pid: number; port: number; version: string };
   /** The loopback URL the `http` entries carry, when the harness has any. */
   url?: string;
-  /** What the operator still has to do before the harness runs the entries. */
-  activation?: string;
+  /** What the operator still has to do before the harness runs the entries,
+   *  one line per step. */
+  activation?: string[];
   skipped?: HooksSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;
@@ -358,6 +359,19 @@ function urlPort(url: string): number | null {
   }
 }
 
+/**
+ * One registered handler of ours, addressed the way a harness's own trust
+ * ledger addresses it: by event and by position. The indices are READ BACK OUT
+ * OF THE FILE rather than counted off the plan, because a hand-merged entry
+ * ahead of ours shifts them and a trust lookup on the wrong index is worse
+ * than none (lib/codex-trust.ts).
+ */
+export interface RegisteredHandler {
+  event: string;
+  groupIndex: number;
+  handlerIndex: number;
+}
+
 export interface RegisteredHooks {
   path: string;
   /** How many entries of ours the file carries. */
@@ -365,6 +379,8 @@ export interface RegisteredHooks {
   /** The port our `http` entries name, or null when none does: a `command`
    *  entry carries no port, and neither does an absent file. */
   port: number | null;
+  /** Every handler of ours, in file order. */
+  handlers: RegisteredHandler[];
 }
 
 /**
@@ -380,21 +396,22 @@ export async function registeredHooks(
 ): Promise<RegisteredHooks> {
   const path = adapter.registrar.configPath(homeDir, env);
   const hooks = await readHooksObject(path);
-  const out: RegisteredHooks = { path, entries: 0, port: null };
+  const out: RegisteredHooks = { path, entries: 0, port: null, handlers: [] };
   if (hooks === null) return out;
-  for (const list of Object.values(hooks)) {
+  for (const [event, list] of Object.entries(hooks)) {
     if (!Array.isArray(list)) continue;
-    list.forEach((entry) => {
+    list.forEach((entry, groupIndex) => {
       if (!ownsHookEntry(entry, dataDir)) return;
       out.entries += 1;
-      for (const handler of (entry as { hooks: unknown[] }).hooks) {
+      (entry as { hooks: unknown[] }).hooks.forEach((handler, handlerIndex) => {
         // OURS ONLY, and parsed defensively even then: a handler someone
         // hand-merged beside ours may carry a relative `url` that would
         // otherwise throw ERR_INVALID_URL out of doctor.
-        if (!ownsHandler(handler, dataDir)) continue;
-        if (!isPlainObject(handler) || typeof handler.url !== 'string') continue;
+        if (!ownsHandler(handler, dataDir)) return;
+        out.handlers.push({ event, groupIndex, handlerIndex });
+        if (!isPlainObject(handler) || typeof handler.url !== 'string') return;
         out.port ??= urlPort(handler.url);
-      }
+      });
     });
   }
   return out;
@@ -429,8 +446,12 @@ export async function writeHooks(opts: WriteHooksOptions): Promise<HooksResult> 
   const harness = adapter.id;
   const dir = hooksDir(dataDir);
   const declaredPath = adapter.registrar.configPath(homeDir, env);
-  const activation =
-    adapter.registrar.activation !== undefined ? { activation: adapter.registrar.activation } : {};
+  // The DECLARED path, not the one `inspectHooksFile` resolves symlinks to:
+  // the harness discovers its hooks file at the declared name, so that is the
+  // source path its own trust browser shows, and telling the operator to look
+  // for the link's target would send them hunting for a line that is not there.
+  const steps = adapter.registrar.activation?.(declaredPath);
+  const activation = steps !== undefined ? { activation: steps } : {};
 
   // Steps 1-3. A daemon that will not come up is reported as a skip rather than
   // thrown: install has already written skills and permissions, and the remedy
@@ -439,6 +460,10 @@ export async function writeHooks(opts: WriteHooksOptions): Promise<HooksResult> 
   try {
     started = await (opts.start ?? startDaemon)(dataDir, {
       ...(opts.bundleDir !== undefined ? { bundleDir: opts.bundleDir } : {}),
+      // The entries this call is about to write all post to this harness's
+      // route, so a running daemon that has no such route is replaced before
+      // they name it, whatever its version says (tenjin-agent#342).
+      requires: [harness],
     });
   } catch (err) {
     return skip('daemon-down', {

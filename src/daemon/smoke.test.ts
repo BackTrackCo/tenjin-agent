@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -11,8 +11,11 @@ import { build, type Options } from 'tsup';
 import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
 import { installDaemonFiles } from './control';
+import { codexAdapter } from '../adapters/codex';
+import { readCodexTrust, trustKey } from '../lib/codex-trust';
+import { registeredHooks, writeHooks } from '../lib/harness-hooks';
 import { HARNESS_MS } from '../hooks/constants';
-import { ensureDaemon, readToken } from '../hooks/shim';
+import { ensureDaemon, health, readToken } from '../hooks/shim';
 import {
   configPath,
   daemonBundlePath,
@@ -891,6 +894,144 @@ describe('the daemon, cold-started from the real bundle', () => {
         expect(again.status).toBe(204);
       });
     });
+
+    /**
+     * ACCEPTANCE 6 (tenjin-agent#342): the whole activation, end to end, with
+     * nothing about it mocked except the one keypress a person has to make.
+     *
+     *   install -> configured, and honestly reported as INERT
+     *   -> trust  -> Codex accepts the source
+     *   -> a fresh session's captured events, through the real shim
+     *   -> recorded fires, and doctor flips to observed.
+     *
+     * The trust step is written here as a FIXTURE standing in for Codex's
+     * `/hooks` browser, and that is the only place in this repository where a
+     * `[hooks.state]` row is ever produced. Product code must not write one:
+     * the hash is the control that stops an edited hooks.json running under
+     * trust granted to an earlier version of itself (lib/codex-trust.ts). A
+     * test may stage the state a person would have created; an installer may
+     * not create it.
+     */
+    it('install -> trust -> fresh session -> recorded fires, with doctor honest at each step', async () => {
+      const home = await mkdtemp(join(tmpdir(), 'tenjin-activation-home-'));
+      try {
+        const codexHome = join(home, '.codex');
+        const env = { CODEX_HOME: codexHome };
+
+        // 1. INSTALL. The real writer -- its plan, its ownership prune, its
+        // merge, its mode and its activation steps -- against the daemon this
+        // file already has running. The bundle-materializing half of a start is
+        // seamed out ONLY because `beforeAll` already did it here and a second
+        // copy would rewrite the very files the reporter case imports; the
+        // copy itself is covered by this file's own bundle cases.
+        const live = await health(port);
+        if (live === null) throw new Error('the smoke daemon is not answering');
+        const wired = await writeHooks({
+          adapter: codexAdapter,
+          homeDir: home,
+          dataDir,
+          env,
+          start: async () => ({
+            health: live,
+            spawned: false,
+            replaced: null,
+            unconfirmed: null,
+            written: [],
+          }),
+        });
+        expect(wired.skipped).toBeUndefined();
+        expect(wired.entries).toBe(7);
+        expect(wired.activation?.length ?? 0).toBeGreaterThan(1);
+
+        const registered = await registeredHooks(codexAdapter, home, dataDir, env);
+        expect(registered.handlers).toHaveLength(7);
+        const keys = registered.handlers.map((h) =>
+          trustKey(registered.path, h.event, h.groupIndex, h.handlerIndex),
+        );
+        expect(keys.every((k) => k !== null)).toBe(true);
+
+        // 2. CONFIGURED, AND INERT. Before the keypress the honest answer is
+        // untrusted: the file exists and Codex will run none of it.
+        const before = await readCodexTrust(home, keys as string[], {
+          env,
+          listHooks: async () => null,
+        });
+        expect(before.state).toBe('untrusted');
+
+        // 3. THE OPERATOR'S KEYPRESS, staged. `/hooks` writes exactly this.
+        await mkdir(codexHome, { recursive: true });
+        await writeFile(
+          join(codexHome, 'config.toml'),
+          `[hooks.state]\n${(keys as string[])
+            .map((k) => `"${k}" = { enabled = true, trusted_hash = "sha256:staged" }`)
+            .join('\n')}\n`,
+        );
+        const trusted = await readCodexTrust(home, keys as string[], {
+          env,
+          // As Codex would answer once the rows are in place and the file is
+          // unchanged since. Asking the real binary here would make this test
+          // require a Codex install; the wire shape is pinned in codex-trust's
+          // own tests.
+          listHooks: async () =>
+            (keys as string[]).map((key) => ({ key, enabled: true, trustStatus: 'trusted' })),
+        });
+        expect(trusted.state).toBe('trusted');
+
+        // 4. A FRESH SESSION: every captured event of one root turn.
+        //
+        // The FIRST goes through the real shim bundle, spawned exactly as the
+        // hook entry just written names it -- that is what proves the entry
+        // runs at all. The rest post to the route that shim resolved, because
+        // five cold `node` starts is the slowest thing in this file and the
+        // shim's own forwarding is pinned by the case below this one.
+        const session = `01a08d00-0000-7000-8000-${Date.now().toString(16).padStart(12, '0')}`;
+        const turn = '01a08d00-0000-7000-8000-000000000abc';
+        const wanted = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'];
+        const fired = countFires();
+        const bodyFor = (event: string): string => {
+          const fixture = codexFixtures.find(
+            (f) => f.event === event && !f.name.startsWith('child'),
+          );
+          if (fixture === undefined) throw new Error(`no captured ${event}`);
+          return JSON.stringify({
+            ...(JSON.parse(fixture.body) as Record<string, unknown>),
+            session_id: session,
+            turn_id: turn,
+          });
+        };
+        const viaShim = await runNode(
+          [shimBundlePath(dataDir), '--harness', 'codex'],
+          { ...process.env, TENJIN_DATA_DIR: dataDir },
+          bodyFor(wanted[0]!),
+        );
+        // The shim never fails the harness, whatever it decides.
+        expect(viaShim.code).toBe(0);
+        for (const event of wanted.slice(1)) {
+          expect((await post(bodyFor(event))).status, event).toBeLessThan(400);
+        }
+        await expect.poll(countFires, POLL).toBe(fired + wanted.length);
+
+        // 5. RECORDED, per event, under this harness and this session.
+        const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+        try {
+          const rows = db
+            .prepare('SELECT event, harness FROM fires WHERE session = ?')
+            .all(`codex:${session}`) as Array<{ event: string; harness: string }>;
+          expect(rows.every((r) => r.harness === 'codex')).toBe(true);
+          expect([...new Set(rows.map((r) => r.event))].sort()).toEqual([
+            'prompt',
+            'session.start',
+            'tool.after',
+            'tool.before',
+            'turn.end',
+          ]);
+        } finally {
+          db.close();
+        }
+      } finally {
+        await rm(home, { recursive: true, force: true });
+      }
+    }, 45_000);
 
     it('the shim forwards a Codex prompt under --harness codex and the row is filed under codex:', async () => {
       const prompt = codexFixtures.find((f) => f.event === 'UserPromptSubmit');

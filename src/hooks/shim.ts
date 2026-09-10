@@ -46,6 +46,21 @@ export interface Health {
   idle_ms: number;
   data_dir: string;
   rss: number;
+  /**
+   * The harnesses the RUNNING process has a route for, sorted. Absent from any
+   * older daemon, and that absence is the point: a version string is no proof
+   * of a route table, so a build that GAINED a harness looked identical to the
+   * one before it and every `/hook/<new harness>` answered 404 until someone
+   * restarted by hand (tenjin-agent#342). Absent reads as "serves nothing I
+   * can name", never as "serves everything".
+   */
+  harnesses?: string[];
+}
+
+/** The harnesses `h` has no route for, out of the ones a caller needs. */
+export function missingRoutes(h: Health, required: readonly string[]): string[] {
+  const served = new Set(Array.isArray(h.harnesses) ? h.harnesses : []);
+  return required.filter((harness) => !served.has(harness));
 }
 
 /** The CLI's `dataDir` under its shim name: one resolution, so the CLI, the shim and the daemon agree on the string. */
@@ -202,22 +217,35 @@ export async function ensureDaemon(
       reason: `spawn failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  const until = now() + (opts.spawnMs ?? SPAWN_MS);
+  const budget = opts.spawnMs ?? SPAWN_MS;
+  const until = now() + budget;
+  const settled = async (): Promise<Health | null> => {
+    const fresh = readPid(dataDir);
+    if (fresh === null || (pid !== null && fresh.started_at === pid.started_at)) return null;
+    const h = await health(fresh.port);
+    return h !== null && h.data_dir === dataDir ? h : null;
+  };
+  const won = (h: Health): EnsureResult => {
+    try {
+      unlinkSync(daemonSpawnPath(dataDir));
+    } catch {
+      // Already gone.
+    }
+    return { ok: true, health: h, spawned: true };
+  };
   while (now() < until) {
     await sleep(20);
-    const fresh = readPid(dataDir);
-    if (fresh === null || (pid !== null && fresh.started_at === pid.started_at)) continue;
-    const h = await health(fresh.port);
-    if (h !== null && h.data_dir === dataDir) {
-      try {
-        unlinkSync(daemonSpawnPath(dataDir));
-      } catch {
-        // Already gone.
-      }
-      return { ok: true, health: h, spawned: true };
-    }
+    const h = await settled();
+    if (h !== null) return won(h);
   }
-  return { ok: false, reason: `spawned but not healthy within ${opts.spawnMs ?? SPAWN_MS} ms` };
+  // ONE PROBE PAST THE DEADLINE: the loop's last `sleep(20)` can land as the
+  // clock passes `until` and skip the probe for a daemon that came up during
+  // it. That boundary reported a healthy daemon as "spawned but not healthy
+  // within 500 ms" (tenjin-agent#342), a verdict the operator then had to
+  // disprove by hand. It costs one probe on a path about to fail anyway.
+  const late = await settled();
+  if (late !== null) return won(late);
+  return { ok: false, reason: `spawned but not healthy within ${budget} ms` };
 }
 
 /**
@@ -256,6 +284,14 @@ export async function forward(
     if (res.status === 200) {
       const body = await res.text();
       if (body.length > 0) writeFileSync(1, body);
+    } else if (res.status === 404) {
+      // The one status with a specific cause and a specific remedy: the daemon
+      // answering is from a build with no route for this harness, so every
+      // fire is dropped silently until it is replaced (tenjin-agent#342).
+      logDown(
+        dataDir,
+        `hook answered 404: the daemon on 127.0.0.1:${ensured.health.port} (v${ensured.health.version}) has no /hook/${harness} route; run \`tenjin install\` to replace it`,
+      );
     } else if (res.status !== 204) {
       logDown(dataDir, `hook answered ${res.status}`);
     }

@@ -432,7 +432,11 @@ describe('writeHooks (codex): seven command entries in hooks.json', () => {
       wrote: true,
     });
     expect(result.url).toBeUndefined();
-    expect(result.activation).toContain('/hooks');
+    // Steps, not a sentence, and they name the file the operator will actually
+    // see in Codex's own /hooks browser rather than a generic `~/.codex` (#342).
+    expect(result.activation?.some((s) => s.includes('/hooks'))).toBe(true);
+    expect(result.activation?.some((s) => s.includes(codexHooksPath()))).toBe(true);
+    expect(result.activation?.some((s) => s.includes('NEW Codex session'))).toBe(true);
     const entries = allEntries(await readCodex());
     expect(entries).toHaveLength(7);
     for (const [, entry] of entries) {

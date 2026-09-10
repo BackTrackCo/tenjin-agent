@@ -185,8 +185,22 @@ export const registrar: Registrar = {
       { event: 'Stop', hooks: command },
     ];
   },
-  activation:
-    'Codex runs a hook entry only once it is trusted: open Codex, run /hooks, and enable the tenjin entries.',
+  /**
+   * The one step this CLI cannot take for you: Codex runs a handler only once
+   * a person has trusted it in `/hooks`, and lib/codex-trust.ts holds why we
+   * refuse to write that row ourselves. So an install is not finished when the
+   * file is written, and this says so in the browser's own terms.
+   */
+  activation(hooksPath) {
+    return [
+      'Codex runs a hook only once you trust it, and no file this CLI can write grants that.',
+      'In Codex, run /hooks.',
+      `Find the 7 tenjin entries sourced from ${hooksPath}.`,
+      'Trust and enable them.',
+      'Start a NEW Codex session: hooks are read at session start, so the session you trusted them in still has none.',
+      'Then `tenjin doctor` reports codex hooks as observed.',
+    ];
+  },
 };
 
 export const codexAdapter: HarnessAdapter = { id: 'codex', decode, encode, registrar };

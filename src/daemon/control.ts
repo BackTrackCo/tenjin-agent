@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pkg from '../../package.json';
@@ -7,6 +7,7 @@ import { STOP_GRACE_MS } from '../hooks/constants';
 import {
   ensureDaemon,
   health,
+  missingRoutes,
   readPid,
   readToken,
   type Health,
@@ -39,7 +40,23 @@ export interface DaemonDeps {
   sleep?: (ms: number) => Promise<void>;
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   now?: () => number;
+  /**
+   * Harnesses whose hook entries this start is about to make live. A running
+   * daemon with no route for one of them is replaced, whatever its version
+   * says (see {@link startDaemon}).
+   */
+  requires?: readonly string[];
 }
+
+/**
+ * How long `install` waits for a spawned daemon, as opposed to the shim's
+ * `SPAWN_MS`. The shim's budget is a fraction of one hook fire and a miss
+ * there costs that fire; install has a person waiting and a miss there costs
+ * the whole activation, so it buys certainty with time it already has. The
+ * measured cold start is 75-120 ms, so this is ~40x headroom for a laptop
+ * under load (tenjin-agent#342).
+ */
+export const INSTALL_SPAWN_MS = 5_000;
 
 /**
  * Every built file that belongs in the hooks dir, and where each one goes. The
@@ -70,7 +87,15 @@ export function installDaemonFiles(dataDir: string, bundleDir: string): { writte
       });
     }
     const dest = target(dataDir);
-    copyFileSync(src, dest);
+    // COPY ASIDE, THEN RENAME. `copyFileSync` truncates the destination and
+    // refills it, so anything reading that path mid-copy — a shim spawned by a
+    // live session, a `node --import` of the reporter — sees a half-written
+    // file and fails on a syntax error it can do nothing about. A rename is
+    // atomic, so a reader gets the old bundle or the new one and never a
+    // fragment of both (tenjin-agent#342).
+    const staged = `${dest}.${process.pid}.tmp`;
+    copyFileSync(src, staged);
+    renameSync(staged, dest);
     written.push(dest);
   }
   if (readToken(dataDir) === null) {
@@ -129,12 +154,19 @@ export async function stopDaemon(
   return { state: 'killed', pid: rec.pid };
 }
 
+/** Why a running daemon had to go. */
+export type ReplaceReason = 'older-build' | 'missing-routes';
+
 /** What one start did, for whoever renders it. */
 export interface DaemonStart {
   health: Health;
   spawned: boolean;
-  /** The older-version daemon this start replaced. */
+  /** The daemon this start replaced. */
   replaced: PidRecord | null;
+  /** Why it was replaced, when one was. */
+  replacedReason?: ReplaceReason;
+  /** The routes the replaced daemon could not serve, on `missing-routes`. */
+  missingRoutes?: string[];
   /** An older daemon that would not confirm itself and was left alone. */
   unconfirmed: number | null;
   /** Bundles and token this call wrote. */
@@ -142,9 +174,17 @@ export interface DaemonStart {
 }
 
 /**
- * Materialize the bundles, replace a daemon from an older build, and return only
- * once one is healthy. Throws when nothing came up: a caller that goes on to
- * write hook entries has no daemon to point them at.
+ * Materialize the bundles, replace a daemon this build has outgrown, and return
+ * only once one is healthy. Throws when nothing came up: a caller that goes on
+ * to write hook entries has no daemon to point them at.
+ *
+ * TWO REASONS TO REPLACE, and the second is the one that bit. A version bump
+ * is obvious. The other is the route table: `deps.requires` names the
+ * harnesses whose entries are about to go live, and a daemon without one of
+ * those routes 404s their every fire, silently. It can be on THIS build's
+ * version and still be wrong, because a version says nothing about which
+ * adapters the process loaded (tenjin-agent#342). A daemon too old to report
+ * `harnesses` counts as serving none, which is the safe reading.
  */
 export async function startDaemon(dataDir: string, deps: DaemonDeps = {}): Promise<DaemonStart> {
   const { written } = installDaemonFiles(dataDir, deps.bundleDir ?? defaultBundleDir());
@@ -153,15 +193,28 @@ export async function startDaemon(dataDir: string, deps: DaemonDeps = {}): Promi
   const rec = readPid(dataDir);
   const running = rec === null ? null : await health(rec.port);
   let replaced: PidRecord | null = null;
+  let reason: ReplaceReason | undefined;
+  let short: string[] = [];
   let unconfirmed: number | null = null;
-  if (running !== null && running.data_dir === dataDir && running.version !== pkg.version) {
-    const stopped = await stopDaemon(dataDir, deps);
-    if (stopped.state === 'stopped' || stopped.state === 'killed') replaced = rec;
-    else if (stopped.state === 'unconfirmed') unconfirmed = stopped.pid ?? null;
+  if (running !== null && running.data_dir === dataDir) {
+    short = missingRoutes(running, deps.requires ?? []);
+    const stale =
+      running.version !== pkg.version
+        ? ('older-build' as const)
+        : short.length > 0
+          ? ('missing-routes' as const)
+          : undefined;
+    if (stale !== undefined) {
+      const stopped = await stopDaemon(dataDir, deps);
+      if (stopped.state === 'stopped' || stopped.state === 'killed') {
+        replaced = rec;
+        reason = stale;
+      } else if (stopped.state === 'unconfirmed') unconfirmed = stopped.pid ?? null;
+    }
   }
   const ensured = await ensureDaemon(dataDir, {
     ...(deps.env ? { env: deps.env } : {}),
-    ...(deps.spawnMs !== undefined ? { spawnMs: deps.spawnMs } : {}),
+    spawnMs: deps.spawnMs ?? INSTALL_SPAWN_MS,
     ...(deps.now ? { now: deps.now } : {}),
   });
   if (!ensured.ok) {
@@ -169,5 +222,24 @@ export async function startDaemon(dataDir: string, deps: DaemonDeps = {}): Promi
       fix: `Read ${join(dataDir, 'daemon.log')}; if it names a port conflict, set \`tenjin config set loop.port <n>\`.`,
     });
   }
-  return { health: ensured.health, spawned: ensured.spawned, replaced, unconfirmed, written };
+  // Checked again on the daemon actually serving now: a start that reused a
+  // healthy process never went through the replace branch at all, and the
+  // caller needs the routes to exist, not a restart to have been attempted.
+  const stillShort = missingRoutes(ensured.health, deps.requires ?? []);
+  if (stillShort.length > 0) {
+    throw new CliError(
+      'INTERNAL',
+      `The daemon on 127.0.0.1:${ensured.health.port} (v${ensured.health.version}) has no route for ${stillShort.join(', ')}, so its hook entries would answer 404.`,
+      { fix: 'Run `tenjin daemon stop`, then re-run `tenjin install`.' },
+    );
+  }
+  return {
+    health: ensured.health,
+    spawned: ensured.spawned,
+    replaced,
+    ...(reason !== undefined ? { replacedReason: reason } : {}),
+    ...(reason === 'missing-routes' ? { missingRoutes: short } : {}),
+    unconfirmed,
+    written,
+  };
 }

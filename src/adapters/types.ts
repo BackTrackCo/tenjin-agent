@@ -156,9 +156,15 @@ export interface Registrar {
    * `{ event, matcher?, hooks }` in the harness's own JSON shape.
    */
   plan(target: { url: string; token: string; shimPath: string; timeoutSeconds: number }): unknown[];
-  /** Before installing hook entries in a file this harness reads: how the
-   *  operator activates them, when the harness gates untrusted entries. */
-  activation?: string;
+  /**
+   * The steps left to a PERSON once the file is written, for a harness that
+   * gates entries it has not been told to trust. Takes the path actually
+   * written, because a machine on `$CODEX_HOME` is not reading `~/.codex`.
+   * One sentence was not enough: as a clause on the undo line, operators
+   * finished an install reporting "7 entries" with a loop that never fired
+   * (tenjin-agent#342).
+   */
+  activation?(hooksPath: string): string[];
 }
 
 export interface HarnessAdapter {
