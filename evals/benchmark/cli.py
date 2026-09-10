@@ -1,4 +1,4 @@
-"""`python3 -m evals.benchmark.cli fake-run|verify|reduce|report|summary|regress|cleanup`.
+"""`python3 -m evals.benchmark.cli fake-run|verify|reduce|report|summary|cleanup`.
 
 The fake path is the CI path: no model, no network, no spend. `verify` re-runs
 the hidden verifiers over a finished run's retained worktrees and reports where
@@ -21,7 +21,7 @@ import secrets
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from . import (
     FIXTURES,
@@ -30,7 +30,6 @@ from . import (
     manifest as manifest_module,
     records,
     reduce as reduce_module,
-    regress as regress_module,
     report as report_module,
     runner,
     schedule,
@@ -172,14 +171,6 @@ def do_report(run_dir: Path) -> dict[str, Any]:
     return report
 
 
-def do_regress(run_dir: Path, baseline_path: Path, environ: Mapping[str, str] | None = None, stream: Any = None) -> dict[str, Any]:
-    """Warn where the run is worse than the committed baseline. Never a failure."""
-    manifest, digest = load_run(run_dir)
-    accepted, _ = records.select(run_dir / "records", manifest.hash, digest)
-    published = read_run_file(run_dir, "report.json")
-    return regress_module.check(published, accepted, baseline_path, environ, stream)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python3 -m evals.benchmark.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -192,11 +183,6 @@ def main(argv: list[str] | None = None) -> int:
     # did without a reader piping JSON through another tool.
     summary = commands.add_parser("summary", help="read a finished run's report.json as text")
     summary.add_argument("--run", required=True, type=Path)
-    # Informational by construction: it prints and annotates, and exits 0
-    # whatever it finds, so the live lane can warn without ever blocking.
-    regress = commands.add_parser("regress", help="warn where a finished run is worse than the committed baseline")
-    regress.add_argument("--run", required=True, type=Path)
-    regress.add_argument("--baseline", type=Path, default=regress_module.BASELINE)
     # The one supported way to clean up after an interrupted run. It acts on the
     # run's own process ledger and verifies each record against the live process
     # before signalling, so it cannot reach anything this package did not start.
@@ -209,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
-    if args.command in ("summary", "regress", "verify", "reduce", "report"):
+    if args.command in ("summary", "verify", "reduce", "report"):
         try:
             return run_reader(args)
         except (CliError, manifest_module.ManifestError, records.RecordError) as error:
@@ -225,9 +211,6 @@ def run_reader(args: argparse.Namespace) -> int:
     """The commands that read a finished run. Each refuses a run with nothing to read in one sentence."""
     if args.command == "summary":
         sys.stdout.write(report_module.render(read_run_file(args.run, "report.json")) + "\n")
-        return 0
-    if args.command == "regress":
-        do_regress(args.run, args.baseline)
         return 0
     payload = {"verify": do_verify, "reduce": do_reduce, "report": do_report}[args.command](args.run)
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)

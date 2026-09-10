@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -20,9 +19,7 @@ from evals.benchmark import (
     records,
     runner,
     schedule,
-    sha256_file,
     sha256_json,
-    vendor,
 )
 
 SESSIONS = FIXTURES / "claude" / "sessions"
@@ -485,96 +482,3 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
     for item in record["usage"]:
         item["trial_id"] = record["trial_id"]
     return record
-
-
-EXACT_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
-def fake_toolchain(tmp: Path, cached: tuple[str, ...] = ("11.11.0",), shim: bool = True) -> dict[str, str]:
-    """A `pnpm` on PATH and a corepack cache under `COREPACK_HOME`, so no case reads the host's."""
-    bin_dir = tmp / "toolchain" / "bin"
-    bin_dir.mkdir(parents=True, exist_ok=True)
-    pnpm = bin_dir / "pnpm"
-    if shim:
-        pnpm.write_text("#!/usr/bin/env node\nprocess.env.COREPACK_ENABLE_DOWNLOAD_PROMPT??='1'\nrequire('./lib/corepack.cjs').runMain(['pnpm']);\n", encoding="utf-8")
-    else:
-        pnpm.write_text("#!/bin/sh\necho 11.11.0\n", encoding="utf-8")
-    pnpm.chmod(0o755)
-    home = tmp / "toolchain" / "corepack"
-    for version in cached:
-        (home / "v1" / "pnpm" / version).mkdir(parents=True, exist_ok=True)
-        (home / "v1" / "pnpm" / version / "package.json").write_text(f'{{"name":"pnpm","version":"{version}"}}\n', encoding="utf-8")
-        (home / "v1" / "pnpm" / version / "bin").mkdir(exist_ok=True)
-        (home / "v1" / "pnpm" / version / "bin" / "pnpm.cjs").write_text("// fake\n", encoding="utf-8")
-    # The fake pnpm comes first; the host PATH stays behind it so `ps` and `node` still resolve.
-    return {"PATH": os.pathsep.join([str(bin_dir), os.environ.get("PATH", "")]), "COREPACK_HOME": str(home)}
-
-
-# Files a run leaves behind. A frozen fixture carries none of them.
-RUN_ARTEFACTS = (
-    ".bench1",
-    "node_modules/.vite",
-    "node_modules/.vite-temp",
-    "node_modules/.modules.yaml",
-    "node_modules/.pnpm",
-    "node_modules/.package-map.json",
-    "node_modules/.pnpm-workspace-state-v1.json",
-)
-# The guard in every fixture's vitest config: a runner that did not come
-# through pnpm is refused for a repository reason, in words that name the
-# convention and never the command that satisfies it.
-PNPM_GUARD = "process.env.npm_config_user_agent"
-# A base64 run long enough to be a payload, which a frozen fixture never holds.
-BLOB = re.compile(r"[A-Za-z0-9+/]{40,}={0,2}")
-PNPM_GUARD_MESSAGE = "this repository's tests run through pnpm; see the repository convention"
-
-
-def assert_vitest_fixture(fixture: Path, task: str, vendored: vendor.Vendor) -> None:
-    """A live task fixture is a real, frozen Vitest project whose only green path is the lesson.
-
-    Its `node_modules` is derived: the committed tree holds the shim alone, and
-    the pinned vitest is the one inside the vendored archive the task names.
-    """
-    package = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
-    pinned = package["devDependencies"]["vitest"]
-    assert EXACT_VERSION.match(pinned), pinned
-    installed = json.loads(vendor.read_member(vendored, "vitest/package.json").decode("utf-8"))
-    assert (installed["version"], vendored.record["vitest"]) == (pinned, pinned)
-    assert (fixture / "pnpm-lock.yaml").is_file()
-    assert vendored.record["lock_sha256"] == "sha256:" + sha256_file(fixture / "pnpm-lock.yaml")
-    assert [path.relative_to(fixture).as_posix() for path in (fixture / "node_modules").rglob("*") if path.is_file()] == ["node_modules/.bin/vitest"]
-    # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
-    assert package["scripts"]["test"] == "node scripts/all-tests.mjs"
-    assert "argv" not in (fixture / "scripts" / "all-tests.mjs").read_text(encoding="utf-8")
-    config = (fixture / "vitest.config.mjs").read_text(encoding="utf-8")
-    assert "'unrelated/**/*.test.mjs'" in config
-    assert f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]" in config
-    assert PNPM_GUARD in config
-    assert PNPM_GUARD_MESSAGE in config
-    assert "pnpm exec" not in config
-    # pnpm 11 reads its settings from pnpm-workspace.yaml and, without this,
-    # runs an install before the first `pnpm exec` or `pnpm run` in a fresh
-    # tree: a registry download the trial must never make.
-    workspace = (fixture / "pnpm-workspace.yaml").read_text(encoding="utf-8")
-    assert "verifyDepsBeforeRun: false" in workspace
-    assert "nodeLinker: hoisted" in workspace
-    assert list((fixture / "unrelated").glob("*.test.mjs"))
-    # The named test is a vitest test, so plain `node` cannot run it, and its cases come from the
-    # runner's setup file: nothing in the tree holds them, decodable or not.
-    test = (fixture / "tests" / f"{task}.test.mjs").read_text(encoding="utf-8")
-    assert "from 'vitest'" in test
-    assert "globalThis.__bench1Cases" in test
-    assert "setupFiles: ['./.bench1/cases.setup.mjs']" in config
-    assert not (fixture / "tests" / "support").exists()
-    hidden = REPO_ROOT / "evals" / "benchmark" / "hidden" / task / "cases.json"
-    assert hidden.is_file(), f"hidden/{task}/cases.json holds the expected values"
-    expected = {str(entry["expected"]) for entry in json.loads(hidden.read_text(encoding="utf-8"))}
-    for path in fixture.rglob("*"):
-        if path.is_file() and "node_modules" not in path.parts:
-            text = path.read_text(encoding="utf-8", errors="replace")
-            # The lockfile's integrity hashes are base64 by design and name no expected value.
-            if path.name != "pnpm-lock.yaml":
-                assert BLOB.search(text) is None, f"{path.relative_to(fixture)} holds a decodable blob"
-            for value in expected:
-                assert value not in text, f"{path.relative_to(fixture)} reveals an expected value"
-    for artefact in RUN_ARTEFACTS:
-        assert not (fixture / artefact).exists(), artefact
-    assert [path for path in fixture.rglob("*") if path.is_symlink()] == []

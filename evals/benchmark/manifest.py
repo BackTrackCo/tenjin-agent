@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import sha256_dir, sha256_json, vendor as vendor_module
+from . import sha256_dir, sha256_json
 from .usage import HARNESSES
 
 SCHEMA_VERSION = 1
@@ -51,7 +51,7 @@ ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "mem
 # checked here so a bad manifest costs nothing; the executor that turns these
 # into argv owns the flag and value allowlists (`claude_live.py`).
 OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env", "concurrency"})
-OPTIONAL_TASK_KEYS = frozenset({"prompt", "vendor"})
+OPTIONAL_TASK_KEYS = frozenset({"prompt"})
 OPTIONAL_ARM_KEYS = frozenset({"settings", "provision", "lessons"})
 PHASE_KEYS = frozenset({"producer", "capture", "consumer"})
 TRANSFER_DISTANCES = frozenset({"none", "same_task", "same_family", "cross_family"})
@@ -107,19 +107,10 @@ class Manifest:
     def fixture_path(self, task: dict[str, Any]) -> Path:
         return (self.path.parent / task["fixture"]).resolve()
 
-    def vendor_for(self, task: dict[str, Any]) -> vendor_module.Vendor | None:
-        """The archive a task's trials extract into `node_modules`, when it names one."""
-        if "vendor" not in task:
-            return None
-        return vendor_module.resolve(self.path.parent, task["vendor"])
 
-
-def fixture_hash(fixture: Path, vendor: vendor_module.Vendor | None = None) -> str:
-    """The committed fixture files, plus the vendor archive digest when the task names one."""
-    tree = sha256_dir(fixture)
-    if vendor is None:
-        return "sha256:" + tree
-    return "sha256:" + sha256_json({"fixture": tree, "vendor": vendor_module.check_archive(vendor)})
+def fixture_hash(fixture: Path) -> str:
+    """The committed fixture files. The layer that vendors a toolchain folds its archive digest in."""
+    return "sha256:" + sha256_dir(fixture)
 
 
 def _pinned(value: Any) -> bool:
@@ -223,13 +214,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
         fixture = base / relative
         if not fixture.is_dir():
             raise ManifestError(f"task {task_id!r} fixture path is missing: {relative}")
-        try:
-            vendor = None if "vendor" not in task else vendor_module.resolve(base, task["vendor"])
-            expected = fixture_hash(fixture, vendor)
-        except vendor_module.VendorError as error:
-            raise ManifestError(f"task {task_id!r} vendor: {error.detail}") from error
-        if task["fixture_hash"] != expected:
-            raise ManifestError(f"task {task_id!r} fixture_hash does not match the fixture directory and its vendor archive")
+        if task["fixture_hash"] != fixture_hash(fixture):
+            raise ManifestError(f"task {task_id!r} fixture_hash does not match the fixture directory")
     seen.clear()
     executors: set[str] = set()
     for arm in data["arms"]:

@@ -331,7 +331,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         shelf_origin=facts.get("shelf_origin"),
     )
     origin = None if runtime.sentinel is None else runtime.sentinel.origin
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin, vendor=manifest.vendor_for(task))
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)
     provision = None
     if provisioned:
         assert spec.prepare is not None

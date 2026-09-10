@@ -11,11 +11,12 @@ product runtime.
 whole offline chain. The frozen contracts (manifest, schedule, immutable record, usage), the
 executor and verifier registries with their fake specs, disposable roots, sentinels and the
 isolation attestation, the reducer, the report and its headline rule, and the `verify`,
-`reduce`, `report`, `summary`, `regress` and `cleanup` commands. `fake-run` drives all of it end
+`reduce`, `report`, `summary` and `cleanup` commands. `fake-run` drives all of it end
 to end with no model, no network and no spend, which is what the required CI lane runs and what
 this layer is for: the measurement machinery has to be trustworthy before anything real runs
-through it. The layer above adds the live executor, the vendored toolchain it needs and the
-Tenjin hooks arm; the one above that adds the corpus reset and the search-intent case export.
+through it. The layer above adds the live executor, the vendored toolchain it needs, the
+`sig_v1` port, the `regress` warning and the Tenjin hooks arm; the one above that adds the
+corpus reset and the search-intent case export.
 Bench-2 (PR 313) then owns every real fixture as a container image, the four arms, the producer
 phase, and the readouts.
 
@@ -38,31 +39,28 @@ Each contract is stated once, in the module that owns it, and held by the test m
 The tests are the specification to reach for: each names its rule and holds to it on a fixture
 the suite builds.
 
-| Module                    | What it owns                                                      | Held by                              |
-| ------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
-| `manifest.py`             | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
-| `schedule.py`             | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
-| `runner.py`               | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py` |
-| `executor.py`             | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
-| `signature.py`            | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                  |
-| `artifact.py`             | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                   |
-| `verifier.py`             | hidden verifier registry, code-owned argv, the hidden layer       | `test_verifier.py`                   |
-| `vendor.py`               | the vendored archive a task's trials extract into `node_modules`  | `test_vendor.py`                     |
-| `usage.py`                | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                      |
-| `claude_usage.py`         | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`               |
-| `records.py`              | the immutable attempt record, publish, select                     | `test_records.py`                    |
-| `loop_join.py`            | read-only delivery join on exact actor keys                       | `test_loop_join.py`                  |
-| `reduce.py`               | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                     |
-| `report.py`, `regress.py` | publishable projection, redaction guard, regression warnings      | `test_report.py`, `test_regress.py`  |
-| `discovery.py`            | the discovery counters read off a settled trial                   | `test_discovery.py`                  |
-| `reap.py`                 | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
-| `cli.py`, `selftest.py`   | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
+| Module                  | What it owns                                                      | Held by                              |
+| ----------------------- | ----------------------------------------------------------------- | ------------------------------------ |
+| `manifest.py`           | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
+| `schedule.py`           | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
+| `runner.py`             | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py` |
+| `executor.py`           | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
+| `artifact.py`           | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                   |
+| `verifier.py`           | hidden verifier registry, code-owned argv, the hidden layer       | `test_verifier.py`                   |
+| `usage.py`              | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                      |
+| `claude_usage.py`       | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`               |
+| `records.py`            | the immutable attempt record, publish, select                     | `test_records.py`                    |
+| `loop_join.py`          | read-only delivery join on exact actor keys                       | `test_loop_join.py`                  |
+| `reduce.py`             | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                     |
+| `report.py`             | publishable projection, redaction guard, the headline rule        | `test_report.py`                     |
+| `discovery.py`          | the discovery counters read off a settled trial                   | `test_discovery.py`                  |
+| `reap.py`               | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
+| `cli.py`, `selftest.py` | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
-bootstrap golden), `fixtures/claude/` (sanitized synthetic Claude sessions; no real transcript),
-and `fixtures/live/baseline.json` (the per-arm figures `regress` warns against). The
-real-repository fixtures, their vendored archive and the code-owned hidden layers arrive with
-the live executor in the layer above.
+bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
+transcript). The real-repository fixtures, their vendored archive, the regression baseline and
+the code-owned hidden layers arrive with the live executor in the layer above.
 
 ## Its CI lanes
 
@@ -224,18 +222,12 @@ method. Everything else the offline suite needs is built: `tests/support.py` wri
 sessions, records, and a whole finished run (`fake_corpus`) through the same code paths a real
 run uses, so regenerating a fixture moves its expectation with it.
 
-`fixtures/live/baseline.json` holds the per-arm figures `regress` warns against at its 25%
-tolerance. The operator-side manifests, the frozen Vitest task fixture, the seeded lessons and
-the code-owned hidden layers under `hidden/<task>/hidden-tests/` arrive with the live executor
-in the layer above.
-
-A trial's `node_modules` is derived, never committed. `vendor.py` extracts one deterministic
-archive per toolchain and platform into the trial's fixture copy offline, checking the archive
-against the record beside it (`archive_sha256`, `tree_sha256`, `files`, `platform`, `node_abi`,
-`vitest`, `lock_sha256`, `pnpm`) and the host against the platform pin, then the extracted tree
-against `tree_sha256`; `manifest.fixture_hash` covers every committed file plus that digest. CI
-never extracts a committed archive, because the offline suite packs a tiny one of its own.
-**This whole path is the darwin pin Bench-2 replaces with a container image per task.**
+The operator-side manifests, the regression baseline, the frozen Vitest task fixture, the
+seeded lessons and the code-owned hidden layers under `hidden/<task>/hidden-tests/` arrive with
+the live executor in the layer above, and `manifest.fixture_hash` folds the vendored archive's
+digest in there. Nothing offline extracts an archive: a trial's `node_modules` is derived, never
+committed, and this layer's fake tasks have none. **That whole vendored path is the darwin pin
+Bench-2 replaces with a container image per task.**
 
 ## Extending the foundation
 
