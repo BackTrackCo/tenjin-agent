@@ -268,10 +268,13 @@ def project(
                 "actors": len(record.get("actors", [])),
                 "requests": len(record["usage"]),
                 "auxiliary_receipts": len(record["auxiliary"]),
-                # The quantity the reducer scored, taken by its own rule: native
-                # usage plus the consumer-phase auxiliary receipts this attempt
-                # caused. Capture-phase receipts are one-time and stay out, so a
-                # reader summing these rows lands on the arm's own total.
+                # What this attempt spent, by the rule the reducer scores with:
+                # native usage plus the consumer-phase auxiliary receipts it
+                # caused, capture-phase receipts left out as one-time cost. An
+                # invalid attempt keeps the spend it really made, so these rows
+                # sum to the arm total only over `outcome != "invalid"`, which
+                # is the same set the reducer aggregates. An arm total is
+                # `arms[arm].tokens` and is the figure to read instead.
                 "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record),
                 "sentinel_hits": sum(record["sentinel"].values()),
                 "public_legs": record["delivery"].get("public", {}).get("legs", 0),
