@@ -13,6 +13,7 @@ from typing import Iterator
 from unittest import mock
 
 import pytest
+from inline_snapshot import snapshot
 
 from evals.benchmark import cases, cli, records, tenjin_arm
 from evals.benchmark.tests import support
@@ -120,10 +121,12 @@ def test_one_record_per_fire_with_a_question_or_a_key_replayed_and_seeded_marked
     assert (prompt["trigger"], prompt["prompt"]["text"], prompt["method"], prompt["human_label"]) == ("prompt", "How do I run one vitest file here?", "baseline", None)
     assert prompt["baseline"]["rank1_title"] == "The convention piece"
     assert (prompt["baseline"]["hit"], prompt["baseline"]["delivered_piece_id"], prompt["baseline"]["delivered_seeded"]) == (True, "piece-real", False)
-    assert [(c["rank"], c["id"], c["seeded"], c["strong"], c["confidence"], c["corroborated"], c["calibration"]) for c in prompt["replay"]["candidates"]] == [
-        (1, "piece-seeded", True, True, 0.9, True, "hybrid-v1"),
-        (2, "piece-real", False, False, None, None, None),
-    ]
+    assert [(c["rank"], c["id"], c["seeded"], c["strong"], c["confidence"], c["corroborated"], c["calibration"]) for c in prompt["replay"]["candidates"]] == snapshot(
+        [
+            (1, "piece-seeded", True, True, 0.9, True, "hybrid-v1"),
+            (2, "piece-real", False, False, None, None, None),
+        ]
+    )
     assert (prompt["replay"]["post_floor"], prompt["replay"]["limit"], prompt["replay"]["search_id"]) == (True, 10, "search-1")
     assert re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", prompt["corpus_snapshot"]["replayed_at"])
     assert prompt["corpus_snapshot"]["shelf_origin"] == "team-shelf.example"
