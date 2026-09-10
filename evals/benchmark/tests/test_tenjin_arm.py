@@ -680,7 +680,7 @@ def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_
     assert "shelf_secret_present=true shelf_origin=team-shelf.example" in printed
     # The image, the mount plan and the allowlist are printed, and nothing
     # was built, copied or started.
-    assert "image     bench2-actor:" in printed
+    assert "image     bench2-actor by stem" in printed
     assert "container bench2-" in printed
     assert "project   bench2-" in printed
     # What the line says, and what it deliberately does not: the sidecar drops

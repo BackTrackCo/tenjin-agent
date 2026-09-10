@@ -358,7 +358,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     )
     # The image is resolved before any root exists: a missing or drifted image
     # is a refusal, and its id is what the record says the attempt ran in.
-    image = images.require(task, manifest.pins) if spec.live else None
+    image = images.require(task, manifest.fixture_path(task), manifest.pins) if spec.live else None
     if image is not None:
         isolation = {**isolation, "image": image.facts}
     roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), image=image)

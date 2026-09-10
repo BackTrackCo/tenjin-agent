@@ -237,8 +237,9 @@ def test_the_launch_is_the_agents_own_command_and_a_recipe_for_the_tasks_image(r
     assert recipe.name == f"bench2-{request.trial_id}"
     assert launch.container == f"bench2-{request.trial_id}"
     assert recipe.workdir == request.roots.repo.resolve()
-    # The image is named by tag until the run resolves it to an id.
-    assert recipe.image == images.fixture_tag(request.task["id"], request.task["fixture_hash"])
+    # A dry run names the image by its stem; a live run resolves the
+    # content-addressed name, which needs the daemon's platform.
+    assert recipe.image == images.fixture_stem(request.task["id"])
     # Every root the trial owns is mounted at its own absolute path.
     targets = {mount.host: mount for mount in recipe.plan}
     for root in (request.roots.repo, request.roots.home, request.roots.profile, request.roots.data_dir, request.roots.output):
@@ -1346,16 +1347,21 @@ def test_an_unreachable_docker_daemon_is_a_sentence_not_a_traceback() -> None:
 
 
 def test_a_manifest_whose_image_is_not_built_names_the_build_command() -> None:
-    def docker(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> images.Completed:
+    from evals.benchmark.tests.test_images import PLAN
+
+    def docker(argv: list[str], timeout_s: float = 0.0) -> images.Completed:
         if argv[:2] == ["image", "inspect"]:
             return images.Completed(returncode=1, stdout="", stderr="No such image")
         return images.Completed(returncode=0, stdout="29.5.2", stderr="")
 
-    # Harbor is not installed in the offline lane, and `unavailable` asks for it
-    # before it asks about images. Stubbed here so the case reaches the refusal
+    # Harbor is not installed in the offline lane, and both gates ask for it
+    # before they ask about images: `container.unavailable` to start one, and
+    # `images._plan` to name one. Stubbed here so the case reaches the refusal
     # it is about; `test_container.py` covers the Harbor half of that gate.
     with (
         mock.patch.object(images, "run_docker", docker),
+        mock.patch.object(images, "_plan", lambda pins, resolved=None: PLAN),
+        mock.patch.object(images, "fixture_name", lambda task, fixture, resolved: f"bench2-{task['id']}--abc"),
         mock.patch.object(container, "harbor", lambda: None),
         pytest.raises(cli.CliError) as caught,
     ):

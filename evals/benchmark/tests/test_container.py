@@ -38,7 +38,7 @@ class Roots:
 def recipe(base: Path, **overrides: object) -> container.Recipe:
     fields: dict[str, object] = {
         "name": "bench2-trial-a",
-        "image": "bench2-actor:abc123def456",
+        "image": "bench2-actor--abc123def456",
         "workdir": base / "repo",
         "trial_dir": base / "harbor",
         "environment_dir": base / "harbor" / "environment",
@@ -51,7 +51,7 @@ def recipe(base: Path, **overrides: object) -> container.Recipe:
 
 
 def fake_docker(**answers: images.Completed):
-    def docker(argv: list[str], timeout_s: float = 0.0, stream: object = None) -> images.Completed:
+    def docker(argv: list[str], timeout_s: float = 0.0) -> images.Completed:
         return answers.get(argv[0], images.Completed(returncode=0, stdout="", stderr=""))
 
     return docker
@@ -216,7 +216,7 @@ def test_the_run_attests_the_isolation_its_allowlist_established() -> None:
 def test_the_project_sweep_removes_containers_and_networks_by_the_compose_label() -> None:
     calls: list[list[str]] = []
 
-    def docker(argv: list[str], timeout_s: float = 0.0, stream: object = None) -> images.Completed:
+    def docker(argv: list[str], timeout_s: float = 0.0) -> images.Completed:
         calls.append(argv)
         if argv[:2] == ["ps", "--all"]:
             return images.Completed(returncode=0, stdout="c1\nc2\n", stderr="")
@@ -242,7 +242,7 @@ def test_the_container_runs_as_the_host_uid_so_a_mount_stays_the_hosts_file() ->
 
 
 def test_a_missing_docker_compose_is_named_before_anything_is_spent() -> None:
-    def docker(argv: list[str], timeout_s: float = 0.0, stream: object = None) -> images.Completed:
+    def docker(argv: list[str], timeout_s: float = 0.0) -> images.Completed:
         if argv[0] == "info":
             return images.Completed(returncode=0, stdout="29.6.1", stderr="")
         if argv == ["compose", "version"]:

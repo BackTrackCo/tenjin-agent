@@ -48,7 +48,7 @@ the suite builds.
 | `artifact.py`              | disposable roots, the credential canary, the isolation attestation        | `test_artifact.py`                   |
 | `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp                | `test_corpus.py`                     |
 | `verifier.py`              | hidden verifier registry, hidden layer, the run marker                    | `test_verifier.py`                   |
-| `images.py`                | one pinned base image, one image per fixture, build and drift             | `test_images.py`                     |
+| `images.py`                | one pinned base image, one image per fixture, content-addressed by Harbor | `test_images.py`                     |
 | `container.py`             | a trial inside its image, run by Harbor: mounts, recipe, allowlist        | `test_container.py`                  |
 | `producer.py`              | the natural arm's producer phase and its receipts                         | `test_phases.py`                     |
 | `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                        | `test_usage.py`                      |
@@ -822,30 +822,48 @@ archive, a committed lockfile per fixture, and a corepack seeding step, which to
 reproducibility a property of this repository's bytes on one machine (operator directive of
 2026-09-08, after the review of the foundation at `11c64f4`).
 
-**Images.** One base image, `bench2-base:<recipe hash>`, from `node:24-bookworm-slim` pinned by
+**Images.** One base image, `bench2-base--<hash>`, from `node:24-bookworm-slim` pinned by
 its multi-architecture index digest
 (`node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e`, Node 24.20),
 with `pnpm@11.11.0` and `@anthropic-ai/claude-code` at the manifest's `pins.harness_version`
 installed globally by exact version, the Tenjin CLI this checkout builds, and the `bench2-trial`
-entrypoint. One image per fixture, `bench2-<task>:<fixture hash prefix>`, built from
+entrypoint. One image per fixture, `bench2-<task>--<hash>`, built from
 `docker/fixture.Dockerfile` with the fixture directory as its whole build context: the fixture
 is copied to `/opt/fixture` and `pnpm install` runs there at build time, so the fixture commits
 a `package.json` with `vitest` pinned and nothing else of the toolchain. There is one fixture
-Dockerfile rather than eight identical ones; the per-task difference is the context and the
-labels. Reproducibility is the image, not the lockfile: `python3 -m evals.benchmark.images
-build --manifest <path>` builds every image a manifest names, labels each with the fixture
-hash, the base image id and the pins it was built from, and writes the ids to
-`fixtures/live/images.json`, a local build ledger that is not committed. `live-run` refuses a
-trial whose image is missing (`image_missing`, naming the build command) or whose labels
-disagree with the manifest (`image_drift`), and the record carries the image id, the CLI build
-hash and the CLI commit under `isolation.image`. Because the install happens at build time, two
-builds of one fixture on two machines may differ in a transitive dependency: the record names the build that ran, and a
-locked run builds once and keeps the image. The base image is 710 MB and a fixture image 774
-MB; a first base build is about 33s and each fixture about 20s, or 2 minutes for all eight.
+Dockerfile rather than eight identical ones; the per-task difference is the context and the base
+name it is built on.
+
+Identity is Harbor's, not this package's. `harbor.utils.container_cache.docker_build_context_hash`
+is a blake2b over every file of the build context, the Dockerfile's bytes, every build argument
+and the daemon's platform, and `ensure_docker_image_built` names the image after it, builds it
+with `docker buildx build` behind a file lock, and re-checks the daemon after taking it. The base
+name is a build argument of every fixture, so a moved pin, Dockerfile line or CLI file reaches
+every fixture name. That subsumes the recipe hash and the `bench2.*` labels this package used to
+keep, and covers three things they did not: every file of the context rather than a chosen list,
+the platform, and the fixture's own tree.
+
+There is no drift check left, because an input that moved cannot name the image that is here:
+`live-run` refuses with `image_missing` naming the build command, and that is the whole of what
+the labels used to check. Two properties they carried are checked elsewhere. That a manifest's
+`fixture_hash` still matches the fixture directory is `manifest.load`'s check. That a task's
+declared runtime quirk survived a base bump is `images.quirk_check`, below. The record carries
+the image id, the CLI build hash and the CLI commit under `isolation.image`, sourced from the
+build plan rather than from a label, because a content-addressed name is a stronger statement
+about what an image is than a string its builder wrote on it.
+
+`python3 -m evals.benchmark.images build --manifest <path>` builds every image a manifest names
+and writes the names and ids to `fixtures/live/images.json`, a local build ledger that is not
+committed. It needs the `buildx` plugin: Harbor builds every image through it, its own egress
+sidecar included, and `live-run` names a Docker client without it before anything is spent.
+Because the install happens at build time, two builds of one fixture on two machines may differ
+in a transitive dependency: the record names the build that ran, and a locked run builds once and
+keeps the image. The base image is 710 MB and a fixture image 774 MB; a first base build is about
+33s and each fixture about 20s, or 2 minutes for all eight.
 
 **The CLI under test is this checkout's build.** The `tenjin` an agent runs in a Bash tool is
 built from the repository the run checks out, not from a published release, so a CLI regression
-reddens the lane instead of passing under a frozen pin. `images.cli_build` reads `package.json`
+reddens the lane instead of passing under a frozen pin. `images.cli_files` reads `package.json`
 and every path its `files` names, `images.stage_cli` copies exactly those into the base build
 context, and the Dockerfile runs `npm pack` plus `npm install -g` there, which is what a user
 would install and so fails the build if `files` ever stops shipping the product. The build then
@@ -855,15 +873,14 @@ trial.
 Identity is content, not a version string. `tenjin-cli@0.1.0-alpha.15` on npm carries no
 `daemon` command anywhere in its dist while the repository at that same version string has it
 (measured 2026-09-09; a CI lane installing the release failed with `unknown command 'daemon'`),
-so the version identifies nothing. The recipe carries `tenjin_cli`, the sha256 of the staged
-package's contents, which puts the CLI in the base tag and in every fixture image's
-`bench2.recipe` label: a CLI change is a new tag, and a stale image can never be mistaken for
-it. The checkout's commit rides beside it as the `bench2.cli_commit` label and reaches the
-attempt record as `isolation.image.cli.commit`, with the content hash as
-`isolation.image.cli.build`; `records.validate` refuses a record whose image carries neither.
+so the version identifies nothing. The staged package is part of the base build context, so
+Harbor's hash covers it and puts the CLI in the base name and, through the `BASE_TAG` build
+argument, in every fixture name: a CLI change is a new image, and a stale one can never be
+mistaken for it. `images.Plan.cli` states the same hash over the staged package alone as
+`isolation.image.cli.build`, with the checkout's commit beside it as
+`isolation.image.cli.commit`; `records.validate` refuses a record whose image carries neither.
 The commit is deliberately not an image input, because a commit that leaves the packed package
-byte-identical is not a new image, and `images.UNCOMPARED` keeps it out of the drift check for
-the same reason. The environment hash does NOT cover any of this: it is the sha256 of the
+byte-identical is not a new image, and Harbor's hash agrees because it never sees a commit. The environment hash does NOT cover any of this: it is the sha256 of the
 manifest's pins alone, so `isolation.image` is where a reader resolves the build back to source.
 There is no published-CLI pin left in the package; `TENJIN_VERSION` is gone rather than kept as
 a pin nothing reads.
@@ -899,8 +916,8 @@ seeded data dir, which is a mount, because they are platform-neutral JavaScript.
 one build of the product: the data dir is materialised by a `tenjin daemon start` running the
 same `dist/` the image packs (`.github/workflows/benchmark-shelf.yml`). The container
 runs as the host's uid and gid, so a file it writes stays the host's. The credential seam is
-forwarded by name (`docker run --env CLAUDE_CODE_OAUTH_TOKEN`), so its value travels through
-the docker client's own environment and appears in no argv, no file and no image layer. The
+forwarded by name and never written to a file or an image layer; Harbor then expands its value
+into the host-side exec argv, which is the accepted cost stated below. The
 daemon runs inside the container on the same data dir: the entrypoint (`docker/trial.mjs`)
 starts it, waits for `/health`, runs `claude` with the argv the runner built, stops the daemon
 and any daemon the shim respawned, waits for the WAL to vanish, writes `daemon.json` into the
@@ -937,9 +954,11 @@ product's own ledger rather than an observation of the network, so it is reporte
 that says so and no longer invalidates.
 
 Harbor also turns egress control off SILENTLY when a kernel probe for nftables `fib inet` support
-fails, which would leave the container on public egress with no error. `container.require_egress`
-asks that probe itself before the first trial and refuses the run, because an allowlist that is
-never installed is a different run rather than a weaker one.
+fails, which would leave the container on public egress with no error. Its own
+`validate_network_policy_support` does not cover this: on the Docker backend it checks Windows
+containers and nothing about the kernel. So `container.require_egress` asks that probe itself
+before the first trial and refuses the run, because an allowlist that is never installed is a
+different run rather than a weaker one.
 
 Two costs of the framework, both accepted rather than worked around. Harbor expands a forwarded
 credential's VALUE into the host-side `docker compose exec` argv, so it is visible in `ps` for the
@@ -955,8 +974,9 @@ host side of a bind mount, and nothing about attempted egress.
 
 - The plan said the four roots are mounted; the code mounts six. The output root and the
   settings file are the two the process cannot run without.
-- The plan put the base image at the tag `bench2-base`; the tag carries the recipe hash, so a
-  changed pin can never reuse a stale base.
+- The plan put the base image at the tag `bench2-base`; the name carries Harbor's content hash
+  over the build context, the Dockerfile, the pins and the platform, so a changed input can
+  never reuse a stale base.
 - The plan said nothing about where a run directory may live. On colima the Docker daemon is a
   Linux VM that shares only part of the host filesystem, and a run directory outside that set
   mounts as an empty directory: a trial would find no repository. `live-run` writes a marker
@@ -1073,9 +1093,10 @@ regression baseline. Frozen means no run artefacts, and `manifest.fixture_hash` 
 committed file; hidden layers live in `hidden/<task>/hidden-tests/` as plain Node assert files.
 
 A trial's `node_modules` is derived, never committed: the task's image owns the installed tree,
-so no lockfile, no `.npmrc`, and no `node_modules` enter a fixture directory. `fixture_hash` is
-also the image's tag and one of its labels, so a fixture edit is a new image and a run against
-the old one is refused before any root exists. **Fixtures are container images** states the whole
+so no lockfile, no `.npmrc`, and no `node_modules` enter a fixture directory. The fixture
+directory is the image's whole build context, so a fixture edit is a new image name and a run
+against the old one is refused before any root exists; `manifest.load` separately refuses a
+`fixture_hash` that has stopped matching the directory. **Fixtures are container images** states the whole
 path.
 
 ## Extending the foundation

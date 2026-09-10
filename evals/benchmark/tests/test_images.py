@@ -1,4 +1,11 @@
-"""Fixture images: tag identity, labels, the build argv, and the refusals a live run makes before it spends."""
+"""Fixture images: what this package hands Harbor to name and build one, and the refusals a live run makes before it spends.
+
+Harbor owns the hash and the `docker buildx build` behind it, and its own suite
+covers both. What is pinned here is the seam: which context, which Dockerfile
+and which build arguments each image is named from, that a fixture's name
+carries the base's, that a missing name is a refusal rather than a silent reuse,
+and that none of it reaches the offline closure.
+"""
 
 from __future__ import annotations
 
@@ -15,19 +22,29 @@ from evals.benchmark.images import Completed, ImageError
 PINS = {"harness_version": "2.1.263"}
 FIXTURE_HASH = "sha256:" + "ab" * 32
 TASK = {"id": "actor", "fixture_hash": FIXTURE_HASH}
-# The CLI build, stated rather than read off this checkout: the suite is stdlib
-# Python that can run before `pnpm build` on a fresh clone, and every assertion
-# here is about what the recipe and the labels do with a build, not about which
-# build this machine happens to hold.
-CLI = images.CliBuild(root=Path("/checkout"), hash="sha256:" + "cd" * 32, commit="9f1c0d3", files=("package.json", "dist"))
+BASE_NAME = "bench2-base--1111111111111111"
+CLI_BUILD = "cd" * 8
+PLATFORM = "linux/arm64"
+# The plan a live run resolves once. Stated rather than read off this checkout:
+# the suite is stdlib Python that runs before `pnpm build` on a fresh clone and
+# with no `harbor` importable, and every assertion here is about what this
+# package does with a plan rather than which one this machine holds.
+PLAN = images.Plan(
+    context=Path("/staged"),
+    platform=PLATFORM,
+    args={"BASE_IMAGE": images.BASE_IMAGE, "BASE_DIGEST": images.BASE_DIGEST, "PNPM_VERSION": images.PNPM_VERSION, "CLAUDE_VERSION": "2.1.263"},
+    base=BASE_NAME,
+    cli_build=CLI_BUILD,
+    commit="9f1c0d3",
+)
 
 
-def checkout(root: Path, entry: str = "#!/usr/bin/env node\n", skill: str = "skill\n") -> Path:
+def checkout(root: Path, entry: str = "#!/usr/bin/env node\n") -> Path:
     """A built checkout: the package manifest, the entry point, and one more path its `files` names."""
     (root / "dist").mkdir(parents=True, exist_ok=True)
     (root / "dist" / "index.js").write_text(entry, encoding="utf-8")
     (root / "skills").mkdir(parents=True, exist_ok=True)
-    (root / "skills" / "SKILL.md").write_text(skill, encoding="utf-8")
+    (root / "skills" / "SKILL.md").write_text("skill\n", encoding="utf-8")
     manifest = {"name": "tenjin-cli", "version": "0.1.0-alpha.15", "bin": {"tenjin": "dist/index.js"}, "files": ["dist", "skills"]}
     (root / "package.json").write_text(json.dumps(manifest), encoding="utf-8")
     return root
@@ -49,10 +66,7 @@ class FakeDocker:
         self.calls: list[list[str]] = []
         self.table = table or {}
 
-    def key(self, argv: list[str]) -> str:
-        return " ".join(argv[:2])
-
-    def __call__(self, argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+    def __call__(self, argv: list[str], timeout_s: float = 0.0) -> Completed:
         self.calls.append(list(argv))
         for width in (2, 1):
             answer = self.table.get(" ".join(argv[:width]))
@@ -60,266 +74,270 @@ class FakeDocker:
                 return answer
         return Completed(returncode=0, stdout="", stderr="")
 
-    def flag(self, index: int, name: str) -> list[str]:
-        """Every value of a repeated flag in the recorded call at `index`."""
-        argv = self.calls[index]
-        return [argv[position + 1] for position, token in enumerate(argv) if token == name]
+
+class FakeBuild:
+    """Harbor's four image symbols, recorded. The hash is a sorted digest of its own arguments, so a changed input is a changed name."""
+
+    def __init__(self) -> None:
+        self.hashed: list[dict[str, Any]] = []
+        self.built: list[dict[str, Any]] = []
+
+    def context_hash(self, *, context: Path, dockerfile_path: Path | None = None, build_args: Any = None, platform: str | None = None) -> str:
+        call = {"context": str(context), "dockerfile": None if dockerfile_path is None else dockerfile_path.name, "args": dict(build_args or {}), "platform": platform}
+        self.hashed.append(call)
+        return format(abs(hash(json.dumps(call, sort_keys=True))) % (16**16), "016x")
+
+    def name(self, stem: str, key: str) -> str:
+        return f"{stem}--{key}"
+
+    async def platform(self) -> str:
+        return PLATFORM
+
+    async def ensure(self, *, docker_name: str, docker_build_context: Path, dockerfile_path: Path, build_args: Any, platform: str, timeout_sec: float) -> str:
+        self.built.append({"stem": docker_name, "context": str(docker_build_context), "dockerfile": dockerfile_path.name, "args": dict(build_args), "platform": platform})
+        return self.name(docker_name, self.context_hash(context=docker_build_context, dockerfile_path=dockerfile_path, build_args=build_args, platform=platform))
 
 
-def inspect_payload(labels: dict[str, str], image_id: str = "sha256:feed") -> Completed:
-    return Completed(returncode=0, stdout=json.dumps({"Id": image_id, "Config": {"Labels": labels}}), stderr="")
+@pytest.fixture
+def build(monkeypatch: pytest.MonkeyPatch) -> FakeBuild:
+    """Harbor, replaced at the seam this package resolves it through. No case here imports it."""
+    fake = FakeBuild()
+    monkeypatch.setattr(images, "harbor", lambda: images.Build(ensure=fake.ensure, context_hash=fake.context_hash, name=fake.name, platform=fake.platform))
+    return fake
 
 
-def labels_for(fixture_hash: str = FIXTURE_HASH, base_id: str = "sha256:base") -> dict[str, str]:
-    return images.fixture_labels("actor", fixture_hash, images.recipe(PINS, CLI), base_id)
+# What the base image is built from, and what a missing pin does.
 
 
-def test_the_tag_names_the_task_and_the_fixture_hash() -> None:
-    assert images.fixture_tag("actor", FIXTURE_HASH) == "bench2-actor:" + "ab" * 6
-
-
-def test_a_fixture_hash_that_is_not_a_token_is_refused() -> None:
-    with pytest.raises(ImageError) as caught:
-        images.fixture_tag("actor", "d19a2b57")
-    assert caught.value.code == "fixture_hash"
-
-
-def test_the_base_tag_changes_with_the_pinned_harness_version() -> None:
-    first = images.base_tag(images.recipe(PINS, CLI))
-    second = images.base_tag(images.recipe({"harness_version": "2.1.264"}, CLI))
-    assert first.startswith("bench2-base:")
-    assert first != second
-
-
-def test_the_base_tag_changes_with_the_dockerfile_and_the_entrypoint() -> None:
-    """An edit to either is an image change, or a run reuses a stale one.
-
-    On 2026-09-09 the recipe named only versions, so a fix to the trial
-    entrypoint left the tag unchanged and two four-attempt runs silently
-    used the image built before it.
-    """
-    base = images.recipe(PINS, CLI)
-    assert "dockerfile" in base
-    assert "entrypoint" in base
-    for name, path in (("dockerfile", images.BASE_DOCKERFILE), ("entrypoint", images.TRIAL_SCRIPT)):
-        assert base[name] == images.file_hash(path)
-        changed = {**base, name: "sha256:" + "0" * 64}
-        assert images.base_tag(base) != images.base_tag(changed)
+def test_the_build_arguments_carry_the_pinned_base_and_every_version() -> None:
+    args = images.build_args(PINS)
+    assert args["BASE_DIGEST"] == images.BASE_DIGEST
+    assert args["CLAUDE_VERSION"] == "2.1.263"
+    assert args["PNPM_VERSION"] == images.PNPM_VERSION
 
 
 def test_a_recipe_without_a_harness_version_is_refused() -> None:
-    with pytest.raises(ImageError) as caught:
-        images.recipe({}, CLI)
-    assert caught.value.code == "recipe_pins"
+    for pins in ({}, {"harness_version": ""}, {"harness_version": 2}):
+        with pytest.raises(ImageError) as caught:
+            images.build_args(pins)
+        assert caught.value.code == "recipe_pins"
 
 
-def test_the_base_tag_changes_when_the_cli_build_changes() -> None:
-    """A CLI change is a new image, or the lane measures the build before it.
-
-    The image installs this checkout's CLI, so the built package is an image
-    input like the Dockerfile is. An unhashed input means a changed file
-    leaves the tag unchanged and the run silently reuses a stale image.
-    """
-    built = images.recipe(PINS, CLI)
-    assert built["tenjin_cli"] == CLI.hash
-    changed = images.recipe(PINS, images.CliBuild(root=CLI.root, hash="sha256:" + "ef" * 32, commit=CLI.commit, files=CLI.files))
-    assert images.base_tag(built) != images.base_tag(changed)
+def test_no_published_cli_version_is_a_build_argument() -> None:
+    """The image installs this checkout's build, so nothing here can pin a release instead."""
+    assert not any("tenjin" in value.lower() for value in images.build_args(PINS).values())
 
 
-def test_no_published_cli_version_is_an_image_input() -> None:
-    """A version string does not identify a build, so the recipe never names one."""
-    assert "tenjin" not in images.recipe(PINS, CLI)
-    assert not hasattr(images, "TENJIN_VERSION")
+# The CLI the image installs: which paths are staged, and which checkout they came from.
 
 
-def test_the_labels_carry_the_fixture_hash_the_base_and_every_pin() -> None:
-    labels = labels_for()
-    assert labels["bench2.task"] == "actor"
-    assert labels["bench2.fixture_hash"] == FIXTURE_HASH
-    assert labels["bench2.base_id"] == "sha256:base"
-    assert labels["bench2.claude"] == "2.1.263"
-    assert labels["bench2.base_digest"] == images.BASE_DIGEST
-
-
-def test_the_labels_name_the_cli_build_and_the_commit_it_came_from() -> None:
-    labels = images.fixture_labels("actor", FIXTURE_HASH, images.recipe(PINS, CLI), "sha256:base", CLI.commit)
-    assert labels["bench2.tenjin_cli"] == CLI.hash
-    assert labels["bench2.cli_commit"] == CLI.commit
-
-
-# The CLI the image installs: this checkout's build, by content and by commit.
-
-
-def test_the_build_hashes_the_package_and_stages_what_files_names(tmp_path: Path) -> None:
-    cli = images.cli_build(checkout(tmp_path), fake_git())
-    assert cli.hash.startswith("sha256:")
-    assert cli.files == ("package.json", "dist", "skills")
-
-
-def test_a_changed_dist_is_a_changed_build(tmp_path: Path) -> None:
-    first = images.cli_build(checkout(tmp_path), fake_git()).hash
-    second = images.cli_build(checkout(tmp_path, entry="#!/usr/bin/env node\n// fixed\n"), fake_git()).hash
-    assert first != second
-
-
-def test_a_change_anywhere_the_package_ships_is_a_changed_build(tmp_path: Path) -> None:
-    """`files` names more than `dist`, and every path it names reaches the agent."""
-    first = images.cli_build(checkout(tmp_path), fake_git()).hash
-    second = images.cli_build(checkout(tmp_path, skill="skill\nmore\n"), fake_git()).hash
-    assert first != second
+def test_the_staged_package_is_the_manifest_and_every_path_files_names(tmp_path: Path) -> None:
+    assert images.cli_files(checkout(tmp_path)) == ("package.json", "dist", "skills")
 
 
 def test_an_unbuilt_checkout_names_the_command_that_builds_it(tmp_path: Path) -> None:
-    (tmp_path / "package.json").write_text(json.dumps({"name": "tenjin-cli", "files": ["dist"]}), encoding="utf-8")
+    root = checkout(tmp_path)
+    (root / "dist" / "index.js").unlink()
     with pytest.raises(ImageError) as caught:
-        images.cli_build(tmp_path, fake_git())
+        images.cli_files(root)
     assert caught.value.code == "cli_unbuilt"
     assert "pnpm build" in caught.value.detail
 
 
 def test_a_files_entry_that_is_not_a_path_here_is_refused(tmp_path: Path) -> None:
-    checkout(tmp_path)
-    manifest = json.loads((tmp_path / "package.json").read_text(encoding="utf-8"))
-    (tmp_path / "package.json").write_text(json.dumps({**manifest, "files": ["dist", "docs/**"]}), encoding="utf-8")
+    root = checkout(tmp_path)
+    manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    (root / "package.json").write_text(json.dumps({**manifest, "files": ["dist", "docs/**/*.md"]}), encoding="utf-8")
     with pytest.raises(ImageError) as caught:
-        images.cli_build(tmp_path, fake_git())
+        images.cli_files(root)
     assert caught.value.code == "cli_files"
 
 
 def test_a_package_without_a_files_list_is_refused(tmp_path: Path) -> None:
-    checkout(tmp_path)
-    (tmp_path / "package.json").write_text(json.dumps({"name": "tenjin-cli"}), encoding="utf-8")
+    root = checkout(tmp_path)
+    manifest = json.loads((root / "package.json").read_text(encoding="utf-8"))
+    (root / "package.json").write_text(json.dumps({key: value for key, value in manifest.items() if key != "files"}), encoding="utf-8")
     with pytest.raises(ImageError) as caught:
-        images.cli_build(tmp_path, fake_git())
+        images.cli_files(root)
     assert caught.value.code == "cli_manifest"
 
 
+def test_the_staged_context_holds_the_entrypoint_and_the_package_and_nothing_else(tmp_path: Path) -> None:
+    root = checkout(tmp_path / "checkout")
+    context = images.stage_base(root, images.cli_files(root))
+    assert sorted(path.name for path in context.iterdir()) == [images.CLI_STAGE, images.TRIAL_SCRIPT.name]
+    staged = context / images.CLI_STAGE
+    assert (staged / "package.json").is_file()
+    assert (staged / "skills" / "SKILL.md").read_text(encoding="utf-8") == "skill\n"
+
+
 def test_the_commit_is_head_and_says_so_when_the_tree_differs(tmp_path: Path) -> None:
-    clean = images.cli_build(checkout(tmp_path), fake_git(head="c0ffee1", status=""))
-    assert clean.commit == "c0ffee1"
-    dirty = images.cli_build(tmp_path, fake_git(head="c0ffee1", status=" M src/index.ts"))
-    assert dirty.commit == "c0ffee1-dirty"
+    assert images.cli_commit(tmp_path, fake_git(head="c0ffee1", status="")) == "c0ffee1"
+    assert images.cli_commit(tmp_path, fake_git(head="c0ffee1", status=" M src/index.ts")) == "c0ffee1-dirty"
 
 
 def test_a_checkout_outside_a_repository_says_unknown_rather_than_guessing(tmp_path: Path) -> None:
-    cli = images.cli_build(checkout(tmp_path), fake_git(head=None))
-    assert cli.commit == images.UNKNOWN_COMMIT
+    assert images.cli_commit(tmp_path, fake_git(head=None)) == images.UNKNOWN_COMMIT
 
 
-def test_a_missing_image_names_the_command_that_builds_it() -> None:
+# The names, and what they are hashed over.
+
+
+def test_the_base_name_is_hashed_over_the_staged_context_the_dockerfile_and_every_pin(tmp_path: Path, build: FakeBuild) -> None:
+    root = checkout(tmp_path)
+    resolved = images.plan(PINS, root, fake_git())
+    call = build.hashed[0]
+    assert call["context"] == str(resolved.context)
+    assert call["dockerfile"] == images.BASE_DOCKERFILE.name
+    assert call["args"] == images.build_args(PINS)
+    assert call["platform"] == PLATFORM
+    assert resolved.base.startswith(images.BASE_STEM + "--")
+
+
+def test_a_moved_pin_is_a_different_base_name(tmp_path: Path, build: FakeBuild) -> None:
+    root = checkout(tmp_path)
+    first = images.plan(PINS, root, fake_git()).base
+    second = images.plan({"harness_version": "2.1.264"}, root, fake_git()).base
+    assert first != second
+
+
+def test_a_changed_entrypoint_or_cli_file_is_a_different_base_name(tmp_path: Path, build: FakeBuild) -> None:
+    """The context is the entrypoint and the package, so Harbor's hash over it catches an edit to either.
+
+    That is the property the hand-rolled recipe existed for: on 2026-09-09 an
+    edit to the entrypoint left the tag unchanged and two four-attempt runs
+    silently reused a stale image.
+    """
+    root = checkout(tmp_path / "one")
+    other = checkout(tmp_path / "two", entry="#!/usr/bin/env node\n// fixed\n")
+    assert images.plan(PINS, root, fake_git()).base != images.plan(PINS, other, fake_git()).base
+
+
+def test_a_fixture_name_is_hashed_over_its_own_tree_and_the_base_it_sits_on(tmp_path: Path, build: FakeBuild) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    name = images.fixture_name(TASK, fixture, PLAN)
+    call = build.hashed[-1]
+    assert call["context"] == str(fixture)
+    assert call["dockerfile"] == images.FIXTURE_DOCKERFILE.name
+    assert call["args"] == {"BASE_TAG": BASE_NAME}
+    assert name.startswith("bench2-actor--")
+
+
+def test_a_moved_base_moves_every_fixture_name(tmp_path: Path, build: FakeBuild) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    other = images.Plan(context=PLAN.context, platform=PLAN.platform, args=PLAN.args, base="bench2-base--2222222222222222", cli_build=CLI_BUILD, commit=PLAN.commit)
+    assert images.fixture_name(TASK, fixture, PLAN) != images.fixture_name(TASK, fixture, other)
+
+
+def test_a_dry_run_states_the_stem_because_it_has_no_daemon_to_ask_for_a_platform() -> None:
+    assert images.fixture_stem("actor") == "bench2-actor"
+
+
+# What a live run does before it spends: the image is there, or it is not.
+
+
+def test_a_missing_image_names_the_command_that_builds_it(tmp_path: Path, build: FakeBuild) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
     docker = FakeDocker({"image inspect": Completed(returncode=1, stdout="", stderr="No such image")})
     with pytest.raises(ImageError) as caught:
-        images.require(TASK, PINS, docker, CLI)
+        images.require(TASK, fixture, PINS, docker, PLAN)
     assert caught.value.code == "image_missing"
     assert "images build" in caught.value.detail
+    assert images.fixture_name(TASK, fixture, PLAN) in caught.value.detail
 
 
-def test_an_image_built_from_another_pin_is_drift_not_a_silent_run() -> None:
-    stale = {**labels_for(), "bench2.claude": "2.1.200"}
-    docker = FakeDocker({"image inspect": inspect_payload(stale)})
+def test_an_input_that_moved_is_a_missing_image_rather_than_a_silent_reuse(tmp_path: Path, build: FakeBuild) -> None:
+    """There is no drift check because a moved input cannot name the image that is here.
+
+    The daemon holds the name the first plan resolved; the second plan asks for
+    another one and is told to build it.
+    """
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    present = images.fixture_name(TASK, fixture, PLAN)
+    moved = images.Plan(context=PLAN.context, platform=PLAN.platform, args=PLAN.args, base="bench2-base--3333333333333333", cli_build=CLI_BUILD, commit=PLAN.commit)
+
+    def docker(argv: list[str], timeout_s: float = 0.0) -> Completed:
+        found = argv[:2] == ["image", "inspect"] and argv[2] == present
+        return Completed(returncode=0 if found else 1, stdout="sha256:feed" if found else "", stderr="")
+
+    assert images.require(TASK, fixture, PINS, docker, PLAN).id == "sha256:feed"
     with pytest.raises(ImageError) as caught:
-        images.require(TASK, PINS, docker, CLI)
-    assert caught.value.code == "image_drift"
-    assert "2.1.200" in caught.value.detail
+        images.require(TASK, fixture, PINS, docker, moved)
+    assert caught.value.code == "image_missing"
 
 
-def test_the_base_id_is_not_compared_because_a_rebuilt_base_is_not_drift() -> None:
-    docker = FakeDocker({"image inspect": inspect_payload(labels_for(base_id="sha256:another"))})
-    image = images.require(TASK, PINS, docker, CLI)
-    assert image.facts["base_id"] == "sha256:another"
-    assert image.facts["fixture_hash"] == FIXTURE_HASH
+def test_the_facts_a_record_carries_name_the_image_its_base_and_the_cli_build(tmp_path: Path, build: FakeBuild) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    docker = FakeDocker({"image inspect": Completed(returncode=0, stdout="sha256:feed\n", stderr="")})
+    facts = images.require(TASK, fixture, PINS, docker, PLAN).facts
+    assert facts["id"] == "sha256:feed"
+    assert facts["fixture_hash"] == FIXTURE_HASH
+    assert facts["base"] == BASE_NAME
+    assert facts["cli"] == {"build": CLI_BUILD, "commit": "9f1c0d3"}
 
 
-def test_an_image_built_from_another_cli_build_is_drift() -> None:
-    stale = {**labels_for(), "bench2.tenjin_cli": "sha256:" + "ef" * 32}
-    docker = FakeDocker({"image inspect": inspect_payload(stale)})
+# The build: what Harbor is asked to build, in what order, and what is proved afterwards.
+
+
+class FakeManifest:
+    def __init__(self, root: Path, ids: tuple[str, ...]) -> None:
+        self.pins = PINS
+        self.tasks = [{"id": task_id, "fixture_hash": FIXTURE_HASH} for task_id in ids]
+        self.root = root
+        for task_id in ids:
+            (root / task_id).mkdir(parents=True, exist_ok=True)
+            (root / task_id / "package.json").write_text(json.dumps({"name": task_id}), encoding="utf-8")
+
+    def fixture_path(self, task: Any) -> Path:
+        return self.root / str(task["id"])
+
+
+def test_the_build_makes_the_base_first_and_hands_its_name_to_every_fixture(tmp_path: Path, build: FakeBuild, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(images, "_plan", lambda pins, resolved=None: PLAN)
+    docker = FakeDocker({"image inspect": Completed(returncode=0, stdout="sha256:feed\n", stderr="")})
+    manifest = FakeManifest(tmp_path / "fixtures", ("actor", "slug"))
+    monkeypatch.setattr(images, "build_image", lambda stem, context, dockerfile, args, resolved: BASE_NAME if stem == images.BASE_STEM else f"{stem}--0000")
+    payload = images.build_all(manifest, docker, log=None, ledger=tmp_path / "images.json")
+    assert payload["base"] == BASE_NAME
+    assert sorted(payload["images"]) == ["bench2-actor--0000", BASE_NAME, "bench2-slug--0000"]
+    assert payload["cli"] == {"build": CLI_BUILD, "commit": "9f1c0d3"}
+
+
+def test_a_base_harbor_names_differently_than_this_run_resolved_is_refused(tmp_path: Path, build: FakeBuild, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A trial looks the image up by name, so a build that produced another one is a run that would refuse every trial."""
+    monkeypatch.setattr(images, "_plan", lambda pins, resolved=None: PLAN)
+    monkeypatch.setattr(images, "build_image", lambda *args: "bench2-base--9999999999999999")
     with pytest.raises(ImageError) as caught:
-        images.require(TASK, PINS, docker, CLI)
-    assert caught.value.code == "image_drift"
-    assert "tenjin_cli" in caught.value.detail
+        images.build_all(FakeManifest(tmp_path / "fixtures", ("actor",)), FakeDocker(), log=None, ledger=tmp_path / "images.json")
+    assert caught.value.code == "base_name"
 
 
-def test_a_new_commit_of_an_identical_build_is_not_drift() -> None:
-    """The commit is a source pointer, not an image input: a rebuild it cannot change is not a rebuild."""
-    labels = {**labels_for(), "bench2.cli_commit": "0a1b2c3"}
-    docker = FakeDocker({"image inspect": inspect_payload(labels)})
-    image = images.require(TASK, PINS, docker, CLI)
-    assert image.facts["cli"] == {"build": CLI.hash, "commit": "0a1b2c3"}
+def test_a_build_passes_the_context_the_dockerfile_and_the_platform_to_harbor(tmp_path: Path, build: FakeBuild) -> None:
+    fixture = tmp_path / "fixture"
+    fixture.mkdir()
+    images.build_image("bench2-actor", fixture, images.FIXTURE_DOCKERFILE, {"BASE_TAG": BASE_NAME}, PLAN)
+    assert build.built == [
+        {"stem": "bench2-actor", "context": str(fixture), "dockerfile": images.FIXTURE_DOCKERFILE.name, "args": {"BASE_TAG": BASE_NAME}, "platform": PLATFORM}
+    ]
 
 
-def test_the_facts_a_record_carries_name_the_cli_build_and_its_commit() -> None:
-    docker = FakeDocker({"image inspect": inspect_payload(labels_for() | {"bench2.cli_commit": CLI.commit})})
-    facts = images.require(TASK, PINS, docker, CLI).facts
-    assert facts["cli"] == {"build": CLI.hash, "commit": CLI.commit}
+def test_a_failed_build_names_the_image_and_what_harbor_said(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def refuse(**_: Any) -> str:
+        raise RuntimeError("Failed to build Docker image bench2-actor--abc, exit code 1, output: pnpm install died")
 
-
-def test_an_unreadable_inspect_is_a_refusal_rather_than_a_crash() -> None:
-    docker = FakeDocker({"image inspect": Completed(returncode=0, stdout="not json", stderr="")})
+    monkeypatch.setattr(images, "harbor", lambda: images.Build(ensure=refuse, context_hash=None, name=None, platform=None))
     with pytest.raises(ImageError) as caught:
-        images.inspect("bench2-actor:abc", docker)
-    assert caught.value.code == "inspect_unreadable"
+        images.build_image("bench2-actor", tmp_path, images.FIXTURE_DOCKERFILE, {}, PLAN)
+    assert caught.value.code == "build_failed"
+    assert "pnpm install died" in caught.value.detail
 
 
-class SpyDocker(FakeDocker):
-    """A docker that also reads the build context, which lives only for the call."""
-
-    def __init__(self, table: dict[str, Completed] | None = None) -> None:
-        super().__init__(table)
-        self.contexts: list[list[str]] = []
-
-    def __call__(self, argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
-        context = Path(argv[-1])
-        if argv[0] == "build" and context.is_dir():
-            self.contexts.append(sorted(item.relative_to(context).as_posix() for item in context.rglob("*") if item.is_file()))
-        return super().__call__(argv, timeout_s, stream)
-
-
-@pytest.fixture
-def cli(tmp_path: Path) -> images.CliBuild:
-    return images.cli_build(checkout(tmp_path), fake_git())
-
-
-def test_the_base_build_passes_every_pin_as_a_build_argument(cli: images.CliBuild) -> None:
-    docker = FakeDocker({"image inspect": inspect_payload({})})
-    images.build_base(images.recipe(PINS, cli), docker, None, cli)
-    arguments = docker.flag(0, "--build-arg")
-    assert f"BASE_DIGEST={images.BASE_DIGEST}" in arguments
-    assert "CLAUDE_VERSION=2.1.263" in arguments
-    assert f"PNPM_VERSION={images.PNPM_VERSION}" in arguments
-    # No published-CLI pin reaches the build: the package is copied in.
-    assert [value for value in arguments if value.startswith("TENJIN")] == []
-
-
-def test_the_base_context_is_staged_and_carries_this_checkouts_cli(cli: images.CliBuild) -> None:
-    """The context is built for the call, because the CLI package does not live beside the Dockerfile."""
-    docker = SpyDocker({"image inspect": inspect_payload({})})
-    images.build_base(images.recipe(PINS, cli), docker, None, cli)
-    assert docker.calls[0][-1] != str(images.DOCKER_DIR)
-    assert docker.contexts[0] == ["cli/dist/index.js", "cli/package.json", "cli/skills/SKILL.md", "trial.mjs"]
-    # The staged context is disposable, so nothing of it survives the build.
-    assert not Path(docker.calls[0][-1]).exists()
-
-
-def test_a_fixture_build_uses_the_fixture_directory_as_its_whole_context() -> None:
-    docker = FakeDocker({"image inspect": inspect_payload(labels_for())})
-    base = images.Image(tag="bench2-base:x", id="sha256:base", labels={})
-    fixture = Path("/tmp/fixtures/actor")
-    images.build_fixture(TASK, fixture, images.recipe(PINS, CLI), base, docker, None, CLI)
-    argv = docker.calls[0]
-    assert argv[-1] == str(fixture)
-    assert "--file" in argv
-    assert argv[argv.index("--file") + 1] == str(images.FIXTURE_DOCKERFILE)
-    assert f"bench2.fixture_hash={FIXTURE_HASH}" in docker.flag(0, "--label")
-    assert "BASE_TAG=bench2-base:x" in docker.flag(0, "--build-arg")
-    assert f"bench2.cli_commit={CLI.commit}" in docker.flag(0, "--label")
-    assert f"bench2.tenjin_cli={CLI.hash}" in docker.flag(0, "--label")
-
-
-def test_a_failed_build_names_the_tag_and_the_exit_code(cli: images.CliBuild) -> None:
-    docker = FakeDocker({"build": Completed(returncode=1, stdout="", stderr="boom")})
-    with pytest.raises(ImageError) as caught:
-        images.build_base(images.recipe(PINS, cli), docker, None, cli)
-    assert caught.value.code == "base_build_failed"
+# The installed tree an image carries, copied into the trial's repository.
 
 
 class StagingDocker(FakeDocker):
@@ -329,8 +347,8 @@ class StagingDocker(FakeDocker):
         super().__init__({"create": Completed(returncode=0, stdout="c0ffee\n", stderr="")})
         self.link = link
 
-    def __call__(self, argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
-        answer = super().__call__(argv, timeout_s, stream)
+    def __call__(self, argv: list[str], timeout_s: float = 0.0) -> Completed:
+        answer = super().__call__(argv, timeout_s)
         if argv[:1] == ["cp"]:
             staging = Path(argv[-1])
             (staging / "package.json").write_text("{}\n", encoding="utf-8")
@@ -352,7 +370,7 @@ def destination(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def image() -> images.Image:
-    return images.Image(tag="bench2-actor:abc", id="sha256:feed", labels={})
+    return images.Image(tag="bench2-actor--abc", id="sha256:feed")
 
 
 def test_the_copy_container_is_removed_even_when_the_copy_fails(destination: Path, image: images.Image) -> None:
@@ -409,13 +427,13 @@ def test_an_image_with_no_installed_tree_is_a_refusal_rather_than_an_empty_copy(
 
 def test_a_task_with_no_hidden_check_runs_no_container() -> None:
     docker = FakeDocker()
-    assert images.quirk_check("actor", "bench2-actor:abc", docker) is None
+    assert images.quirk_check("actor", "bench2-actor--abc", docker) is None
     assert docker.calls == []
 
 
 def test_a_declared_check_runs_in_the_image_read_only_and_off_the_network() -> None:
     docker = FakeDocker({"run": Completed(returncode=0, stdout="still there\n", stderr="")})
-    assert images.quirk_check("ambient", "bench2-ambient:abc", docker) == "still there"
+    assert images.quirk_check("ambient", "bench2-ambient--abc", docker) == "still there"
     argv = docker.calls[0]
     assert argv[:2] == ["run", "--rm"]
     assert argv[argv.index("--network") + 1] == "none"
@@ -426,7 +444,7 @@ def test_a_declared_check_runs_in_the_image_read_only_and_off_the_network() -> N
 def test_an_image_that_lost_the_quirk_fails_the_build_by_name() -> None:
     docker = FakeDocker({"run": Completed(returncode=1, stdout="", stderr="AssertionError: Intl no longer renders 9")})
     with pytest.raises(ImageError) as caught:
-        images.quirk_check("ambient", "bench2-ambient:abc", docker)
+        images.quirk_check("ambient", "bench2-ambient--abc", docker)
     assert caught.value.code == "image_quirk_absent"
     assert "Intl no longer renders" in caught.value.detail
 
@@ -436,18 +454,14 @@ def test_the_ambient_check_is_the_task_that_declares_one() -> None:
     assert declared == ["ambient"]
 
 
-def test_the_ledger_records_every_tag_its_id_and_the_recipe(tmp_path: Path) -> None:
+def test_the_ledger_records_every_name_its_id_and_what_the_run_was_built_from(tmp_path: Path) -> None:
     path = tmp_path / "images.json"
-    built = images.ledger_write(
-        {"bench2-actor:abc": images.Image(tag="bench2-actor:abc", id="sha256:feed", labels=labels_for())},
-        images.recipe(PINS, CLI),
-        path,
-        CLI,
-    )
-    assert built["recipe"]["claude"] == "2.1.263"
-    assert built["cli"] == {"build": CLI.hash, "commit": CLI.commit}
+    built = images.ledger_write({"bench2-actor--abc": images.Image(tag="bench2-actor--abc", id="sha256:feed", base=BASE_NAME, cli=PLAN.cli)}, PLAN, path)
+    assert built["pins"]["CLAUDE_VERSION"] == "2.1.263"
+    assert built["platform"] == PLATFORM
+    assert built["cli"] == {"build": CLI_BUILD, "commit": "9f1c0d3"}
     read = images.ledger_read(path)
-    assert read["images"]["bench2-actor:abc"]["id"] == "sha256:feed"
+    assert read["images"]["bench2-actor--abc"]["id"] == "sha256:feed"
 
 
 def test_a_missing_ledger_reads_as_empty_rather_than_raising() -> None:
@@ -464,19 +478,19 @@ def image_record(image: Any) -> dict[str, Any]:
     return {**base, "isolation": {**base["isolation"], "image": image}}
 
 
-UNNAMED_CLI = images.Image(tag="bench2-actor:abc", id="sha256:feed", labels=labels_for()).facts
+NAMED = images.Image(tag="bench2-actor--abc", id="sha256:feed", base=BASE_NAME, cli=PLAN.cli).facts
+UNNAMED_CLI = images.Image(tag="bench2-actor--abc", id="sha256:feed").facts
 
 
 def test_the_record_carries_the_cli_build_and_the_commit_under_the_image() -> None:
     from evals.benchmark import records
 
-    facts = images.Image(tag="bench2-actor:abc", id="sha256:feed", labels=labels_for() | {"bench2.cli_commit": CLI.commit}).facts
-    record = image_record(facts)
+    record = image_record(NAMED)
     records.validate(record)
-    assert record["isolation"]["image"]["cli"] == {"build": CLI.hash, "commit": CLI.commit}
+    assert record["isolation"]["image"]["cli"] == {"build": CLI_BUILD, "commit": "9f1c0d3"}
 
 
-@pytest.mark.parametrize("bad", (UNNAMED_CLI, {**UNNAMED_CLI, "cli": {"build": CLI.hash}}, {**UNNAMED_CLI, "cli": "0.1.0-alpha.15"}, "bench2-actor:abc"))
+@pytest.mark.parametrize("bad", (UNNAMED_CLI, {**NAMED, "cli": {"build": CLI_BUILD}}, {**NAMED, "cli": "0.1.0-alpha.15"}, "bench2-actor--abc"))
 def test_an_image_that_cannot_name_its_cli_build_is_refused(bad: Any) -> None:
     from evals.benchmark import records
 
@@ -524,6 +538,9 @@ def test_the_record_keeps_the_package_manager_in_its_isolation_block() -> None:
             records.validate({**record, "isolation": {**record["isolation"], "package_manager": bad}})
 
 
+# Whether an image can be built or read here at all, answered in one sentence.
+
+
 def test_a_daemon_that_does_not_answer_is_one_sentence() -> None:
     docker = FakeDocker({"info": Completed(returncode=1, stdout="", stderr="cannot connect")})
     reason = images.unavailable(docker)
@@ -531,12 +548,32 @@ def test_a_daemon_that_does_not_answer_is_one_sentence() -> None:
     assert "container" in str(reason)
 
 
+def test_a_docker_without_buildkit_is_named_before_a_build_fails_halfway() -> None:
+    """Harbor builds every image with `docker buildx build`, its egress sidecar included, and its Dockerfile needs `COPY --chmod`."""
+    docker = FakeDocker({"buildx": Completed(returncode=1, stdout="", stderr="unknown command")})
+    reason = images.unavailable(docker)
+    assert reason is not None
+    assert "buildx" in reason
+
+
 def test_a_reachable_daemon_reports_nothing() -> None:
     assert images.unavailable(FakeDocker()) is None
 
 
 def test_no_docker_on_path_is_the_same_sentence_rather_than_a_traceback() -> None:
-    def missing(argv: list[str], timeout_s: float = 0.0, stream: Any = None) -> Completed:
+    def missing(argv: list[str], timeout_s: float = 0.0) -> Completed:
         raise ImageError("docker_missing", "no `docker` on PATH; a live trial runs inside a container")
 
     assert "no `docker` on PATH" in str(images.unavailable(missing))
+
+
+def test_no_harbor_in_the_offline_closure_is_a_refusal_that_names_the_requirements_file() -> None:
+    """The offline suite installs twelve wheels and imports this module; Harbor is 89 and needs 3.12."""
+    pytest.importorskip("evals.benchmark.images")
+    try:
+        import harbor  # noqa: F401
+    except ImportError:
+        with pytest.raises(ImageError) as caught:
+            images.harbor()
+        assert caught.value.code == "harbor_missing"
+        assert "requirements-live.txt" in caught.value.detail

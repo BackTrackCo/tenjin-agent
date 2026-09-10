@@ -707,8 +707,9 @@ def launch(request: LaunchRequest) -> Launch:
     apply_overlay(request.roots, overlay_of(request.arm, request.roots))
     inject_cases(request.roots, request.task)
     agent = build_argv(request, path, session_id)
-    tag = images.fixture_tag(str(request.task["id"]), str(request.task["fixture_hash"]))
-    reference = request.image or tag
+    # A resolved run passes the content-addressed name; a dry run has no daemon
+    # to ask for the platform the hash covers, so it states the name's stem.
+    reference = request.image or images.fixture_stem(str(request.task["id"]))
     name = container.container_name(request.trial_id, request.phase)
     plan = container.mounts(request.roots, settings=path)
     environment = container_environment(request.roots, os.environ, session_id, daemon=provisioned)
@@ -744,7 +745,7 @@ def launch(request: LaunchRequest) -> Launch:
         recipe=recipe,
         container_plan={
             **recipe.to_json(),
-            "image": {"tag": tag, "reference": reference, "resolved": request.image is not None},
+            "image": {"reference": reference, "resolved": request.image is not None},
             "user": container.user(),
             "agent": list(agent),
         },

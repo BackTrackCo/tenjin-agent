@@ -1,4 +1,4 @@
-"""Fixture images: one pinned base, one image per fixture, built before a live run.
+"""Fixture images: one pinned base, one image per fixture, content-addressed by Harbor.
 
 A task fixture is a real Vitest project, and its dependency tree is about 780
 files. Committing that tree, or a vendored archive of it, made reproducibility a
@@ -13,38 +13,48 @@ names. A pinned published release cannot redden this lane: it is frozen, so a
 CLI change never reaches the measured agent. The version string does not
 identify a build either, measured 2026-09-09: `tenjin-cli@0.1.0-alpha.15` on npm
 carries no `daemon` command while the repository at that same version string
-does. So the recipe hashes the built package by content and the labels carry the
-checkout's commit.
+does.
+
+Identity is Harbor's (`harbor.environments.docker.utils`). Every image is named
+`<stem>--<hash>`, where the hash is a blake2b over the whole build context, the
+Dockerfile's bytes, every build argument and the daemon's platform, and the
+build is a `docker buildx build` behind a file lock. That subsumes the recipe
+this module used to hash by hand, and covers three things it did not: every file
+of the context rather than a chosen list, the platform, and the fixture's own
+tree. The base's name is a build argument of each fixture, so a base input
+reaches every fixture name too.
+
+There is no drift check left, because there is nothing left to drift: an input
+that moved cannot name the image that is here. The image is simply absent, and
+`require` says which command builds it. Two properties the old recipe carried
+are checked elsewhere. That a manifest's `fixture_hash` still matches the
+fixture directory is `manifest.py`'s check, at load. That a task's declared
+runtime quirk survived a base bump is `quirk_check`, run inside the image the
+build just produced.
 
 `python3 -m evals.benchmark.images build --manifest <path>` builds every image a
-manifest names, labels each with the fixture hash, the base image, and the pins
-it was built from, and writes the ids to `fixtures/live/images.json`, which is a
-local build ledger rather than a committed fact. `live-run` refuses a trial
-whose image is missing or whose labels disagree with the manifest, and the
-attempt's record carries the image id, the CLI build hash and the CLI commit
-under `isolation.image`.
-
-Because the install happens at build time, two builds of one fixture on two
-machines may differ in a transitive dependency. That is the trade the design
-states: the record names the build that ran, and a locked run builds once and
-keeps the image.
+manifest names and writes the names to `fixtures/live/images.json`, a local
+build ledger rather than a committed fact. Because `pnpm install` happens at
+build time, two builds of one fixture on two machines may differ in a transitive
+dependency. That is the trade the design states: the record names the build that
+ran, and a locked run builds once and keeps the image.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import shutil
 import subprocess
 import sys
-import hashlib
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import FIXTURES, PACKAGE_ROOT, REPO_ROOT, sha256_file, sha256_json
+from . import FIXTURES, PACKAGE_ROOT, REPO_ROOT
 from .verifier import HIDDEN
 
 DOCKER = "docker"
@@ -62,18 +72,16 @@ PNPM_VERSION = "11.11.0"
 # There is no published-CLI pin. The image installs this checkout's build, so
 # the agent's `tenjin` and the daemon under test are one build of the product.
 
-BASE_REPOSITORY = "bench2-base"
+BASE_STEM = "bench2-base"
 FIXTURE_PREFIX = "bench2-"
-LABEL = "bench2."
-TAG_LENGTH = 12
 NODE_MODULES = "node_modules"
 FIXTURE_PATH = "/opt/fixture"
 # A task whose difficulty rests on a runtime behaviour rather than on its own
-# files states that behaviour as a check in its hidden layer, and the build
-# runs it inside the image it just built. Without it a base bump that moved
-# the behaviour would turn a hard task into a trivial one and the corpus would
-# go on reporting the old number. The layer is mounted read-only and the
-# check is code-owned, so a fixture cannot supply one.
+# files states that behaviour as a check in its hidden layer, and the build runs
+# it inside the image it just built. Without it a base bump that moved the
+# behaviour would turn a hard task into a trivial one and the corpus would go on
+# reporting the old number. The layer is mounted read-only and the check is
+# code-owned, so a fixture cannot supply one.
 QUIRK_CHECK = "image-check.mjs"
 CHECK_PATH = "/opt/bench2/check"
 
@@ -106,12 +114,9 @@ class Completed:
     stderr: str
 
 
-def run_docker(argv: list[str], timeout_s: float = DOCKER_TIMEOUT_S, stream: Any = None) -> Completed:
+def run_docker(argv: list[str], timeout_s: float = DOCKER_TIMEOUT_S) -> Completed:
     """The one place this module runs `docker`. No shell, code-owned argv."""
     try:
-        if stream is not None:
-            process = subprocess.run([DOCKER, *argv], stdout=stream, stderr=subprocess.STDOUT, timeout=timeout_s, shell=False, check=False)
-            return Completed(returncode=process.returncode, stdout="", stderr="")
         completed = subprocess.run([DOCKER, *argv], capture_output=True, text=True, timeout=timeout_s, shell=False, check=False)
     except FileNotFoundError as error:
         raise ImageError("docker_missing", "no `docker` on PATH; a live trial runs inside a container") from error
@@ -131,7 +136,7 @@ def _docker(docker: Docker | None) -> Docker:
 
 
 def unavailable(docker: Docker | None = None) -> str | None:
-    """One sentence when the daemon cannot be reached, or None. Nothing offline calls this."""
+    """One sentence when an image cannot be built or read here, or None. Nothing offline calls this."""
     docker = _docker(docker)
     try:
         completed = docker(["info", "--format", "{{.ServerVersion}}"], DOCKER_TIMEOUT_S)
@@ -139,12 +144,42 @@ def unavailable(docker: Docker | None = None) -> str | None:
         return f"{error.detail}. Start Docker (this machine runs colima) and try again."
     if completed.returncode != 0:
         return "the Docker daemon is not reachable; a live trial runs inside a container. Start Docker (this machine runs colima) and try again."
+    if docker(["buildx", "version"], DOCKER_TIMEOUT_S).returncode != 0:
+        return (
+            "`docker buildx` is not installed; Harbor builds every image with BuildKit, this package's and its own "
+            "egress sidecar. Install the buildx plugin and try again."
+        )
     return None
 
 
-def file_hash(path: Path) -> str:
-    """One file's content, for the recipe."""
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+@dataclass(frozen=True)
+class Build:
+    """The Harbor symbols this module uses, resolved together."""
+
+    ensure: Any
+    context_hash: Any
+    name: Any
+    platform: Any
+
+
+def harbor() -> Build:
+    """Import Harbor at the call, never at module scope.
+
+    The offline suite installs `requirements-test.txt` alone, twelve wheels on a
+    Python 3.11 floor, and imports this module. Harbor is 89 wheels and needs
+    3.12, so a module-scope import would put it in the required CI job's closure
+    for a lane that builds nothing.
+    """
+    try:
+        from harbor.environments.docker.utils import _compute_image_name, default_docker_platform, ensure_docker_image_built
+        from harbor.utils.container_cache import docker_build_context_hash
+    except ImportError as error:
+        raise ImageError(
+            "harbor_missing",
+            "no `harbor` importable; it owns this package's image identity and its builds. "
+            "Install it with `pip install -r evals/benchmark/requirements-live.txt`",
+        ) from error
+    return Build(ensure=ensure_docker_image_built, context_hash=docker_build_context_hash, name=_compute_image_name, platform=default_docker_platform)
 
 
 def run_git(root: Path, *argv: str) -> str | None:
@@ -159,30 +194,13 @@ def run_git(root: Path, *argv: str) -> str | None:
 Git = Callable[..., str | None]
 
 
-@dataclass(frozen=True)
-class CliBuild:
-    """The Tenjin CLI the image installs: a built checkout, by content and by commit.
-
-    `hash` is the recipe's identifier, because it is the only one that tracks
-    the artefact: it covers `package.json` and every file under the paths its
-    `files` names, which is exactly what `npm pack` ships. `commit` is the
-    reader's identifier, resolvable back to source, and it is deliberately NOT
-    in the recipe: a commit that leaves the built package byte-identical is not
-    a new image.
-    """
-
-    root: Path
-    hash: str
-    commit: str
-    files: tuple[str, ...]
-
-    @property
-    def facts(self) -> dict[str, str]:
-        return {"build": self.hash, "commit": self.commit}
-
-
 def cli_commit(root: Path, git: Git | None = None) -> str:
-    """HEAD of the checkout, suffixed `-dirty` when the tree differs from it, `unknown` outside a repository."""
+    """HEAD of the checkout, suffixed `-dirty` when the tree differs from it, `unknown` outside a repository.
+
+    The reader's identifier, resolvable back to source, and deliberately not an
+    image input: a commit that leaves the built package byte-identical is not a
+    new image, and Harbor's hash agrees because it never sees a commit.
+    """
     git = run_git if git is None else git
     head = git(root, "rev-parse", "HEAD")
     if not head:
@@ -190,16 +208,13 @@ def cli_commit(root: Path, git: Git | None = None) -> str:
     return head if git(root, "status", "--porcelain") == "" else f"{head}-dirty"
 
 
-def cli_build(root: Path | None = None, git: Git | None = None) -> CliBuild:
-    """The package this checkout would publish, hashed by content and named by commit.
+def cli_files(root: Path) -> tuple[str, ...]:
+    """`package.json` and every path its `files` names, from a checkout that has been built.
 
-    The version string is not an identity: `tenjin-cli@0.1.0-alpha.15` on npm
-    carries no `daemon` command while the repository at that same version string
-    does, so a lane that installed the release failed with `unknown command
-    'daemon'` after its gate had passed. The content hash is what a stale image
-    cannot forge.
+    The paths only. What the package IS is Harbor's hash of the staged context,
+    so nothing here digests a file; this refuses the two shapes that would stage
+    the wrong thing, a glob and an unbuilt tree.
     """
-    root = CLI_ROOT if root is None else root
     manifest = root / CLI_MANIFEST
     try:
         payload = json.loads(manifest.read_text(encoding="utf-8"))
@@ -207,169 +222,27 @@ def cli_build(root: Path | None = None, git: Git | None = None) -> CliBuild:
         raise ImageError("cli_manifest", f"no readable {CLI_MANIFEST} at {root}; the image installs the CLI this checkout builds") from error
     entries = payload.get("files")
     if not isinstance(entries, list) or not entries:
-        raise ImageError("cli_manifest", f"{root / CLI_MANIFEST} names no `files`, so nothing states what the package is")
+        raise ImageError("cli_manifest", f"{manifest} names no `files`, so nothing states what the package is")
     if not (root / CLI_ENTRY).is_file():
         raise ImageError(
             "cli_unbuilt",
             f"no {CLI_ENTRY} in {root}; build it with `pnpm build`. The image installs the CLI this checkout builds, not a published release",
         )
-    digests = [[CLI_MANIFEST, sha256_file(manifest)]]
-    staged = [CLI_MANIFEST]
-    for entry in sorted(str(item) for item in entries):
-        source = root / entry
-        if source.is_dir():
-            members = sorted(item for item in source.rglob("*") if item.is_file())
-        elif source.is_file():
-            members = [source]
-        else:
+    for entry in entries:
+        if not (root / str(entry)).exists():
             raise ImageError(
                 "cli_files",
-                f"{CLI_MANIFEST} `files` names {entry!r}, which is neither a file nor a directory in {root}; "
+                f"{CLI_MANIFEST} `files` names {str(entry)!r}, which is neither a file nor a directory in {root}; "
                 "the image stages plain paths, so a pattern there would ship into the image unhashed",
             )
-        staged.append(entry)
-        digests += [[item.relative_to(root).as_posix(), sha256_file(item)] for item in members]
-    return CliBuild(root=root, hash="sha256:" + sha256_json(digests), commit=cli_commit(root, git), files=tuple(staged))
+    return (CLI_MANIFEST, *sorted(str(entry) for entry in entries))
 
 
-def _cli(cli: CliBuild | None) -> CliBuild:
-    """Resolved at the call, never bound as a default, so one build serves a whole `images build`."""
-    return cli_build() if cli is None else cli
-
-
-def recipe(pins: Mapping[str, Any], cli: CliBuild | None = None) -> dict[str, str]:
-    """What the base image is built from. The harness version is the manifest's, so a pin change is a rebuild.
-
-    The Dockerfile, the entrypoint and the CLI package are in here by content.
-    They are as much the image as any pinned version is, and while the first two
-    were not, an edit to either left the tag unchanged and the run silently
-    reused a stale image. On 2026-09-09 that hid a fix to the entrypoint through
-    two four-attempt runs whose numbers looked plausible. The CLI is now an
-    image input for the same reason: a CLI change has to produce a new tag, or
-    the lane measures the build before it.
-    """
-    version = pins.get("harness_version")
-    if not isinstance(version, str) or not version.strip():
-        raise ImageError("recipe_pins", "pins.harness_version must name the Claude Code version the image installs")
-    return {
-        "base_image": BASE_IMAGE,
-        "base_digest": BASE_DIGEST,
-        "pnpm": PNPM_VERSION,
-        "claude": version,
-        "tenjin_cli": _cli(cli).hash,
-        "dockerfile": file_hash(BASE_DOCKERFILE),
-        "entrypoint": file_hash(TRIAL_SCRIPT),
-    }
-
-
-def recipe_hash(built_from: Mapping[str, str]) -> str:
-    return "sha256:" + sha256_json(dict(built_from))
-
-
-def base_tag(built_from: Mapping[str, str]) -> str:
-    """The base tag carries the recipe hash, so a changed pin can never reuse a stale base."""
-    return f"{BASE_REPOSITORY}:{recipe_hash(built_from)[len('sha256:'):][:TAG_LENGTH]}"
-
-
-def fixture_tag(task_id: str, fixture_hash: str) -> str:
-    """`bench2-<task>:<fixture hash prefix>`: a fixture edit is a new tag, and the old image is never mistaken for it."""
-    if not str(fixture_hash).startswith("sha256:"):
-        raise ImageError("fixture_hash", f"task {task_id!r} fixture_hash must be a sha256 token")
-    return f"{FIXTURE_PREFIX}{task_id}:{fixture_hash[len('sha256:'):][:TAG_LENGTH]}"
-
-
-def fixture_labels(task_id: str, fixture_hash: str, built_from: Mapping[str, str], base_id: str = "", cli_commit: str = "") -> dict[str, str]:
-    """The labels a run checks. Every value is a pin or a hash, never a path or a time.
-
-    `cli_commit` is the exception the record needs: a source pointer rather than
-    an image input, which is why `UNCOMPARED` keeps it out of the drift check.
-    """
-    return {
-        f"{LABEL}task": task_id,
-        f"{LABEL}fixture_hash": fixture_hash,
-        f"{LABEL}recipe": recipe_hash(built_from),
-        f"{LABEL}base_id": base_id,
-        f"{LABEL}cli_commit": cli_commit,
-        **{f"{LABEL}{key}": value for key, value in built_from.items()},
-    }
-
-
-# Two labels a run reads but never compares: a rebuilt base is not drift, and
-# neither is a new commit whose built package is byte-identical. What identifies
-# the CLI build to the drift check is `bench2.tenjin_cli`, its content hash.
-UNCOMPARED = (f"{LABEL}base_id", f"{LABEL}cli_commit")
-
-
-@dataclass(frozen=True)
-class Image:
-    tag: str
-    id: str
-    labels: dict[str, str]
-
-    @property
-    def fixture_hash(self) -> str:
-        return self.labels.get(f"{LABEL}fixture_hash", "")
-
-    @property
-    def facts(self) -> dict[str, Any]:
-        """What reaches the attempt record under `isolation.image`.
-
-        `cli` is here because the version string does not identify a build. The
-        content hash is inside `recipe` as well; the commit is the only field a
-        reader can resolve back to source.
-        """
-        return {
-            "tag": self.tag,
-            "id": self.id,
-            "fixture_hash": self.fixture_hash,
-            "base_id": self.labels.get(f"{LABEL}base_id", ""),
-            "recipe": self.labels.get(f"{LABEL}recipe", ""),
-            "cli": {
-                "build": self.labels.get(f"{LABEL}tenjin_cli", ""),
-                "commit": self.labels.get(f"{LABEL}cli_commit", ""),
-            },
-        }
-
-
-def inspect(tag: str, docker: Docker | None = None) -> Image | None:
-    """The local image behind a tag, or None when there is none."""
-    docker = _docker(docker)
-    completed = docker(["image", "inspect", tag, "--format", "{{json .}}"], DOCKER_TIMEOUT_S)
-    if completed.returncode != 0:
-        return None
-    try:
-        payload = json.loads(completed.stdout.strip() or "{}")
-    except json.JSONDecodeError as error:
-        raise ImageError("inspect_unreadable", f"`docker image inspect {tag}` did not return JSON") from error
-    labels = (payload.get("Config") or {}).get("Labels") or {}
-    return Image(tag=tag, id=str(payload.get("Id", "")), labels={str(key): str(value) for key, value in labels.items()})
-
-
-def require(task: Mapping[str, Any], pins: Mapping[str, Any], docker: Docker | None = None, cli: CliBuild | None = None) -> Image:
-    """The image this task's trials run in, or a refusal that names the command that builds it."""
-    docker = _docker(docker)
-    task_id = str(task["id"])
-    fixture_hash = str(task["fixture_hash"])
-    tag = fixture_tag(task_id, fixture_hash)
-    image = inspect(tag, docker)
-    if image is None:
-        raise ImageError("image_missing", f"no image {tag} for task {task_id!r}; build it with `python3 -m evals.benchmark.images build --manifest <manifest>`")
-    expected = {key: value for key, value in fixture_labels(task_id, fixture_hash, recipe(pins, cli)).items() if key not in UNCOMPARED}
-    drifted = sorted(key for key, value in expected.items() if image.labels.get(key) != value)
-    if drifted:
-        raise ImageError(
-            "image_drift",
-            f"image {tag} was built from {', '.join(f'{key}={image.labels.get(key)!r}' for key in drifted)}, "
-            f"and the manifest states {', '.join(f'{key}={expected[key]!r}' for key in drifted)}; rebuild it with `images build`",
-        )
-    return image
-
-
-def stage_cli(cli: CliBuild, destination: Path) -> Path:
-    """Copy the package the image installs into a build context: `package.json` and every path its `files` names."""
+def stage_cli(root: Path, files: tuple[str, ...], destination: Path) -> Path:
+    """Copy the package the image installs into a build context."""
     destination.mkdir(parents=True, exist_ok=True)
-    for entry in cli.files:
-        source = cli.root / entry
+    for entry in files:
+        source = root / entry
         target = destination / entry
         target.parent.mkdir(parents=True, exist_ok=True)
         if source.is_dir():
@@ -379,68 +252,165 @@ def stage_cli(cli: CliBuild, destination: Path) -> Path:
     return destination
 
 
-def build_base(built_from: Mapping[str, str], docker: Docker | None = None, stream: Any = None, cli: CliBuild | None = None) -> Image:
-    """Build the base from a staged context: the entrypoint and this checkout's CLI package, and nothing else of the tree."""
-    docker = _docker(docker)
-    cli = _cli(cli)
-    tag = base_tag(built_from)
-    with tempfile.TemporaryDirectory(prefix="bench2-base-") as name:
-        context = Path(name)
-        shutil.copy2(TRIAL_SCRIPT, context / TRIAL_SCRIPT.name)
-        stage_cli(cli, context / CLI_STAGE)
-        argv = [
-            "build",
-            "--file",
-            str(BASE_DOCKERFILE),
-            "--tag",
-            tag,
-            "--build-arg",
-            f"BASE_IMAGE={built_from['base_image']}",
-            "--build-arg",
-            f"BASE_DIGEST={built_from['base_digest']}",
-            "--build-arg",
-            f"PNPM_VERSION={built_from['pnpm']}",
-            "--build-arg",
-            f"CLAUDE_VERSION={built_from['claude']}",
-            str(context),
-        ]
-        completed = docker(argv, BUILD_TIMEOUT_S, stream)
+def build_args(pins: Mapping[str, Any]) -> dict[str, str]:
+    """The base's build arguments, which Harbor's hash makes part of its name. The harness version is the manifest's, so a pin change is a rebuild."""
+    version = pins.get("harness_version")
+    if not isinstance(version, str) or not version.strip():
+        raise ImageError("recipe_pins", "pins.harness_version must name the Claude Code version the image installs")
+    return {"BASE_IMAGE": BASE_IMAGE, "BASE_DIGEST": BASE_DIGEST, "PNPM_VERSION": PNPM_VERSION, "CLAUDE_VERSION": version}
+
+
+# The staged contexts of this process, held so their directories outlive the
+# call that built them: a context IS the base image's name under Harbor's hash,
+# so it is staged once and every trial after the first reads that staging.
+_STAGED: list[Any] = []
+
+
+def stage_base(root: Path, files: tuple[str, ...]) -> Path:
+    """The base build context on disk: the entrypoint and the CLI package, and nothing else of the tree."""
+    staging = tempfile.TemporaryDirectory(prefix="bench2-base-")
+    _STAGED.append(staging)
+    context = Path(staging.name)
+    shutil.copy2(TRIAL_SCRIPT, context / TRIAL_SCRIPT.name)
+    stage_cli(root, files, context / CLI_STAGE)
+    return context
+
+
+@dataclass(frozen=True)
+class Plan:
+    """Everything every image of one run is built from, resolved once.
+
+    `base` is the name Harbor's hash gives the base context, and it is a build
+    argument of each fixture, so a moved pin, Dockerfile or CLI file reaches
+    every fixture name too. `cli_build` is that same hash over the staged
+    package alone: the record names the build it measured, because a version
+    string does not identify one.
+    """
+
+    context: Path
+    platform: str
+    args: dict[str, str]
+    base: str
+    cli_build: str
+    commit: str
+
+    @property
+    def cli(self) -> dict[str, str]:
+        return {"build": self.cli_build, "commit": self.commit}
+
+
+def plan(pins: Mapping[str, Any], root: Path | None = None, git: Git | None = None) -> Plan:
+    """Stage the base context, ask the daemon its platform, and name what follows from both."""
+    root = CLI_ROOT if root is None else root
+    build = harbor()
+    context = stage_base(root, cli_files(root))
+    args = build_args(pins)
+    platform = asyncio.run(build.platform())
+    key = build.context_hash(context=context, dockerfile_path=BASE_DOCKERFILE, build_args=args, platform=platform)
+    return Plan(
+        context=context,
+        platform=platform,
+        args=args,
+        base=build.name(BASE_STEM, key),
+        cli_build=build.context_hash(context=context / CLI_STAGE),
+        commit=cli_commit(root, git),
+    )
+
+
+_PLANS: dict[str, Plan] = {}
+
+
+def _plan(pins: Mapping[str, Any], resolved: Plan | None = None) -> Plan:
+    """Resolved at the call and once per run: staging the CLI copies 15MB, and every trial asks for it."""
+    if resolved is not None:
+        return resolved
+    key = str(pins.get("harness_version"))
+    if key not in _PLANS:
+        _PLANS[key] = plan(pins)
+    return _PLANS[key]
+
+
+def fixture_stem(task_id: str) -> str:
+    """The half of a fixture image's name that is not its content hash: what a dry run can state without a daemon."""
+    return f"{FIXTURE_PREFIX}{task_id}"
+
+
+def fixture_name(task: Mapping[str, Any], fixture: Path, resolved: Plan) -> str:
+    """`bench2-<task>--<hash>`: the fixture's own tree, the Dockerfile, the base it sits on, and the platform."""
+    build = harbor()
+    key = build.context_hash(context=fixture, dockerfile_path=FIXTURE_DOCKERFILE, build_args={"BASE_TAG": resolved.base}, platform=resolved.platform)
+    return str(build.name(fixture_stem(str(task["id"])), key))
+
+
+@dataclass(frozen=True)
+class Image:
+    """One built image, as the attempt record carries it under `isolation.image`."""
+
+    tag: str
+    id: str
+    fixture_hash: str = ""
+    base: str = ""
+    cli: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def facts(self) -> dict[str, Any]:
+        return {"tag": self.tag, "id": self.id, "fixture_hash": self.fixture_hash, "base": self.base, "cli": dict(self.cli)}
+
+
+def image_id(name: str, docker: Docker | None = None) -> str | None:
+    """The local image behind a name, or None when there is none."""
+    completed = _docker(docker)(["image", "inspect", name, "--format", "{{.Id}}"], DOCKER_TIMEOUT_S)
     if completed.returncode != 0:
-        raise ImageError("base_build_failed", f"`docker build` of {tag} exited {completed.returncode}: {completed.stderr.strip()[-400:]}")
-    image = inspect(tag, docker)
-    if image is None:
-        raise ImageError("base_build_failed", f"{tag} is not present after its build")
-    return image
+        return None
+    return completed.stdout.strip() or None
 
 
-def build_fixture(
-    task: Mapping[str, Any],
-    fixture: Path,
-    built_from: Mapping[str, str],
-    base: Image,
-    docker: Docker | None = None,
-    stream: Any = None,
-    cli: CliBuild | None = None,
-) -> Image:
-    docker = _docker(docker)
-    task_id = str(task["id"])
-    tag = fixture_tag(task_id, str(task["fixture_hash"]))
-    labels = fixture_labels(task_id, str(task["fixture_hash"]), built_from, base.id, _cli(cli).commit)
-    argv = ["build", "--file", str(FIXTURE_DOCKERFILE), "--tag", tag, "--build-arg", f"BASE_TAG={base.tag}"]
-    for key, value in sorted(labels.items()):
-        argv += ["--label", f"{key}={value}"]
-    argv.append(str(fixture))
-    completed = docker(argv, BUILD_TIMEOUT_S, stream)
-    if completed.returncode != 0:
-        raise ImageError("fixture_build_failed", f"`docker build` of {tag} exited {completed.returncode}: {completed.stderr.strip()[-400:]}")
-    image = inspect(tag, docker)
-    if image is None:
-        raise ImageError("fixture_build_failed", f"{tag} is not present after its build")
-    quirk_check(task_id, tag, docker)
-    return image
+def require(task: Mapping[str, Any], fixture: Path, pins: Mapping[str, Any], docker: Docker | None = None, resolved: Plan | None = None) -> Image:
+    """The image this task's trials run in, or a refusal that names the command that builds it.
+
+    There is no drift check. The name is a content address over the fixture, the
+    base it is built on, the Dockerfile and the platform, so an input that moved
+    cannot name the image that is here: it is absent. That is the whole of what
+    the labels used to check, and one fewer thing to keep true.
+    """
+    resolved = _plan(pins, resolved)
+    name = fixture_name(task, fixture, resolved)
+    found = image_id(name, docker)
+    if found is None:
+        raise ImageError(
+            "image_missing",
+            f"no image {name} for task {str(task['id'])!r}; build it with `python3 -m evals.benchmark.images build --manifest <manifest>`",
+        )
+    return Image(tag=name, id=found, fixture_hash=str(task["fixture_hash"]), base=resolved.base, cli=resolved.cli)
 
 
-def quirk_check(task_id: str, tag: str, docker: Docker | None = None) -> str | None:
+def build_image(stem: str, context: Path, dockerfile: Path, args: Mapping[str, str], resolved: Plan) -> str:
+    """Build one content-addressed image through Harbor, or refuse with what its build said.
+
+    Harbor names the image after the hash, holds a file lock so two builds of
+    one image cannot race, re-checks the daemon after taking it, and writes the
+    build log under its own cache directory. A failed build raises with the
+    whole of that log, which is why the refusal here truncates.
+    """
+    build = harbor()
+    try:
+        return str(
+            asyncio.run(
+                build.ensure(
+                    docker_name=stem,
+                    docker_build_context=context,
+                    dockerfile_path=dockerfile,
+                    build_args=dict(args),
+                    platform=resolved.platform,
+                    timeout_sec=BUILD_TIMEOUT_S,
+                )
+            )
+        )
+    except RuntimeError as error:
+        raise ImageError("build_failed", f"{stem}: {str(error)[-600:]}") from error
+
+
+def quirk_check(task_id: str, name: str, docker: Docker | None = None) -> str | None:
     """Run the task's hidden image check inside its image, or None when it declares none.
 
     The check reads the task's own frozen cases and asserts the runtime still
@@ -451,9 +421,8 @@ def quirk_check(task_id: str, tag: str, docker: Docker | None = None) -> str | N
     layer = HIDDEN / task_id
     if not (layer / QUIRK_CHECK).is_file():
         return None
-    docker = _docker(docker)
-    completed = docker(
-        ["run", "--rm", "--network", "none", "--entrypoint", "node", "--volume", f"{layer}:{CHECK_PATH}:ro", tag, f"{CHECK_PATH}/{QUIRK_CHECK}"],
+    completed = _docker(docker)(
+        ["run", "--rm", "--network", "none", "--entrypoint", "node", "--volume", f"{layer}:{CHECK_PATH}:ro", name, f"{CHECK_PATH}/{QUIRK_CHECK}"],
         DOCKER_TIMEOUT_S,
     )
     if completed.returncode != 0:
@@ -472,9 +441,9 @@ def export_node_modules(image: Image, destination: Path, docker: Docker | None =
     measured 2026-09-09 as `invalid symlink`, with the whole export failing.
     Staged from `/opt/fixture` that link resolves inside the copy and is
     written, and moving `node_modules` on alone leaves the trial's own fixture
-    files untouched. The staging directory is inside the repository copy, so
-    the move is a rename rather than a second traversal of 780 files, and it is
-    gone before the trial's roots are handed to anything.
+    files untouched. The staging directory is inside the repository copy, so the
+    move is a rename rather than a second traversal of 780 files, and it is gone
+    before the trial's roots are handed to anything.
     """
     docker = _docker(docker)
     destination.mkdir(parents=True, exist_ok=True)
@@ -505,44 +474,52 @@ def ledger_read(path: Path = LEDGER) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def ledger_write(images: Mapping[str, Image], built_from: Mapping[str, str], path: Path = LEDGER, cli: CliBuild | None = None) -> dict[str, Any]:
-    """The local build ledger: which image id each tag names, and what it was built from. Not committed; `images build` rewrites it."""
+def ledger_write(built: Mapping[str, Image], resolved: Plan, path: Path = LEDGER) -> dict[str, Any]:
+    """The local build ledger: which id each image name has, and what the run was built from. Not committed; `images build` rewrites it."""
     payload = {
-        "recipe": dict(built_from),
-        "recipe_hash": recipe_hash(built_from),
-        "cli": None if cli is None else cli.facts,
+        "base": resolved.base,
+        "platform": resolved.platform,
+        "pins": dict(resolved.args),
+        "cli": resolved.cli,
         "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "images": {tag: image.facts for tag, image in sorted(images.items())},
+        "images": {name: image.facts for name, image in sorted(built.items())},
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return payload
 
 
-def build_all(manifest: Any, docker: Docker | None = None, stream: Any = None, only: str | None = None) -> dict[str, Any]:
-    """Build the base and every image the manifest's tasks name, then write the ledger.
+def _say(log: Any, line: str) -> None:
+    """A build runs for minutes and Harbor writes its output to a log of its own, so the caller gets one line per image."""
+    if log is not None:
+        log.write(line + "\n")
+        log.flush()
 
-    The CLI is resolved once here, so every image in one build names the same
-    package and the same commit.
-    """
-    docker = _docker(docker)
-    cli = cli_build()
-    built_from = recipe(manifest.pins, cli)
-    base = build_base(built_from, docker, stream, cli)
-    images = {base.tag: base}
+
+def build_all(manifest: Any, docker: Docker | None = None, only: str | None = None, log: Any = None, ledger: Path = LEDGER) -> dict[str, Any]:
+    """Build the base and every image the manifest's tasks name, then write the ledger."""
+    resolved = _plan(manifest.pins)
+    _say(log, f"base {resolved.base} ({resolved.platform})")
+    base = build_image(BASE_STEM, resolved.context, BASE_DOCKERFILE, resolved.args, resolved)
+    if base != resolved.base:
+        raise ImageError("base_name", f"Harbor built {base} where this run resolved {resolved.base}, so a trial would look for a name that does not exist")
+    built = {base: Image(tag=base, id=image_id(base, docker) or "", base=base, cli=resolved.cli)}
     for task in manifest.tasks:
-        if only is not None and str(task["id"]) != only:
+        task_id = str(task["id"])
+        if only is not None and task_id != only:
             continue
-        image = build_fixture(task, manifest.fixture_path(task), built_from, base, docker, stream, cli)
-        images[image.tag] = image
-    return ledger_write(images, built_from, LEDGER, cli)
+        fixture = manifest.fixture_path(task)
+        _say(log, f"{task_id} {fixture_name(task, fixture, resolved)}")
+        name = build_image(fixture_stem(task_id), fixture, FIXTURE_DOCKERFILE, {"BASE_TAG": base}, resolved)
+        quirk_check(task_id, name, docker)
+        built[name] = Image(tag=name, id=image_id(name, docker) or "", fixture_hash=str(task["fixture_hash"]), base=base, cli=resolved.cli)
+    return ledger_write(built, resolved, ledger)
 
 
 def check_all(manifest: Any, docker: Docker | None = None) -> dict[str, Any]:
     """Every task's image, or the first refusal. What `live-run` does before it spends anything."""
-    docker = _docker(docker)
-    cli = cli_build()
-    return {str(task["id"]): require(task, manifest.pins, docker, cli).facts for task in manifest.tasks}
+    resolved = _plan(manifest.pins)
+    return {str(task["id"]): require(task, manifest.fixture_path(task), manifest.pins, docker, resolved).facts for task in manifest.tasks}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -562,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         manifest = load(args.manifest)
-        payload = build_all(manifest, stream=sys.stderr, only=args.task) if args.command == "build" else check_all(manifest)
+        payload = build_all(manifest, only=args.task, log=sys.stderr) if args.command == "build" else check_all(manifest)
     except (ImageError, ManifestError) as error:
         sys.stderr.write(f"{error}\n")
         return 2

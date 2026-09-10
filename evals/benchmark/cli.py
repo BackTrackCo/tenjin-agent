@@ -343,8 +343,8 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
         plan_container = plan.get("container")
         if plan_container is not None:
             image = plan_container["image"]
-            state = "by id, resolved from the local image" if image["resolved"] else "by tag; live-run resolves it to an id and refuses a missing or drifted image"
-            lines.append(f"  {'image':10}{image['tag']} {state}")
+            state = "by id, resolved from the local image" if image["resolved"] else "by stem; live-run resolves the content-addressed name and refuses a missing image"
+            lines.append(f"  {'image':10}{image['reference']} {state}")
             lines.append(f"  {'container':10}{plan_container['container']} user={plan_container['user']} workdir={plan_container['workdir']}")
             for mount in plan_container["mounts"]:
                 lines.append(f"  {'mount':10}{mount['host']} -> {mount['target']} ({mount['mode']})")
