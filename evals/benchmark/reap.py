@@ -12,6 +12,15 @@ operator's own editor session, and reaching for one is exactly the accident this
 module exists to remove. Before signalling, a record is checked against the live
 process: same start time and same group, or the record is dropped unkilled,
 because a pid is reused and killing a recycled one kills a stranger.
+
+The whole module is for one case: the harness dying without running its own
+`finally`. Every ordinary exit, an interrupt included, already kills the group
+in `runner.process_spawn`. Measured 2026-09-10 by SIGKILLing a run mid-trial:
+the trial's child was reparented to pid 1 and stayed alive, its own grandchild
+with it, and nothing on the machine but this ledger named either. `survivors`
+found the group from the record and `reap` killed both. That is the reason to
+keep a ledger rather than a pattern, and the reason the record is written
+before the process is waited on.
 """
 
 from __future__ import annotations
