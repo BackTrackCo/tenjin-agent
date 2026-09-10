@@ -70,7 +70,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInstall, PUBLISH_MODE_CHOICES, WALLET_QUESTION } from './install';
-import type { InstallDeps, PromptPublishModeFn } from './install';
+import type { InstallDeps, PromptHarnessesFn, PromptPublishModeFn } from './install';
 import type { PublishMode } from '../lib/config';
 import type { ExecFn } from '../lib/wallet/passphrase';
 import {
@@ -304,6 +304,7 @@ type Data = {
   dryRun: boolean;
   skillsSource: string;
   harnesses: Harnesses;
+  hooks: unknown[];
   doctor: unknown;
   bazaarPay: { enabled: boolean; status: string };
 };
@@ -317,7 +318,8 @@ describe('runInstall: harness override', () => {
     expect(out.harnesses).toHaveLength(1);
     const h = out.harnesses[0]!;
     expect(h.harness).toBe('claude');
-    expect(h.detectedBy).toEqual(['override']);
+    expect(h.detected).toBe(false);
+    expect(h.detectedBy).toEqual([]);
     expect(h.skillsDir).toBe(join(home, '.claude', 'skills'));
     expect(h.codexNetworkRule).toBeUndefined();
     expect(h.skills.map((s) => s.status)).toEqual(SKILL_NAMES.map(() => 'installed'));
@@ -340,13 +342,14 @@ describe('runInstall: harness override', () => {
     expect(existsSync(join(home, '.agents', 'skills', 'tenjin', 'SKILL.md'))).toBe(true);
   });
 
-  it('dedupes codex + shared onto the one ~/.agents/skills target', async () => {
-    const { data: d } = await runInstall({ harness: ['codex', 'shared'] }, makeCtx(), deps());
+  it('dedupes a repeated harness', async () => {
+    const { data: d } = await runInstall({ harness: ['codex', 'codex'] }, makeCtx(), deps());
     expect(asData(d).harnesses).toHaveLength(1);
+    expect(asData(d).hooks).toHaveLength(1);
   });
 
-  it('rejects an unknown harness as USAGE / exit 2', async () => {
-    const err = await caught(() => runInstall({ harness: ['cursor'] }, makeCtx(), deps()));
+  it.each(['shared', 'cursor'])('rejects non-harness target %s as USAGE / exit 2', async (name) => {
+    const err = await caught(() => runInstall({ harness: [name] }, makeCtx(), deps()));
     expect(err.code).toBe('USAGE');
     expect(err.exitCode).toBe(2);
   });
@@ -356,30 +359,80 @@ describe('runInstall: detection', () => {
   it('detects Claude from ~/.claude and Codex from ~/.codex directories', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await mkdir(join(home, '.codex'), { recursive: true });
-    const { data: d } = await runInstall({}, makeCtx(), deps());
+    const { data: d } = await runInstall(
+      {},
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        promptHarnesses: async (choices) => choices.map((choice) => choice.harness),
+      }),
+    );
     const byName = Object.fromEntries(asData(d).harnesses.map((h) => [h.harness, h]));
     expect(byName.claude!.detectedBy).toEqual(['home-dir']);
     expect(byName.codex!.detectedBy).toEqual(['home-dir']);
   });
 
   it('detects a harness from a binary on PATH', async () => {
-    const { data: d } = await runInstall({}, makeCtx(), deps({ which: (bin) => bin === 'claude' }));
+    const { data: d } = await runInstall(
+      {},
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        which: (bin) => bin === 'claude',
+        promptHarnesses: async (choices) =>
+          choices.filter((choice) => choice.detectedBy.length > 0).map((choice) => choice.harness),
+      }),
+    );
     const out = asData(d);
     expect(out.harnesses).toHaveLength(1);
     expect(out.harnesses[0]!.harness).toBe('claude');
     expect(out.harnesses[0]!.detectedBy).toEqual(['binary']);
   });
 
-  it('falls back to the shared Agent Skills location when nothing is detected', async () => {
-    const { data: d } = await runInstall({}, makeCtx(), deps());
+  it('shows both real harnesses when nothing is detected and wires the selected one', async () => {
+    let offered: Parameters<PromptHarnessesFn>[0] = [];
+    const { data: d } = await runInstall(
+      {},
+      makeCtx(),
+      deps({
+        isInteractive: true,
+        promptHarnesses: async (choices) => {
+          offered = choices;
+          return ['codex'];
+        },
+      }),
+    );
     const out = asData(d);
+    expect(offered.map((choice) => [choice.harness, choice.detectedBy])).toEqual([
+      ['claude', []],
+      ['codex', []],
+    ]);
     expect(out.harnesses).toHaveLength(1);
     const h = out.harnesses[0]!;
-    expect(h.harness).toBe('shared');
+    expect(h.harness).toBe('codex');
     expect(h.detected).toBe(false);
-    expect(h.detectedBy).toEqual(['fallback']);
+    expect(h.detectedBy).toEqual([]);
     expect(h.skillsDir).toBe(join(home, '.agents', 'skills'));
     expect(existsSync(join(home, '.agents', 'skills', 'tenjin', 'SKILL.md'))).toBe(true);
+  });
+
+  it('requires --harness when no interactive prompt is available', async () => {
+    const err = await caught(() => runInstall({}, makeCtx(), deps()));
+    expect(err.code).toBe('USAGE');
+    expect(err.message).toContain('non-interactive');
+    expect(err.fix).toContain('--harness claude');
+    expect(existsSync(join(home, '.claude'))).toBe(false);
+    expect(existsSync(join(home, '.agents'))).toBe(false);
+  });
+
+  it('cancels before any write when the harness prompt is dismissed', async () => {
+    const err = await caught(() =>
+      runInstall({}, makeCtx(), deps({ isInteractive: true, promptHarnesses: async () => null })),
+    );
+    expect(err.code).toBe('REFUSED');
+    expect(err.message).toContain('before anything was written');
+    expect(existsSync(join(home, '.claude'))).toBe(false);
+    expect(existsSync(join(home, '.agents'))).toBe(false);
   });
 
   it('resolves the packaged skills itself when no source is injected', async () => {
@@ -567,23 +620,24 @@ describe('runInstall: default PATH binary probe', () => {
     try {
       // A DIRECTORY named claude on PATH must not count as the binary.
       await mkdir(join(bin, 'claude'), { recursive: true });
-      const notDetected = await runInstall(
-        {},
-        makeCtx(),
-        deps({ which: undefined, env: { PATH: bin } }),
-      );
-      expect(asData(notDetected.data).harnesses[0]!.harness).toBe('shared');
-
       // A real FILE named codex does count.
       await writeFile(join(bin, 'codex'), '#!/bin/sh\n');
       const detected = await runInstall(
         {},
         makeCtx(),
-        deps({ which: undefined, env: { PATH: bin } }),
+        deps({
+          isInteractive: true,
+          which: undefined,
+          env: { PATH: bin },
+          promptHarnesses: async (choices) =>
+            choices
+              .filter((choice) => choice.detectedBy.length > 0)
+              .map((choice) => choice.harness),
+        }),
       );
-      const names = asData(detected.data).harnesses.map((h) => h.harness);
-      expect(names).toContain('codex');
-      expect(names).not.toContain('claude');
+      const harnesses = asData(detected.data).harnesses;
+      expect(harnesses.map((h) => h.harness)).toEqual(['codex']);
+      expect(harnesses[0]?.detectedBy).toEqual(['binary']);
     } finally {
       await rm(bin, { recursive: true, force: true });
     }
@@ -724,10 +778,9 @@ describe('runInstall: output ordering', () => {
   });
 });
 
-// An explicit --harness is the user telling the CLI which directory they use.
-// Detection cannot see a harness Tenjin does not probe for, so the choice is recorded
-// and `doctor` keeps judging that directory on later runs (#39 review).
-describe('runInstall: recording an explicit --harness', () => {
+// Every settled selection is the user's answer about which real harnesses this
+// machine wires. Doctor keeps judging those directories on later runs.
+describe('runInstall: recording the harness selection', () => {
   async function recorded(): Promise<string[] | undefined> {
     const raw = await readFile(join(data, 'config.json'), 'utf8').catch(() => null);
     if (raw === null) return undefined;
@@ -735,38 +788,54 @@ describe('runInstall: recording an explicit --harness', () => {
   }
 
   it('records the requested targets', async () => {
-    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
-    expect(await recorded()).toEqual(['shared']);
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    expect(await recorded()).toEqual(['codex']);
   });
 
-  it('records the DE-DUPED target set, matching what was written', async () => {
-    // codex + shared are one directory, so one recorded entry, like one install target.
-    await runInstall({ harness: ['codex', 'shared'] }, makeCtx(), deps());
+  it('records the de-duplicated harness set, matching what was wired', async () => {
+    await runInstall({ harness: ['codex', 'codex'] }, makeCtx(), deps());
     expect(await recorded()).toEqual(['codex']);
   });
 
   it('a later explicit run REPLACES the record rather than unioning', async () => {
-    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     await runInstall({ harness: ['claude'] }, makeCtx(), deps());
     // The way out of a mistaken --harness is re-running install with the right one.
     expect(await recorded()).toEqual(['claude']);
   });
 
-  it('a bare install records nothing: detection is re-probed every time', async () => {
-    await mkdir(join(home, '.claude'), { recursive: true });
-    await runInstall({}, makeCtx(), deps());
-    expect(await recorded()).toBeUndefined();
+  it('an explicit run replaces a migrated legacy shared record', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ install: { harness: ['shared', 'codex'] } }),
+    );
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(await recorded()).toEqual(['claude']);
   });
 
-  it('a bare install leaves an earlier explicit record alone', async () => {
-    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+  it('records a selection made through detection and the prompt', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
-    await runInstall({}, makeCtx(), deps());
-    expect(await recorded()).toEqual(['shared']);
+    await runInstall(
+      {},
+      makeCtx(),
+      deps({ isInteractive: true, promptHarnesses: async () => ['claude'] }),
+    );
+    expect(await recorded()).toEqual(['claude']);
+  });
+
+  it('a later prompted selection replaces an earlier explicit record', async () => {
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
+    await mkdir(join(home, '.claude'), { recursive: true });
+    await runInstall(
+      {},
+      makeCtx(),
+      deps({ isInteractive: true, promptHarnesses: async () => ['claude'] }),
+    );
+    expect(await recorded()).toEqual(['claude']);
   });
 
   it('--dry-run records nothing, like the publish-mode write', async () => {
-    await runInstall({ harness: ['shared'], dryRun: true }, makeCtx(), deps());
+    await runInstall({ harness: ['codex'], dryRun: true }, makeCtx(), deps());
     expect(await recorded()).toBeUndefined();
   });
 
@@ -775,13 +844,13 @@ describe('runInstall: recording an explicit --harness', () => {
       join(data, 'config.json'),
       JSON.stringify({ publish: { mode: 'auto' }, evalCohort: true }),
     );
-    await runInstall({ harness: ['shared'] }, makeCtx(), deps());
+    await runInstall({ harness: ['codex'] }, makeCtx(), deps());
     const json = JSON.parse(await readFile(join(data, 'config.json'), 'utf8')) as {
       install?: { harness?: string[] };
       publish?: { mode?: string };
       evalCohort?: boolean;
     };
-    expect(json.install?.harness).toEqual(['shared']);
+    expect(json.install?.harness).toEqual(['codex']);
     expect(json.publish?.mode).toBe('auto');
     expect(json.evalCohort).toBe(true);
   });
@@ -2409,7 +2478,7 @@ describe('runInstall: hosted skill already present (#35)', () => {
     await seedHostedSkill(sharedSkills);
 
     const res = await runInstall(
-      { harness: ['claude', 'codex'] },
+      { harness: ['codex', 'claude'] },
       makeCtx(),
       deps({ isInteractive: true }),
     );
@@ -3233,12 +3302,14 @@ describe('runInstall: harness hooks', () => {
       wrote: boolean;
       url?: string;
       daemon?: { pid: number; port: number; version: string };
+      activation?: string;
       removed: string[];
       skipped?: string;
       fix?: string;
-    };
+    }[];
   };
-  const hooksOf = (d: unknown) => (d as HooksData).hooks;
+  /** The one outcome a single-harness run reports. */
+  const hooksOf = (d: unknown) => (d as HooksData).hooks[0]!;
 
   async function settings(): Promise<Record<string, unknown>> {
     const raw = await readFile(claudeSettingsPath(home), 'utf8').catch(() => null);
@@ -3329,12 +3400,41 @@ describe('runInstall: harness hooks', () => {
     expect(await persistedHooks()).toBeUndefined();
   });
 
-  it('is not wired for a Codex-only install, and names no Claude settings file', async () => {
+  it('a Codex-only install writes hooks.json under ~/.codex and no Claude settings file', async () => {
     const res = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
+    expect((res.data as HooksData).hooks).toHaveLength(1);
     const h = hooksOf(res.data);
-    expect(h.skipped).toBe('harness-not-claude');
-    expect(h.path).toBeUndefined();
-    expect(existsSync(join(data, 'hooks'))).toBe(false);
+    expect(h).toMatchObject({ harness: 'codex', entries: 7, wrote: true });
+    expect(h.skipped).toBeUndefined();
+    expect(h.path).toBe(join(home, '.codex', 'hooks.json'));
+    expect(h.url).toBeUndefined();
+    expect(h.activation).toContain('/hooks');
+    expect(existsSync(join(data, 'hooks'))).toBe(true);
+    expect(existsSync(claudeSettingsPath(home))).toBe(false);
+    const file = JSON.parse(await readFile(h.path ?? '', 'utf8')) as {
+      hooks: Record<string, unknown[]>;
+    };
+    expect(Object.keys(file.hooks)).toHaveLength(7);
+    expect(JSON.stringify(file)).not.toContain(DAEMON_PORT.toString());
+  });
+
+  it('both harnesses: one outcome each, one daemon, and the Codex trust step in the walkthrough', async () => {
+    const res = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx(),
+      deps({ isInteractive: true }),
+    );
+    const hooks = (res.data as HooksData).hooks;
+    expect(hooks.map((h) => [h.harness, h.entries])).toEqual([
+      ['claude', 11],
+      ['codex', 7],
+    ]);
+    expect(hooks[0]?.daemon?.port).toBe(hooks[1]?.daemon?.port);
+    const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
+    expect(text).toContain('hooks        Claude Code: 7 enabled');
+    expect(text).toContain('hooks        Codex: 7 enabled');
+    expect(text).toContain('Restart Claude Code to load the hooks.');
+    expect(text).toContain('run /hooks');
   });
 });
 
@@ -3494,11 +3594,11 @@ describe('runInstall: wallet creation is the default', () => {
     );
     const d = res.data as {
       permissions: { wired: { added: string[] } };
-      hooks: { entries: number };
+      hooks: { entries: number }[];
     };
     // The default mode is auto, so the publish rule rides along with the tier.
     expect(d.permissions.wired.added).toEqual([...FREE_VERB_RULES, ...MODE_GATED_RULES]);
-    expect(d.hooks.entries).toBe(11);
+    expect(d.hooks[0]?.entries).toBe(11);
   });
 
   it('never writes a passphrase to a plain file', async () => {
@@ -3589,7 +3689,7 @@ describe('runInstall: wallet creation is the default', () => {
 });
 
 describe('runInstall: --no-hooks', () => {
-  const hooksOf = (d: unknown) => (d as { hooks: { skipped?: string; mode: string } }).hooks;
+  const hooksOf = (d: unknown) => (d as { hooks: { skipped?: string; mode: string }[] }).hooks[0]!;
 
   it('registers nothing and writes no config', async () => {
     const res = await runInstall(
@@ -3676,13 +3776,17 @@ describe('runInstall --refresh', () => {
       makeCtx(),
       refreshDeps({ startDaemon: startAt(40_002) }),
     );
-    const hooks = (result.data as { hooks: { entries: number; url: string } }).hooks;
+    const hooks = (result.data as { hooks: { entries: number; url: string }[] }).hooks[0]!;
     expect(hooks.entries).toBe(11);
     expect(hooks.url).toBe('http://127.0.0.1:40002/hook/claude');
     const urls = hookEntries(await readSettings())
       .map(([, e]) => e.hooks[0]?.url)
       .filter((u): u is string => u !== undefined);
     expect(new Set(urls)).toEqual(new Set(['http://127.0.0.1:40002/hook/claude']));
+    expect((result.data as { hooks: { harness: string }[] }).hooks.map((h) => h.harness)).toEqual([
+      'claude',
+    ]);
+    expect(result.humanLines?.join('\n')).not.toContain('hooks (codex)');
   });
 
   /**
@@ -3879,7 +3983,7 @@ describe('runInstall --refresh', () => {
     const before = existsSync(settingsPath()) ? await readFile(settingsPath(), 'utf8') : null;
 
     const result = await runInstall({ refresh: true }, makeCtx(), refreshDeps());
-    expect((result.data as { hooks: { skipped?: string } }).hooks.skipped).toBe('declined');
+    expect((result.data as { hooks: unknown[] }).hooks).toEqual([]);
     const after = existsSync(settingsPath()) ? await readFile(settingsPath(), 'utf8') : null;
     expect(after).toBe(before);
     // And no daemon was materialized for it either.

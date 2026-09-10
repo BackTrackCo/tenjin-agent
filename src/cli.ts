@@ -224,13 +224,9 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
 
   leaf(program, SETUP, 'install', 'wire Tenjin into this machine, then run doctor')
     .description(
-      'Detect the installed harnesses (Claude Code, Codex) and wire the skills, the hook entries and the permission rules, then create a wallet and run doctor. Safe to re-run: the entries are written as one whole set, so a second run leaves the same files.',
+      'Detect the installed harnesses (Claude Code, Codex), ask which to wire, then install their skills, hook entries and permission rules, create a wallet and run doctor. For non-interactive use, pass --harness for each target.',
     )
-    .option(
-      '--harness <name>',
-      'claude | codex | shared (repeatable; overrides detection)',
-      collect,
-    )
+    .option('--harness <name>', 'claude | codex (repeatable; skips harness selection)', collect)
     .option('--dry-run', 'print what would change, write nothing')
     .option('--publish-mode <mode>', 'set the publish consent mode: review | auto | full-auto')
     .option('--no-wallet', 'create no wallet')
@@ -252,7 +248,7 @@ export function buildProgram(io: Io, setExit: (code: number) => void): Command {
       `
 Examples:
   $ tenjin install
-  $ tenjin install --dry-run
+  $ tenjin install --dry-run --harness claude
   $ tenjin install --harness claude --publish-mode review
 
 Learn more:

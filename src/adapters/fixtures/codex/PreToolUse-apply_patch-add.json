@@ -1,0 +1,14 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000000",
+  "turn_id": "cccccccc-0000-7000-8000-000000000000",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000000.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PreToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "apply_patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Add File: notes/a.txt\n+alpha\n*** Add File: README.md\n+beta\n*** End Patch"
+  },
+  "tool_use_id": "exec-2be9685c-263c-4016-87ad-19df5c0aa55b"
+}

@@ -17,7 +17,7 @@ afterEach(() => {
 });
 
 const NOW = 1_700_000_000_000;
-const LEAD: Actor = { session: 's1', agent: '' };
+const LEAD: Actor = { session: 'claude:s1', agent: '' };
 
 const CONFIG: KernelConfig = {
   hooks: CONFIG_DEFAULTS.hooks,
@@ -41,8 +41,8 @@ function input(over: Partial<HookInput> = {}): HookInput {
   };
 }
 
-function toolOf(kind: HookTool['kind']): HookTool {
-  return { name: 'x', kind, input: {} };
+function toolOf(kind: 'web' | 'shell'): HookTool {
+  return kind === 'web' ? { name: 'x', kind, query: '' } : { name: 'x', kind, command: '' };
 }
 
 function deps(db: LoopDb, arms: Arm[], clock: () => number = () => NOW): Deps {
@@ -414,7 +414,7 @@ describe('runFire: once-per-piece is about what was SHOWN', () => {
     };
     const d = deps(db, [logged, injects]);
     const first = await runFire(
-      input({ event: 'tool.before', tool: { name: 'Edit', kind: 'edit', input: {} } }),
+      input({ event: 'tool.before', tool: { name: 'Edit', kind: 'edit', paths: [] } }),
       d,
     );
     first.commit();

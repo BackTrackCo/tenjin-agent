@@ -188,7 +188,8 @@ type FireRow = {
   delivered: string | null;
 };
 
-/** The `fires` rows for one session, or for one agent within that session. */
+/** The `fires` rows for one Claude session (stored as `claude:<id>`), or for
+ *  one agent within that session. */
 function firesOf(session: string, agent?: string): FireRow[] {
   const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
   try {
@@ -197,7 +198,8 @@ function firesOf(session: string, agent?: string): FireRow[] {
         agent === undefined ? '' : ' AND agent = ?'
       }`,
     );
-    return (agent === undefined ? stmt.all(session) : stmt.all(session, agent)) as FireRow[];
+    const key = `claude:${session}`;
+    return (agent === undefined ? stmt.all(key) : stmt.all(key, agent)) as FireRow[];
   } finally {
     db.close();
   }
@@ -450,8 +452,8 @@ describe('the daemon, cold-started from the real bundle', () => {
     expect(res.status).toBe(413);
   });
 
-  it('404s on /hook/codex, an unregistered harness', async () => {
-    const res = await fetch(`http://127.0.0.1:${port}/hook/codex`, {
+  it('404s on /hook/hermes, an unregistered harness', async () => {
+    const res = await fetch(`http://127.0.0.1:${port}/hook/hermes`, {
       method: 'POST',
       headers: authHeaders(),
       body: '{}',
@@ -729,6 +731,193 @@ describe('the daemon, cold-started from the real bundle', () => {
   }, 15_000);
 
   // Last: tears down the daemon every prior case in this file depends on.
+  /**
+   * Codex on the same daemon, through the captured 0.153.4 payloads
+   * (`adapters/fixtures/codex`). What the adapter tests cannot show is proven
+   * here: the route dispatches, the rows are filed under `codex:<session>` and
+   * the child's own id, the capture ask reaches a child as a Stop `decision:
+   * block`, and the shim forwards a Codex payload under `--harness codex`.
+   */
+  describe('Codex on the same daemon', () => {
+    const CODEX_FIXTURES_DIR = join(HERE, '..', 'adapters', 'fixtures', 'codex');
+    let codexFixtures: Fixture[] = [];
+
+    function codexUrl(): string {
+      return `http://127.0.0.1:${port}/hook/codex`;
+    }
+
+    async function post(body: string): Promise<Response> {
+      return fetch(codexUrl(), { method: 'POST', headers: authHeaders(), body });
+    }
+
+    async function withArms(arms: Record<string, boolean>, fn: () => Promise<void>): Promise<void> {
+      const original = await readFile(configPath(dataDir), 'utf8');
+      await writeFile(
+        configPath(dataDir),
+        JSON.stringify({ loop: { port: 0 }, hooks: { ...ALL_OFF, ...arms } }),
+      );
+      try {
+        await fn();
+      } finally {
+        await writeFile(configPath(dataDir), original);
+      }
+    }
+
+    beforeAll(async () => {
+      const files = (await readdir(CODEX_FIXTURES_DIR)).filter((f) => f.endsWith('.json')).sort();
+      codexFixtures = await Promise.all(
+        files.map(async (name) => {
+          const body = await readFile(join(CODEX_FIXTURES_DIR, name), 'utf8');
+          return { name, event: eventNameOf(body), body };
+        }),
+      );
+    });
+
+    it('answers every captured event: 204, the primer on SessionStart, nothing on SessionEnd', async () => {
+      await withArms({ primer: true }, async () => {
+        for (const f of codexFixtures) {
+          const res = await post(f.body);
+          if (f.event === 'SessionStart') {
+            expect(res.status, f.name).toBe(200);
+            const out = (await res.json()) as {
+              hookSpecificOutput?: { hookEventName?: string; additionalContext?: string };
+            };
+            expect(out.hookSpecificOutput?.hookEventName).toBe('SessionStart');
+            expect(out.hookSpecificOutput?.additionalContext).toContain('Tenjin');
+            continue;
+          }
+          expect(res.status, f.name).toBe(204);
+        }
+      });
+    });
+
+    it('files every row under codex:<root session> and the child under its own id; the spawn is no dispatch', async () => {
+      // Every mapped fixture is one row, except the two stops: with `publish`
+      // off the child's start wrote no `started` mark, so its stops are
+      // phantoms (actor.ts), exactly as the Claude case above records them.
+      const stops = codexFixtures.filter((f) => f.event === 'SubagentStop').length;
+      const mapped = codexFixtures.filter((f) => f.event !== 'SessionEnd').length - stops;
+      await expect.poll(countFires, POLL).toBeGreaterThanOrEqual(mapped);
+      const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+      try {
+        const rows = db
+          .prepare("SELECT session, agent, event, arm, reason FROM fires WHERE harness = 'codex'")
+          .all() as Array<{
+          session: string;
+          agent: string;
+          event: string;
+          arm: string;
+          reason: string;
+        }>;
+        expect(rows.length).toBe(mapped);
+        for (const r of rows) expect(r.session.startsWith('codex:'), r.session).toBe(true);
+        const child = codexFixtures.find((f) => f.name === 'SubagentStart.json');
+        const agentId = (JSON.parse(child?.body ?? '{}') as { agent_id: string }).agent_id;
+        const childFixtures = codexFixtures.filter(
+          (f) =>
+            (JSON.parse(f.body) as { agent_id?: string }).agent_id === agentId &&
+            f.event !== 'SubagentStop',
+        );
+        expect(childFixtures.length).toBeGreaterThanOrEqual(3);
+        expect(rows.filter((r) => r.agent === agentId)).toHaveLength(childFixtures.length);
+        // The spawn call reaches no arm: its task is opaque on the wire.
+        const spawn = rows.find((r) => r.event === 'tool.before' && r.arm === 'dispatch');
+        expect(spawn).toBeUndefined();
+        // An apply_patch and a Bash call reach the context arm; a Bash result the failure arm.
+        expect(rows.some((r) => r.arm === 'context')).toBe(true);
+        expect(rows.some((r) => r.arm === 'failure')).toBe(true);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('equal native ids on two harnesses are two sessions in the ledger', async () => {
+      const stop = fixtures.find((f) => f.event === 'Stop');
+      if (stop === undefined) throw new Error('no Claude Stop fixture');
+      const claudeSession = (JSON.parse(stop.body) as { session_id: string }).session_id;
+      const before = countFires();
+      expect((await post(stop.body)).status).toBe(204);
+      await expect.poll(countFires, POLL).toBe(before + 1);
+      const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+      try {
+        const sessions = (
+          db
+            .prepare('SELECT DISTINCT session FROM fires WHERE session LIKE ?')
+            .all(`%:${claudeSession}`) as Array<{ session: string }>
+        ).map((r) => r.session);
+        expect(sessions.sort()).toEqual([`claude:${claudeSession}`, `codex:${claudeSession}`]);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('a child with an edit is asked once at its stop as a block reason, and the fused stop harvests', async () => {
+      // The sibling child: its patch is in the fixtures, its stop is built from
+      // the captured one so it has a start of its own to answer for.
+      const start = codexFixtures.find((f) => f.name === 'SubagentStart-sibling.json');
+      const patch = codexFixtures.find((f) => f.name === 'child-PreToolUse-apply_patch.json');
+      const stop = codexFixtures.find((f) => f.name === 'SubagentStop.json');
+      if (start === undefined || patch === undefined || stop === undefined)
+        throw new Error('fixtures');
+      const sibling = JSON.parse(start.body) as { agent_id: string; turn_id: string };
+      const stopFor = (fuse: boolean, last: string): string =>
+        JSON.stringify({
+          ...(JSON.parse(stop.body) as Record<string, unknown>),
+          agent_id: sibling.agent_id,
+          turn_id: sibling.turn_id,
+          stop_hook_active: fuse,
+          last_assistant_message: last,
+        });
+      await withArms({ publish: true }, async () => {
+        expect((await post(start.body)).status).toBe(204);
+        expect((await post(patch.body)).status).toBe(204);
+        const asked = await post(stopFor(false, 'gamma written'));
+        expect(asked.status).toBe(200);
+        const out = (await asked.json()) as {
+          decision?: string;
+          reason?: string;
+          hookSpecificOutput?: unknown;
+        };
+        expect(out.decision).toBe('block');
+        expect(out.reason).toContain('Tenjin');
+        expect(out.reason).toContain(`--agent ${sibling.agent_id}`);
+        expect(out.hookSpecificOutput).toBeUndefined();
+        // The answer turn: harvested, and nothing more to say.
+        const fused = await post(
+          stopFor(true, '```tenjin-finding\n# gamma\nthe file is gamma\n```'),
+        );
+        expect(fused.status).toBe(204);
+        const again = await post(stopFor(false, 'later'));
+        expect(again.status).toBe(204);
+      });
+    });
+
+    it('the shim forwards a Codex prompt under --harness codex and the row is filed under codex:', async () => {
+      const prompt = codexFixtures.find((f) => f.event === 'UserPromptSubmit');
+      if (prompt === undefined) throw new Error('no Codex prompt fixture');
+      const before = countFires();
+      const result = await runNode(
+        [shimBundlePath(dataDir), '--harness', 'codex'],
+        { ...process.env, TENJIN_DATA_DIR: dataDir },
+        prompt.body,
+      );
+      expect(result.code).toBe(0);
+      expect(result.stdout).toBe('');
+      await expect.poll(countFires, POLL).toBe(before + 1);
+      const session = (JSON.parse(prompt.body) as { session_id: string }).session_id;
+      const db = new DatabaseSync(loopDbPath(dataDir), { readOnly: true });
+      try {
+        const rows = db
+          .prepare("SELECT harness FROM fires WHERE session = ? AND event = 'prompt'")
+          .all(`codex:${session}`) as Array<{ harness: string }>;
+        expect(rows.length).toBeGreaterThan(0);
+        expect(rows.every((r) => r.harness === 'codex')).toBe(true);
+      } finally {
+        db.close();
+      }
+    });
+  });
+
   it('SIGTERM: the daemon exits within 3 s, removes daemon.pid, and logs the exit', async () => {
     process.kill(daemonPid, 'SIGTERM');
     const deadline = Date.now() + 3000;

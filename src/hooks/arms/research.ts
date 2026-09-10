@@ -46,19 +46,17 @@ function addressOnly(raw: string): string {
  * four alterations nobody asked for, under a comment claiming one. The string
  * the agent typed is the address; `URL` only says whether it is a web one.
  */
-export function fetchQuestion(toolInput: Record<string, unknown>): string {
-  const raw = typeof toolInput.url === 'string' ? toolInput.url : '';
+export function fetchQuestion(fetch: { url: string; prompt?: string }): string {
   let url: URL;
   try {
-    url = new URL(raw);
+    url = new URL(fetch.url);
   } catch {
     return '';
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') return '';
-  const prompt = typeof toolInput.prompt === 'string' ? toolInput.prompt : '';
   // The trim is the join's own: with no prompt attached there is nothing on the
   // far side of the space to keep it for.
-  return `${addressOnly(raw)} ${prompt}`.trim();
+  return `${addressOnly(fetch.url)} ${fetch.prompt ?? ''}`.trim();
 }
 
 /** WebSearch. The one arm `hooks.web-search` speaks for. */
@@ -68,10 +66,7 @@ export const researchArm: Arm = lookupArm({
   on: [{ event: 'tool.before', kind: 'web' }],
   trigger: 'research',
   enabled: (cfg) => cfg.hooks['web-search'],
-  text: (input) => {
-    const query = input.tool?.input.query;
-    return typeof query === 'string' ? query.trim() : null;
-  },
+  text: (input) => (input.tool?.kind === 'web' ? input.tool.query.trim() : null),
   shelves: ['team', 'public'],
   deliver: 'inject',
 });
@@ -85,7 +80,7 @@ export const fetchArm: Arm = lookupArm({
   // KIND of moment produced the question, and both of these are a web lookup.
   trigger: 'research',
   enabled: (cfg) => cfg.hooks['web-fetch'],
-  text: (input) => fetchQuestion(input.tool?.input ?? {}),
+  text: (input) => (input.tool?.kind === 'fetch' ? fetchQuestion(input.tool) : null),
   shelves: ['team', 'public'],
   deliver: 'inject',
 });

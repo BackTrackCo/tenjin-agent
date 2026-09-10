@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import pkg from '../../package.json';
-import { claudeAdapter } from '../adapters/claude';
+import { ADAPTERS } from '../adapters/registry';
 import { contextArm } from '../hooks/arms/context';
 import { dispatchArm } from '../hooks/arms/dispatch';
 import { failureArm } from '../hooks/arms/failure';
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     clock,
     log,
     arms: ARMS,
-    adapters: { claude: claudeAdapter },
+    adapters: ADAPTERS,
   } as Deps;
 
   const startedAt = clock();
