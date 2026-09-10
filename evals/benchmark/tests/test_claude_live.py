@@ -35,7 +35,6 @@ from evals.benchmark import (
     cli,
     executor,
     manifest as manifest_module,
-    reap,
     records,
     runner,
     schedule,
@@ -852,9 +851,8 @@ def test_a_live_manifest_that_fails_validation_is_one_sentence_and_exit_two(tmp_
 def test_every_gate_live_run_reaches_is_a_refusal_the_entry_point_catches() -> None:
     # Each of these is raised somewhere `main` can reach without a nearer
     # handler: `artifact.create` and the concurrency gate are unwrapped inside
-    # `execute`, and `reap` is the whole of the `cleanup` command. The
-    # per-trial ones runner.py catches and turns into a reason are deliberately
-    # absent, because those never reach here.
+    # `execute`. The per-trial ones runner.py catches and turns into a reason
+    # are deliberately absent, because those never reach here.
     for kind in (
         artifact.ArtifactError,
         manifest_module.ManifestError,
@@ -863,7 +861,6 @@ def test_every_gate_live_run_reaches_is_a_refusal_the_entry_point_catches() -> N
         executor.ExecutorError,
         LiveExecutorError,
         executor.ProvisionError,
-        reap.ReapError,
         records.RecordError,
         runner.ConcurrencyError,
     ):

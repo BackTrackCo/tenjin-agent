@@ -23,7 +23,7 @@ from unittest import mock
 
 import pytest
 
-from evals.benchmark import artifact, cli, executor, manifest as manifest_module, reap, records, runner, schedule, signature, tenjin_arm, vendor, verifier
+from evals.benchmark import artifact, cli, executor, manifest as manifest_module, records, runner, schedule, signature, tenjin_arm, vendor, verifier
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -184,8 +184,6 @@ def test_prepare_seeds_the_data_dir_starts_one_daemon_and_stop_ends_it_with_the_
     assert provision.secrets == (SECRET,)
     assert provision.facts["shelf_origin"] == "team-shelf.example"
     assert (data / "loop.db-wal").exists()
-    # The reaper knows the daemon under the trial's own ledger id.
-    assert [record.trial_id for record in reap.read_records(roots.run_dir)] == [f"{roots.trial_id}.daemon"]
     # The resolved hook URL and token are what the daemon accepts.
     request = urllib.request.Request(
         provision.values["daemon_url"], data=b"{}", headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -196,7 +194,6 @@ def test_prepare_seeds_the_data_dir_starts_one_daemon_and_stop_ends_it_with_the_
     assert tenjin_arm.stop(roots, provision) == {"respawned": False, "wal_live": False}
     assert _gone(pid)
     assert not (data / "loop.db-wal").exists()
-    assert reap.read_records(roots.run_dir) == []
 
 
 def test_stop_reaches_a_daemon_the_shim_respawned_through_its_own_pid_record(make_roots, prepare: Prepare) -> None:
@@ -254,7 +251,6 @@ def test_a_daemon_that_never_answers_is_stopped_and_refused(make_roots, prepare:
         with pytest.raises(ProvisionError) as caught:
             prepare(roots)
     assert "/health" in str(caught.value)
-    assert reap.read_records(roots.run_dir) == []
 
 
 def test_a_dry_run_seeds_without_a_secret_a_token_or_a_daemon(make_roots, prepare: Prepare) -> None:
@@ -351,7 +347,6 @@ def test_a_provisioned_trial_runs_between_prepare_and_stop_and_records_the_facts
     assert (isolation["publishable"], isolation["shelf_secret_present"], isolation["shelf_origin"]) == (False, True, "team-shelf.example")
     assert isolation["daemon_respawned"] is False
     assert record["delivery"]["classes"] == {"team": 0, "public": 0, "local": 0, "other": 0}
-    assert reap.read_records(run_dir) == []
     assert SECRET not in json.dumps(record)
 
 
@@ -403,7 +398,6 @@ def test_a_wal_left_live_makes_the_attempt_invalid(seeded_manifest, make_runtime
     with mock.patch.object(tenjin_arm, "DAEMON_ARGV", lambda roots: list(FAKE_DAEMON) + ["--keep-wal"]), mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
         record = runner.run_trial(seeded_manifest, trial_of(seeded_manifest, "tenjin_seeded"), run_dir, "sha256:schedule", make_runtime())
     assert (record["outcome"], record["invalid_reason"]) == ("invalid", "delivery:wal_live")
-    assert reap.read_records(run_dir) == []
 
 
 def legs(*shelves: str | tuple[str, str, str]) -> support.Before:
@@ -762,7 +756,6 @@ def test_key_drift_and_a_failed_publish_refuse_the_trial_before_the_daemon_and_m
     assert "tenjin publish exited 4" in str(caught.value)
     assert SECRET not in str(caught.value)
     assert "[secret]" in str(caught.value)
-    assert reap.read_records(seed_roots.run_dir) == []
 
 
 def test_an_envelope_on_stderr_is_read_by_shape(source, seed_request, stop_seeded) -> None:
@@ -794,7 +787,6 @@ def test_a_publish_whose_id_cannot_be_read_sweeps_the_shelf_by_title_and_refuses
     note = json.loads((seed_roots.output / tenjin_arm.SEED_NOTE).read_text(encoding="utf-8"))
     assert (note["published"], note["exit"], note["sweep"]["deleted"]) == ("unknown", 0, ["stray-1", "stray-2"])
     assert f"trial {seed_roots.trial_id}" in note["stamp"]
-    assert reap.read_records(seed_roots.run_dir) == []
 
 
 def test_a_dedup_answer_is_a_refusal_and_two_runs_stamp_differently(source, seed_roots, seed_request, calls) -> None:
@@ -805,7 +797,6 @@ def test_a_dedup_answer_is_a_refusal_and_two_runs_stamp_differently(source, seed
     note = json.loads((seed_roots.output / tenjin_arm.SEED_NOTE).read_text(encoding="utf-8"))
     assert (note["published"], note["already_published_url"]) == (False, "https://team-shelf.example/a/ali/the-lesson")
     assert [call["argv"][0] for call in calls()] == ["publish"]
-    assert reap.read_records(seed_roots.run_dir) == []
     with pytest.raises(ProvisionError) as missing:
         tenjin_arm.prepare(seed_request(nonce=None))
     assert "run nonce" in str(missing.value)

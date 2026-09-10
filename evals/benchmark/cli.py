@@ -39,7 +39,6 @@ from typing import Any, Mapping
 
 from . import (
     FIXTURES,
-    reap as reap_module,
     artifact,
     executor,
     manifest as manifest_module,
@@ -81,7 +80,6 @@ REFUSALS = (
     executor.ExecutorError,
     executor.ProvisionError,
     manifest_module.ManifestError,
-    reap_module.ReapError,
     records.RecordError,
     runner.ConcurrencyError,
     schedule.ScheduleError,
@@ -505,23 +503,7 @@ def main(argv: list[str] | None = None) -> int:
     regress = commands.add_parser("regress", help="warn where a finished run is worse than the committed baseline")
     regress.add_argument("--run", required=True, type=Path)
     regress.add_argument("--baseline", type=Path, default=regress_module.BASELINE)
-    # The one supported way to clean up after an interrupted run. It acts on the
-    # run's own process ledger and verifies each record against the live process
-    # before signalling, so it cannot reach anything this package did not start.
-    # Matching a process by name instead, `pkill -f bin/claude` and its
-    # relatives, also matches an operator's unrelated sessions; do not.
-    cleanup = commands.add_parser("cleanup", help="kill any process this run started and left behind")
-    cleanup.add_argument("--run", required=True, type=Path)
     args = parser.parse_args(argv)
-    if args.command == "cleanup":
-        try:
-            payload = reap_module.reap(args.run)
-        except REFUSALS as error:
-            sys.stderr.write(f"{error}\n")
-            return 2
-        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
-        sys.stdout.write("\n")
-        return 0
     if args.command in ("summary", "regress", "verify", "reduce", "report"):
         try:
             return run_reader(args)

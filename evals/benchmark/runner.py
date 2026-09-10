@@ -41,7 +41,6 @@ from typing import Any, Callable
 
 from . import artifact, claude_usage, discovery, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
-from . import reap
 from .schedule import Trial
 
 Clock = Callable[[], float]
@@ -77,11 +76,15 @@ class TrialResult:
 def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
     """The only place this package starts a process. Own session, no shell.
 
-    The group is recorded before it is waited on and released only once it is
-    dead, so a leftover is a file under `<run>/pids/` that `cli.py cleanup`
-    acts on. Nothing here, and nothing an operator or an agent has to do
-    afterwards, matches a process by name: that is how a cleanup aimed at one
-    trial reaches an unrelated session.
+    Its own session so the wall-clock cap and the way out both reach a
+    grandchild the agent left behind. Nothing here, and nothing an operator or
+    an agent has to do afterwards, matches a process by name: that is how a
+    cleanup aimed at one trial reaches an unrelated session.
+
+    A harness SIGKILLed mid-trial leaves this child reparented to pid 1, and
+    nothing reaps it. That is deliberate. This seam runs the fake and offline
+    executors, which start no model and spend nothing, so a stray `sleep` costs
+    a `kill` an operator may never bother to type.
     """
     roots.output.mkdir(parents=True, exist_ok=True)
     stream = roots.stream.open("w", encoding="utf-8")
@@ -97,7 +100,6 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
         start_new_session=True,
         shell=False,
     )
-    reap.register(roots.run_dir, roots.trial_id, process.pid, launch.argv[0])
     timed_out = False
     try:
         try:
@@ -116,7 +118,6 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
                 process.communicate(timeout=_ORPHAN_WAIT_S)
             except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
                 pass
-        reap.release(roots.run_dir, roots.trial_id)
         stream.close()
     return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
 
@@ -135,28 +136,16 @@ def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> No
         process.send_signal(sig)
 
 
-@dataclass(frozen=True)
-class Started:
-    """A helper process an arm's provisioning owns for the length of one trial."""
-
-    process: subprocess.Popen[Any]
-    ledger_id: str
-
-
-def process_start(
-    argv: list[str], *, cwd: Path, env: dict[str, str], roots: artifact.TrialRoots, ledger_id: str, log: Path
-) -> Started:
-    """Start a helper the way the agent is started: own session, no shell, in the ledger.
+def process_start(argv: list[str], *, cwd: Path, env: dict[str, str], log: Path) -> subprocess.Popen[Any]:
+    """Start a helper the way the agent is started: own session, no shell.
 
     The one other place a process begins. It exists for a provisioned arm's
     daemon, which has to outlive the launch call and die before `loop.db` is
-    read, so it cannot be a child of the agent's group; its own group is
-    recorded under the trial's ledger id with a suffix, and `cli.py cleanup`
-    reaches it the same way.
+    read, so it cannot be a child of the agent's group.
     """
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open("a", encoding="utf-8") as handle:
-        process = subprocess.Popen(
+        return subprocess.Popen(
             argv,
             cwd=cwd,
             env=env,
@@ -166,26 +155,20 @@ def process_start(
             start_new_session=True,
             shell=False,
         )
-    reap.register(roots.run_dir, ledger_id, process.pid, argv[0])
-    return Started(process=process, ledger_id=ledger_id)
 
 
-def process_stop(started: Started, run_dir: Path, grace_s: float) -> int | None:
-    """SIGTERM the helper's group, wait, SIGKILL what is left, and clear its ledger entry."""
-    process = started.process
-    try:
-        if process.poll() is None:
-            _kill_group(process, signal.SIGTERM)
+def process_stop(process: subprocess.Popen[Any], grace_s: float) -> int | None:
+    """SIGTERM the helper's group, wait, SIGKILL what is left."""
+    if process.poll() is None:
+        _kill_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=grace_s)
+        except subprocess.TimeoutExpired:
+            _kill_group(process)
             try:
-                process.wait(timeout=grace_s)
-            except subprocess.TimeoutExpired:
-                _kill_group(process)
-                try:
-                    process.wait(timeout=_ORPHAN_WAIT_S)
-                except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
-                    pass
-    finally:
-        reap.release(run_dir, started.ledger_id)
+                process.wait(timeout=_ORPHAN_WAIT_S)
+            except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
+                pass
     return process.returncode
 
 

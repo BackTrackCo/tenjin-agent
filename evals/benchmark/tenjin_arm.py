@@ -545,17 +545,17 @@ def health(port: int, timeout_s: float = 0.5) -> dict[str, Any] | None:
     return body
 
 
-def wait_healthy(roots: artifact.TrialRoots, started: runner.Started, deadline_s: float) -> dict[str, Any]:
+def wait_healthy(roots: artifact.TrialRoots, started: subprocess.Popen[Any], deadline_s: float) -> dict[str, Any]:
     """Poll `daemon.pid` and `/health` until the daemon for this data dir answers."""
     expected = data_dir_string(roots)
     end = time.monotonic() + deadline_s
     while time.monotonic() < end:
-        if started.process.poll() is not None:
-            raise ProvisionError(f"the daemon exited with {started.process.returncode} before it was healthy; see {roots.output / 'daemon.log'}")
+        if started.poll() is not None:
+            raise ProvisionError(f"the daemon exited with {started.returncode} before it was healthy; see {roots.output / 'daemon.log'}")
         record = read_pid(roots.data_dir)
         if record is not None:
             body = health(record["port"])
-            if body is not None and body["data_dir"] == expected and body["pid"] == started.process.pid:
+            if body is not None and body["data_dir"] == expected and body["pid"] == started.pid:
                 return {"pid": body["pid"], "port": record["port"]}
         time.sleep(HEALTH_POLL_S)
     raise ProvisionError(f"the daemon did not answer /health within {deadline_s:.0f}s; see {roots.output / 'daemon.log'}", code="daemon_unhealthy")
@@ -620,14 +620,12 @@ def prepare(request: ProvisionRequest) -> Provision:
             DAEMON_ARGV(roots),
             cwd=roots.data_dir,
             env=daemon_environment(roots),
-            roots=roots,
-            ledger_id=f"{roots.trial_id}.daemon",
             log=roots.output / "daemon.log",
         )
         try:
             live = wait_healthy(roots, started, HEALTH_TIMEOUT_S)
         except ProvisionError:
-            runner.process_stop(started, roots.run_dir, STOP_GRACE_S)
+            runner.process_stop(started, STOP_GRACE_S)
             for published in pieces:
                 delete_lesson(source, published)
             raise
@@ -674,17 +672,17 @@ def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
     answers for another directory, or does not answer, is left alone.
     """
     state = provision.stop_state
-    started: runner.Started | None = state.get("started")
+    started: subprocess.Popen[Any] | None = state.get("started")
     expected = data_dir_string(roots)
     report: dict[str, Any] = {"respawned": False, "wal_live": False}
     record = read_pid(roots.data_dir)
-    if record is not None and (started is None or record["pid"] != started.process.pid):
+    if record is not None and (started is None or record["pid"] != started.pid):
         body = health(record["port"])
         if body is not None and body["data_dir"] == expected and body["pid"] == record["pid"]:
             report["respawned"] = True
             _terminate(record["pid"], STOP_GRACE_S)
     if started is not None:
-        runner.process_stop(started, roots.run_dir, STOP_GRACE_S)
+        runner.process_stop(started, STOP_GRACE_S)
     wal = roots.data_dir / f"{LOOP_DB}-wal"
     end = time.monotonic() + WAL_TIMEOUT_S
     while wal.exists() and time.monotonic() < end:
