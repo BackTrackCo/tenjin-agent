@@ -16,23 +16,12 @@ compose `command` is `sleep infinity`, so the image's ENTRYPOINT still owns the
 daemon. Egress is per trial: a `NetworkPolicy` in allowlist mode puts the
 service behind a sidecar whose nftables ruleset drops every host off the list.
 
-Three facts about that arrangement are load-bearing, and this module exists for
-them rather than to re-implement anything above.
-
-Harbor's ruleset carries no `log` statement and nothing in Harbor reads a
-denial, so this package cannot report that an attempt TRIED to leave the
-allowlist. The counter that used to say so is gone rather than pinned at zero
-(see `artifact.py`), and no field below claims it.
-
-Harbor turns egress control off silently when its kernel probe fails, which
-would leave the container on public egress with no error. `require_egress` asks
-that probe itself and refuses the run instead of measuring a different one.
-
-The credential is forwarded by name into Harbor's exec, and Harbor expands it
-into the host-side `docker compose exec` argv (`docker.py:1156-1158`), so its
-value is visible in `ps` on the host for the length of the attempt. That is
-accepted for a single-tenant runner; nothing here can prevent it without forking
-Harbor's Docker backend, which has no env-file and no secret support.
+Everything below is a fact about Harbor that the trial cannot be measured
+without: `require_egress` for a kernel probe Harbor fails silently,
+`write_environment_override` for an `env` field that is not only the
+container's, `remove_project` for objects a failed `up` leaves behind, and
+`attestation` for the denial Harbor never reports. `README.md` carries the
+evidence for each.
 """
 
 from __future__ import annotations
@@ -87,11 +76,9 @@ class Api:
 def harbor() -> Api:
     """Import Harbor at the call, never at module scope.
 
-    The offline suite installs `requirements-test.txt` alone, twelve wheels on a
-    Python 3.11 floor, and imports this module. Harbor is 89 wheels and needs
-    3.12, so a module-scope import would put it in the required CI job's closure
-    for a lane that starts no container. Every live entry point below goes
-    through here, and `tests/test_container.py` pins that.
+    Harbor is 89 wheels on a 3.12 floor and the required CI job installs twelve
+    on 3.11, so a module-scope import would put it in that job's closure for a
+    lane that starts no container. `tests/test_container.py` pins it.
     """
     try:
         from importlib.metadata import version
@@ -153,10 +140,9 @@ def compose_project(name: str) -> str:
     """The compose project Harbor derives from a session id, which every object of it is labelled with.
 
     Mirrored from `_sanitize_docker_compose_project_name` rather than called,
-    because a dry run builds a `Recipe` with no Harbor importable. The session
-    id is the container name and nothing more: Harbor's own `Trial` passes
-    `f"{trial_name}__env"`, and copying that suffix here made every cleanup
-    sweep match a project that does not exist.
+    because a dry run builds a `Recipe` with no Harbor importable. The session id
+    is the container name and nothing more: copying the `__env` suffix Harbor's
+    own `Trial` uses made every cleanup sweep match a project that does not exist.
     """
     sanitised = re.sub(r"[^a-z0-9_-]", "-", name.lower())
     return sanitised if sanitised[:1].isalnum() else f"0{sanitised}"
@@ -165,11 +151,9 @@ def compose_project(name: str) -> str:
 def mounts(roots: Any, settings: Path | None = None) -> list[Mount]:
     """The trial's own roots at their own paths, plus the output root the entrypoint writes to.
 
-    The four the design names are the repository copy, HOME, the profile
-    (`CLAUDE_CONFIG_DIR`) and `TENJIN_DATA_DIR`. Two more are here because the
-    process needs them: the output root, where the entrypoint leaves the
-    daemon's log and report, and the arm's settings file, read-only, because
-    `--settings` names a path outside every other root.
+    The design names four: the repository copy, HOME, the profile
+    (`CLAUDE_CONFIG_DIR`) and `TENJIN_DATA_DIR`. The output root and the arm's
+    settings file are the two more the process cannot run without.
     """
     plan = [
         Mount(roots.repo, roots.repo),
@@ -221,15 +205,11 @@ def require_egress(egress: Egress, probe: Any = None) -> None:
     """Refuse a run whose allowlist Harbor would silently not enforce.
 
     `DockerEnvironment.__init__` sets `_enable_egress_control` to the policy AND
-    a kernel probe for `CONFIG_NFT_FIB_INET`, and a probe that fails leaves the
-    flag False with no error and the container on PUBLIC egress. An allowlist
-    that is never installed is not a weaker measurement, it is a different run,
-    so it ends here rather than in the numbers. Harbor's own
-    `validate_network_policy_support` does not cover this: on the Docker backend
-    it checks Windows containers and nothing about the kernel.
-
-    `no-network` asks the kernel nothing: compose gives the service
-    `network_mode: none` and there is no ruleset to install.
+    a kernel probe for `CONFIG_NFT_FIB_INET`; a probe that fails leaves the flag
+    False with no error and the container on PUBLIC egress. Harbor's own
+    `validate_network_policy_support` does not cover it, so an allowlist that is
+    never installed would be a different run rather than a weaker one, and it
+    ends here instead of in the numbers. `no-network` asks the kernel nothing.
     """
     if egress.mode == NO_NETWORK:
         return
@@ -286,13 +266,10 @@ class Container:
     """One Harbor Docker environment, for the life of one attempt.
 
     Harbor's API is asyncio and this package's runner is not, so one loop lives
-    and dies with the container rather than one loop per call: `start`, every
-    `exec`, and `stop` are the same environment object on the same loop, and
-    whatever state the compose project holds survives between them.
-
-    The container's own environment is set at `up`, not at exec: the ENTRYPOINT
-    starts the trial's daemon before any agent runs, and it reads the data dir,
-    the output root and `BENCH2_DAEMON` from there.
+    and dies with the container rather than one per call: `start`, every `exec`
+    and `stop` share an environment object and a loop. The container's own
+    environment is set at `up` and not at exec, because the ENTRYPOINT starts the
+    trial's daemon before any agent runs.
     """
 
     def __init__(self, *, recipe: Recipe, image: str | None = None, user_id: str | None = None) -> None:
@@ -342,9 +319,9 @@ class Container:
     def close(self) -> None:
         """Tear the compose project down, then the loop. Every path here tolerates a thing that is already gone.
 
-        `docker compose down` removes what compose wrote. A project that failed
-        on the way up can leave objects that command never learns about, so the
-        label sweep runs on every path out.
+        `docker compose down` removes what compose wrote; a project that failed
+        on the way up leaves objects it never learns about, so the label sweep
+        runs on every path out.
         """
         if self._environment is not None and self._loop is not None:
             with contextlib.suppress(Exception):
@@ -400,18 +377,14 @@ class Container:
 def write_environment_override(path: Path, environment: Mapping[str, str]) -> Path:
     """The trial's environment, as a compose override rather than as `EnvironmentConfig.env`.
 
-    Harbor's `env` field is NOT only the container's. `_compose_env_vars` starts
+    Harbor's `env` field is NOT only the container's: `_compose_env_vars` starts
     from `os.environ` and overlays it, and that dict becomes the environment of
-    the host-side `docker compose` process, so a trial root named `HOME`
-    replaces the HOME of the docker client. Measured 2026-09-10: the client then
-    failed to find `~/.docker/config.json`, did not discover the compose plugin,
-    and `up` died with `unknown flag: --project-name`. Anything the docker CLI
-    reads would go the same way: PATH, TMPDIR, the DOCKER_* family. So the
-    trial's environment goes into the compose file, where it reaches the service
-    and nothing else.
-
-    Values are written with `$` doubled, because compose interpolates its own
-    file and a path or a token holding one would otherwise be rewritten.
+    the host-side `docker compose` process. Measured 2026-09-10: a trial root
+    named `HOME` retargeted the docker client, which then lost
+    `~/.docker/config.json` and the compose plugin, and `up` died with `unknown
+    flag: --project-name`. PATH, TMPDIR and the DOCKER_* family would go the same
+    way. So the trial's environment goes into the compose file instead, with `$`
+    doubled because compose interpolates its own file.
     """
     payload = {"services": {MAIN_SERVICE: {"environment": {key: str(value).replace("$", "$$") for key, value in sorted(environment.items())}}}}
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -487,14 +460,12 @@ def stop(name: str, docker: Docker | None = None) -> bool:
 def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None:
     """Refuse a run directory the container cannot actually see.
 
-    Every root a trial uses is a bind mount of a host path, and on this machine
-    Docker is a Linux VM that shares only some of the host's filesystem. A run
-    directory outside that set mounts as an empty directory, which a trial would
-    discover as a missing repository or a lost transcript. So one container
-    reads one marker back before anything is spent. A plain `docker run` rather
-    than a Harbor environment: this asks what the daemon can see of the host,
-    and it has to be answerable before a task, an allowlist or a compose project
-    exists.
+    On this machine Docker is a Linux VM that shares only some of the host's
+    filesystem, and a run directory outside that set mounts as an empty
+    directory: a trial would find no repository. So one container reads one
+    marker back before anything is spent, through a plain `docker run` rather
+    than a Harbor environment, because the answer is needed before a task, an
+    allowlist or a compose project exists.
     """
     docker = images._docker(docker)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -522,13 +493,12 @@ def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None
 def attestation(egress: Egress, seam: str, instance_id: str) -> dict[str, Any]:
     """The isolation this run established, stated as the attestation's own fields.
 
-    `instance_id` is the run's nonce. Under Harbor the container, its network
-    and its egress sidecar are per attempt, so no single run-level object names
-    the isolation; the nonce is what every one of this run's compose projects is
-    derived from, and the per-trial image id is in the record.
-    `network_allowlist` is the policy `require_egress` proved Harbor would
-    enforce before the first trial started, so it states what the sidecar drops
-    and NOT that no attempt tried to leave.
+    Under Harbor the container, its network and its egress sidecar are per
+    attempt, so no run-level object names the isolation: `instance_id` is the
+    nonce every compose project of the run derives from, and the per-trial image
+    id is in the record. `network_allowlist` is the policy `require_egress`
+    proved Harbor would enforce, so it states what the sidecar drops and NOT that
+    no attempt tried to leave. Harbor reports no denial, so nothing here can.
     """
     return {
         "kind": "container",

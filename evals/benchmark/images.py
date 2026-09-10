@@ -16,28 +16,25 @@ carries no `daemon` command while the repository at that same version string
 does.
 
 Identity is Harbor's (`harbor.environments.docker.utils`). Every image is named
-`<stem>--<hash>`, where the hash is a blake2b over the whole build context, the
-Dockerfile's bytes, every build argument and the daemon's platform, and the
-build is a `docker buildx build` behind a file lock. That subsumes the recipe
-this module used to hash by hand, and covers three things it did not: every file
-of the context rather than a chosen list, the platform, and the fixture's own
-tree. The base's name is a build argument of each fixture, so a base input
-reaches every fixture name too.
+`<stem>--<hash>`, a blake2b over the whole build context, the Dockerfile's
+bytes, every build argument and the daemon's platform, built by `docker buildx
+build` behind a file lock. That subsumes the recipe this module used to hash by
+hand and covers three things it did not: every file of the context rather than a
+chosen list, the platform, and the fixture's own tree. The base's name is a build
+argument of each fixture, so a base input reaches every fixture name too.
 
-There is no drift check left, because there is nothing left to drift: an input
-that moved cannot name the image that is here. The image is simply absent, and
-`require` says which command builds it. Two properties the old recipe carried
-are checked elsewhere. That a manifest's `fixture_hash` still matches the
-fixture directory is `manifest.py`'s check, at load. That a task's declared
-runtime quirk survived a base bump is `quirk_check`, run inside the image the
-build just produced.
+There is no drift check left, because an input that moved cannot name the image
+that is here: it is absent, and `require` says which command builds it. Two
+properties the old recipe carried are checked elsewhere: a manifest's
+`fixture_hash` against the fixture directory by `manifest.py` at load, and a
+task's declared runtime quirk by `quirk_check` inside the image the build just
+produced.
 
 `python3 -m evals.benchmark.images build --manifest <path>` builds every image a
-manifest names and writes the names to `fixtures/live/images.json`, a local
-build ledger rather than a committed fact. Because `pnpm install` happens at
-build time, two builds of one fixture on two machines may differ in a transitive
-dependency. That is the trade the design states: the record names the build that
-ran, and a locked run builds once and keeps the image.
+manifest names and writes them to `fixtures/live/images.json`, a local ledger
+rather than a committed fact. `pnpm install` happens at build time, so two builds
+of one fixture on two machines may differ in a transitive dependency: the record
+names the build that ran, and a locked run builds once and keeps the image.
 """
 
 from __future__ import annotations
@@ -165,10 +162,9 @@ class Build:
 def harbor() -> Build:
     """Import Harbor at the call, never at module scope.
 
-    The offline suite installs `requirements-test.txt` alone, twelve wheels on a
-    Python 3.11 floor, and imports this module. Harbor is 89 wheels and needs
-    3.12, so a module-scope import would put it in the required CI job's closure
-    for a lane that builds nothing.
+    Harbor is 89 wheels on a 3.12 floor and the required CI job installs twelve
+    on 3.11, so a module-scope import would put it in that job's closure for a
+    lane that builds nothing.
     """
     try:
         from harbor.environments.docker.utils import _compute_image_name, default_docker_platform, ensure_docker_image_built

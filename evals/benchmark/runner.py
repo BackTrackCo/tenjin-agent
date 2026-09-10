@@ -75,9 +75,7 @@ def default_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
 
     A launch that names a container recipe is a live attempt and runs inside
     Harbor; anything else is a plain child process. The choice is the launch's
-    own shape rather than a flag on the runtime, so a manifest cannot ask for a
-    live executor and a host process, and an injected runtime replaces both
-    with one seam.
+    own shape rather than a runtime flag, so a manifest cannot ask for both.
     """
     return container_spawn(launch, roots, timeout_s) if launch.recipe is not None else process_spawn(launch, roots, timeout_s)
 
@@ -85,21 +83,18 @@ def default_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
 def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
     """The live seam: bring one Harbor container up, exec the agent in it, tear it down.
 
-    The container is the process boundary here, so nothing is started in this
-    process's own session and there is no group to kill. The teardown is what
-    replaces the group kill: `Container.close` runs on every path out, the
-    interrupt included, and sweeps the compose project by name afterwards in
-    case `down` never ran. The project name is in the run's ledger before the
-    agent starts, so `cli.py cleanup` reaches it after a kill this process
-    never saw.
+    The container is the process boundary, so nothing starts in this process's
+    own session and there is no group to kill. `Container.close` runs on every
+    path out and sweeps the compose project afterwards in case `down` never ran,
+    and the project name is in the run's ledger before the agent starts so
+    `cli.py cleanup` reaches it after a kill this process never saw.
 
-    Three execs, in one container, in this order. The ENTRYPOINT has already
-    started the trial's daemon by the time `up --wait` returns, so the first
-    thing read is its report: a daemon that never became healthy ends the
-    attempt before the agent is exec'd and before anything is spent. Then the
-    agent, under the wall-clock cap. Then the daemon stop, which has to happen
-    while the container is still up, because the host reads `loop.db` back
-    after it is gone.
+    Three execs in one container, in order. The ENTRYPOINT has already started
+    the trial's daemon by the time `up --wait` returns, so its report is read
+    first: an unhealthy daemon ends the attempt before anything is spent. Then
+    the agent under the wall-clock cap. Then the daemon stop, which has to happen
+    while the container is up, because the host reads `loop.db` back after it is
+    gone.
     """
     recipe = launch.recipe
     roots.output.mkdir(parents=True, exist_ok=True)

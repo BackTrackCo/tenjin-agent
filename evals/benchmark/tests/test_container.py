@@ -58,8 +58,7 @@ def fake_docker(**answers: images.Completed):
 
 
 def test_the_offline_suite_never_imports_harbor() -> None:
-    # The assertion to trust more than the requirements comment: this suite has
-    # imported the package, and `harbor` is not in `sys.modules`. A module-scope
+    # The assertion to trust more than the requirements comment: a module-scope
     # import anywhere in the offline reach fails here rather than three minutes
     # into a required CI job on a Python this package no longer floors at.
     assert "harbor" not in sys.modules
@@ -113,10 +112,9 @@ def test_a_phase_is_part_of_the_name_so_the_two_containers_of_one_trial_differ()
 
 
 def test_the_compose_project_is_the_name_harbor_will_label_every_object_with() -> None:
-    # Harbor sanitises the session id and uses it verbatim as the project. The
-    # sweep that cleans up after an interrupt matches on the result, so these
-    # agree here or `cleanup` reaches nothing: with an `__env` suffix copied
-    # from Harbor's own `Trial`, a killed run left two containers and an
+    # The sweep that cleans up after an interrupt matches on the result, so
+    # these agree here or `cleanup` reaches nothing: with an `__env` suffix
+    # copied from Harbor's own `Trial`, a killed run left two containers and an
     # orphaned exec client behind while the sweep reported success.
     assert container.compose_project("bench2-trial-a") == "bench2-trial-a"
     assert container.compose_project("BENCH2-Trial.A") == "bench2-trial-a"
@@ -136,9 +134,8 @@ def test_an_empty_allowlist_is_refused_rather_than_started() -> None:
 
 
 def test_a_host_that_cannot_enforce_the_allowlist_is_refused_rather_than_measured() -> None:
-    # Harbor computes `_enable_egress_control` as the policy AND a kernel probe,
-    # and a probe that fails leaves the flag False with no error and the
-    # container on public egress. That is a different run, not a weaker one.
+    # A failed probe leaves egress control off with no error and the container
+    # on public egress. That is a different run, not a weaker one.
     with pytest.raises(container.EgressError) as caught:
         container.require_egress(container.plan_egress(ALLOW), probe=lambda: False)
     assert "public egress" in str(caught.value)
@@ -167,9 +164,8 @@ def test_the_credential_is_read_out_of_this_process_and_only_when_it_is_set(tmp_
     plan = recipe(tmp_path, forward=("CLAUDE_CODE_OAUTH_TOKEN",))
     assert container.forwarded(plan, {"CLAUDE_CODE_OAUTH_TOKEN": "sk-value"}) == {"CLAUDE_CODE_OAUTH_TOKEN": "sk-value"}
     assert container.forwarded(plan, {}) == {}
-    # It is not in the environment the container comes UP with, so it is absent
-    # from the compose override Harbor writes to disk. Harbor still puts it in
-    # the host-side `docker compose exec` argv, which is the accepted cost.
+    # Absent from the environment the container comes UP with, so absent from
+    # the compose override Harbor writes to disk.
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in plan.environment
 
 
@@ -199,9 +195,7 @@ def test_the_run_attests_the_isolation_its_allowlist_established() -> None:
     assert attestation["wallet_present"] is False
     assert attestation["credential_seam"] == "CLAUDE_CODE_OAUTH_TOKEN"
     assert attestation["network_allowlist"] == list(ALLOW)
-    # No field claims anything about attempted egress. Harbor reports no
-    # denials, so an attestation that spoke to it would be stating something
-    # nothing in this package can check.
+    # No field claims anything about attempted egress, which Harbor never reports.
     assert set(attestation) == {
         "kind",
         "instance_id",
