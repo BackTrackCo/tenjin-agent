@@ -3,7 +3,7 @@
 Trustworthy measurement infrastructure for the developer token-savings benchmark. Eval-only.
 Every command here runs from a venv built from `requirements-test.txt`, which is the package's
 whole hash-pinned closure: pytest and inline-snapshot for the suite, scipy for the reducer's
-interval. This package measures trials: for one task and
+interval, jsonschema for the validators. This package measures trials: for one task and
 one quality bar, how many model tokens did the complete agent run consume with and without a
 knowledge system. It does not itself produce a savings number, and nothing here touches the
 product runtime.
@@ -43,6 +43,7 @@ the suite builds.
 | Module                  | What it owns                                                      | Held by                              |
 | ----------------------- | ----------------------------------------------------------------- | ------------------------------------ |
 | `manifest.py`           | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
+| `schema.py`             | JSON Schema checking under each module's own refusal              | `test_manifest.py`                   |
 | `schedule.py`           | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
 | `runner.py`             | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py` |
 | `executor.py`           | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
@@ -88,6 +89,13 @@ suite and shipped commands alike, so there is no stdlib-only side to keep.
   method line a reader can check and a hand-rolled rank rule is not. What the
   package still owns is the sampling unit: one ratio per task, so a task with
   more repeats cannot speak louder.
+- **A schema keyword should be a schema keyword.** The shape half of
+  `manifest.py` is one JSON Schema document, checked by `jsonschema` through
+  `schema.check`, which raises the caller's own error class so a refusal stays
+  the refusal the contract names. What stays written out is every rule a schema
+  cannot state: the ones that cost money, that let an arm widen its own pins,
+  or that read something outside the document (a fixture on disk, the hash of
+  its bytes, a constant this package computes at import).
 - **A new pin is a real cost.** Each one is exact, hashed, and installed by a
   required check on every pull request, and a platform wheel is one hash per
   runner and per Python minor. Add one when it replaces logic this package
