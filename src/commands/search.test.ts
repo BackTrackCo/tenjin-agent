@@ -1,29 +1,29 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runSearch } from './search';
 import { loadSearches, type StoredSearch } from '../lib/searches';
 import { CliError } from '../lib/errors';
 import { PRODUCTION_ORIGIN, knownDeploymentOrigins } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
+import {
+  capturingStream,
+  cleanupTempDirs,
+  commandContext,
+  jsonResponse,
+  sinkStream,
+  tempDir,
+} from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-search-cmd-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-search-cmd-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, baseUrl: 'https://preview.example', ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: dir, flags: { baseUrl: 'https://preview.example', ...flags } });
 }
 
 /** The row this search just wrote: the record is newest-first, and each of these
@@ -36,10 +36,7 @@ function stub(body: unknown, status = 200): { fetch: typeof fetch; bodies: unkno
   const bodies: unknown[] = [];
   const fetchFn = (async (_url: string, init?: RequestInit) => {
     bodies.push(JSON.parse(String(init?.body)));
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(status, body);
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, bodies };
 }
@@ -328,17 +325,13 @@ describe('runSearch — the miss stderr surface', () => {
 
   function ctxCapturingStderr(): { ctx: CommandContext; stderr: () => string } {
     const chunks: string[] = [];
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    const err = {
-      write: (s: string) => (chunks.push(s), true),
-    } as unknown as NodeJS.WritableStream;
     return {
       stderr: () => chunks.join(''),
-      ctx: {
-        flags: { json: false, timeout: 5000, baseUrl: 'https://preview.example' },
+      ctx: commandContext({
         dataDir: dir,
-        io: { stdout: sink(), stderr: err, isTTY: false },
-      },
+        flags: { baseUrl: 'https://preview.example' },
+        io: { stdout: sinkStream(), stderr: capturingStream(chunks), isTTY: false },
+      }),
     };
   }
 
@@ -437,10 +430,7 @@ describe('evalCohort threading', () => {
     const headers: Array<Record<string, string>> = [];
     const fetchFn = (async (_url: string, init?: RequestInit) => {
       headers.push((init?.headers ?? {}) as Record<string, string>);
-      return new Response(JSON.stringify(MISS), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return jsonResponse(200, MISS);
     }) as unknown as typeof fetch;
     return { fetch: fetchFn, headers };
   }
@@ -540,10 +530,7 @@ describe('runSearch across two shelves', () => {
         url,
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
       });
-      return new Response(JSON.stringify(by[origin] ?? MISS), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
+      return jsonResponse(200, by[origin] ?? MISS);
     }) as unknown as typeof fetch;
     return { fetch: fetchFn, sent };
   }
@@ -660,10 +647,7 @@ describe('runSearch across two shelves', () => {
         if (new URL(url).origin === TEAM) {
           return new Response(typeof body === 'string' ? body : JSON.stringify(body), { status });
         }
-        return new Response(JSON.stringify(publicHit), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
+        return jsonResponse(200, publicHit);
       }) as unknown as typeof fetch;
       return { fetch: fetchFn, sent };
     }

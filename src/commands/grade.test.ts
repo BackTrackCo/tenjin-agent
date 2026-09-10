@@ -1,27 +1,20 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runGrade } from './grade';
 import { openLoopDb, type LoopDb } from '../hooks/store';
 import type { TranscriptLookup } from '../lib/grade';
 import type { CommandContext } from '../context';
+import { cleanupTempDirs, commandContext, jsonResponse, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-grade-cmd-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-grade-cmd-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: dir, flags: { json: true } });
 }
 
 /** One `legs` row, as a leg's verdict left it. */
@@ -128,10 +121,7 @@ describe('runGrade', () => {
     const calls: Call[] = [];
     const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
       calls.push({ url: String(url), init: init ?? {} });
-      return new Response(JSON.stringify({ accepted: 1 }), {
-        status,
-        headers: { 'content-type': 'application/json' },
-      });
+      return jsonResponse(status, { accepted: 1 });
     }) as unknown as typeof fetch;
     return { fetchImpl, calls };
   }

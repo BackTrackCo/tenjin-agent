@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import { parseSIWxHeader } from '@x402/extensions/sign-in-with-x';
@@ -19,6 +18,14 @@ vi.mock('../lib/usdc', () => ({
 
 import { getUsdcBalance } from '../lib/usdc';
 import { runFund } from './fund';
+import {
+  capturingStream,
+  cleanupTempDirs,
+  commandContext,
+  jsonResponse,
+  sinkStream,
+  tempDir,
+} from './test-support';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const CHECKOUT = 'https://pay.coinbase.com/buy?sessionToken=tok123';
@@ -39,28 +46,23 @@ let dataDir: string;
 let stderr: string[];
 
 beforeEach(async () => {
-  tmp = await mkdtemp(join(tmpdir(), 'tenjin-fund-'));
+  tmp = tempDir('tenjin-fund-');
   dataDir = join(tmp, '.tenjin');
   stderr = [];
   mockedBalance.mockReset();
 });
-afterEach(async () => {
-  await rm(tmp, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(overrides: { isTTY?: boolean; json?: boolean } = {}): CommandContext {
-  const sink = { write: () => true } as unknown as NodeJS.WritableStream;
-  const errStream = {
-    write: (chunk: string) => {
-      stderr.push(chunk);
-      return true;
-    },
-  } as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: overrides.json ?? true, timeout: 10000 },
+  return commandContext({
     dataDir,
-    io: { stdout: sink, stderr: errStream, isTTY: overrides.isTTY ?? false },
-  };
+    flags: { json: overrides.json ?? true, timeout: 10000 },
+    io: {
+      stdout: sinkStream(),
+      stderr: capturingStream(stderr),
+      isTTY: overrides.isTTY ?? false,
+    },
+  });
 }
 
 /**
@@ -107,10 +109,7 @@ function stubFetch(status: number, json: unknown): { fetchImpl: typeof fetch; ca
       headers: Object.fromEntries(new Headers(init?.headers).entries()),
       body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
     });
-    return new Response(JSON.stringify(json), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(status, json);
   }) as typeof fetch;
   return { fetchImpl, calls };
 }

@@ -1,37 +1,13 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { HookInput } from '../adapters/types';
 import { CONFIG_DEFAULTS } from '../lib/config';
 import { actorOf, STARTED_MARK } from './actor';
 import { claim, deleteMark, finish, firstSight, gates, getMark, release, setMark } from './gates';
-import { openLoopDb, type LoopDb } from './store';
+import type { LoopDb } from './store';
+import { cleanup, freshDb } from './arms/test-support';
 import type { Actor, Answer, FireContext, KernelConfig, Plan } from './types';
 
-const dirs: string[] = [];
-const open: LoopDb[] = [];
-
-async function freshDb(): Promise<LoopDb> {
-  const dir = await mkdtemp(join(tmpdir(), 'tenjin-b-gates-'));
-  dirs.push(dir);
-  const db = openLoopDb(dir);
-  open.push(db);
-  return db;
-}
-
-afterEach(async () => {
-  for (const db of open.splice(0)) {
-    try {
-      db.close();
-    } catch {
-      // Already closed by the test.
-    }
-  }
-  for (const dir of dirs.splice(0)) {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+afterEach(cleanup);
 
 const NOW = 1_700_000_000_000;
 const WAIT_MS = 2500;
@@ -96,7 +72,7 @@ const PLAN: Plan = { question: { text: 'why is vitest slow', questionKey: 'qk1' 
 
 describe('marks', () => {
   it('get, set (upsert), delete on one (session, agent, key)', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     expect(getMark(db, LEAD, 'k')).toBeNull();
     setMark(db, LEAD, 'k', 'v1', NOW);
     expect(getMark(db, LEAD, 'k')).toBe('v1');
@@ -112,7 +88,7 @@ describe('marks', () => {
 
 describe('claim / finish / release', () => {
   it('first claim is fresh and writes an asking mark', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     expect(claim(db, LEAD, 'qk1', NOW, WAIT_MS)).toEqual({ kind: 'fresh' });
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toEqual({
       status: 'asking',
@@ -122,7 +98,7 @@ describe('claim / finish / release', () => {
   });
 
   it('a second claim inside the first fire’s deadline is asked; past it the question is retaken', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     claim(db, LEAD, 'qk1', NOW, WAIT_MS);
     expect(claim(db, LEAD, 'qk1', NOW + WAIT_MS - 1, WAIT_MS)).toEqual({ kind: 'asked' });
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toEqual({
@@ -143,7 +119,7 @@ describe('claim / finish / release', () => {
     // A research fire (tool_wait_ms 4000) holds the key; a prompt fire
     // (human_wait_ms 2500) arriving at t+2600 must not retake it and drop the
     // research verdict. At t+4100 the research fire is past its deadline.
-    const db = await freshDb();
+    const db = freshDb();
     const research = CONFIG_DEFAULTS.loop.tool_wait_ms;
     const prompt = CONFIG_DEFAULTS.loop.human_wait_ms;
     expect(prompt).toBeLessThan(research);
@@ -157,13 +133,13 @@ describe('claim / finish / release', () => {
   });
 
   it('an asking mark with no deadline on it is stale', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     setMark(db, LEAD, 'q:qk1', JSON.stringify({ status: 'asking', at: NOW }), NOW);
     expect(claim(db, LEAD, 'qk1', NOW + 1, WAIT_MS)).toEqual({ kind: 'fresh' });
   });
 
   it('finish caches the verdict, hit or miss', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     claim(db, LEAD, 'qk1', NOW, WAIT_MS);
     finish(db, LEAD, 'qk1', ANSWER, NOW + 100);
     expect(claim(db, LEAD, 'qk1', NOW + 60_000 * 60, WAIT_MS)).toEqual({
@@ -177,7 +153,7 @@ describe('claim / finish / release', () => {
   });
 
   it('release frees the question', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     claim(db, LEAD, 'qk1', NOW, WAIT_MS);
     release(db, LEAD, 'qk1');
     expect(getMark(db, LEAD, 'q:qk1')).toBeNull();
@@ -185,7 +161,7 @@ describe('claim / finish / release', () => {
   });
 
   it('treats a corrupt mark as absent', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     setMark(db, LEAD, 'q:qk1', '{not json', NOW);
     expect(claim(db, LEAD, 'qk1', NOW + 1, WAIT_MS)).toEqual({ kind: 'fresh' });
     setMark(db, LEAD, 'q:qk2', JSON.stringify({ status: 'weird', at: NOW }), NOW);
@@ -198,7 +174,7 @@ describe('claim / finish / release', () => {
   });
 
   it('claims are per actor', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     claim(db, LEAD, 'qk1', NOW, WAIT_MS);
     expect(claim(db, CHILD, 'qk1', NOW, WAIT_MS)).toEqual({ kind: 'fresh' });
   });
@@ -206,7 +182,7 @@ describe('claim / finish / release', () => {
 
 describe('firstSight', () => {
   it('is true once per resource per actor', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     expect(firstSight(db, LEAD, 'r1', NOW)).toBe(true);
     expect(firstSight(db, LEAD, 'r1', NOW + 1)).toBe(false);
     expect(firstSight(db, LEAD, 'r2', NOW)).toBe(true);
@@ -218,7 +194,7 @@ describe('firstSight', () => {
 
 describe('gates', () => {
   it('lets a fresh question through, claimed', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     expect(gates(context(db, LEAD, NOW), PLAN)).toBeNull();
     expect(JSON.parse(getMark(db, LEAD, 'q:qk1') ?? 'null')).toMatchObject({
       status: 'asking',
@@ -227,13 +203,13 @@ describe('gates', () => {
   });
 
   it('asked: a live claim skips', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     claim(db, LEAD, 'qk1', NOW, WAIT_MS);
     expect(gates(context(db, LEAD, NOW + WAIT_MS - 1), PLAN)).toEqual({ reason: 'asked' });
   });
 
   it('cached: the stored verdict rides out', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     finish(db, LEAD, 'qk1', ANSWER, NOW);
     expect(gates(context(db, LEAD, NOW + 1), PLAN)).toEqual({ reason: 'cached', answer: ANSWER });
 
@@ -245,7 +221,7 @@ describe('gates', () => {
     // The client-side rate limit is deleted (09-pr-c-lookup-arms.md, review
     // round 2): a research subagent's 15-to-18-a-minute burst must reach the
     // shelf. A fresh question is fresh however many came before it.
-    const db = await freshDb();
+    const db = freshDb();
     for (let i = 0; i < 50; i++) {
       const plan: Plan = { question: { text: `q${i}`, questionKey: `qk-${i}` }, stages: [] };
       expect(gates(context(db, LEAD, NOW), plan)).toBeNull();
@@ -255,14 +231,14 @@ describe('gates', () => {
 
 describe('actorOf', () => {
   it('lead is agent "", child is its id', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     expect(actorOf(input(), db)).toEqual(LEAD);
     expect(actorOf(input({ agent: CHILD.agent }), db)).toEqual(CHILD);
     expect(actorOf(input({ event: 'agent.start', agent: CHILD.agent }), db)).toEqual(CHILD);
   });
 
   it('agent.stop needs a started mark from the same actor', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const stop = input({
       event: 'agent.stop',
       native: { event: 'SubagentStop' },

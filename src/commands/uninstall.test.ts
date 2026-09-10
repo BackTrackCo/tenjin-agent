@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runUninstall } from './uninstall';
 import { openLoopDb } from '../hooks/store';
@@ -19,26 +18,19 @@ import {
 } from '../lib/paths';
 import type { UninstallReport } from '../lib/uninstall';
 import type { CommandContext } from '../context';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 let home: string;
 let data: string;
 
-beforeEach(async () => {
-  home = await mkdtemp(join(tmpdir(), 'tenjin-uninstall-home-'));
-  data = await mkdtemp(join(tmpdir(), 'tenjin-uninstall-data-'));
+beforeEach(() => {
+  home = tempDir('tenjin-uninstall-home-');
+  data = tempDir('tenjin-uninstall-data-');
 });
-afterEach(async () => {
-  await rm(home, { recursive: true, force: true });
-  await rm(data, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: data, flags: { json: true } });
 }
 
 const run = async (): Promise<{ report: UninstallReport; text: string }> => {

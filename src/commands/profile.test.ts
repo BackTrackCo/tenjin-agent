@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runProfileSet, runProfileShow, type ProfileDeps } from './profile';
 import { runStats } from './stats';
@@ -9,6 +8,7 @@ import { CliError } from '../lib/errors';
 import { SHELF_BYPASS_HEADER } from '../lib/http';
 import type { WalletProvider } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import { cleanupTempDirs, commandContext, jsonResponse, tempDir } from './test-support';
 
 /**
  * `tenjin profile [set]` and `tenjin stats` against a stub server. Everything
@@ -18,12 +18,10 @@ import type { CommandContext } from '../context';
  */
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-profile-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-profile-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 const ADDRESS = testSigner().address;
 const CREATOR = {
@@ -40,12 +38,7 @@ const CREATOR = {
 };
 
 function makeCtx(baseUrl = 'https://preview.example'): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: dir, flags: { json: true, baseUrl } });
 }
 
 function provider(): { provider: WalletProvider; signCount: () => number } {
@@ -104,10 +97,7 @@ function stub(respond: (call: Call) => Response): { fetch: typeof fetch; calls: 
 }
 
 function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
+  return jsonResponse(status, body);
 }
 
 /** Plain SIWX (no session file) keeps each test to one signer and no disk state. */
@@ -323,12 +313,7 @@ describe('tenjin stats', () => {
 describe('team shelf', () => {
   /** No --base-url flag: an override yields no bypass pair and so no team mode. */
   function teamCtx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir: dir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return commandContext({ dataDir: dir, flags: { json: true } });
   }
 
   it('every account request to the shelf origin carries the bypass header', async () => {

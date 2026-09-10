@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
 import { runDoctor, runDoctorPrune } from './doctor';
-import type { CheckResult } from './doctor';
+import type { CheckResult, DoctorDeps } from './doctor';
 import { getUsdcBalance } from '../lib/usdc';
 import { CliError } from '../lib/errors';
 import { claudeSettingsPath, FREE_VERB_RULES, MODE_GATED_RULES } from '../lib/harness-permissions';
@@ -122,6 +122,24 @@ const healthyFetch = routeFetch({
   '/api/articles': { body: ARTICLES_OK },
 });
 
+/**
+ * The deps nearly every check below wants: no OS credential store, a temp HOME
+ * and packaged-skills dir so the skill checks read a controlled tree, an empty
+ * env so nothing in the developer's shell leaks in, and the healthy fetch. A
+ * fresh object per call, so no test can mutate another's. Tests that are about
+ * one of those seams override just that key.
+ */
+function deps(over: Partial<DoctorDeps> = {}): DoctorDeps {
+  return {
+    walletPassphrase: NO_OS_STORE,
+    homeDir: skillHome,
+    skillsSourceDir: pkgSrc,
+    env: {},
+    fetchImpl: healthyFetch,
+    ...over,
+  };
+}
+
 function find(checks: CheckResult[], name: string): CheckResult {
   const c = checks.find((x) => x.name === name);
   if (c === undefined) throw new Error(`no check named ${name}`);
@@ -219,13 +237,7 @@ describe('runDoctor — passing outcomes', () => {
   });
 
   it('all required checks green, no wallet: status pass with a warn wallet check', async () => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'api').detail).toContain('0.1.0');
@@ -257,13 +269,7 @@ describe('runDoctor — passing outcomes', () => {
       },
       '/api/articles': { body: ARTICLES_OK },
     });
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: aliasOnly,
-    });
+    const res = await runDoctor(ctxFor(), deps({ fetchImpl: aliasOnly }));
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass'); // still passes: `search` is not required
     const check = find(data.checks, 'search');
@@ -276,13 +282,7 @@ describe('runDoctor — passing outcomes', () => {
       '/openapi.json': { body: { openapi: '3.1.0', info: { version: '0.1.0' }, paths: {} } },
       '/api/articles': { body: ARTICLES_OK },
     });
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: noSearch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ fetchImpl: noSearch }));
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass'); // still passes: `search` is not required
     expect(find(data.checks, 'search').status).toBe('warn');
@@ -291,13 +291,7 @@ describe('runDoctor — passing outcomes', () => {
   it('wallet present but not 0600: warns on perms, still passes', async () => {
     await writeWallet(0o644);
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     // Perms surface via the provider's diagnostics as a wallet-custody warn,
@@ -320,13 +314,7 @@ describe('runDoctor — passing outcomes', () => {
     expect(envAddress).not.toBe(ADDRESS);
     process.env.TENJIN_WALLET_KEY = envKey; // provider reads process.env
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: { TENJIN_WALLET_KEY: envKey },
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ env: { TENJIN_WALLET_KEY: envKey } }));
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     const shadow = data.checks.find(
@@ -340,13 +328,7 @@ describe('runDoctor — passing outcomes', () => {
   it('zero balance warns with the funding fix', async () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(0n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('warn');
     expect(balance.fix).toContain('tenjin wallet fund');
@@ -355,13 +337,7 @@ describe('runDoctor — passing outcomes', () => {
   it('a positive balance is an ok check with dual-form amount', async () => {
     await writeWallet(0o600);
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const balance = find((res.data as { checks: CheckResult[] }).checks, 'balance');
     expect(balance.status).toBe('ok');
     expect(balance.detail).toContain('5');
@@ -371,13 +347,7 @@ describe('runDoctor — passing outcomes', () => {
   it('an RPC failure warns, never fails doctor', async () => {
     await writeWallet(0o600);
     balanceMock.mockRejectedValue(new Error('rpc down'));
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'balance').status).toBe('warn');
@@ -385,13 +355,7 @@ describe('runDoctor — passing outcomes', () => {
 
   it('a corrupt wallet file warns, never fails doctor', async () => {
     await writeFile(join(dir, 'wallet.json'), '{ not json');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     const wallet = find(data.checks, 'wallet');
@@ -411,13 +375,7 @@ describe('runDoctor — passing outcomes', () => {
       const body = url.includes('/openapi.json') ? OPENAPI_OK : ARTICLES_OK;
       return new Response(JSON.stringify(body), { status: 200 });
     }) as typeof fetch;
-    await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: capturing,
-    });
+    await runDoctor(ctxFor(), deps({ fetchImpl: capturing }));
     expect(readPathUrl).toBeDefined();
     expect(new URL(readPathUrl as string).searchParams.has('q')).toBe(false);
   });
@@ -433,13 +391,7 @@ describe('runDoctor — passing outcomes', () => {
       const body = url.includes('/openapi.json') ? OPENAPI_OK : ARTICLES_OK;
       return new Response(JSON.stringify(body), { status: 200 });
     }) as typeof fetch;
-    await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: capturing,
-    });
+    await runDoctor(ctxFor(), deps({ fetchImpl: capturing }));
     // Two fetches: one openapi.json behind `api` and `search`, plus the read path.
     expect(headersSeen.length).toBe(2);
     for (const headers of headersSeen) {
@@ -483,13 +435,7 @@ describe('runDoctor — passing outcomes', () => {
       }) as typeof fetch;
       await runDoctor(
         { flags: { json: false, timeout: 5000, ...flags }, dataDir: dir, io: captureIo().io },
-        {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env,
-          fetchImpl: capturing,
-        },
+        deps({ env, fetchImpl: capturing }),
       );
       return headersSeen;
     }
@@ -509,13 +455,7 @@ describe('runDoctor — passing outcomes', () => {
         join(dir, 'config.json'),
         JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: 'https://tenjin.blog' }),
       );
-      const half = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const half = await runDoctor(ctxFor(), deps());
       const halfCheck = checkNamed(half, 'team shelf');
       expect(halfCheck?.status).toBe('warn');
       // Never fails the command: public mode is a working machine.
@@ -529,25 +469,13 @@ describe('runDoctor — passing outcomes', () => {
         join(dir, 'config.json'),
         JSON.stringify({ shelfBypassSecret: SECRET, baseUrl: TEAM }),
       );
-      const done = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const done = await runDoctor(ctxFor(), deps());
       expect(checkNamed(done, 'team shelf')?.status).toBe('ok');
       expect(JSON.stringify(done.data)).not.toContain(SECRET);
     });
 
     it('emits no team shelf check on a default machine (marketplace baseUrl, no secret)', async () => {
-      const plain = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const plain = await runDoctor(ctxFor(), deps());
       expect(checkNamed(plain, 'team shelf')).toBeUndefined();
     });
 
@@ -575,13 +503,7 @@ describe('runDoctor — passing outcomes', () => {
           dataDir: dir,
           io: captureIo().io,
         },
-        {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        },
+        deps(),
       );
       const check = checkNamed(res, 'team shelf');
       expect(check?.status).toBe('warn');
@@ -609,13 +531,7 @@ describe('runDoctor — passing outcomes', () => {
         await writeFile(join(dir, 'config.json'), JSON.stringify(config));
         const res = await runDoctor(
           { flags: { json: false, timeout: 5000, ...flags }, dataDir: dir, io: captureIo().io },
-          {
-            walletPassphrase: NO_OS_STORE,
-            homeDir: skillHome,
-            skillsSourceDir: pkgSrc,
-            env,
-            fetchImpl: healthyFetch,
-          },
+          deps({ env }),
         );
         return checkNamed(res, 'team shelf');
       }
@@ -649,13 +565,7 @@ describe('runDoctor — passing outcomes', () => {
 
 describe('runDoctor — required failures throw the mapped CliError', () => {
   async function catchDoctor(fetchImpl: typeof fetch, baseUrlFlag?: string): Promise<CliError> {
-    const err = await runDoctor(ctxFor(baseUrlFlag), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl,
-    }).catch((e: unknown) => e);
+    const err = await runDoctor(ctxFor(baseUrlFlag), deps({ fetchImpl })).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CliError);
     return err as CliError;
   }
@@ -729,13 +639,9 @@ describe('runDoctor — required failures throw the mapped CliError', () => {
       },
     ]) {
       const ctx = await setup();
-      const err = (await runDoctor(ctx, {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: GATE_PAGE,
-      }).catch((e: unknown) => e)) as CliError;
+      const err = (await runDoctor(ctx, deps({ fetchImpl: GATE_PAGE })).catch(
+        (e: unknown) => e,
+      )) as CliError;
       const check = find((err.details as { checks: CheckResult[] }).checks, 'api');
       // Still names what actually came back: that part is true either way.
       expect(check.detail).toContain('HTML page');
@@ -1008,14 +914,7 @@ describe('runDoctor — injected remote provider', () => {
   it('empty data dir: wallet check reports the remote address, balance probes it', async () => {
     const address = privateKeyToAccount(generatePrivateKey()).address;
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-      provider: remoteProvider(address),
-    });
+    const res = await runDoctor(ctxFor(), deps({ provider: remoteProvider(address) }));
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'wallet').detail).toContain(address);
@@ -1031,14 +930,13 @@ describe('runDoctor — injected remote provider', () => {
     process.env.TENJIN_WALLET_KEY = generatePrivateKey();
     const address = privateKeyToAccount(generatePrivateKey()).address;
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: { TENJIN_WALLET_KEY: process.env.TENJIN_WALLET_KEY },
-      fetchImpl: healthyFetch,
-      provider: remoteProvider(address),
-    });
+    const res = await runDoctor(
+      ctxFor(),
+      deps({
+        env: { TENJIN_WALLET_KEY: process.env.TENJIN_WALLET_KEY },
+        provider: remoteProvider(address),
+      }),
+    );
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass');
     expect(find(data.checks, 'wallet').detail).toContain(address);
@@ -1075,14 +973,7 @@ describe('runDoctor — wallet verification', () => {
 
   async function walletFor(verify?: WalletProvider['verify']): Promise<CheckResult> {
     balanceMock.mockResolvedValue(5_000_000n);
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-      provider: providerVerifying(verify),
-    });
+    const res = await runDoctor(ctxFor(), deps({ provider: providerVerifying(verify) }));
     return find((res.data as { checks: CheckResult[] }).checks, 'wallet');
   }
 
@@ -1188,13 +1079,7 @@ const installCodex = (): Promise<string | undefined> =>
 
 describe('runDoctor — skill wiring', () => {
   it('no skills anywhere: warns and points at tenjin install', async () => {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const data = res.data as { status: string; checks: CheckResult[] };
     expect(data.status).toBe('pass'); // never required: a server machine has no harness
     const skills = find(data.checks, 'skills');
@@ -1206,13 +1091,7 @@ describe('runDoctor — skill wiring', () => {
 
   it('hosted skill only: warns that both CLI skills are missing', async () => {
     await writeSkill('tenjin');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
     expect(skills.detail).toContain(
@@ -1224,13 +1103,7 @@ describe('runDoctor — skill wiring', () => {
   it('hosted + search but no publish: names the directory and only the missing skill', async () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
     expect(skills.detail).toContain(`${claudeSkills()}: tenjin-publish missing`);
@@ -1242,13 +1115,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish', 'disable-model-invocation: true\n');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('warn');
     expect(skills.detail).toContain(
@@ -1263,13 +1130,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin');
     await writeSkill('tenjin-search');
     await writeSkill('tenjin-publish');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
     expect(skills.detail).toBe('tenjin-search + tenjin-publish, current');
@@ -1279,13 +1140,7 @@ describe('runDoctor — skill wiring', () => {
     for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
       await writeSkillIn(sharedSkills(), name);
     }
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(skills.status).toBe('ok');
     expect(JSON.stringify(skills.data)).toContain(sharedSkills());
@@ -1296,13 +1151,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin-publish');
     await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o000);
     try {
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain('unreadable or disable-model-invocation');
@@ -1316,13 +1165,7 @@ describe('runDoctor — skill wiring', () => {
     await writeSkill('tenjin-publish');
     await chmod(join(claudeSkills(), 'tenjin-publish', 'SKILL.md'), 0o000);
     try {
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       // The flagged one is a fact; only the unreadable one carries the hedge, because
       // being unable to read it is exactly why its flag cannot be asserted.
@@ -1348,13 +1191,7 @@ describe('runDoctor — skill wiring', () => {
     it('toggle on, skill missing: warns and coaches the re-sync', async () => {
       await wireCli();
       await writeFile(join(dir, 'config.json'), JSON.stringify({ bazaarPay: true }));
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain('bazaarPay is on but the tenjin-pay skill is missing');
@@ -1365,13 +1202,7 @@ describe('runDoctor — skill wiring', () => {
     it('toggle off, skill still present: warns that a refused lane is being taught', async () => {
       await wireCli();
       await writeSkill('tenjin-pay'); // no config: bazaarPay defaults to off
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain('bazaarPay is off but the tenjin-pay skill is still present');
@@ -1382,13 +1213,7 @@ describe('runDoctor — skill wiring', () => {
       await wireCli();
       await writeSkill('tenjin-pay');
       await writeFile(join(dir, 'config.json'), JSON.stringify({ bazaarPay: true }));
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('ok');
     });
@@ -1404,13 +1229,7 @@ describe('runDoctor — skill wiring', () => {
       }
       await writeSkillIn(sharedSkills(), 'tenjin');
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('ok');
       // The regression: a union across directories announced both CLI skills
@@ -1427,13 +1246,7 @@ describe('runDoctor — skill wiring', () => {
       await writeSkillIn(claudeSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
       await writeSkillIn(sharedSkills(), 'tenjin-search');
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       // The shadowed branch used to return before missing was ever computed.
@@ -1449,13 +1262,7 @@ describe('runDoctor — skill wiring', () => {
       }
       await writeSkillIn(sharedSkills(), 'tenjin-search');
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
@@ -1471,13 +1278,7 @@ describe('runDoctor — skill wiring', () => {
         await writeSkillIn(sharedSkills(), name);
       }
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain(
@@ -1494,13 +1295,7 @@ describe('runDoctor — skill wiring', () => {
         await writeSkillIn(sharedSkills(), name);
       }
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.detail).toContain(`${claudeSkills()}: neither CLI skill is wired`);
@@ -1514,13 +1309,7 @@ describe('runDoctor — skill wiring', () => {
       }
       await writeSkillIn(sharedSkills(), 'tenjin-search');
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-      });
+      const res = await runDoctor(ctxFor(), deps());
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('ok');
       expect(skills.fix).toBeUndefined();
@@ -1545,13 +1334,7 @@ describe('runDoctor — skill wiring', () => {
         await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
         await recordHarness('codex');
 
-        const res = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const res = await runDoctor(ctxFor(), deps());
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         // Before the record existed this shadowed publish skill — the #35 defect, in
         // the directory the user picked — appeared only in the "Full state" tail.
@@ -1576,13 +1359,7 @@ describe('runDoctor — skill wiring', () => {
         await writeSkillIn(sharedSkills(), 'tenjin-search');
         await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
 
-        const res = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const res = await runDoctor(ctxFor(), deps());
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.detail).not.toContain('not model-invocable');
         expect(skills.detail).toContain('not from this CLI build');
@@ -1595,13 +1372,7 @@ describe('runDoctor — skill wiring', () => {
         }
         await recordHarness('codex');
 
-        const res = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const res = await runDoctor(ctxFor(), deps());
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         const dirs = (skills.data as { directories: Array<Record<string, unknown>> }).directories;
         const shared = dirs.find((d) => d.dir === sharedSkills());
@@ -1618,13 +1389,7 @@ describe('runDoctor — skill wiring', () => {
         }
         await recordHarness('codex');
 
-        const res = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const res = await runDoctor(ctxFor(), deps());
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('ok');
         expect(skills.fix).toBeUndefined();
@@ -1637,13 +1402,7 @@ describe('runDoctor — skill wiring', () => {
         // then needed to learn about --harness codex. One recorded target, one fix.
         await recordHarness('codex');
 
-        const res = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const res = await runDoctor(ctxFor(), deps());
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('warn');
         expect(skills.detail).toContain('No Tenjin skills wired');
@@ -1653,13 +1412,7 @@ describe('runDoctor — skill wiring', () => {
         for (const name of ['tenjin-search', 'tenjin-publish']) {
           await writeSkillIn(sharedSkills(), name);
         }
-        const after = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const after = await runDoctor(ctxFor(), deps());
         const skillsAfter = find((after.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skillsAfter.status).toBe('ok');
       });
@@ -1670,13 +1423,7 @@ describe('runDoctor — skill wiring', () => {
         await mkdir(join(skillHome, '.claude'), { recursive: true });
         await recordHarness('codex');
 
-        const res = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const res = await runDoctor(ctxFor(), deps());
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('warn');
         expect(skills.fix).toBe('tenjin install --harness codex');
@@ -1685,13 +1432,7 @@ describe('runDoctor — skill wiring', () => {
         for (const name of ['tenjin-search', 'tenjin-publish']) {
           await writeSkillIn(sharedSkills(), name);
         }
-        const after = await runDoctor(ctxFor(), {
-          walletPassphrase: NO_OS_STORE,
-          homeDir: skillHome,
-          skillsSourceDir: pkgSrc,
-          env: {},
-          fetchImpl: healthyFetch,
-        });
+        const after = await runDoctor(ctxFor(), deps());
         const skillsAfter = find((after.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skillsAfter.status).toBe('ok');
       });
@@ -1703,14 +1444,7 @@ describe('runDoctor — skill wiring', () => {
       }
       await writeSkillIn(sharedSkills(), 'tenjin');
 
-      const res = await runDoctor(ctxFor(), {
-        walletPassphrase: NO_OS_STORE,
-        homeDir: skillHome,
-        skillsSourceDir: pkgSrc,
-        env: {},
-        fetchImpl: healthyFetch,
-        which: (bin) => bin === 'codex',
-      });
+      const res = await runDoctor(ctxFor(), deps({ which: (bin) => bin === 'codex' }));
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
       expect(skills.fix).toBe('tenjin install --harness codex');
@@ -1721,13 +1455,7 @@ describe('runDoctor — skill wiring', () => {
     for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
       await writeSkillIn(claudeSkills(), name);
     }
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     const data = skills.data as {
       directories: Array<{
@@ -2116,13 +1844,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       await writeFile(join(src, name, 'SKILL.md'), 'current\n');
     }
     await wire('current\n');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: src,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ skillsSourceDir: src }));
     expect(find((res.data as { checks: CheckResult[] }).checks, 'skills').status).toBe('ok');
     await rm(src, { recursive: true, force: true });
   });
@@ -2134,13 +1856,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       await writeFile(join(src, name, 'SKILL.md'), 'current\n');
     }
     const skills = await wire('what an older CLI shipped\n');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: src,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ skillsSourceDir: src }));
     const data = res.data as { status: string; checks: CheckResult[] };
     const check = find(data.checks, 'skills');
     expect(check.status).toBe('warn');
@@ -2157,13 +1873,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
   it('still reports every check when the packaged skills cannot be resolved', async () => {
     const gone = join(tmpdir(), 'tenjin-nonexistent-skills-source');
     await wire('anything\n');
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: gone,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ skillsSourceDir: gone }));
     const data = res.data as { status: string; checks: CheckResult[] };
     // Every check still reported, and "cannot verify" is a warning rather than a
     // green tick: an unreadable package is exactly what doctor should describe.
@@ -2195,13 +1905,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     await rm(link, { recursive: true, force: true });
     await symlink(real, link);
 
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: src,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ skillsSourceDir: src }));
     const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('not from this CLI build');
@@ -2227,14 +1931,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
       await mkdir(join(shared, name), { recursive: true });
       await writeFile(join(shared, name, 'SKILL.md'), 'what an older CLI shipped\n');
     }
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: src,
-      which: () => false,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ skillsSourceDir: src, which: () => false }));
     const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('not from this CLI build');
@@ -2258,13 +1955,7 @@ describe('runDoctor — skills go stale after a CLI update', () => {
     // Requested but NOT detected, which is exactly what a bare `tenjin install`
     // misses: the harness record is what put this directory in play.
     await writeFile(join(dir, 'config.json'), JSON.stringify({ install: { harness: ['codex'] } }));
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: src,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps({ skillsSourceDir: src }));
     const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(check.status).toBe('warn');
     expect(check.detail).toContain('not from this CLI build');
@@ -2289,13 +1980,7 @@ describe('runDoctor — a pipe at a skill path cannot hang the diagnostic', () =
     const { execFileSync } = await import('node:child_process');
     execFileSync('mkfifo', [join(skills, 'tenjin-search', 'SKILL.md')]);
 
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     // Reaching this line at all is the assertion: before the guard it never returned.
     const check = find((res.data as { checks: CheckResult[] }).checks, 'skills');
     expect(check.status).toBe('warn');
@@ -2339,13 +2024,7 @@ describe('runDoctor — a base URL that is not an origin never aborts the run', 
  */
 describe('runDoctor — loop hook wiring', () => {
   async function hookChecks(): Promise<CheckResult[]> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     const checks = (res.data as { checks: CheckResult[] }).checks;
     return checks.filter((c) => c.name === 'daemon' || c.name === 'entries');
   }
@@ -2522,13 +2201,7 @@ describe('runDoctor — Codex loop hook wiring', () => {
  */
 describe('runDoctor — the grouped page', () => {
   async function page(): Promise<{ lines: string[]; checks: CheckResult[] }> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     return { lines: res.humanLines ?? [], checks: (res.data as { checks: CheckResult[] }).checks };
   }
 
@@ -2589,13 +2262,7 @@ describe('runDoctor — pending pairings', () => {
   }
 
   async function pairingsCheck(): Promise<CheckResult | undefined> {
-    const res = await runDoctor(ctxFor(), {
-      walletPassphrase: NO_OS_STORE,
-      homeDir: skillHome,
-      skillsSourceDir: pkgSrc,
-      env: {},
-      fetchImpl: healthyFetch,
-    });
+    const res = await runDoctor(ctxFor(), deps());
     return (res.data as { checks: CheckResult[] }).checks.find((c) => c.name === 'pairings');
   }
 

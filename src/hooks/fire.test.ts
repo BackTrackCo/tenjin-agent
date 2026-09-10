@@ -1,41 +1,19 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { HookInput, HookTool } from '../adapters/types';
 import { CONFIG_DEFAULTS } from '../lib/config';
 import { claim, getMark } from './gates';
 import { runFire, selectArm } from './fire';
-import { openLoopDb, type LoopDb } from './store';
+import type { LoopDb } from './store';
+import { cleanup, freshDb } from './arms/test-support';
 import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult, Question } from './types';
 
 // End-to-end over a real loop.db: every gate, the ledger write and the bail
 // timer are the real thing, only the clock, the arms and the legs are fake
 // (02-redesign.md §5, 07-pr-b-daemon-kernel.md).
 
-const dirs: string[] = [];
-const open: LoopDb[] = [];
-
-async function freshDb(): Promise<LoopDb> {
-  const dir = await mkdtemp(join(tmpdir(), 'tenjin-b-fire-'));
-  dirs.push(dir);
-  const db = openLoopDb(dir);
-  open.push(db);
-  return db;
-}
-
-afterEach(async () => {
+afterEach(() => {
   vi.useRealTimers();
-  for (const db of open.splice(0)) {
-    try {
-      db.close();
-    } catch {
-      // Already closed by the test.
-    }
-  }
-  for (const dir of dirs.splice(0)) {
-    await rm(dir, { recursive: true, force: true });
-  }
+  cleanup();
 });
 
 const NOW = 1_700_000_000_000;
@@ -179,7 +157,7 @@ describe('selectArm', () => {
 
 describe('runFire: no question', () => {
   it('no arm: one fires row, arm "none", reason no-question, wait tool, deadline tool_wait_ms', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const { commit } = await runFire(input(), deps(db, []));
     commit();
     const rows = fireRows(db);
@@ -193,7 +171,7 @@ describe('runFire: no question', () => {
   });
 
   it("arm.plan null: no-question, before() ran, deadline is the arm's wait", async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const before = vi.fn();
     const arm: Arm = {
       id: 'noq',
@@ -217,7 +195,7 @@ describe('runFire: no question', () => {
 
 describe('runFire: a skip', () => {
   it("records the skip's reason and stamps the row with the text it refused", async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'prompt',
       wait: 'human',
@@ -239,7 +217,7 @@ describe('runFire: a skip', () => {
   });
 
   it.each(['slash', 'harness', 'words'] as const)('%s lands as its own reason', async (r) => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'prompt',
       wait: 'human',
@@ -257,7 +235,7 @@ describe('runFire: no client-side rate limit', () => {
     // A research subagent fires 15 to 18 web lookups a minute at peak, so the
     // tenth fire of a burst is exactly the one that must still reach a shelf
     // (09-pr-c-lookup-arms.md, review round 2).
-    const db = await freshDb();
+    const db = freshDb();
     let calls = 0;
     const arm: Arm = {
       id: 'research',
@@ -284,7 +262,7 @@ describe('runFire: no client-side rate limit', () => {
 
 describe('runFire: a hit', () => {
   it('delivers, caches the verdict, and rows one leg as hit', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'hit-arm',
       wait: 'tool',
@@ -310,7 +288,7 @@ describe('runFire: a hit', () => {
   });
 
   it('stores what was SENT: the row carries the search leg’s 512-character cut', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const text = 'why is vitest slow '.repeat(106).trim();
     expect(text.length).toBeGreaterThan(2000);
     const arm: Arm = {
@@ -337,7 +315,7 @@ describe('runFire: a hit', () => {
     // The catch releases only a claim this fire still holds as `asking`;
     // once `finish` cached the verdict, an error in delivery must not turn
     // the next identical question back into a paid lookup.
-    const db = await freshDb();
+    const db = freshDb();
     let legCalls = 0;
     const leg = strongLeg('res-x');
     const counted: Leg = {
@@ -379,7 +357,7 @@ describe('runFire: a hit', () => {
 
 describe('runFire: seen', () => {
   it('the same resource on a later fire with a different question key is "seen" with no emit', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     let calls = 0;
     const arm: Arm = {
       id: 'seen-arm',
@@ -413,7 +391,7 @@ describe('runFire: once-per-piece is about what was SHOWN', () => {
     // The context arm looks things up to earn a precision number and says
     // nothing. Burning `seen:` there would let a silent lookup silence the
     // injection a prompt asks for a second later (00-principles.md, 4).
-    const db = await freshDb();
+    const db = freshDb();
     const logged: Arm = {
       id: 'context',
       wait: 'tool',
@@ -459,7 +437,7 @@ describe('runFire: once-per-piece is about what was SHOWN', () => {
 describe('runFire: deadline', () => {
   it('a leg that never resolves hits the deadline, releases the claim, and never calls after()', async () => {
     vi.useFakeTimers();
-    const db = await freshDb();
+    const db = freshDb();
     const clockRef = { now: NOW };
     const advance = async (ms: number): Promise<void> => {
       clockRef.now += ms;
@@ -515,7 +493,7 @@ describe('runFire: async arm hooks under the race (K1)', () => {
 
   it('a plan that resolves past the deadline records deadline and spends no mark', async () => {
     const { clockRef, advance } = withClock();
-    const db = await freshDb();
+    const db = freshDb();
     let afterCalls = 0;
     const arm: Arm = {
       id: 'slow-plan-arm',
@@ -559,7 +537,7 @@ describe('runFire: async arm hooks under the race (K1)', () => {
 
   it('an after() that stalls past the deadline is a deadline row with no emit', async () => {
     const { clockRef, advance } = withClock();
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'slow-after-arm',
       wait: 'tool',
@@ -582,7 +560,7 @@ describe('runFire: async arm hooks under the race (K1)', () => {
   });
 
   it('async before, plan and after that resolve in time run in order and emit', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const order: string[] = [];
     const arm: Arm = {
       id: 'async-arm',
@@ -611,7 +589,7 @@ describe('runFire: async arm hooks under the race (K1)', () => {
 
 describe('runFire: leg outcomes short of a hit', () => {
   it('a rejecting leg is no-answer and releases the claim', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'reject-arm',
       wait: 'tool',
@@ -632,7 +610,7 @@ describe('runFire: leg outcomes short of a hit', () => {
     // The client has no quality rule of its own, so a shelf that marked nothing
     // `strong` has said nothing: the leg is a definite miss, not an outage, and
     // the row keeps what the shelf offered.
-    const db = await freshDb();
+    const db = freshDb();
     let delivered = 0;
     const arm: Arm = {
       id: 'no-vouch-arm',
@@ -662,7 +640,7 @@ describe('runFire: leg outcomes short of a hit', () => {
   });
 
   it('a http_429 leg is rate-server', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'r429-arm',
       wait: 'tool',
@@ -680,7 +658,7 @@ describe('runFire: leg outcomes short of a hit', () => {
 
 describe('runFire: before() throws', () => {
   it('reason error, with the detail naming the error', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'throw-arm',
       wait: 'tool',
@@ -704,7 +682,7 @@ describe('runFire: before() throws', () => {
 
 describe('runFire: after()', () => {
   it("after()'s context is the emit when there was no delivery", async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'after-only-arm',
       wait: 'tool',
@@ -717,7 +695,7 @@ describe('runFire: after()', () => {
   });
 
   it("after()'s context is appended to the delivery's context", async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const asked: Array<Question | null> = [];
     const arm: Arm = {
       id: 'append-arm',
@@ -743,7 +721,7 @@ describe('runFire: after()', () => {
 
 describe('runFire: commit', () => {
   it('is idempotent, and nothing is recorded until it is called', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const { commit } = await runFire(input(), deps(db, []));
     expect(fireRows(db)).toHaveLength(0);
     commit();
@@ -755,7 +733,7 @@ describe('runFire: commit', () => {
 
 describe('runFire: clientSignal', () => {
   it('an already-aborted clientSignal forces emit null and reason deadline', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const arm: Arm = {
       id: 'client-abort-arm',
       wait: 'tool',
@@ -774,7 +752,7 @@ describe('runFire: clientSignal', () => {
     // The row says `deadline` either way. Running `after` under it would let an
     // abandoned fire spend a mark — the context arm's one chance at a package —
     // on a question nobody will ever read the answer to.
-    const db = await freshDb();
+    const db = freshDb();
     let afterCalls = 0;
     const arm: Arm = {
       id: 'client-abort-after-arm',
@@ -798,7 +776,7 @@ describe('runFire: clientSignal', () => {
 
 describe('runFire: phantom agent.stop', () => {
   it('a stop with no started mark returns emit null and commit writes no row', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const stop = input({ event: 'agent.stop', native: { event: 'SubagentStop' }, agent: 'child1' });
     const { emit, commit } = await runFire(stop, deps(db, []));
     expect(emit).toBeNull();

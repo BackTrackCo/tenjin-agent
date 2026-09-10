@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { runPublish, type PublishArgs, type PublishDeps } from './publish';
@@ -9,41 +8,38 @@ import { withLoopDb } from '../lib/loop-db';
 import { testSigner } from '../lib/read-test-utils';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import {
+  capturingStream,
+  cleanupTempDirs,
+  commandContext,
+  jsonResponse,
+  sinkStream,
+  tempDir,
+} from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-publish-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-publish-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+  return commandContext({
     dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+    flags: { json: true, baseUrl: 'https://preview.example' },
+  });
 }
 
 /** A ctx whose stderr writes are captured, for asserting the default-mode notice. */
 function makeCtxCapturingStderr(): { ctx: CommandContext; stderr: () => string } {
   const chunks: string[] = [];
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  const errStream = {
-    write: (s: string) => {
-      chunks.push(s);
-      return true;
-    },
-  } as unknown as NodeJS.WritableStream;
   return {
     stderr: () => chunks.join(''),
-    ctx: {
-      flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+    ctx: commandContext({
       dataDir: dir,
-      io: { stdout: sink(), stderr: errStream, isTTY: false },
-    },
+      flags: { json: true, baseUrl: 'https://preview.example' },
+      io: { stdout: sinkStream(), stderr: capturingStream(chunks), isTTY: false },
+    }),
   };
 }
 
@@ -108,10 +104,7 @@ function stubServer(post: Record<string, unknown> = CREATED): {
   const calls: string[] = [];
   const fetchFn = (async (url: string | URL) => {
     calls.push(String(url));
-    return new Response(JSON.stringify(post), {
-      status: 201,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(201, post);
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, calls };
 }
@@ -121,10 +114,7 @@ function bodyServer(): { fetch: typeof fetch; body: () => Record<string, unknown
   let captured: Record<string, unknown> | undefined;
   const fetchFn = (async (_url: string | URL, init?: RequestInit) => {
     captured = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined;
-    return new Response(JSON.stringify(CREATED), {
-      status: 201,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(201, CREATED);
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, body: () => captured };
 }
@@ -1745,22 +1735,14 @@ describe('runPublish on a team shelf', () => {
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
         body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
       });
-      return new Response(JSON.stringify({ ...CREATED, price: '0' }), {
-        status: 201,
-        headers: { 'content-type': 'application/json' },
-      });
+      return jsonResponse(201, { ...CREATED, price: '0' });
     }) as unknown as typeof fetch;
     return { fetch: fetchFn, sent };
   }
 
   /** A ctx with no --base-url, so the shelf config below decides the target. */
   function teamCtx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir: dir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return commandContext({ dataDir: dir, flags: { json: true } });
   }
 
   async function writeShelfConfig(): Promise<void> {
@@ -2184,10 +2166,7 @@ function stubGate(
         { status: 422, headers: { 'content-type': 'application/json' } },
       );
     }
-    return new Response(JSON.stringify(post), {
-      status: 201,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(201, post);
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, bodies: () => bodies };
 }
@@ -2702,10 +2681,7 @@ describe('runPublish — server ingest gate', () => {
                 },
               },
             };
-      return new Response(JSON.stringify({ error: { message: 'gate', ...body } }), {
-        status: 422,
-        headers: { 'content-type': 'application/json' },
-      });
+      return jsonResponse(422, { error: { message: 'gate', ...body } });
     }) as unknown as typeof fetch;
     const err = (await runPublish(
       baseArgs(await writeDoc(CLEAN), { mode: 'full-auto' }),
