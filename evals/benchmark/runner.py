@@ -41,7 +41,6 @@ from typing import Any, Callable
 
 from . import artifact, claude_usage, container, discovery, executor, images, loop_join, phases as phases_module, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
-from . import reap
 from .schedule import Trial
 
 Clock = Callable[[], float]
@@ -135,15 +134,15 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
 def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
     """The only place this package starts a process. Own session, no shell.
 
-    The group is recorded before it is waited on and released only once it is
-    dead, so a leftover is a file under `<run>/pids/` that `cli.py cleanup`
-    acts on. Nothing here, and nothing an operator or an agent has to do
-    afterwards, matches a process by name: that is how a cleanup aimed at one
-    trial reaches an unrelated session.
+    Its own session so the wall-clock cap and the way out both reach a
+    grandchild the agent left behind. Nothing here, and nothing an operator or
+    an agent has to do afterwards, matches a process by name: that is how a
+    cleanup aimed at one trial reaches an unrelated session.
 
-    A live launch names a container. Killing the docker client's group does not
-    stop it, so the container is stopped and removed here on every path out,
-    the interrupt included, before the ledger entry is released.
+    A harness SIGKILLed mid-trial leaves this child reparented to pid 1, and
+    nothing reaps it. That is deliberate. This seam runs the fake and offline
+    executors, which start no model and spend nothing, so a stray `sleep` costs
+    a `kill` an operator may never bother to type.
     """
     roots.output.mkdir(parents=True, exist_ok=True)
     stream = roots.stream.open("w", encoding="utf-8")
@@ -159,7 +158,6 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
         start_new_session=True,
         shell=False,
     )
-    reap.register(roots.run_dir, roots.trial_id, process.pid, launch.argv[0], container=launch.container)
     timed_out = False
     try:
         try:
@@ -178,9 +176,6 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
                 process.communicate(timeout=_ORPHAN_WAIT_S)
             except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
                 pass
-        if launch.container is not None:
-            container.stop(launch.container)
-        reap.release(roots.run_dir, roots.trial_id)
         stream.close()
     return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
 

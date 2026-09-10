@@ -58,7 +58,6 @@ the suite builds.
 | `reduce.py`                | task-equal reduction, amortization, seeded bootstrap                      | `test_reduce.py`                     |
 | `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary            | `test_report.py`, `test_regress.py`  |
 | `cases.py`, `discovery.py` | the search-intent export and the discovery counters                       | `test_cases.py`, `test_discovery.py` |
-| `reap.py`                  | cleanup by recorded identity, never by process name                       | `test_reap.py`                       |
 | `snapshot.py`              | the per-run corpus reading: post count and content hash                   | `test_snapshot.py`                   |
 | `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs                | `test_fake_run.py`                   |
 
@@ -94,8 +93,8 @@ one hash per package covers every runner. Nothing else in the package needs eith
 
 The live plumbing smoke is `benchmark-live.yml`, on a pull request touching `evals/benchmark/**`
 and on dispatch: a pinned Claude Code, `live-run --plumbing --ci-live` over the smoke manifest
-with `CLAUDE_CODE_OAUTH_TOKEN` on that one step, then `verify`, `summary`, `regress`, `cleanup`,
-and `report.json` uploaded alone. Every record is stamped automated and non-publishable, so the
+with `CLAUDE_CODE_OAUTH_TOKEN` on that one step, then `verify`, `summary`, `regress`, and
+`report.json` uploaded alone. Every record is stamped automated and non-publishable, so the
 lane is evidence that the chain runs on a real agent and never a number anyone may quote. It is
 informational: not required, never blocking, and not `continue-on-error` either, because a red
 run is meant to be seen; on a fork the secret is absent and the live steps skip.
@@ -333,8 +332,7 @@ trial from the operator's own data dir, which `--tenjin-source` names and which 
 **Provisioning and stop.** An arm declaring `provision: "tenjin"` is prepared after its roots
 exist and before its launch: the bundles are copied, exactly `COPIED_KEYS` are copied from the
 source config, the constants in `SEEDED` are forced, a fresh `daemon.token` and a free loopback
-port are minted, and one daemon starts under `process_start` in its own session with its group in
-the pids ledger. `prepare` waits for `/health` to name this data dir and this pid and refuses the
+port are minted, and one daemon starts under `process_start` in its own session. `prepare` waits for `/health` to name this data dir and this pid and refuses the
 trial otherwise; nothing wallet-related is copied. `stop` ends the daemon once the agent has
 exited and waits for `loop.db-wal` to disappear, and because the shim may have spawned a detached
 daemon outside the trial's group it also reads `daemon.pid` as it is then, confirms through
@@ -923,8 +921,8 @@ starts it, waits for `/health`, runs `claude` with the argv the runner built, st
 and any daemon the shim respawned, waits for the WAL to vanish, writes `daemon.json` into the
 output root, and exits with claude's code; the host reads that file instead of signalling a
 pid, and `tenjin_arm` no longer starts a process at all. The natural arm's two phases are two
-containers in sequence on one data dir. The container name goes into the run's process ledger,
-so `cli.py cleanup`, the wall-clock cap and an interrupt all stop and remove it.
+containers in sequence on one data dir. The wall-clock cap and an interrupt both stop and remove
+the container on the way out.
 
 **Network.** Egress is per attempt, and Harbor owns it. A `NetworkPolicy` in allowlist mode puts
 the trial's service in the network namespace of an egress sidecar whose nftables ruleset redirects
@@ -1034,12 +1032,10 @@ is per attempt now, so nothing counted per run has to be attributed to one trial
 
 ## Cleanup
 
-Every process this package starts leads its own session, and its group is recorded under
-`<run>/pids/` before the run waits on it. The spawn kills the group and clears the record on its
-way out whatever happened, an interrupt included. If a run is killed outright, `cli.py cleanup
---run <dir>` reads the ledger, and before signalling anything checks each record against the live
-process: same start time and same process group, or the record is dropped unkilled. A pid is
-reused, so killing a recycled one kills a stranger.
+Every process this package starts leads its own session, and the spawn kills the whole group on
+its way out whatever happened, an interrupt included. A harness SIGKILLed mid-trial leaves that
+child reparented to pid 1 and nothing reaps it, which is a cost this package accepts rather than
+a gap: this seam runs the fake and offline executors, which start no model and spend nothing.
 
 Never clean up by matching a process name. A pattern such as `pkill -f bin/claude` also matches
 the operator's own unrelated sessions, and on 2026-09-07 exactly that command, run to tidy one

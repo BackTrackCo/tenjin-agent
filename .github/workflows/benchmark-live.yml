@@ -132,7 +132,7 @@ jobs:
       # `regress` warns on the checks tab where the run is worse than the
       # committed baseline and exits 0 whatever it finds; the lane stays
       # informational.
-      - name: Verify, summary, regress, cleanup
+      - name: Verify, summary, regress
         if: steps.gate.outputs.live == 'true'
         run: |
           set -o pipefail
@@ -156,7 +156,6 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           python3 -m evals.benchmark.cli regress --run "$run" \
             --baseline evals/benchmark/fixtures/live/baseline.json
-          python3 -m evals.benchmark.cli cleanup --run "$run"
       # report.json is the only publishable projection and the only thing
       # retained. Records, transcripts, and worktrees stay on the runner and
       # die with it.

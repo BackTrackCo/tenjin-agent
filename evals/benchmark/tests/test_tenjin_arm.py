@@ -26,7 +26,7 @@ from unittest import mock
 import pytest
 from inline_snapshot import snapshot
 
-from evals.benchmark import artifact, cases, cli, container, executor, manifest as manifest_module, producer, reap, records, runner, schedule, signature, tenjin_arm, usage, verifier
+from evals.benchmark import artifact, cases, cli, container, executor, manifest as manifest_module, producer, records, runner, schedule, signature, tenjin_arm, usage, verifier
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -258,9 +258,6 @@ def test_prepare_seeds_the_data_dir_and_starts_nothing(make_roots, prepare: Prep
     assert provision.secrets == (SECRET,)
     assert provision.facts["shelf_origin"] == "team-shelf.example"
     assert not (data / "daemon.pid").exists()
-    # Nothing of ours is running, so the ledger is empty: the container the
-    # runner starts is what the ledger will name.
-    assert reap.read_records(roots.run_dir) == []
 
 
 def test_stop_reads_the_containers_report_and_confirms_the_wal_is_gone(make_roots, prepare: Prepare, entrypoint: Entrypoint) -> None:
@@ -482,7 +479,6 @@ def test_a_provisioned_trial_runs_between_prepare_and_stop_and_records_the_facts
     assert (isolation["publishable"], isolation["shelf_secret_present"], isolation["shelf_origin"]) == (False, True, "team-shelf.example")
     assert isolation["daemon_respawned"] is False
     assert record["delivery"]["classes"] == {"team": 0, "public": 0, "local": 0, "other": 0}
-    assert reap.read_records(run_dir) == []
     assert SECRET not in json.dumps(record)
 
 
@@ -541,7 +537,6 @@ def test_a_wal_left_live_makes_the_attempt_invalid(seeded_manifest, make_runtime
             seeded_manifest, trial_of(seeded_manifest, "tenjin_seeded"), run_dir, "sha256:schedule", make_runtime(spawn=support.fake_spawn(before=before))
         )
     assert (record["outcome"], record["invalid_reason"]) == ("invalid", "delivery:wal_live")
-    assert reap.read_records(run_dir) == []
 
 
 def legs(*shelves: str | tuple[str, str, str]) -> support.Before:
@@ -958,7 +953,6 @@ def test_key_drift_and_a_failed_publish_refuse_the_trial_before_the_daemon_and_m
     assert "tenjin publish exited 4" in str(caught.value)
     assert SECRET not in str(caught.value)
     assert "[secret]" in str(caught.value)
-    assert reap.read_records(seed_roots.run_dir) == []
 
 
 def test_an_envelope_on_stderr_is_read_by_shape(source, seed_request) -> None:
@@ -989,7 +983,6 @@ def test_a_publish_whose_id_cannot_be_read_sweeps_the_shelf_by_title_and_refuses
     note = json.loads((seed_roots.output / tenjin_arm.SEED_NOTE).read_text(encoding="utf-8"))
     assert (note["published"], note["exit"], note["sweep"]["deleted"]) == ("unknown", 0, ["stray-1", "stray-2"])
     assert f"trial {seed_roots.trial_id}" in note["stamp"]
-    assert reap.read_records(seed_roots.run_dir) == []
 
 
 def test_a_dedup_answer_is_a_refusal_and_two_runs_stamp_differently(source, seed_roots, seed_request, calls) -> None:
@@ -1000,7 +993,6 @@ def test_a_dedup_answer_is_a_refusal_and_two_runs_stamp_differently(source, seed
     note = json.loads((seed_roots.output / tenjin_arm.SEED_NOTE).read_text(encoding="utf-8"))
     assert (note["published"], note["already_published_url"]) == (False, "https://team-shelf.example/a/ali/the-lesson")
     assert [call["argv"][0] for call in calls()] == ["publish"]
-    assert reap.read_records(seed_roots.run_dir) == []
     with pytest.raises(ProvisionError) as missing:
         tenjin_arm.prepare(seed_request(nonce=None))
     assert "run nonce" in str(missing.value)
@@ -1343,7 +1335,6 @@ def test_the_producer_runs_first_is_verified_and_its_capture_reaches_the_consume
     trial_dir = run_dir / "trials" / record["trial_id"]
     assert (trial_dir / "producer" / "output" / "sessions").is_dir()
     assert (trial_dir / "producer" / "verify").is_dir()
-    assert reap.read_records(run_dir) == []
     assert SECRET not in json.dumps(record)
 
 
@@ -1363,7 +1354,6 @@ def test_a_producer_that_does_not_fix_the_task_makes_the_attempt_invalid_and_sta
     assert (record["outcome"], record["invalid_reason"]) == ("invalid", "producer:failed")
     assert record["isolation"]["producer"]["outcome"] == "invalid"
     assert record["isolation"]["producer"]["verifier"]["exit_code"] == 1
-    assert reap.read_records(run_dir) == []
 
 
 def test_a_producer_that_captured_nothing_is_a_valid_natural_attempt(

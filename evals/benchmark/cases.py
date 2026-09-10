@@ -32,7 +32,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from . import loop_join, reap, records, tenjin_arm
+from . import loop_join, records, tenjin_arm
 from .manifest import Manifest
 
 SEARCH_LIMIT = tenjin_arm.SEARCH_LIMIT
@@ -84,10 +84,12 @@ def _mask(value: Any, secrets: tuple[str, ...], home: str) -> Any:
 
 
 def refuse_live(run_dir: Path, trial_ids: list[str]) -> None:
-    """After settlement only: no process of the run alive, no live WAL on any trial ledger."""
-    alive = reap.survivors(run_dir)
-    if alive:
-        raise CasesError(f"the run still has {len(alive)} live process(es) in its ledger; run cleanup first")
+    """After settlement only: no live WAL on any trial ledger.
+
+    The WAL is the settlement fact this export depends on, and it is per trial.
+    A run that is still going has one; a run whose harness died has none, and
+    the questions it recorded are as replayable as any other.
+    """
     for trial_id in trial_ids:
         if loop_join.wal_live(run_dir / "trials" / trial_id / "data" / "loop.db"):
             raise CasesError(f"trial {trial_id} has a live loop.db WAL: settlement has not completed")

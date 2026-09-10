@@ -95,7 +95,6 @@ jobs:
           python3 -m evals.benchmark.cli verify --run "$run"
           echo "::endgroup::"
           python3 -m evals.benchmark.cli summary --run "$run" | tee "$RUNNER_TEMP/bench1-summary.txt"
-          python3 -m evals.benchmark.cli cleanup --run "$run"
           {
             echo '## Bench-1 fake run'
             echo
