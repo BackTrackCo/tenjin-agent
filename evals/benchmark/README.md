@@ -335,11 +335,13 @@ exist and before its launch: the bundles are copied, exactly `COPIED_KEYS` are c
 source config, the constants in `SEEDED` are forced, a fresh `daemon.token` and a free loopback
 port are minted, and one daemon starts under `process_start` in its own session. `prepare` waits for `/health` to name this data dir and this pid and refuses the
 trial otherwise; nothing wallet-related is copied. `stop` ends the daemon once the agent has
-exited and waits for `loop.db-wal` to disappear, and because the shim may have spawned a detached
+exited and then closes `loop.db` itself with a `wal_checkpoint(TRUNCATE)`, because a `-wal` that
+outlived its writer never disappears by being waited on; `WAL_TIMEOUT_S` remains only as the
+backstop for a checkpoint another connection refuses. Because the shim may have spawned a detached
 daemon outside the trial's group it also reads `daemon.pid` as it is then, confirms through
 `/health` that it serves exactly this data dir, and signals it too
-(`isolation.daemon_respawned`). A live WAL after the wait is `delivery:wal_live` and the attempt
-is invalid; a refused prepare invalidates its own trial under `provision:<code>`, undoes what it
+(`isolation.daemon_respawned`). Frames still in the WAL after that are `delivery:wal_live`, the
+attempt is invalid, and `isolation.wal_checkpoint` says which refusal left them there; a refused prepare invalidates its own trial under `provision:<code>`, undoes what it
 half-did, and leaves the rest of the run alone.
 
 **Seeding is honest only if a lesson reached the shelf the way a producer's would**: published
@@ -919,9 +921,11 @@ forwarded by name and never written to a file or an image layer; Harbor then exp
 into the host-side exec argv, which is the accepted cost stated below. The
 daemon runs inside the container on the same data dir: the entrypoint (`docker/trial.mjs`)
 starts it, waits for `/health`, runs `claude` with the argv the runner built, stops the daemon
-and any daemon the shim respawned, waits for the WAL to vanish, writes `daemon.json` into the
-output root, and exits with claude's code; the host reads that file instead of signalling a
-pid, and `tenjin_arm` no longer starts a process at all. The natural arm's two phases are two
+and any daemon the shim respawned, writes `daemon.json` into the output root, and exits with
+claude's code; the host reads that file instead of signalling a pid, and `tenjin_arm` no longer
+starts a process at all. The entrypoint's own wait for the WAL raced the container teardown, so
+settling the ledger is the host's: `settle_daemon` runs the `wal_checkpoint(TRUNCATE)` after the
+container is down and before anything reads `loop.db`. The natural arm's two phases are two
 containers in sequence on one data dir. The wall-clock cap and an interrupt both stop and remove
 the container on the way out, and the attempt's compose project is recorded under
 `<run>/projects/` before it exists, so a sweep after a kill can name it.

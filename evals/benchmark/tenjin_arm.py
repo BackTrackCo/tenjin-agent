@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from . import FIXTURES, artifact, container, sha256_text, signature
+from . import FIXTURES, artifact, container, loop_join, sha256_text, signature
 from .executor import Provision, ProvisionError, ProvisionRequest
 
 NAME = "tenjin"
@@ -96,6 +96,8 @@ DAEMON_PORT = 45871
 DAEMON_REPORT = "daemon.json"
 HEALTH_POLL_S = 0.05
 WAL_TIMEOUT_S = 5.0
+WAL_BUSY = "checkpoint: another connection holds the ledger"
+WAL_UNCLOSED = "checkpoint: the WAL still holds frames"
 PLACEHOLDERS = ("daemon_url", "daemon_token", "data_dir")
 DRY_TOKEN = "minted-at-launch"
 # The seeded lesson: one piece per lesson family under `fixtures/live/lessons/`,
@@ -901,24 +903,70 @@ def read_report(output: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def checkpoint_wal(loop_db: Path) -> str | None:
+    """Empty the ledger's WAL by closing it here. None when it has settled, the reason it has not otherwise.
+
+    A `-wal` that outlives the daemon means the writer never closed the
+    database, and nothing about waiting removes it: only a checkpoint moves
+    the committed frames into the main file, and only the last connection's
+    close deletes the file. So this opens the ledger read-write, checkpoints
+    in TRUNCATE mode, and closes. `wal_checkpoint` reports a lock through its
+    first column instead of raising, so a busy result is read and returned
+    rather than mistaken for success. The connect timeout is zero because the
+    caller owns the retry schedule, and a ledger that does not exist is
+    already settled: opening one read-write would create it.
+    """
+    if not loop_db.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(loop_db, timeout=0)
+    except sqlite3.Error as error:
+        return f"open: {error}"
+    try:
+        row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error as error:
+        return f"checkpoint: {error}"
+    finally:
+        connection.close()
+    return WAL_BUSY if row is not None and row[0] else None
+
+
+def settle_wal(data_dir: Path) -> dict[str, Any]:
+    """Close the trial ledger's WAL, retrying until `WAL_TIMEOUT_S`, and report whether frames survived.
+
+    The checkpoint comes first because it is the deterministic step; the
+    timeout is the backstop for a daemon that outlived its own SIGKILL and
+    still holds the lock. `wal_live` is `loop_join`'s question, not
+    `exists()`: a zero-byte `-wal` holds no frames, which is what the reader
+    downstream refuses on. A checkpoint that reported no error and still left
+    frames behind failed whatever it claimed, so it is reported as a failure.
+    """
+    loop_db = data_dir / LOOP_DB
+    end = time.monotonic() + WAL_TIMEOUT_S
+    reason = checkpoint_wal(loop_db)
+    while loop_join.wal_live(loop_db) and time.monotonic() < end:
+        time.sleep(HEALTH_POLL_S)
+        reason = checkpoint_wal(loop_db)
+    live = loop_join.wal_live(loop_db)
+    return {"wal_live": live, "wal_checkpoint": WAL_UNCLOSED if live and reason is None else reason}
+
+
 def settle_daemon(roots: artifact.TrialRoots, output: Path) -> dict[str, Any]:
-    """The stopped daemon's facts, read off the entrypoint's report, with the WAL confirmed here.
+    """The stopped daemon's facts, read off the entrypoint's report, with the WAL closed here.
 
     The container stopped the daemon it started, and any daemon the shim
     respawned inside it, before it exited; both are gone with the container
     either way. What the host still has to establish is that `loop.db` has
-    settled, because it is about to be read.
+    settled, because it is about to be read, and the container's own wait for
+    the WAL raced its teardown. So the host closes the ledger itself rather
+    than waiting on whoever wrote it.
     """
     report = read_report(output) or {}
-    wal = roots.data_dir / f"{LOOP_DB}-wal"
-    end = time.monotonic() + WAL_TIMEOUT_S
-    while wal.exists() and time.monotonic() < end:
-        time.sleep(HEALTH_POLL_S)
     return {
         "respawned": bool(report.get("respawned", False)),
         "started": bool(report.get("started", False)),
         "daemon_error": report.get("error"),
-        "wal_live": wal.exists(),
+        **settle_wal(roots.data_dir),
     }
 
 

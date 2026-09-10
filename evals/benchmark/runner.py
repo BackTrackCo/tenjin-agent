@@ -291,7 +291,14 @@ def isolation_of(isolation: dict[str, Any], provision: executor.Provision | None
     """The record's isolation block: the gate's facts, the daemon's, and what became of the seeded piece."""
     if provision is None:
         return isolation
-    out = {**isolation, "daemon_respawned": bool((stop or {}).get("respawned", False))}
+    # `wal_checkpoint` is why an attempt that came back `delivery:wal_live`
+    # did. The ledger's WAL is closed explicitly at stop, so a surviving one
+    # is a checkpoint that refused and named its reason, not a wait that ran out.
+    out = {
+        **isolation,
+        "daemon_respawned": bool((stop or {}).get("respawned", False)),
+        "wal_checkpoint": (stop or {}).get("wal_checkpoint"),
+    }
     # Which product hook arms the seeded config turned off, on every
     # provisioned attempt and not only where the manifest named one: an empty
     # list is the arm as shipped, and no key at all means no provisioning.

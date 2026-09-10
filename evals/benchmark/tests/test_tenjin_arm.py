@@ -26,7 +26,7 @@ from unittest import mock
 import pytest
 from inline_snapshot import snapshot
 
-from evals.benchmark import artifact, cases, cli, container, executor, manifest as manifest_module, producer, records, runner, schedule, signature, tenjin_arm, usage, verifier
+from evals.benchmark import artifact, cases, cli, container, executor, loop_join, manifest as manifest_module, producer, records, runner, schedule, signature, tenjin_arm, usage, verifier
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec, ProvisionError, ProvisionRequest
 from evals.benchmark.tests import support
@@ -260,22 +260,46 @@ def test_prepare_seeds_the_data_dir_and_starts_nothing(make_roots, prepare: Prep
     assert not (data / "daemon.pid").exists()
 
 
+# A daemon that died without closing its database, which is what the container
+# teardown produces: the frames are committed and the `-wal` is real.
+ORPHAN_WAL = """
+import os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("CREATE TABLE IF NOT EXISTS fires (id TEXT)")
+db.execute("INSERT INTO fires VALUES ('f1')")
+db.commit()
+{tail}
+"""
+
+
+def orphan_wal(loop_db: Path, tail: str = "os._exit(0)") -> subprocess.Popen[bytes]:
+    process = subprocess.Popen([sys.executable, "-c", ORPHAN_WAL.format(tail=tail), str(loop_db)])
+    if tail == "os._exit(0)":
+        assert process.wait(timeout=30) == 0
+    return process
+
+
 def test_stop_reads_the_containers_report_and_confirms_the_wal_is_gone(make_roots, prepare: Prepare, entrypoint: Entrypoint) -> None:
     roots = make_roots()
     provision = prepare(roots)
     entrypoint(roots, respawned=True)
     report = tenjin_arm.stop(roots, provision)
-    assert report == {"respawned": True, "started": True, "daemon_error": None, "wal_live": False}
+    assert report == {"respawned": True, "started": True, "daemon_error": None, "wal_live": False, "wal_checkpoint": None}
 
 
-def test_a_wal_the_daemon_leaves_behind_is_reported_not_hidden(make_roots, prepare: Prepare, entrypoint: Entrypoint) -> None:
+def test_a_wal_the_container_left_behind_is_closed_by_the_host_not_waited_out(make_roots, prepare: Prepare, entrypoint: Entrypoint) -> None:
+    # The container's own wait for the WAL races its teardown, so the host
+    # gets a ledger whose writer never closed it. The timeout is zero here:
+    # only the checkpoint can settle this trial.
     roots = make_roots()
     provision = prepare(roots)
     entrypoint(roots)
-    (roots.data_dir / "loop.db-wal").write_bytes(b"wal")
-    with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
+    orphan_wal(roots.data_dir / "loop.db")
+    with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.0):
         report = tenjin_arm.stop(roots, provision)
-    assert report["wal_live"]
+    assert (report["wal_live"], report["wal_checkpoint"]) == (False, None)
+    assert not (roots.data_dir / "loop.db-wal").exists()
 
 
 def test_a_daemon_that_never_became_healthy_is_named_in_the_report(make_roots, prepare: Prepare, entrypoint: Entrypoint) -> None:
@@ -286,12 +310,54 @@ def test_a_daemon_that_never_became_healthy_is_named_in_the_report(make_roots, p
     assert not report["started"]
     assert "/health" in str(report["daemon_error"])
 
+def test_the_stop_path_closes_the_wal_instead_of_waiting_for_it(tmp_path: Path) -> None:
+    # WAL_TIMEOUT_S is zero, so nothing here can pass by waiting: the frames
+    # are gone because the checkpoint moved them, and they are still readable
+    # in the main file afterwards, which is what the join is about to do.
+    data = tmp_path / "data"
+    data.mkdir()
+    orphan_wal(data / "loop.db")
+    assert loop_join.wal_live(data / "loop.db"), "the case needs a WAL with frames in it"
+    with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.0):
+        assert tenjin_arm.settle_wal(data) == {"wal_live": False, "wal_checkpoint": None}
+    assert not (data / "loop.db-wal").exists()
+    connection = sqlite3.connect(f"file:{(data / 'loop.db').as_posix()}?mode=ro&immutable=1", uri=True)
+    try:
+        assert connection.execute("SELECT id FROM fires").fetchall() == [("f1",)]
+    finally:
+        connection.close()
+
+
+def test_a_checkpoint_another_connection_refuses_stays_an_invalid_attempt(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    holder = orphan_wal(data / "loop.db", tail="db.execute('BEGIN IMMEDIATE')\nimport time; time.sleep(30)")
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not loop_join.wal_live(data / "loop.db"):
+            time.sleep(0.02)
+        assert loop_join.wal_live(data / "loop.db")
+        with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
+            report = tenjin_arm.settle_wal(data)
+        assert report["wal_live"], "a checkpoint that could not run leaves the attempt invalid"
+        assert report["wal_checkpoint"] != tenjin_arm.WAL_UNCLOSED and "checkpoint" in report["wal_checkpoint"]
+    finally:
+        holder.kill()
+        holder.wait(timeout=5)
+
+
+def test_a_data_dir_with_no_ledger_settles_without_creating_one(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    assert tenjin_arm.settle_wal(data) == {"wal_live": False, "wal_checkpoint": None}
+    assert not (data / "loop.db").exists(), "settling must not bring a ledger into being"
+
 
 def test_a_container_that_left_no_report_settles_on_the_wal_alone(make_roots, prepare: Prepare) -> None:
     roots = make_roots()
     provision = prepare(roots)
     report = tenjin_arm.stop(roots, provision)
-    assert report == {"respawned": False, "started": False, "daemon_error": None, "wal_live": False}
+    assert report == {"respawned": False, "started": False, "daemon_error": None, "wal_live": False, "wal_checkpoint": None}
 
 
 def test_a_dry_run_seeds_without_a_secret_a_token_or_a_daemon(make_roots, prepare: Prepare) -> None:
@@ -526,17 +592,20 @@ def test_an_attestation_has_to_list_the_seeded_shelf_origin(
     assert "team-shelf.example" in str(caught.value)
 
 
-def test_a_wal_left_live_makes_the_attempt_invalid(seeded_manifest, make_runtime, run_dir: Path) -> None:
+def test_a_wal_the_checkpoint_cannot_close_still_makes_the_attempt_invalid(seeded_manifest, make_runtime, run_dir: Path) -> None:
     def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
         # A store the daemon left with its write-ahead log still beside it.
         support.write_loop_db(roots.data_dir / "loop.db", [])
         (roots.data_dir / "loop.db-wal").write_bytes(b"wal")
 
-    with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2):
+    # A checkpoint that refuses is the one case the timeout was ever standing
+    # in for, and it stays an invalid attempt that says why in the record.
+    with mock.patch.object(tenjin_arm, "WAL_TIMEOUT_S", 0.2), mock.patch.object(tenjin_arm, "checkpoint_wal", return_value=tenjin_arm.WAL_BUSY):
         record = runner.run_trial(
             seeded_manifest, trial_of(seeded_manifest, "tenjin_seeded"), run_dir, "sha256:schedule", make_runtime(spawn=support.fake_spawn(before=before))
         )
     assert (record["outcome"], record["invalid_reason"]) == ("invalid", "delivery:wal_live")
+    assert record["isolation"]["wal_checkpoint"] == tenjin_arm.WAL_BUSY
 
 
 def legs(*shelves: str | tuple[str, str, str]) -> support.Before:

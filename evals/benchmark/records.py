@@ -317,6 +317,8 @@ def validate(record: dict[str, Any]) -> None:
         for name in sorted(CLI_KEYS):
             if not isinstance(cli[name], str) or not cli[name]:
                 raise RecordError(f"isolation.image.cli.{name} must name the CLI build the trial ran")
+    if isolation.get("wal_checkpoint") is not None and (not isinstance(isolation["wal_checkpoint"], str) or not isolation["wal_checkpoint"]):
+        raise RecordError("isolation.wal_checkpoint must be null or the reason the ledger's WAL did not close")
     seeds = isolation.get("seed")
     if seeds is not None and not isinstance(seeds, list):
         raise RecordError("isolation.seed must be a list, one entry per seeded lesson")
