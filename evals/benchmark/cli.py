@@ -69,6 +69,22 @@ class CliError(RuntimeError):
     """A refusal an operator should read as a sentence, not as a traceback."""
 
 
+# Every validation gate a command can refuse at, in one tuple so the entry point
+# treats them alike. `live-run` reaches more of them than the readers do: it
+# loads the manifest, expands the schedule, builds the executor's argv, and
+# reads the attestation, and each of those refuses in its own type. Anything
+# outside this tuple is a defect, and a defect keeps its traceback.
+REFUSALS = (
+    CliError,
+    artifact.IsolationError,
+    executor.ExecutorError,
+    executor.ProvisionError,
+    manifest_module.ManifestError,
+    records.RecordError,
+    schedule.ScheduleError,
+)
+
+
 def baseline(manifest: manifest_module.Manifest) -> str:
     """The first arm in the manifest is the control every other arm is read against."""
     return str(manifest.arms[0]["id"])
@@ -489,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("summary", "regress", "verify", "reduce", "report"):
         try:
             return run_reader(args)
-        except (CliError, manifest_module.ManifestError, records.RecordError) as error:
+        except REFUSALS as error:
             sys.stderr.write(f"{error}\n")
             return 2
     if args.command == "live-run":
@@ -504,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
                 automated=args.automated,
                 tenjin_source=args.tenjin_source,
             )
-        except (CliError, executor.ProvisionError) as error:
+        except REFUSALS as error:
             sys.stderr.write(f"{error}\n")
             return 2
         if args.dry_run:
