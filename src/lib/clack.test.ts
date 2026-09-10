@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { PassThrough, Readable, Writable } from 'node:stream';
-import { confirmChoice, selectOne } from './clack';
+import { confirmChoice, selectMany, selectOne } from './clack';
 
 /**
  * The EOF contract, pinned against the real @clack/prompts.
@@ -124,6 +124,23 @@ describe('selectOne: input that ends', () => {
     expect(output.text().lastIndexOf('\x1b[?25h')).toBeGreaterThan(
       output.text().lastIndexOf('\x1b[?25l'),
     );
+  });
+});
+
+describe('selectMany: input that ends', () => {
+  it('settles as cancelled when stdin is already at EOF', async () => {
+    const output = sink();
+    const answer = await within(
+      2000,
+      selectMany({
+        message: 'pick',
+        choices: CHOICES,
+        initialValues: ['auto'],
+        streams: { input: emptyInput(), output },
+      }),
+    );
+    expect(answer).toBeNull();
+    expect(output.text()).toContain('\x1b[?25h');
   });
 });
 

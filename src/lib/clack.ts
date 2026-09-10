@@ -139,6 +139,34 @@ export async function selectOne<T extends string>(opts: {
   });
 }
 
+/** A multi-choice list. Returns the selected values, or `null` when cancelled. */
+export async function selectMany<T extends string>(opts: {
+  message: string;
+  choices: readonly SelectChoice<T>[];
+  initialValues: readonly T[];
+  required?: boolean;
+  streams?: PromptStreams;
+}): Promise<T[] | Cancelled> {
+  const { multiselect, isCancel } = await import('@clack/prompts');
+  const streams = resolveStreams(opts.streams ?? {});
+  return withInputEnd<T[] | Cancelled>(streams, null, async (signal) => {
+    const answer = await multiselect<string>({
+      message: opts.message,
+      options: opts.choices.map((c) => ({
+        value: c.value as string,
+        label: c.label,
+        ...(c.hint !== undefined ? { hint: c.hint } : {}),
+      })),
+      initialValues: [...opts.initialValues] as string[],
+      required: opts.required ?? true,
+      input: streams.input,
+      output: streams.output,
+      signal,
+    });
+    return isCancel(answer) ? null : (answer as T[]);
+  });
+}
+
 /** A yes/no confirm. Cancelling, or an input that ends, reads as no. */
 export async function confirmChoice(
   message: string,

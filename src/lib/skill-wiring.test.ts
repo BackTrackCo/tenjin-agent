@@ -118,10 +118,9 @@ describe('skill name constants', () => {
 
 describe('harnessFlagFor', () => {
   it('maps each skills directory to the --harness value that targets it', () => {
-    // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
-    // machine, so a fix line naming it has to say `--harness shared`.
+    // ~/.agents/skills is Codex's skill directory; `shared` is not a harness.
     expect(harnessFlagFor(home, join(home, '.claude', 'skills'))).toBe('claude');
-    expect(harnessFlagFor(home, join(home, '.agents', 'skills'))).toBe('shared');
+    expect(harnessFlagFor(home, join(home, '.agents', 'skills'))).toBe('codex');
   });
 });
 
@@ -229,15 +228,13 @@ describe('harness detection', () => {
     const none = detectHarnesses(home, noBinaries);
     expect(none).toEqual({ claude: false, codex: false });
     expect(harnessReads(home, claudeDir, none)).toBe(false);
-    expect(harnessReads(home, sharedDir, none)).toBe(true);
+    expect(harnessReads(home, sharedDir, none)).toBe(false);
   });
 
   it('harnessTargetDir maps every target the way install writes it', () => {
     const [claudeDir, sharedDir] = skillsDirsFor(home) as [string, string];
     expect(harnessTargetDir(home, 'claude')).toBe(claudeDir);
-    // Codex and the shared fallback are the same directory, hence one dir, two flags.
     expect(harnessTargetDir(home, 'codex')).toBe(sharedDir);
-    expect(harnessTargetDir(home, 'shared')).toBe(sharedDir);
   });
 });
 
@@ -249,14 +246,15 @@ describe('an explicitly requested harness', () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     const claudeOnly = detectHarnesses(home, noBinaries);
 
-    // `tenjin install --harness shared` on this machine: nothing DETECTED reads the
+    // `tenjin install --harness codex` on this machine: nothing DETECTED reads the
     // shared dir, but the user named it, so it is still this machine's business.
     expect(harnessReads(home, sharedDir, claudeOnly)).toBe(false);
-    expect(harnessRequested(home, sharedDir, ['shared'])).toBe(true);
-    expect(harnessInPlay(home, sharedDir, claudeOnly, ['shared'])).toBe(true);
-    // And the record says nothing about the other directory.
-    expect(harnessRequested(home, claudeDir, ['shared'])).toBe(false);
-    expect(harnessInPlay(home, claudeDir, claudeOnly, ['shared'])).toBe(true); // detected
+    expect(harnessRequested(home, sharedDir, ['codex'])).toBe(true);
+    expect(harnessInPlay(home, sharedDir, claudeOnly, ['codex'])).toBe(true);
+    // And the settled selection excludes the other directory even though detection
+    // would otherwise put it in play.
+    expect(harnessRequested(home, claudeDir, ['codex'])).toBe(false);
+    expect(harnessInPlay(home, claudeDir, claudeOnly, ['codex'])).toBe(false);
   });
 
   it('a recorded `codex` covers the shared directory it writes to', () => {

@@ -1,0 +1,14 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000001",
+  "turn_id": "cccccccc-0000-7000-8000-000000000002",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000001.jsonl",
+  "agent_transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-bbbbbbbb-0000-7000-8000-000000000000.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "SubagentStop",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "stop_hook_active": false,
+  "agent_id": "bbbbbbbb-0000-7000-8000-000000000000",
+  "agent_type": "default",
+  "last_assistant_message": "CODEX_CI=1\nCODEX_COMPANION_SESSION_ID=2c1d57bb-326e-40b5-8616-65ee70d62bc8\nCODEX_COMPANION_TRANSCRIPT_PATH=/Users/dev\nCODEX_INTERNAL_ORIGINATOR_OVERRIDE=Codex D"
+}

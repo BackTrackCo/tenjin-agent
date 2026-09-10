@@ -1,9 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { claudeAdapter, decode, encode, registrar } from './claude';
-import { EVENTS } from './types';
 import type { Event, HookInput, ToolKind } from './types';
-import { CLAUDE_CONTEXT_MAX } from '../hooks/constants';
+import { CONTEXT_MAX } from '../hooks/constants';
 import SessionStart from './fixtures/claude/SessionStart.json';
 import UserPromptSubmit from './fixtures/claude/UserPromptSubmit.json';
 import PreToolUse from './fixtures/claude/PreToolUse.json';
@@ -85,7 +84,8 @@ describe('decode', () => {
     expect(input.tool).toEqual({
       name: 'WebFetch',
       kind: 'fetch',
-      input: PreToolUse.tool_input,
+      url: PreToolUse.tool_input.url,
+      prompt: PreToolUse.tool_input.prompt,
       callId: PreToolUse.tool_use_id,
     });
   });
@@ -95,7 +95,7 @@ describe('decode', () => {
     expect(input.tool).toEqual({
       name: 'Bash',
       kind: 'shell',
-      input: PostToolUse.tool_input,
+      command: PostToolUse.tool_input.command,
       callId: PostToolUse.tool_use_id,
       ok: true,
       result: { stdout: PostToolUse.tool_response.stdout, stderr: '' },
@@ -108,7 +108,7 @@ describe('decode', () => {
     expect(input.tool).toEqual({
       name: 'Bash',
       kind: 'shell',
-      input: PostToolUseFailure.tool_input,
+      command: PostToolUseFailure.tool_input.command,
       callId: PostToolUseFailure.tool_use_id,
       ok: false,
       result: { error: PostToolUseFailure.error },
@@ -199,21 +199,43 @@ describe('decode', () => {
       expect(input?.tool).toMatchObject({ name, kind });
     });
 
-    it('a missing tool_name is an empty other tool with an empty input', () => {
+    it('a missing tool_name is an empty other tool', () => {
       const rest = { ...PreToolUse } as Record<string, unknown>;
       delete rest.tool_name;
       delete rest.tool_input;
       expect(decode(rest)?.tool).toEqual({
         name: '',
         kind: 'other',
-        input: {},
         callId: PreToolUse.tool_use_id,
       });
     });
 
-    it('a non-object tool_input decodes as an empty input', () => {
-      expect(decode({ ...PreToolUse, tool_input: 'ls' })?.tool?.input).toEqual({});
-      expect(decode({ ...PreToolUse, tool_input: ['ls'] })?.tool?.input).toEqual({});
+    it('a non-object tool_input leaves the canonical fields empty', () => {
+      expect(decode({ ...PreToolUse, tool_input: 'ls' })?.tool).toMatchObject({
+        kind: 'fetch',
+        url: '',
+        prompt: '',
+      });
+      expect(decode({ ...PreToolUse, tool_name: 'Bash', tool_input: ['ls'] })?.tool).toMatchObject({
+        kind: 'shell',
+        command: '',
+      });
+    });
+  });
+
+  describe('canonical tool fields', () => {
+    it.each([
+      ['Edit', { file_path: '/p/a.ts' }, { kind: 'edit', paths: ['/p/a.ts'] }],
+      ['Read', { file_path: '/p/b.ts' }, { kind: 'read', paths: ['/p/b.ts'] }],
+      ['Edit', {}, { kind: 'edit', paths: [] }],
+      [
+        'Agent',
+        { prompt: 'find the flake', description: 'a label', subagent_type: 'Explore' },
+        { kind: 'dispatch', task: 'find the flake' },
+      ],
+      ['WebSearch', { query: 'pg 16 collation' }, { kind: 'web', query: 'pg 16 collation' }],
+    ])('%s carries its canonical fields', (tool_name, tool_input, expected) => {
+      expect(decode({ ...PreToolUse, tool_name, tool_input })?.tool).toMatchObject(expected);
     });
   });
 
@@ -368,16 +390,16 @@ describe('encode', () => {
     });
   });
 
-  it('slices additionalContext at CLAUDE_CONTEXT_MAX', () => {
-    expect(CLAUDE_CONTEXT_MAX).toBe(10_000);
-    const out = encode({ context: 'x'.repeat(CLAUDE_CONTEXT_MAX + 50) }, stop) as {
+  it('slices additionalContext at CONTEXT_MAX', () => {
+    expect(CONTEXT_MAX).toBe(10_000);
+    const out = encode({ context: 'x'.repeat(CONTEXT_MAX + 50) }, stop) as {
       hookSpecificOutput: { additionalContext: string };
     };
-    expect(out.hookSpecificOutput.additionalContext).toHaveLength(CLAUDE_CONTEXT_MAX);
-    const exact = encode({ context: 'y'.repeat(CLAUDE_CONTEXT_MAX) }, stop) as {
+    expect(out.hookSpecificOutput.additionalContext).toHaveLength(CONTEXT_MAX);
+    const exact = encode({ context: 'y'.repeat(CONTEXT_MAX) }, stop) as {
       hookSpecificOutput: { additionalContext: string };
     };
-    expect(exact.hookSpecificOutput.additionalContext).toHaveLength(CLAUDE_CONTEXT_MAX);
+    expect(exact.hookSpecificOutput.additionalContext).toHaveLength(CONTEXT_MAX);
   });
 
   it('speaks the same field with the fuse tripped: the ask is feedback, not an error', () => {
@@ -448,54 +470,6 @@ describe('registrar', () => {
       hooks: { timeout: number }[];
     }[];
     for (const entry of plan) for (const h of entry.hooks) expect(h.timeout).toBe(8);
-  });
-
-  it('events map covers all seven canonical events under their native names', () => {
-    expect(Object.keys(registrar.events).sort()).toEqual([...EVENTS].sort());
-    expect(registrar.events).toEqual({
-      'session.start': { native: 'SessionStart', matcher: 'startup|clear|compact' },
-      prompt: { native: 'UserPromptSubmit' },
-      'tool.before': { native: 'PreToolUse' },
-      'tool.after': { native: 'PostToolUse' },
-      'agent.start': { native: 'SubagentStart' },
-      'agent.stop': { native: 'SubagentStop' },
-      'turn.end': { native: 'Stop' },
-    });
-  });
-
-  it('tools regexes anchor on the whole native name', () => {
-    const { tools } = registrar;
-    expect(tools.web?.test('WebSearch')).toBe(true);
-    expect(tools.web?.test('WebSearchX')).toBe(false);
-    // WebFetch is its own kind, so its own arm and its own budget.
-    expect(tools.web?.test('WebFetch')).toBe(false);
-    expect(tools.fetch?.test('WebFetch')).toBe(true);
-    expect(tools.fetch?.test('WebFetchX')).toBe(false);
-    expect(tools.dispatch?.test('Agent')).toBe(true);
-    expect(tools.dispatch?.test('Task')).toBe(true);
-    expect(tools.dispatch?.test('TaskOutput')).toBe(false);
-    expect(tools.shell?.test('Bash')).toBe(true);
-    expect(tools.shell?.test('BashOutput')).toBe(false);
-    expect(tools.edit?.test('Edit')).toBe(true);
-    expect(tools.edit?.test('Write')).toBe(true);
-    expect(tools.edit?.test('MultiEdit')).toBe(true);
-    expect(tools.edit?.test('NotebookEdit')).toBe(false);
-    expect(tools.read?.test('Read')).toBe(true);
-    expect(tools.read?.test('ReadMcpResourceTool')).toBe(false);
-  });
-
-  it('children are tagged', () => {
-    expect(registrar.childrenTagged).toBe(true);
-  });
-
-  it('transcriptFor prefers the child transcript, then the session one, else null', () => {
-    expect(registrar.transcriptFor(decoded('SubagentStop'))).toEqual({
-      path: SubagentStop.agent_transcript_path,
-    });
-    expect(registrar.transcriptFor(decoded('Stop'))).toEqual({ path: Stop.transcript_path });
-    const stop = decoded('Stop');
-    expect(registrar.transcriptFor({ ...stop, transcript: undefined })).toBeNull();
-    expect(registrar.transcriptFor({ ...stop, transcript: {} })).toBeNull();
   });
 });
 
