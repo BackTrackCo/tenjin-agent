@@ -51,7 +51,6 @@ DOCKER = "docker"
 DOCKER_DIR = PACKAGE_ROOT / "docker"
 BASE_DOCKERFILE = DOCKER_DIR / "base.Dockerfile"
 FIXTURE_DOCKERFILE = DOCKER_DIR / "fixture.Dockerfile"
-PROXY_SCRIPT = DOCKER_DIR / "proxy.py"
 TRIAL_SCRIPT = DOCKER_DIR / "trial.mjs"
 LEDGER = FIXTURES / "live" / "images.json"
 
@@ -62,9 +61,6 @@ BASE_DIGEST = "sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d52810
 PNPM_VERSION = "11.11.0"
 # There is no published-CLI pin. The image installs this checkout's build, so
 # the agent's `tenjin` and the daemon under test are one build of the product.
-# The egress proxy's image, also by index digest. Nothing is installed into it.
-PROXY_IMAGE = "python:3.12-slim"
-PROXY_DIGEST = "sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea"
 
 BASE_REPOSITORY = "bench2-base"
 FIXTURE_PREFIX = "bench2-"

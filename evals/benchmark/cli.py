@@ -94,7 +94,6 @@ REFUSALS = (
     manifest_module.ManifestError,
     reap_module.ReapError,
     records.RecordError,
-    runner.ConcurrencyError,
     schedule.ScheduleError,
 )
 
@@ -350,13 +349,15 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
             for mount in plan_container["mounts"]:
                 lines.append(f"  {'mount':10}{mount['host']} -> {mount['target']} ({mount['mode']})")
             lines.append(f"  {'agent env':10}{' '.join(sorted(plan_container['env']))}")
-            lines.append(f"  {'forward':10}{' '.join(plan_container['forward'])} (by name; docker reads the value from this shell, never from an argv)")
+            lines.append(f"  {'forward':10}{' '.join(plan_container['forward'])} (read from this shell at exec; Harbor puts the value in the host-side exec argv)")
             if plan_container["daemon"]:
-                lines.append(f"  {'daemon':10}started inside the container on the mounted data dir, stopped before the run reads loop.db")
+                lines.append(f"  {'daemon':10}started by the entrypoint on the mounted data dir, stopped before the run reads loop.db")
             egress = plan_container["egress"]
-            if egress is not None:
-                lines.append(f"  {'network':10}{egress['network']} (internal, no route out) via proxy {egress['proxy']} from {egress['proxy_image']}")
-                lines.append(f"  {'allowlist':10}{' '.join(egress['allowlist'])}; anything else is refused at the proxy and counted")
+            lines.append(f"  {'project':10}{plan_container['project']} (one compose project per attempt, torn down with it)")
+            if egress["mode"] == container.NO_NETWORK:
+                lines.append(f"  {'network':10}none; this container reaches nothing")
+            else:
+                lines.append(f"  {'allowlist':10}{' '.join(egress['allowlist'])}; the sidecar drops anything else, and reports no denial")
             lines.append(f"  {'agent':10}{shlex.join(plan_container['agent'])}")
         lines.append(f"  {'argv':10}{shlex.join(plan['argv'])}")
     return "\n".join(lines)
@@ -438,7 +439,7 @@ def live_run(
         # identity is armed under the same label the egress uses, because a
         # reviewer reads this plan to see what a trial process is given.
         arm_caller_user_agent("dry-run", environ)
-        planned = container.plan_egress(out, allowlist, "dry-run")
+        planned = container.plan_egress(allowlist)
         plans = [plan_trial(manifest, trial, out, source, planned) for trial in trials]
         (stream or sys.stdout).write(render_plan(manifest, plans) + "\n")
         return {"dry_run": True, "trials": plans, "corpus": None if manifest.corpus is None else manifest.corpus.facts}
@@ -478,56 +479,60 @@ def live_run(
             tenjin_arm.check_signing_identity(source)
         except tenjin_arm.ProvisionError as error:
             raise CliError(str(error)) from error
-    # One network and one proxy for the whole run: the trial containers join the
-    # internal network only, and the proxy log is the run's sentinel. Both are
-    # in the process ledger, so `cleanup` reaches them after an interrupt, and
-    # both are removed here on every path out.
-    # The run's nonce is its identity to the marketplace as well as its egress
-    # names, and the refusal here is the last one that costs nothing.
+    # Egress is per attempt under Harbor: each trial's container shares a
+    # network namespace with its own sidecar, which holds this allowlist. There
+    # is nothing run-level to start, so what used to be a proxy and a network in
+    # the process ledger is now each attempt's compose project, registered by
+    # the spawn that creates it.
+    #
+    # The allowlist is still checked once, here, before anything is spent: an
+    # empty one, or a host kernel Harbor would silently give up enforcing on,
+    # ends the run rather than producing a differently isolated one.
+    # The run's nonce is its identity to the marketplace, and the refusal here
+    # is the last one that costs nothing.
     nonce = run_nonce(out, manifest)
     arm_caller_user_agent(nonce, environ)
-    egress = container.start_egress(container.plan_egress(out, allowlist, nonce))
-    reap_module.register_objects(out, "egress", container=egress.proxy, network=egress.network)
+    egress = container.plan_egress(allowlist)
     try:
-        # The gates stay code-owned: an injected runtime supplies the clock, the
-        # settlement barrier, or the process seam, never the isolation contract.
-        #
-        # The attestation is the run's own, built from the egress it just created:
-        # the allowlist is true by construction, because the network has no route
-        # out and the proxy refuses every other host. `--attestation <file>` still
-        # states an isolation this package cannot see (a disposable VM), and
-        # `--plumbing` still buys a run with no claim at all, stamped
-        # non-publishable in every record, for a chain check on a host that is not
-        # a disposable instance.
-        attestation = None
-        if attestation_path is not None:
-            attestation = artifact.load_attestation(attestation_path)
-        elif not plumbing:
-            attestation = artifact.load_attestation_data(container.attestation(egress, seam or ""))
-        # The last thing before the first trial, and after every refusal that costs
-        # nothing: the corpus a run measures is the one this reset left behind, so a
-        # reset that does not happen ends the run here rather than in the numbers.
-        stamp = None
-        if manifest.corpus is not None:
-            api = corpus_module.HttpApi.from_env(environ) if corpus_api is None else corpus_api
-            stamp = corpus_module.reset(manifest.corpus, api)
-            if attestation is not None:
-                attestation = artifact.with_corpus(attestation, stamp)
-        runtime = dataclasses.replace(
-            runtime or runner.Runtime(),
-            snapshot=None if manifest.corpus is None else (corpus_snapshot or snapshot_module.Once(out, manifest.corpus.origin)),
-            attestation=attestation,
-            publishable=not plumbing,
-            ci=bool(automation),
-            automated=ci_live or automated,
-            source=source,
-            egress=egress,
-            sentinel=container.ProxySentinel(egress.log, egress.proxy_url),
-        )
-        payload = execute(manifest, trials, out, runtime)
-    finally:
-        container.stop_egress(egress)
-        reap_module.release(out, "egress")
+        container.require_egress(egress)
+    except container.EgressError as error:
+        raise CliError(f"live-run cannot isolate this run: {error}") from error
+    # The gates stay code-owned: an injected runtime supplies the clock, the
+    # settlement barrier, or the process seam, never the isolation contract.
+    #
+    # The attestation is the run's own, built from the allowlist it just proved
+    # Harbor will enforce. That states what each attempt's sidecar drops, and
+    # NOT that nothing tried to leave, which is a thing this package can no
+    # longer observe anywhere. `--attestation <file>` still
+    # states an isolation this package cannot see (a disposable VM), and
+    # `--plumbing` still buys a run with no claim at all, stamped
+    # non-publishable in every record, for a chain check on a host that is not
+    # a disposable instance.
+    attestation = None
+    if attestation_path is not None:
+        attestation = artifact.load_attestation(attestation_path)
+    elif not plumbing:
+        attestation = artifact.load_attestation_data(container.attestation(egress, seam or "", nonce))
+    # The last thing before the first trial, and after every refusal that costs
+    # nothing: the corpus a run measures is the one this reset left behind, so a
+    # reset that does not happen ends the run here rather than in the numbers.
+    stamp = None
+    if manifest.corpus is not None:
+        api = corpus_module.HttpApi.from_env(environ) if corpus_api is None else corpus_api
+        stamp = corpus_module.reset(manifest.corpus, api)
+        if attestation is not None:
+            attestation = artifact.with_corpus(attestation, stamp)
+    runtime = dataclasses.replace(
+        runtime or runner.Runtime(),
+        snapshot=None if manifest.corpus is None else (corpus_snapshot or snapshot_module.Once(out, manifest.corpus.origin)),
+        attestation=attestation,
+        publishable=not plumbing,
+        ci=bool(automation),
+        automated=ci_live or automated,
+        source=source,
+        egress=egress,
+    )
+    payload = execute(manifest, trials, out, runtime)
     return payload if stamp is None else {**payload, "corpus": dataclasses.asdict(stamp)}
 
 

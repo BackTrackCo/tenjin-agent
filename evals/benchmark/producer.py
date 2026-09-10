@@ -169,7 +169,7 @@ def run(
     from . import runner
 
     producer_roots = artifact.create(
-        roots.run_dir, trial_id, fixture, public_origin=roots.public_origin, phase=PHASE, data_dir=roots.data_dir, image=image
+        roots.run_dir, trial_id, fixture, phase=PHASE, data_dir=roots.data_dir, image=image
     )
     launch = spec.launch(
         LaunchRequest(
@@ -185,7 +185,6 @@ def run(
         )
     )
     session_id = launch.root_session_id
-    hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
     started = runtime.clock()
     try:
         completed = runtime.spawn(launch, producer_roots, wall_clock_s)
@@ -219,7 +218,7 @@ def run(
         "usage_reconciliation": {"status": "unparsed"},
         "phase_tokens": {PHASE: 0, CAPTURE_PHASE: 0},
         "capture": store_facts(roots.data_dir / tenjin_arm.LOOP_DB, session_id, project_id(str(launch.cwd))),
-        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "sentinel": {"credential_exposures": 0},
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None},
     }
     invalid: str | None = None
@@ -229,8 +228,7 @@ def run(
         producer_roots.audit()
     except artifact.ArtifactError as error:
         invalid = invalid or f"producer:isolation_{error.code}"
-    hits = 0 if runtime.sentinel is None else len(runtime.sentinel.hits) - hits_before
-    sentinel = artifact.scan_sentinels(producer_roots, hits, canaries=provision.secrets, exclude=(roots.data_dir / tenjin_arm.CONFIG_FILE,))
+    sentinel = artifact.scan_sentinels(producer_roots, canaries=provision.secrets, exclude=(roots.data_dir / tenjin_arm.CONFIG_FILE,))
     facts["sentinel"] = sentinel.counts()
     if sentinel.reason is not None:
         invalid = invalid or "producer:" + sentinel.reason.replace(":", "_")

@@ -1,4 +1,4 @@
-"""One attempt inside its fixture image: the mounts, the argv, and the run's egress.
+"""One attempt inside its fixture image, run by Harbor's Docker environment.
 
 The trial's roots are built on the host exactly as before and bind-mounted into
 the container at the SAME absolute paths, because the product hashes the working
@@ -8,25 +8,40 @@ the CLI come from the image by exact version; the daemon, shim and reporter
 bundles come from the seeded data dir, which is a mount, because those are the
 product build under test.
 
-The credential seam is forwarded by name (`docker run -e NAME`), so its value
-travels through the docker client's own environment and never appears in an
-argv, in a file, or in the image.
+Harbor (`harbor==0.22.0`, `evals/benchmark/requirements-live.txt`) owns the
+container. It writes the compose project, brings the service up, execs into it,
+and tears it down. `EnvironmentConfig.mounts` reaches `services.main.volumes`
+verbatim, so a bind at an identical absolute path inside and out survives; the
+compose `command` is `sleep infinity`, so the image's ENTRYPOINT still owns the
+daemon.
 
-Egress is a run-level object: one `--internal` Docker network, which has no
-route out and no DNS for outside names, and one proxy container on both that
-network and the default bridge holding the run's allowlist. A trial container
-joins the internal network only and is given the proxy variables, so everything
-it sends is either refused by the proxy or logged as allowed. `ProxySentinel`
-reads that log, which is what the runner counts as an attempt's public requests.
+Egress is per trial rather than per run: a `NetworkPolicy` in allowlist mode
+puts the service behind a sidecar whose nftables ruleset drops every host off
+the list. Two things about that ruleset are load-bearing here. It carries no
+`log` statement and nothing in Harbor reads a denial, so this package can no
+longer report that an attempt TRIED to leave the allowlist; the counter that
+used to say so is gone rather than pinned at zero (see `artifact.py`). And
+Harbor turns egress control off silently when its kernel probe fails, which
+would leave the container on public egress with no error, so `require_egress`
+asks that probe itself and refuses the run instead of measuring a different one.
+
+The credential is forwarded by name into Harbor's exec, and Harbor expands it
+into the host-side `docker compose exec` argv (`docker.py:1156-1158`), so its
+value is visible in `ps` on the host for the length of the attempt. That is
+accepted for a single-tenant runner and is stated here rather than left for a
+reader to find; nothing in this package can prevent it without forking Harbor's
+Docker backend.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import os
 import re
 import secrets
-import time
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -34,27 +49,68 @@ from typing import Any, Mapping
 from . import images
 from .images import Completed, Docker, ImageError, run_docker
 
-NETWORK_PREFIX = "bench2-net-"
-PROXY_PREFIX = "bench2-proxy-"
 TRIAL_PREFIX = "bench2-"
-LABEL = "bench2.run"
-PROXY_PORT = 8888
-PROXY_TARGET = "/opt/bench2/proxy.py"
-PROXY_LOG_DIR = "/var/log/bench2"
-PROXY_LOG = "requests.jsonl"
-PROXY_DIR = "proxy"
-STOP_GRACE_S = 2
-PROXY_READY_S = 20.0
-PROXY_POLL_S = 0.2
 MOUNT_MARKER = ".bench2-mount"
 MOUNT_TIMEOUT_S = 60.0
 OUTPUT_VAR = "BENCH2_OUTPUT"
-# Node 24 reads the proxy variables for `fetch` only under this flag, and
-# Claude Code, the daemon's shelf legs and the CLI's reads are all `fetch`.
-NODE_PROXY_VAR = "NODE_USE_ENV_PROXY"
-NO_PROXY_HOSTS = "127.0.0.1,localhost"
 # A docker object name: what `--name` accepts, and what a trial id already is.
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
+# Harbor names the compose project after the session id and the container
+# `<project>-main-1`; the service is always `main` (`harbor/constants.py`).
+MAIN_SERVICE = "main"
+COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
+# Our own compose override, written beside the environment definition.
+ENV_OVERRIDE = "bench2-environment.json"
+# Harbor's own four bind mounts land under this prefix, and ours are appended
+# after them, so a trial root here would collide silently.
+RESERVED_MOUNT_ROOT = "/logs"
+
+
+class EgressError(RuntimeError):
+    """Harbor cannot enforce this run's allowlist on this host."""
+
+
+@dataclass(frozen=True)
+class Api:
+    """The Harbor symbols this module uses, resolved together."""
+
+    DockerEnvironment: Any
+    EnvironmentConfig: Any
+    NetworkMode: Any
+    NetworkPolicy: Any
+    TrialPaths: Any
+    version: str
+
+
+def harbor() -> Api:
+    """Import Harbor at the call, never at module scope.
+
+    The offline suite installs `requirements-test.txt` alone, twelve wheels on
+    a Python 3.11 floor, and imports this module. Harbor is 89 wheels and needs
+    3.12, so a module-scope import would put it in the required CI job's
+    closure for a lane that starts no container. Every live entry point below
+    goes through here, and `tests/test_container.py` pins that.
+    """
+    try:
+        from importlib.metadata import version
+
+        from harbor.environments.docker.docker import DockerEnvironment
+        from harbor.models.task.config import EnvironmentConfig, NetworkMode, NetworkPolicy
+        from harbor.models.trial.paths import TrialPaths
+    except ImportError as error:
+        raise ImageError(
+            "harbor_missing",
+            "no `harbor` importable; a live trial runs inside a Harbor container. "
+            "Install it with `pip install -r evals/benchmark/requirements-live.txt`",
+        ) from error
+    return Api(
+        DockerEnvironment=DockerEnvironment,
+        EnvironmentConfig=EnvironmentConfig,
+        NetworkMode=NetworkMode,
+        NetworkPolicy=NetworkPolicy,
+        TrialPaths=TrialPaths,
+        version=version("harbor"),
+    )
 
 
 @dataclass(frozen=True)
@@ -64,8 +120,16 @@ class Mount:
     mode: str = "rw"
 
     @property
-    def flag(self) -> str:
-        return f"{os.path.abspath(self.host)}:{os.path.abspath(self.target)}:{self.mode}"
+    def volume(self) -> dict[str, Any]:
+        """One `services.main.volumes` entry. Harbor writes `source` verbatim, so the path matches inside and out."""
+        entry: dict[str, Any] = {
+            "type": "bind",
+            "source": os.path.abspath(self.host),
+            "target": os.path.abspath(self.target),
+        }
+        if self.mode == "ro":
+            entry["read_only"] = True
+        return entry
 
     def to_json(self) -> dict[str, str]:
         return {"host": str(self.host), "target": str(self.target), "mode": self.mode}
@@ -83,8 +147,27 @@ def user() -> str:
 
 
 def container_name(trial_id: str, phase: str | None = None) -> str:
-    """One container per attempt, named after it, so the ledger and `docker ps` agree."""
+    """One environment per attempt, named after it, so the ledger and `docker ps` agree."""
     return _name(f"{TRIAL_PREFIX}{trial_id}" if phase is None else f"{TRIAL_PREFIX}{trial_id}-{phase}")
+
+
+def compose_project(name: str) -> str:
+    """The compose project Harbor derives from a session id, which is the label every object of it carries.
+
+    Mirrors `_sanitize_docker_compose_project_name`: lowercased, anything
+    outside the alphabet replaced, and a leading non-alphanumeric prefixed. The
+    names this package mints always start with `bench2-`, so the prefix branch
+    never fires here; it is written out because the sanitiser owns the rule.
+
+    The session id is the container name and nothing more. Harbor's own `Trial`
+    passes `f"{trial_name}__env"`, and copying that suffix here made every
+    cleanup sweep match a project that does not exist: measured 2026-09-10 by
+    killing a run and finding two containers and an orphaned `docker compose
+    exec` client that `remove_project` reported it had removed. This package
+    builds the environment directly, so the session id is what it passed.
+    """
+    sanitised = re.sub(r"[^a-z0-9_-]", "-", name.lower())
+    return sanitised if sanitised[:1].isalnum() else f"0{sanitised}"
 
 
 def mounts(roots: Any, settings: Path | None = None) -> list[Mount]:
@@ -105,222 +188,377 @@ def mounts(roots: Any, settings: Path | None = None) -> list[Mount]:
     ]
     if settings is not None:
         plan.append(Mount(settings, settings, "ro"))
+    for mount in plan:
+        target = os.path.abspath(mount.target)
+        if target == RESERVED_MOUNT_ROOT or target.startswith(RESERVED_MOUNT_ROOT + "/"):
+            raise ImageError("mount_reserved", f"{target} is under {RESERVED_MOUNT_ROOT}, which Harbor's own mounts own")
     return plan
+
+
+ALLOWLIST = "allowlist"
+NO_NETWORK = "no-network"
 
 
 @dataclass(frozen=True)
 class Egress:
-    """The run's network: an internal network and the proxy that holds its allowlist."""
+    """What a container may reach. Harbor enforces it per container, and reports no refusal.
 
-    network: str
-    proxy: str
-    allowlist: tuple[str, ...]
-    log: Path
-    port: int = PROXY_PORT
+    Two modes, and the difference matters to the refusal below: `allowlist`
+    needs hosts and needs the sidecar, `no-network` needs neither and is what a
+    seed probe runs under, because a probe that reached anything would be
+    measuring something other than the fixture.
+    """
 
-    @property
-    def proxy_url(self) -> str:
-        return f"http://{self.proxy}:{self.port}"
+    allowlist: tuple[str, ...] = ()
+    mode: str = ALLOWLIST
 
-    def variables(self) -> dict[str, str]:
-        """What a trial container is given so every request it makes goes through the proxy."""
-        return {
-            "HTTP_PROXY": self.proxy_url,
-            "HTTPS_PROXY": self.proxy_url,
-            "http_proxy": self.proxy_url,
-            "https_proxy": self.proxy_url,
-            "NO_PROXY": NO_PROXY_HOSTS,
-            "no_proxy": NO_PROXY_HOSTS,
-            NODE_PROXY_VAR: "1",
-        }
+    def to_json(self) -> dict[str, Any]:
+        return {"enforced_by": "harbor", "mode": self.mode, "allowlist": sorted(self.allowlist)}
+
+
+def plan_egress(allowlist: tuple[str, ...], mode: str = ALLOWLIST) -> Egress:
+    """The hosts, normalised. Starts nothing, so a dry run can print it."""
+    return Egress(allowlist=tuple(sorted({host.strip().lower() for host in allowlist if host and host.strip()})), mode=mode)
+
+
+def no_network() -> Egress:
+    """An egress that reaches nothing at all."""
+    return Egress(allowlist=(), mode=NO_NETWORK)
+
+
+def kernel_supports_egress() -> bool:
+    """Harbor's own nftables probe, asked directly. One container, no state."""
+    return bool(harbor().DockerEnvironment._egress_control_kernel_support())
+
+
+def sidecar(docker: Docker | None = None) -> tuple[str, bool]:
+    """Harbor's egress sidecar image: the tag Harbor will look for, and whether it is here.
+
+    Read out of Harbor rather than written down: its Dockerfile, its build
+    context, the platform and the content hash the tag is named after are all
+    Harbor's own functions, so a Harbor bump moves this tag with it.
+    """
+    from harbor.environments.docker.docker import DockerEnvironment
+    from harbor.environments.docker.utils import (
+        _compute_image_name,
+        default_docker_platform,
+        docker_build_context_hash,
+        docker_image_exists,
+    )
+
+    async def resolve() -> tuple[str, bool]:
+        platform = await default_docker_platform()
+        key = docker_build_context_hash(
+            context=DockerEnvironment._EGRESS_CONTROL_SIDECAR_CONTEXT_PATH,
+            dockerfile_path=DockerEnvironment._egress_control_sidecar_dockerfile_path(),
+            build_args={},
+            platform=platform,
+        )
+        tag = _compute_image_name(DockerEnvironment._EGRESS_CONTROL_SIDECAR_DOCKER_NAME, key)
+        return tag, await docker_image_exists(tag)
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(resolve())
+    finally:
+        loop.close()
+
+
+def require_sidecar(docker: Docker | None = None) -> str:
+    """Refuse before spend when Harbor could not build the sidecar its allowlist runs in.
+
+    Harbor builds that image with `docker buildx build`, and its Dockerfile uses
+    `COPY --chmod`, which only BuildKit understands. A Docker client with no
+    buildx plugin therefore fails the build in the middle of `start()`, after
+    the trial's roots exist. The image is content-addressed and built once, so
+    the cheap question here is whether it is already present, and the answer
+    when it is not names the missing plugin rather than the failed flag.
+    """
+    tag, exists = sidecar(docker)
+    if exists:
+        return tag
+    docker = images._docker(docker)
+    if docker(["buildx", "version"]).returncode != 0:
+        raise EgressError(
+            f"Harbor's egress sidecar image {tag} is not built and this Docker client has no `buildx` plugin, "
+            "which Harbor's build of it needs (its Dockerfile uses `COPY --chmod`). Install the buildx plugin, "
+            "or build that tag once from "
+            "`harbor/environments/docker/harbor-docker-egress-control-sidecar` with any BuildKit builder"
+        )
+    return tag
+
+
+def require_egress(egress: Egress, probe: Any = None) -> None:
+    """Refuse a run whose allowlist Harbor would silently not enforce.
+
+    `DockerEnvironment.__init__` sets `_enable_egress_control` to the policy AND
+    a kernel probe for `CONFIG_NFT_FIB_INET`, and a probe that fails leaves the
+    flag False with no error and the container on PUBLIC egress. An allowlist
+    that is never installed is not a weaker measurement, it is a different run,
+    so it ends here rather than in the numbers.
+    """
+    if egress.mode == NO_NETWORK:
+        # No sidecar, no nftables, no kernel question: compose gives the
+        # service `network_mode: none` and there is nothing to enforce.
+        return
+    if not egress.allowlist:
+        raise EgressError("an egress with no allowlist would refuse everything, including the provider")
+    supported = kernel_supports_egress if probe is None else probe
+    if not supported():
+        raise EgressError(
+            "this Docker host's kernel has no nftables `fib inet` support, so Harbor would drop the allowlist "
+            "and run the trial on public egress without saying so"
+        )
+    require_sidecar()
+
+
+@dataclass(frozen=True)
+class Recipe:
+    """Everything one attempt's container is, decided before anything starts.
+
+    A dry run prints this and starts nothing, which is why the image is a tag
+    here rather than a resolved id and why no Harbor symbol appears: building a
+    recipe never imports Harbor and never needs Docker.
+    """
+
+    name: str
+    image: str
+    workdir: Path
+    trial_dir: Path
+    # The directory Harbor treats as the environment definition. With a
+    # prebuilt image nothing in it is read, but Harbor resolves it to an
+    # absolute path for `--project-directory`, so it has to exist.
+    environment_dir: Path
+    plan: list[Mount]
+    environment: dict[str, str]
+    egress: Egress
+    daemon: bool = False
+    # The variable whose value the credential travels in. Read out of this
+    # process's environment at exec time, which is the last moment it exists in
+    # this package; Harbor then puts it in the host-side exec argv.
+    forward: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
-            "network": self.network,
-            "proxy": self.proxy,
-            "proxy_image": f"{images.PROXY_IMAGE}@{images.PROXY_DIGEST}",
-            "allowlist": sorted(self.allowlist),
-            "log": str(self.log),
+            "container": self.name,
+            "project": compose_project(self.name),
+            "image": self.image,
+            "workdir": str(self.workdir),
+            "mounts": [mount.to_json() for mount in self.plan],
+            "env": dict(self.environment),
+            "forward": list(self.forward),
+            "daemon": self.daemon,
+            "egress": self.egress.to_json(),
         }
 
 
-def plan_egress(run_dir: Path, allowlist: tuple[str, ...], run_id: str) -> Egress:
-    """The names and paths an egress would use. Starts nothing, so a dry run can print it."""
-    return Egress(
-        network=_name(f"{NETWORK_PREFIX}{run_id}"),
-        proxy=_name(f"{PROXY_PREFIX}{run_id}"),
-        allowlist=tuple(sorted({host.strip().lower() for host in allowlist if host and host.strip()})),
-        log=run_dir / PROXY_DIR / PROXY_LOG,
-    )
+class Container:
+    """One Harbor Docker environment, for the life of one attempt.
 
+    Harbor's API is asyncio and this package's runner is not, so one loop lives
+    and dies with the container rather than one loop per call: `start`, every
+    `exec`, and `stop` are the same environment object on the same loop, and
+    whatever state the compose project holds survives between them.
 
-def start_egress(egress: Egress, docker: Docker | None = None) -> Egress:
-    """Create the internal network and start the proxy on it and on the default bridge."""
-    docker = images._docker(docker)
-    if not egress.allowlist:
-        raise ImageError("empty_allowlist", "an egress with no allowlist would refuse everything, including the provider")
-    egress.log.parent.mkdir(parents=True, exist_ok=True)
-    created = docker(["network", "create", "--internal", "--label", f"{LABEL}={egress.network}", egress.network])
-    if created.returncode != 0:
-        raise ImageError("network_failed", f"`docker network create {egress.network}` exited {created.returncode}: {created.stderr.strip()[-200:]}")
-    argv = [
-        "run",
-        "--detach",
-        "--name",
-        egress.proxy,
-        "--label",
-        f"{LABEL}={egress.network}",
-        "--volume",
-        f"{os.path.abspath(images.PROXY_SCRIPT)}:{PROXY_TARGET}:ro",
-        "--volume",
-        f"{os.path.abspath(egress.log.parent)}:{PROXY_LOG_DIR}:rw",
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
-        f"{images.PROXY_IMAGE}@{images.PROXY_DIGEST}",
-        "python3",
-        PROXY_TARGET,
-        "--port",
-        str(egress.port),
-        "--log",
-        f"{PROXY_LOG_DIR}/{egress.log.name}",
-    ]
-    for host in egress.allowlist:
-        argv += ["--allow", host]
-    started = docker(argv)
-    if started.returncode != 0:
-        docker(["network", "rm", egress.network])
-        raise ImageError("proxy_failed", f"`docker run` of {egress.proxy} exited {started.returncode}: {started.stderr.strip()[-200:]}")
-    joined = docker(["network", "connect", egress.network, egress.proxy])
-    if joined.returncode != 0:
-        stop_egress(egress, docker)
-        raise ImageError("proxy_failed", f"the proxy could not join {egress.network}: {joined.stderr.strip()[-200:]}")
-    wait_listening(egress, docker)
-    return egress
-
-
-def wait_listening(egress: Egress, docker: Docker | None = None, deadline_s: float = PROXY_READY_S, sleep: Any = time.sleep) -> None:
-    """Wait until the proxy is accepting connections inside its own container.
-
-    A trial that starts first would send its CONNECT into a container whose
-    listener does not exist yet, and a dropped packet on an internal network is
-    a stall rather than a refusal. The check runs inside the proxy, so it needs
-    no published port.
+    The container's own environment is set at `up`, not at exec: the ENTRYPOINT
+    starts the trial's daemon before any agent runs, and it reads the data dir,
+    the output root and `BENCH2_DAEMON` from there.
     """
-    docker = images._docker(docker)
-    probe = f"import socket; socket.create_connection(('127.0.0.1', {egress.port}), 1).close()"
-    end = time.monotonic() + deadline_s
-    while True:
-        if docker(["exec", egress.proxy, "python3", "-c", probe]).returncode == 0:
-            return
-        if time.monotonic() >= end:
-            stop_egress(egress, docker)
-            raise ImageError("proxy_failed", f"{egress.proxy} was not accepting connections within {deadline_s:.0f}s")
-        sleep(PROXY_POLL_S)
+
+    def __init__(self, *, recipe: Recipe, image: str | None = None, user_id: str | None = None) -> None:
+        self.recipe = recipe
+        self.name = _name(recipe.name)
+        self.project = compose_project(self.name)
+        self.environment_dir = recipe.environment_dir
+        self.image = recipe.image if image is None else image
+        self.user_id = user() if user_id is None else user_id
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._environment: Any = None
+
+    def __enter__(self) -> "Container":
+        api = harbor()
+        require_egress(self.recipe.egress)
+        self.recipe.trial_dir.mkdir(parents=True, exist_ok=True)
+        self.environment_dir.mkdir(parents=True, exist_ok=True)
+        paths = api.TrialPaths(trial_dir=self.recipe.trial_dir)
+        paths.mkdir()
+        override = write_environment_override(self.environment_dir / ENV_OVERRIDE, self.recipe.environment)
+        self._loop = asyncio.new_event_loop()
+        try:
+            self._environment = api.DockerEnvironment(
+                environment_dir=self.environment_dir,
+                environment_name=self.name,
+                session_id=self.name,
+                trial_paths=paths,
+                task_env_config=api.EnvironmentConfig(docker_image=self.image),
+                network_policy=self._policy(api),
+                mounts=[mount.volume for mount in self.recipe.plan],
+                extra_docker_compose=[override],
+            )
+            self._loop.run_until_complete(self._environment.start(force_build=False))
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def _policy(self, api: Api) -> Any:
+        if self.recipe.egress.mode == NO_NETWORK:
+            return api.NetworkPolicy(network_mode=api.NetworkMode.NO_NETWORK)
+        return api.NetworkPolicy(network_mode=api.NetworkMode.ALLOWLIST, allowed_hosts=sorted(self.recipe.egress.allowlist))
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Tear the compose project down, then the loop. Every path here tolerates a thing that is already gone."""
+        if self._environment is not None and self._loop is not None:
+            with contextlib.suppress(Exception):
+                self._loop.run_until_complete(self._environment.stop(delete=True))
+        if self._loop is not None:
+            with contextlib.suppress(Exception):
+                self._loop.close()
+        self._environment = None
+        self._loop = None
+        # `docker compose down` removes what compose wrote. A project that
+        # failed on the way up can leave objects that command never learns
+        # about, so the label sweep runs on every path out.
+        remove_project(self.project)
+
+    def exec(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        environment: Mapping[str, str] | None = None,
+        timeout_s: float | None = None,
+        stream: Any = None,
+    ) -> Completed:
+        """One command in the running container. `stream` is written each output chunk as it arrives."""
+        if self._environment is None or self._loop is None:
+            raise ImageError("container_stopped", f"{self.name} is not running")
+        return self._loop.run_until_complete(self._exec(command, cwd, environment, timeout_s, stream))
+
+    async def _exec(
+        self,
+        command: list[str],
+        cwd: Path | None,
+        environment: Mapping[str, str] | None,
+        timeout_s: float | None,
+        stream: Any,
+    ) -> Completed:
+        call = dict(
+            cwd=None if cwd is None else str(cwd),
+            env=dict(environment or {}),
+            timeout_sec=None if timeout_s is None else int(timeout_s),
+            user=self.user_id,
+        )
+        if stream is None:
+            result = await self._environment.exec(shell_command(command), **call)
+        else:
+
+            async def collect(chunk: str, _which: Any) -> None:
+                stream.write(chunk)
+                stream.flush()
+
+            with self._environment.scoped_output_callback(collect):
+                result = await self._environment.exec(shell_command(command), **call)
+        return Completed(returncode=result.return_code, stdout=result.stdout or "", stderr=result.stderr or "")
 
 
-def stop_egress(egress: Egress, docker: Docker | None = None) -> dict[str, Any]:
-    """Stop the proxy and remove the network. Every path here tolerates a thing that is already gone."""
+def write_environment_override(path: Path, environment: Mapping[str, str]) -> Path:
+    """The trial's environment, as a compose override rather than as `EnvironmentConfig.env`.
+
+    Harbor's `env` field is NOT only the container's. `_compose_env_vars`
+    starts from `os.environ` and overlays it, and that dict becomes the
+    environment of the host-side `docker compose` process, so a trial root
+    named `HOME` replaces the HOME of the docker client. Measured 2026-09-10:
+    the client then failed to find `~/.docker/config.json`, did not discover
+    the compose plugin, and `up` died with `unknown flag: --project-name`.
+    Anything the docker CLI reads would go the same way: PATH, TMPDIR, the
+    DOCKER_* family. So the trial's environment goes into the compose file,
+    where it reaches the service and nothing else.
+
+    Values are written with `$` doubled, because compose interpolates its own
+    file and a path or a token holding one would otherwise be rewritten.
+    """
+    payload = {"services": {MAIN_SERVICE: {"environment": {key: str(value).replace("$", "$$") for key, value in sorted(environment.items())}}}}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def shell_command(command: list[str]) -> str:
+    """One argv as a shell line. Harbor's exec takes a string, so each element is quoted rather than joined."""
+    return " ".join(shlex.quote(str(item)) for item in command)
+
+
+# The entrypoint, by the path the base image installs it at, and the argument
+# that ends the daemon it started.
+TRIAL_ENTRY = "/usr/local/bin/bench2-trial"
+STOP_ARG = "--stop"
+DAEMON_VAR = "BENCH2_DAEMON"
+DAEMON_REPORT = "daemon.json"
+# What the entrypoint exits with when the daemon it was asked for never became
+# healthy, kept from the argv-era entrypoint because the record's refusal path
+# reads it.
+DAEMON_REFUSED = 70
+STOP_TIMEOUT_S = 60.0
+
+
+def forwarded(recipe: Recipe, parent: Mapping[str, str]) -> dict[str, str]:
+    """The credential, read out of this process at the last moment.
+
+    Harbor expands it into the host-side `docker compose exec` argv, so from
+    here on its value is visible in `ps` on this machine. That is the accepted
+    cost of the framework and the reason a measured run belongs on a
+    single-tenant runner; there is no by-name path through Harbor's Docker
+    backend, which has no env-file and no secret support.
+    """
+    return {name: parent[name] for name in recipe.forward if parent.get(name)}
+
+
+def daemon_error(output: Path) -> str | None:
+    """What the entrypoint recorded about the daemon it was asked to start, or None when it is healthy."""
+    import json
+
+    try:
+        report = json.loads((output / DAEMON_REPORT).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return f"the entrypoint wrote no readable {DAEMON_REPORT}"
+    if not isinstance(report, dict) or not report.get("requested"):
+        return None
+    return None if report.get("started") else str(report.get("error") or "the daemon did not start")
+
+
+def remove_project(project: str, docker: Docker | None = None) -> bool:
+    """Remove every container and network compose labelled with this project. True when something went."""
     docker = images._docker(docker)
-    stopped = stop(egress.proxy, docker)
-    removed = docker(["network", "rm", egress.network])
-    return {"proxy": stopped, "network_removed": removed.returncode == 0}
+    label = f"label={COMPOSE_PROJECT_LABEL}={project}"
+    removed = False
+    for token in _listed(docker, "container", label):
+        docker(["rm", "--force", token])
+        removed = True
+    for token in _listed(docker, "network", label):
+        docker(["network", "rm", token])
+        removed = True
+    return removed
+
+
+def _listed(docker: Docker, kind: str, label: str) -> list[str]:
+    argv = ["ps", "--all", "--quiet", "--filter", label] if kind == "container" else ["network", "ls", "--quiet", "--filter", label]
+    try:
+        completed = docker(argv)
+    except ImageError:
+        return []
+    return completed.stdout.split() if completed.returncode == 0 else []
 
 
 def stop(name: str, docker: Docker | None = None) -> bool:
-    """Stop and remove one container by name. True when it was there to stop."""
-    docker = images._docker(docker)
+    """Stop and remove one attempt's compose project by name. True when it was there to stop."""
     try:
-        halted = docker(["stop", "--time", str(STOP_GRACE_S), name])
-        docker(["rm", "--force", name])
+        return remove_project(compose_project(name), docker)
     except ImageError:
         return False
-    return halted.returncode == 0
-
-
-def run_argv(
-    *,
-    image: str,
-    name: str,
-    workdir: Path,
-    plan: list[Mount],
-    environment: Mapping[str, str],
-    forward: tuple[str, ...] = (),
-    network: str | None = None,
-    daemon: bool = False,
-    command: list[str],
-    user_id: str | None = None,
-) -> list[str]:
-    """The whole `docker run`. Every value here is code-owned or already checked by the caller.
-
-    `forward` names variables passed without a value: docker reads them from
-    this process's environment, which is how the credential seam reaches the
-    container and nothing else.
-    """
-    argv = [
-        images.DOCKER,
-        "run",
-        "--rm",
-        "--init",
-        "--name",
-        _name(name),
-        "--workdir",
-        str(workdir),
-        "--user",
-        user_id if user_id is not None else user(),
-    ]
-    if network is not None:
-        argv += ["--network", _name(network)]
-    for mount in plan:
-        argv += ["--volume", mount.flag]
-    for key in sorted(environment):
-        argv += ["--env", f"{key}={environment[key]}"]
-    for key in forward:
-        argv += ["--env", key]
-    argv.append(image)
-    if daemon:
-        argv.append("--daemon")
-    return argv + ["--", *command]
-
-
-def agent_argv(argv: list[str]) -> list[str]:
-    """The command the entrypoint runs, out of a full `docker run` argv. What a reader wants to see."""
-    return argv[argv.index("--") + 1 :] if "--" in argv else argv
-
-
-class ProxySentinel:
-    """The proxy log as the run's sentinel: every refused request is a public request.
-
-    A container cannot reach a loopback origin on the host, so the planted
-    origin the fake path uses has no meaning here. What replaces it is stronger:
-    the proxy sees every request that leaves, and a host outside the allowlist
-    is refused there rather than counted afterwards.
-    """
-
-    def __init__(self, log: Path, origin: str) -> None:
-        self.log = log
-        self.origin = origin
-
-    @property
-    def entries(self) -> list[dict[str, Any]]:
-        try:
-            text = self.log.read_text(encoding="utf-8")
-        except OSError:
-            return []
-        rows = []
-        for line in text.splitlines():
-            if not line.strip():
-                continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(row, dict):
-                rows.append(row)
-        return rows
-
-    @property
-    def hits(self) -> list[dict[str, Any]]:
-        return [row for row in self.entries if row.get("verdict") == "refused"]
 
 
 def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None:
@@ -331,6 +569,10 @@ def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None
     directory outside that set mounts as an empty directory, which a trial
     would discover as a missing repository or a lost transcript. So one
     container reads one marker back before anything is spent.
+
+    A plain `docker run` rather than a Harbor environment: this asks what the
+    daemon can see of the host, and it has to be answerable before a task, an
+    allowlist or a compose project exists.
     """
     docker = images._docker(docker)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -355,19 +597,25 @@ def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None
         )
 
 
-def attestation(egress: Egress, seam: str) -> dict[str, Any]:
+def attestation(egress: Egress, seam: str, instance_id: str) -> dict[str, Any]:
     """The isolation this run established, stated as the attestation's own fields.
 
-    A container run does not need an operator to promise its isolation: the
-    network is `--internal`, so the only way out is the proxy, and the proxy
-    holds exactly this allowlist. The roots are built fresh per trial and no
-    wallet is ever mounted or installed, and the seam is the one variable the
-    client forwards. `instance_id` is the run's network, which names this run's
-    isolation and nothing else's; the per-trial image id is in the record.
+    `instance_id` is the run's nonce. Under Harbor the container, its network
+    and its egress sidecar are per attempt, so no single run-level object names
+    the isolation; the nonce is what every one of this run's compose projects
+    is derived from, and the per-trial image id is in the record.
+
+    `network_allowlist` is the policy `require_egress` proved Harbor would
+    enforce before the first trial started. It states what the sidecar drops,
+    and NOT that no attempt tried to leave: Harbor reports no denials, so that
+    second claim is one this harness no longer makes anywhere. `credential_seam`
+    names the variable the run forwards; its value reaches the host-side
+    `docker compose exec` argv, which is why a measured run belongs on a
+    single-tenant machine.
     """
     return {
         "kind": "container",
-        "instance_id": egress.network,
+        "instance_id": instance_id,
         "image": f"{images.BASE_IMAGE}@{images.BASE_DIGEST}",
         "fresh_roots": True,
         "wallet_present": False,
@@ -378,22 +626,37 @@ def attestation(egress: Egress, seam: str) -> dict[str, Any]:
 
 def unavailable(docker: Docker | None = None) -> str | None:
     """Whether a live run can start at all. One sentence, or None."""
-    return images.unavailable(docker)
+    reason = images.unavailable(docker)
+    if reason is not None:
+        return reason
+    docker = images._docker(docker)
+    if docker(["compose", "version"]).returncode != 0:
+        return "`docker compose` is not installed; Harbor's Docker backend shells out to it. Install the compose plugin and try again."
+    try:
+        harbor()
+    except ImageError as error:
+        return f"{error.detail}."
+    return None
 
 
 __all__ = [
+    "Api",
     "Completed",
+    "Container",
     "Egress",
+    "EgressError",
     "ImageError",
     "Mount",
-    "ProxySentinel",
-    "agent_argv",
+    "attestation",
+    "check_mount",
+    "compose_project",
     "container_name",
+    "harbor",
     "mounts",
     "plan_egress",
-    "run_argv",
-    "start_egress",
+    "remove_project",
+    "require_egress",
+    "require_sidecar",
     "stop",
-    "stop_egress",
     "unavailable",
 ]

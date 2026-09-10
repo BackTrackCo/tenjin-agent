@@ -137,6 +137,11 @@ class Launch:
     # cap both stop it; None is a launch that starts no container.
     container: str | None = None
     container_plan: dict[str, Any] | None = None
+    # What a container spawn needs to bring the environment up and exec into
+    # it: a `container.Recipe`. `argv` above stays the agent's own command, so
+    # a fake spec and a live one describe the same thing and only the seam that
+    # runs it differs. None is a launch that starts no container.
+    recipe: Any = None
 
 
 # Where a finished trial's transcripts are, given its roots and root session

@@ -100,14 +100,19 @@ def _refuse(where: str):
 
 @contextlib.contextmanager
 def spawn_seam() -> Iterator[None]:
-    """Both process boundaries raise, and the exception says which was reached.
+    """Every boundary that could start something raises, and says which was reached.
 
-    A case that means to reach `runner.process_spawn` asserts on the name. The
-    `subprocess.Popen` patch is what makes that assertion safe to write: if the
-    seam above it ever stopped intercepting, this raises rather than starting
-    `claude` with a real budget.
+    A live launch runs inside a Harbor container, so `runner.container_spawn`
+    is the seam it reaches; a fake one still reaches `process_spawn`. The
+    `subprocess.Popen` patch is what makes either assertion safe to write: if
+    the seam above it ever stopped intercepting, this raises rather than
+    starting `claude` with a real budget or bringing a container up.
     """
-    with mock.patch.object(runner, "process_spawn", _refuse("process_spawn")), mock.patch.object(subprocess, "Popen", _refuse("subprocess.Popen")):
+    with (
+        mock.patch.object(runner, "container_spawn", _refuse("container_spawn")),
+        mock.patch.object(runner, "process_spawn", _refuse("process_spawn")),
+        mock.patch.object(subprocess, "Popen", _refuse("subprocess.Popen")),
+    ):
         yield
 
 
@@ -118,7 +123,12 @@ def no_process() -> Iterator[None]:
     def refuse(*args: object, **kwargs: object) -> None:
         raise AssertionError("the dry run started a process")
 
-    with mock.patch.object(runner, "process_spawn", refuse), mock.patch.object(verifier, "run", refuse), mock.patch.object(subprocess, "Popen", refuse):
+    with (
+        mock.patch.object(runner, "container_spawn", refuse),
+        mock.patch.object(runner, "process_spawn", refuse),
+        mock.patch.object(verifier, "run", refuse),
+        mock.patch.object(subprocess, "Popen", refuse),
+    ):
         yield
 
 
@@ -185,7 +195,7 @@ def test_the_argv_is_exactly_the_command_the_operator_would_run(request_for: Req
     request = request_for(smoke())
     pins = request.pins
     launch = claude_live.launch(request)
-    assert container.agent_argv(launch.argv) == [
+    assert launch.argv == [
         "claude",
         "-p",
         request.task["prompt"],
@@ -217,23 +227,24 @@ def test_the_argv_is_exactly_the_command_the_operator_would_run(request_for: Req
     assert "--no-session-persistence" not in launch.argv
 
 
-def test_the_command_is_one_docker_run_of_the_tasks_own_image(request_for: Request) -> None:
+def test_the_launch_is_the_agents_own_command_and_a_recipe_for_the_tasks_image(request_for: Request) -> None:
+    # The argv is the agent's, not a `docker run`: Harbor owns bringing the
+    # container up, and the command is exec'd into it afterwards.
     request = request_for(smoke())
     launch = claude_live.launch(request)
-    argv = launch.argv
-    assert argv[:4] == ["docker", "run", "--rm", "--init"]
-    assert argv[argv.index("--name") + 1] == f"bench2-{request.trial_id}"
+    assert launch.argv[0] == "claude"
+    recipe = launch.recipe
+    assert recipe.name == f"bench2-{request.trial_id}"
     assert launch.container == f"bench2-{request.trial_id}"
-    assert argv[argv.index("--user") + 1] == f"{os.getuid()}:{os.getgid()}"
-    assert argv[argv.index("--workdir") + 1] == str(request.roots.repo.resolve())
+    assert recipe.workdir == request.roots.repo.resolve()
     # The image is named by tag until the run resolves it to an id.
-    assert argv[argv.index("--") - 1] == images.fixture_tag(request.task["id"], request.task["fixture_hash"])
-    assert container.agent_argv(argv)[0] == "claude"
+    assert recipe.image == images.fixture_tag(request.task["id"], request.task["fixture_hash"])
     # Every root the trial owns is mounted at its own absolute path.
-    volumes = [argv[position + 1] for position, token in enumerate(argv) if token == "--volume"]
+    targets = {mount.host: mount for mount in recipe.plan}
     for root in (request.roots.repo, request.roots.home, request.roots.profile, request.roots.data_dir, request.roots.output):
-        assert f"{root}:{root}:rw" in volumes
-    assert f"{claude_live.settings_path(request.roots)}:{claude_live.settings_path(request.roots)}:ro" in volumes
+        assert targets[root].target == root and targets[root].mode == "rw"
+    settings = claude_live.settings_path(request.roots)
+    assert targets[settings].target == settings and targets[settings].mode == "ro"
 
 
 def test_a_provisioned_arm_asks_the_entrypoint_for_a_daemon_and_an_unprovisioned_one_does_not(run_dir: Path) -> None:
@@ -241,10 +252,12 @@ def test_a_provisioned_arm_asks_the_entrypoint_for_a_daemon_and_an_unprovisioned
     plans = {trial.arm_id: cli.plan_trial(manifest, trial, run_dir) for trial in schedule.expand(manifest)}
     assert plans["tenjin_seeded"]["container"]["daemon"]
     assert not plans["off"]["container"]["daemon"]
-    # The entrypoint is asked for a daemon by one flag, before the agent's
-    # own argv, and only the provisioned arm gets it.
-    assert plans["tenjin_seeded"]["argv"][plans["tenjin_seeded"]["argv"].index("--") - 1] == "--daemon"
-    assert "--daemon" not in plans["off"]["argv"]
+    # The entrypoint is asked for a daemon by one variable in the environment
+    # the container comes up with, because Harbor fixes the compose command and
+    # the entrypoint only ever sees the keepalive. Only the provisioned arm
+    # gets it, and the agent's own argv is the same either way.
+    assert plans["tenjin_seeded"]["container"]["env"][container.DAEMON_VAR] == "1"
+    assert container.DAEMON_VAR not in plans["off"]["container"]["env"]
 
 
 def test_the_arm_fragment_becomes_the_trials_own_settings_file(request_for: Request) -> None:
@@ -763,7 +776,7 @@ def test_a_fixture_carrying_dot_claude_is_refused_before_the_launch(live_manifes
 
 
 def test_a_fixture_without_project_settings_launches(live_manifest, request_for: Request) -> None:
-    assert container.agent_argv(claude_live.launch(request_for(live_manifest)).argv)[0] == "claude"
+    assert claude_live.launch(request_for(live_manifest)).argv[0] == "claude"
 
 
 def test_the_root_session_id_is_a_stable_distinct_uuid() -> None:
@@ -986,13 +999,15 @@ def test_the_container_gets_no_wallet_no_shelf_secret_and_not_the_operators_prof
     assert "/Users/operator" not in " ".join(env.values())
 
 
-def test_the_run_proxy_variables_are_the_only_network_the_container_is_told_about(request_for: Request, run_dir: Path) -> None:
-    egress = container.plan_egress(run_dir, ("api.anthropic.com",), "case")
+def test_the_container_is_told_nothing_about_the_network_because_it_does_not_have_to_be(request_for: Request) -> None:
+    # Harbor intercepts with nftables in a sidecar sharing the namespace, so a
+    # process is contained whether or not it reads a proxy variable. The old
+    # design put the container on an `--internal` network whose only route out
+    # was an HTTP proxy, and a process that ignored the variables reached
+    # nothing at all while the run still looked healthy.
     request = request_for(smoke())
-    env = claude_live.container_environment(request.roots, PARENT_ENV, claude_live.root_session_id(request.trial_id), egress)
-    assert env["HTTPS_PROXY"] == egress.proxy_url
-    assert env["NODE_USE_ENV_PROXY"] == "1"
-    assert env["NO_PROXY"] == container.NO_PROXY_HOSTS
+    env = claude_live.container_environment(request.roots, PARENT_ENV, claude_live.root_session_id(request.trial_id))
+    assert not [name for name in env if "PROXY" in name.upper()]
 
 
 def test_the_run_identity_reaches_the_container_and_the_daemon_inside_it(request_for: Request) -> None:
@@ -1018,7 +1033,7 @@ def test_the_run_identity_reaches_the_container_and_the_daemon_inside_it(request
 @pytest.mark.parametrize("value", [None, "tenjin-cli/0.1.0-alpha.15"], ids=["unset", "the plain cli"])
 def test_an_attempt_that_can_reach_the_marketplace_does_not_start_unnamed(request_for: Request, run_dir: Path, value: str | None) -> None:
     """The failure this refuses is silent: the run succeeds, its numbers are right, and only the public demand tables show it."""
-    egress = container.plan_egress(run_dir, ("api.anthropic.com",), "case")
+    egress = container.plan_egress(("api.anthropic.com",))
     request = dataclasses.replace(request_for(smoke()), egress=egress)
     environ = {} if value is None else {tenjin_arm.CALLER_USER_AGENT: value}
     with mock.patch.dict(os.environ, environ, clear=True), pytest.raises(LiveExecutorError) as caught:
@@ -1028,52 +1043,52 @@ def test_an_attempt_that_can_reach_the_marketplace_does_not_start_unnamed(reques
 
 def test_a_credential_variable_off_the_seam_list_is_refused() -> None:
     with pytest.raises(LiveExecutorError):
-        claude_live.docker_environment(PARENT_ENV, "GITHUB_TOKEN")
+        claude_live.credential_seam("GITHUB_TOKEN")
 
 
-def test_the_credential_reaches_the_client_by_value_and_the_container_by_name(request_for: Request) -> None:
-    env = claude_live.docker_environment(PARENT_ENV, "ANTHROPIC_API_KEY")
-    # What the docker client needs, plus the seam it forwards. Nothing else
-    # of the operator's environment is on the list.
-    assert env["ANTHROPIC_API_KEY"] == "sk-operator-key"
-    assert sorted(env) == ["ANTHROPIC_API_KEY", "HOME", "LANG", "PATH", "TERM"]
+def test_the_credential_is_named_by_the_recipe_and_valued_nowhere_this_package_writes(request_for: Request) -> None:
+    assert claude_live.credential_seam("ANTHROPIC_API_KEY") == ("ANTHROPIC_API_KEY",)
     request = request_for(smoke())
     with mock.patch.dict(os.environ, PARENT_ENV, clear=True):
         launch = claude_live.launch(dataclasses.replace(request, pins={**request.pins, "credential_env": "ANTHROPIC_API_KEY"}))
-    # `--env NAME` with no value: docker reads it from the client's own
-    # environment, so the secret is in no argv and no file.
-    assert "ANTHROPIC_API_KEY" in launch.argv
-    assert "ANTHROPIC_API_KEY=sk-operator-key" not in launch.argv
+    # The name is a fact about the run. The value is read out of this process
+    # at exec, so it is in no argv this package builds, in the plan a dry run
+    # prints, or in the compose override Harbor writes for `up`.
+    assert launch.recipe.forward == ("ANTHROPIC_API_KEY",)
+    assert "sk-operator-key" not in json.dumps(launch.container_plan)
     assert "sk-operator-key" not in " ".join(launch.argv)
+    assert "ANTHROPIC_API_KEY" not in launch.recipe.environment
 
 
-def test_the_launch_carries_the_environment_the_runner_will_use(request_for: Request) -> None:
+def test_the_launch_carries_the_environment_the_container_will_come_up_with(request_for: Request) -> None:
     request = request_for(smoke())
     launch = claude_live.launch(request)
-    assert launch.env is not None
-    # The runner starts a docker client, so the launch environment is the
-    # client's; the trial's own roots are the container's.
+    # There is no host-side child any more, so the launch owns no host
+    # environment: what it carries is the container's, and the ENTRYPOINT reads
+    # it before any agent runs.
+    assert launch.env is None
     assert launch.container_plan["env"]["HOME"] == str(request.roots.home)
-    assert "TENJIN_DATA_DIR" not in launch.env
+    assert launch.recipe.environment["TENJIN_DATA_DIR"] == str(request.roots.data_dir)
 
 
 # The guard above is only worth anything if the runtime reads what it patched.
 
 
 def test_the_patched_spawn_is_the_one_a_runtime_would_call() -> None:
-    replacement = _refuse("process_spawn")
-    with mock.patch.object(runner, "process_spawn", replacement):
+    replacement = _refuse("default_spawn")
+    with mock.patch.object(runner, "default_spawn", replacement):
         assert runner.Runtime().spawn is replacement
-    assert runner.Runtime().spawn is runner.process_spawn
+    assert runner.Runtime().spawn is runner.default_spawn
 
 
 def test_the_seam_intercepts_the_spawn_a_real_live_run_would_reach(run_dir: Path, attestation_file: AttestationFile, live_gates, run_identity) -> None:
     # The whole live path with a valid attestation and a credential in the
-    # shell: everything except the spawn happens, and what the runtime
-    # calls is the replaced seam rather than `subprocess.Popen`.
+    # shell: everything except the container happens, and what the runtime
+    # calls is the replaced seam rather than `subprocess.Popen`. A live launch
+    # names a container recipe, so the seam it routes to is the Harbor one.
     with spawn_seam(), pytest.raises(SpawnReached) as caught:
         cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ=LIVE_ENV)
-    assert str(caught.value) == "process_spawn"
+    assert str(caught.value) == "container_spawn"
 
 
 def test_an_injected_runtime_cannot_supply_the_isolation_contract(run_dir: Path, attestation_file: AttestationFile, live_gates, run_identity) -> None:
@@ -1086,7 +1101,7 @@ def test_an_injected_runtime_cannot_supply_the_isolation_contract(run_dir: Path,
         # there for the runtimes a caller built earlier.
         runtime = runner.Runtime(attestation=None, publishable=False)
         cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ=LIVE_ENV, runtime=runtime)
-    assert str(caught.value) == "process_spawn"
+    assert str(caught.value) == "container_spawn"
 
 
 def test_the_dry_run_prints_every_trials_argv_and_roots_and_starts_nothing(run_dir: Path, run_identity) -> None:
@@ -1102,9 +1117,10 @@ def test_the_dry_run_prints_every_trials_argv_and_roots_and_starts_nothing(run_d
         assert plan["roots"]["profile"] in plan["roots"]["sessions"]
         # The whole argv is one copyable line, in the order the CLI receives it.
         assert shlex.join(plan["argv"]) in printed
-        # One `docker run` per trial, with the agent's own command after it.
-        assert plan["argv"][0] == "docker"
-        assert plan["container"]["agent"][0] == "claude"
+        # The argv IS the agent's command: Harbor brings the container up and
+        # execs this into it, so there is no `docker run` to print.
+        assert plan["argv"][0] == "claude"
+        assert plan["container"]["agent"] == plan["argv"]
     assert "nothing was started" in printed
 
 
@@ -1156,10 +1172,11 @@ def test_a_run_with_no_attestation_file_carries_the_one_the_run_wrote_itself(run
     cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, environ=dict(LIVE_ENV))
     attestation = captured_runtime[0].attestation
     assert attestation is not None
-    # Not a promise: the network the run created is `--internal`, so the
-    # proxy holding this allowlist is the only way out of it.
+    # Not a promise: each attempt runs behind a sidecar holding this
+    # allowlist, and `require_egress` proved before the run that Harbor would
+    # install it rather than fall back to public egress.
     assert attestation.kind == "container"
-    assert attestation.instance_id.startswith("bench2-net-")
+    assert attestation.instance_id == cli.run_nonce(run_dir, manifest_module.load(cli.SMOKE_MANIFEST))
     assert attestation.image == f"{images.BASE_IMAGE}@{images.BASE_DIGEST}"
     assert attestation.network_allowlist == ("127.0.0.1", "api.anthropic.com")
     assert attestation.credential_seam == "CLAUDE_CODE_OAUTH_TOKEN"
@@ -1263,7 +1280,6 @@ def test_every_gate_live_run_reaches_is_a_refusal_the_entry_point_catches() -> N
         executor.ProvisionError,
         reap.ReapError,
         records.RecordError,
-        runner.ConcurrencyError,
     ):
         assert issubclass(kind, cli.REFUSALS), kind
 
@@ -1335,7 +1351,14 @@ def test_a_manifest_whose_image_is_not_built_names_the_build_command() -> None:
             return images.Completed(returncode=1, stdout="", stderr="No such image")
         return images.Completed(returncode=0, stdout="29.5.2", stderr="")
 
-    with mock.patch.object(images, "run_docker", docker), pytest.raises(cli.CliError) as caught:
+    # Harbor is not installed in the offline lane, and `unavailable` asks for it
+    # before it asks about images. Stubbed here so the case reaches the refusal
+    # it is about; `test_container.py` covers the Harbor half of that gate.
+    with (
+        mock.patch.object(images, "run_docker", docker),
+        mock.patch.object(container, "harbor", lambda: None),
+        pytest.raises(cli.CliError) as caught,
+    ):
         cli.refuse_without_images(smoke())
     assert "images build" in str(caught.value)
 
@@ -1449,7 +1472,7 @@ def test_ci_live_plumbing_reaches_the_spawn_seam_under_ci_stamped_automated(run_
     environ = {"CI": "1", "GITHUB_ACTIONS": "true", **LIVE_ENV}
     with spawn_seam(), pytest.raises(SpawnReached) as caught:
         cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ=environ)
-    assert str(caught.value) == "process_spawn"
+    assert str(caught.value) == "container_spawn"
     # The seam is reached from `runner.run_trial`, after `require_isolation`
     # accepted the run, so the roots it built are the automated stamp's proof.
     assert (run_dir / "trials").is_dir()

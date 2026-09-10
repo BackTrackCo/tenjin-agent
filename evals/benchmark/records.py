@@ -401,8 +401,8 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("verifier must be null or carry an id")
     if record["outcome"] in ("pass", "fail") and verifier is None:
         raise RecordError("a pass or fail outcome needs a verifier verdict")
-    if "public_requests" not in record["sentinel"]:
-        raise RecordError("sentinel must carry public_requests")
+    if "credential_exposures" not in record["sentinel"]:
+        raise RecordError("sentinel must carry credential_exposures")
     for name, value in record["sentinel"].items():
         if not _count(value):
             raise RecordError(f"sentinel.{name} must be a count")

@@ -1,15 +1,26 @@
-// The container entrypoint for one attempt: start the trial's daemon on the
-// mounted data dir, run the agent, stop the daemon, wait for the WAL, exit
-// with the agent's code.
+// The container entrypoint for one attempt, and the command that ends it.
+//
+// Harbor brings the service up with `sh -c "sleep infinity"` and execs the
+// agent into the running container afterwards, so the daemon's life is no
+// longer bracketed by one process. Two modes:
+//
+//   (no arguments beyond the keepalive)  start the daemon when BENCH2_DAEMON
+//                                        is set, write `daemon.json`, then
+//                                        exec the keepalive as pid 1.
+//   --stop                               stop the daemon and any the shim
+//                                        respawned, wait for the WAL, and
+//                                        merge the result into `daemon.json`.
 //
 // The daemon lives here rather than on the host because the data dir it serves
 // is a bind mount at the same absolute path in both, and a loopback daemon a
-// hook posts to has to be reachable from inside this network namespace. What
-// the host used to observe by signalling a pid it started, it now reads back
-// from `daemon.json` in the trial's output root.
+// hook posts to has to be reachable from inside this network namespace. The
+// host reads what happened out of `daemon.json` in the trial's output root; a
+// daemon that never became healthy is recorded there and the host refuses the
+// attempt without ever execing the agent.
 //
-// PID 1 in the container: `docker stop` lands here as SIGTERM, so the agent
-// and the daemon are stopped from the same handler that runs on a clean exit.
+// The daemon is spawned detached from pid 1's own lifetime on purpose: pid 1
+// is the keepalive, and `docker compose exec` is a different process, so
+// nothing links the agent's exit to the daemon's.
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -21,25 +32,12 @@ const WAL_TIMEOUT_MS = 5_000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const DAEMON_VAR = 'BENCH2_DAEMON';
+
 function usage(message) {
   process.stderr.write(`bench2-trial: ${message}\n`);
-  process.stderr.write('usage: bench2-trial [--daemon] -- <command> [args...]\n');
+  process.stderr.write('usage: bench2-trial [--stop] [command [args...]]\n');
   process.exit(2);
-}
-
-function parseArgs(argv) {
-  let daemon = false;
-  let index = 0;
-  for (; index < argv.length; index += 1) {
-    if (argv[index] === '--daemon') daemon = true;
-    else if (argv[index] === '--') {
-      index += 1;
-      break;
-    } else usage(`unknown option ${argv[index]}`);
-  }
-  const command = argv.slice(index);
-  if (command.length === 0) usage('no command after --');
-  return { daemon, command };
 }
 
 function readJson(path) {
@@ -167,46 +165,75 @@ async function stopDaemon(dataDir, started) {
   return report;
 }
 
-async function main() {
-  const { daemon, command } = parseArgs(process.argv.slice(2));
-  const output = process.env.BENCH2_OUTPUT;
-  if (!output) usage('BENCH2_OUTPUT is not set');
-  mkdirSync(output, { recursive: true });
-  const dataDir = process.env.TENJIN_DATA_DIR ?? '';
-  let started = null;
-  const report = { requested: daemon, started: false, pid: null, port: null, error: null };
-  if (daemon) {
-    try {
-      started = await startDaemon(dataDir, output);
-      Object.assign(report, { started: true, pid: started.pid, port: started.port });
-    } catch (error) {
-      // A daemon that never became healthy is a refusal the host reads off
-      // this file; the agent is not started, because the arm it would run
-      // under does not exist.
-      report.error = String(error?.message ?? error);
-      writeFileSync(join(output, 'daemon.json'), JSON.stringify(report, null, 2) + '\n');
-      return 70;
-    }
-  }
+function reportPath(output) {
+  return join(output, 'daemon.json');
+}
 
+function mergeReport(output, fields) {
+  const current = readJson(reportPath(output)) ?? {};
+  const merged = { ...current, ...fields };
+  writeFileSync(reportPath(output), JSON.stringify(merged, null, 2) + '\n');
+  return merged;
+}
+
+// The keepalive Harbor's compose file hands this entrypoint. Replacing this
+// process with it keeps pid 1 the thing `docker compose down` signals.
+function keepAlive(command) {
   const child = spawn(command[0], command.slice(1), { stdio: 'inherit' });
   const forward = (signal) => {
     try {
       child.kill(signal);
     } catch {
-      // The agent is already gone; the daemon stop below still runs.
+      // Already gone; there is nothing else this process owns.
     }
   };
   process.on('SIGTERM', () => forward('SIGTERM'));
   process.on('SIGINT', () => forward('SIGINT'));
-  const [code, signal] = await new Promise((resolve) => {
-    child.on('error', () => resolve([127, null]));
-    child.on('exit', (exitCode, exitSignal) => resolve([exitCode, exitSignal]));
+  return new Promise((resolve) => {
+    child.on('error', () => resolve(127));
+    child.on('exit', (code, signal) => resolve(signal ? 128 : (code ?? 1)));
   });
+}
 
-  if (daemon) Object.assign(report, await stopDaemon(dataDir, started));
-  writeFileSync(join(output, 'daemon.json'), JSON.stringify(report, null, 2) + '\n');
-  return signal ? 128 : (code ?? 1);
+async function start(output, dataDir) {
+  const wanted = Boolean(process.env[DAEMON_VAR]);
+  const report = { requested: wanted, started: false, pid: null, port: null, error: null };
+  if (!wanted) {
+    mergeReport(output, report);
+    return null;
+  }
+  try {
+    const live = await startDaemon(dataDir, output);
+    mergeReport(output, { ...report, started: true, pid: live.pid, port: live.port });
+    return live;
+  } catch (error) {
+    // A daemon that never became healthy is a refusal the host reads off this
+    // file before it execs anything. The container still comes up, because a
+    // service that exits is a compose failure rather than a readable one.
+    mergeReport(output, { ...report, error: String(error?.message ?? error) });
+    return null;
+  }
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const stopping = argv[0] === '--stop';
+  const command = stopping ? argv.slice(1) : argv;
+  const output = process.env.BENCH2_OUTPUT;
+  if (!output) usage('BENCH2_OUTPUT is not set');
+  mkdirSync(output, { recursive: true });
+  const dataDir = process.env.TENJIN_DATA_DIR ?? '';
+
+  if (stopping) {
+    const report = readJson(reportPath(output)) ?? {};
+    const started = typeof report.pid === 'number' ? { pid: report.pid, port: report.port } : null;
+    mergeReport(output, await stopDaemon(dataDir, started));
+    return 0;
+  }
+
+  await start(output, dataDir);
+  if (command.length === 0) usage('no command to keep the container alive');
+  return keepAlive(command);
 }
 
 main().then(

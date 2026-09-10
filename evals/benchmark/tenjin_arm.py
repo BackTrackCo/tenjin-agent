@@ -192,40 +192,54 @@ def lessons_for(task: dict[str, Any], lessons: Path | None = None, selected: lis
     return found
 
 
-def probe_argv(image: str, probe: Path, command: str, environment: dict[str, str]) -> list[str]:
-    """One command from a lesson, run in the task's own image with no network at all.
+def probe_recipe(image: str, probe: Path, environment: dict[str, str]) -> "container.Recipe":
+    """One lesson command's container: the task's own image, the probe tree, and no network at all.
 
     Through the image's entrypoint, which is what a trial runs under, so it
     needs an output root: the probe's own, beside the repository copy, never
     the trial's, and mounted because nothing outside a mount exists in there.
+    The entrypoint starts no daemon here, so it comes up as the keepalive and
+    the command is exec'd into it.
     """
     output = Path(environment[container.OUTPUT_VAR])
-    return container.run_argv(
+    name = f"{container.TRIAL_PREFIX}probe-{secrets.token_hex(4)}"
+    return container.Recipe(
+        name=name,
         image=image,
-        name=f"{container.TRIAL_PREFIX}probe-{secrets.token_hex(4)}",
         workdir=probe,
+        trial_dir=output / name,
+        environment_dir=output / name / "environment",
         plan=[container.Mount(probe, probe), container.Mount(output, output)],
-        environment=environment,
-        network="none",
-        command=command.split(" "),
+        environment=dict(environment),
+        egress=container.no_network(),
     )
 
 
-def probe_run(image: str, probe: Path, command: str, environment: dict[str, str]) -> "subprocess.CompletedProcess[str]":
-    """Run one probe command in its container, and stop that container whatever happens."""
-    argv = probe_argv(image, probe, command, environment)
-    name = argv[argv.index("--name") + 1]
+@dataclass(frozen=True)
+class Probed:
+    """One probe command's result. The shape `signature.key_of` reads, and nothing of the process."""
+
+    stdout: str
+    stderr: str
+    returncode: int
+
+
+def probe_run(image: str, probe: Path, command: str, environment: dict[str, str]) -> Probed:
+    """Run one probe command in its own container, and tear that container down whatever happens."""
+    recipe = probe_recipe(image, probe, environment)
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, shell=False, check=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        container.stop(name)
+        with container.Container(recipe=recipe) as box:
+            ran = box.exec(command.split(" "), cwd=probe, timeout_s=PROBE_TIMEOUT_S)
+            return Probed(stdout=ran.stdout, stderr=ran.stderr, returncode=ran.returncode)
+    except (OSError, RuntimeError) as error:
+        container.stop(recipe.name)
         raise ProvisionError(f"the seed probe could not run {command!r}: {error.__class__.__name__}") from error
 
 
 # The seam a test replaces to run a probe command directly, so the offline
 # suite proves the keying without a container. Code-owned, like the CLI argv
 # seams below: the manifest never names a program.
-PROBE_RUN: Callable[[str, Path, str, dict[str, str]], "subprocess.CompletedProcess[str]"] = probe_run
+PROBE_RUN: Callable[[str, Path, str, dict[str, str]], Probed] = probe_run
 
 
 def probe_keys(
@@ -311,10 +325,10 @@ ENVELOPE_KEYS = frozenset({"ok", "data", "resourceId", "postId", "deleted", "can
 SEED_NOTE = "seed.json"
 CANDIDATE_FIELDS = ("confidence", "corroborated", "calibration", "score")
 SHORTLIST_FILE = "shortlist.json"
-# The CLI asks npm for its own dist-tags once a day. On a run whose only route
-# out is the allowlist proxy that request is refused, the refusal is what the
-# sentinel counts, and the trial is thrown away for an egress the arm never
-# wanted. The product's own opt-out (`update-check.ts`) turns it off.
+# The CLI asks npm for its own dist-tags once a day. On a run whose egress is
+# an allowlist that request goes nowhere, and it is traffic the arm never
+# wanted in the first place. The product's own opt-out (`update-check.ts`)
+# turns it off at the source.
 NO_UPDATE_CHECK = "TENJIN_NO_UPDATE_CHECK"
 # The product's documented handoff for an agent that launches the CLI
 # (`src/lib/client-meta.ts`, `CALLER_USER_AGENT_ENV`). A benchmark leg is not
@@ -853,25 +867,8 @@ def daemon_argv(roots: artifact.TrialRoots) -> list[str]:
 DAEMON_ARGV: Callable[[artifact.TrialRoots], list[str]] = daemon_argv
 
 
-# The run's only route out is the allowlist proxy, and a daemon told nothing
-# about it dials each host directly. On an `--internal` network that reaches
-# nothing, so every shelf leg fails as a bare `error` with no search id and the
-# arm delivers nothing while the run still reports four healthy attempts. Node
-# 24 reads the addresses for `fetch` only under `NODE_USE_ENV_PROXY`, so the
-# flag travels with them or none of them count.
-PROXY_NAMES = (
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "no_proxy",
-    "NODE_USE_ENV_PROXY",
-)
-
-
 def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None = None) -> dict[str, str]:
-    """The daemon's allowlist: the trial's own roots, the run's proxy and the locale names, nothing of the operator's."""
+    """The daemon's allowlist: the trial's own roots and the locale names, nothing of the operator's."""
     parent = os.environ if parent is None else parent
     env = {
         "PATH": parent.get("PATH", ""),
@@ -879,12 +876,17 @@ def daemon_environment(roots: artifact.TrialRoots, parent: dict[str, str] | None
         "TENJIN_DATA_DIR": data_dir_string(roots),
         NO_UPDATE_CHECK: "1",
     }
-    # CALLER_USER_AGENT rides with them: the daemon's shelf and marketplace legs
-    # are the bulk of a trial's public traffic, and this environment has already
-    # dropped a variable the daemon needed twice (the proxy names above, and the
-    # update-check opt-out), so anything the trial's other processes get is
-    # listed here in the same change or it goes missing here.
-    for name in ("LANG", "TMPDIR", CALLER_USER_AGENT, *PROXY_NAMES):
+    # CALLER_USER_AGENT rides here: the daemon's shelf and marketplace legs are
+    # the bulk of a trial's public traffic, and this environment has already
+    # dropped a variable the daemon needed twice, so anything the trial's other
+    # processes get is listed here in the same change or it goes missing here.
+    #
+    # No proxy names any more. The old design put the container on an
+    # `--internal` network whose only route out was an HTTP proxy, so a process
+    # that did not read the proxy variables reached nothing at all and its legs
+    # failed as bare errors. Harbor intercepts with nftables in a sidecar that
+    # shares the namespace, so a process needs to be told nothing.
+    for name in ("LANG", "TMPDIR", CALLER_USER_AGENT):
         if parent.get(name):
             env[name] = parent[name]
     return env

@@ -407,13 +407,13 @@ def test_the_seeded_secret_is_a_canary_everywhere_but_the_seeded_config(make_roo
     roots = make_roots()
     (roots.data_dir / "config.json").write_text(json.dumps({"shelfBypassSecret": SECRET}), encoding="utf-8")
     exclude = (roots.data_dir / "config.json",)
-    assert artifact.scan_sentinels(roots, 0, canaries=(SECRET,), exclude=exclude).credential_exposures == 0
+    assert artifact.scan_sentinels(roots, canaries=(SECRET,), exclude=exclude).credential_exposures == 0
     (roots.repo / "notes.md").write_text(f"header {SECRET}\n", encoding="utf-8")
     transcript = roots.profile / "projects" / "p" / "root.jsonl"
     transcript.parent.mkdir(parents=True)
     transcript.write_text(json.dumps({"text": SECRET}) + "\n", encoding="utf-8")
     (roots.output / "daemon.log").write_text(f"sent {SECRET}\n", encoding="utf-8")
-    report = artifact.scan_sentinels(roots, 0, canaries=(SECRET,), exclude=exclude)
+    report = artifact.scan_sentinels(roots, canaries=(SECRET,), exclude=exclude)
     assert report.credential_exposures == 3
     assert report.reason == "sentinel:credential_exposure"
 
@@ -562,7 +562,7 @@ def legs(*shelves: str | tuple[str, str, str]) -> support.Before:
     return before
 
 
-def test_team_and_public_fallback_legs_are_named_origins_and_an_unknown_shelf_is_a_public_request(
+def test_team_and_public_fallback_legs_are_named_and_an_unnamed_shelf_is_counted_without_invalidating(
     seeded_manifest, make_runtime, run_dir: Path, public_source
 ) -> None:
     trial = trial_of(seeded_manifest, "tenjin_seeded")
@@ -571,16 +571,16 @@ def test_team_and_public_fallback_legs_are_named_origins_and_an_unknown_shelf_is
         seeded_manifest, trial, run_dir, "sha256:schedule", make_runtime(spawn=support.fake_spawn(before=legs("team", "public")), source=public_source)
     )
     assert record["delivery"]["classes"] == {"team": 1, "public": 1, "local": 0, "other": 0}
-    assert record["sentinel"]["public_requests"] == 0
     assert record["outcome"] == "pass"
-    # A leg to a shelf this package cannot name is a request to an unknown origin.
+    # A leg to a shelf this package cannot name is counted as `other`. It is
+    # the daemon's own ledger, not an observation of the network, so it is
+    # reported and the attempt still stands.
     record = runner.run_trial(
         seeded_manifest, trial, run_dir, "sha256:schedule", make_runtime(spawn=support.fake_spawn(before=legs("team", "mirror")), source=public_source)
     )
     assert record["delivery"]["shelves"] == {"team": 1, "public": 0, "keys": 0, "local": 0, "other": 1}
     assert record["delivery"]["classes"] == {"team": 1, "public": 0, "local": 0, "other": 1}
-    assert (record["outcome"], record["invalid_reason"]) == ("invalid", "sentinel:public_request")
-    assert record["sentinel"]["public_requests"] == 1
+    assert (record["outcome"], record["invalid_reason"]) == ("pass", None)
 
 
 def test_keys_and_local_legs_are_classified_and_never_invalidate(
@@ -603,7 +603,6 @@ def test_keys_and_local_legs_are_classified_and_never_invalidate(
         seeded_manifest, trial, run_dir, "sha256:schedule", make_runtime(spawn=support.fake_spawn(before=before), source=public_source)
     )
     assert record["outcome"] == "pass"
-    assert record["sentinel"]["public_requests"] == 0
     assert record["delivery"]["shelves"] == {"team": 1, "public": 1, "keys": 2, "local": 2, "other": 0}
     assert record["delivery"]["classes"] == {"team": 1, "public": 3, "local": 2, "other": 0}
     assert record["delivery"]["public"] == {"legs": 3, "hits": 1, "timeouts": 1, "no_answer": 1}
@@ -683,8 +682,10 @@ def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_
     # was built, copied or started.
     assert "image     bench2-actor:" in printed
     assert "container bench2-" in printed
-    assert "(internal, no route out) via proxy" in printed
-    assert "allowlist api.anthropic.com public.example team-shelf.example" in printed
+    assert "project   bench2-" in printed
+    # What the line says, and what it deliberately does not: the sidecar drops
+    # anything off the list, and reports no denial for the record to count.
+    assert "allowlist api.anthropic.com public.example team-shelf.example; the sidecar drops anything else, and reports no denial" in printed
     for plan in payload["trials"]:
         assert plan["container"]["image"]["resolved"] is False
         assert [mount["mode"] for mount in plan["container"]["mounts"]] == ["rw"] * 5 + ["ro"]
@@ -817,19 +818,18 @@ def calls(source: tenjin_arm.Source) -> Callable[[], list[dict]]:
     return read
 
 
-def test_the_probe_argv_carries_what_the_image_entrypoint_needs_to_start(tmp_path: Path) -> None:
-    """The entrypoint refuses without an output root, and refuses a container command that is not after `--`."""
+def test_the_probe_recipe_carries_what_the_image_entrypoint_needs_and_reaches_nothing(tmp_path: Path) -> None:
+    """The entrypoint refuses without an output root, and a probe that reached anything would measure something else."""
     probe = tmp_path / "probe"
     output = tmp_path / "probe-output"
-    argv = tenjin_arm.probe_argv(
-        "sha256:image", probe, "pnpm exec vitest run tests/a.test.mjs", {"HOME": str(tmp_path), container.OUTPUT_VAR: str(output)}
-    )
-    assert f"{container.OUTPUT_VAR}={output}" in argv
+    recipe = tenjin_arm.probe_recipe("sha256:image", probe, {"HOME": str(tmp_path), container.OUTPUT_VAR: str(output)})
+    assert recipe.environment[container.OUTPUT_VAR] == str(output)
     # Mounted as well as named: nothing outside a mount exists in there.
-    assert f"{output}:{output}:rw" in argv
-    assert f"{probe}:{probe}:rw" in argv
-    assert argv[argv.index("--network") + 1] == "none"
-    assert argv[argv.index("--") + 1 :] == ["pnpm", "exec", "vitest", "run", "tests/a.test.mjs"]
+    assert [mount.host for mount in recipe.plan] == [probe, output]
+    assert recipe.workdir == probe
+    assert recipe.egress.mode == container.NO_NETWORK
+    # No daemon: the probe runs the fixture's own commands, not an arm.
+    assert recipe.daemon is False
 
 
 def test_the_probe_gets_its_own_output_root_and_a_copy_that_keeps_its_symlinks(seed_roots, seed_lane: None) -> None:
@@ -1446,20 +1446,22 @@ def test_the_cli_and_the_daemon_environments_both_turn_the_npm_check_off(make_ro
     assert daemon[tenjin_arm.NO_UPDATE_CHECK] == "1"
 
 
-def test_the_daemon_environment_carries_the_run_proxy_and_the_flag_that_makes_it_count(make_roots) -> None:
+def test_the_daemon_environment_is_an_allowlist_and_carries_no_proxy_names(make_roots) -> None:
+    # Harbor's egress control is an nftables redirect in a sidecar sharing the
+    # namespace, so the daemon needs to be told nothing to be intercepted. The
+    # old design had to hand it proxy variables, and a process that missed them
+    # reached nothing at all on an `--internal` network.
     parent = {
         "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
         "HTTPS_PROXY": "http://proxy:8888",
-        "https_proxy": "http://proxy:8888",
-        "NO_PROXY": "127.0.0.1,localhost",
         "NODE_USE_ENV_PROXY": "1",
         "AWS_SECRET_ACCESS_KEY": "nope",
     }
     env = tenjin_arm.daemon_environment(make_roots("t2"), parent)
-    assert env["HTTPS_PROXY"] == "http://proxy:8888"
-    assert env["https_proxy"] == "http://proxy:8888"
-    assert env["NO_PROXY"] == "127.0.0.1,localhost"
-    assert env["NODE_USE_ENV_PROXY"] == "1"
+    assert env["LANG"] == "C.UTF-8"
+    assert "HTTPS_PROXY" not in env
+    assert "NODE_USE_ENV_PROXY" not in env
     assert "AWS_SECRET_ACCESS_KEY" not in env
 
 

@@ -1,4 +1,4 @@
-"""Executing a schedule: settlement, caps, outcomes, sentinels, resume, and concurrency.
+"""Executing a schedule: settlement, caps, outcomes, the credential canary, resume, and concurrency.
 
 Every case injects the clock, the settlement barrier, and the process
 boundary. Two exceptions start a real short-lived process: the timeout case,
@@ -15,7 +15,6 @@ import json
 import os
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import Callable
 
@@ -29,7 +28,6 @@ from evals.benchmark.tests import support
 from evals.benchmark.tests.support import ATTESTED
 from evals.benchmark.usage import AuxiliaryReceipt
 from evals.benchmark.verifier import VerifierError
-from evals.harness.sentinel import start_sentinel
 
 LIVE = "live_only_for_this_test"
 
@@ -215,32 +213,15 @@ def test_a_credential_that_leaves_the_disposable_home_makes_the_attempt_invalid(
     record = one_trial(make_manifest(), make_runtime(spawn=support.fake_spawn(before=before)))
     assert record["outcome"] == "invalid"
     assert record["invalid_reason"] == "sentinel:credential_exposure"
-    assert record["sentinel"] == {"public_requests": 0, "credential_exposures": 1}
+    assert record["sentinel"] == {"credential_exposures": 1}
 
 
-def test_a_public_request_makes_only_its_own_attempt_invalid(make_manifest, make_runtime, run_dir: Path) -> None:
-    # Loopback only, one server for this case, stopped when it ends.
-    sentinel = start_sentinel()
-    try:
-        calls: list[int] = []
-
-        def before(launch: executor.Launch, roots: artifact.TrialRoots) -> None:
-            calls.append(1)
-            if len(calls) == 1:
-                urllib.request.urlopen(f"{roots.public_origin}/collect", data=b"[redacted]", timeout=5).read()
-
-        manifest = make_manifest()
-        runtime = make_runtime(spawn=support.fake_spawn(before=before), sentinel=sentinel)
-        results = runner.run(manifest, schedule.expand(manifest), run_dir, "sha256:schedule", runtime)
-        assert [result.outcome for result in results] == ["invalid", "pass"]
-        first, second = (json.loads(result.path.read_text(encoding="utf-8")) for result in results)
-        assert first["invalid_reason"] == "sentinel:public_request"
-        assert first["sentinel"]["public_requests"] == 1
-        # The second trial is not charged for the first trial's hit.
-        assert second["sentinel"]["public_requests"] == 0
-        assert len(sentinel.hits) == 1
-    finally:
-        sentinel.stop()
+def test_a_record_states_only_the_sentinel_evidence_the_harness_can_still_gather(one_trial: OneTrial, make_manifest, make_runtime) -> None:
+    # The loopback public-request sentinel is retired with the container
+    # harness that could report a refusal, so a record carries the credential
+    # scan and nothing standing in for egress the harness cannot see.
+    record = one_trial(make_manifest(), make_runtime())
+    assert record["sentinel"] == {"credential_exposures": 0}
 
 
 # The CLI's own budget and turn stops: a failed attempt with its spend, never an invalid one.
@@ -913,21 +894,3 @@ def test_a_failing_trial_ends_the_run_without_stranding_another(tmp_path: Path, 
     assert reap.read_records(run_dir) == []
 
 
-def test_a_run_with_a_sentinel_refuses_more_than_one_trial_at_a_time(tmp_path: Path, run_dir: Path) -> None:
-    # The sentinel is one server for the run and its hits name no trial, so
-    # a trial claims whatever arrived while it ran. Two overlapping trials
-    # make that the wrong trial, and a hit invalidates an attempt.
-    sentinel = start_sentinel()
-    try:
-        manifest = support.synthetic_manifest(tmp_path, concurrency=2)
-        with pytest.raises(runner.ConcurrencyError):
-            runner.run(
-                manifest,
-                schedule.expand(manifest),
-                run_dir,
-                "sha256:schedule",
-                runner.Runtime(spawn=support.fake_spawn(), sentinel=sentinel),
-            )
-        assert not run_dir.exists()
-    finally:
-        sentinel.stop()

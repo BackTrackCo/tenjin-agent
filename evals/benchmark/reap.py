@@ -13,10 +13,18 @@ module exists to remove. Before signalling, a record is checked against the live
 process: same start time and same group, or the record is dropped unkilled,
 because a pid is reused and killing a recycled one kills a stranger.
 
-A live trial runs inside a container, which outlives the docker client that
-started it. So a record may also name a container and a network: those are
-stopped and removed by name before the group is signalled, and a record that
-names only them carries no pid to check.
+A live trial runs inside a Harbor compose project, which outlives this process
+entirely. Measured 2026-09-10 by SIGKILLing a run mid-attempt: both the trial
+container and its egress sidecar were still up, and so was an orphaned
+host-side `docker compose exec` client. That client is a child of this process
+rather than a session of its own, so the pid ledger below cannot record it
+(`register` refuses a pid in this group). Removing the project is what reaches
+all three: the containers go, and the client exits with the exec it was
+waiting on. So a record may also name a container, which is the compose
+project to sweep, and a record that names only that carries no pid to check.
+
+Both halves are live. The offline lane still spawns a real child in its own
+session and is reaped by process group; the Harbor lane is reaped by project.
 """
 
 from __future__ import annotations
@@ -235,8 +243,9 @@ def reap(
     containers: dict[str, bool] = {}
     pending: list[Record] = []
     for record in read_records(run_dir) if records is None else list(records):
-        # The container first: it outlives the client that started it, so
-        # signalling the group alone would leave a paid agent running.
+        # The container first: the compose project outlives this process, so
+        # signalling a group alone would leave a paid agent running, and the
+        # host-side exec client only exits once its container is gone.
         if record.container is not None:
             containers[record.container] = stop_fn(record.container)
         if record.network is not None:
