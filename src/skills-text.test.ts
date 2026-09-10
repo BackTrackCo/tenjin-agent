@@ -962,15 +962,28 @@ describe('the public render did not move', () => {
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
-  // Re-pinned when #203's skill resync landed on main. The answer-card overhaul
-  // later removed card completeness as a ranking/candidacy signal in both modes;
-  // compatibility fields remain public fit-context guidance only.
+  // Digest history, oldest first — what moved and which arm. The two #315
+  // entries below stay longhand while that PR is live; collapse them the same
+  // way once it merges.
+  // - #203 resync; card overhaul removed completeness as a rank signal (both modes).
+  // - Scan hardening: warn triage names the new detectors; block tier gains seed phrases (publish/else).
+  // - Review r7: block tier enumerated one way in both arms + safety-model.md.
+  // - Marketplace ingest gate: a `--yes` re-run can hit a second exit 3; team arm drops the "only findings" claim.
+  // - #158 merge: wallet fund rename in search, outside any arm.
+  // - Outcome statuses spelled out below the fence (a fenced `a|b|c` pastes as three piped commands).
+  // - Stdin publishing (#260): heredoc canonical example; file fallback stays prefix-matched.
+  // - tenjin#733/#797 card contract: `--excerpt` is a listing teaser; completeness claims nothing.
+  // - 2026-09-04 redact module: local scan is warn-only; team warn survivors down to two.
+  // - PR C lookup arms: Stop-hook `publish.mode=` line gone; item bullet gains `strong` + `body`.
+  // - PR E loop.db: `outcome --last`/`--all-open` deleted; `--search-id` alone.
+  // - PR E fix lane: turn-end ask names the fix; `--key fingerprint=<key>`.
+  // - PR E2: `session start` deleted, `read` mints its own session; `not_performed` dropped.
+  // - PR E2 mint pin: `read` signs for configured shelves only; `origin_not_configured` added.
   //
-  // Re-pinned again for the scan hardening: the public arm's warn triage now names
-  // the detectors that branch added (`private-network-endpoint`, `high-entropy-string`,
-  // `collaboration-url`, `cloud-resource-id`, `env-dump-block`) and the block tier
-  // gained seed phrases. Only tenjin-publish's else arm moved; tenjin-search is
-  // untouched, which is why its digest still holds.
+  // Re-pinned for the #315 Act 2 pointer: `config get` reads single leaf keys
+  // only, so tenjin-search's command surface now points hook-arm state at bare
+  // `tenjin hooks` (table + enable/disable) instead of letting agents guess a
+  // `config get hooks` subtree that never existed. tenjin-publish is untouched.
   //
   // Re-pinned once more (review r7): the block tier was enumerated three ways
   // across the two arms and safety-model.md, so all three now name the same five
@@ -1047,9 +1060,21 @@ describe('the public render did not move', () => {
   // error-to-fix record, so the turn-end ask names a failure this turn HIT
   // rather than a fix it closed, and tenjin-publish's key sentence follows it.
   // tenjin-search is untouched.
+  //
+  // Re-pinned for the tenjin-search tighten (same PR): 228 to 207 lines with no
+  // fact dropped — compressed bullets (matched/item/miss, read refusal taxonomy,
+  // outcome id lines, publish-handoff close), a shorter team-privacy bullet and
+  // description examples, and the fund line folded into the buy list. The item
+  // bullet keeps the `` `body`. `` terminator the wire-schema test parses on.
+  // Every pinned invariant (firing gate pairs, leak refusal, denial rule and its
+  // five-sentence cap, untrusted-data verbatim, mode handoff, no trust-scope
+  // language) holds in both renders; only the digest moved.
+  //
+  // Re-pinned by the merge of main into this branch: both chains above touch
+  // the same two files, so the digests below are this merge's own bytes.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '7a4e9c74c05362b85ea8e59d219ad9bd',
+      'tenjin-search': '9e0ec8e8600955353d1e902a60e83c4e',
       'tenjin-publish': '18251526058285eb9e09e0bbd1adf9e2',
     });
   });
