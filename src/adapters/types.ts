@@ -15,12 +15,12 @@
  */
 
 /** Harnesses with an adapter in this build. */
-export type Harness = 'claude';
+export type Harness = 'claude' | 'codex';
 
 /** The same union at run time: the installer's ownership predicate matches a
  *  registered URL against `/hook/<harness>`, and a list it cannot iterate would
  *  have to be spelled a second time. */
-export const HARNESSES: readonly Harness[] = ['claude'];
+export const HARNESSES: readonly Harness[] = ['claude', 'codex'];
 
 /**
  * The canonical event vocabulary every adapter maps its native events onto.
@@ -56,19 +56,46 @@ export const EVENTS: readonly Event[] = [
  */
 export type ToolKind = 'web' | 'fetch' | 'dispatch' | 'shell' | 'edit' | 'read';
 
-export interface HookTool {
+export interface ToolResult {
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+  text?: string;
+}
+
+interface ToolBase {
+  /** The native tool name, verbatim. */
   name: string;
-  kind: ToolKind | 'other';
   callId?: string;
-  input: Record<string, unknown>;
   /**
-   * `tool.after` only, and DECIDED IN DECODE (Claude: `PostToolUseFailure`;
-   * Codex: nonzero exit), never by an arm reading the result text.
+   * `tool.after` only, and DECIDED IN DECODE, never by an arm reading the
+   * result text. `false` is a failure the harness stated or an error marker in
+   * a shell's output; `true` is a completion the harness vouched for;
+   * `undefined` is unknown, which is what a harness that reports no exit status
+   * leaves behind. No marker never means success.
    */
   ok?: boolean;
-  result?: { stdout?: string; stderr?: string; error?: string; text?: string };
+  result?: ToolResult;
   interrupted?: boolean;
 }
+
+/**
+ * The fields the arms read, canonical per kind. Native argument shapes (a
+ * `file_path`, a patch body, a `message`) stop at the adapter; an arm never
+ * reads a vendor field. One native invocation is one tool value, so an edit
+ * that touches several files carries them all in `paths` and the context arm
+ * marks every one in a single fire.
+ */
+export type HookTool = ToolBase &
+  (
+    | { kind: 'shell'; command: string }
+    | { kind: 'edit'; paths: string[] }
+    | { kind: 'read'; paths: string[] }
+    | { kind: 'dispatch'; task: string }
+    | { kind: 'web'; query: string }
+    | { kind: 'fetch'; url: string; prompt: string }
+    | { kind: 'other' }
+  );
 
 /** The normalized payload the kernel runs on. */
 export interface HookInput {
@@ -76,7 +103,9 @@ export interface HookInput {
   event: Event;
   /** `hook_event_name` verbatim; `encode` stamps its response with it. */
   native: { event: string };
-  /** The ROOT session: the id the lead and all its children share. */
+  /** The ROOT session as the harness names it: the id the lead and all its
+   *  children share. `actorOf` namespaces it by harness before anything is
+   *  stored, so equal native ids across harnesses never share state. */
   session: string;
   /** Child id; undefined = the lead. Present-but-invalid makes `decode` return null. */
   agent?: string;
@@ -113,26 +142,23 @@ export interface Emit {
   context?: string;
 }
 
-/** What the installer needs to register a harness. */
+/**
+ * What the installer needs to register a harness, and nothing the daemon runs
+ * on: `selectArm` reads the event and tool kind off the decoded input, so a
+ * registrar carries no event or tool metadata that would claim an enforcement
+ * nothing performs.
+ */
 export interface Registrar {
-  /** The harness's own settings file under `home`. */
-  configPath(home: string): string;
-  /** Opaque entries the installer merges additively into that file. */
+  /** The harness's own hooks file under `home`. */
+  configPath(home: string, env?: NodeJS.ProcessEnv): string;
+  /**
+   * Entries the installer merges additively into that file, each
+   * `{ event, matcher?, hooks }` in the harness's own JSON shape.
+   */
   plan(target: { url: string; token: string; shimPath: string; timeoutSeconds: number }): unknown[];
-  /**
-   * Which canonical events this harness raises, under which native name and
-   * matcher. An arm whose `on` names an event absent here is not registered for
-   * this harness.
-   */
-  events: Partial<Record<Event, { native: string; matcher?: string }>>;
-  /** Native tool names per kind. Missing kinds decode as `'other'`. */
-  tools: Partial<Record<ToolKind, RegExp>>;
-  /**
-   * `false` means the harness cannot tag a child's fires with its id, so the
-   * actor is the session for this harness and subagent arms register marks only.
-   */
-  childrenTagged: boolean;
-  transcriptFor(input: HookInput): { path: string } | null;
+  /** Before installing hook entries in a file this harness reads: how the
+   *  operator activates them, when the harness gates untrusted entries. */
+  activation?: string;
 }
 
 export interface HarnessAdapter {

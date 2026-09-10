@@ -42,13 +42,8 @@ import type {
   LoopConfigKey,
   TeamConfigKey,
 } from '../lib/config';
-import {
-  detectHarnesses,
-  harnessInPlay,
-  harnessTargetDir,
-  onPath,
-  type HarnessTarget,
-} from '../lib/skill-wiring';
+import { detectHarnesses, harnessInPlay, harnessTargetDir, onPath } from '../lib/skill-wiring';
+import type { Harness } from '../adapters/types';
 import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
@@ -538,7 +533,7 @@ async function claudeInPlay(
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = await loadRawConfig(ctx.dataDir)
     .then((c) => c.install?.harness ?? [])
-    .catch(() => [] as HarnessTarget[]);
+    .catch(() => [] as Harness[]);
   return harnessInPlay(
     home,
     harnessTargetDir(home, 'claude'),
@@ -678,15 +673,14 @@ export async function persistBazaarPay(dir: string, enabled: boolean): Promise<v
 }
 
 /**
- * Record the explicit `--harness` set `install` was given, through the same locked
- * merge-write. It REPLACES the previous record rather than unioning with it: the last
- * explicit request is the current intent, and re-running install with the right flag
- * is then the way out of a mistaken one. Detected harnesses are never recorded — they
- * are re-probed on every `doctor` — so this file holds only what detection cannot see.
+ * Record the settled harness selection through the same locked merge-write. It
+ * replaces the previous record rather than unioning with it: the last operator
+ * answer is the current intent. Doctor still re-probes detection independently;
+ * the record keeps a deliberately selected but currently undetected harness in play.
  */
 export async function persistInstallHarness(
   dir: string,
-  harness: readonly HarnessTarget[],
+  harness: readonly Harness[],
 ): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,

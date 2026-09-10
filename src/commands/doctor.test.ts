@@ -57,6 +57,7 @@ beforeEach(async () => {
   delete process.env.TENJIN_WALLET_KEY;
 });
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await rm(dir, { recursive: true, force: true });
   await rm(skillHome, { recursive: true, force: true });
   await rm(pkgSrc, { recursive: true, force: true });
@@ -1438,10 +1439,10 @@ describe('runDoctor — skill wiring', () => {
       // The shadowed branch used to return before missing was ever computed.
       expect(skills.detail).toContain(`${claudeSkills()}: tenjin-publish installed but not`);
       expect(skills.detail).toContain(`${sharedSkills()}: tenjin-publish missing`);
-      expect(skills.fix).toBe('tenjin install --harness claude --harness shared');
+      expect(skills.fix).toBe('tenjin install --harness claude --harness codex');
     });
 
-    it('a problem only in .agents/skills gets the --harness shared fix that can clear it', async () => {
+    it('a problem only in .agents/skills gets the --harness codex fix that can clear it', async () => {
       await installCodex();
       for (const name of ['tenjin', 'tenjin-search', 'tenjin-publish']) {
         await writeSkillIn(claudeSkills(), name);
@@ -1459,7 +1460,7 @@ describe('runDoctor — skill wiring', () => {
       expect(skills.status).toBe('warn');
       // A bare `tenjin install` never targets ~/.agents/skills on a Claude-only
       // machine, so it would reproduce the warning forever.
-      expect(skills.fix).toBe('tenjin install --harness shared');
+      expect(skills.fix).toBe('tenjin install --harness codex');
     });
 
     // Unioning the SUCCESSES is the same bug as unioning the problems, inverted:
@@ -1542,7 +1543,7 @@ describe('runDoctor — skill wiring', () => {
         }
         await writeSkillIn(sharedSkills(), 'tenjin-search');
         await writeSkillIn(sharedSkills(), 'tenjin-publish', 'disable-model-invocation: true\n');
-        await recordHarness('shared');
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1558,7 +1559,7 @@ describe('runDoctor — skill wiring', () => {
         expect(skills.detail).toContain(
           `${sharedSkills()}: tenjin-publish installed but not model-invocable`,
         );
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
         // The healthy .claude directory is not dragged into the warning.
         expect(skills.detail).not.toContain(`${claudeSkills()}: `);
       });
@@ -1585,14 +1586,14 @@ describe('runDoctor — skill wiring', () => {
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.detail).not.toContain('not model-invocable');
         expect(skills.detail).toContain('not from this CLI build');
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
       });
 
       it('rides in the data as `requested`, leaving `harnessPresent` a detection fact', async () => {
         for (const name of ['tenjin-search', 'tenjin-publish']) {
           await writeSkillIn(claudeSkills(), name);
         }
-        await recordHarness('codex'); // `codex` and `shared` are the same directory
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1608,14 +1609,14 @@ describe('runDoctor — skill wiring', () => {
         expect(shared?.harnessPresent).toBe(false); // no Codex here, and that stays true
         // An empty requested directory the user asked for is still the defect.
         expect(skills.status).toBe('warn');
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
       });
 
       it('a recorded directory that is properly wired stays quiet', async () => {
         for (const dirOf of [claudeSkills(), sharedSkills()]) {
           for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
         }
-        await recordHarness('shared');
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1630,11 +1631,11 @@ describe('runDoctor — skill wiring', () => {
       });
 
       it('nothing wired anywhere: the first fix names the recorded target, not a bare tenjin install', async () => {
-        // Both directories empty, but a past `install --harness shared` recorded
+        // Both directories empty, but a past `install --harness codex` recorded
         // where the user wants it. Before this fix, this branch hardcoded
         // `tenjin install`, which wires .claude only; a second `doctor` run was
-        // then needed to learn about --harness shared. One recorded target, one fix.
-        await recordHarness('shared');
+        // then needed to learn about --harness codex. One recorded target, one fix.
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1646,7 +1647,7 @@ describe('runDoctor — skill wiring', () => {
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('warn');
         expect(skills.detail).toContain('No Tenjin skills wired');
-        expect(skills.fix).toBe('tenjin install --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
 
         // The fix clears the warning in one pass: wiring what it names is enough.
         for (const name of ['tenjin-search', 'tenjin-publish']) {
@@ -1663,17 +1664,11 @@ describe('runDoctor — skill wiring', () => {
         expect(skillsAfter.status).toBe('ok');
       });
 
-      it('nothing wired anywhere, with a DETECTED harness alongside the recorded target: the fix names both', async () => {
-        // Claude Code detected (a bare .claude dir, no skill written into it yet)
-        // AND a different target recorded via a past `install --harness shared`.
-        // Filtering on `requested` alone named only the recorded directory;
-        // wiring it left the DETECTED .claude directory empty, and a second
-        // doctor run then asked for --harness claude — two commands either way,
-        // just a swapped which-directory-is-left-behind. The round-4 test above
-        // could not catch this: with no `.claude` dir and `env: {}`, nothing was
-        // ever detected, so filtering on `requested` alone looked sufficient.
+      it('a settled selection outranks detection of a different harness', async () => {
+        // Claude Code is detected, but the operator explicitly settled on Codex.
+        // Doctor must honor that answer instead of silently widening the install.
         await mkdir(join(skillHome, '.claude'), { recursive: true });
-        await recordHarness('shared');
+        await recordHarness('codex');
 
         const res = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1684,12 +1679,11 @@ describe('runDoctor — skill wiring', () => {
         });
         const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
         expect(skills.status).toBe('warn');
-        expect(skills.fix).toBe('tenjin install --harness claude --harness shared');
+        expect(skills.fix).toBe('tenjin install --harness codex');
 
-        // The fix clears the warning in one pass: wiring what it names, both
-        // directories, is enough. Wiring only one of the two would still warn.
-        for (const dirOf of [claudeSkills(), sharedSkills()]) {
-          for (const name of ['tenjin-search', 'tenjin-publish']) await writeSkillIn(dirOf, name);
+        // Wiring exactly the selected target clears the warning in one pass.
+        for (const name of ['tenjin-search', 'tenjin-publish']) {
+          await writeSkillIn(sharedSkills(), name);
         }
         const after = await runDoctor(ctxFor(), {
           walletPassphrase: NO_OS_STORE,
@@ -1719,7 +1713,7 @@ describe('runDoctor — skill wiring', () => {
       });
       const skills = find((res.data as { checks: CheckResult[] }).checks, 'skills');
       expect(skills.status).toBe('warn');
-      expect(skills.fix).toBe('tenjin install --harness shared');
+      expect(skills.fix).toBe('tenjin install --harness codex');
     });
   });
 
@@ -2428,6 +2422,96 @@ describe('runDoctor — loop hook wiring', () => {
     expect(entries?.status).toBe('warn');
     expect(entries?.detail).toContain('wider than 0600');
     expect(entries?.fix).toContain('chmod 600');
+  });
+});
+
+describe('runDoctor — Codex loop hook wiring', () => {
+  const codexHooksPath = (): string => join(skillHome, '.codex', 'hooks.json');
+
+  async function wireCodex(events: readonly string[] = ['SessionStart', 'Stop']): Promise<void> {
+    await mkdir(join(skillHome, '.codex'), { recursive: true });
+    const command = `node ${join(dir, 'hooks', 'tenjin-shim.mjs')} --harness codex`;
+    await writeFile(
+      codexHooksPath(),
+      `${JSON.stringify({
+        hooks: Object.fromEntries(
+          events.map((event) => [event, [{ hooks: [{ type: 'command', command }] }]]),
+        ),
+      })}\n`,
+      { mode: 0o600 },
+    );
+  }
+
+  function addFire(id: string, harness: 'claude' | 'codex', at: number): void {
+    const db = openLoopDb(dir);
+    try {
+      db.prepare(
+        `INSERT INTO fires (id, at, session, agent, arm, harness, event, prompt_id, cwd, wait,
+           deadline_ms, elapsed_ms, reason, question_key, question, delivered, emit, error)
+         VALUES (?, ?, 's', '', 'prompt', ?, 'prompt', NULL, '/r', 'tool', 1, 1,
+           'hit', NULL, NULL, NULL, NULL, NULL)`,
+      ).run(id, at, harness);
+    } finally {
+      db.close();
+    }
+  }
+
+  async function page(): Promise<{ checks: CheckResult[]; text: string }> {
+    const res = await runDoctor(ctxFor(), {
+      walletPassphrase: NO_OS_STORE,
+      homeDir: skillHome,
+      skillsSourceDir: pkgSrc,
+      env: {},
+      fetchImpl: healthyFetch,
+    });
+    return {
+      checks: (res.data as { checks: CheckResult[] }).checks,
+      text: (res.humanLines ?? []).join('\n'),
+    };
+  }
+
+  it('reports configured entries and only recent Codex fires, including on the human page', async () => {
+    await wireCodex();
+    const now = Date.now();
+    addFire('recent-codex', 'codex', now);
+    addFire('old-codex', 'codex', now - 8 * 24 * 60 * 60 * 1000);
+    addFire('recent-claude', 'claude', now);
+
+    const result = await page();
+    const hooks = find(result.checks, 'codex hooks');
+    expect(hooks).toMatchObject({ status: 'ok', required: false });
+    expect(hooks.detail).toBe(`2 in ${codexHooksPath()}; 1 fire observed in 7d`);
+    expect(hooks.fix).toBeUndefined();
+    expect(result.text).toContain('codex hooks');
+    expect(result.text).toContain(hooks.detail);
+  });
+
+  it('probes a Codex-only daemon through daemon.pid and reports that port', async () => {
+    await wireCodex(['Stop']);
+    await writeFile(
+      join(dir, 'daemon.pid'),
+      JSON.stringify({ pid: 42, port: 32_123, started_at: 1, data_dir: dir }),
+    );
+    vi.stubGlobal(
+      'fetch',
+      routeFetch({
+        '/health': {
+          body: {
+            version: '9.9.9',
+            pid: 42,
+            port: 32_123,
+            uptime_ms: 1,
+            idle_ms: 0,
+            data_dir: dir,
+            rss: 1,
+          },
+        },
+      }),
+    );
+
+    const daemon = find((await page()).checks, 'daemon');
+    expect(daemon.status).toBe('ok');
+    expect(daemon.detail).toBe('127.0.0.1:32123, pid 42, v9.9.9');
   });
 });
 

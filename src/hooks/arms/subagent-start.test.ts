@@ -84,7 +84,7 @@ describe('the subagent-start arm', () => {
   it('delivers a parked free hit whole, under the child, in the lead form, and burns the child seen:', async () => {
     const db = freshDb();
     park(db, {
-      session: 's1',
+      session: LEAD.session,
       promptId: 'p1',
       at: NOW - 10,
       question: 'the pgvector collation flip',
@@ -105,7 +105,7 @@ describe('the subagent-start arm', () => {
   it('a paid hit is a pointer, on the shelf it was parked from', async () => {
     const db = freshDb();
     park(db, {
-      session: 's1',
+      session: LEAD.session,
       promptId: 'p1',
       at: NOW,
       question: 'q',
@@ -120,7 +120,7 @@ describe('the subagent-start arm', () => {
   it('a parked miss is no-hit and becomes the child evidence, with the search id', async () => {
     const db = freshDb();
     park(db, {
-      session: 's1',
+      session: LEAD.session,
       promptId: 'p1',
       at: NOW,
       question: 'the pgvector collation flip',
@@ -136,7 +136,7 @@ describe('the subagent-start arm', () => {
   it('claims only its own turn', async () => {
     const db = freshDb();
     park(db, {
-      session: 's1',
+      session: LEAD.session,
       promptId: 'p2',
       at: NOW,
       question: 'q',
