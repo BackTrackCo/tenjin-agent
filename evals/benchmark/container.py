@@ -22,6 +22,10 @@ without: `require_egress` for a kernel probe Harbor fails silently,
 container's, `remove_project` for objects a failed `up` leaves behind, and
 `attestation` for the denial Harbor never reports. `README.md` carries the
 evidence for each.
+
+`record_project` is this package's own: one line per attempt naming its compose
+project, because after a SIGKILL nothing else on disk says which project to
+remove and a prefix sweep cannot tell this run's objects from another run's.
 """
 
 from __future__ import annotations
@@ -426,6 +430,44 @@ def daemon_error(output: Path) -> str | None:
     return None if report.get("started") else str(report.get("error") or "the daemon did not start")
 
 
+# One line per live attempt, holding the compose project and nothing else.
+# After a SIGKILL nothing else on disk says which project to remove, and a
+# prefix sweep cannot tell this run's objects from a concurrent run's.
+PROJECTS = "projects"
+
+
+def record_project(run_dir: Path, trial_id: str, name: str) -> str:
+    """Name the attempt's compose project on disk, before Harbor creates it."""
+    project = compose_project(name)
+    directory = run_dir / PROJECTS
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{_name(trial_id)}.project").write_text(project + "\n", encoding="utf-8")
+    return project
+
+
+def forget_project(run_dir: Path, trial_id: str) -> None:
+    """The attempt is over and its project is torn down; the line is spent."""
+    (run_dir / PROJECTS / f"{_name(trial_id)}.project").unlink(missing_ok=True)
+
+
+def sweep(run_dir: Path, docker: Docker | None = None) -> dict[str, Any]:
+    """Remove every compose project this run recorded and never released. The whole of `cli.py cleanup`.
+
+    A SIGKILLed run leaves the trial container, its egress sidecar, the network
+    and an orphaned host-side `docker compose exec` client. Removing the project
+    reaches all four: the client is blocked on a container that just went, so it
+    exits on its own.
+    """
+    directory = run_dir / PROJECTS
+    removed: dict[str, bool] = {}
+    for path in sorted(directory.glob("*.project")) if directory.is_dir() else []:
+        project = path.read_text(encoding="utf-8").strip()
+        if project:
+            removed[project] = remove_project(project, docker)
+        path.unlink(missing_ok=True)
+    return {"run": str(run_dir), "projects": removed}
+
+
 def remove_project(project: str, docker: Docker | None = None) -> bool:
     """Remove every container and network compose labelled with this project. True when something went."""
     docker = images._docker(docker)
@@ -537,12 +579,15 @@ __all__ = [
     "check_mount",
     "compose_project",
     "container_name",
+    "forget_project",
     "harbor",
     "mounts",
     "plan_egress",
+    "record_project",
     "remove_project",
     "require_egress",
     "run_docker",
     "stop",
+    "sweep",
     "unavailable",
 ]

@@ -741,7 +741,6 @@ def launch(request: LaunchRequest) -> Launch:
         root_session_id=session_id,
         resolved_settings_hash=resolved_hash,
         package_manager=package_manager(),
-        container=name,
         recipe=recipe,
         container_plan={
             **recipe.to_json(),

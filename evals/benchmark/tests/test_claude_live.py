@@ -234,7 +234,7 @@ def test_the_launch_is_the_agents_own_command_and_a_recipe_for_the_tasks_image(r
     assert launch.argv[0] == "claude"
     recipe = launch.recipe
     assert recipe.name == f"bench2-{request.trial_id}"
-    assert launch.container == f"bench2-{request.trial_id}"
+    assert launch.recipe.name == f"bench2-{request.trial_id}"
     assert recipe.workdir == request.roots.repo.resolve()
     # A dry run names the image by its stem; a live run resolves the
     # content-addressed name, which needs the daemon's platform.

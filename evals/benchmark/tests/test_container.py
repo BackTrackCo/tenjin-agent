@@ -245,3 +245,42 @@ def test_a_missing_docker_compose_is_named_before_anything_is_spent() -> None:
 
     reason = container.unavailable(docker)
     assert reason is not None and "docker compose" in reason
+
+
+# The one record the package keeps on disk: which compose project a trial owns.
+# It exists for the run that is SIGKILLed, where nothing else names the project.
+
+
+def test_a_recorded_project_is_the_name_harbor_labels_every_object_with(tmp_path: Path) -> None:
+    project = container.record_project(tmp_path, "trial-a", container.container_name("trial-a", "produce"))
+    assert project == container.compose_project("bench2-trial-a-produce")
+    assert (tmp_path / container.PROJECTS / "trial-a.project").read_text(encoding="utf-8").strip() == project
+
+
+def test_a_released_project_is_not_swept_and_a_kept_one_is(tmp_path: Path) -> None:
+    container.record_project(tmp_path, "trial-a", container.container_name("trial-a"))
+    container.record_project(tmp_path, "trial-b", container.container_name("trial-b"))
+    container.forget_project(tmp_path, "trial-a")
+    removed: list[str] = []
+
+    def docker(argv: list[str], timeout_s: float = 0.0) -> images.Completed:
+        if argv[0] == "ps":
+            removed.append(argv[-1])
+            return images.Completed(returncode=0, stdout="c1\n", stderr="")
+        return images.Completed(returncode=0, stdout="", stderr="")
+
+    report = container.sweep(tmp_path, docker)
+    assert report["projects"] == {"bench2-trial-b": True}
+    assert removed == ["label=com.docker.compose.project=bench2-trial-b"]
+    # A swept line is spent: a second cleanup finds nothing to remove.
+    assert container.sweep(tmp_path, docker)["projects"] == {}
+
+
+def test_a_sweep_of_a_run_that_started_no_container_is_not_an_error(tmp_path: Path) -> None:
+    assert container.sweep(tmp_path, fake_docker())["projects"] == {}
+
+
+def test_a_trial_id_that_is_not_a_docker_name_is_refused_rather_than_written(tmp_path: Path) -> None:
+    # The path is built from the id, so a `../` in one would write outside the run.
+    with pytest.raises(ImageError):
+        container.record_project(tmp_path, "../escape", container.container_name("trial-a"))

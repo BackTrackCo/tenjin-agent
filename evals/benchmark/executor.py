@@ -132,10 +132,8 @@ class Launch:
     # The package manager the child runs, recorded in the attempt's isolation
     # block by a live spec. For a container trial it is the image's pnpm.
     package_manager: dict[str, Any] | None = None
-    # The container this attempt runs in, and the plan a dry run prints. The
-    # name goes into the run's process ledger, so `cleanup` and the wall-clock
-    # cap both stop it; None is a launch that starts no container.
-    container: str | None = None
+    # The plan a dry run prints for the container this attempt runs in. What
+    # the container IS is `recipe` below; this is only its readable form.
     container_plan: dict[str, Any] | None = None
     # What a container spawn needs to bring the environment up and exec into
     # it: a `container.Recipe`. `argv` above stays the agent's own command, so

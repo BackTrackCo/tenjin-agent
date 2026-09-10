@@ -87,6 +87,7 @@ REFUSALS = (
     CliError,
     artifact.ArtifactError,
     artifact.IsolationError,
+    container.ImageError,
     corpus_module.CorpusError,
     executor.ExecutorError,
     executor.ProvisionError,
@@ -677,6 +678,13 @@ def main(argv: list[str] | None = None) -> int:
     regress = commands.add_parser("regress", help="warn where a finished run is worse than the committed baseline")
     regress.add_argument("--run", required=True, type=Path)
     regress.add_argument("--baseline", type=Path, default=regress_module.BASELINE)
+    # The one supported way to clean up after a run that was killed outright.
+    # It reads the compose projects the run recorded and removes each one, so it
+    # cannot reach an object this run did not create. Matching by name instead,
+    # `pkill -f bin/claude` and its relatives, also reaches an operator's
+    # unrelated sessions; do not.
+    cleanup = commands.add_parser("cleanup", help="remove any container this run started and left behind")
+    cleanup.add_argument("--run", required=True, type=Path)
     # Case records for the search-intent experiment: after settlement only,
     # one JSONL row per hook fire, each question replayed through the shelf.
     cases = commands.add_parser("cases", help="export a settled run's hook fires as search-intent case records")
@@ -685,6 +693,15 @@ def main(argv: list[str] | None = None) -> int:
     cases.add_argument("--out", type=Path, help="the JSONL file to write")
     cases.add_argument("--dry-run", action="store_true", help="list the cases that would be replayed and call nothing")
     args = parser.parse_args(argv)
+    if args.command == "cleanup":
+        try:
+            payload = container.sweep(args.run)
+        except REFUSALS as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
     if args.command == "attest":
         try:
             payload = do_attest(args.manifest, args.tenjin_source, args.instance, args.image, args.kind, args.out)

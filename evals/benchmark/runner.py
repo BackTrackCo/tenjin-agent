@@ -85,8 +85,8 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
     The container is the process boundary, so nothing starts in this process's
     own session and there is no group to kill. `Container.close` runs on every
     path out and sweeps the compose project afterwards in case `down` never ran,
-    and the project name is in the run's ledger before the agent starts so
-    `cli.py cleanup` reaches it after a kill this process never saw.
+    and the project is recorded under `<run>/projects/` before the agent starts,
+    so `cli.py cleanup` reaches it after a kill this process never saw.
 
     Three execs in one container, in order. The ENTRYPOINT has already started
     the trial's daemon by the time `up --wait` returns, so its report is read
@@ -97,7 +97,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
     """
     recipe = launch.recipe
     roots.output.mkdir(parents=True, exist_ok=True)
-    reap.register_objects(roots.run_dir, roots.trial_id, container=recipe.name)
+    container.record_project(roots.run_dir, roots.trial_id, recipe.name)
     stream = roots.stream.open("w", encoding="utf-8")
     completed = Completed(returncode=1, stderr="", timed_out=False)
     try:
@@ -127,7 +127,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
     finally:
         stream.close()
         container.stop(recipe.name)
-        reap.release(roots.run_dir, roots.trial_id)
+        container.forget_project(roots.run_dir, roots.trial_id)
     return completed
 
 

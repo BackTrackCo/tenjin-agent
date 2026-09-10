@@ -35,31 +35,31 @@ Each contract is stated once, in the module that owns it, and held by the test m
 The tests are the specification to reach for: each names its rule and holds to it on a fixture
 the suite builds.
 
-| Module                     | What it owns                                                              | Held by                              |
-| -------------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
-| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree         | `test_manifest.py`                   |
-| `presets.py`               | named arm settings, expanded at load, an inline block over them           | `test_presets.py`                    |
-| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256                    | `test_schedule.py`                   |
-| `runner.py`                | execution: fresh roots, settlement, caps, the canary, resume, concurrency | `test_runner.py`, `test_fake_run.py` |
-| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents           | `test_artifact.py`                   |
-| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings            | `test_claude_live.py`                |
-| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial          | `test_tenjin_arm.py`                 |
-| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported                     | `test_signature.py`                  |
-| `artifact.py`              | disposable roots, the credential canary, the isolation attestation        | `test_artifact.py`                   |
-| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp                | `test_corpus.py`                     |
-| `verifier.py`              | hidden verifier registry, hidden layer, the run marker                    | `test_verifier.py`                   |
-| `images.py`                | one pinned base image, one image per fixture, content-addressed by Harbor | `test_images.py`                     |
-| `container.py`             | a trial inside its image, run by Harbor: mounts, recipe, allowlist        | `test_container.py`                  |
-| `producer.py`              | the natural arm's producer phase and its receipts                         | `test_phases.py`                     |
-| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                        | `test_usage.py`                      |
-| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                           | `test_claude_usage.py`               |
-| `records.py`               | the immutable attempt record, publish, select                             | `test_records.py`                    |
-| `loop_join.py`             | read-only delivery join on exact actor keys                               | `test_loop_join.py`                  |
-| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap                      | `test_reduce.py`                     |
-| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary            | `test_report.py`, `test_regress.py`  |
-| `cases.py`, `discovery.py` | the search-intent export and the discovery counters                       | `test_cases.py`, `test_discovery.py` |
-| `snapshot.py`              | the per-run corpus reading: post count and content hash                   | `test_snapshot.py`                   |
-| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs                | `test_fake_run.py`                   |
+| Module                     | What it owns                                                               | Held by                              |
+| -------------------------- | -------------------------------------------------------------------------- | ------------------------------------ |
+| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree          | `test_manifest.py`                   |
+| `presets.py`               | named arm settings, expanded at load, an inline block over them            | `test_presets.py`                    |
+| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256                     | `test_schedule.py`                   |
+| `runner.py`                | execution: fresh roots, settlement, caps, the canary, resume, concurrency  | `test_runner.py`, `test_fake_run.py` |
+| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents            | `test_artifact.py`                   |
+| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings             | `test_claude_live.py`                |
+| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial           | `test_tenjin_arm.py`                 |
+| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported                      | `test_signature.py`                  |
+| `artifact.py`              | disposable roots, the credential canary, the isolation attestation         | `test_artifact.py`                   |
+| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp                 | `test_corpus.py`                     |
+| `verifier.py`              | hidden verifier registry, hidden layer, the run marker                     | `test_verifier.py`                   |
+| `images.py`                | one pinned base image, one image per fixture, content-addressed by Harbor  | `test_images.py`                     |
+| `container.py`             | a trial inside its image, run by Harbor: mounts, recipe, the project sweep | `test_container.py`                  |
+| `producer.py`              | the natural arm's producer phase and its receipts                          | `test_phases.py`                     |
+| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                         | `test_usage.py`                      |
+| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                            | `test_claude_usage.py`               |
+| `records.py`               | the immutable attempt record, publish, select                              | `test_records.py`                    |
+| `loop_join.py`             | read-only delivery join on exact actor keys                                | `test_loop_join.py`                  |
+| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap                       | `test_reduce.py`                     |
+| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary             | `test_report.py`, `test_regress.py`  |
+| `cases.py`, `discovery.py` | the search-intent export and the discovery counters                        | `test_cases.py`, `test_discovery.py` |
+| `snapshot.py`              | the per-run corpus reading: post count and content hash                    | `test_snapshot.py`                   |
+| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs                 | `test_fake_run.py`                   |
 
 An arm's treatment is its `settings`, and most arms run the same one, so an arm may name a preset
 instead: `"settings_preset": "tenjin-hooks-and-cli-reads"` is the product's whole hook wiring plus
@@ -922,7 +922,8 @@ and any daemon the shim respawned, waits for the WAL to vanish, writes `daemon.j
 output root, and exits with claude's code; the host reads that file instead of signalling a
 pid, and `tenjin_arm` no longer starts a process at all. The natural arm's two phases are two
 containers in sequence on one data dir. The wall-clock cap and an interrupt both stop and remove
-the container on the way out.
+the container on the way out, and the attempt's compose project is recorded under
+`<run>/projects/` before it exists, so a sweep after a kill can name it.
 
 **Network.** Egress is per attempt, and Harbor owns it. A `NetworkPolicy` in allowlist mode puts
 the trial's service in the network namespace of an egress sidecar whose nftables ruleset redirects
@@ -1032,10 +1033,20 @@ is per attempt now, so nothing counted per run has to be attributed to one trial
 
 ## Cleanup
 
-Every process this package starts leads its own session, and the spawn kills the whole group on
-its way out whatever happened, an interrupt included. A harness SIGKILLed mid-trial leaves that
-child reparented to pid 1 and nothing reaps it, which is a cost this package accepts rather than
-a gap: this seam runs the fake and offline executors, which start no model and spend nothing.
+Every trial is a container, and `Container.close` tears its compose project down on every path
+out, an interrupt included. The one case that path never runs is a harness SIGKILLed mid-trial,
+which leaves the trial container, its egress sidecar, the network, and an orphaned host-side
+`docker compose exec` client. `cli.py cleanup --run <dir>` reaches all four with one label sweep
+per project: the client is blocked on a container that just went, so it exits on its own.
+
+The sweep needs a name, so `<run>/projects/<trial>.project` is written before Harbor creates the
+project and removed when the attempt ends. That one line is the whole record. Sweeping every
+project matching a prefix instead cannot tell this run's objects from a concurrent run's on the
+same machine.
+
+The host process lane keeps no such record. It runs the fake and offline executors, which start
+no model and spend nothing, so a child reparented to pid 1 after a kill costs a `kill` nobody has
+to type.
 
 Never clean up by matching a process name. A pattern such as `pkill -f bin/claude` also matches
 the operator's own unrelated sessions, and on 2026-09-07 exactly that command, run to tidy one
