@@ -1,0 +1,15 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000000",
+  "turn_id": "cccccccc-0000-7000-8000-000000000000",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000000.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "node -e \"process.stderr.write(\\\"Error: probe failure\\\\n\\\"); process.exit(1)\""
+  },
+  "tool_response": "Error: probe failure\n",
+  "tool_use_id": "exec-200cb50e-4d0e-45c6-8aac-75a4736c4ca6"
+}

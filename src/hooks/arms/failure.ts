@@ -48,8 +48,7 @@ import { BASH_START } from './context';
  */
 
 function commandOf(tool: HookTool | undefined): string {
-  const command = tool?.input.command;
-  return typeof command === 'string' ? command : '';
+  return tool?.kind === 'shell' ? tool.command : '';
 }
 
 /** Both streams, and the failure string a `PostToolUseFailure` carries. A

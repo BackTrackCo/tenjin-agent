@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../../adapters/types';
+import { nativeSessionOf } from '../../lib/session';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { runFire } from '../fire';
 import { sigV1Test } from '../failure/test-identity';
@@ -73,7 +74,8 @@ function shell(s: Shell): HookInput {
   return hookInput({
     event: 'tool.after',
     native: { event: 'PostToolUse' },
-    session: actor.session,
+    // The input carries the NATIVE id; `actorOf` prefixes the harness back on.
+    session: nativeSessionOf(actor.session),
     cwd: s.cwd ?? repo,
     ...(actor.agent !== '' ? { agent: actor.agent } : {}),
     tool: {

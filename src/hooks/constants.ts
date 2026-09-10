@@ -94,8 +94,8 @@ export const HEADERS_TIMEOUT_MS = 5000;
 export const PORT_BASE = 30_000;
 export const PORT_SPAN = 2000;
 
-/** Claude Code caps `additionalContext` here; the encoder slices to it. */
-export const CLAUDE_CONTEXT_MAX = 10_000;
+/** Claude Code caps `additionalContext` here; both encoders slice their context to it. */
+export const CONTEXT_MAX = 10_000;
 
 /** How long `tenjin daemon stop` waits after SIGTERM before SIGKILL. */
 export const STOP_GRACE_MS = 3000;

@@ -8,7 +8,8 @@ import {
   LEGACY_ALLOWLIST_RULES,
   MODE_GATED_RULES,
 } from './harness-permissions';
-import { pruneOurHandlers } from './harness-hooks';
+import { inspectHooksFile, pruneHooks } from './harness-hooks';
+import type { HarnessAdapter } from '../adapters/types';
 import {
   daemonPidPath,
   daemonSpawnPath,
@@ -72,6 +73,8 @@ const HOOK_FILES = ['tenjin-daemon.mjs', 'tenjin-shim.mjs', VITEST_REPORTER_FILE
 /** Everything the command found and acted on, for both the receipt and the JSON. */
 export interface UninstallReport {
   settings: SettingsOutcome;
+  /** The other harnesses' hook files (Codex's hooks.json), one outcome each. */
+  hookFiles: SettingsOutcome[];
   /** How the loop daemon ended, from `stopDaemon`. */
   daemon: string;
   skills: string[];
@@ -237,24 +240,12 @@ export async function removeFromSettings(
     );
   }
   if (isPlainObject(hooksValue)) {
-    const nextHooks: Record<string, unknown> = {};
-    for (const [event, value] of Object.entries(hooksValue)) {
-      if (!Array.isArray(value)) {
-        nextHooks[event] = value;
-        continue;
-      }
-      // Handler by handler, not entry by entry: an entry someone hand-merged
-      // ours into keeps their handler and loses only ours.
-      const kept = value.map((e) => pruneOurHandlers(e, dataDir)).filter((e) => e !== null);
-      if (kept.length !== value.length) removedHooks.push(event);
-      // An event WE emptied loses its key entirely; one that still holds someone
-      // else's entry keeps it, and an array that was already empty before we
-      // looked is left as we found it.
-      const emptiedByUs = kept.length === 0 && value.length > 0;
-      if (!emptiedByUs) nextHooks[event] = kept;
-    }
-    next = { ...next, hooks: nextHooks };
-    if (Object.keys(nextHooks).length === 0) delete next.hooks;
+    // The one prune `install` runs before it appends its plan: handler by
+    // handler, so an entry someone hand-merged ours into keeps theirs.
+    const pruned = pruneHooks(hooksValue, dataDir);
+    removedHooks.push(...pruned.removed);
+    next = { ...next, hooks: pruned.next };
+    if (Object.keys(pruned.next).length === 0) delete next.hooks;
   }
 
   const permissions = settings.permissions;
@@ -309,6 +300,63 @@ export async function removeFromSettings(
     mode === undefined ? {} : { mode: mode & 0o777 },
   );
   return { path, hooks: removedHooks, rules: removedRules };
+}
+
+/**
+ * Strip our hook entries from a harness's own hooks file (Codex's
+ * `hooks.json`), leaving every other entry and key exactly where it was. The
+ * same prune and the same concurrency contract as {@link removeFromSettings};
+ * a file with nothing of ours in it is not rewritten. Codex keeps its trust
+ * records in config.toml, which this never touches: a record for an entry
+ * that is gone is inert, and config.toml is not ours to edit.
+ */
+export async function removeFromHooksFile(
+  adapter: HarnessAdapter,
+  homeDir: string,
+  dataDir: string,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<SettingsOutcome> {
+  const declaredPath = adapter.registrar.configPath(homeDir, env);
+  if ((await lstat(declaredPath).catch(() => null)) === null) {
+    return { path: declaredPath, hooks: [], rules: [], skipped: 'absent' };
+  }
+  const found = await inspectHooksFile(declaredPath);
+  if ('refusal' in found) {
+    const reason: SettingsSkipReason =
+      found.refusal.reason === 'unresolvable' ||
+      found.refusal.reason === 'unreadable' ||
+      found.refusal.reason === 'unparsable'
+        ? found.refusal.reason
+        : 'unexpected-shape';
+    return {
+      path: found.refusal.path,
+      hooks: [],
+      rules: [],
+      skipped: reason,
+      warning: found.refusal.message,
+    };
+  }
+  const { path, raw, settings, hooks } = found;
+  const pruned = pruneHooks(hooks, dataDir);
+  if (pruned.removed.length === 0) return { path, hooks: [], rules: [] };
+  const next: Record<string, unknown> = { ...settings, hooks: pruned.next };
+  if (Object.keys(pruned.next).length === 0) delete next.hooks;
+  if ((await readFile(path, 'utf8').catch(() => null)) !== raw) {
+    return {
+      path,
+      hooks: [],
+      rules: [],
+      skipped: 'changed-since-read',
+      warning: `${path} changed while it was being updated, so nothing was removed from it. Re-run \`tenjin uninstall\`.`,
+    };
+  }
+  const mode = statSync(path, { throwIfNoEntry: false })?.mode;
+  await writeFileAtomic(
+    path,
+    `${JSON.stringify(next, null, 2)}\n`,
+    mode === undefined ? {} : { mode: mode & 0o777 },
+  );
+  return { path, hooks: pruned.removed, rules: [] };
 }
 
 /**

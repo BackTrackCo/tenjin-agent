@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { readFile } from 'node:fs/promises';
 import { resolveContextSettings } from '../lib/settings';
 import { CliError } from '../lib/errors';
+import { nativeSessionOf } from '../lib/session';
 import { buildOutcomeItem, postOutcomes } from '../lib/agent-api';
 import { UUID_RE } from '../lib/ids';
 import {
@@ -142,7 +143,7 @@ const HALTING_FAILURES = new Set(['RATE_LIMITED', 'NETWORK_ERROR']);
  *  a session's rows are read in the order they happened. */
 const POPULATION_SQL = `
   SELECT f.id AS id, f.at AS at, f.arm AS arm, f.session AS session, f.agent AS agent,
-         f.delivered AS delivered, l.stage AS stage, l.shelf AS shelf,
+         f.harness AS harness, f.delivered AS delivered, l.stage AS stage, l.shelf AS shelf,
          l.title AS title, l.url AS url
     FROM fires f JOIN legs l ON l.fire_id = f.id
    WHERE f.at >= ? AND f.delivered LIKE 'inject:%'
@@ -286,6 +287,16 @@ async function gradeSessions(
       title: str(clean(str(row.title) ?? '', 160)),
     };
     const relayed = arm === 'subagent-start';
+    // The transcript reader below is Claude Code's projects directory; a fire
+    // from another harness has no file this command knows how to open, and is
+    // left ungraded rather than closed as never-seen.
+    const harness = str(row.harness) ?? 'claude';
+    if (harness !== 'claude') {
+      out.push(
+        ungraded({ key, arm, target, agentId, note: `no transcript reader for ${harness}` }),
+      );
+      continue;
+    }
     // Nothing names a file to open, and nothing ever will, so the row is closed
     // rather than left open forever: a fire with no session at all, and a
     // relayed finding whose child was not recorded.
@@ -311,7 +322,9 @@ async function gradeSessions(
     const parsedKey = `${session} ${agentId ?? ''}`;
     let state = parsed.get(parsedKey);
     if (state === undefined) {
-      state = await readSession(session, agentId, {
+      // The stored session carries the harness prefix; the transcript is
+      // named by the native id alone.
+      state = await readSession(nativeSessionOf(session), agentId, {
         homeDir,
         locate,
         readText,

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { getMark } from '../gates';
 import type { LoopDb } from '../store';
+import type { HookTool } from '../../adapters/types';
 import type { Actor, KernelConfig } from '../types';
 import { contextArm } from './context';
 import {
@@ -40,8 +41,7 @@ function key(path: string): string {
 
 function ctxFor(
   event: 'tool.before' | 'tool.after',
-  kind: 'edit' | 'shell' | 'read',
-  input: Record<string, unknown>,
+  tool: HookTool,
   actor: Actor = LEAD,
   config: KernelConfig = ON,
 ) {
@@ -53,24 +53,39 @@ function ctxFor(
     input: hookInput({
       event,
       native: { event: event === 'tool.before' ? 'PreToolUse' : 'PostToolUse' },
-      tool: toolInput(kind, input),
+      tool,
     }),
   });
 }
 
 function fire(
   event: 'tool.before' | 'tool.after',
-  kind: 'edit' | 'shell' | 'read',
-  input: Record<string, unknown>,
+  tool: HookTool,
   actor: Actor = LEAD,
   config: KernelConfig = ON,
 ): void {
-  contextArm.before?.(ctxFor(event, kind, input, actor, config));
+  contextArm.before?.(ctxFor(event, tool, actor, config));
 }
 
 function edit(path: string, actor: Actor = LEAD): void {
-  fire('tool.before', 'edit', { file_path: path }, actor);
+  fire('tool.before', toolInput('edit', { paths: [path] }), actor);
 }
+
+describe('an edit that names several paths', () => {
+  it('marks every path in one fire, under this actor, each with its own key', () => {
+    const paths = ['/p/a.ts', '/p/b.ts', '/p/c/renamed.ts'];
+    fire('tool.before', toolInput('edit', { paths }), CHILD);
+    for (const path of paths) expect(getMark(db, CHILD, `edited:${key(path)}`)).toBe(path);
+    expect(getMark(db, LEAD, `edited:${key(paths[0]!)}`)).toBeNull();
+  });
+
+  it('an edit with no path marks nothing, and never the activity of a child', () => {
+    fire('tool.before', toolInput('edit', { paths: [] }), CHILD);
+    expect(db.prepare('SELECT count(*) AS n FROM marks WHERE agent = ?').get(CHILD.agent)).toEqual({
+      n: 0,
+    });
+  });
+});
 
 describe('the context arm registration', () => {
   it('is one tool-wait arm on three (event, kind) pairs', () => {
@@ -92,7 +107,7 @@ describe('the context arm registration', () => {
 
 describe('the marks PR D reads', () => {
   it('stamps bashstart on a shell call', () => {
-    fire('tool.before', 'shell', { command: 'pnpm vitest run x' });
+    fire('tool.before', toolInput('shell', { command: 'pnpm vitest run x' }));
     expect(getMark(db, LEAD, 'bashstart')).not.toBeNull();
     // A Bash call is not activity: only a read or an edit is.
     expect(getMark(db, LEAD, 'activity:mutation')).toBeNull();
@@ -133,7 +148,7 @@ describe('the marks PR D reads', () => {
 
   it('marks activity for the lead only, split inspection from mutation', () => {
     edit('/p/a.ts');
-    fire('tool.after', 'read', { file_path: '/p/b.ts' });
+    fire('tool.after', toolInput('read', { paths: ['/p/b.ts'] }));
     expect(getMark(db, LEAD, 'activity:mutation')).not.toBeNull();
     expect(getMark(db, LEAD, 'activity:inspection')).not.toBeNull();
     edit('/p/c.ts', CHILD);
@@ -158,8 +173,8 @@ describe('the marks PR D reads', () => {
   it('writes nothing at all while both arms it keeps books for are off', () => {
     const off = kernelConfig({ failure: false, publish: false });
     const path = '/p/d.ts';
-    fire('tool.before', 'edit', { file_path: path }, LEAD, off);
-    fire('tool.before', 'shell', { command: 'ls' }, LEAD, off);
+    fire('tool.before', toolInput('edit', { paths: [path] }), LEAD, off);
+    fire('tool.before', toolInput('shell', { command: 'ls' }), LEAD, off);
     expect(getMark(db, LEAD, `edited:${key(path)}`)).toBeNull();
     expect(getMark(db, LEAD, 'bashstart')).toBeNull();
   });
@@ -167,7 +182,7 @@ describe('the marks PR D reads', () => {
 
 describe('the context arm never asks', () => {
   it('marks a Read and looks nothing up about what the file imports', () => {
-    fire('tool.after', 'read', { file_path: '/p/one.ts' });
+    fire('tool.after', toolInput('read', { paths: ['/p/one.ts'] }));
     expect(getMark(db, LEAD, 'activity:inspection')).not.toBeNull();
     expect(getMark(db, LEAD, 'package:zod')).toBeNull();
   });

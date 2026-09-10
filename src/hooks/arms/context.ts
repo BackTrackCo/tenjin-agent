@@ -41,9 +41,11 @@ export const BASH_START = 'bashstart';
 export const EDITED_PREFIX = 'edited:';
 const ACTIVITY_PREFIX = 'activity:';
 
-function filePathOf(ctx: FireContext): string {
-  const value = ctx.input.tool?.input.file_path;
-  return typeof value === 'string' && value.length <= 4096 ? value : '';
+/** Every path the edit names, bounded; an adapter that found none leaves nothing to mark. */
+function editedPaths(ctx: FireContext): string[] {
+  const tool = ctx.input.tool;
+  if (tool?.kind !== 'edit') return [];
+  return tool.paths.filter((p) => p.length > 0 && p.length <= 4096);
 }
 
 export const contextArm: Arm = {
@@ -75,15 +77,15 @@ export const contextArm: Arm = {
       setMark(db, ctx.actor, BASH_START, String(clock()), clock());
       return;
     }
-    const path = filePathOf(ctx);
-    if (kind === 'edit' && path.length > 0) {
-      // Upserted, so a re-edit moves `marks.at` and nothing else. NOTHING
-      // READS THE VALUE: the one reader asks whether this actor edited
-      // anything at all (`capture.ts`, `hasMark(db, actor, EDITED_PREFIX)`,
-      // the publish arm's `edited` evidence), and the key answers that by
-      // itself. The path is kept because the key is a one-way hash, so a row
-      // an operator opens on their own machine would otherwise say nothing
-      // about which file it stands for.
+    // One mark per path, all in this fire: a patch that touches three files is
+    // one native call and one row, and every file it named is attempted work.
+    // Upserted, so a re-edit moves `marks.at` and nothing else. NOTHING READS
+    // THE VALUE: the one reader asks whether this actor edited anything at all
+    // (`capture.ts`, `hasMark(db, actor, EDITED_PREFIX)`, the publish arm's
+    // `edited` evidence), and the key answers that by itself. The path is kept
+    // because the key is a one-way hash, so a row an operator opens on their
+    // own machine would otherwise say nothing about which file it stands for.
+    for (const path of editedPaths(ctx)) {
       setMark(db, ctx.actor, EDITED_PREFIX + pathKey(path), stripControl(path), clock());
     }
     // Content-free, and the LEAD's only: one mark for inspection and one for

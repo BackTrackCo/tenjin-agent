@@ -121,10 +121,11 @@ function seedSearch(
 ): void {
   db.prepare(
     `INSERT INTO searches (search_id, at, session, question, fingerprint, decision, candidates,
-       source, resolved_at) VALUES (?, ?, 's1', ?, 'fp', ?, '[]', ?, ?)`,
+       source, resolved_at) VALUES (?, ?, ?, ?, 'fp', ?, '[]', ?, ?)`,
   ).run(
     over.id,
     NOW - 20,
+    LEAD.session,
     'does ox 0.14 still export Bytes.from?',
     over.decision ?? 'MISS',
     over.source === undefined ? 'cli' : over.source,
@@ -140,7 +141,7 @@ function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW -
     JSON.stringify({
       title: 'ox 0.14 keeps Bytes.from',
       body: 'Pinning the resolver to 4.1 stops the parse throw.',
-      session: 's1',
+      session: LEAD.session,
       agent: CHILD.agent,
       agentType: 'general-purpose',
       project: null,
@@ -274,7 +275,7 @@ describe('the child ask', () => {
       {
         title: 'ox 0.14 keeps Bytes.from',
         body,
-        session: 's1',
+        session: LEAD.session,
         agent: CHILD.agent,
         agentType: 'general-purpose',
         searchId: '',

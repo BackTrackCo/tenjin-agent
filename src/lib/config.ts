@@ -3,7 +3,8 @@ import { z } from 'zod';
 import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
-import { HARNESS_TARGETS } from './skill-wiring';
+import { HARNESSES } from '../adapters/types';
+import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -188,15 +189,13 @@ export function parseUpdateModeFlag(value: string, flagName: string): UpdateMode
 }
 
 /**
- * What `install` recorded about its OWN targets. `harness` is the explicit
- * `--harness` set of the last install that passed the flag, and it exists so
- * `doctor` keeps judging a directory the user named by hand: detection cannot see a
- * harness this CLI does not probe for, and without the record such a directory is a
- * target for one run and invisible to every later check. Written by `install`, not a
- * `config set` key.
+ * What `install` recorded about its own targets. `harness` is the last settled
+ * prompt or explicit `--harness` selection, so `doctor` keeps judging every
+ * directory the operator chose even when later detection cannot see it. Written
+ * by `install`, not a `config set` key.
  */
 const InstallConfigSchema = z.object({
-  harness: z.array(z.enum(HARNESS_TARGETS)),
+  harness: z.array(z.enum(HARNESSES)),
   /**
    * The EXACT rule strings still pending the last time an install explicitly
    * declined the free-verb allowlist (`--no-allow-free-verbs`), so `--refresh`
@@ -216,6 +215,27 @@ const InstallConfigSchema = z.object({
    */
   freeVerbsDeclined: z.array(z.string()),
 });
+
+/**
+ * `shared` was a real `install --harness` value before the harness selector was
+ * narrowed to actual harnesses. It targeted the same ~/.agents/skills directory
+ * as Codex, so the lossless upgrade is `codex`. Normalize at the raw parse edge:
+ * commands that intentionally consume loadRawConfig directly must never see the
+ * superseded value, and a later merge-write naturally persists the current shape.
+ */
+const STORED_INSTALL_HARNESSES = [...HARNESSES, 'shared'] as const;
+type StoredInstallHarness = (typeof STORED_INSTALL_HARNESSES)[number];
+
+export function resolveInstallHarness(
+  value: readonly StoredInstallHarness[] | undefined,
+): Harness[] {
+  const normalized = new Set(value?.map((harness) => (harness === 'shared' ? 'codex' : harness)));
+  return HARNESSES.filter((harness) => normalized.has(harness));
+}
+
+const RawInstallHarnessSchema = z
+  .array(z.enum(STORED_INSTALL_HARNESSES))
+  .transform(resolveInstallHarness);
 
 /**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
@@ -301,7 +321,10 @@ export type Config = z.infer<typeof ConfigSchema>;
  * a boolean carries no per-rule information to recover.
  */
 const RawInstallConfigSchema = InstallConfigSchema.partial()
-  .extend({ freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional() })
+  .extend({
+    harness: RawInstallHarnessSchema.optional(),
+    freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional(),
+  })
   .passthrough();
 
 /**

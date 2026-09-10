@@ -1,6 +1,6 @@
-import { join } from 'node:path';
 import { AGENT_ID_RE } from '../lib/grade';
-import { CLAUDE_CONTEXT_MAX } from '../hooks/constants';
+import { CONTEXT_MAX } from '../hooks/constants';
+import { claudeSettingsPath } from '../lib/harness-permissions';
 import { hasErrorMarker } from './error-markers';
 import type {
   Emit,
@@ -10,6 +10,7 @@ import type {
   HookTool,
   Registrar,
   ToolKind,
+  ToolResult,
 } from './types';
 
 /**
@@ -61,10 +62,32 @@ function toolKind(name: string): ToolKind | 'other' {
   return 'other';
 }
 
-function toolResult(v: unknown): HookTool['result'] | undefined {
+/** Claude's argument shapes onto the canonical fields; nothing else reads `tool_input`. */
+function canonicalTool(name: string, input: Record<string, unknown>): HookTool {
+  const kind = toolKind(name);
+  switch (kind) {
+    case 'shell':
+      return { name, kind, command: str(input.command) ?? '' };
+    case 'edit':
+    case 'read': {
+      const path = str(input.file_path);
+      return { name, kind, paths: path === undefined ? [] : [path] };
+    }
+    case 'dispatch':
+      return { name, kind, task: str(input.prompt) ?? '' };
+    case 'web':
+      return { name, kind, query: str(input.query) ?? '' };
+    case 'fetch':
+      return { name, kind, url: str(input.url) ?? '', prompt: str(input.prompt) ?? '' };
+    default:
+      return { name, kind };
+  }
+}
+
+function toolResult(v: unknown): ToolResult | undefined {
   if (typeof v === 'string') return { text: v };
   if (!isRecord(v)) return undefined;
-  const out: NonNullable<HookTool['result']> = {};
+  const out: ToolResult = {};
   const stdout = str(v.stdout);
   const stderr = str(v.stderr);
   const error = str(v.error);
@@ -128,11 +151,7 @@ export function decode(raw: unknown): HookInput | null {
 
   if (event === 'tool.before' || event === 'tool.after') {
     const name = str(raw.tool_name) ?? '';
-    const tool: HookTool = {
-      name,
-      kind: toolKind(name),
-      input: isRecord(raw.tool_input) ? raw.tool_input : {},
-    };
+    const tool: HookTool = canonicalTool(name, isRecord(raw.tool_input) ? raw.tool_input : {});
     const callId = str(raw.tool_use_id);
     if (callId !== undefined) tool.callId = callId;
     if (event === 'tool.after') {
@@ -177,7 +196,7 @@ export function encode(emit: Emit | null, input: HookInput): unknown {
   return {
     hookSpecificOutput: {
       hookEventName: input.native.event,
-      additionalContext: emit.context.slice(0, CLAUDE_CONTEXT_MAX),
+      additionalContext: emit.context.slice(0, CONTEXT_MAX),
     },
   };
 }
@@ -204,7 +223,7 @@ function commandHandler(shimPath: string, timeoutSeconds: number) {
 
 export const registrar: Registrar = {
   configPath(home) {
-    return join(home, '.claude', 'settings.json');
+    return claudeSettingsPath(home);
   },
   /**
    * 9 `http` entries and 2 `command` entries (02-redesign.md §4). SessionStart
@@ -238,21 +257,6 @@ export const registrar: Registrar = {
       { event: 'SubagentStop', hooks: http },
       { event: 'Stop', hooks: http },
     ];
-  },
-  events: {
-    'session.start': { native: 'SessionStart', matcher: SESSION_START_MATCHER },
-    prompt: { native: 'UserPromptSubmit' },
-    'tool.before': { native: 'PreToolUse' },
-    'tool.after': { native: 'PostToolUse' },
-    'agent.start': { native: 'SubagentStart' },
-    'agent.stop': { native: 'SubagentStop' },
-    'turn.end': { native: 'Stop' },
-  },
-  tools: TOOLS,
-  childrenTagged: true,
-  transcriptFor(input) {
-    const path = input.transcript?.agentPath ?? input.transcript?.path;
-    return path === undefined ? null : { path };
   },
 };
 

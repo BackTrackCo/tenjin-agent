@@ -53,7 +53,7 @@ const PUBLISHED_AGENT_PREFIX = 'agent_published:';
 const WORKFLOW_AGENT_TYPE = 'workflow-subagent';
 
 type Evidence =
-  'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding' | 'failure';
+  'edited' | 'research' | 'handoff-miss' | 'lookup' | 'activity' | 'finding' | 'miss' | 'failure';
 
 /** Any WebSearch, WebFetch or Read row by the child counts (decision 2). The
  *  context arm's other row, a Bash call on `tool.before`, is not evidence. */
@@ -147,24 +147,30 @@ function childFindings(db: LoopDb, session: string): Array<{ id: string; finding
 }
 
 /**
- * This session's deliberate `tenjin search` misses that nothing has closed,
- * oldest first, one line each. THE LEAD'S ASK ONLY: an open search is the
- * lead's loop to close, and a child cannot resolve one it never opened.
+ * THIS ACTOR'S deliberate `tenjin search` misses that nothing has closed,
+ * oldest first, one line each. Exact actor, never the session: `search` stamps
+ * the thread it ran inside as `agent_id` (`lib/session.ts`), so a child is
+ * handed the misses it opened and the lead only its own, and neither a
+ * sibling nor a parent is asked to publish another actor's loop.
  *
  * THE CLI'S ROWS ONLY. `searches` is written by `tenjin search`, so every row is
  * a question the agent decided was worth asking; a null `source` is a row an
  * older CLI wrote before the column existed and is the same kind of question.
  * The hooks' own lookups live in `fires`/`legs` and are nobody's open loop.
  */
-function missLines(db: LoopDb, session: string): string[] {
+function missLines(db: LoopDb, actor: Actor): string[] {
   const rows = db
     .prepare(
       `SELECT search_id, question FROM searches
        WHERE session = ? AND decision = 'MISS' AND resolved_at IS NULL
          AND (source = 'cli' OR source IS NULL)
+         AND ((? = '' AND agent_id IS NULL) OR agent_id = ?)
        ORDER BY at, rowid`,
     )
-    .all(session) as unknown as Array<{ search_id?: unknown; question?: unknown }>;
+    .all(actor.session, actor.agent, actor.agent) as unknown as Array<{
+    search_id?: unknown;
+    question?: unknown;
+  }>;
   const out: string[] = [];
   for (const row of rows) {
     const id = typeof row.search_id === 'string' ? row.search_id : '';
@@ -302,17 +308,21 @@ function publishedLines(db: LoopDb, session: string): string[] {
  * appended, never inserted, so no ASKED value a ledger already holds changes
  * meaning.
  *
+ * An open CLI miss of this actor's own is evidence for a child and a lead
+ * alike: the agent chose to ask, and the ask is what closes that loop.
+ *
  * `failure` needs no team-origin guard of its own, unlike `activity`: the
  * failure arm plans nothing at all without one (`arms/failure.ts`), so a
  * machine with no team shelf writes no failure fire to find here.
  */
-function evidence(ctx: FireContext, hasFailures: boolean): Evidence | null {
+function evidence(ctx: FireContext, misses: string[], hasFailures: boolean): Evidence | null {
   const { db } = ctx.deps;
   const actor = ctx.actor;
   if (actor.agent !== '') {
     if (hasMark(db, actor, EDITED_PREFIX)) return 'edited';
     if (fired(db, actor, CHILD_RESEARCH_SQL)) return 'research';
     if (getMark(db, actor, HANDOFF_MISS) !== null) return 'handoff-miss';
+    if (misses.length > 0) return 'miss';
     if (hasFailures) return 'failure';
     return null;
   }
@@ -320,6 +330,7 @@ function evidence(ctx: FireContext, hasFailures: boolean): Evidence | null {
   if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
     return 'activity';
   if (childFindings(db, actor.session).length > 0) return 'finding';
+  if (misses.length > 0) return 'miss';
   if (hasFailures) return 'failure';
   return null;
 }
@@ -400,7 +411,8 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt) && failures.length === 0)
     return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
-  const kind = evidence(ctx, failures.length > 0);
+  const misses = missLines(db, actor);
+  const kind = evidence(ctx, misses, failures.length > 0);
   if (kind === null) return null;
   setMark(db, actor, ASKED, kind, clock());
 
@@ -411,7 +423,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   const text = captureAsk({
     mode: projectPublishMode(input.cwd) ?? cfg.publish.mode,
     flags,
-    misses: audience === 'lead' ? missLines(db, actor.session) : [],
+    misses,
     failures,
     published: audience === 'lead' ? publishedLines(db, actor.session) : [],
     queued: queued.map((q): QueuedLine => ({

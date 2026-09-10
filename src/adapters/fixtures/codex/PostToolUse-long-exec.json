@@ -1,0 +1,15 @@
+{
+  "session_id": "aaaaaaaa-0000-7000-8000-000000000000",
+  "turn_id": "cccccccc-0000-7000-8000-000000000000",
+  "transcript_path": "/Users/dev/.codex/sessions/2026/09/08/rollout-2026-09-08T04-30-00-aaaaaaaa-0000-7000-8000-000000000000.jsonl",
+  "cwd": "/Users/dev/proj",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "sh -c \"sleep 20; echo late-probe\""
+  },
+  "tool_response": "late-probe\n",
+  "tool_use_id": "exec-c507ea17-f15a-475e-b459-414917bfec2f"
+}

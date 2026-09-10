@@ -2,14 +2,17 @@ import { homedir } from 'node:os';
 import {
   keptItems,
   REMOVED_FROM_DATA_DIR,
+  removeFromHooksFile,
   removeFromSettings,
   removeHookScripts,
   removeSkills,
+  type SettingsOutcome,
   type UninstallReport,
 } from '../lib/uninstall';
 import { stopDaemon } from '../daemon/control';
 import { sanitizeForTerminal } from '../lib/output';
 import { loadRawConfig } from '../lib/config';
+import { ADAPTERS } from '../adapters/registry';
 import type { CommandContext, CommandResult } from '../context';
 
 /**
@@ -38,6 +41,8 @@ export interface UninstallDeps {
   home?: string;
   /** Seam for stopping the daemon; tests inject one that signals nothing. */
   stop?: typeof stopDaemon;
+  /** Environment (CODEX_HOME); defaults to process.env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export async function runUninstall(
@@ -51,6 +56,13 @@ export async function runUninstall(
   // leaves registered entries pointing at a daemon that is still answering them,
   // rather than at a port with nothing behind it.
   const settings = await removeFromSettings(home, ctx.dataDir);
+  // Every other harness's hooks file, by the same rules and before the daemon
+  // for the same reason.
+  const hookFiles: SettingsOutcome[] = [];
+  for (const adapter of Object.values(ADAPTERS)) {
+    if (adapter.id === 'claude') continue;
+    hookFiles.push(await removeFromHooksFile(adapter, home, ctx.dataDir, deps.env));
+  }
   // Then the daemon, before its bundle is deleted: a running daemon whose entries
   // are gone still holds the port and still serves any session that has not
   // re-read settings.json yet.
@@ -60,6 +72,7 @@ export async function runUninstall(
 
   const report: UninstallReport = {
     settings,
+    hookFiles,
     daemon: daemon.state,
     skills,
     scripts: scripts.scripts,
@@ -94,8 +107,10 @@ function humanLines(report: UninstallReport): string[] {
   if (report.hooksDir !== undefined) {
     removed.push(`empty hooks directory ${sanitizeForTerminal(report.hooksDir)}`);
   }
-  for (const event of settings.hooks) {
-    removed.push(`${event} hook entry in ${sanitizeForTerminal(settings.path)}`);
+  for (const file of [settings, ...report.hookFiles]) {
+    for (const event of file.hooks) {
+      removed.push(`${event} hook entry in ${sanitizeForTerminal(file.path)}`);
+    }
   }
   if (settings.rules.length > 0) {
     removed.push(
@@ -118,8 +133,8 @@ function humanLines(report: UninstallReport): string[] {
   lines.push('Removed from ~/.tenjin:');
   for (const item of REMOVED_FROM_DATA_DIR) lines.push(`  - ${item}`);
 
-  if (settings.warning !== undefined) {
-    lines.push(`! ${sanitizeForTerminal(settings.warning)}`);
+  for (const file of [settings, ...report.hookFiles]) {
+    if (file.warning !== undefined) lines.push(`! ${sanitizeForTerminal(file.warning)}`);
   }
   lines.push('Reinstall anytime: tenjin install');
   return lines;
