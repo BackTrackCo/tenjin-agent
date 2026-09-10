@@ -21,6 +21,7 @@ from typing import Any
 
 from . import canonical_json
 from .artifact import CANARY_PREFIX
+from .reduce import consumer_auxiliary
 
 REPORT_SCHEMA = "bench1.report.v1"
 # How a run was isolated, weakest first. A report takes the weakest kind any
@@ -267,7 +268,11 @@ def project(
                 "actors": len(record.get("actors", [])),
                 "requests": len(record["usage"]),
                 "auxiliary_receipts": len(record["auxiliary"]),
-                "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]),
+                # The quantity the reducer scored, taken by its own rule: native
+                # usage plus the consumer-phase auxiliary receipts this attempt
+                # caused. Capture-phase receipts are one-time and stay out, so a
+                # reader summing these rows lands on the arm's own total.
+                "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record),
                 "sentinel_hits": sum(record["sentinel"].values()),
                 "public_legs": record["delivery"].get("public", {}).get("legs", 0),
                 "public_hits": record["delivery"].get("public", {}).get("hits", 0),
