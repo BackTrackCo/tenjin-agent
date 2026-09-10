@@ -156,12 +156,14 @@ export const FAILURE_LINE = (errorLine: string, keys: string[]): string => {
         keys.map((key) => '`--key fingerprint=' + key + '`').join(' ') +
         '.'
       : ' If you settled it and the answer would save a teammate the same hour, publish it.';
-  // NOT "the shelf had nothing for it". A failure reaches this line when the
-  // lookup missed AND when it never finished, and those are different facts;
-  // claiming the shelf was asked and came back empty would be a guess on the
-  // second. What is true of every one of them is that the agent hit it and has
-  // no answer in hand.
-  return '- Came up this turn, and you have no answer for it on hand: ' + what + '.' + publish;
+  // STATES THE ENCOUNTER AND NOTHING ELSE. A failure reaches this line when the
+  // lookup missed, when it never landed, and when a note that answered another
+  // failure had already been shown; "the shelf had nothing" is a guess on the
+  // second and false on the third, and "you have no answer in hand" is false on
+  // the third too. The one thing true of all of them is that the agent walked
+  // into this, so that is all the line claims, and whether anything reusable
+  // came out of it is left where it belongs.
+  return '- Encountered this turn: ' + what + '.' + publish;
 };
 
 /** What one of this session's children published, so the lead that cannot read

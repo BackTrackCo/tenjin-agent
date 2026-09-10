@@ -63,34 +63,34 @@ const CHILD_RESEARCH_SQL =
 const LEAD_LOOKUP_SQL =
   "arm IN ('prompt', 'research', 'fetch') AND reason IN ('hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server')";
 /**
- * A failure worth naming in the ask, by what HAPPENED rather than by what the
- * lookup returned. `no-hit` and `no-answer` are asked-and-empty; `deadline` and
- * `error` never finished, so they say nothing about the shelf's stock — and the
- * agent hit that wall either way, which is the whole reason to ask. Excluding
- * them dropped the failure entirely, because the re-runs behind it are `cached`
- * rows this same list refuses (below).
- *
- * `asked`, `cached` and `seen` are the same failure a second time. They are not
- * a second thing to write up and cannot stand in for a first, so a key known
- * only by them is not named.
+ * Every failure fire this actor left. NOT an allowlist of lookup outcomes: the
+ * two exclusions below are the only things that can disqualify a failure, so a
+ * transport result nobody has thought of yet — one more way for a request not
+ * to land — is named rather than silently dropped. An allowlist got that
+ * backwards twice: first by omitting `deadline` and `error`, then by omitting
+ * `rate-server`.
  */
-const FAILURE_LISTABLE_SQL =
-  "arm = 'failure' AND reason IN ('no-hit', 'no-answer', 'deadline', 'error')";
-
-/** Every failure fire, listable or not. {@link failureLines} needs the rows it
- *  will NOT list: a `hit` on one run is what disqualifies that key on all the
- *  others, and it can only do that if it was selected. */
 const FAILURE_ANY_SQL = "arm = 'failure' AND reason != 'no-question'";
 
-/** The two outcomes that mean this actor already HAS the answer: a piece was
- *  delivered for the key, or one was withheld only because the same piece had
- *  already been injected into this actor. */
-const ANSWERED_REASONS: ReadonlySet<string> = new Set(['hit', 'seen']);
+/**
+ * The one outcome that means this actor HAS the answer to this failure: a piece
+ * was delivered for this question key.
+ *
+ * `seen` IS NOT ONE OF THEM, and that is the whole subtlety. `fire.ts` decides
+ * `seen` on the ANSWER'S RESOURCE ID, not on the failure: two different
+ * failures whose prose searches land on one note give the first `hit` and the
+ * second `seen`, with nothing injected for the second. Having read a note about
+ * the first failure is not evidence the second was solved, and the agent may
+ * well have learned something reusable climbing out of it. Whether it did is
+ * the agent's call, which is what the ask is for.
+ */
+const ANSWERED_REASONS: ReadonlySet<string> = new Set(['hit']);
 
-/** The reasons {@link FAILURE_LISTABLE_SQL} admits, for the in-memory pass over
- *  the wider row set. One definition would need a SQL parser; these two are
- *  asserted equal by a test rather than kept in step by hand. */
-const LISTABLE_REASONS: ReadonlySet<string> = new Set(['no-hit', 'no-answer', 'deadline', 'error']);
+/** The same failure a second time, carrying no verdict of its own: the claim
+ *  gate answered from its own cache without a leg running. Not disqualifying —
+ *  the row that DID reach a shelf decides that — but it cannot stand in for a
+ *  first sighting either, so a key known only by these is not named. */
+const REPEAT_REASONS: ReadonlySet<string> = new Set(['asked', 'cached']);
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   return (
@@ -178,14 +178,17 @@ function missLines(db: LoopDb, session: string): string[] {
  * The failures this actor hit and does not already have an answer to, oldest
  * first, one line each.
  *
- * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED. Reading only the
- * rows the shelf missed loses a failure to a `deadline` or an `error`, where
- * the request never finished and so says nothing about whether the shelf holds
- * an answer — and it loses the failure ENTIRELY, since the repeats behind it
- * are `cached` rows the same filter drops. The agent still hit that wall and
- * may still have the fix, which is the whole point of asking. Only `hit` and
- * `seen` disqualify a key, because both mean this actor is already holding the
- * piece ({@link ANSWERED_REASONS}).
+ * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED. A `deadline`, an
+ * `error` or a `rate-server` says nothing about whether the shelf holds an
+ * answer — the request never landed — and the agent hit that wall either way,
+ * which is the whole reason to ask. Listing only the outcomes that mean
+ * "asked, and came back empty" dropped those failures, so the rule is inverted:
+ * everything counts except a key this actor was actually handed a piece for
+ * ({@link ANSWERED_REASONS}), and repeats that carry no verdict of their own
+ * ({@link REPEAT_REASONS}). A transport result added later is named by default,
+ * which is the safe direction: the cost of naming one failure too many is a
+ * line the agent ignores, and the cost of dropping one is a fingerprint nobody
+ * can ever publish under.
  *
  * THE `fires` ROW IS THE RECORD: `fire.ts` sets the plan's
  * question key and its masked, cut text before the gates run, and `ledger.ts`
@@ -246,7 +249,7 @@ function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] 
   for (const row of rows) {
     const key = typeof row.question_key === 'string' ? row.question_key : '';
     if (key === '' || seen.has(key) || answered.has(key)) continue;
-    if (!LISTABLE_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
+    if (REPEAT_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
     seen.add(key);
     if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
     // Already masked and cut at the shelf's bound on the way into the row; the
@@ -303,21 +306,21 @@ function publishedLines(db: LoopDb, session: string): string[] {
  * failure arm plans nothing at all without one (`arms/failure.ts`), so a
  * machine with no team shelf writes no failure fire to find here.
  */
-function evidence(ctx: FireContext): Evidence | null {
+function evidence(ctx: FireContext, hasFailures: boolean): Evidence | null {
   const { db } = ctx.deps;
   const actor = ctx.actor;
   if (actor.agent !== '') {
     if (hasMark(db, actor, EDITED_PREFIX)) return 'edited';
     if (fired(db, actor, CHILD_RESEARCH_SQL)) return 'research';
     if (getMark(db, actor, HANDOFF_MISS) !== null) return 'handoff-miss';
-    if (fired(db, actor, FAILURE_LISTABLE_SQL)) return 'failure';
+    if (hasFailures) return 'failure';
     return null;
   }
   if (fired(db, actor, LEAD_LOOKUP_SQL)) return 'lookup';
   if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
     return 'activity';
   if (childFindings(db, actor.session).length > 0) return 'finding';
-  if (fired(db, actor, FAILURE_LISTABLE_SQL)) return 'failure';
+  if (hasFailures) return 'failure';
   return null;
 }
 
@@ -397,7 +400,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   if (askedAt !== null && !queued.some((q) => q.finding.at > askedAt) && failures.length === 0)
     return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
-  const kind = evidence(ctx);
+  const kind = evidence(ctx, failures.length > 0);
   if (kind === null) return null;
   setMark(db, actor, ASKED, kind, clock());
 

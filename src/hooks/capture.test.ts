@@ -341,7 +341,7 @@ describe('the child ask', () => {
     // explain its own wall, and the lead never walked into it.
     const child = (await fire(db, childStop()))?.context ?? '';
     expect(child).toContain(
-      '- Came up this turn, and you have no answer for it on hand: `' +
+      '- Encountered this turn: `' +
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
         '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
@@ -527,14 +527,52 @@ describe('the lead ask', () => {
     expect((await fire(db, leadStop()))?.context).toBeDefined();
     expect(getMark(db, LEAD, 'capture:asked')).toBe('failure');
 
-    // `hit`, `cached` and `seen` are the same failure a second time, or one the
-    // shelf answered: neither is a thing to write up.
-    for (const reason of ['hit', 'cached', 'seen']) {
+    // `hit` is this key's own answer delivered; `cached` is the same failure a
+    // second time with no verdict of its own. Neither is a thing to write up.
+    for (const reason of ['hit', 'cached', 'asked']) {
       const answered = freshDb();
       seedFailure(answered, LEAD, { reason });
       expect(await fire(answered, leadStop()), reason).toBeNull();
       expect(getMark(answered, LEAD, 'capture:asked'), reason).toBeNull();
     }
+
+    // `seen` IS evidence. It is decided on the answer's resource id, not on the
+    // failure, so it means "a note this actor had already read would have been
+    // shown here" — nothing was injected for THIS failure, and having read a
+    // note about another one does not make this one answered.
+    const alreadyRead = freshDb();
+    seedFailure(alreadyRead, LEAD, { reason: 'seen' });
+    expect((await fire(alreadyRead, leadStop()))?.context).toContain(ENOENT_LINE);
+    expect(getMark(alreadyRead, LEAD, 'capture:asked')).toBe('failure');
+  });
+
+  it('names a second failure whose note the first failure had already shown', async () => {
+    // The real shape: one actor hits the same error in two files, both prose
+    // searches land on one note, so the first fire is `hit` and the second is
+    // `seen` with nothing injected. Two distinct question keys, and the second
+    // one's fingerprint has to survive into the ask.
+    const db = freshDb();
+    seedFailure(db, LEAD, { reason: 'hit', at: NOW - 50 });
+    seedFailure(db, LEAD, {
+      reason: 'seen',
+      questionKey: 'sig_v1:bbbb1111bbbb1111',
+      question: "TypeError: cfg.load is not a function ('src/b.ts')",
+      at: NOW - 40,
+    });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    const lines = context.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('sig_v1:bbbb1111bbbb1111');
+    expect(context).not.toContain(ENOENT_KEY);
+  });
+
+  it('names a failure the shelf rate-limited', async () => {
+    // A 429 is one more way for the request not to land, the same class as
+    // `deadline`. An allowlist of outcomes dropped it twice over.
+    const db = freshDb();
+    seedFailure(db, LEAD, { reason: 'rate-server' });
+    expect((await fire(db, leadStop()))?.context).toContain(ENOENT_LINE);
+    expect(getMark(db, LEAD, 'capture:asked')).toBe('failure');
   });
 
   it('names a failure whose lookup never finished, and the repeat behind it cannot stand in', async () => {
@@ -565,7 +603,7 @@ describe('the lead ask', () => {
     seedFailure(db, LEAD, { reason: 'deadline', at: NOW - 40 });
     seedFailure(db, LEAD, { questionKey: 'sig_v1:ffff0000ffff0000', at: NOW - 30 });
     const context = (await fire(db, leadStop()))?.context ?? '';
-    const lines = context.split('\n').filter((l) => l.startsWith('- Came up this turn'));
+    const lines = context.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain('sig_v1:ffff0000ffff0000');
     expect(context).not.toContain(ENOENT_KEY);
@@ -604,15 +642,15 @@ describe('the lead ask', () => {
       at: NOW - 20,
     });
     const reason = (await fire(db, leadStop()))?.context ?? '';
-    const lines = reason.split('\n').filter((l) => l.startsWith('- Came up this turn'));
+    const lines = reason.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
     expect(lines).toEqual([
-      '- Came up this turn, and you have no answer for it on hand: `' +
+      '- Encountered this turn: `' +
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
         '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
-      '- Came up this turn, and you have no answer for it on hand: `error: linting failed for the ' +
+      '- Encountered this turn: `error: linting failed for the ' +
         'workspace`. If you settled it and the answer would save a teammate the same hour, publish it.',
-      '- Came up this turn, and you have no answer for it on hand: A failure filed under ' +
+      '- Encountered this turn: A failure filed under ' +
         '`sig_v1_test:0123456789abcdef`. If you settled it and the answer would save a teammate the ' +
         'same hour, publish it with `--key fingerprint=sig_v1_test:0123456789abcdef`.',
     ]);
@@ -623,7 +661,7 @@ describe('the lead ask', () => {
     seedFire(db, LEAD, 'prompt', 'no-hit');
     // Hit before the ask: the first ask already named it, so it re-arms nothing.
     seedFailure(db, LEAD, { at: NOW - 10 });
-    expect((await fire(db, leadStop()))?.context).toContain('- Came up this turn');
+    expect((await fire(db, leadStop()))?.context).toContain('- Encountered this turn');
     await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
     expect(await fire(db, leadStop(), TEAM, () => NOW + 10)).toBeNull();
 
