@@ -201,7 +201,7 @@ class HttpApi:
 
     def _settle(self, project_id: str, payload: Mapping[str, Any]) -> None:
         """Wait for the restore's operations, so a started reset is not a finished one."""
-        pending = [str(item["id"]) for item in payload.get("operations", []) or [] if isinstance(item, dict) and item.get("id")]
+        pending = _operation_ids(payload)
         deadline = self.clock() + self.poll_cap_s
         while pending:
             operation_id = pending[0]
@@ -241,6 +241,28 @@ class HttpApi:
         if not isinstance(payload, dict):
             raise CorpusError("api_unreadable", f"{method} {path} answered with {type(payload).__name__}, not an object")
         return payload
+
+
+def _operation_ids(payload: Mapping[str, Any]) -> list[str]:
+    """The ids `_settle` has to wait on, or a refusal.
+
+    Neon answers a restore with the operations it started. A 200 that names
+    none, or one whose entries carry no id, leaves nothing to poll, and the
+    empty wait would read as a settled reset: the run would then be stamped and
+    measured against a corpus no operation was ever seen to restore. Silence
+    here is the one answer that cannot be distinguished from success, so it is
+    refused rather than filtered out.
+    """
+    operations = payload.get("operations")
+    if not isinstance(operations, list) or not operations:
+        raise CorpusError("reset_unconfirmed", "the restore response named no operation to wait on")
+    ids = []
+    for item in operations:
+        identifier = item.get("id") if isinstance(item, dict) else None
+        if identifier is None or not str(identifier).strip():
+            raise CorpusError("reset_unconfirmed", "the restore response carried an operation with no id")
+        ids.append(str(identifier))
+    return ids
 
 
 def _quote(value: str) -> str:

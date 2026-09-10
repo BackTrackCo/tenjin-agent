@@ -1232,6 +1232,33 @@ def test_reading_a_run_that_never_started_is_one_sentence_and_exit_two(tmp_path:
     assert "Traceback" not in stderr.getvalue()
 
 
+def test_a_live_manifest_that_fails_validation_is_one_sentence_and_exit_two(tmp_path: Path) -> None:
+    # `live-run` validates in more places than the readers do, and each place
+    # refuses in its own type. One the entry point does not catch reaches the
+    # operator as a traceback instead of the sentence it wrote.
+    bad = tmp_path / "bad-manifest.json"
+    bad.write_text("{}", encoding="utf-8")
+    stderr = io.StringIO()
+    with no_process(), contextlib.redirect_stderr(stderr):
+        code = cli.main(["live-run", "--manifest", str(bad), "--out", str(tmp_path / "run"), "--plumbing", "--ci-live"])
+    assert code == 2
+    assert stderr.getvalue().strip()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_every_gate_live_run_reaches_is_a_refusal_the_entry_point_catches() -> None:
+    for kind in (
+        manifest_module.ManifestError,
+        schedule.ScheduleError,
+        IsolationError,
+        executor.ExecutorError,
+        LiveExecutorError,
+        executor.ProvisionError,
+        records.RecordError,
+    ):
+        assert issubclass(kind, cli.REFUSALS), kind
+
+
 def test_fake_run_refuses_a_live_executor_manifest(run_dir: Path) -> None:
     with no_process(), pytest.raises(cli.CliError) as caught:
         cli.fake_run(run_dir, cli.SMOKE_MANIFEST)
