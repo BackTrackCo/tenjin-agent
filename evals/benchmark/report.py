@@ -191,16 +191,18 @@ def project(
         reason = item["reason"].split(":", 1)[0]
         excluded[reason] = excluded.get(reason, 0) + 1
     publishable, kind = stamp(accepted)
-    # The delivery legs by origin, summed over the accepted attempts, so the
-    # plan's canary gate reads as two separate counts: requests to an origin
-    # outside the known set, and legs the public marketplace answered.
-    origins = {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "other_requests": 0}
+    # The delivery legs by shelf, summed over the accepted attempts. Every
+    # count here comes from the daemon's own ledger, so it says which legs the
+    # product recorded, never which requests left the container: the container
+    # harness reports no denials, and `unnamed_shelf_legs` is named for what it
+    # is rather than dressed up as observed egress.
+    origins = {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "unnamed_shelf_legs": 0}
     for record in accepted.values():
         public = record["delivery"].get("public", {})
         origins["public_legs"] += public.get("legs", 0)
         origins["public_hits"] += public.get("hits", 0)
         origins["public_timeouts"] += public.get("timeouts", 0)
-        origins["other_requests"] += record["delivery"].get("classes", {}).get("other", 0)
+        origins["unnamed_shelf_legs"] += record["delivery"].get("classes", {}).get("other", 0)
     # The seeded pieces: how many trials wrote one to the team shelf, and how
     # many left it there because the delete failed, which the summary warns on.
     seeds = {"published": 0, "not_deleted": 0}
@@ -318,10 +320,10 @@ def project(
                 # is the same set the reducer aggregates. An arm total is
                 # `arms[arm].tokens` and is the figure to read instead.
                 "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record),
-                "sentinel_hits": sum(record["sentinel"].values()),
+                "credential_exposures": record["sentinel"].get("credential_exposures", 0),
                 "public_legs": record["delivery"].get("public", {}).get("legs", 0),
                 "public_hits": record["delivery"].get("public", {}).get("hits", 0),
-                "other_requests": record["delivery"].get("classes", {}).get("other", 0),
+                "unnamed_shelf_legs": record["delivery"].get("classes", {}).get("other", 0),
                 "local_hits": sum(1 for leg in record["delivery"].get("legs", []) if leg.get("shelf") == "local" and leg.get("outcome") == "hit"),
                 "child_tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"] if item["actor_key"][2] != ""),
                 "producer_outcome": None if not isinstance(record["isolation"].get("producer"), dict) else record["isolation"]["producer"].get("outcome"),
@@ -609,7 +611,7 @@ def render(report: dict[str, Any]) -> str:
     if origins is not None:
         lines.append(
             f"public legs: {origins['public_legs']}, hits: {origins['public_hits']}, "
-            f"timeouts: {origins['public_timeouts']}; requests to an unknown origin: {origins['other_requests']}"
+            f"timeouts: {origins['public_timeouts']}; legs the daemon logged to an unnamed shelf: {origins['unnamed_shelf_legs']}"
         )
     if report["comparisons"]:
         lines.append(f"token ratio versus {baseline}, 1.0 means no change, lower means fewer tokens:")

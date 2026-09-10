@@ -76,8 +76,10 @@ def live_gates() -> Iterator["images.Image"]:
     with (
         patched_images() as image,
         mock.patch.object(cli, "refuse_without_images", lambda manifest, out=None: None),
-        mock.patch.object(container, "start_egress", lambda egress, docker=None: egress),
-        mock.patch.object(container, "stop_egress", lambda egress, docker=None: {"proxy": False, "network_removed": False}),
+        # The allowlist gate asks Docker whether Harbor could enforce it. A
+        # case here starts no container, so the answer is stubbed rather than
+        # probed; `test_container.py` covers the gate itself.
+        mock.patch.object(container, "require_egress", lambda egress, probe=None: None),
     ):
         yield image
 
@@ -398,7 +400,7 @@ def reduction_record(
             "legs": [],
             "unmatched_fires": [],
         },
-        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "sentinel": {"credential_exposures": 0},
         "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None, "automated": False},
         "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
     }
@@ -553,7 +555,7 @@ def attempt_record(session: claude_usage.SessionUsage, **overrides: Any) -> dict
         "wall_time_s": 1.5,
         "unresolved_actors": [],
         "delivery": {"status": "unavailable", "fires": [], "legs": [], "unmatched_fires": []},
-        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "sentinel": {"credential_exposures": 0},
         "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None, "automated": False},
         "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
     }

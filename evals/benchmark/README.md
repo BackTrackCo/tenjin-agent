@@ -35,32 +35,32 @@ Each contract is stated once, in the module that owns it, and held by the test m
 The tests are the specification to reach for: each names its rule and holds to it on a fixture
 the suite builds.
 
-| Module                     | What it owns                                                             | Held by                              |
-| -------------------------- | ------------------------------------------------------------------------ | ------------------------------------ |
-| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree        | `test_manifest.py`                   |
-| `presets.py`               | named arm settings, expanded at load, an inline block over them          | `test_presets.py`                    |
-| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256                   | `test_schedule.py`                   |
-| `runner.py`                | execution: fresh roots, settlement, caps, sentinels, resume, concurrency | `test_runner.py`, `test_fake_run.py` |
-| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents          | `test_artifact.py`                   |
-| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings           | `test_claude_live.py`                |
-| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial         | `test_tenjin_arm.py`                 |
-| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported                    | `test_signature.py`                  |
-| `artifact.py`              | disposable roots, sentinels, the isolation attestation                   | `test_artifact.py`                   |
-| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp               | `test_corpus.py`                     |
-| `verifier.py`              | hidden verifier registry, hidden layer, the run marker                   | `test_verifier.py`                   |
-| `images.py`                | one pinned base image, one image per fixture, build and drift            | `test_images.py`                     |
-| `container.py`             | a trial inside its image: mounts, argv, the run's egress proxy           | `test_container.py`                  |
-| `producer.py`              | the natural arm's producer phase and its receipts                        | `test_phases.py`                     |
-| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                       | `test_usage.py`                      |
-| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                          | `test_claude_usage.py`               |
-| `records.py`               | the immutable attempt record, publish, select                            | `test_records.py`                    |
-| `loop_join.py`             | read-only delivery join on exact actor keys                              | `test_loop_join.py`                  |
-| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap                     | `test_reduce.py`                     |
-| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary           | `test_report.py`, `test_regress.py`  |
-| `cases.py`, `discovery.py` | the search-intent export and the discovery counters                      | `test_cases.py`, `test_discovery.py` |
-| `reap.py`                  | cleanup by recorded identity, never by process name                      | `test_reap.py`                       |
-| `snapshot.py`              | the per-run corpus reading: post count and content hash                  | `test_snapshot.py`                   |
-| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs               | `test_fake_run.py`                   |
+| Module                     | What it owns                                                              | Held by                              |
+| -------------------------- | ------------------------------------------------------------------------- | ------------------------------------ |
+| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree         | `test_manifest.py`                   |
+| `presets.py`               | named arm settings, expanded at load, an inline block over them           | `test_presets.py`                    |
+| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256                    | `test_schedule.py`                   |
+| `runner.py`                | execution: fresh roots, settlement, caps, the canary, resume, concurrency | `test_runner.py`, `test_fake_run.py` |
+| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents           | `test_artifact.py`                   |
+| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings            | `test_claude_live.py`                |
+| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial          | `test_tenjin_arm.py`                 |
+| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported                     | `test_signature.py`                  |
+| `artifact.py`              | disposable roots, the credential canary, the isolation attestation        | `test_artifact.py`                   |
+| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp                | `test_corpus.py`                     |
+| `verifier.py`              | hidden verifier registry, hidden layer, the run marker                    | `test_verifier.py`                   |
+| `images.py`                | one pinned base image, one image per fixture, build and drift             | `test_images.py`                     |
+| `container.py`             | a trial inside its image, run by Harbor: mounts, recipe, allowlist        | `test_container.py`                  |
+| `producer.py`              | the natural arm's producer phase and its receipts                         | `test_phases.py`                     |
+| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                        | `test_usage.py`                      |
+| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                           | `test_claude_usage.py`               |
+| `records.py`               | the immutable attempt record, publish, select                             | `test_records.py`                    |
+| `loop_join.py`             | read-only delivery join on exact actor keys                               | `test_loop_join.py`                  |
+| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap                      | `test_reduce.py`                     |
+| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary            | `test_report.py`, `test_regress.py`  |
+| `cases.py`, `discovery.py` | the search-intent export and the discovery counters                       | `test_cases.py`, `test_discovery.py` |
+| `reap.py`                  | cleanup by recorded identity, never by process name                       | `test_reap.py`                       |
+| `snapshot.py`              | the per-run corpus reading: post count and content hash                   | `test_snapshot.py`                   |
+| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs                | `test_fake_run.py`                   |
 
 An arm's treatment is its `settings`, and most arms run the same one, so an arm may name a preset
 instead: `"settings_preset": "tenjin-hooks-and-cli-reads"` is the product's whole hook wiring plus
@@ -368,8 +368,8 @@ list, and every delivery leg is classed by its `shelf` column as `team`, `public
 and a `keys` leg, which the public host also serves), `local` (never leaves the process), or
 `other`. An arm with `public_fallback: "off"` still lists the marketplace as an allowed origin and
 simply never reaches it, so `public_legs` at zero is a measurement rather than a blocked request.
-Only `other` reaches the sentinel's `public_requests` and invalidates, so the plan's canary gate
-is two counts judged on their own: unknown requests zero and public hits zero. A task's expected
+`other` is counted and reported as `unnamed_shelf_legs` and no longer invalidates: it is the
+daemon's own ledger, and the container harness reports no denial that could corroborate it. A task's expected
 values live in the hidden layer and reach the trial's repository copy at launch, derived and
 outside every `fixture_hash`; an agent that reads them anyway is counted by
 `discovery.setup_read` and `discovery.test_run_before_fix`, which `summary` prints per arm. A
@@ -909,32 +909,47 @@ pid, and `tenjin_arm` no longer starts a process at all. The natural arm's two p
 containers in sequence on one data dir. The container name goes into the run's process ledger,
 so `cli.py cleanup`, the wall-clock cap and an interrupt all stop and remove it.
 
-**Network.** Per run the runner creates one Docker network with `--internal` (no route out and
-no DNS for an outside name: resolution fails with `EAI_AGAIN`, proven on this machine's colima
-29.5.2) and one egress proxy container on both that network and the default bridge: a Python
-`CONNECT` proxy from `python:3.12-slim` pinned by index digest, holding the run's allowlist and
-logging every request with its verdict to `<run>/proxy/requests.jsonl`. The run waits until the
-proxy is accepting connections before any trial starts, because a CONNECT into a container with
-no listener stalls on an internal network rather than being refused. Every trial container
-joins the internal network only and gets `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY=127.0.0.1,
-localhost` and `NODE_USE_ENV_PROXY=1` (Node 24 reads the proxy variables for `fetch` under that
-flag), so Claude Code, the daemon's shelf legs and the CLI's reads all go through the proxy and
-nothing else can leave. The allowlist is `api.anthropic.com` plus the seeded config's team and
-public shelf hosts; a request to any other host is refused with 403 and counted as that trial's
-`sentinel.public_requests` through `container.ProxySentinel`, which reads the log the runner
-already counts deltas on. The proxy does not log a request from its own loopback, because the
-readiness check is not a request a trial made.
+**Network.** Egress is per attempt, and Harbor owns it. A `NetworkPolicy` in allowlist mode puts
+the trial's service in the network namespace of an egress sidecar whose nftables ruleset redirects
+every connection into a `gost` proxy that DROPS any host off the list. The allowlist is
+`api.anthropic.com` plus the seeded config's team and public shelf hosts. Nothing in the container
+is told about any of this: interception is transparent, so a process is contained whether or not it
+reads a proxy variable. That is a real improvement on the design it replaces, where the only route
+out was an HTTP proxy and a process that ignored `HTTPS_PROXY` reached nothing at all while the run
+still looked healthy.
 
-Proven on 2026-09-09, on the base image with the run's own egress: `fetch` to
-`https://api.anthropic.com/v1/models` returned 401 (the provider answered; the log line says
-`verdict: allowed`), `fetch` to `https://example.com/` failed and the log line says `verdict:
-refused, reason: not on the allowlist`, and the same fetch with no proxy variables failed with
-`EAI_AGAIN`. So the allowlist is enforced by construction, and a live run carries an
-attestation the runner writes itself (`kind: container`, the run's network as the instance,
-the base image by digest, `fresh_roots: true`, `wallet_present: false`, the seam, the
-allowlist). What colima cannot enforce, and the record does not claim: nothing at the packet
-level inside the container beyond "no route out" (a process there can still talk to the proxy,
-which is the point), and nothing about the host side of a bind mount.
+Proven on 2026-09-10, in the fixture image under Harbor with no proxy variables set: `fetch` to
+`https://api.anthropic.com/v1/models` returned 401 (the provider answered), and `fetch` to
+`https://example.com/` and `https://registry.npmjs.org/` both failed with `ECONNRESET`. So the
+allowlist is enforced by construction, and a live run carries an attestation the runner writes
+itself (`kind: container`, the run's nonce as the instance, the base image by digest,
+`fresh_roots: true`, `wallet_present: false`, the seam, the allowlist).
+
+**What this harness can no longer see, and therefore no longer claims.** Harbor's ruleset carries
+no `log` statement and nothing in Harbor reads a denial, so there is no way to learn that a trial
+TRIED to reach an unlisted origin. The rule that made such an attempt invalid is retired rather
+than pinned at zero: `ProxySentinel`, `sentinel.public_requests` and the `sentinel:public_request`
+reason are gone, and no line of the summary implies a run verified that nothing tried to leave.
+What survives is containment, which is unchanged, and the credential canary, which is a host-side
+scan of the trial's own roots and never depended on the network. `delivery.classes.other` still
+counts legs the daemon itself logged to a shelf outside the seeded config's set; that is the
+product's own ledger rather than an observation of the network, so it is reported under a name
+that says so and no longer invalidates.
+
+Harbor also turns egress control off SILENTLY when a kernel probe for nftables `fib inet` support
+fails, which would leave the container on public egress with no error. `container.require_egress`
+asks that probe itself before the first trial and refuses the run, because an allowlist that is
+never installed is a different run rather than a weaker one.
+
+Two costs of the framework, both accepted rather than worked around. Harbor expands a forwarded
+credential's VALUE into the host-side `docker compose exec` argv, so it is visible in `ps` for the
+length of an attempt; a measured run therefore belongs on a single-tenant machine. And
+`EnvironmentConfig.env` is not only the container's: Harbor overlays it onto `os.environ` for the
+compose client, so a trial root named `HOME` retargets the docker CLI's own config. The trial's
+environment goes into a compose override file instead (`container.write_environment_override`).
+
+What the record does not claim: nothing at the packet level beyond the allowlist, nothing about the
+host side of a bind mount, and nothing about attempted egress.
 
 **Where the plan and the code differ.** Three places, each because the machine said so:
 
@@ -993,9 +1008,9 @@ unprovisioned arm converges on the time its provisioned arms take alone, and the
 unprovisioned quarter hiding inside that.
 
 The schedule is untouched: trials are assigned in its order, the results come back in it whatever
-order they finish in, and no trial id, hash, or balance property depends on the degree. A run
-with a sentinel attached is refused above one, because the sentinel is one server for the whole
-run and its hits name no trial, so a trial claims whatever arrived while it ran.
+order they finish in, and no trial id, hash, or balance property depends on the degree. The
+concurrency ceiling that used to sit here is gone with the loopback sentinel that needed it: egress
+is per attempt now, so nothing counted per run has to be attributed to one trial by delta.
 
 ## Cleanup
 
@@ -1020,7 +1035,7 @@ rather than remembered: a test parses every module here and fails on a name-matc
   incomplete or contradictory and never scores. `invalid` is never a miss, never a failure, and
   never a zero-token run, and its reason names the gate that refused it (`executor:exit_N`,
   `usage:<code>`, `delivery:<code>`, `verifier:<id>`, `auxiliary:<code>`, `provision:<code>`,
-  `isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`).
+  `isolation:symlink_escape`, `sentinel:credential_exposure`).
 - **Every task weighs the same.** A cell is one `(arm, task)` pair and an arm figure is the mean
   over its cells, never a sum over attempts, so a task with more repeats does not speak louder.
   Pass rate and token ratio are separate axes and nothing folds them into one number. Producer

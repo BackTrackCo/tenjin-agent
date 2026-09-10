@@ -77,7 +77,7 @@ def test_hashes_counts_and_enums_are_publishable() -> None:
             "schedule_hash": "sha256:" + "b" * 64,
             "trial_id": "27d0f0fe30d9608939dadc4c",
             "outcome": "capped",
-            "invalid_reason": "sentinel:public_request",
+            "invalid_reason": "sentinel:credential_exposure",
             "token_ratio": 0.825,
             "attempts": 12,
             "headline_eligible": True,
@@ -287,24 +287,24 @@ def test_the_projection_carries_no_usage_body_or_delivery_detail(corpus, project
         "arm_id",
         "auxiliary_receipts",
         "child_tokens",
+        "credential_exposures",
         "invalid_reason",
         "local_hits",
-        "other_requests",
         "outcome",
         "producer_outcome",
         "producer_tokens",
         "public_hits",
         "public_legs",
         "requests",
-        "sentinel_hits",
         "stop_reason",
         "task_id",
         "tokens",
         "trial_id",
+        "unnamed_shelf_legs",
     ]
     # The corpus predates leg classes, so every origin count reads as zero
     # rather than as a missing field.
-    assert published["origins"] == {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "other_requests": 0}
+    assert published["origins"] == {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "unnamed_shelf_legs": 0}
     # The private record has fields the projection deliberately drops.
     private = accepted[trial["trial_id"]]
     assert "private_hashes" in private
@@ -424,7 +424,7 @@ def test_a_hidden_category_prints_a_reason_where_the_new_token_ratio_would_be() 
     assert report.REQUESTS_LABEL + ":    1.00 versus    1.00, ratio 1.000" in text
 
 
-def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(corpus, project: Project) -> None:
+def test_the_origin_counts_sum_the_public_legs_and_the_unnamed_shelf_legs(corpus, project: Project) -> None:
     _manifest, _digest, accepted, _excluded = corpus
     records_in = {}
     for trial_id, record in accepted.items():
@@ -434,9 +434,9 @@ def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(corpus, 
         records_in[trial_id] = copy
     published = project(accepted_records=records_in)
     count = len(records_in)
-    assert published["origins"] == {"public_legs": 2 * count, "public_hits": count, "public_timeouts": count, "other_requests": count}
+    assert published["origins"] == {"public_legs": 2 * count, "public_hits": count, "public_timeouts": count, "unnamed_shelf_legs": count}
     assert published["trials"][0]["public_legs"] == 2
-    assert published["trials"][0]["other_requests"] == 1
+    assert published["trials"][0]["unnamed_shelf_legs"] == 1
     report.guard(published)
 
 

@@ -1,0 +1,29 @@
+# The live lane's container harness, and nothing the offline suite touches.
+#
+# `evals/benchmark/requirements-test.txt` is what the required CI job installs:
+# twelve pure-python wheels, one hash each, on a Python 3.11 floor. Harbor is
+# 88 `requires_dist`, 89 wheels, roughly 112 MB across two platforms, and
+# `requires_python >= 3.12`. Putting it in that file would move the floor and
+# multiply the required job's closure by nine for a lane that job never runs:
+# the offline suite drives a fake executor and starts no container.
+#
+# So the split is a seam, not a preference. Nothing under `evals/benchmark/`
+# imports `harbor` at module scope; the live executor resolves it at the call
+# (`container.harbor()`), so the offline suite imports the same modules with
+# this file uninstalled. `tests/test_container.py` asserts that, and the CI
+# job proves it by running green without ever installing this file.
+#
+# Install only for a live run, on a machine that has Docker:
+#
+#   python3.12 -m venv .venv-live
+#   .venv-live/bin/pip install -r evals/benchmark/requirements-live.txt
+#
+# Not hash-pinned, unlike the offline file, and the reason is what each pin
+# buys. The offline file's hashes stop a required check from depending on
+# whatever the index served that minute. A live run's reproducibility does not
+# rest here: what a trial ran inside is the image, pinned by digest and by
+# recipe hash in `images.py` and recorded per attempt under `isolation.image`.
+# Harbor is the thing that starts the container, and its version is what the
+# attestation names. One exact version is the claim this file can keep; 109
+# transitive hashes across two platforms would be a claim about the index.
+harbor==0.22.0

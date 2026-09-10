@@ -497,10 +497,9 @@ def test_a_launch_records_the_images_pnpm_and_seeds_nothing_on_the_host(tmp_path
     roots = artifact.create(tmp_path / "run", trial.trial_id, manifest.fixture_path(task))
     launch = claude_live.launch(claude_live.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins))
     assert launch.package_manager == {"kind": "image", "version": images.PNPM_VERSION}
-    assert launch.env is not None
     # Nothing of the host's package manager reaches the trial: no corepack
     # home, no cache seeded beside the roots, no version probed.
-    assert "COREPACK_HOME" not in launch.env
+    assert "COREPACK_HOME" not in launch.recipe.environment
     assert "COREPACK_HOME" not in launch.container_plan["env"]
     assert not (roots.base / "corepack").exists()
 

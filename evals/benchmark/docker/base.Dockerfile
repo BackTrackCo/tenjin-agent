@@ -40,8 +40,10 @@ RUN npm pack /opt/tenjin-cli --ignore-scripts --pack-destination /tmp \
   && tenjin --version \
   && tenjin daemon --help > /dev/null
 
-# The entrypoint: it starts the trial's daemon inside this container, runs the
-# agent, stops the daemon, and exits with the agent's code.
+# The entrypoint: it starts the trial's daemon inside this container and then
+# execs the keepalive Harbor's compose file hands it, so pid 1 is what
+# `docker compose down` signals. The agent is exec'd in separately, and
+# `bench2-trial --stop` ends the daemon before the host reads `loop.db`.
 COPY trial.mjs /opt/bench2/trial.mjs
 RUN printf '#!/bin/sh\nexec node /opt/bench2/trial.mjs "$@"\n' > /usr/local/bin/bench2-trial \
   && chmod 0755 /usr/local/bin/bench2-trial

@@ -125,12 +125,17 @@ INHERITED = ("LANG",)
 # the daemon, and where its own configuration is. The credential seam rides
 # here too, and `docker run --env NAME` forwards it into the container without
 # ever putting the value in an argv.
-DOCKER_INHERITED = ("PATH", "HOME", "TERM", "LANG", "TMPDIR", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY")
 # Variables the trial's own roots own, or that would move the model traffic,
 # the config directory, or the process loader. An arm names its treatment with
 # its own variables; it does not reach these through `settings.env`.
 RESERVED_ENV_PREFIXES = ("ANTHROPIC_", "AWS_", "CLAUDE_", "COREPACK_", "DYLD_", "GITHUB_", "LD_", "NODE_", "TENJIN_")
-RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "TERM", "LANG", "SHELL", "PYTHONPATH", artifact.PUBLIC_ORIGIN_VAR})
+RESERVED_ENV_NAMES = frozenset({"HOME", "PATH", "TERM", "LANG", "SHELL", "PYTHONPATH"})
+# Where Harbor's own trial directory goes: under the attempt's base, beside the
+# roots, so it is thrown away with them. `environment` is the directory Harbor
+# resolves for `--project-directory`; with a prebuilt image nothing in it is
+# read, but it has to exist.
+HARBOR_DIR = "harbor"
+ENVIRONMENT_DIR = "environment"
 
 # `\Z` rather than `$`: in Python `$` also matches before a trailing newline,
 # so `$` would let `claude-fable-5-1\n` through as a model id.
@@ -580,16 +585,23 @@ def refuse_project_settings(repo: Path) -> None:
 
 
 def container_environment(
-    roots: artifact.TrialRoots, parent: Mapping[str, str], project_dir: str | None = None, egress: Any = None
+    roots: artifact.TrialRoots, parent: Mapping[str, str], project_dir: str | None = None, daemon: bool = False
 ) -> dict[str, str]:
-    """The variables the container gets: the trial's own roots, and the run's proxy.
+    """The variables the container is brought up with: the trial's own roots.
 
-    Everything here is a value this package computed. The credential is not:
-    it is forwarded by name, so it exists in the container's environment and in
-    no argv, no file, and no image layer. A wallet key, a shelf secret and the
-    operator's own `CLAUDE_CONFIG_DIR` have no way in either, because nothing
-    outside this list crosses, and the arm's `settings.env` is refused every
-    name this function owns.
+    Everything here is a value this package computed, and it is set at `up`
+    rather than at exec because the image's ENTRYPOINT reads it before any
+    agent runs. The credential is NOT here: it travels on the agent's exec
+    alone, so it is absent from the compose override Harbor writes to disk.
+    A wallet key, a shelf secret and the operator's own `CLAUDE_CONFIG_DIR`
+    have no way in either, because nothing outside this list crosses, and the
+    arm's `settings.env` is refused every name this function owns.
+
+    There are no proxy variables any more. Harbor's egress control is an
+    nftables redirect in a sidecar sharing the network namespace, so it
+    intercepts what the trial sends whether or not the sender honours a proxy
+    setting. The old design had to ask each process to opt in, and a process
+    that did not reached nothing at all on an `--internal` network.
     """
     env = roots.environment(parent.get("PATH", ""))
     # The image owns PATH: `claude`, `tenjin`, `node` and `pnpm` are its.
@@ -597,9 +609,14 @@ def container_environment(
     if project_dir is not None:
         env[PROJECT_DIR_VAR] = project_dir_name(project_dir)
     env[container.OUTPUT_VAR] = str(roots.output)
+    if daemon:
+        # What the ENTRYPOINT reads to know it owns a daemon for this attempt.
+        # A flag rather than an argument, because Harbor fixes the compose
+        # command and the entrypoint only ever sees the keepalive.
+        env[container.DAEMON_VAR] = "1"
     # Every tenjin process in the trial, the shim included: the CLI's daily npm
-    # check is one request to a host no arm asked for, the proxy refuses it,
-    # and the refusal is what invalidates the trial.
+    # check is one request to a host no arm asked for, and the allowlist drops
+    # it. The product's own opt-out keeps it from being sent at all.
     env[tenjin_arm.NO_UPDATE_CHECK] = "1"
     # The same three processes, and the reason is the same shape: an unnamed leg
     # is counted as public demand on the marketplace. The value is the run's
@@ -610,30 +627,23 @@ def container_environment(
     if caller:
         env[tenjin_arm.CALLER_USER_AGENT] = caller
     # The agent has an updater and a telemetry path of its own, and they reach
-    # npm and the vendor from inside the trial. Neither is the arm's traffic,
-    # and each is one refused request the sentinel reads as a public one. The
-    # attempt's model calls are untouched: these turn off what a measured run
-    # never wanted.
+    # npm and the vendor from inside the trial. Neither is the arm's traffic.
+    # The attempt's model calls are untouched: these turn off what a measured
+    # run never wanted.
     env["DISABLE_AUTOUPDATER"] = "1"
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     for name in INHERITED:
         value = parent.get(name)
         if value:
             env[name] = value
-    if egress is not None:
-        env.update(egress.variables())
     return env
 
 
-def docker_environment(parent: Mapping[str, str], credential_env: str) -> dict[str, str]:
-    """What the docker client runs under: how to reach the daemon, plus the seam it forwards."""
+def credential_seam(credential_env: str) -> tuple[str, ...]:
+    """The one variable an attempt forwards, checked against the declared set."""
     if credential_env not in CREDENTIAL_ENVS:
         raise LiveExecutorError(f"{credential_env!r} is not a declared credential seam variable")
-    env = {name: parent[name] for name in DOCKER_INHERITED if parent.get(name)}
-    credential = parent.get(credential_env)
-    if credential:
-        env[credential_env] = credential
-    return env
+    return (credential_env,)
 
 
 def package_manager() -> dict[str, Any]:
@@ -701,7 +711,7 @@ def launch(request: LaunchRequest) -> Launch:
     reference = request.image or tag
     name = container.container_name(request.trial_id, request.phase)
     plan = container.mounts(request.roots, settings=path)
-    environment = container_environment(request.roots, os.environ, session_id, request.egress)
+    environment = container_environment(request.roots, os.environ, session_id, daemon=provisioned)
     # An attempt with an egress can reach the marketplace, so it does not start
     # unnamed. The failure this refuses is silent: the run succeeds and only the
     # marketplace's demand tables show it, so the check is here, at the seam that
@@ -711,35 +721,31 @@ def launch(request: LaunchRequest) -> Launch:
             f"this attempt's environment does not lead with {tenjin_arm.EVAL_PRODUCT!r} in "
             f"{tenjin_arm.CALLER_USER_AGENT}, so its public requests would count as demand"
         )
-    argv = container.run_argv(
-        image=reference,
+    workdir = working_dir(request.roots)
+    recipe = container.Recipe(
         name=name,
-        workdir=working_dir(request.roots),
+        image=reference,
+        workdir=workdir,
+        trial_dir=request.roots.base / HARBOR_DIR,
+        environment_dir=request.roots.base / HARBOR_DIR / ENVIRONMENT_DIR,
         plan=plan,
         environment=environment,
-        forward=(credential_env,),
-        network=None if request.egress is None else request.egress.network,
+        egress=container.plan_egress(()) if request.egress is None else request.egress,
         daemon=provisioned,
-        command=agent,
+        forward=credential_seam(credential_env),
     )
     return Launch(
-        argv=argv,
-        cwd=working_dir(request.roots),
+        argv=agent,
+        cwd=workdir,
         root_session_id=session_id,
-        env=docker_environment(os.environ, credential_env),
         resolved_settings_hash=resolved_hash,
         package_manager=package_manager(),
         container=name,
+        recipe=recipe,
         container_plan={
+            **recipe.to_json(),
             "image": {"tag": tag, "reference": reference, "resolved": request.image is not None},
-            "container": name,
             "user": container.user(),
-            "workdir": str(working_dir(request.roots)),
-            "mounts": [mount.to_json() for mount in plan],
-            "env": dict(environment),
-            "forward": [credential_env],
-            "daemon": provisioned,
-            "egress": None if request.egress is None else request.egress.to_json(),
             "agent": list(agent),
         },
     )

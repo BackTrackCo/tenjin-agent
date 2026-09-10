@@ -43,7 +43,7 @@ def contradictions(base: dict) -> dict[str, dict]:
         "fire outside attempt": {**base, "delivery": {**base["delivery"], "status": "joined", "fires": [{"fire_id": "f", "actor": ["claude", "sess-family", "ghost"]}]}},
         "negative wall time": {**base, "wall_time_s": -1},
         "bad turns": {**base, "turns": "two"},
-        "sentinel count": {**base, "sentinel": {"public_requests": None}},
+        "sentinel count": {**base, "sentinel": {"credential_exposures": None}},
         "reconciliation shape": {**base, "usage_reconciliation": {}},
     }
 

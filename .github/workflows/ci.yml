@@ -59,6 +59,12 @@ jobs:
       # `pip install` because the runner's python3 is externally managed, and
       # `--require-hashes` because a required check must not depend on whatever
       # the index served that minute.
+      #
+      # Twelve wheels, and `requirements-live.txt` is deliberately not one of
+      # them: Harbor is 89 wheels and needs Python 3.12, and this lane starts
+      # no container. Nothing under evals/benchmark/ imports it at module
+      # scope, so this install is the whole closure the suite needs, and
+      # `test_container.py` fails if that ever stops being true.
       - name: Bench-1 test dependency
         run: |
           python3 -m venv "$RUNNER_TEMP/bench1-venv"
