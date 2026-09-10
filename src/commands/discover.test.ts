@@ -1,31 +1,33 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runDiscover } from './discover';
-import type { CommandContext, GlobalFlags } from '../context';
+import type { CommandContext } from '../context';
+import {
+  capturingStream,
+  cleanupTempDirs,
+  commandContext,
+  jsonResponse,
+  sinkStream,
+  tempDir,
+} from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-discover-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-discover-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+afterEach(() => {
+  cleanupTempDirs();
   vi.unstubAllGlobals();
 });
 
 function makeCtx(): { ctx: CommandContext; stderr: () => string } {
   const err: string[] = [];
-  const sink = (parts?: string[]) =>
-    ({
-      write: (chunk: string | Uint8Array) => {
-        parts?.push(chunk.toString());
-        return true;
-      },
-    }) as unknown as NodeJS.WritableStream;
-  const flags: GlobalFlags = { json: false, timeout: 5000 };
   return {
-    ctx: { flags, dataDir: dir, io: { stdout: sink(), stderr: sink(err), isTTY: false } },
+    ctx: commandContext({
+      dataDir: dir,
+      io: { stdout: sinkStream(), stderr: capturingStream(err), isTTY: false },
+    }),
     stderr: () => err.join(''),
   };
 }
@@ -62,10 +64,7 @@ function stubRegistry(handler: (url: string) => Response): { urls: string[] } {
 }
 
 function json(body: unknown): Response {
-  return new Response(JSON.stringify(body), {
-    status: 200,
-    headers: { 'content-type': 'application/json' },
-  });
+  return jsonResponse(200, body);
 }
 
 async function writeConfig(over: Record<string, unknown> = {}): Promise<void> {

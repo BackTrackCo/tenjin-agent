@@ -23,24 +23,18 @@ import {
 } from '../lib/harness-permissions';
 import { PRODUCTION_ORIGIN } from '../lib/production-origin';
 import type { CommandContext, GlobalFlags } from '../context';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 const SKILLS_SRC = resolveSkillsSource(fileURLToPath(new URL('.', import.meta.url)));
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-cfg-cmd-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-cfg-cmd-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 10000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: dir, flags: { timeout: 10000, ...flags } });
 }
 
 const configFile = () => join(dir, 'config.json');

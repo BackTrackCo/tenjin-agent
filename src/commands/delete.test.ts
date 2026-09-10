@@ -1,20 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { runDelete, type DeleteArgs, type DeleteDeps } from './delete';
 import { testSigner, testWalletProvider } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { TenjinSigner, WalletProvider } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import {
+  capturingStream,
+  cleanupTempDirs,
+  commandContext,
+  jsonResponse,
+  sinkStream,
+  tempDir,
+} from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-delete-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-delete-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -32,20 +36,13 @@ const STORED = {
 
 function makeCtx(isTTY = false): { ctx: CommandContext; stderr: () => string } {
   const chunks: string[] = [];
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  const errStream = {
-    write: (s: string) => {
-      chunks.push(s);
-      return true;
-    },
-  } as unknown as NodeJS.WritableStream;
   return {
     stderr: () => chunks.join(''),
-    ctx: {
-      flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+    ctx: commandContext({
       dataDir: dir,
-      io: { stdout: sink(), stderr: errStream, isTTY },
-    },
+      flags: { json: true, baseUrl: 'https://preview.example' },
+      io: { stdout: sinkStream(), stderr: capturingStream(chunks), isTTY },
+    }),
   };
 }
 
@@ -70,10 +67,7 @@ function stubServer(opts: { get?: Record<string, unknown>; deleteStatus?: number
     if (method === 'DELETE') {
       return new Response(null, { status: opts.deleteStatus ?? 204 });
     }
-    return new Response(JSON.stringify(opts.get ?? STORED), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(200, opts.get ?? STORED);
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, calls };
 }
@@ -223,10 +217,7 @@ describe('runDelete — the request', () => {
 
   it('maps a 404 to RESOURCE_NOT_FOUND and never asks about a post it could not read', async () => {
     const fetchImpl = (async () =>
-      new Response(JSON.stringify({ error: { code: 'not_found' } }), {
-        status: 404,
-        headers: { 'content-type': 'application/json' },
-      })) as unknown as typeof fetch;
+      jsonResponse(404, { error: { code: 'not_found' } })) as unknown as typeof fetch;
     const { ctx } = makeCtx();
     await expect(runDelete(args(), ctx, hermetic('auto', { fetchImpl }))).rejects.toMatchObject({
       code: 'RESOURCE_NOT_FOUND',

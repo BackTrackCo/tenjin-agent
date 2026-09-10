@@ -1,36 +1,26 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runOutcome } from './outcome';
 import { loadSearches, recordSearch, type StoredSearch } from '../lib/searches';
 import type { CommandContext } from '../context';
+import { cleanupTempDirs, commandContext, jsonResponse, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-outcome-cmd-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-outcome-cmd-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, baseUrl: 'https://preview.example' },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: dir, flags: { baseUrl: 'https://preview.example' } });
 }
 
 function stub(): { fetch: typeof fetch; urls: string[] } {
   const urls: string[] = [];
   const fetchFn = (async (url: string) => {
     urls.push(String(url));
-    return new Response(JSON.stringify({ accepted: 1 }), {
-      status: 202,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(202, { accepted: 1 });
   }) as unknown as typeof fetch;
   return { fetch: fetchFn, urls };
 }
@@ -551,10 +541,7 @@ describe('runOutcome, closing several searches at once', () => {
       urls.push(String(url));
       return String(url).includes(id(2))
         ? new Response('nope', { status: 500 })
-        : new Response(JSON.stringify({ accepted: 1 }), {
-            status: 202,
-            headers: { 'content-type': 'application/json' },
-          });
+        : jsonResponse(202, { accepted: 1 });
     }) as unknown as typeof fetch;
     const call = runOutcome({ searchId: [id(1), id(2)], status: 'regenerated' }, makeCtx(), {
       fetchImpl,
@@ -581,10 +568,7 @@ describe('runOutcome, closing several searches at once', () => {
     const fetchImpl = (async (url: string) =>
       String(url).includes(id(2))
         ? new Response('nope', { status: 500 })
-        : new Response(JSON.stringify({ accepted: 1 }), {
-            status: 202,
-            headers: { 'content-type': 'application/json' },
-          })) as unknown as typeof fetch;
+        : jsonResponse(202, { accepted: 1 })) as unknown as typeof fetch;
     const call = runOutcome({ searchId: [id(1), id(2)], status: 'regenerated' }, makeCtx(), {
       fetchImpl,
     });
@@ -625,14 +609,8 @@ describe('runOutcome, closing several searches at once', () => {
     const fetchImpl = (async (url: string) => {
       urls.push(String(url));
       return String(url).includes(id(2))
-        ? new Response(JSON.stringify({ error: { message: 'no' } }), {
-            status: 400,
-            headers: { 'content-type': 'application/json' },
-          })
-        : new Response(JSON.stringify({ accepted: 1 }), {
-            status: 202,
-            headers: { 'content-type': 'application/json' },
-          });
+        ? jsonResponse(400, { error: { message: 'no' } })
+        : jsonResponse(202, { accepted: 1 });
     }) as unknown as typeof fetch;
     await expect(
       runOutcome({ searchId: [id(1), id(2), id(3)], status: 'regenerated' }, makeCtx(), {
@@ -669,22 +647,14 @@ describe('runOutcome routes to the shelf that answered', () => {
         url: String(url),
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
       });
-      return new Response(JSON.stringify({ accepted: 1 }), {
-        status: 202,
-        headers: { 'content-type': 'application/json' },
-      });
+      return jsonResponse(202, { accepted: 1 });
     }) as unknown as typeof fetch;
     return { fetch: fetchFn, sent };
   }
 
   /** No --base-url: the shelf config below decides where a close goes. */
   function teamCtx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: false, timeout: 5000 },
-      dataDir: dir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return commandContext({ dataDir: dir, flags: { json: false } });
   }
 
   async function writeShelfConfig(): Promise<void> {

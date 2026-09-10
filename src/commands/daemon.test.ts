@@ -1,8 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import pkg from '../../package.json';
 import type { CommandContext } from '../context';
@@ -19,6 +18,7 @@ import {
 } from '../lib/paths';
 import { installDaemonFiles, stopDaemon } from '../daemon/control';
 import { runDaemonStart, runDaemonStatus, runDaemonStop } from './daemon';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 let dataDir: string;
 let bundleDir: string;
@@ -27,8 +27,8 @@ let pids: number[];
 let servers: Server[];
 
 beforeEach(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-daemon-'));
-  bundleDir = await mkdtemp(join(tmpdir(), 'tenjin-b-bundles-'));
+  dataDir = tempDir('tenjin-b-daemon-');
+  bundleDir = tempDir('tenjin-b-bundles-');
   pids = [];
   servers = [];
 });
@@ -44,17 +44,11 @@ afterEach(async () => {
     }
   }
   await Promise.all(servers.map((s) => new Promise<void>((r) => s.close(() => r()))));
-  await rm(dataDir, { recursive: true, force: true });
-  await rm(bundleDir, { recursive: true, force: true });
+  cleanupTempDirs();
 });
 
 function makeCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 10000 },
-    dataDir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir, flags: { timeout: 10000 } });
 }
 
 /**

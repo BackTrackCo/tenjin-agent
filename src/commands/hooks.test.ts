@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { openLoopDb } from '../hooks/store';
 import { runHooksList, runHooksToggle, type DaemonState } from './hooks';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 import { CliError } from '../lib/errors';
 import type { CommandContext } from '../context';
 
@@ -20,20 +20,10 @@ import type { CommandContext } from '../context';
 const NOW = 1_700_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
 
-const dirs: string[] = [];
-afterEach(async () => {
-  await Promise.all(dirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
-});
+afterEach(cleanupTempDirs);
 
-async function tempCtx(): Promise<CommandContext> {
-  const dir = await mkdtemp(join(tmpdir(), 'tenjin-hooks-'));
-  dirs.push(dir);
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000 },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+function tempCtx(): CommandContext {
+  return commandContext({ dataDir: tempDir('tenjin-hooks-'), flags: { json: true } });
 }
 
 /** One `fires` row, with only the columns this command reads made interesting. */
@@ -61,7 +51,7 @@ function rows(data: unknown): Map<string, Row> {
 
 describe('tenjin hooks list', () => {
   it('is one row per arm, enabled by default, with its harness event', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     const result = await runHooksList(ctx, { now: () => NOW, daemonLine: noDaemon });
     const byArm = rows(result.data);
     expect([...byArm.keys()]).toEqual([
@@ -81,7 +71,7 @@ describe('tenjin hooks list', () => {
   });
 
   it('counts fires and hits in the window, and nothing older', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     fire(ctx.dataDir, 'prompt', 'hit', NOW - 1000);
     fire(ctx.dataDir, 'prompt', 'no-hit', NOW - 2000);
     fire(ctx.dataDir, 'prompt', 'seen', NOW - 3000);
@@ -94,7 +84,7 @@ describe('tenjin hooks list', () => {
   });
 
   it("sums both of an arm's fire ids under its one key", async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     // `subagent` answers the dispatch and again at the child's start; `publish`
     // asks at the lead's Stop and at each subagent's. One key, two ids each.
     fire(ctx.dataDir, 'dispatch', 'hit', NOW - 1000);
@@ -110,7 +100,7 @@ describe('tenjin hooks list', () => {
   });
 
   it('reads the state off config, and the daemon line off the running daemon', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     await writeFile(
       join(ctx.dataDir, 'config.json'),
       JSON.stringify({ hooks: { 'web-fetch': false } }),
@@ -126,7 +116,7 @@ describe('tenjin hooks list', () => {
   });
 
   it('renders a header row and one padded line per arm', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     const result = await runHooksList(ctx, { now: () => NOW, daemonLine: noDaemon });
     const lines = result.humanLines ?? [];
     expect(lines[0]).toMatch(/^ARM\s+STATE\s+EVENT\s+FIRED 7d\s+HIT 7d$/);
@@ -138,7 +128,7 @@ describe('tenjin hooks list', () => {
 
 describe('tenjin hooks enable|disable', () => {
   it('round-trips one arm through config.json and leaves the others alone', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     const off = await runHooksToggle('web-search', false, ctx);
     expect(off.data).toEqual({ arm: 'web-search', state: 'disabled' });
     expect(off.humanLines?.[0]).toContain('hooks.web-search disabled');
@@ -157,7 +147,7 @@ describe('tenjin hooks enable|disable', () => {
   });
 
   it('merges rather than replaces, so a sibling key set earlier survives', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     await runHooksToggle('primer', false, ctx);
     await runHooksToggle('failure', false, ctx);
     const config = JSON.parse(await readFile(join(ctx.dataDir, 'config.json'), 'utf8')) as {
@@ -167,7 +157,7 @@ describe('tenjin hooks enable|disable', () => {
   });
 
   it('refuses a name that is not one of the seven, naming all of them', async () => {
-    const ctx = await tempCtx();
+    const ctx = tempCtx();
     const err = await runHooksToggle('websearch', false, ctx).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CliError);
     expect((err as CliError).code).toBe('USAGE');

@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { runEdit, type EditArgs, type EditDeps } from './edit';
@@ -11,14 +10,20 @@ import { testSigner } from '../lib/read-test-utils';
 import { sessionPath } from '../lib/paths';
 import type { WalletProvider, TenjinSigner } from '../lib/wallet';
 import type { CommandContext } from '../context';
+import {
+  capturingStream,
+  cleanupTempDirs,
+  commandContext,
+  jsonResponse,
+  sinkStream,
+  tempDir,
+} from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-edit-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-edit-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
@@ -58,31 +63,22 @@ const STORED = {
 };
 
 function makeCtx(): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+  return commandContext({
     dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+    flags: { json: true, baseUrl: 'https://preview.example' },
+  });
 }
 
 /** A ctx whose stderr writes are captured, for asserting notes + the summary. */
 function makeCtxCapturingStderr(): { ctx: CommandContext; stderr: () => string } {
   const chunks: string[] = [];
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  const errStream = {
-    write: (s: string) => {
-      chunks.push(s);
-      return true;
-    },
-  } as unknown as NodeJS.WritableStream;
   return {
     stderr: () => chunks.join(''),
-    ctx: {
-      flags: { json: true, timeout: 5000, baseUrl: 'https://preview.example' },
+    ctx: commandContext({
       dataDir: dir,
-      io: { stdout: sink(), stderr: errStream, isTTY: false },
-    },
+      flags: { json: true, baseUrl: 'https://preview.example' },
+      io: { stdout: sinkStream(), stderr: capturingStream(chunks), isTTY: false },
+    }),
   };
 }
 
@@ -170,10 +166,7 @@ function json(
   body: Record<string, unknown>,
   headers: Record<string, string> = {},
 ): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json', ...headers },
-  });
+  return jsonResponse(status, body, headers);
 }
 
 /** Hermetic deps: `auto` mode (edit has no --mode flag), a temp cwd, empty env. */
@@ -1532,12 +1525,7 @@ describe('runEdit — a team shelf narrows the scan exactly as publish does', ()
 
   /** No --base-url flag: an override yields no bypass pair and so no team mode. */
   function teamCtx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: true, timeout: 5000 },
-      dataDir: dir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return commandContext({ dataDir: dir, flags: { json: true } });
   }
 
   async function writeShelfConfig(): Promise<void> {

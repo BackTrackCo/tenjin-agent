@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, mkdir, rm, readFile, writeFile, stat, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, readFile, writeFile, stat, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 import type { Address } from 'viem';
@@ -24,6 +23,7 @@ vi.mock('../lib/usdc', () => ({
 
 import { getUsdcBalance } from '../lib/usdc';
 import { runWalletCreate, runWalletShow, runWalletBalance } from './wallet';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 const mockedBalance = vi.mocked(getUsdcBalance);
 const isWindows = process.platform === 'win32';
@@ -32,25 +32,20 @@ const PASSPHRASE = 'test-passphrase-123';
 let tmp: string;
 let dataDir: string;
 beforeEach(async () => {
-  tmp = await mkdtemp(join(tmpdir(), 'tenjin-wallet-'));
+  tmp = tempDir('tenjin-wallet-');
   // A nested, not-yet-created dir so the atomic writer creates it 0700 itself.
   dataDir = join(tmp, '.tenjin');
   mockedBalance.mockReset();
   // Encrypt via the env passphrase by default: deterministic, no keychain/TTY.
   vi.stubEnv('TENJIN_WALLET_PASSPHRASE', PASSPHRASE);
 });
-afterEach(async () => {
+afterEach(() => {
   vi.unstubAllEnvs();
-  await rm(tmp, { recursive: true, force: true });
+  cleanupTempDirs();
 });
 
 function makeCtx(): CommandContext {
-  const sink = { write: () => true } as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: true, timeout: 10000 },
-    dataDir,
-    io: { stdout: sink, stderr: sink, isTTY: false },
-  };
+  return commandContext({ dataDir, flags: { json: true, timeout: 10000 } });
 }
 
 async function catchCliError(p: Promise<unknown>): Promise<CliError> {

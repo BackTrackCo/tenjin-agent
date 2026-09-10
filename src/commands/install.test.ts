@@ -96,6 +96,7 @@ import { configPath, daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } 
 import { renderSkillMarkdown } from '../lib/skill-materialize';
 import type { DoctorChecks } from './doctor';
 import type { CommandContext, GlobalFlags } from '../context';
+import { commandContext } from './test-support';
 
 // Real packaged skills, resolved once from this test's location. Using the real
 // source (not a fixture) also proves the copy lands byte-identical content.
@@ -128,12 +129,7 @@ afterEach(async () => {
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 10000, ...flags },
-    dataDir: data,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: data, flags: { timeout: 10000, ...flags } });
 }
 
 /** The port the fake daemon reports, which is the one every entry must carry. */
@@ -1309,12 +1305,7 @@ describe('runInstall: the ten rows', () => {
     // humanOutput true (io.isTTY, no --json), but canPrompt false (stdin is not a
     // TTY in the test runner and no isInteractive override): default mode, no
     // wallet prompt, still the full ten rows.
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    const ttyCtx: CommandContext = {
-      flags: { json: false, timeout: 10000 },
-      dataDir: data,
-      io: { stdout: sink(), stderr: sink(), isTTY: true },
-    };
+    const ttyCtx = commandContext({ dataDir: data, flags: { timeout: 10000 }, isTTY: true });
     const prompt = vi.fn(async () => 'review' as const);
     const confirm = vi.fn(async () => true);
     const res = await runInstall(

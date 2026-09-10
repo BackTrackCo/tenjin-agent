@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runBuy } from './buy';
 import { findDelivered, saveDelivery } from '../lib/library';
@@ -20,22 +19,16 @@ import { TENJIN_USER_AGENT } from '../lib/client-meta';
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-buy-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-buy-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY },
-  };
+  return commandContext({ dataDir: dir, flags, isTTY });
 }
 
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';

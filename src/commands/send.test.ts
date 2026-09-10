@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 // The chain boundary is mocked WHOLE (the wallet.test.ts pattern): no test in
@@ -38,6 +37,7 @@ import { writeWalletRecord } from '../lib/wallet/store';
 import { fakeRecord } from '../lib/wallet/test-support';
 import type { WalletProvider } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 const balanceMock = vi.mocked(getUsdcBalance);
 const prepareMock = vi.mocked(prepareUsdcSend);
@@ -65,7 +65,7 @@ function preparedFixture(over: Partial<PreparedUsdcSend> = {}): PreparedUsdcSend
 
 let dir: string;
 beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-send-'));
+  dir = tempDir('tenjin-send-');
   vi.clearAllMocks();
   balanceMock.mockResolvedValue(10_000_000n); // $10 by default
   prepareMock.mockResolvedValue(preparedFixture());
@@ -75,17 +75,10 @@ beforeEach(async () => {
   // carries an explicit cap decision — 'none' is the explicit uncapped opt-in.
   await writeFile(join(dir, 'config.json'), JSON.stringify({ sendMaxAmount: 'none' }));
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY },
-  };
+  return commandContext({ dataDir: dir, flags, isTTY });
 }
 
 /** A wallet provider whose getSigner is spied, so "no signature" is provable. */

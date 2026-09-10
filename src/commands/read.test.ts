@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, readdir, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runRead } from './read';
 import { libraryDir, saveDelivery } from '../lib/library';
@@ -21,24 +20,18 @@ import { CliError } from '../lib/errors';
 import { webcrypto } from 'node:crypto';
 import type { SessionFile } from '../lib/session-present';
 import type { CommandContext, GlobalFlags } from '../context';
+import { cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-read-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-read-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    // The fixtures are served from TEST_ORIGIN, which is also what the session
-    // fixture binds to; a test that overrides it is testing the binding.
-    flags: { json: false, timeout: 5000, baseUrl: TEST_ORIGIN, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  // The fixtures are served from TEST_ORIGIN, which is also what the session
+  // fixture binds to; a test that overrides it is testing the binding.
+  return commandContext({ dataDir: dir, flags: { baseUrl: TEST_ORIGIN, ...flags } });
 }
 
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
@@ -925,12 +918,7 @@ describe('runRead across two shelves', () => {
 
   /** No --base-url, so the config above decides. */
   function shelfCtx(): CommandContext {
-    const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-    return {
-      flags: { json: false, timeout: 5000 },
-      dataDir: dir,
-      io: { stdout: sink(), stderr: sink(), isTTY: false },
-    };
+    return commandContext({ dataDir: dir, flags: { json: false } });
   }
 
   it('reads a free piece on the team shelf, with the key', async () => {

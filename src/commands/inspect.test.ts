@@ -1,7 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readdir } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readdir } from 'node:fs/promises';
 import { runInspect } from './inspect';
 import {
   buildPaymentRequired,
@@ -13,22 +11,16 @@ import {
 import { libraryDir } from '../lib/library';
 import { recordSearch } from '../lib/searches';
 import type { CommandContext, GlobalFlags } from '../context';
+import { cleanupTempDirs, commandContext, jsonResponse, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-inspect-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-inspect-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY: false },
-  };
+  return commandContext({ dataDir: dir, flags });
 }
 
 const URL_ = 'https://tenjin.blog/api/read/iris/slug';
@@ -117,10 +109,7 @@ describe('runInspect, live metadata fallback for an id-resolved ref', () => {
   }
 
   function jsonRes(status: number, body: unknown): Response {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { 'content-type': 'application/json' },
-    });
+    return jsonResponse(status, body);
   }
 
   it('falls back to live metadata when the 402 preview carries no title', async () => {

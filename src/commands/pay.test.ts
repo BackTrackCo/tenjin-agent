@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { runPay } from './pay';
 import { saveSweepListings } from '../lib/bazaar';
@@ -13,23 +12,19 @@ import { buildPaymentRequired, testWalletProvider, withBuilderCode } from '../li
 import { TENJIN_CLI_BUILDER_CODE } from '../lib/x402-pay';
 import type { SpendAuthorizer, SpendAuthorization } from '../lib/wallet';
 import type { CommandContext, GlobalFlags } from '../context';
+import { cleanupTempDirs, commandContext, jsonResponse, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-pay-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-pay-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
+afterEach(() => {
+  cleanupTempDirs();
   vi.unstubAllGlobals();
 });
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false): CommandContext {
-  const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
-  return {
-    flags: { json: false, timeout: 5000, ...flags },
-    dataDir: dir,
-    io: { stdout: sink(), stderr: sink(), isTTY },
-  };
+  return commandContext({ dataDir: dir, flags, isTTY });
 }
 
 const TENJIN_URL = 'https://tenjin.blog/api/answer';
@@ -88,10 +83,7 @@ function scriptedFetch(responses: Response[]): { fetch: typeof fetch; calls: Rec
 }
 
 function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json', ...headers },
-  });
+  return jsonResponse(status, body, headers);
 }
 
 /** A registry answer the SDK's bazaar client accepts: one listed resource. */

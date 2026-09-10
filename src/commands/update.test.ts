@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises';
 import { existsSync, realpathSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
   runUpdate,
@@ -14,32 +14,19 @@ import {
 import { REFUSALS, resolveNpmCli } from '../lib/install-location';
 import { CliError } from '../lib/errors';
 import { buildFailureEnvelope } from '../lib/output';
-import type { CommandContext, GlobalFlags } from '../context';
+import type { GlobalFlags } from '../context';
+import { capturingIo, cleanupTempDirs, commandContext, tempDir } from './test-support';
 
 let dir: string;
-beforeEach(async () => {
-  dir = await mkdtemp(join(tmpdir(), 'tenjin-update-cmd-'));
+beforeEach(() => {
+  dir = tempDir('tenjin-update-cmd-');
 });
-afterEach(async () => {
-  await rm(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 function makeCtx(flags: Partial<GlobalFlags> = {}, isTTY = false) {
-  const out: string[] = [];
-  const err: string[] = [];
-  const mk = (sink: string[]) =>
-    ({
-      write: (chunk: string | Uint8Array) => {
-        sink.push(chunk.toString());
-        return true;
-      },
-    }) as unknown as NodeJS.WritableStream;
-  const ctx: CommandContext = {
-    flags: { json: false, timeout: 10000, ...flags },
-    dataDir: dir,
-    io: { stdout: mk(out), stderr: mk(err), isTTY },
-  };
-  return { ctx, stdout: () => out.join(''), stderr: () => err.join('') };
+  const { io, stdout, stderr } = capturingIo(isTTY);
+  const ctx = commandContext({ dataDir: dir, flags: { timeout: 10000, ...flags }, io });
+  return { ctx, stdout, stderr };
 }
 
 function registry(tags: Record<string, string>) {
