@@ -82,10 +82,11 @@ function seedSearch(
 ): void {
   db.prepare(
     `INSERT INTO searches (search_id, at, session, question, fingerprint, decision, candidates,
-       source, resolved_at) VALUES (?, ?, 's1', ?, 'fp', ?, '[]', ?, ?)`,
+       source, resolved_at) VALUES (?, ?, ?, ?, 'fp', ?, '[]', ?, ?)`,
   ).run(
     over.id,
     NOW - 20,
+    LEAD.session,
     'does ox 0.14 still export Bytes.from?',
     over.decision ?? 'MISS',
     over.source === undefined ? 'cli' : over.source,
@@ -102,11 +103,12 @@ function seedPairing(
     .prepare(
       `INSERT INTO pairings (uid, at, session, project, machine, kind, key, error_line,
          error_files, scope, status, closes, closed_at, post_id)
-       VALUES (?, ?, 's1', NULL, 'm', ?, ?, ?, '[]', ?, 'unverified', 1, ?, ?) RETURNING id`,
+       VALUES (?, ?, ?, NULL, 'm', ?, ?, ?, '[]', ?, 'unverified', 1, ?, ?) RETURNING id`,
     )
     .get(
       randomUUID(),
       NOW - 30,
+      LEAD.session,
       over.kind ?? 'sig_v1_test',
       over.key,
       'AssertionError: expected 3 to be 4',
@@ -116,8 +118,8 @@ function seedPairing(
     ) as { id: number };
   db.prepare(
     `INSERT INTO pairing_closes (pairing_id, session, at, fix_cmd, fix_files, scope)
-     VALUES (?, 's1', ?, 'vitest', '["src/http.ts"]', ?)`,
-  ).run(id.id, NOW - 20, over.scope ?? 'code');
+     VALUES (?, ?, ?, 'vitest', '["src/http.ts"]', ?)`,
+  ).run(id.id, LEAD.session, NOW - 20, over.scope ?? 'code');
 }
 
 function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW - 10): string {
@@ -128,7 +130,7 @@ function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW -
     JSON.stringify({
       title: 'ox 0.14 keeps Bytes.from',
       body: 'Pinning the resolver to 4.1 stops the parse throw.',
-      session: 's1',
+      session: LEAD.session,
       agent: CHILD.agent,
       agentType: 'general-purpose',
       project: null,
@@ -262,7 +264,7 @@ describe('the child ask', () => {
       {
         title: 'ox 0.14 keeps Bytes.from',
         body,
-        session: 's1',
+        session: LEAD.session,
         agent: CHILD.agent,
         agentType: 'general-purpose',
         searchId: '',
