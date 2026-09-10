@@ -1,0 +1,7 @@
+# Papa Parse counts the newline at the end of a file as a row
+
+`Papa.parse` reads the empty line a trailing newline leaves behind as a record. Under `header: true` that record arrives as an object holding only the first column, set to the empty string; with no header it arrives as `['']`. Nothing is thrown, and nothing inside `data` looks wrong: every real row is intact and every value in it is right. What is wrong is the length, by one. A count, a total taken over `data.length`, or anything reached from the end is off, while the figures that led there all check out, so the search goes to the code around the parse rather than to the parse.
+
+This survives careful reading because it is a property of the input rather than of the call. A CSV a program wrote ends in a newline; a CSV literal typed by hand into a scratch probe usually does not, and against that input the same call returns exactly what it should. An isolated re-run of the suspect line therefore comes back clean. The library does say something, in one place that is easy never to read: the result's `errors` array carries the row as `TooFewFields`.
+
+`skipEmptyLines` is the switch and it is off by default. `true` drops a line that is empty; `'greedy'` also drops a line holding only delimiters and whitespace, which `true` keeps as a record of blanks. Measured on Papa Parse 5.7.0 and identical on 5.4.1 and 4.6.3, so this is a standing behaviour rather than a regression a bump will take away, and the package ships no documentation of it: its options live on the web, not in the installed tree.

@@ -1,0 +1,22 @@
+[
+  {
+    "args": ["sku,qty\nA-1,4\nB-2,6\n"],
+    "expected": { "lines": 2, "units": 10 }
+  },
+  {
+    "args": ["sku,qty,note\nA-1,4,\"ships, boxed\"\nB-2,6,\n"],
+    "expected": { "lines": 2, "units": 10 }
+  },
+  {
+    "args": ["sku,qty\nA-1,4\nB-2,6"],
+    "expected": { "lines": 2, "units": 10 }
+  },
+  {
+    "args": ["sku,qty\n\"C-3\nspare\",7\n"],
+    "expected": { "lines": 1, "units": 7 }
+  },
+  {
+    "args": ["sku,qty\nA-1,4\n,\nB-2,6\n"],
+    "expected": { "lines": 2, "units": 10 }
+  }
+]
