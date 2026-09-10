@@ -701,14 +701,17 @@ than a number.
 | Manifest                       | Version                   | Shape                                                                                     | Attempts        |
 | ------------------------------ | ------------------------- | ----------------------------------------------------------------------------------------- | --------------- |
 | `canary-manifest.json`         | `bench2-canary-1`         | the four same-task transfers, one per lesson family, `off` and `tenjin_seeded`, 3 repeats | 24              |
-| `local-arms-manifest.json`     | `bench2-core-suite-2`     | the core suite: 8 tasks x 5 arms x 3 repeats                                              | 120 + producers |
+| `local-arms-manifest.json`     | `bench2-core-suite-2`     | the core suite: 10 tasks x 5 arms x 3 repeats, caps raised                                | 150 + producers |
 | `real-manifest.json`           | `bench2-local-pilot-3`    | the Phase 1 pilot: 8 tasks x (`off`, `tenjin_natural`) x 3                                | 48 + producers  |
 | `recursive-manifest.json`      | `bench2-recursive-5`      | the recursive slice: one delegating task across four arms                                 | 12 + producers  |
 | `high-discovery-manifest.json` | `bench2-high-discovery-1` | the pilot: `shadow` and `ambient`, `off` and `tenjin_seeded`, 3 repeats, caps raised      | 12              |
 
 `max_budget_usd` stays 0.75 an attempt on the eight-task manifests, producer attempts included.
-At the 0.237 USD an attempt the pilot measured, the canary is about 5.69 USD a run and the core
-suite about four times that. The high-discovery manifest is the one exception and says why above.
+At the 0.237 USD an attempt the pilot measured, the canary is about 5.69 USD a run. The core suite
+carries `shadow` and `ambient` and so takes the high-discovery caps with them: a ceiling sized for
+7.5 requests would censor the quantity those two exist to move, and the other eight never approach
+either ceiling. That raise is why the core suite and the canary no longer share an environment
+hash, and their records never pool.
 
 ```bash
 # the nightly lane's manifest, by hand

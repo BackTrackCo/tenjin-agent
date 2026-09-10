@@ -543,10 +543,10 @@ def test_the_real_manifest_is_the_phase_one_local_pilot() -> None:
     assert_bench2_tasks(manifest)
 
 
-def test_the_core_suite_runs_the_five_arms_over_the_eight_tasks() -> None:
+def test_the_core_suite_runs_the_five_arms_over_the_ten_tasks() -> None:
     manifest = manifest_module.load(cli.LOCAL_ARMS_MANIFEST)
     trials = schedule.expand(manifest)
-    assert len(trials) == 120
+    assert len(trials) == 150
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "flat", "tenjin_seeded", "tenjin_seeded_no_public", "tenjin_natural"]
     off, flat, seeded, no_public, natural = manifest.arms
@@ -569,7 +569,11 @@ def test_the_core_suite_runs_the_five_arms_over_the_eight_tasks() -> None:
     assert flat["settings"]["overlay"]["LESSONS.md"].endswith(expected)
     assert "read LESSONS.md" in flat["settings"]["overlay"]["CLAUDE.md"]
     claude_live._settings_overlay(flat["settings"]["overlay"])
-    assert manifest.tasks == manifest_module.load(cli.REAL_MANIFEST).tasks
+    # The corpus is the phase-one pilot's, with the two high-discovery tasks
+    # appended. The core suite selects from the corpus, it never invents a task.
+    pilot = manifest_module.load(cli.REAL_MANIFEST).tasks
+    high_discovery = manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST).tasks
+    assert manifest.tasks == pilot + high_discovery
 
 
 def test_the_canary_manifest_is_the_four_same_task_transfers_off_against_the_shelf_arm() -> None:
@@ -587,8 +591,13 @@ def test_the_canary_manifest_is_the_four_same_task_transfers_off_against_the_she
     assert len({task["family"] for task in manifest.tasks}) == len(manifest.tasks)
     # The canary is a subset of the core suite, never a second definition of it.
     assert manifest.arms == [arm for arm in core.arms if arm["id"] in ("off", "tenjin_seeded")]
-    assert manifest.tasks == [task for task in core.tasks if task["transfer_distance"] == "same_task"]
-    assert manifest.pins == core.pins
+    assert manifest.tasks == [task for task in core.tasks if task["id"] in ("alias", "level", "money", "core")]
+    # The caps are the only pins the canary and the core suite differ on: the
+    # core suite raised them for the two high-discovery tasks, and none of the
+    # four the canary runs comes near either ceiling, so the nightly lane keeps
+    # the tighter one. Records from the two therefore never pool, which is the
+    # cost of the raise and the reason it is stated here rather than inferred.
+    assert manifest.pins == {**core.pins, "wall_clock_s": 600, "turn_budget": 40, "max_budget_usd": 0.75}
 
 
 HIGH_DISCOVERY = {
@@ -640,11 +649,14 @@ def test_the_high_discovery_manifest_is_the_two_task_pilot_with_the_caps_raised(
 def test_the_pilot_tasks_are_additions_and_the_control_corpus_is_untouched() -> None:
     """The four convention tasks stay: without the low-discovery end of the range a ratio cannot be read against cost."""
     core = manifest_module.load(cli.LOCAL_ARMS_MANIFEST)
-    assert [task["id"] for task in core.tasks] == list(BENCH2)
-    pilot = {task["id"] for task in manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST).tasks}
-    assert pilot & set(BENCH2) == set()
-    # Its own manifest, so its own environment hash: `pins` differ, and records from the two never pool.
-    assert manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST).pins != core.pins
+    pilot = manifest_module.load(cli.HIGH_DISCOVERY_MANIFEST)
+    pilot_ids = [task["id"] for task in pilot.tasks]
+    # The pilot graduated into the core suite: the two tasks are appended to the
+    # eight, never substituted for any of them, and the caps came with them, so
+    # the core suite now runs the pilot's environment over the whole corpus.
+    assert [task["id"] for task in core.tasks] == list(BENCH2) + pilot_ids
+    assert set(pilot_ids) & set(BENCH2) == set()
+    assert core.pins == pilot.pins
 
 
 @pytest.mark.parametrize(
