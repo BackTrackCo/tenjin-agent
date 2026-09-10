@@ -2649,7 +2649,14 @@ describe('runDoctorPrune', () => {
     ).run(Date.now());
     db.close();
 
-    for (const name of ['state.db', 'state.db-wal', 'state.db-shm', 'push-ledger.jsonl']) {
+    for (const name of [
+      'state.db',
+      'state.db-wal',
+      'state.db-shm',
+      'push-ledger.jsonl',
+      'hook-nags.json',
+      'hook-health.json',
+    ]) {
       await writeFile(join(dir, name), 'x');
     }
     await mkdir(join(dir, 'candidates'), { recursive: true });
@@ -2663,8 +2670,12 @@ describe('runDoctorPrune', () => {
     expect(removed).toContain(join(dir, 'state.db-wal'));
     expect(removed).toContain(join(dir, 'state.db-shm'));
     expect(removed).toContain(join(dir, 'push-ledger.jsonl'));
+    expect(removed).toContain(join(dir, 'hook-nags.json'));
+    expect(removed).toContain(join(dir, 'hook-health.json'));
     expect(removed).toContain(join(dir, 'candidates'));
     expect(existsSync(join(dir, 'state.db'))).toBe(false);
+    expect(existsSync(join(dir, 'hook-nags.json'))).toBe(false);
+    expect(existsSync(join(dir, 'hook-health.json'))).toBe(false);
     expect(existsSync(join(dir, 'candidates'))).toBe(false);
 
     // The operator's own property, untouched and said to be so.
