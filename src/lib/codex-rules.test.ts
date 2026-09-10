@@ -14,6 +14,7 @@ import {
 } from './codex-rules';
 import {
   FREE_VERB_RULES,
+  inspectHarnessPermissions,
   MODE_GATED_FORBIDDEN_FRAGMENTS,
   MODE_GATED_RULES,
   rulesForPublishMode,
@@ -209,5 +210,28 @@ describe('removeCodexGrant: uninstall reclaims the whole grant', () => {
     await mkdir(rulesPath(), { recursive: true });
     expect((await removeCodexGrant(home, {})).removed).toBe(false);
     expect(existsSync(rulesPath())).toBe(true);
+  });
+});
+
+describe("the grant state is Codex's answer, not our own", () => {
+  /**
+   * A `.rules` file that matches the mode is not the same fact as a grant in
+   * force. On a Codex too old for the rules layer, or with no `codex` on PATH,
+   * the file is inert — and reporting `granted` over it would be exactly the
+   * overclaim this issue is about, one harness over (tenjin-agent#342).
+   */
+  it('is unknown, not granted, when codex cannot be asked to confirm', async () => {
+    await wireCodexGrant(home, 'auto', {});
+    // No `codex` on this PATH, so `execpolicy check` cannot answer.
+    const state = await inspectHarnessPermissions('codex', home, 'auto', { PATH: '/nonexistent' });
+    expect(state.state).toBe('unknown');
+    expect(state.detail).toMatch(/could not be asked/);
+    expect(state.rules.length).toBeGreaterThan(0);
+  });
+
+  it('is pending when no grant is installed at all', async () => {
+    const state = await inspectHarnessPermissions('codex', home, 'auto', { PATH: '/nonexistent' });
+    expect(state.state).toBe('pending');
+    expect(state.fix).toBe('tenjin install');
   });
 });

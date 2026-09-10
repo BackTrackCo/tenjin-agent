@@ -268,16 +268,30 @@ async function inspectCodexGrant(
       fix: 'tenjin install',
     };
   }
+  // GRANTED ONLY WHEN CODEX SAYS SO. A file that matches what the mode calls
+  // for is not the same fact as a grant in force: on a Codex too old for the
+  // rules layer, or with no `codex` on PATH at all, this file is inert and
+  // reporting `granted` over it would be the same overclaim as the Claude
+  // rules on a Codex machine (tenjin-agent#342). `unknown` says the write
+  // landed and the question could not be put.
+  if (agreed === null) {
+    return {
+      harness: 'codex',
+      state: 'unknown',
+      path,
+      rules,
+      missing: [],
+      detail: `${rules.length} prefixes written to ${path}, but codex could not be asked whether it reads them as a grant`,
+      fix: 'Check `codex execpolicy check --rules <file> tenjin publish x` on the machine itself.',
+    };
+  }
   return {
     harness: 'codex',
     state: 'granted',
     path,
     rules,
     missing: [],
-    detail:
-      agreed === true
-        ? `${rules.length} prefixes in ${path}, confirmed by codex execpolicy`
-        : `${rules.length} prefixes in ${path} (codex could not be asked to confirm)`,
+    detail: `${rules.length} prefixes in ${path}, confirmed by codex execpolicy`,
   };
 }
 
