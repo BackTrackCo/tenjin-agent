@@ -86,6 +86,25 @@ lane is evidence that the chain runs on a real agent and never a number anyone m
 informational: not required, never blocking, and not `continue-on-error` either, because a red
 run is meant to be seen; on a fork the secret is absent and the live steps skip.
 
+## Where a dependency may go
+
+One line decides it, and it is not line count: reach for a maintained library
+before hand-rolling, but only on the side of the package that installs one.
+
+- **The suite may depend on anything.** `requirements-test.txt` is hash-pinned and
+  the required job installs it into a throwaway venv, so pytest and
+  inline-snapshot are there and the next useful test library may join them. Keep
+  every wheel `py3-none-any`: a platform wheel turns one hash per package into one
+  hash per runner and per Python minor.
+- **Every shipped command stays standard-library.** The required job runs
+  `fake-run`, `verify` and `summary` on the runner's own `python3`, never the
+  venv, and an operator runs them on a bare interpreter too. So `manifest.py`,
+  `claude_live.py` and `reduce.py` may not import a third party, and that, not the shape of any
+  individual rule, is why the manifest and arm validators are written out rather
+  than handed to `jsonschema` or `pydantic`, and why `paired_bootstrap` is 29 lines
+  rather than a `scipy.stats.bootstrap` call. Moving that line is a decision about
+  what this package is, not a refactor.
+
 ## The fake command
 
 ```bash
