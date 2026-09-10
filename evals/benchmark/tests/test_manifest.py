@@ -51,6 +51,13 @@ BAD_SHAPES = {
     },
     "phase keys": {**BASE, "phases": {"producer": "x"}},
     "empty phase": {**BASE, "phases": {**BASE["phases"], "capture": ""}},
+    # A membership test alone raised TypeError on an unhashable value, which
+    # escaped this module's refusal contract; a schema keyword refuses it.
+    "harness that is not hashable": {**BASE, "harness": ["claude"]},
+    "transfer distance that is not hashable": {**BASE, "tasks": [{**TASK, "transfer_distance": {}}]},
+    "auxiliary exposure that is not hashable": {**BASE, "arms": [{**ARM, "auxiliary_usage": []}, BASE["arms"][1]]},
+    # `True == 1` in Python, so a boolean used to pass for the schema version.
+    "boolean schema version": {**BASE, "schema_version": True},
 }
 
 

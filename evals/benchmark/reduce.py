@@ -23,9 +23,11 @@ and 10.
 
 from __future__ import annotations
 
-import random
 import statistics
 from typing import Any
+
+import numpy as np
+from scipy import stats
 
 from .records import Excluded
 from .usage import from_json, totals
@@ -41,8 +43,8 @@ REUSE_POINTS = (1, 2, 5, 10)
 RESAMPLES = 2000
 CONFIDENCE = 0.95
 # Reporting precision for derived floats. Ratios are dimensionless and nothing
-# downstream needs more digits, and rounding here is what keeps the golden
-# bootstrap byte-identical across platforms and Python builds.
+# downstream needs more digits, and rounding here is what keeps a published
+# number from carrying a platform's last float bit.
 PRECISION = 12
 
 
@@ -143,11 +145,6 @@ def amortize(tokens_per_attempt: float | None, capture: int) -> list[dict[str, A
     return schedule
 
 
-def _quantile_index(count: int, quantile: float) -> int:
-    """Nearest-rank index into a sorted sample. Stated so the golden is a rule."""
-    return min(count - 1, max(0, int(quantile * (count - 1) + 0.5)))
-
-
 def paired_bootstrap(
     ratios: list[float], seed: int, resamples: int = RESAMPLES, confidence: float = CONFIDENCE
 ) -> dict[str, Any] | None:
@@ -155,24 +152,29 @@ def paired_bootstrap(
 
     Tasks are the sampling unit because tasks are the unit the reducer weighs
     equally; resampling attempts would let a task with more repeats speak
-    louder. `random.Random(seed)` and a stated rank rule make one frozen seed
-    reproduce one interval, which is what the golden fixture pins.
+    louder, so the caller passes one ratio per task and `scipy.stats.bootstrap`
+    draws over that. The pinned scipy and the manifest's own seed are what make
+    one run reproduce one interval.
     """
     if not ratios:
         return None
-    count = len(ratios)
-    generator = random.Random(seed)
-    sample: list[float] = []
-    for _ in range(resamples):
-        draw = [ratios[generator.randrange(count)] for _ in range(count)]
-        sample.append(statistics.fmean(draw))
-    sample.sort()
+    point = _mean(ratios)
+    if len(ratios) == 1:
+        # scipy refuses a one-observation sample. It is right to: every
+        # resample of one task is that task, so the interval is the point.
+        low = high = point
+    else:
+        interval = stats.bootstrap(
+            (np.asarray(ratios, dtype=float),), np.mean,
+            n_resamples=resamples, confidence_level=confidence, method="percentile", rng=np.random.default_rng(seed),
+        ).confidence_interval
+        low, high = _round(float(interval.low)), _round(float(interval.high))
     return {
         "method": "task_paired_percentile",
-        "point": _mean(ratios),
-        "low": _round(sample[_quantile_index(resamples, (1 - confidence) / 2)]),
-        "high": _round(sample[_quantile_index(resamples, (1 + confidence) / 2)]),
-        "tasks": count,
+        "point": point,
+        "low": low,
+        "high": high,
+        "tasks": len(ratios),
         "resamples": resamples,
         "confidence": confidence,
         "seed": seed,

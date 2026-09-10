@@ -7,10 +7,9 @@ The flags the workflow passes are unchanged: `--verbosity` picks pytest's quiet,
 default, or verbose reporting, `--groups` wraps the run in one GitHub Actions
 log group, and `--summary` appends the one-line verdict to a step summary file.
 
-pytest and inline-snapshot are the suite's dependencies, pinned in
-`requirements-test.txt`. They are imported here and under `tests/` and nowhere
-else in the package, so every shipped command still runs on a bare
-standard-library interpreter.
+pytest and inline-snapshot are the suite's own dependencies, pinned alongside
+the package's in `requirements-test.txt`. Run this file with that venv's
+interpreter, which is what the CI step does.
 """
 
 from __future__ import annotations
