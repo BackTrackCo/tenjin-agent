@@ -1,0 +1,159 @@
+{
+  "arms": [
+    {
+      "auxiliary_usage": "none",
+      "executor": "claude_live",
+      "id": "off",
+      "memory_snapshot_hash": "sha256:empty",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "auxiliary_usage": "none",
+      "executor": "claude_live",
+      "hooks_disabled": ["publish"],
+      "id": "tenjin_seeded",
+      "memory_snapshot_hash": "sha256:empty",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "settings_preset": "tenjin-hooks-and-cli-reads"
+    }
+  ],
+  "benchmark_version": "bench2-corpus-10",
+  "corpus": {
+    "branch_id": "br-ancient-dream-ave43t84",
+    "origin": "bench.tenjin.sh",
+    "parent_id": "br-shiny-mountain-av1jfsuq",
+    "project_id": "weathered-paper-24312028",
+    "provider": "neon"
+  },
+  "harness": "claude",
+  "phases": {
+    "capture": "local-store",
+    "consumer": "local",
+    "producer": "natural-or-shelf-seeded"
+  },
+  "pins": {
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ],
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "dependency_lock_hash": "sha256:none",
+    "effort": "default",
+    "harness_version": "2.1.263",
+    "image": "operator-machine",
+    "max_budget_usd": 2.5,
+    "model": "claude-opus-5",
+    "permission_mode": "dontAsk",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "turn_budget": 80,
+    "wall_clock_s": 1500
+  },
+  "price_sheet_version": "real-2026-09",
+  "repeats": 3,
+  "schema_version": 1,
+  "seed": 20260910,
+  "tasks": [
+    {
+      "family": "stale-build-artifact",
+      "fixture": "shadow",
+      "fixture_hash": "sha256:797f7257f48069b877bc0932fb7a3ff13610ab2c86897205d46c95c5b3aa9d9c",
+      "id": "shadow",
+      "prompt": "Make tests/shadow.test.mjs pass by fixing the @fixture/range package, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_task",
+      "verifier": "node_test_shadow"
+    },
+    {
+      "family": "invisible-whitespace-mismatch",
+      "fixture": "ambient",
+      "fixture_hash": "sha256:7462f9bc277872f008f8eeb40c08c282e599d2279cbeca8b5a1f0bfb3e97a304",
+      "id": "ambient",
+      "prompt": "Fix src/price.mjs so that tests/ambient.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_task",
+      "verifier": "node_test_ambient"
+    },
+    {
+      "family": "test-harness-convention",
+      "fixture": "actor",
+      "fixture_hash": "sha256:71649359979d59bf3801e65594740dc5741ec67faea726e973c1ddfb0553670b",
+      "id": "actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_family",
+      "verifier": "node_test_actor"
+    },
+    {
+      "family": "test-harness-convention",
+      "fixture": "budget",
+      "fixture_hash": "sha256:02a88306b5328ffabb6f0cc49b4a7f1a0cee77d3094e6ae0bbc9abc66d4d7843",
+      "id": "budget",
+      "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_family",
+      "verifier": "node_test_budget"
+    },
+    {
+      "family": "test-harness-convention",
+      "fixture": "candidate",
+      "fixture_hash": "sha256:7f7568eee16e3e5800ffb29d767dfcd7995d3c729116401b1d1de58560400f63",
+      "id": "candidate",
+      "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_family",
+      "verifier": "node_test_candidate"
+    },
+    {
+      "family": "test-harness-convention",
+      "fixture": "slug",
+      "fixture_hash": "sha256:c7a58a66c89ca549042ea0451cc84c1a7f2b50f7db82431060d16ea395ae6a42",
+      "id": "slug",
+      "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_family",
+      "verifier": "node_test_slug"
+    },
+    {
+      "family": "vitest-path-alias",
+      "fixture": "alias",
+      "fixture_hash": "sha256:a55879c23cb5a8ca370836d70d64c13f809fa1313a4aa5b0f8d9cb87575c8414",
+      "id": "alias",
+      "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_task",
+      "verifier": "node_test_alias"
+    },
+    {
+      "family": "node-type-stripping",
+      "fixture": "level",
+      "fixture_hash": "sha256:e6d1aac9eb50f375646068c8d57a6a1417b64a5151d203fd0e44203879491c56",
+      "id": "level",
+      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_task",
+      "verifier": "node_test_level"
+    },
+    {
+      "family": "esm-cjs-interop",
+      "fixture": "money",
+      "fixture_hash": "sha256:4f36ad3354281cc88fa87b0d5129deb323894e6e32dad622ac653300e5f7fd11",
+      "id": "money",
+      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_task",
+      "verifier": "node_test_money"
+    },
+    {
+      "family": "pnpm-workspace",
+      "fixture": "core",
+      "fixture_hash": "sha256:5fdf92945afa2e9cb61bee34ffb4c7e2657a9d9bd4d890ea63e30755416fd84c",
+      "id": "core",
+      "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents.",
+      "transfer_distance": "same_task",
+      "verifier": "node_test_core"
+    }
+  ]
+}
