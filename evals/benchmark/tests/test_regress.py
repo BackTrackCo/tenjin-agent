@@ -10,6 +10,7 @@ from typing import Callable
 from unittest import mock
 
 import pytest
+from inline_snapshot import snapshot
 
 from evals.benchmark import cli, regress
 from evals.benchmark.tests import support
@@ -108,10 +109,12 @@ def test_token_growth_within_the_tolerance_is_not(check: Check) -> None:
 
 def test_cost_growth_beyond_the_tolerance_is_a_finding(check: Check) -> None:
     found, _ = check(report(), records=accepted(cost=0.08))
-    assert found == [
-        "arm off: 0.0800 USD per attempt, above baseline 0.0600 by more than 25%",
-        "arm on: 0.0800 USD per attempt, above baseline 0.0600 by more than 25%",
-    ]
+    assert found == snapshot(
+        [
+            "arm off: 0.0800 USD per attempt, above baseline 0.0600 by more than 25%",
+            "arm on: 0.0800 USD per attempt, above baseline 0.0600 by more than 25%",
+        ]
+    )
 
 
 def test_a_missing_cost_is_not_compared(check: Check) -> None:
