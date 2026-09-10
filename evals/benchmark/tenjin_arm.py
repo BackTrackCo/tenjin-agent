@@ -27,6 +27,7 @@ import secrets
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -36,7 +37,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from . import FIXTURES, artifact, runner, sha256_text, signature
+from . import FIXTURES, artifact, loop_join, runner, sha256_text, signature
 from .executor import Provision, ProvisionError, ProvisionRequest
 
 NAME = "tenjin"
@@ -71,6 +72,8 @@ HEALTH_TIMEOUT_S = 15.0
 HEALTH_POLL_S = 0.05
 STOP_GRACE_S = 5.0
 WAL_TIMEOUT_S = 5.0
+WAL_BUSY = "checkpoint: another connection holds the ledger"
+WAL_UNCLOSED = "checkpoint: the WAL still holds frames"
 PLACEHOLDERS = ("daemon_url", "daemon_token", "data_dir")
 DRY_TOKEN = "minted-at-launch"
 # The seeded lesson: one piece per lesson family under `fixtures/live/lessons/`,
@@ -662,8 +665,56 @@ def _terminate(pid: int, grace_s: float) -> bool:
     return True
 
 
+def checkpoint_wal(loop_db: Path) -> str | None:
+    """Empty the ledger's WAL by closing it here. None when it has settled, the reason it has not otherwise.
+
+    A `-wal` that outlives the daemon means the writer never closed the
+    database, and nothing about waiting removes it: only a checkpoint moves
+    the committed frames into the main file, and only the last connection's
+    close deletes the file. So this opens the ledger read-write, checkpoints
+    in TRUNCATE mode, and closes. `wal_checkpoint` reports a lock through its
+    first column instead of raising, so a busy result is read and returned
+    rather than mistaken for success. The connect timeout is zero because the
+    caller owns the retry schedule, and a ledger that does not exist is
+    already settled: opening one read-write would create it.
+    """
+    if not loop_db.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(loop_db, timeout=0)
+    except sqlite3.Error as error:
+        return f"open: {error}"
+    try:
+        row = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    except sqlite3.Error as error:
+        return f"checkpoint: {error}"
+    finally:
+        connection.close()
+    return WAL_BUSY if row is not None and row[0] else None
+
+
+def settle_wal(data_dir: Path) -> dict[str, Any]:
+    """Close the trial ledger's WAL, retrying until `WAL_TIMEOUT_S`, and report whether frames survived.
+
+    The checkpoint comes first because it is the deterministic step; the
+    timeout is the backstop for a daemon that outlived its own SIGKILL and
+    still holds the lock. `wal_live` is `loop_join`'s question, not
+    `exists()`: a zero-byte `-wal` holds no frames, which is what the reader
+    downstream refuses on. A checkpoint that reported no error and still left
+    frames behind failed whatever it claimed, so it is reported as a failure.
+    """
+    loop_db = data_dir / LOOP_DB
+    end = time.monotonic() + WAL_TIMEOUT_S
+    reason = checkpoint_wal(loop_db)
+    while loop_join.wal_live(loop_db) and time.monotonic() < end:
+        time.sleep(HEALTH_POLL_S)
+        reason = checkpoint_wal(loop_db)
+    live = loop_join.wal_live(loop_db)
+    return {"wal_live": live, "wal_checkpoint": WAL_UNCLOSED if live and reason is None else reason}
+
+
 def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
-    """Stop the trial's daemon, and any daemon the shim respawned for this data dir, then wait for the WAL.
+    """Stop the trial's daemon, and any daemon the shim respawned for this data dir, then settle the WAL.
 
     The shim starts a detached daemon of its own when the one it expects is
     not healthy, and a detached process is outside the trial's process group.
@@ -674,7 +725,7 @@ def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
     state = provision.stop_state
     started: subprocess.Popen[Any] | None = state.get("started")
     expected = data_dir_string(roots)
-    report: dict[str, Any] = {"respawned": False, "wal_live": False}
+    report: dict[str, Any] = {"respawned": False, "wal_live": False, "wal_checkpoint": None}
     record = read_pid(roots.data_dir)
     if record is not None and (started is None or record["pid"] != started.pid):
         body = health(record["port"])
@@ -683,11 +734,7 @@ def stop(roots: artifact.TrialRoots, provision: Provision) -> dict[str, Any]:
             _terminate(record["pid"], STOP_GRACE_S)
     if started is not None:
         runner.process_stop(started, STOP_GRACE_S)
-    wal = roots.data_dir / f"{LOOP_DB}-wal"
-    end = time.monotonic() + WAL_TIMEOUT_S
-    while wal.exists() and time.monotonic() < end:
-        time.sleep(HEALTH_POLL_S)
-    report["wal_live"] = wal.exists()
+    report.update(settle_wal(roots.data_dir))
     # The seeded piece leaves the shelf with the trial. A delete that fails is
     # a fact in the record, never a retry loop and never silence.
     pieces = state.get("pieces")

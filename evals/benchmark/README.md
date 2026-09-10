@@ -301,11 +301,13 @@ exist and before its launch: the bundles are copied, exactly `COPIED_KEYS` are c
 source config, the constants in `SEEDED` are forced, a fresh `daemon.token` and a free loopback
 port are minted, and one daemon starts under `process_start` in its own session. `prepare` waits for `/health` to name this data dir and this pid and refuses the
 trial otherwise; nothing wallet-related is copied. `stop` ends the daemon once the agent has
-exited and waits for `loop.db-wal` to disappear, and because the shim may have spawned a detached
+exited and then closes `loop.db` itself with a `wal_checkpoint(TRUNCATE)`, because a `-wal` that
+outlived its writer never disappears by being waited on; `WAL_TIMEOUT_S` remains only as the
+backstop for a checkpoint another connection refuses. Because the shim may have spawned a detached
 daemon outside the trial's group it also reads `daemon.pid` as it is then, confirms through
 `/health` that it serves exactly this data dir, and signals it too
-(`isolation.daemon_respawned`). A live WAL after the wait is `delivery:wal_live` and the attempt
-is invalid; a refused prepare invalidates its own trial under `provision:<code>`, undoes what it
+(`isolation.daemon_respawned`). Frames still in the WAL after that are `delivery:wal_live`, the
+attempt is invalid, and `isolation.wal_checkpoint` says which refusal left them there; a refused prepare invalidates its own trial under `provision:<code>`, undoes what it
 half-did, and leaves the rest of the run alone.
 
 **Seeding is honest only if a lesson reached the shelf the way a producer's would**: published
