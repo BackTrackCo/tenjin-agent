@@ -112,9 +112,11 @@ const RETIRED_VERBS: ReadonlyArray<{ verb: string; replacement: string }> = [
   { verb: 'lookup', replacement: 'search' },
 ];
 
-// `scripts/eval-lookup-recall.ts` is a script in the tenjin repo, not a CLI verb,
-// and it kept its name through the search rename.
-const RETIRED_EXEMPT = /eval-lookup-recall/g;
+// Names that contain a retired verb without being one. `scripts/eval-lookup-recall.ts`
+// is a script in the tenjin repo, not a CLI verb, and it kept its name through the
+// search rename. `lookups` is the Tenjin database table, and a benchmark readout that
+// explains where a search's text is stored has to be able to name its column.
+const RETIRED_EXEMPT = /eval-lookup-recall|lookups\.\w+|`lookups`/g;
 
 interface Registry {
   /** Top-level verbs: `search`, `publish`, `wallet`. */

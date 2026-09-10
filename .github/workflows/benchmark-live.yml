@@ -96,6 +96,21 @@ jobs:
       # rather than installed here: node, pnpm, Claude Code at the manifest's
       # `pins.harness_version`, and the Tenjin CLI, each by exact version on a
       # base pinned by digest. `live-run` refuses a missing or drifted image.
+      # The image installs the CLI THIS checkout builds, not a published
+      # release, so `dist/` has to exist before the build. Without this the
+      # step exits 2 with `cli_unbuilt` and no image is ever produced.
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        if: steps.gate.outputs.live == 'true'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: steps.gate.outputs.live == 'true'
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Build the CLI the images install
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
       - name: Build the fixture images
         if: steps.gate.outputs.live == 'true'
         run: |
