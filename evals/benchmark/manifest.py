@@ -115,11 +115,17 @@ class Manifest:
 
 
 def fixture_hash(fixture: Path, vendor: vendor_module.Vendor | None = None) -> str:
-    """The committed fixture files, plus the vendor archive digest when the task names one."""
+    """The committed fixture files, plus the vendor archive digest when the task names one.
+
+    The archive itself is a release asset rather than a committed file, so the
+    digest comes from the record, and from the local bytes whenever a checkout
+    has them. Both spell the same value: `vendor.archive_digest` refuses bytes
+    that are not the ones the record pins.
+    """
     tree = sha256_dir(fixture)
     if vendor is None:
         return "sha256:" + tree
-    return "sha256:" + sha256_json({"fixture": tree, "vendor": vendor_module.check_archive(vendor)})
+    return "sha256:" + sha256_json({"fixture": tree, "vendor": vendor_module.archive_digest(vendor)})
 
 
 def _pinned(value: Any) -> bool:

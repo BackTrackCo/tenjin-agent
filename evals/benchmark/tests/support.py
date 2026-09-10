@@ -531,13 +531,14 @@ def assert_vitest_fixture(fixture: Path, task: str, vendored: vendor.Vendor) -> 
     """A live task fixture is a real, frozen Vitest project whose only green path is the lesson.
 
     Its `node_modules` is derived: the committed tree holds the shim alone, and
-    the pinned vitest is the one inside the vendored archive the task names.
+    the pinned vitest is the one the vendored archive's record names. That the
+    archive really holds that vitest is `test_vendor.py`'s case, because it is
+    the one assertion here that has to open the archive.
     """
     package = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
     pinned = package["devDependencies"]["vitest"]
     assert EXACT_VERSION.match(pinned), pinned
-    installed = json.loads(vendor.read_member(vendored, "vitest/package.json").decode("utf-8"))
-    assert (installed["version"], vendored.record["vitest"]) == (pinned, pinned)
+    assert vendored.record["vitest"] == pinned
     assert (fixture / "pnpm-lock.yaml").is_file()
     assert vendored.record["lock_sha256"] == "sha256:" + sha256_file(fixture / "pnpm-lock.yaml")
     assert [path.relative_to(fixture).as_posix() for path in (fixture / "node_modules").rglob("*") if path.is_file()] == ["node_modules/.bin/vitest"]

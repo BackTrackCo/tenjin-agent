@@ -1,4 +1,4 @@
-"""The vendored toolchain: one deterministic archive, extracted and verified per trial, platform-pinned."""
+"""The vendored toolchain: one deterministic archive, fetched once, extracted and verified per trial, platform-pinned."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import pytest
 
-from evals.benchmark import artifact, cli, manifest as manifest_module, vendor
+from evals.benchmark import REPO_ROOT, artifact, cli, manifest as manifest_module, vendor
 from evals.benchmark.artifact import ArtifactError
 from evals.benchmark.manifest import ManifestError
 from evals.benchmark.vendor import VendorError
@@ -23,6 +23,7 @@ ID = "fake-1.0.0-test"
 
 Build = Callable[..., vendor.Vendor]
 Rewrite = Callable[..., None]
+Served = Callable[..., tuple[vendor.Vendor, dict[str, str]]]
 
 
 @pytest.fixture
@@ -102,14 +103,23 @@ def test_a_tree_without_vitest_is_refused(build: Build, tree: Path) -> None:
     assert caught.value.code == "vendor_source"
 
 
-def test_the_record_is_checked_for_shape_and_its_archive_for_presence(build: Build, base: Path, rewrite: Rewrite) -> None:
+def test_the_record_resolves_without_the_archive_and_the_bytes_are_required_where_they_are_read(build: Build, base: Path, rewrite: Rewrite, tmp_path: Path) -> None:
+    """The archive is a release asset, so resolving a record cannot demand it; reading one still does."""
     built = build()
     assert vendor.resolve(base, ID).facts["archive_sha256"] == built.record["archive_sha256"]
     rewrite(built)
     built.archive.unlink()
-    with pytest.raises(VendorError) as caught:
-        vendor.resolve(base, ID)
-    assert caught.value.code == "vendor_archive"
+    resolved = vendor.resolve(base, ID)
+    for call in (
+        lambda: vendor.check_archive(resolved),
+        lambda: vendor.ensure(resolved, allow_fetch=False),
+        lambda: vendor.extract(resolved, tmp_path / "trial" / "node_modules", HOST),
+        lambda: vendor.read_member(resolved, "vitest/package.json"),
+    ):
+        with pytest.raises(VendorError) as caught:
+            call()
+        assert caught.value.code == "vendor_archive"
+        assert "vendor fetch" in caught.value.detail
 
 
 @pytest.mark.parametrize(
@@ -156,6 +166,92 @@ def test_extraction_lands_the_tree_and_verifies_it_against_the_record(build: Bui
     assert (destination / ".bin" / "vitest").read_text(encoding="utf-8") == "shim\n"
     assert [path for path in destination.rglob("*") if path.is_symlink()] == []
     assert vendor.read_member(built, "vitest/package.json") == b'{"name":"vitest","version":"1.0.0"}\n'
+
+
+@pytest.fixture
+def served(build: Build, tmp_path: Path) -> Served:
+    """A built archive moved to a mirror, so the vendor's own copy is missing and only a fetch can supply it."""
+
+    def run(host: dict[str, str] | None = None) -> tuple[vendor.Vendor, dict[str, str]]:
+        built = build(ID, HOST if host is None else host)
+        mirror = tmp_path / "mirror"
+        mirror.mkdir(exist_ok=True)
+        built.archive.replace(mirror / built.archive.name)
+        return built, {vendor.SOURCE_ENV: mirror.as_uri()}
+
+    return run
+
+
+def test_an_absent_archive_is_fetched_from_its_source_and_verified(served: Served, tmp_path: Path) -> None:
+    built, environ = served()
+    assert vendor.ensure(built, environ=environ) == built.archive
+    assert vendor.check_archive(built) == built.record["archive_sha256"]
+    assert sorted(path.name for path in built.archive.parent.iterdir()) == [f"{ID}.json", f"{ID}{vendor.SUFFIX}"]
+    assert vendor.extract(built, tmp_path / "trial" / "node_modules", HOST) == 3
+    # A second call is offline: the bytes are here, so an unreachable source is never read.
+    assert vendor.ensure(built, environ={vendor.SOURCE_ENV: (tmp_path / "gone").as_uri()}) == built.archive
+
+
+def test_a_source_that_serves_other_bytes_is_refused_and_nothing_is_kept(served: Served) -> None:
+    built, environ = served()
+    mirror = Path(environ[vendor.SOURCE_ENV].removeprefix("file://")) / built.archive.name
+    mirror.write_bytes(mirror.read_bytes() + b"\n")
+    with pytest.raises(VendorError) as caught:
+        vendor.ensure(built, environ=environ)
+    assert caught.value.code == "vendor_fetch"
+    assert built.record["archive_sha256"] in caught.value.detail
+    assert [path.name for path in built.archive.parent.iterdir()] == [f"{ID}.json"]
+
+
+def test_a_source_that_is_not_there_is_a_refusal_not_a_traceback(served: Served, tmp_path: Path) -> None:
+    built, _environ = served()
+    with pytest.raises(VendorError) as caught:
+        vendor.ensure(built, environ={vendor.SOURCE_ENV: (tmp_path / "nowhere").as_uri()})
+    assert caught.value.code == "vendor_fetch"
+    assert [path.name for path in built.archive.parent.iterdir()] == [f"{ID}.json"]
+
+
+def test_extraction_never_fetches_however_reachable_the_source_is(served: Served, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The download is the operator's one network step; nothing a trial runs may reach for it."""
+    built, environ = served()
+    monkeypatch.setenv(vendor.SOURCE_ENV, environ[vendor.SOURCE_ENV])
+    destination = tmp_path / "trial" / "node_modules"
+    with pytest.raises(VendorError) as caught:
+        vendor.extract(built, destination, HOST)
+    assert caught.value.code == "vendor_archive"
+    assert not built.archive.exists()
+
+
+def test_the_fixture_hash_is_the_same_with_the_archive_here_and_away(vendored_manifest, base: Path, fixture: Path) -> None:
+    """Moving the bytes out of the tree may not move a pin: the record is what a fixture hash folds in."""
+    data, built = vendored_manifest
+    with_archive = manifest_module.fixture_hash(fixture, built)
+    manifest_module.validate(data, base)
+    built.archive.unlink()
+    assert manifest_module.fixture_hash(fixture, vendor.resolve(base, ID)) == with_archive == data["tasks"][0]["fixture_hash"]
+    manifest_module.validate(data, base)
+
+
+def vendored_live_manifest(base: Path) -> manifest_module.Manifest:
+    """The fake manifest's first task, retargeted at the temporary vendored fixture."""
+    data = json.loads(cli.FAKE_MANIFEST.read_text(encoding="utf-8"))
+    data["tasks"] = [{**data["tasks"][0], "fixture": "task", "vendor": ID}]
+    return manifest_module.Manifest(data, base / "manifest.json", "sha256:" + "0" * 64)
+
+
+def test_a_live_run_fetches_the_archive_once_before_any_root_exists(served: Served, base: Path) -> None:
+    built, environ = served(host=vendor.host_facts())
+    cli.prepare_vendors(vendored_live_manifest(base), {**environ, "PATH": os.environ.get("PATH", "")})
+    assert built.archive.is_file()
+    assert vendor.check_archive(built) == built.record["archive_sha256"]
+
+
+def test_a_host_the_archive_was_never_built_for_is_refused_without_a_download(served: Served, base: Path) -> None:
+    built, environ = served()
+    with pytest.raises(cli.CliError) as caught:
+        cli.prepare_vendors(vendored_live_manifest(base), environ)
+    assert "test-arch" in str(caught.value)
+    assert not built.archive.exists()
 
 
 def test_tampered_archive_bytes_fail_closed(build: Build, tmp_path: Path) -> None:
@@ -290,7 +386,6 @@ def test_the_live_manifests_name_the_one_archive_and_its_record_agrees_with_the_
     built = manifest.vendor_for(manifest.tasks[0])
     assert built is not None
     assert built.archive.parent.name == vendor.DIR
-    assert built.archive.stat().st_size < 10 << 20
     assert built.record["platform"] == "darwin-arm64"
     assert built.record["node_abi"] == "137"
     for task in manifest.tasks:
@@ -299,3 +394,33 @@ def test_the_live_manifests_name_the_one_archive_and_its_record_agrees_with_the_
         assert [item.name for item in (path / "node_modules").iterdir()] == [".bin"]
     smoke = manifest_module.load(cli.SMOKE_MANIFEST)
     assert smoke.vendor_for(smoke.tasks[0]) is None
+
+
+def test_the_vendor_directory_keeps_the_record_and_the_archive_comes_from_a_release_asset() -> None:
+    """7.4 MB of build output in a squashed commit is in `main` for good, so the tree keeps the pin alone."""
+    manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    built = manifest.vendor_for(manifest.tasks[0])
+    assert built is not None
+    # Nothing but the record and, on a machine that has fetched, the archive itself.
+    assert sorted(path.name for path in built.archive.parent.iterdir()) in ([built.path.name], sorted([built.path.name, built.archive.name]))
+    # The line that keeps a fetched archive out of the next commit.
+    ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert f"evals/benchmark/fixtures/live/{vendor.DIR}/*{vendor.SUFFIX}" in ignored
+    assert vendor.archive_url(built, {}) == (
+        "https://github.com/BackTrackCo/tenjin-agent/releases/download/"
+        "bench-vendor-vitest-3.2.4-node24-darwin-arm64/vitest-3.2.4-node24-darwin-arm64.tar.gz"
+    )
+
+
+def test_the_real_archive_holds_the_vitest_its_record_names() -> None:
+    """The one case that reads the released bytes: a record could otherwise name a vitest the archive does not hold."""
+    manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    built = manifest.vendor_for(manifest.tasks[0])
+    assert built is not None
+    if not built.archive.is_file():
+        pytest.skip(f"the vendored archive is not in this checkout: {vendor.fetch_hint(built)}")
+    assert vendor.check_archive(built) == built.record["archive_sha256"]
+    assert built.archive.stat().st_size < 10 << 20
+    installed = json.loads(vendor.read_member(built, "vitest/package.json").decode("utf-8"))
+    pinned = json.loads((manifest.fixture_path(manifest.tasks[0]) / "package.json").read_text(encoding="utf-8"))["devDependencies"]["vitest"]
+    assert (installed["version"], built.record["vitest"]) == (pinned, pinned)
