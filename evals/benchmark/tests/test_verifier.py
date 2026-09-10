@@ -233,8 +233,7 @@ def test_the_vitest_config_refuses_a_runner_that_did_not_come_through_pnpm(tmp_p
         assert "pnpm exec" not in completed.stderr
 
 
-@pytest.mark.parametrize("task", sorted(verifier.TASK_PACKAGES))
-def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer(task: str, run_dir: Path, tmp_path: Path) -> None:
+def _unfixed_verdict(task: str, run_dir: Path, tmp_path: Path) -> verifier.Verdict:
     live = verifier.HIDDEN.parent / "fixtures" / "live"
     spec = verifier.lookup(f"node_test_{task}")
     # The committed fixture without its dependency tree: a hidden
@@ -246,8 +245,42 @@ def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer
     roots = artifact.create(run_dir, f"trial-{task}", copy)
     support.link_workspace_packages(roots.repo)
     roots.mark_stopped()
-    verdict = verifier.run(spec, roots.hidden_copy(spec.hidden_layer), run_dir)
+    return verifier.run(spec, roots.hidden_copy(spec.hidden_layer), run_dir)
+
+
+@pytest.mark.parametrize("task", sorted(set(verifier.TASK_PACKAGES) - set(verifier.DEPENDENT_TASKS)))
+def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer(task: str, run_dir: Path, tmp_path: Path) -> None:
+    verdict = _unfixed_verdict(task, run_dir, tmp_path)
     assert (verdict.outcome, verdict.exit_code) == ("fail", 1)
+
+
+@pytest.mark.parametrize("task", sorted(verifier.DEPENDENT_TASKS))
+def test_a_task_that_pins_a_third_party_package_is_judged_in_the_image_and_says_so_here(task: str, run_dir: Path, tmp_path: Path) -> None:
+    """A dependent task's no-op check belongs to the image, and this states why rather than reading a red run as one.
+
+    `upstream` hides a real behaviour of a pinned package, so its hidden test
+    reaches that package through the fixture's source. Offline the copy has no
+    dependency tree, so the run is red for a missing module: the same exit code
+    the real verdict uses, on a fixture that was never judged. The declaration
+    and the reason are asserted here so nobody reads the row above as proof.
+    """
+    live = verifier.HIDDEN.parent / "fixtures" / "live"
+    assert _registry_dependencies(live / task), f"{task} is declared dependent but pins no registry package"
+    verdict = _unfixed_verdict(task, run_dir, tmp_path)
+    assert verdict.outcome == "fail"
+    assert "ERR_MODULE_NOT_FOUND" in verdict.detail, verdict.detail
+
+
+def _registry_dependencies(fixture: Path) -> dict[str, str]:
+    """A fixture's runtime dependencies that come from the registry; a `workspace:` link is the fixture's own code."""
+    declared = json.loads((fixture / "package.json").read_text(encoding="utf-8")).get("dependencies") or {}
+    return {name: version for name, version in declared.items() if not version.startswith("workspace:")}
+
+
+def test_only_a_fixture_that_pins_a_registry_package_is_declared_dependent() -> None:
+    """The set is derived from the fixtures, so a new dependency cannot quietly opt a task out of the no-op check."""
+    live = verifier.HIDDEN.parent / "fixtures" / "live"
+    assert {task for task in verifier.TASK_PACKAGES if _registry_dependencies(live / task)} == set(verifier.DEPENDENT_TASKS)
 
 
 def test_verifier_output_is_bounded(repo: Path, run_dir: Path) -> None:
