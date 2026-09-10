@@ -42,35 +42,39 @@ jobs:
       # Bench-1 (evals/benchmark/) runs no model, no network and no spend, so
       # its offline suite runs here on every PR and a change that breaks the
       # package fails the required check. No path filter: the whole chain is
-      # well under a minute. The floor is 3.11; a runner below it is a red run,
-      # because a skipped gate reads like a passing one. The package itself is
-      # standard-library, which is why the steps below this one call the
-      # runner's own `python3`; only the suite installs anything.
+      # well under a minute. The floor is 3.12, which is what scipy 1.18 asks
+      # for; a runner below it is a red run, because a skipped gate reads like
+      # a passing one. Every step below this one runs from the venv the next
+      # step builds, the shipped commands included: the package imports scipy
+      # and jsonschema, so a bare interpreter is not a lane it supports.
       # The live plumbing smoke is benchmark-live.yml, informational only.
       - name: Bench-1 interpreter floor
         run: |
           python3 --version
-          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
-            echo "::error title=python::evals/benchmark needs Python 3.11 or later"
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || {
+            echo "::error title=python::evals/benchmark needs Python 3.12 or later (scipy 1.18)"
             exit 1
           }
-      # pytest, at one exact version and by hash, into a throwaway venv built
-      # from the interpreter the step above just checked. A venv rather than a
-      # `pip install` because the runner's python3 is externally managed, and
-      # `--require-hashes` because a required check must not depend on whatever
-      # the index served that minute.
+      # The package's whole closure, at exact versions and by hash, into a
+      # throwaway venv built from the interpreter the step above just checked.
+      # A venv rather than a `pip install` because the runner's python3 is
+      # externally managed, and `--require-hashes` because a required check
+      # must not depend on whatever the index served that minute. scipy and
+      # numpy carry the download; the install runs in well under a minute.
       - name: Bench-1 test dependency
+        timeout-minutes: 5
         run: |
           python3 -m venv "$RUNNER_TEMP/bench1-venv"
           "$RUNNER_TEMP/bench1-venv/bin/python" -m pip install --quiet --require-hashes \
             --only-binary=:all: -r evals/benchmark/requirements-test.txt
           "$RUNNER_TEMP/bench1-venv/bin/python" -m pytest --version
-      # The suite is pytest over evals/benchmark/tests/ and takes about 20
-      # seconds; the step's own timeout is what bounds it, so the runner owns
+      # The suite is pytest over evals/benchmark/tests/ and takes under a
+      # minute at this layer and a few minutes once the container fixtures
+      # arrive; the step's own timeout is what bounds it, so the runner owns
       # the clock and the suite owns the result. `--groups` collapses the log
       # section and `--summary` puts the verdict on the run page.
       - name: Bench-1 offline self-test
-        timeout-minutes: 2
+        timeout-minutes: 10
         run: |
           "$RUNNER_TEMP/bench1-venv/bin/python" evals/benchmark/selftest.py \
             --verbosity 2 --groups --summary "$GITHUB_STEP_SUMMARY"
@@ -82,13 +86,14 @@ jobs:
         run: |
           set -o pipefail
           run="$RUNNER_TEMP/bench1-fake"
+          python="$RUNNER_TEMP/bench1-venv/bin/python"
           echo "::group::fake-run"
-          python3 -m evals.benchmark.cli fake-run --out "$run"
+          "$python" -m evals.benchmark.cli fake-run --out "$run"
           echo "::endgroup::"
           echo "::group::verify (hidden verifiers re-run over the finished run)"
-          python3 -m evals.benchmark.cli verify --run "$run"
+          "$python" -m evals.benchmark.cli verify --run "$run"
           echo "::endgroup::"
-          python3 -m evals.benchmark.cli summary --run "$run" | tee "$RUNNER_TEMP/bench1-summary.txt"
+          "$python" -m evals.benchmark.cli summary --run "$run" | tee "$RUNNER_TEMP/bench1-summary.txt"
           {
             echo '## Bench-1 fake run'
             echo
