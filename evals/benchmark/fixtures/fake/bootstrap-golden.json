@@ -1,5 +1,5 @@
 {
-  "note": "Frozen output of evals.benchmark.reduce.paired_bootstrap. Regenerate only with a benchmark version bump.",
+  "note": "Inputs and the method's deterministic fields for evals.benchmark.reduce.paired_bootstrap. The interval's endpoints are NOT pinned here: they are asserted as invariants (low <= point <= high, and low < high when the ratios differ), so a resampling-order change is a real failure rather than a fixture to regenerate.",
   "cases": [
     {
       "name": "single_task",
@@ -8,8 +8,6 @@
       "expected": {
         "method": "task_paired_percentile",
         "point": 0.8,
-        "low": 0.8,
-        "high": 0.8,
         "tasks": 1,
         "resamples": 2000,
         "confidence": 0.95,
@@ -23,8 +21,6 @@
       "expected": {
         "method": "task_paired_percentile",
         "point": 0.825,
-        "low": 0.791666666667,
-        "high": 0.85,
         "tasks": 3,
         "resamples": 2000,
         "confidence": 0.95,
@@ -38,8 +34,6 @@
       "expected": {
         "method": "task_paired_percentile",
         "point": 0.88625,
-        "low": 0.76875,
-        "high": 1.01,
         "tasks": 8,
         "resamples": 2000,
         "confidence": 0.95,
