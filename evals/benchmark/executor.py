@@ -203,6 +203,11 @@ def _fake_launch(behavior: str) -> Callable[[LaunchRequest], Launch]:
 
 REGISTRY: dict[str, ExecutorSpec] = {
     "fake": ExecutorSpec(name="fake", harness="claude", launch=_fake_launch("pass")),
+    # The null agent. It does the work badly rather than not at all, because
+    # what it exists to catch is a verifier that returns `pass` whatever is in
+    # the worktree: an agent that wrote nothing would fail on the missing file
+    # instead, which a broken verifier would also do.
+    "fake_wrong": ExecutorSpec(name="fake_wrong", harness="claude", launch=_fake_launch("wrong-answer")),
     "fake_hang": ExecutorSpec(name="fake_hang", harness="claude", launch=_fake_launch("hang")),
 }
 
