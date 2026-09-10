@@ -962,86 +962,23 @@ describe('the public render did not move', () => {
   const digest = (source: string): string =>
     createHash('sha256').update(source).digest('hex').slice(0, 32);
 
-  // Re-pinned when #203's skill resync landed on main. The answer-card overhaul
-  // later removed card completeness as a ranking/candidacy signal in both modes;
-  // compatibility fields remain public fit-context guidance only.
-  //
-  // Re-pinned again for the scan hardening: the public arm's warn triage now names
-  // the detectors that branch added (`private-network-endpoint`, `high-entropy-string`,
-  // `collaboration-url`, `cloud-resource-id`, `env-dump-block`) and the block tier
-  // gained seed phrases. Only tenjin-publish's else arm moved; tenjin-search is
-  // untouched, which is why its digest still holds.
-  //
-  // Re-pinned once more (review r7): the block tier was enumerated three ways
-  // across the two arms and safety-model.md, so all three now name the same five
-  // families (TOTP provisioning URIs is what the public arm was missing), and the
-  // "usually fine" warn bucket got back the qualifiers that make it conditional.
-  //
-  // Re-pinned again for the marketplace ingest gate: a `--yes` re-run can now hit
-  // a SECOND exit 3 carrying findings marked `[server]` that the first payload
-  // could not have shown, and an agent told only to re-run with `--yes` would
-  // loop on it. Both arms moved; the team arm also drops the claim that the
-  // survivors are the only findings there are, since the shelf scans at ingest.
-  //
-  // Re-pinned merging main into #158: #158's own wallet fund rename touches
-  // skills/tenjin-search/SKILL.md's fund line outside any `tenjin:when` arm,
-  // so tenjin-search's digest carries that rename on top of whatever main's
-  // own chain above pins. tenjin-publish is untouched by #158, so it keeps
-  // main's value unchanged.
-  //
-  // Re-pinned for the outcome line's copy-paste hazard: the status list sat
-  // inside a bash fence as `a|b|c`, which a shell reads as three piped commands
-  // whose first one posts `used`. It is spelled out below the fence now, the
-  // same fix the child rung already carries. tenjin-publish is untouched.
-  //
-  // Re-pinned for stdin publishing (#260): the canonical publish example is a
-  // heredoc whose command begins with `tenjin publish -`, and the file fallback
-  // explicitly stays a standalone prefix-matched command. The follow-up regular-
-  // file boundary names that constraint on the fallback without changing either
-  // publish mode's policy.
-  //
-  // Re-pinned for tenjin#733 and the post-#797 card contract: `--excerpt` is a
-  // listing teaser rather than the in-page preview boundary, and legacy card
-  // completeness no longer claims any relevance, placement, candidacy, or
-  // answer-source effect. tenjin-search is untouched, so its digest still carries
-  // the value the stdin rung pinned; tenjin-publish's is this merge's own bytes,
-  // both chains applied.
-  //
-  // Re-pinned for the 2026-09-04 redact-module decision
-  // (tenjin-notes/loop-redesign/06-pr-a-redact.md): the local scan is warn-only
-  // now, so tenjin-publish's mode table, scan sections and exit-3 guidance were
-  // rewritten to say the local scan never refuses and only the marketplace's own
-  // ingest scan still blocks; the team-shelf warn survivor list dropped from six
-  // to two (`secret-assignment`, `hex32-value`) and `private-repo-reference` is
-  // gone. tenjin-search is untouched.
-  //
-  // Re-pinned for the loop's lookup arms (PR C): the generated Stop hook that
-  // led with a `publish.mode=` line is unregistered, so tenjin-publish no longer
-  // promises it; hook searches are the daemon's now and close their own loops,
-  // so tenjin-search's open-loop sentence names only the searches you ran; and
-  // its item bullet gained `strong` and `body`, the two candidate fields the
-  // shelf sends since search learned to say which item answers and to carry a
-  // free piece whole. Both arms moved.
-  //
-  // Re-pinned for the CLI on `loop.db` (PR E): `outcome --last` and `--all-open`
-  // are deleted — the CLI knows the harness session but never the agent inside
-  // it, so in a fan-out `--last` could rate a sibling's search — and the outcome
-  // paragraph names `--search-id <id>` alone. tenjin-publish is untouched.
-  //
-  // Re-pinned again for the same PR's fix lane: the turn-end ask names a fix
-  // this session closed and the key it was recorded under, so tenjin-publish
-  // says to pass that key as `--key fingerprint=<key>`. tenjin-search is
-  // untouched.
-  //
-  // Re-pinned for one hook surface (PR E2, decision 15): `tenjin session start`
-  // is deleted and `read` mints its own read-scoped session, so tenjin-search's
-  // read paragraph says the piece simply comes back and the refusal's
-  // `entitlementCheck` list drops `not_performed` and the `sessionCommand` it
-  // used to point at. tenjin-publish is untouched.
-  //
-  // Re-pinned once more for the same PR's mint pin: `read` signs only for the
-  // shelves the config names, so tenjin-search says so and its
-  // `entitlementCheck` list gains `origin_not_configured`.
+  // Digest history, oldest first — what moved and which arm. The two #315
+  // entries below stay longhand while that PR is live; collapse them the same
+  // way once it merges.
+  // - #203 resync; card overhaul removed completeness as a rank signal (both modes).
+  // - Scan hardening: warn triage names the new detectors; block tier gains seed phrases (publish/else).
+  // - Review r7: block tier enumerated one way in both arms + safety-model.md.
+  // - Marketplace ingest gate: a `--yes` re-run can hit a second exit 3; team arm drops the "only findings" claim.
+  // - #158 merge: wallet fund rename in search, outside any arm.
+  // - Outcome statuses spelled out below the fence (a fenced `a|b|c` pastes as three piped commands).
+  // - Stdin publishing (#260): heredoc canonical example; file fallback stays prefix-matched.
+  // - tenjin#733/#797 card contract: `--excerpt` is a listing teaser; completeness claims nothing.
+  // - 2026-09-04 redact module: local scan is warn-only; team warn survivors down to two.
+  // - PR C lookup arms: Stop-hook `publish.mode=` line gone; item bullet gains `strong` + `body`.
+  // - PR E loop.db: `outcome --last`/`--all-open` deleted; `--search-id` alone.
+  // - PR E fix lane: turn-end ask names the fix; `--key fingerprint=<key>`.
+  // - PR E2: `session start` deleted, `read` mints its own session; `not_performed` dropped.
+  // - PR E2 mint pin: `read` signs for configured shelves only; `origin_not_configured` added.
   //
   // Re-pinned for the #315 Act 2 pointer: `config get` reads single leaf keys
   // only, so tenjin-search's command surface now points hook-arm state at bare
