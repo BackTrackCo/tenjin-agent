@@ -9,6 +9,12 @@ __pycache__/
 # artifact of the most recent local `vitest run`, never something to commit.
 .vitest-report.json
 
+# The Bench-1 vendored toolchain is a build artifact published as a release
+# asset, never a commit: 7.4 MB in a squashed commit is in main's history for
+# good. `evals/benchmark/vendor.py` fetches it beside its committed record.
+evals/benchmark/fixtures/live/vendor/*.tar.gz
+evals/benchmark/fixtures/live/vendor/*.partial
+
 # Bench-1 task fixtures track only the hand-written vitest shim under
 # node_modules; the tree itself is evals/benchmark/fixtures/live/vendor/,
 # one archive extracted into each trial.

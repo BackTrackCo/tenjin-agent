@@ -9,6 +9,12 @@
 # node_modules. The archive is platform-specific; run it on the platform the
 # id names. A rebuild changes every fixture_hash that names the id, so the
 # manifests re-pin and bump their benchmark_version.
+#
+# The record is committed and the archive is not, so a rebuild is only half
+# done here: publish the new bytes as the asset the record now pins, on a
+# release tagged bench-vendor-<id>, or every other machine fetches the old
+# archive and refuses it. Nothing in the tree carries the archive: it is
+# gitignored, and `vendor.py fetch` is what puts it back on a fresh checkout.
 set -euo pipefail
 cd "$(dirname "$0")/../../.."
 fixture=${1:-evals/benchmark/fixtures/live/actor}

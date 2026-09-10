@@ -541,8 +541,11 @@ def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_
     # The vendored toolchain is named, with the host verdict, and nothing was extracted.
     assert "vendor    vitest-3.2.4-node24-darwin-arm64 platform=darwin-arm64 node_abi=137 host=" in printed
     assert ("extracted into repo/node_modules" if vendor.host_platform() == "darwin-arm64" else "MISMATCH") in printed
+    # The archive is a release asset, so the line states whether this checkout has it.
+    assert ("live-run fetches it first" in printed) is not payload["trials"][0]["vendor"]["present"]
     for plan in payload["trials"]:
         assert plan["vendor"]["id"] == "vitest-3.2.4-node24-darwin-arm64"
+        assert plan["vendor"]["present"] is installed.vendor_for(installed.tasks[0]).archive.is_file()
         assert not (Path(plan["roots"]["cwd"]) / "node_modules" / "vitest").exists()
     assert SECRET not in printed
     assert tenjin_arm.DRY_TOKEN not in printed

@@ -1,9 +1,8 @@
 """Vendored fixture toolchains: one archive per platform, extracted into each trial.
 
 A live task fixture is a real Vitest project, and Vitest with its transitive
-dependencies is about 780 files. Committing that tree once per fixture made
-the pull request unreviewable, so the tree is committed once, as one
-deterministic archive under `fixtures/live/vendor/` with a record beside it
+dependencies is about 780 files. That tree is packed once, as one
+deterministic archive, with a record beside it under `fixtures/live/vendor/`
 that states its digests and the platform it was built for. `artifact.create`
 extracts it into `<repo>/node_modules` at trial preparation, offline, and
 checks the extracted tree against the recorded digest. A trial's
@@ -11,12 +10,27 @@ checks the extracted tree against the recorded digest. A trial's
 hand-written `.bin/vitest` shim, and `manifest.fixture_hash` folds the archive
 digest in, so a change to either the fixture or the archive changes the hash.
 
+The record is committed and the archive is not. The archive is 7.4 MB of
+build output that a rebuild replaces wholesale, and these pull requests squash
+merge, so committing it would leave the bytes in `main`'s history for good
+even on a branch that later deletes them. It is published instead as a release
+asset on a tag that is not a product release, and `ensure` fetches it when a
+checkout does not have it yet. The pin does not move with it: `archive_sha256`
+in the committed record is what every fixture hash folds in and what every
+fetch is checked against, so the bytes are as fixed as they were in git and a
+mismatch is a refusal rather than a warning.
+
+The fetch is one network step, taken by `cli.live_run` on the operator's
+machine before the first trial root exists. Nothing downstream reaches for it:
+`extract` reads a file that is already here and verified, so no trial, and no
+container a trial runs in, ever has a reason to leave the machine.
+
 The archive carries darwin-arm64 natives (esbuild, rollup, fsevents), so the
 record pins `platform` and `node_abi`, and a live run on any other host is
 refused before a root is built rather than failing inside a trial.
 
-`python3 -m evals.benchmark.vendor build|check` is the operator entry; the
-rebuild that installs first is `evals/benchmark/scripts/vendor-vitest.sh`.
+`python3 -m evals.benchmark.vendor build|check|fetch` is the operator entry;
+the rebuild that installs first is `evals/benchmark/scripts/vendor-vitest.sh`.
 """
 
 from __future__ import annotations
@@ -28,9 +42,11 @@ import json
 import os
 import platform as platform_module
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import urllib.request
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -52,6 +68,16 @@ ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MTIME = 1_757_203_200
 NODE = "node"
 NODE_TIMEOUT_S = 10
+# The archive lives on a release asset, not in the tree. The tag names the
+# vendor id and carries nothing else, so it is never read as a product release.
+ASSET_URL = "https://github.com/BackTrackCo/tenjin-agent/releases/download/bench-vendor-{vendor_id}/{name}"
+# A mirror, for an operator whose network cannot reach GitHub directly, and the
+# seam the offline suite serves a synthetic archive through. It moves where the
+# bytes come from and nothing about which bytes are accepted: `fetch` checks
+# whatever it downloads against the record either way.
+SOURCE_ENV = "BENCH_VENDOR_SOURCE"
+FETCH_TIMEOUT_S = 120
+PARTIAL = ".partial"
 
 
 class VendorError(RuntimeError):
@@ -98,7 +124,12 @@ def record_path(base: Path, vendor_id: str) -> Path:
 
 
 def resolve(base: Path, vendor_id: str) -> Vendor:
-    """Read `<base>/vendor/<id>.json` and locate its archive. Nothing is hashed here."""
+    """Read `<base>/vendor/<id>.json` and name where its archive belongs.
+
+    Nothing is hashed and nothing is downloaded here, and the archive does not
+    have to be here yet: the record is the pin, so a fresh checkout can read and
+    validate a manifest without the bytes. `ensure` puts them in place.
+    """
     if not isinstance(vendor_id, str) or not ID.match(vendor_id):
         raise VendorError("vendor_record", f"vendor id {vendor_id!r} is not a file-name token")
     path = record_path(base, vendor_id)
@@ -127,18 +158,68 @@ def resolve(base: Path, vendor_id: str) -> Vendor:
     for key in ("archive_sha256", "tree_sha256"):
         if not record[key].startswith("sha256:"):
             raise VendorError("vendor_record", f"{path.name} {key} must be a sha256 token")
-    archive = path.parent / name
-    if not archive.is_file():
-        raise VendorError("vendor_archive", f"{name} is missing beside {path.name}")
-    return Vendor(id=vendor_id, record=record, path=path, archive=archive)
+    return Vendor(id=vendor_id, record=record, path=path, archive=path.parent / name)
+
+
+def fetch_hint(vendor: Vendor) -> str:
+    return f"fetch it with python3 -m evals.benchmark.vendor fetch --base {vendor.path.parent.parent} --id {vendor.id}"
 
 
 def check_archive(vendor: Vendor) -> str:
     """The archive's digest, which has to be the one its record states."""
+    if not vendor.archive.is_file():
+        raise VendorError("vendor_archive", f"{vendor.archive.name} is not beside {vendor.path.name}: {fetch_hint(vendor)}")
     digest = "sha256:" + sha256_file(vendor.archive)
     if digest != vendor.archive_sha256:
         raise VendorError("vendor_archive", f"{vendor.archive.name} is not the archive {vendor.path.name} records")
     return digest
+
+
+def archive_digest(vendor: Vendor) -> str:
+    """The digest a fixture hash folds in: the record's pin, read against the local bytes when they are here.
+
+    A checkout that has not fetched still hashes a manifest to the same value,
+    because the pin is committed and the bytes only ever have to agree with it.
+    Nothing reads the archive on the strength of the pin alone: `extract` and
+    `read_member` both check the bytes first.
+    """
+    return check_archive(vendor) if vendor.archive.is_file() else vendor.archive_sha256
+
+
+def archive_url(vendor: Vendor, environ: Mapping[str, str] | None = None) -> str:
+    mirror = (os.environ if environ is None else environ).get(SOURCE_ENV)
+    if mirror:
+        return f"{mirror.rstrip('/')}/{vendor.archive.name}"
+    return ASSET_URL.format(vendor_id=vendor.id, name=vendor.archive.name)
+
+
+def fetch(vendor: Vendor, environ: Mapping[str, str] | None = None) -> Path:
+    """Download the archive beside its record, and keep it only if it is the archive the record pins."""
+    url = archive_url(vendor, environ)
+    partial = vendor.archive.parent / (vendor.archive.name + PARTIAL)
+    vendor.archive.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_S) as response, partial.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+    except (OSError, ValueError) as error:
+        partial.unlink(missing_ok=True)
+        raise VendorError("vendor_fetch", f"cannot download {vendor.archive.name} from {url}: {error.__class__.__name__}") from error
+    digest = "sha256:" + sha256_file(partial)
+    if digest != vendor.archive_sha256:
+        partial.unlink(missing_ok=True)
+        raise VendorError("vendor_fetch", f"{url} served {digest}, not the {vendor.archive_sha256} {vendor.path.name} records; nothing was kept")
+    partial.replace(vendor.archive)
+    return vendor.archive
+
+
+def ensure(vendor: Vendor, *, allow_fetch: bool = True, environ: Mapping[str, str] | None = None) -> Path:
+    """The archive on disk with bytes the record vouches for, downloaded once if it is not here."""
+    if vendor.archive.is_file():
+        check_archive(vendor)
+        return vendor.archive
+    if not allow_fetch:
+        raise VendorError("vendor_archive", f"{vendor.archive.name} is not beside {vendor.path.name}: {fetch_hint(vendor)}")
+    return fetch(vendor, environ)
 
 
 def host_platform() -> str:
@@ -229,6 +310,7 @@ def extract(vendor: Vendor, destination: Path, host: Mapping[str, str | None] | 
 
 
 def read_member(vendor: Vendor, name: str) -> bytes:
+    check_archive(vendor)
     with tarfile.open(vendor.archive, "r:gz") as archive:
         handle = archive.extractfile(name)
         if handle is None:
@@ -308,9 +390,10 @@ def main(argv: list[str] | None = None) -> int:
     pack.add_argument("--fixture", required=True, type=Path, help="a fixture whose node_modules pnpm has just installed")
     pack.add_argument("--id", required=True, help="the archive id, such as vitest-3.2.4-node24-darwin-arm64")
     pack.add_argument("--pnpm", required=True, help="the pnpm version that produced the tree")
-    check = commands.add_parser("check", help="verify an archive against its record and this host")
-    check.add_argument("--base", required=True, type=Path, help="the fixtures directory holding vendor/")
-    check.add_argument("--id", required=True)
+    for name, help_text in (("check", "verify an archive against its record and this host"), ("fetch", "download the archive from its release asset and verify it")):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("--base", required=True, type=Path, help="the fixtures directory holding vendor/")
+        command.add_argument("--id", required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
@@ -318,7 +401,8 @@ def main(argv: list[str] | None = None) -> int:
             vendor = build(fixture / TARGET, fixture.parent / DIR, args.id, lock=fixture / "pnpm-lock.yaml", pnpm=args.pnpm)
         else:
             vendor = resolve(args.base.resolve(), args.id)
-            check_archive(vendor)
+            # `check` states what is here; `fetch` is the one command that leaves the machine.
+            ensure(vendor, allow_fetch=args.command == "fetch")
     except VendorError as error:
         sys.stderr.write(f"{error}\n")
         return 2

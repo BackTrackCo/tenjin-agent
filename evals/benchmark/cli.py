@@ -229,7 +229,7 @@ def plan_trial(manifest: manifest_module.Manifest, trial: schedule.Trial, out: P
         "repeat": trial.repeat,
         "argv": list(launch.argv),
         "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
-        "vendor": None if vendor is None else {**vendor.facts, "host": host, "host_matches": vendor_module.matches(vendor, host)},
+        "vendor": None if vendor is None else {**vendor.facts, "host": host, "host_matches": vendor_module.matches(vendor, host), "present": vendor.archive.is_file()},
         "package_manager": launch.package_manager,
         "overlay": sorted((settings.get("overlay") or {}).keys()),
         "hooks": describe_hooks(resolved),
@@ -294,9 +294,12 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
         if plan["vendor"] is not None:
             facts = plan["vendor"]
             verdict = "extracted into repo/node_modules at trial preparation" if facts["host_matches"] else "MISMATCH: live-run refuses this host"
+            # The archive is a release asset, so a dry run says whether this
+            # checkout has it: the live run's first network step, or nothing.
+            here = "" if facts["present"] else "; not in this checkout, so live-run fetches it first"
             lines.append(
                 f"  {'vendor':10}{facts['id']} platform={facts['platform']} node_abi={facts['node_abi']} "
-                f"host={facts['host']['platform']} {verdict}"
+                f"host={facts['host']['platform']} {verdict}{here}"
             )
         for path in plan.get("overlay") or []:
             lines.append(f"  {'overlay':10}{path} written into the repository copy from the arm's settings template ({{data_dir}} resolved)")
@@ -308,8 +311,16 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
     return "\n".join(lines)
 
 
-def refuse_foreign_vendor(manifest: manifest_module.Manifest, environ: Mapping[str, str]) -> None:
-    """A vendored toolchain built for another platform is refused before any root exists."""
+def prepare_vendors(manifest: manifest_module.Manifest, environ: Mapping[str, str]) -> None:
+    """Refuse a foreign toolchain, then put the archive it names on this machine, before any root exists.
+
+    This is the run's one network step for the toolchain: the archive is a
+    release asset, so a checkout that has never fetched it downloads it here,
+    once, against the digest its committed record pins. The host check comes
+    first, so a host the archive was never built for is refused without a
+    download. Nothing after this point leaves the machine: `artifact.create`
+    extracts a file that is already here and already verified.
+    """
     vendors = [(task, manifest.vendor_for(task)) for task in manifest.tasks]
     if not any(vendor is not None for _task, vendor in vendors):
         return
@@ -319,6 +330,7 @@ def refuse_foreign_vendor(manifest: manifest_module.Manifest, environ: Mapping[s
             continue
         try:
             vendor_module.check_platform(vendor, host)
+            vendor_module.ensure(vendor, environ=environ)
         except vendor_module.VendorError as error:
             raise CliError(f"task {task['id']!r}: {error.detail}") from error
 
@@ -394,7 +406,7 @@ def live_run(
             "live-run requires --attestation, or --plumbing for a non-publishable smoke: "
             "a publishable live run states the isolation it ran under"
         )
-    refuse_foreign_vendor(manifest, environ)
+    prepare_vendors(manifest, environ)
     refuse_package_manager(manifest, environ)
     seam = None if spec.credential_seam is None else spec.credential_seam(manifest.pins)
     # A run launched from a shell without the credential would spend the
