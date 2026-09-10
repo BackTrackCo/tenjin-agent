@@ -447,8 +447,8 @@ the turn's first tool call. With Codex installed, seven entries in
 no token; Codex runs them only after you enable them in `/hooks`, and `tenjin
 doctor` reports configured and observed entries as separate facts.
 A Codex shell result carries no exit status, so the failure arm learns of a
-failure only from an error marker and never closes a pairing on Codex; a Codex
-spawn's task is opaque on the wire, so no work order is looked up for a child. No arm can block or change a tool call; every one of
+failure only from an error marker; a Codex spawn's task is opaque on the wire,
+so no work order is looked up for a child. No arm can block or change a tool call; every one of
 them only adds context beside it. The arms ask your configured shelf a question
 and mention a tested answer if one exists. Six things leave the machine, each
 with its secrets stubbed and then cut at 512 characters: a prompt you typed, a

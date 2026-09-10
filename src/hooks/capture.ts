@@ -63,33 +63,30 @@ const CHILD_RESEARCH_SQL =
 const LEAD_LOOKUP_SQL =
   "arm IN ('prompt', 'research', 'fetch') AND reason IN ('hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server')";
 /**
- * Every failure fire this actor left. NOT an allowlist of lookup outcomes: the
- * two exclusions below are the only things that can disqualify a failure, so a
- * transport result nobody has thought of yet — one more way for a request not
- * to land — is named rather than silently dropped. An allowlist got that
- * backwards twice: first by omitting `deadline` and `error`, then by omitting
- * `rate-server`.
+ * Every failure fire this actor left. NO LOOKUP OUTCOME DISQUALIFIES ONE, and
+ * that is the point: what the shelf did or did not return is a fact about the
+ * shelf, and the ask is about what the agent walked into.
+ *
+ * A DELIVERED PIECE IS NOT AN ANSWER EITHER. `hit` says a note was injected,
+ * not that it was right: it may need a correction this repo alone knows, or
+ * miss the problem entirely, and none of that is legible from the row. Even a
+ * note that solved it outright carries no fingerprint of its own unless someone
+ * files one, so the key still has to reach the agent for the next teammate to
+ * resolve it. `seen` is weaker still — `fire.ts` decides it on the ANSWER'S
+ * resource id rather than on the failure, so it can mean nothing more than that
+ * a note about a NEIGHBOURING failure had already been read.
+ *
+ * Selecting on outcomes went wrong three times in a row here, each time by
+ * omitting one: `deadline` and `error`, then `rate-server`, then `hit`. So the
+ * rule no longer reads outcomes at all.
  */
 const FAILURE_ANY_SQL = "arm = 'failure' AND reason != 'no-question'";
 
-/**
- * The one outcome that means this actor HAS the answer to this failure: a piece
- * was delivered for this question key.
- *
- * `seen` IS NOT ONE OF THEM, and that is the whole subtlety. `fire.ts` decides
- * `seen` on the ANSWER'S RESOURCE ID, not on the failure: two different
- * failures whose prose searches land on one note give the first `hit` and the
- * second `seen`, with nothing injected for the second. Having read a note about
- * the first failure is not evidence the second was solved, and the agent may
- * well have learned something reusable climbing out of it. Whether it did is
- * the agent's call, which is what the ask is for.
- */
-const ANSWERED_REASONS: ReadonlySet<string> = new Set(['hit']);
-
 /** The same failure a second time, carrying no verdict of its own: the claim
- *  gate answered from its own cache without a leg running. Not disqualifying —
- *  the row that DID reach a shelf decides that — but it cannot stand in for a
- *  first sighting either, so a key known only by these is not named. */
+ *  gate answered from its own cache without a leg running. Not a second thing
+ *  to write up, and it cannot stand in for a first sighting either, so a key
+ *  known only by these is not named. The one thing a row's reason still
+ *  decides. */
 const REPEAT_REASONS: ReadonlySet<string> = new Set(['asked', 'cached']);
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
@@ -184,17 +181,16 @@ function missLines(db: LoopDb, actor: Actor): string[] {
  * The failures this actor hit and does not already have an answer to, oldest
  * first, one line each.
  *
- * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED. A `deadline`, an
- * `error` or a `rate-server` says nothing about whether the shelf holds an
- * answer — the request never landed — and the agent hit that wall either way,
- * which is the whole reason to ask. Listing only the outcomes that mean
- * "asked, and came back empty" dropped those failures, so the rule is inverted:
- * everything counts except a key this actor was actually handed a piece for
- * ({@link ANSWERED_REASONS}), and repeats that carry no verdict of their own
- * ({@link REPEAT_REASONS}). A transport result added later is named by default,
- * which is the safe direction: the cost of naming one failure too many is a
- * line the agent ignores, and the cost of dropping one is a fingerprint nobody
- * can ever publish under.
+ * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED ({@link
+ * FAILURE_ANY_SQL}). Every failure this actor hit is named once, and the only
+ * thing a row's reason still decides is whether it can be the one that names it
+ * ({@link REPEAT_REASONS}). The cost of naming one failure too many is a line
+ * the agent ignores; the cost of dropping one is a fingerprint nobody can ever
+ * publish under, so the asymmetry decides the default.
+ *
+ * DEDUPED AND BOUNDED, WHICH IS WHAT KEEPS IT QUIET. One line per key however
+ * many times the command ran, and `since` drops the keys a previous ask already
+ * named, so a failure is offered once per actor and never re-offered.
  *
  * THE `fires` ROW IS THE RECORD: `fire.ts` sets the plan's
  * question key and its masked, cut text before the gates run, and `ledger.ts`
@@ -238,23 +234,11 @@ function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] 
     at?: unknown;
     reason?: unknown;
   }>;
-  // ANSWERED IS DECIDED PER KEY, NOT PER ROW, and it has to be, because the two
-  // halves of one failure land in different rows: the fire that reached the
-  // shelf carries the verdict, and every re-run of the same command behind it
-  // is a `cached` or `asked` row carrying none. A per-row test would name a
-  // failure whose answer this actor is holding, on the strength of its repeats.
-  const answered = new Set<string>();
-  for (const row of rows) {
-    const key = typeof row.question_key === 'string' ? row.question_key : '';
-    if (key !== '' && ANSWERED_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) {
-      answered.add(key);
-    }
-  }
   const seen = new Set<string>();
   const out: string[] = [];
   for (const row of rows) {
     const key = typeof row.question_key === 'string' ? row.question_key : '';
-    if (key === '' || seen.has(key) || answered.has(key)) continue;
+    if (key === '' || seen.has(key)) continue;
     if (REPEAT_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
     seen.add(key);
     if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;

@@ -522,29 +522,27 @@ describe('the lead ask', () => {
     expect(emit?.context).toContain('on the team shelf also a decision and why');
   });
 
-  it('a failure nothing answered is evidence, and a failure that was answered is not', async () => {
-    const db = freshDb();
-    seedFailure(db, LEAD);
-    expect((await fire(db, leadStop()))?.context).toBeDefined();
-    expect(getMark(db, LEAD, 'capture:asked')).toBe('failure');
-
-    // `hit` is this key's own answer delivered; `cached` is the same failure a
-    // second time with no verdict of its own. Neither is a thing to write up.
-    for (const reason of ['hit', 'cached', 'asked']) {
-      const answered = freshDb();
-      seedFailure(answered, LEAD, { reason });
-      expect(await fire(answered, leadStop()), reason).toBeNull();
-      expect(getMark(answered, LEAD, 'capture:asked'), reason).toBeNull();
+  it('a failure is evidence whatever the lookup did, and a bare repeat is not', async () => {
+    // NO OUTCOME DISQUALIFIES A FAILURE. `hit` says a note was injected, not
+    // that it was right; `seen` is decided on the answer's resource id, so it
+    // can mean only that a note about a NEIGHBOURING failure had been read.
+    // Neither tells the agent this failure's key, which is what the next
+    // teammate resolves under.
+    for (const reason of ['no-hit', 'hit', 'seen', 'deadline', 'error', 'rate-server']) {
+      const db = freshDb();
+      seedFailure(db, LEAD, { reason });
+      expect((await fire(db, leadStop()))?.context, reason).toContain(ENOENT_LINE);
+      expect(getMark(db, LEAD, 'capture:asked'), reason).toBe('failure');
     }
 
-    // `seen` IS evidence. It is decided on the answer's resource id, not on the
-    // failure, so it means "a note this actor had already read would have been
-    // shown here" — nothing was injected for THIS failure, and having read a
-    // note about another one does not make this one answered.
-    const alreadyRead = freshDb();
-    seedFailure(alreadyRead, LEAD, { reason: 'seen' });
-    expect((await fire(alreadyRead, leadStop()))?.context).toContain(ENOENT_LINE);
-    expect(getMark(alreadyRead, LEAD, 'capture:asked')).toBe('failure');
+    // The one thing a reason still decides: a claim answered from its own cache
+    // ran no leg and cannot stand in for a first sighting.
+    for (const reason of ['cached', 'asked']) {
+      const repeat = freshDb();
+      seedFailure(repeat, LEAD, { reason });
+      expect(await fire(repeat, leadStop()), reason).toBeNull();
+      expect(getMark(repeat, LEAD, 'capture:asked'), reason).toBeNull();
+    }
   });
 
   it('names a second failure whose note the first failure had already shown', async () => {
@@ -562,9 +560,9 @@ describe('the lead ask', () => {
     });
     const context = (await fire(db, leadStop()))?.context ?? '';
     const lines = context.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('sig_v1:bbbb1111bbbb1111');
-    expect(context).not.toContain(ENOENT_KEY);
+    expect(lines).toHaveLength(2);
+    expect(context).toContain('--key fingerprint=sig_v1:aaaabbbbccccdddd');
+    expect(context).toContain('--key fingerprint=sig_v1:bbbb1111bbbb1111');
   });
 
   it('names a failure the shelf rate-limited', async () => {
@@ -595,19 +593,18 @@ describe('the lead ask', () => {
     expect(await fire(repeatOnly, leadStop())).toBeNull();
   });
 
-  it('a key answered on any run is not named on the runs that were not', async () => {
-    // `answered` is decided over the key's whole history, not one row: the fire
-    // that reached the shelf carries the verdict, and a later `deadline` on the
-    // same key must not re-offer a piece this actor is already holding.
+  it('names a failure whose prose note was delivered, because a note is not a key', async () => {
+    // The first delivery, not the second: exact keys missed, a prose note came
+    // back `strong` and was injected, and the fire recorded `hit`. Whether the
+    // note solved it, needed a correction this repo alone knows, or missed the
+    // problem is not legible from that row — and the note carries no
+    // fingerprint of its own, so unless the agent files one the next teammate
+    // resolving this key still finds nothing.
     const db = freshDb();
-    seedFailure(db, LEAD, { reason: 'hit', at: NOW - 50 });
-    seedFailure(db, LEAD, { reason: 'deadline', at: NOW - 40 });
-    seedFailure(db, LEAD, { questionKey: 'sig_v1:ffff0000ffff0000', at: NOW - 30 });
+    seedFailure(db, LEAD, { reason: 'hit' });
     const context = (await fire(db, leadStop()))?.context ?? '';
-    const lines = context.split('\n').filter((l) => l.startsWith('- Encountered this turn'));
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('sig_v1:ffff0000ffff0000');
-    expect(context).not.toContain(ENOENT_KEY);
+    expect(context).toContain(ENOENT_LINE);
+    expect(context).toContain('--key fingerprint=sig_v1:aaaabbbbccccdddd');
   });
 
   it('offers every fingerprint the arm resolves, one --key flag each', async () => {
