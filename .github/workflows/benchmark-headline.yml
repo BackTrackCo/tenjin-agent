@@ -7,7 +7,16 @@ name: benchmark headline
 # an anonymous reader over the public API, and the per-attempt records ride
 # along as a workflow artifact.
 #
-# Schedule, release, and manual dispatch only, never on push.
+# Schedule, release, manual dispatch, and one label. Never on push.
+#
+# The `benchmark: headline` label is how a branch runs this lane before the
+# workflow is registered on the default branch: `schedule` and
+# `workflow_dispatch` are keyed on registration against the DEFAULT branch, so
+# neither reaches a ref whose workflow file has not merged, while a
+# `pull_request` trigger reads the workflow from the PR's own ref. A label
+# rather than a path filter because this lane spends about 32 USD and takes
+# roughly two hours: it runs when somebody asks for it, never because a file
+# changed. Remove the label to stop it running on the next push.
 on:
   schedule:
     # 03:41 UTC on Sunday. Off the hour and off the canary's slot, and the two
@@ -17,11 +26,19 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
 
 permissions: {}
 
 jobs:
   headline:
+    # On a pull request this lane is opt-in and costly, so it runs only while
+    # the label is on. Every other trigger carries no label and runs as before.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark: headline')
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read
