@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { HookInput } from '../../adapters/types';
+import { nativeSessionOf } from '../../lib/session';
 import { PRODUCTION_ORIGIN } from '../../lib/production-origin';
 import { runFire } from '../fire';
 import { getMark, setMark } from '../gates';
@@ -67,7 +68,8 @@ function shell(s: Shell): HookInput {
   return hookInput({
     event: 'tool.after',
     native: { event: 'PostToolUse' },
-    session: actor.session,
+    // The input carries the NATIVE id; `actorOf` prefixes the harness back on.
+    session: nativeSessionOf(actor.session),
     cwd: s.cwd ?? repo,
     ...(actor.agent !== '' ? { agent: actor.agent } : {}),
     tool: {
@@ -341,12 +343,18 @@ describe('the record, once closed', () => {
 
   it("closes only on this actor's own edit, and the shown record becomes the second close", async () => {
     const id = await record();
-    const other: Actor = { session: 's2', agent: 'c2c2c2c2' };
+    const other: Actor = { session: 'claude:s2', agent: 'c2c2c2c2' };
     shelf([[]]);
     await fire(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT, actor: other }));
     expect(getMark(db, other, 'replayed:pnpm')).toBe(`[${id}]`);
     // Its session's lead edits the named file; the child passes: not its edit.
-    setMark(db, { session: 's2', agent: '' }, 'edited:y', join(repo, 'src/migrate.ts'), NOW + 30);
+    setMark(
+      db,
+      { session: 'claude:s2', agent: '' },
+      'edited:y',
+      join(repo, 'src/migrate.ts'),
+      NOW + 30,
+    );
     await fire(
       shell({ command: 'pnpm db:migrate', ok: true, actor: other }),
       deps(TEAM, () => NOW + 40),
@@ -364,8 +372,8 @@ describe('the record, once closed', () => {
         .prepare('SELECT session, agent_id FROM pairing_closes WHERE pairing_id = ? ORDER BY at')
         .all(id),
     ).toEqual([
-      { session: 's1', agent_id: null },
-      { session: 's2', agent_id: 'c2c2c2c2' },
+      { session: 'claude:s1', agent_id: null },
+      { session: 'claude:s2', agent_id: 'c2c2c2c2' },
     ]);
   });
 });

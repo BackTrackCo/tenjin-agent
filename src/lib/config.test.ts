@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -238,8 +238,31 @@ describe('install block', () => {
   });
 
   it('reads back the recorded targets', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'shared'] } }));
-    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'shared']);
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['claude', 'codex'] } }));
+    expect((await loadConfig(dir)).install.harness).toEqual(['claude', 'codex']);
+  });
+
+  it.each([
+    [['shared'], ['codex']],
+    [
+      ['claude', 'shared'],
+      ['claude', 'codex'],
+    ],
+    [['codex', 'shared'], ['codex']],
+    [
+      ['shared', 'claude', 'shared', 'codex', 'claude'],
+      ['claude', 'codex'],
+    ],
+    [[], []],
+  ])('normalizes the stored harnesses %j at the raw read edge', async (harness, expected) => {
+    const stored = { install: { harness } };
+    await writeFile(configFile(), JSON.stringify(stored));
+
+    expect((await loadRawConfig(dir)).install?.harness).toEqual(expected);
+    expect((await loadConfig(dir)).install.harness).toEqual(expected);
+    // Reading is not a config write: the next locked writer performs the durable
+    // migration, while read-only commands leave the operator's file untouched.
+    expect(JSON.parse(await readFile(configFile(), 'utf8'))).toEqual(stored);
   });
 
   it('reads back a recorded free-verb decline as the exact declined rules', async () => {
@@ -266,7 +289,7 @@ describe('install block', () => {
   });
 
   it('rejects a harness name install could not have written', async () => {
-    await writeFile(configFile(), JSON.stringify({ install: { harness: ['cursor'] } }));
+    await writeFile(configFile(), JSON.stringify({ install: { harness: ['shared', 'cursor'] } }));
     await expect(loadConfig(dir)).rejects.toBeInstanceOf(CliError);
   });
 

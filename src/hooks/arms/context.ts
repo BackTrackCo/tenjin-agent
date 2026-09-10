@@ -41,9 +41,11 @@ export const BASH_START = 'bashstart';
 export const EDITED_PREFIX = 'edited:';
 const ACTIVITY_PREFIX = 'activity:';
 
-function filePathOf(ctx: FireContext): string {
-  const value = ctx.input.tool?.input.file_path;
-  return typeof value === 'string' && value.length <= 4096 ? value : '';
+/** Every path the edit names, bounded; an adapter that found none leaves nothing to mark. */
+function editedPaths(ctx: FireContext): string[] {
+  const tool = ctx.input.tool;
+  if (tool?.kind !== 'edit') return [];
+  return tool.paths.filter((p) => p.length > 0 && p.length <= 4096);
 }
 
 export const contextArm: Arm = {
@@ -74,13 +76,14 @@ export const contextArm: Arm = {
       setMark(db, ctx.actor, BASH_START, String(clock()), clock());
       return;
     }
-    const path = filePathOf(ctx);
-    if (kind === 'edit' && path.length > 0) {
-      // Upserted, so a re-edit moves `marks.at` and nothing else. The VALUE is
-      // the path as given: the failure arm's close rule asks whether it is
-      // under the checkout (tenjin-agent#269), compares its basename with the
-      // files the error named, records it repo-relative, and reads the time
-      // off `marks.at`.
+    // One mark per path, all in this fire: a patch that touches three files is
+    // one native call and one row, and every file it named is attempted work.
+    // Upserted, so a re-edit moves `marks.at` and nothing else. The VALUE is
+    // the path as given: the failure arm's close rule asks whether it is
+    // under the checkout (tenjin-agent#269), compares its basename with the
+    // files the error named, records it repo-relative, and reads the time
+    // off `marks.at`.
+    for (const path of editedPaths(ctx)) {
       setMark(db, ctx.actor, EDITED_PREFIX + pathKey(path), stripControl(path), clock());
     }
     // Content-free, and the LEAD's only: one mark for inspection and one for

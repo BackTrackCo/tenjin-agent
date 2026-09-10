@@ -1,4 +1,5 @@
 import type { HookInput } from '../adapters/types';
+import { sessionKey } from '../lib/session';
 import { getMark } from './gates';
 import type { LoopDb } from './store';
 import type { Actor } from './types';
@@ -7,17 +8,22 @@ import type { Actor } from './types';
 export const STARTED_MARK = 'started';
 
 /**
- * `actor = (session, agent ?? '')`. Three answers: absent agent is the lead; a
- * valid one is a child; a present-but-invalid one never reaches here (the
- * adapter's `decode` returns null and the fire is dropped, so a child's work is
- * never filed under the lead).
+ * `actor = (<harness>:<session>, agent ?? '')`. Three answers: absent agent is
+ * the lead; a valid one is a child; a present-but-invalid one never reaches
+ * here (the adapter's `decode` returns null and the fire is dropped, so a
+ * child's work is never filed under the lead). The session is namespaced HERE,
+ * once, by the same helper the CLI's ingress uses (`lib/session.ts`), so a
+ * hook fire and a `tenjin search` inside the same thread share one actor.
  *
  * One addition: an `agent.stop` needs a `started` mark from that actor's
  * `agent.start`. A stop with no start is a phantom (68% of last week's
  * SubagentStop rows had no SubagentStart row) and exits before any row.
  */
 export function actorOf(input: HookInput, db: LoopDb): Actor | null {
-  const actor: Actor = { session: input.session, agent: input.agent ?? '' };
+  const actor: Actor = {
+    session: sessionKey(input.harness, input.session),
+    agent: input.agent ?? '',
+  };
   if (input.event === 'agent.stop' && getMark(db, actor, STARTED_MARK) === null) return null;
   return actor;
 }

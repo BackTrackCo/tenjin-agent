@@ -150,7 +150,18 @@ describe('runSearch', () => {
       fetchImpl: fetch,
       env: { CLAUDE_CODE_SESSION_ID: 'harness-session' },
     });
-    expect((await latest())?.sessionId).toBe('harness-session');
+    expect((await latest())?.sessionId).toBe('claude:harness-session');
+    expect((await latest())?.agentId).toBeUndefined();
+  });
+
+  it('stamps the Codex session and the child thread it ran inside', async () => {
+    const { fetch } = stub(HIT);
+    await runSearch({ question: 'q' }, makeCtx(), {
+      fetchImpl: fetch,
+      env: { CODEX_SESSION_ID: 'root-1', CODEX_THREAD_ID: 'child-2' },
+    });
+    expect((await latest())?.sessionId).toBe('codex:root-1');
+    expect((await latest())?.agentId).toBe('child-2');
   });
 
   // Explicit operator override beats the ambient one.
@@ -170,7 +181,7 @@ describe('runSearch', () => {
       fetchImpl: fetch,
       env: { TENJIN_SESSION_ID: '  ', CLAUDE_CODE_SESSION_ID: 'harness-session' },
     });
-    expect((await latest())?.sessionId).toBe('harness-session');
+    expect((await latest())?.sessionId).toBe('claude:harness-session');
   });
 
   // The candidate line prices in dollars, like the browse hint below it: a human

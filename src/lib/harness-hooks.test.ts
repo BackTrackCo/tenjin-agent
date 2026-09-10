@@ -21,7 +21,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     },
   };
 });
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { platform, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -29,13 +29,15 @@ import type { DaemonStart } from '../daemon/control';
 import { HARNESS_MS } from '../hooks/constants';
 import { claudeSettingsPath } from './harness-permissions';
 import {
-  hasClaudeHooks,
+  hasHooks,
   hookBundlesPresent,
   ownsHookEntry,
   pruneOurHandlers,
   registeredHooks,
-  writeClaudeHooks,
+  writeHooks,
 } from './harness-hooks';
+import { claudeAdapter } from '../adapters/claude';
+import { codexAdapter } from '../adapters/codex';
 import { daemonPidPath, daemonTokenPath, hooksDir, shimBundlePath } from './paths';
 
 let home: string;
@@ -106,9 +108,23 @@ async function fakeStart(dataDir: string, port = PORT): Promise<DaemonStart> {
 }
 
 function write(overrides: { start?: (d: string) => Promise<DaemonStart> } = {}) {
-  return writeClaudeHooks({
+  return writeHooks({
+    adapter: claudeAdapter,
     homeDir: home,
     dataDir: data,
+    env: {},
+    start: overrides.start ?? ((d) => fakeStart(d)),
+  });
+}
+
+const codexHooksPath = (): string => join(home, '.codex', 'hooks.json');
+
+function writeCodex(overrides: { start?: (d: string) => Promise<DaemonStart> } = {}) {
+  return writeHooks({
+    adapter: codexAdapter,
+    homeDir: home,
+    dataDir: data,
+    env: {},
     start: overrides.start ?? ((d) => fakeStart(d)),
   });
 }
@@ -133,7 +149,7 @@ function allEntries(s: Record<string, unknown>): [string, Entry][] {
   return out;
 }
 
-describe('writeClaudeHooks: the eleven entries, whole', () => {
+describe('writeHooks (claude): the eleven entries, whole', () => {
   it('registers nine http and two command entries and nothing else', async () => {
     const result = await write();
     expect(result.skipped).toBeUndefined();
@@ -249,7 +265,7 @@ describe('writeClaudeHooks: the eleven entries, whole', () => {
   });
 });
 
-describe('writeClaudeHooks: the cutover', () => {
+describe('writeHooks (claude): the cutover', () => {
   it('replaces an old-style install rather than duplicating it', async () => {
     // What a pre-daemon machine carries: `command` entries naming the generated
     // scripts. They are ours by filename, so they are dropped, not doubled.
@@ -275,14 +291,20 @@ describe('writeClaudeHooks: the cutover', () => {
 
   it('drops an entry of ours whose port has moved, and re-adds it on the new one', async () => {
     await write({ start: (d) => fakeStart(d, 40_001) });
-    expect(await registeredHooks(home, data)).toEqual({ port: 40_001, entries: 11 });
+    expect(await registeredHooks(claudeAdapter, home, data, {})).toMatchObject({
+      port: 40_001,
+      entries: 11,
+    });
     await write({ start: (d) => fakeStart(d, 40_002) });
     expect(allEntries(await readSettings())).toHaveLength(11);
-    expect(await registeredHooks(home, data)).toEqual({ port: 40_002, entries: 11 });
+    expect(await registeredHooks(claudeAdapter, home, data, {})).toMatchObject({
+      port: 40_002,
+      entries: 11,
+    });
   });
 });
 
-describe('writeClaudeHooks: refusals', () => {
+describe('writeHooks (claude): refusals', () => {
   it('writes nothing when the daemon will not start', async () => {
     const result = await write({
       start: () => Promise.reject(new Error('Daemon did not start: spawn backoff')),
@@ -380,16 +402,120 @@ describe('ownership', () => {
     const entry = settings.hooks.PreToolUse?.[0];
     entry?.hooks.unshift({ type: 'http', url: 'hooks/x' });
     await writeSettings(settings);
-    expect((await registeredHooks(home, data)).port).toBe(41_234);
+    expect((await registeredHooks(claudeAdapter, home, data, {})).port).toBe(41_234);
   });
 
-  it('hasClaudeHooks answers no for a missing, unreadable or foreign settings file', async () => {
-    expect(await hasClaudeHooks(home, data)).toBe(false);
+  it('hasHooks answers no for a missing, unreadable or foreign settings file', async () => {
+    expect(await hasHooks(claudeAdapter, home, data, {})).toBe(false);
     await writeSettings('{ not json');
-    expect(await hasClaudeHooks(home, data)).toBe(false);
+    expect(await hasHooks(claudeAdapter, home, data, {})).toBe(false);
     await writeSettings({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'node x' }] }] } });
-    expect(await hasClaudeHooks(home, data)).toBe(false);
+    expect(await hasHooks(claudeAdapter, home, data, {})).toBe(false);
     await write();
-    expect(await hasClaudeHooks(home, data)).toBe(true);
+    expect(await hasHooks(claudeAdapter, home, data, {})).toBe(true);
+    // Per harness: wiring Claude says nothing about Codex.
+    expect(await hasHooks(codexAdapter, home, data, {})).toBe(false);
+  });
+});
+
+describe('writeHooks (codex): seven command entries in hooks.json', () => {
+  async function readCodex(): Promise<Record<string, unknown>> {
+    return JSON.parse(await readFile(codexHooksPath(), 'utf8')) as Record<string, unknown>;
+  }
+
+  it('writes the plan through the shim, no URL and no token, mode 0600', async () => {
+    const result = await writeCodex();
+    expect(result).toMatchObject({
+      harness: 'codex',
+      path: codexHooksPath(),
+      entries: 7,
+      wrote: true,
+    });
+    expect(result.url).toBeUndefined();
+    expect(result.activation).toContain('/hooks');
+    const entries = allEntries(await readCodex());
+    expect(entries).toHaveLength(7);
+    for (const [, entry] of entries) {
+      expect(entry.hooks[0]?.type).toBe('command');
+      expect(entry.hooks[0]?.command).toContain(shimBundlePath(data));
+      expect(entry.hooks[0]?.command).toContain('--harness codex');
+      expect(entry.hooks[0]?.timeout).toBe(HARNESS_MS / 1000);
+    }
+    expect(await readFile(codexHooksPath(), 'utf8')).not.toContain(TOKEN);
+    if (platform() !== 'win32') {
+      expect((await stat(codexHooksPath())).mode & 0o777).toBe(0o600);
+    }
+    // Nothing of Claude's was touched.
+    expect(existsSync(settingsPath())).toBe(false);
+  });
+
+  it('a second run is byte-identical and does not rewrite the file', async () => {
+    await writeCodex();
+    const before = await readFile(codexHooksPath(), 'utf8');
+    const again = await writeCodex();
+    expect(again.wrote).toBe(false);
+    expect(await readFile(codexHooksPath(), 'utf8')).toBe(before);
+  });
+
+  it('keeps a stranger’s entry and a hand-merged handler, and lands under CODEX_HOME', async () => {
+    const codexHome = join(home, 'elsewhere');
+    const path = join(codexHome, 'hooks.json');
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      path,
+      JSON.stringify({
+        description: 'mine',
+        hooks: {
+          Stop: [{ hooks: [{ type: 'command', command: 'node /other/stop.mjs' }] }],
+          PreToolUse: [
+            {
+              matcher: 'Bash',
+              hooks: [
+                { type: 'command', command: 'node /other/pre.mjs' },
+                { type: 'command', command: `node ${shimBundlePath(data)} --harness codex` },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const result = await writeHooks({
+      adapter: codexAdapter,
+      homeDir: home,
+      dataDir: data,
+      env: { CODEX_HOME: codexHome },
+      start: (d) => fakeStart(d),
+    });
+    // The write resolves symlinks (macOS tmp is one), so compare real paths.
+    expect(await realpath(result.path ?? '')).toBe(await realpath(path));
+    const file = JSON.parse(await readFile(path, 'utf8')) as {
+      description: string;
+      hooks: Record<string, Entry[]>;
+    };
+    expect(file.description).toBe('mine');
+    expect(file.hooks.Stop?.[0]?.hooks[0]?.command).toBe('node /other/stop.mjs');
+    expect(file.hooks.Stop).toHaveLength(2);
+    // Their handler stays in the entry ours was hand-merged into; ours moves to the plan's entry.
+    expect(file.hooks.PreToolUse?.[0]?.hooks).toEqual([
+      { type: 'command', command: 'node /other/pre.mjs' },
+    ]);
+    expect(file.hooks.PreToolUse).toHaveLength(2);
+    expect(
+      await registeredHooks(codexAdapter, home, data, { CODEX_HOME: codexHome }),
+    ).toMatchObject({
+      path,
+      entries: 7,
+      port: null,
+    });
+    expect(existsSync(codexHooksPath())).toBe(false);
+  });
+
+  it('both harnesses on one machine: two files, one daemon, one hooks dir', async () => {
+    const claude = await write();
+    const codex = await writeCodex();
+    expect(claude.daemon?.port).toBe(codex.daemon?.port);
+    expect(claude.hooksDir).toBe(codex.hooksDir);
+    expect(allEntries(await readSettings())).toHaveLength(11);
+    expect(allEntries(await readCodex())).toHaveLength(7);
   });
 });

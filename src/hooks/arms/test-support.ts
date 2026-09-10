@@ -17,8 +17,10 @@ import type { Actor, Arm, Deps, FireContext, FireClock, KernelConfig } from '../
 
 export const NOW = 1_700_000_000_000;
 
-export const LEAD: Actor = { session: 's1', agent: '' };
-export const CHILD: Actor = { session: 's1', agent: 'a1b2c3d4' };
+/** The stored actors of the `s1` session `hookInput` names: `actorOf` prefixes
+ *  the harness, so a test that seeds rows must seed them under these. */
+export const LEAD: Actor = { session: 'claude:s1', agent: '' };
+export const CHILD: Actor = { session: 'claude:s1', agent: 'a1b2c3d4' };
 
 const dirs: string[] = [];
 const open: LoopDb[] = [];
@@ -58,8 +60,12 @@ export function kernelConfig(
   };
 }
 
-export function toolInput(kind: ToolKind, input: Record<string, unknown>): HookTool {
-  return { name: kind, kind, input };
+/** A canonical tool of `kind`, named after it, with the fields that kind carries. */
+export function toolInput<K extends ToolKind>(
+  kind: K,
+  fields: Omit<Extract<HookTool, { kind: K }>, 'kind' | 'name'>,
+): HookTool {
+  return { name: kind, kind, ...fields } as unknown as HookTool;
 }
 
 export function hookInput(over: Partial<HookInput> = {}): HookInput {
