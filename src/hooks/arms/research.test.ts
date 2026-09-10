@@ -25,11 +25,11 @@ function searchInput(query: string) {
   });
 }
 
-function fetchInput(input: Record<string, unknown>) {
+function fetchInput(input: { url?: string; prompt?: string }) {
   return hookInput({
     event: 'tool.before',
     native: { event: 'PreToolUse' },
-    tool: toolInput('fetch', input),
+    tool: toolInput('fetch', { url: input.url ?? '', prompt: input.prompt ?? '' }),
   });
 }
 
@@ -217,7 +217,7 @@ describe('fetchQuestion', () => {
   it('is empty for a non-http url and for a malformed one', () => {
     expect(fetchQuestion({ url: 'file:///etc/passwd' })).toBe('');
     expect(fetchQuestion({ url: 'not a url' })).toBe('');
-    expect(fetchQuestion({})).toBe('');
+    expect(fetchQuestion({ url: '' })).toBe('');
   });
 
   it("has no length rule: the search leg's 512 is the only bound", () => {

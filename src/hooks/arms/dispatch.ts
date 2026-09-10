@@ -9,9 +9,9 @@ import { lookupArm } from './lookup';
  * never saw that answer before writing the child's prompt, which is why this
  * handoff stays where the prompt-answer fallback went (decision 5).
  *
- * THE WORK ORDER GOES AS TYPED (decision 10): `tool_input.prompt`, masked, cut
- * at 512 by the leg. The description is a label, not a question, and is not
- * sent.
+ * THE WORK ORDER GOES AS TYPED (decision 10): the tool's `task`, masked, cut
+ * at 512 by the leg. A description is a label, not a question, and no adapter
+ * carries one.
  *
  * `deliver: 'log'` (decision D): the child gets the piece whole and the parent
  * is not told. If the parent is ever told, it is one sentence in `prose.ts`
@@ -31,10 +31,7 @@ export const dispatchArm: Arm = lookupArm({
   on: [{ event: 'tool.before', kind: 'dispatch' }],
   trigger: 'dispatch',
   enabled: (cfg) => cfg.hooks.subagent,
-  text: (input) => {
-    const prompt = input.tool?.input.prompt;
-    return typeof prompt === 'string' ? prompt.trim() : null;
-  },
+  text: (input) => (input.tool?.kind === 'dispatch' ? input.tool.task.trim() : null),
   shelves: ['team', 'public'],
   deliver: 'log',
   after(ctx, result, question) {

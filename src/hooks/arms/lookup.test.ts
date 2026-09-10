@@ -140,7 +140,7 @@ describe('lookupArm trigger', () => {
       arm,
       input: hookInput({
         event: 'tool.after',
-        tool: toolInput('read', { file_path: '/p/a.ts' }),
+        tool: toolInput('read', { paths: ['/p/a.ts'] }),
       }),
       config: kernelConfig(),
     });
