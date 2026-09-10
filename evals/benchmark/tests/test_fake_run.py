@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.benchmark import artifact, cli, executor, manifest, records, report, runner, schedule
+from evals.benchmark import FIXTURES, artifact, cli, executor, manifest, records, reduce, report, runner, schedule
 from evals.benchmark.manifest import ManifestError
 
 Run = tuple[Path, dict, dict]
@@ -166,3 +166,71 @@ def test_report_guard_refuses_private_strings() -> None:
         report.guard({"trials": [{"note": "/Users/someone/.claude/transcript.jsonl"}]})
     with pytest.raises(report.ReportError):
         report.guard({"prompt": "x"})
+
+
+# The null half of the pair. The shipped fake manifest scripts success and the
+# cases above assert it; a fake path that only ever succeeds cannot tell a
+# working verifier from one that returns `pass` whatever it is handed. So the
+# same chain is driven once more over a manifest identical but for its
+# executor, and every trial of it must FAIL.
+
+NOP = FIXTURES / "fake" / "nop-manifest.json"
+
+
+@pytest.fixture(scope="module")
+def nop_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, dict]:
+    out = tmp_path_factory.mktemp("nop-run") / "run"
+    return out, cli.fake_run(out, NOP)
+
+
+def test_the_null_agent_fails_every_trial(nop_run: tuple[Path, dict]) -> None:
+    out, first = nop_run
+    assert set(first["outcomes"].values()) == {"fail"}
+    for path in (out / "records").glob("*.json"):
+        record = json.loads(path.read_text())
+        records.validate(record)
+        assert record["outcome"] == "fail"
+        assert record["verifier"] == {"id": "fake_answer_file", "exit_code": 1}
+
+
+def test_the_null_agent_scores_zero_and_is_still_scored(nop_run: tuple[Path, dict]) -> None:
+    out, _ = nop_run
+    arms = cli.do_reduce(out)["arms"]
+    assert {arm_id: arm["pass_rate"] for arm_id, arm in arms.items()} == {"off": 0.0, "on": 0.0}
+    # A failed task keeps every token it spent, so a zero pass rate is a
+    # result rather than an absence: the arm has attempts and a token figure.
+    for arm in arms.values():
+        assert arm["attempts"] == TRIALS // len(arms)
+        assert arm["tokens_per_attempt"]
+
+
+def test_a_fresh_verifier_agrees_the_null_agent_failed(nop_run: tuple[Path, dict]) -> None:
+    # The half `verify` owns. A verifier that passed unconditionally would
+    # disagree with every recorded `fail` here rather than reproducing it.
+    out, _ = nop_run
+    verdicts = cli.do_verify(out)
+    assert verdicts["disagreements"] == []
+    assert {row["status"] for row in verdicts["trials"].values()} == {"fail"}
+
+
+# The same seam over a corpus no simulator produced. `support.fake_corpus`
+# writes a finished 3-task, 2-arm, 2-repeat run straight to disk, which is a
+# shape the shipped 1-task fake manifest cannot reach: the reducer weighs
+# several tasks and the comparison earns an interval. Nothing here re-derives
+# the arithmetic test_reduce.py owns; what it holds is that each hop hands the
+# next one the same run.
+
+
+def test_the_reduce_and_report_seam_carries_one_corpus_end_to_end(corpus) -> None:
+    manifest_obj, digest, accepted, excluded = corpus
+    assert len(accepted) == len(schedule.expand(manifest_obj))
+    reduction = reduce.reduce(accepted, excluded, "off", manifest_obj.data["seed"], manifest_obj.arms)
+    published = report.project(manifest_obj.data, manifest_obj.hash, digest, reduction, accepted)
+    assert published["manifest_hash"] == manifest_obj.hash
+    assert published["schedule_hash"] == digest
+    assert len(published["arms"]) == len(manifest_obj.arms)
+    assert set(published["arms"]["on"]["tasks"]) == {task["id"] for task in manifest_obj.tasks}
+    interval = published["comparisons"]["on"]["interval"]
+    assert interval["tasks"] == len(manifest_obj.tasks)
+    assert interval["low"] <= interval["point"] <= interval["high"]
+    assert [point["reuse"] for point in published["arms"]["on"]["amortization"]] == list(reduce.REUSE_POINTS)

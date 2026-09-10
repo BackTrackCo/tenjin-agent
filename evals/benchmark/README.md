@@ -56,8 +56,8 @@ the suite builds.
 | `discovery.py`          | the discovery counters read off a settled trial                   | `test_discovery.py`                  |
 | `cli.py`, `selftest.py` | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
 
-The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
-bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
+The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, the null
+manifest beside it, and the bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
 transcript). The real-repository fixtures, their vendored archive, the regression baseline and
 the code-owned hidden layers arrive with the live executor in the layer above.
 
@@ -234,11 +234,21 @@ flat, retry, categories, null-zero, fallback, malformed, duplicate, capped, capp
 capped-budget, ambiguous, mismatch, side-models): the frozen row shapes the Claude adapter reads.
 Real transcripts are never read, and the `loop.db` fixture is built at test time from the
 product's own `LOOP_DDL` in `src/hooks/store.ts`. `fixtures/fake/` holds `manifest.json` and
-`repo/`, which `fake-run` drives, and `bootstrap-golden.json`, the frozen `paired_bootstrap`
-output for four seeded inputs, which is the reducer's pre-registration freeze of the interval
-method. Everything else the offline suite needs is built: `tests/support.py` writes manifests,
+`repo/`, which `fake-run` drives, `nop-manifest.json`, which is that manifest with the null
+executor and whose every trial must FAIL, and `bootstrap-golden.json`, the seeded inputs and
+deterministic fields of `paired_bootstrap`. Everything else the offline suite needs is built: `tests/support.py` writes manifests,
 sessions, records, and a whole finished run (`fake_corpus`) through the same code paths a real
 run uses, so regenerating a fixture moves its expectation with it.
+
+Two rules about what the offline suite pins. The fake path asserts BOTH polarities: the shipped
+manifest's every trial passes, and `nop-manifest.json`, identical but for its executor, has to
+fail every trial and score 0.0, because a chain that only ever succeeds cannot tell a working
+verifier from one that returns `pass` whatever it is handed. And the bootstrap interval is
+asserted as invariants, `low <= point <= high` with `low < high` whenever two ratios differ,
+rather than by pinned endpoints: `point` is a plain mean and is a fact, while the endpoints are
+resample means, so freezing them froze `random.Random`'s draw order rather than the contract. The
+amortization series at reuse 1, 2, 5 and 10 stays pinned exactly, because it is deterministic
+arithmetic over the reduction and a moved value there is a real change.
 
 The operator-side manifests, the regression baseline, the frozen Vitest task fixture, the
 seeded lessons and the code-owned hidden layers under `hidden/<task>/hidden-tests/` arrive with
