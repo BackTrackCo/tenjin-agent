@@ -13,18 +13,28 @@ module exists to remove. Before signalling, a record is checked against the live
 process: same start time and same group, or the record is dropped unkilled,
 because a pid is reused and killing a recycled one kills a stranger.
 
-A live trial runs inside a Harbor compose project, which outlives this process
-entirely. Measured 2026-09-10 by SIGKILLing a run mid-attempt: both the trial
-container and its egress sidecar were still up, and so was an orphaned
-host-side `docker compose exec` client. That client is a child of this process
-rather than a session of its own, so the pid ledger below cannot record it
-(`register` refuses a pid in this group). Removing the project is what reaches
-all three: the containers go, and the client exits with the exec it was
-waiting on. So a record may also name a container, which is the compose
-project to sweep, and a record that names only that carries no pid to check.
+The whole module is for one case: the harness dying without running its own
+`finally`. Every ordinary exit, an interrupt included, already tears down what
+the trial started. Both lanes were measured on 2026-09-10 by SIGKILLing a run
+mid-trial, and both leave something behind.
 
-Both halves are live. The offline lane still spawns a real child in its own
-session and is reaped by process group; the Harbor lane is reaped by project.
+The offline lane leaves processes. The trial's child was reparented to pid 1
+and stayed alive, its own grandchild with it, and nothing on the machine but
+this ledger named either. `survivors` found the group from the record and
+`reap` killed both. That is the reason to keep a ledger rather than a pattern,
+and the reason a record is written before the process is waited on.
+
+The live lane leaves a compose project, which outlives this process entirely:
+the trial container, its egress sidecar, the network, and an orphaned host-side
+`docker compose exec` client. `container.remove_project` reaches all four in
+one call, the client included, because it exits with the container it was
+waiting on; measured by running it against a killed attempt and finding
+nothing left. The client is a child of this process rather than a session of
+its own, so the pid half could never have recorded it (`register` refuses a pid
+in this group). What the ledger contributes is the NAME: after the kill,
+nothing else on disk says which compose project to remove. So a record may name
+a container instead of a pid, and one that names only that carries no pid to
+check.
 """
 
 from __future__ import annotations
