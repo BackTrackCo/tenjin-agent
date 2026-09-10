@@ -11,9 +11,9 @@
     "image": "operator-machine",
     "dependency_lock_hash": "sha256:none",
     "permission_mode": "dontAsk",
-    "wall_clock_s": 600,
-    "turn_budget": 40,
-    "max_budget_usd": 0.75,
+    "wall_clock_s": 1500,
+    "turn_budget": 80,
+    "max_budget_usd": 2.5,
     "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
     "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
     "allowed_tools": [
@@ -114,6 +114,24 @@
       "fixture_hash": "sha256:5fdf92945afa2e9cb61bee34ffb4c7e2657a9d9bd4d890ea63e30755416fd84c",
       "verifier": "node_test_core",
       "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "shadow",
+      "family": "stale-build-artifact",
+      "transfer_distance": "same_task",
+      "fixture": "shadow",
+      "fixture_hash": "sha256:797f7257f48069b877bc0932fb7a3ff13610ab2c86897205d46c95c5b3aa9d9c",
+      "verifier": "node_test_shadow",
+      "prompt": "Make tests/shadow.test.mjs pass by fixing the @fixture/range package, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "ambient",
+      "family": "invisible-whitespace-mismatch",
+      "transfer_distance": "same_task",
+      "fixture": "ambient",
+      "fixture_hash": "sha256:7462f9bc277872f008f8eeb40c08c282e599d2279cbeca8b5a1f0bfb3e97a304",
+      "verifier": "node_test_ambient",
+      "prompt": "Fix src/price.mjs so that tests/ambient.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     }
   ],
   "arms": [
