@@ -480,9 +480,8 @@ def live_run(
             raise CliError(str(error)) from error
     # Egress is per attempt under Harbor: each trial's container shares a
     # network namespace with its own sidecar, which holds this allowlist. There
-    # is nothing run-level to start, so what used to be a proxy and a network in
-    # the process ledger is now each attempt's compose project, registered by
-    # the spawn that creates it.
+    # is nothing run-level to start, so the only thing a run records is each
+    # attempt's compose project, written by the spawn that creates it.
     #
     # The allowlist is still checked once, here, before anything is spent: an
     # empty one, or a host kernel Harbor would silently give up enforcing on,
