@@ -309,6 +309,29 @@ def test_the_projection_carries_no_usage_body_or_delivery_detail(corpus, project
     assert "delivery" not in trial
 
 
+def test_the_trial_rows_sum_to_their_arm_total(corpus, project: Project, reduction: dict) -> None:
+    """A trial's tokens are the reducer's numerator, not the native usage alone.
+
+    The treatment arm carries a consumer-phase receipt on every attempt and one
+    capture receipt on top. A row that dropped the first would sum below its
+    arm; a row that added the second would sum above it.
+    """
+    _manifest, _digest, accepted, _excluded = corpus
+    published = project()
+    scored: dict[str, int] = {}
+    for trial in published["trials"]:
+        if trial["outcome"] != "invalid":
+            scored[trial["arm_id"]] = scored.get(trial["arm_id"], 0) + trial["tokens"]
+    assert scored == {arm_id: arm["tokens"] for arm_id, arm in reduction["arms"].items()}
+    # The consumer receipt is inside the row and the capture receipt is not.
+    treatment = next(row for row in published["trials"] if row["arm_id"] == "on" and row["auxiliary_receipts"] == 2)
+    record = accepted[treatment["trial_id"]]
+    native = sum(item["input_total"] + item["output_total"] for item in record["usage"])
+    assert treatment["tokens"] == native + 500
+    assert reduce_module.capture_tokens([record]) == 5000
+    report.guard(published)
+
+
 def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(corpus, project: Project) -> None:
     _manifest, _digest, accepted, _excluded = corpus
     records_in = {}
