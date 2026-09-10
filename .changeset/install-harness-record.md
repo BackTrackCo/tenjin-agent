@@ -18,3 +18,11 @@ harness detected here reads this".
 Doctor's repair command names the selected harness, or each detected harness on
 a home that predates the selection record, instead of suggesting a bare
 `tenjin install` that would prompt again.
+
+This intentionally changes scripted installs: a bare `tenjin install` in a
+non-interactive shell now refuses before writing unless it receives one or more
+explicit `--harness claude` / `--harness codex` flags, instead of silently
+targeting the shared skills directory. Existing `install --refresh` calls,
+including those started by `tenjin update`, remain prompt-free and unaffected. A
+persisted legacy `shared` selection is read as `codex`, its lossless replacement,
+so upgrading does not invalidate config.

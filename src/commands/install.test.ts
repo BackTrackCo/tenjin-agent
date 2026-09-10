@@ -808,6 +808,15 @@ describe('runInstall: recording the harness selection', () => {
     expect(await recorded()).toEqual(['claude']);
   });
 
+  it('an explicit run replaces a migrated legacy shared record', async () => {
+    await writeFile(
+      join(data, 'config.json'),
+      JSON.stringify({ install: { harness: ['shared', 'codex'] } }),
+    );
+    await runInstall({ harness: ['claude'] }, makeCtx(), deps());
+    expect(await recorded()).toEqual(['claude']);
+  });
+
   it('records a selection made through detection and the prompt', async () => {
     await mkdir(join(home, '.claude'), { recursive: true });
     await runInstall(

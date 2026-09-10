@@ -191,6 +191,25 @@ describe('runConfigList', () => {
     });
   });
 
+  it('the next locked config write persists a legacy shared harness as codex', async () => {
+    await writeFile(
+      configFile(),
+      JSON.stringify({
+        install: { harness: ['shared', 'codex', 'shared'] },
+        future: { kept: true },
+      }),
+    );
+
+    await persistFreeVerbsDeclined(dir, ['Bash(tenjin search:*)']);
+    expect(await readRawFile()).toEqual({
+      install: {
+        harness: ['codex'],
+        freeVerbsDeclined: ['Bash(tenjin search:*)'],
+      },
+      future: { kept: true },
+    });
+  });
+
   it('preserves an unknown key (e.g. a newer CLI block) through set', async () => {
     // An older binary must not strip a config block a newer CLI wrote (e.g. B3's
     // publish.*): set a known key and assert the unknown one still round-trips.

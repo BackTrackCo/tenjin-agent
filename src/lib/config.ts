@@ -4,6 +4,7 @@ import { CliError } from './errors';
 import { PRODUCTION_ORIGIN } from './production-origin';
 import { configPath } from './paths';
 import { HARNESSES } from '../adapters/types';
+import type { Harness } from '../adapters/types';
 import { writeFileAtomic } from './atomic-json';
 
 /** A non-negative integer string in USDC atomic units (6-decimal base). */
@@ -216,6 +217,27 @@ const InstallConfigSchema = z.object({
 });
 
 /**
+ * `shared` was a real `install --harness` value before the harness selector was
+ * narrowed to actual harnesses. It targeted the same ~/.agents/skills directory
+ * as Codex, so the lossless upgrade is `codex`. Normalize at the raw parse edge:
+ * commands that intentionally consume loadRawConfig directly must never see the
+ * superseded value, and a later merge-write naturally persists the current shape.
+ */
+const STORED_INSTALL_HARNESSES = [...HARNESSES, 'shared'] as const;
+type StoredInstallHarness = (typeof STORED_INSTALL_HARNESSES)[number];
+
+export function resolveInstallHarness(
+  value: readonly StoredInstallHarness[] | undefined,
+): Harness[] {
+  const normalized = new Set(value?.map((harness) => (harness === 'shared' ? 'codex' : harness)));
+  return HARNESSES.filter((harness) => normalized.has(harness));
+}
+
+const RawInstallHarnessSchema = z
+  .array(z.enum(STORED_INSTALL_HARNESSES))
+  .transform(resolveInstallHarness);
+
+/**
  * The persisted config shape. Spend keys are stored atomic (accepted as decimal
  * USD at the command edge, see lib/money); `confirm` is the stored form
  * "always" | "above:<atomic>". These are client-enforced guardrails, not a
@@ -299,7 +321,10 @@ export type Config = z.infer<typeof ConfigSchema>;
  * a boolean carries no per-rule information to recover.
  */
 const RawInstallConfigSchema = InstallConfigSchema.partial()
-  .extend({ freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional() })
+  .extend({
+    harness: RawInstallHarnessSchema.optional(),
+    freeVerbsDeclined: z.union([z.array(z.string()), z.boolean()]).optional(),
+  })
   .passthrough();
 
 /**
