@@ -76,11 +76,14 @@ class CliError(RuntimeError):
 # outside this tuple is a defect, and a defect keeps its traceback.
 REFUSALS = (
     CliError,
+    artifact.ArtifactError,
     artifact.IsolationError,
     executor.ExecutorError,
     executor.ProvisionError,
     manifest_module.ManifestError,
+    reap_module.ReapError,
     records.RecordError,
+    runner.ConcurrencyError,
     schedule.ScheduleError,
 )
 
@@ -499,7 +502,12 @@ def main(argv: list[str] | None = None) -> int:
     cleanup.add_argument("--run", required=True, type=Path)
     args = parser.parse_args(argv)
     if args.command == "cleanup":
-        json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
+        try:
+            payload = reap_module.reap(args.run)
+        except REFUSALS as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        json.dump(payload, sys.stdout, indent=2, sort_keys=True)
         sys.stdout.write("\n")
         return 0
     if args.command in ("summary", "regress", "verify", "reduce", "report"):
