@@ -7,14 +7,16 @@ The flags the workflow passes are unchanged: `--verbosity` picks pytest's quiet,
 default, or verbose reporting, `--groups` wraps the run in one GitHub Actions
 log group, and `--summary` appends the one-line verdict to a step summary file.
 
-pytest is the suite's only dependency, pinned in `requirements-test.txt`. It is
-imported here and nowhere else in the package, so every shipped command still
-runs on a bare standard-library interpreter.
+pytest and inline-snapshot are the suite's dependencies, pinned in
+`requirements-test.txt`. They are imported here and under `tests/` and nowhere
+else in the package, so every shipped command still runs on a bare
+standard-library interpreter.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import sys
 import time
 from pathlib import Path
@@ -50,6 +52,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--groups", action="store_true", help="wrap the run in a GitHub Actions log group")
     parser.add_argument("--summary", type=Path, help="append the verdict line here, such as $GITHUB_STEP_SUMMARY")
     args = parser.parse_args(argv)
+    # `find_spec` rather than an import: importing the plugin here would beat
+    # pytest to it and lose assertion rewriting inside it.
+    if importlib.util.find_spec("inline_snapshot") is None:
+        print(f"the benchmark self-test needs inline-snapshot; install it with\n  {INSTALL}", file=sys.stderr)
+        return 2
     try:
         import pytest
     except ModuleNotFoundError:

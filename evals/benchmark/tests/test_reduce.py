@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 import pytest
+from inline_snapshot import snapshot
 
 from evals.benchmark import FIXTURES, records, reduce as reduce_module, schedule
 from evals.benchmark.records import Excluded
@@ -129,18 +130,22 @@ def test_capture_cost_amortizes_at_reuse_1_2_5_and_10(amortized: dict) -> None:
     assert arm["capture_tokens"] == 5000
     # Capture leaves the per-attempt numerator and returns per use.
     assert arm["tokens_per_attempt"] == 8000
-    assert [(point["reuse"], point["capture_tokens_per_use"], point["tokens_per_attempt"]) for point in arm["amortization"]] == [
-        (1, 5000, 13000),
-        (2, 2500, 10500),
-        (5, 1000, 9000),
-        (10, 500, 8500),
-    ]
-    assert [(point["reuse"], point["token_ratio"]) for point in amortized["comparisons"]["on"]["amortized_token_ratio"]] == [
-        (1, 1.3),
-        (2, 1.05),
-        (5, 0.9),
-        (10, 0.85),
-    ]
+    assert [(point["reuse"], point["capture_tokens_per_use"], point["tokens_per_attempt"]) for point in arm["amortization"]] == snapshot(
+        [
+            (1, 5000, 13000),
+            (2, 2500, 10500),
+            (5, 1000, 9000),
+            (10, 500, 8500),
+        ]
+    )
+    assert [(point["reuse"], point["token_ratio"]) for point in amortized["comparisons"]["on"]["amortized_token_ratio"]] == snapshot(
+        [
+            (1, 1.3),
+            (2, 1.05),
+            (5, 0.9),
+            (10, 0.85),
+        ]
+    )
 
 
 def test_the_producer_phase_and_the_capture_overhead_amortize_apart() -> None:

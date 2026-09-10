@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+from inline_snapshot import snapshot
 
 from evals.benchmark import artifact, executor
 from evals.benchmark.artifact import ArtifactError, Attestation, IsolationError
@@ -179,17 +180,19 @@ def test_an_attested_live_run_is_allowed_and_hashed() -> None:
 
 
 def test_an_unattested_live_run_can_never_be_publishable() -> None:
-    assert artifact.require_isolation(live=True, publishable=False, attestation=None) == {
-        "live": True,
-        "publishable": False,
-        "fresh_roots": True,
-        "attested_container": False,
-        "attestation_hash": None,
-        "automated": False,
-        "shelf_secret_present": False,
-        "shelf_origin": None,
-        "corpus": None,
-    }
+    assert artifact.require_isolation(live=True, publishable=False, attestation=None) == snapshot(
+        {
+            "live": True,
+            "publishable": False,
+            "fresh_roots": True,
+            "attested_container": False,
+            "attestation_hash": None,
+            "automated": False,
+            "shelf_secret_present": False,
+            "shelf_origin": None,
+            "corpus": None,
+        }
+    )
 
 
 def test_a_seeded_shelf_secret_is_non_publishable_by_construction() -> None:
