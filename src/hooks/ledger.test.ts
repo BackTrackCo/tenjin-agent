@@ -1,35 +1,11 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { Emit } from '../adapters/types';
 import { record, type FireRecord } from './ledger';
-import { openLoopDb, type LoopDb } from './store';
+import type { LoopDb } from './store';
+import { cleanup, freshDb } from './arms/test-support';
 import type { Actor, LegRow, Outcome } from './types';
 
-const dirs: string[] = [];
-const open: LoopDb[] = [];
-
-async function freshDb(): Promise<LoopDb> {
-  const dir = await mkdtemp(join(tmpdir(), 'tenjin-b-ledger-'));
-  dirs.push(dir);
-  const db = openLoopDb(dir);
-  open.push(db);
-  return db;
-}
-
-afterEach(async () => {
-  for (const db of open.splice(0)) {
-    try {
-      db.close();
-    } catch {
-      // Already closed by the test.
-    }
-  }
-  for (const dir of dirs.splice(0)) {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+afterEach(cleanup);
 
 const ACTOR: Actor = { session: 's1', agent: 'a7c31e9f' };
 
@@ -84,7 +60,7 @@ function legRows(db: LoopDb, id = 'f1'): Array<Record<string, unknown>> {
 
 describe('record', () => {
   it('writes every fires column for a full FireRecord, plus its legs', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const log = vi.fn();
     expect(record(db, log, fullRecord())).toBe(true);
 
@@ -131,7 +107,7 @@ describe('record', () => {
   it('round-trips legs.calibration, and leaves it NULL when the leg had none', async () => {
     // `lexical-v1` is the shelf saying the meaning step never ran; without the
     // column a spent embedding budget looks exactly like an empty shelf.
-    const db = await freshDb();
+    const db = freshDb();
     const lexical: LegRow = { ...LEG, shelf: 'public', calibration: 'lexical-v1' };
     const none: LegRow = { ...LEG, shelf: 'keys' };
     delete none.calibration;
@@ -145,7 +121,7 @@ describe('record', () => {
   });
 
   it('stamps "log:<id>" for a log-mode delivery', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     record(
       db,
       vi.fn(),
@@ -155,13 +131,13 @@ describe('record', () => {
   });
 
   it('writes NULL emit for a null Emit', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     record(db, vi.fn(), fullRecord({ emit: null }));
     expect(fireRow(db).emit).toBeNull();
   });
 
   it('writes outcome.detail to its OWN column, beside whatever question it had', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     record(
       db,
       vi.fn(),
@@ -177,14 +153,14 @@ describe('record', () => {
   });
 
   it('leaves question and error NULL when the fire had neither', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     record(db, vi.fn(), fullRecord({ question: undefined, outcome: { reason: 'no-question' } }));
     expect(fireRow(db).question).toBeNull();
     expect(fireRow(db).error).toBeNull();
   });
 
   it('does not throw on duplicate legs (same stage+shelf): ON CONFLICT DO NOTHING', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     // Same (stage, shelf) as LEG but with different data: the second copy must
     // be silently dropped, not upserted, per ON CONFLICT DO NOTHING.
     const dup: LegRow = { ...LEG, elapsed_ms: 999, title: 'a later duplicate' };
@@ -196,7 +172,7 @@ describe('record', () => {
   });
 
   it('a second record with the same fire id returns false, logs, writes nothing new, and does not throw', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     const log = vi.fn();
     expect(record(db, log, fullRecord())).toBe(true);
 
@@ -212,7 +188,7 @@ describe('record', () => {
   });
 
   it('a closed db returns false without throwing', async () => {
-    const db = await freshDb();
+    const db = freshDb();
     db.close();
     const log = vi.fn();
     expect(() => record(db, log, fullRecord())).not.toThrow();
