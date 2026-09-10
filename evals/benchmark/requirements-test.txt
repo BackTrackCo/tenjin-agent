@@ -1,15 +1,25 @@
-# The offline self-test's only dependency, and the whole of it. The package
+# The offline self-test's dependencies, and the whole of them. The package
 # itself stays standard-library: nothing under evals/benchmark/ outside the
-# suite imports pytest, so `cli.py` runs on a bare interpreter.
+# suite imports pytest or inline-snapshot, so `cli.py` runs on a bare
+# interpreter.
+#
+# pytest runs the suite. inline-snapshot maintains the goldens: the handful of
+# expectations that are whatever the producer emitted for a fixed fixture, as
+# opposed to a value a person chose. `--inline-snapshot=fix` rewrites those in
+# place, so nobody retypes a derived structure by hand; the value still lives at
+# the assertion, which is what keeps a test readable as the specification.
+# Contract literals (a reject code, an argv flag, a published field list) are
+# deliberately not snapshots and stay written out.
 #
 # Pinned exactly and by hash, with every transitive dependency listed, because
 # the required CI job installs this: a floating resolve would make a required
-# check depend on whatever the index served that minute. Install with
+# check depend on whatever the index served that minute. Every wheel here is
+# `py3-none-any`, so one hash per package covers every runner. Install with
 #
 #   python3 -m pip install --require-hashes --only-binary=:all: \
 #     -r evals/benchmark/requirements-test.txt
 #
-# To move the pin, bump the version and regenerate the hashes with
+# To move a pin, bump the version and regenerate the hashes with
 # `pip download --only-binary=:all:` followed by `pip hash` on each wheel.
 pytest==9.1.1 \
     --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
@@ -21,3 +31,17 @@ pluggy==1.6.0 \
     --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
 pygments==2.21.0 \
     --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+inline-snapshot==0.35.4 \
+    --hash=sha256:0ad221c1bc6fe4ce249f7c1c4131284099ecac1a5c1023aa7b1a95921c07265d
+asttokens==3.0.2 \
+    --hash=sha256:9da13157f5b28becde0bd374fc677dcd3c290614264eff096f167c469cd9f933
+executing==2.2.1 \
+    --hash=sha256:760643d3452b4d777d295bb167ccc74c64a81df23fb5e08eff250c425a4b2017
+rich==15.0.0 \
+    --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb
+markdown-it-py==4.2.0 \
+    --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
+mdurl==0.1.2 \
+    --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
