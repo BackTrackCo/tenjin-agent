@@ -5,12 +5,32 @@ name: benchmark canary
 # measured. It is a health check on the whole chain against a real corpus, not
 # the evidence run; the headline lane is that.
 #
-# Schedule and manual dispatch only, never on push.
+# Nightly, on demand, and on a pull request that could move the number.
+#
+# The pull-request lane is a REGRESSION WARNING, never a gate. It is not a
+# required check, and the shelf lane it calls reports `neutral` rather than
+# `failure` for any run that produced no quotable number, so a PR is blocked by
+# nothing here. Only a run that produced no report at all goes red, which is
+# the case where the change under review broke the harness itself.
+#
+# The path filter is what keeps it honest. A live lane spends real money and
+# about 17 minutes, so a docs-only or skills-only pull request must not pay for
+# it; a change to the product, the benchmark package or this lane's own
+# plumbing is exactly what can move a measurement, so those do.
 on:
   schedule:
     # 07:17 UTC. Off the hour, because every workflow scheduled on one competes
     # for the same runners and drifts.
     - cron: '17 7 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'evals/benchmark/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/benchmark-canary.yml'
+      - '.github/workflows/benchmark-shelf.yml'
   workflow_dispatch:
 
 permissions: {}
@@ -28,6 +48,8 @@ jobs:
       check_name: benchmark canary (nightly)
       timeout_minutes: 180
       budget_note: >-
-        Nightly canary: 24 attempts, budget capped at 0.75 USD an attempt, about
-        5.69 USD a run at the measured 0.237 USD an attempt. The weekly headline
+        Canary: 24 attempts, budget capped at 0.75 USD an attempt, about 5.12 USD
+        a run at the 0.213 USD an attempt measured over 149 valid attempts on
+        2026-09-10. Nightly, and on a pull request that touches the product or
+        the benchmark, where it is a warning and not a gate. The weekly headline
         lane runs the full core suite.
