@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+from unittest import mock
 
 from evals.benchmark import (
     FIXTURES,
@@ -21,7 +23,6 @@ from evals.benchmark import (
     records,
     runner,
     schedule,
-    sha256_file,
     sha256_json,
 )
 
@@ -63,35 +64,30 @@ def tenjin_source(path: Path, *, base_url: str, public_url: str = "https://tenji
     return path
 
 
-def patch_live_gates(case: Any) -> None:
+@contextlib.contextmanager
+def live_gates() -> Iterator["images.Image"]:
     """Every seam a live case would otherwise take to Docker: the image gate, the image lookup, and the run's egress.
 
-    A case that stubs these still builds the real plan and the real argv; what
+    A case that enters this still builds the real plan and the real argv; what
     it does not do is talk to a daemon.
     """
-    from unittest import mock
-
     from evals.benchmark import cli, container
 
-    patch_images(case)
-    for patcher in (
+    with (
+        patched_images() as image,
         mock.patch.object(cli, "refuse_without_images", lambda manifest, out=None: None),
         mock.patch.object(container, "start_egress", lambda egress, docker=None: egress),
         mock.patch.object(container, "stop_egress", lambda egress, docker=None: {"proxy": False, "network_removed": False}),
     ):
-        patcher.start()
-        case.addCleanup(patcher.stop)
+        yield image
 
 
-def patch_images(case: Any, image: "images.Image | None" = None) -> "images.Image":
+@contextlib.contextmanager
+def patched_images(image: "images.Image | None" = None) -> Iterator["images.Image"]:
     """Stub the image lookup and the tree export for one case. No case here reaches Docker."""
-    from unittest import mock
-
     resolved = IMAGE if image is None else image
-    for patcher in (mock.patch.object(images, "require", return_value=resolved), mock.patch.object(images, "export_node_modules", return_value=0)):
-        patcher.start()
-        case.addCleanup(patcher.stop)
-    return resolved
+    with mock.patch.object(images, "require", return_value=resolved), mock.patch.object(images, "export_node_modules", return_value=0):
+        yield resolved
 
 
 ATTESTED = artifact.Attestation(
@@ -130,6 +126,7 @@ def synthetic_manifest(
     executor_name: str = "fake",
     verifier_name: str = "fake_answer_file",
     wall_clock_s: int = 30,
+    concurrency: int | None = None,
     auxiliary_usage: str | dict[str, str] = "none",
     live: bool = False,
     prompt: str = "Write 42 into answer.txt.",
@@ -160,6 +157,7 @@ def synthetic_manifest(
             "permission_mode": "default",
             "wall_clock_s": wall_clock_s,
             "turn_budget": 4,
+            **({} if concurrency is None else {"concurrency": concurrency}),
         },
         "price_sheet_version": "fake-2026-09",
         "tasks": [
@@ -605,7 +603,7 @@ def link_workspace_packages(repo: Path) -> list[str]:
     return made
 
 
-def assert_vitest_fixture(case: Any, fixture: Path, task: str, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
+def assert_vitest_fixture(fixture: Path, task: str, *, trap: bool = True, package_dir: str = "", test_ext: str = "mjs") -> None:
     """A live task fixture is a real Vitest project that commits none of its toolchain.
 
     Its dependency tree is the image's: `pnpm install` ran there at build time,
@@ -618,41 +616,41 @@ def assert_vitest_fixture(case: Any, fixture: Path, task: str, *, trap: bool = T
     """
     root = json.loads((fixture / "package.json").read_text(encoding="utf-8"))
     pinned = root["devDependencies"]["vitest"]
-    case.assertRegex(pinned, EXACT_VERSION)
+    assert EXACT_VERSION.match(pinned), pinned
     for absent in ("pnpm-lock.yaml", ".npmrc", "node_modules"):
-        case.assertFalse((fixture / absent).exists(), f"{task} commits {absent}, which the image owns")
+        assert not (fixture / absent).exists(), f"{task} commits {absent}, which the image owns"
     project = fixture / package_dir if package_dir else fixture
     package = json.loads((project / "package.json").read_text(encoding="utf-8"))
     config = (project / "vitest.config.mjs").read_text(encoding="utf-8")
-    case.assertIn(f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]", config)
-    case.assertNotIn("pnpm exec", config)
+    assert f"['./scripts/ran-marker.mjs', {{ task: '{task}' }}]" in config
+    assert "pnpm exec" not in config
     if trap:
         # The trap: the package script is a wrapper, and the wrapper never reads its arguments.
-        case.assertEqual(package["scripts"]["test"], "node scripts/all-tests.mjs")
-        case.assertNotIn("argv", (project / "scripts" / "all-tests.mjs").read_text(encoding="utf-8"))
-        case.assertIn("'unrelated/**/*.test.mjs'", config)
-        case.assertIn(PNPM_GUARD, config)
-        case.assertIn(PNPM_GUARD_MESSAGE, config)
-        case.assertTrue(list((project / "unrelated").glob("*.test.mjs")))
+        assert package["scripts"]["test"] == "node scripts/all-tests.mjs"
+        assert "argv" not in (project / "scripts" / "all-tests.mjs").read_text(encoding="utf-8")
+        assert "'unrelated/**/*.test.mjs'" in config
+        assert PNPM_GUARD in config
+        assert PNPM_GUARD_MESSAGE in config
+        assert list((project / "unrelated").glob("*.test.mjs"))
     else:
-        case.assertNotIn(PNPM_GUARD, config)
-        case.assertFalse((project / "unrelated").exists())
-        case.assertFalse((project / "scripts" / "all-tests.mjs").exists())
+        assert PNPM_GUARD not in config
+        assert not (project / "unrelated").exists()
+        assert not (project / "scripts" / "all-tests.mjs").exists()
     # pnpm 11 reads its settings from pnpm-workspace.yaml and, without this,
     # runs an install before the first `pnpm exec` or `pnpm run` in a fresh
     # tree: a registry download the trial must never make.
     workspace = (fixture / "pnpm-workspace.yaml").read_text(encoding="utf-8")
-    case.assertIn("verifyDepsBeforeRun: false", workspace)
-    case.assertIn("nodeLinker: hoisted", workspace)
+    assert "verifyDepsBeforeRun: false" in workspace
+    assert "nodeLinker: hoisted" in workspace
     # The named test is a vitest test, so plain `node` cannot run it, and its cases come from the
     # runner's setup file: nothing in the tree holds them, decodable or not.
     test = (project / "tests" / f"{task}.test.{test_ext}").read_text(encoding="utf-8")
-    case.assertIn("from 'vitest'", test)
-    case.assertIn("globalThis.__bench1Cases", test)
-    case.assertIn("setupFiles: ['./.bench1/cases.setup.mjs']", config)
-    case.assertFalse((project / "tests" / "support").exists())
+    assert "from 'vitest'" in test
+    assert "globalThis.__bench1Cases" in test
+    assert "setupFiles: ['./.bench1/cases.setup.mjs']" in config
+    assert not (project / "tests" / "support").exists()
     hidden = REPO_ROOT / "evals" / "benchmark" / "hidden" / task / "cases.json"
-    case.assertTrue(hidden.is_file(), f"hidden/{task}/cases.json holds the expected values")
+    assert hidden.is_file(), f"hidden/{task}/cases.json holds the expected values"
     # Values of three characters or more, matched as whole tokens, so a bare digit or a word inside
     # an identifier is not "revealed"; the source under test is skipped, since the fix's own tokens
     # (an enum member, a unit) live there.
@@ -662,12 +660,12 @@ def assert_vitest_fixture(case: Any, fixture: Path, task: str, *, trap: bool = T
             text = path.read_text(encoding="utf-8", errors="replace")
             # The lockfile's integrity hashes are base64 by design and name no expected value.
             if path.name != "pnpm-lock.yaml":
-                case.assertIsNone(BLOB.search(text), f"{path.relative_to(fixture)} holds a decodable blob")
+                assert BLOB.search(text) is None, f"{path.relative_to(fixture)} holds a decodable blob"
             if "src" in path.relative_to(fixture).parts:
                 continue
             for value in expected:
-                case.assertIsNone(re.search(r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])", text), f"{path.relative_to(fixture)} reveals an expected value")
+                assert re.search(r"(?<![A-Za-z0-9])" + re.escape(value) + r"(?![A-Za-z0-9])", text) is None, f"{path.relative_to(fixture)} reveals an expected value"
     for artefact in RUN_ARTEFACTS:
-        case.assertFalse((fixture / artefact).exists(), artefact)
-        case.assertFalse((project / artefact).exists(), artefact)
-    case.assertEqual([path for path in fixture.rglob("*") if path.is_symlink()], [])
+        assert not (fixture / artefact).exists(), artefact
+        assert not (project / artefact).exists(), artefact
+    assert [path for path in fixture.rglob("*") if path.is_symlink()] == []

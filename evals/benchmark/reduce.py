@@ -207,7 +207,9 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
         # Round trips and unique ingestion, beside the total the headline uses.
         # A ratio of totals moves with the number of requests, because a fixed
         # preamble is replayed on every one of them; these two say how much of
-        # it was round trips and how much was text nobody had sent before.
+        # it was round trips and how much was text nobody had sent before. The
+        # corpus readout orders tasks by requests_per_attempt in the baseline
+        # arm, which is what a task cost to work out with nothing carried in.
         "requests_per_attempt": _round(requests / attempts),
         "new_tokens": new,
         "new_tokens_per_attempt": None if new is None else _round(new / attempts),

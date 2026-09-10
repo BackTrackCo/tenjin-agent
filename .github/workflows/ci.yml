@@ -39,11 +39,13 @@ jobs:
       # the committed fixture) run here; the LIVE walk lives in contract-drift.yml
       # (scheduled + dispatch) so a server blip can never red an unrelated PR.
       - run: pnpm run check
-      # Bench-1 (evals/benchmark/) is standard-library Python with no model, no
-      # network and no spend, so its offline suite runs here on every PR and a
-      # change that breaks the package fails the required check. No path filter:
-      # the whole chain is well under a minute. The floor is 3.11; a runner
-      # below it is a red run, because a skipped gate reads like a passing one.
+      # Bench-1 (evals/benchmark/) runs no model, no network and no spend, so
+      # its offline suite runs here on every PR and a change that breaks the
+      # package fails the required check. No path filter: the whole chain is
+      # well under a minute. The floor is 3.11; a runner below it is a red run,
+      # because a skipped gate reads like a passing one. The package itself is
+      # standard-library, which is why the steps below this one call the
+      # runner's own `python3`; only the suite installs anything.
       # The live plumbing smoke is benchmark-live.yml, informational only.
       - name: Bench-1 interpreter floor
         run: |
@@ -52,14 +54,25 @@ jobs:
             echo "::error title=python::evals/benchmark needs Python 3.11 or later"
             exit 1
           }
-      # The suite is stdlib unittest discovery and takes about 20 seconds; the
-      # step's own timeout is what bounds it, so the runner owns the clock and
-      # the suite owns the result. `--groups` collapses the log section and
-      # `--summary` puts the verdict on the run page.
+      # pytest, at one exact version and by hash, into a throwaway venv built
+      # from the interpreter the step above just checked. A venv rather than a
+      # `pip install` because the runner's python3 is externally managed, and
+      # `--require-hashes` because a required check must not depend on whatever
+      # the index served that minute.
+      - name: Bench-1 test dependency
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bench1-venv"
+          "$RUNNER_TEMP/bench1-venv/bin/python" -m pip install --quiet --require-hashes \
+            --only-binary=:all: -r evals/benchmark/requirements-test.txt
+          "$RUNNER_TEMP/bench1-venv/bin/python" -m pytest --version
+      # The suite is pytest over evals/benchmark/tests/ and takes about 20
+      # seconds; the step's own timeout is what bounds it, so the runner owns
+      # the clock and the suite owns the result. `--groups` collapses the log
+      # section and `--summary` puts the verdict on the run page.
       - name: Bench-1 offline self-test
         timeout-minutes: 2
         run: |
-          python3 evals/benchmark/selftest.py \
+          "$RUNNER_TEMP/bench1-venv/bin/python" evals/benchmark/selftest.py \
             --verbosity 2 --groups --summary "$GITHUB_STEP_SUMMARY"
       # The suite proves the seams; this proves the machine: fake manifest to
       # published report, hidden verifiers re-run over the finished run, the

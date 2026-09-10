@@ -53,7 +53,7 @@ ARM_KEYS = frozenset({"id", "executor", "product_version", "settings_hash", "mem
 # What a live executor needs and a fake one has no use for. Coarse shapes are
 # checked here so a bad manifest costs nothing; the executor that turns these
 # into argv owns the flag and value allowlists (`claude_live.py`).
-OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env"})
+OPTIONAL_PIN_KEYS = frozenset({"max_budget_usd", "tools", "allowed_tools", "credential_env", "concurrency"})
 OPTIONAL_TASK_KEYS = frozenset({"prompt", "tools", "allowed_tools"})
 # `lessons` names exactly which lessons a provisioned arm seeds on the team
 # shelf (the default is the task's family lesson and its own fix), and
@@ -116,6 +116,16 @@ class Manifest:
     @property
     def harness(self) -> str:
         return str(self.data["harness"])
+
+    @property
+    def concurrency(self) -> int:
+        """How many trials may be in flight at once. Absent means one, so an existing manifest is unchanged.
+
+        It is a pin because it is a property of the run rather than of the
+        schedule, and `environment_hash` is the hash of the pins: a reader
+        comparing two runs sees a different environment without a new field.
+        """
+        return int(self.data["pins"].get("concurrency", 1))
 
     def fixture_path(self, task: dict[str, Any]) -> Path:
         return (self.path.parent / task["fixture"]).resolve()
@@ -239,6 +249,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
         raise ManifestError("pins.dependency_lock_hash must be a sha256 token")
     _require_count("pins.wall_clock_s", pins["wall_clock_s"], 1)
     _require_count("pins.turn_budget", pins["turn_budget"], 1)
+    if "concurrency" in pins:
+        _require_count("pins.concurrency", pins["concurrency"], 1)
     if "corpus" in data:
         try:
             corpus_module.parse(data["corpus"])

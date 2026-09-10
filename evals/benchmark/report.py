@@ -21,6 +21,7 @@ from typing import Any
 
 from . import canonical_json
 from .artifact import CANARY_PREFIX
+from .reduce import consumer_auxiliary
 
 REPORT_SCHEMA = "bench1.report.v1"
 # The pre-registered headline: the capture-only amortized ratio at reuse 1, every
@@ -256,6 +257,10 @@ def project(
         "schedule_hash": schedule_hash,
         "seed": manifest_data["seed"],
         "repeats": manifest_data["repeats"],
+        # Every record carries this inside `environment_hash`, which is the
+        # hash of the pins. Stating it here is the same fact in the form a
+        # reader comparing two runs can act on without opening a record.
+        "concurrency": int(manifest_data["pins"].get("concurrency", 1)),
         "publishable": publishable,
         "isolation": kind,
         "shelf_secret_present": any(record["isolation"].get("shelf_secret_present", False) for record in accepted.values()),
@@ -265,6 +270,21 @@ def project(
         "automated": any(record["isolation"].get("automated", False) for record in accepted.values()),
         "corpus": corpus_stamp(accepted),
         "corpus_snapshot": snapshot_fields(corpus_snapshot),
+        # What the arms above were measured on, one entry per manifest task.
+        # A headline is a ratio over this set, so a reader who cannot see the
+        # set cannot tell a corpus that is too easy from one that is too small.
+        # The per-task figures stay under `arms`; this is the metadata only the
+        # manifest holds, and `render` joins the two.
+        "corpus_tasks": [
+            {
+                "task_id": task["id"],
+                "family": task["family"],
+                "transfer_distance": task["transfer_distance"],
+                "verifier": task["verifier"],
+                "fixture_hash": task["fixture_hash"],
+            }
+            for task in manifest_data["tasks"]
+        ],
         "baseline": reduction["baseline"],
         "arms": arms,
         # A headline needs complete accounting and a publishable run; the
@@ -290,7 +310,14 @@ def project(
                 "actors": len(record.get("actors", [])),
                 "requests": len(record["usage"]),
                 "auxiliary_receipts": len(record["auxiliary"]),
-                "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]),
+                # What this attempt spent, by the rule the reducer scores with:
+                # native usage plus the consumer-phase auxiliary receipts it
+                # caused, capture-phase receipts left out as one-time cost. An
+                # invalid attempt keeps the spend it really made, so these rows
+                # sum to the arm total only over `outcome != "invalid"`, which
+                # is the same set the reducer aggregates. An arm total is
+                # `arms[arm].tokens` and is the figure to read instead.
+                "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record),
                 "sentinel_hits": sum(record["sentinel"].values()),
                 "public_legs": record["delivery"].get("public", {}).get("legs", 0),
                 "public_hits": record["delivery"].get("public", {}).get("hits", 0),
@@ -401,6 +428,90 @@ def check_summary(report: dict[str, Any], methodology: str = METHODOLOGY, limit:
     return head + "\n" + body + tail
 
 
+# The corpus block is the readout's only per-task section, so it is the only
+# one whose length follows the manifest. A check run's `output.summary` is
+# capped at 65,535 characters and the API truncates silently past it, so this
+# caps itself first: the rows are ordered by discovery cost, a cut therefore
+# drops the cheapest tasks, and the line under them says how many were dropped.
+# Every task stays in `report.json` under `corpus_tasks` either way.
+CORPUS_ROWS = 50
+# task, family, distance, verifier: the manifest columns, and the report keys
+# they read. `fixture` is the fixture hash and takes a fixed dozen characters.
+CORPUS_COLUMNS = (("task", "task_id"), ("family", "family"), ("distance", "transfer_distance"), ("verifier", "verifier"))
+FIXTURE_WIDTH = 12
+# requests, tokens, pass rate: one group of three per arm, and the cell keys
+# they read.
+ARM_GROUP = ("7.2f", "10.1f", "5.3f")
+ARM_LABELS = ("reqs", "tokens", "pass")
+CELL_KEYS = ("requests_per_attempt", "tokens_per_attempt", "pass_rate")
+
+
+def _cell(report: dict[str, Any], arm_id: str, task_id: str) -> dict[str, Any]:
+    """One arm's cell for one task, or an empty cell for a task it never scored."""
+    return (((report.get("arms") or {}).get(arm_id) or {}).get("tasks") or {}).get(task_id) or {}
+
+
+def _group(report: dict[str, Any], arm_id: str, task_id: str) -> str:
+    """One arm's three figures for one task: round trips, tokens, and pass rate."""
+    cell = _cell(report, arm_id, task_id)
+    return " ".join(_number(cell.get(key), spec) for key, spec in zip(CELL_KEYS, ARM_GROUP))
+
+
+def _row(left: str, groups: list[str]) -> str:
+    """The manifest columns, then one group per arm. A run with no arm is left alone."""
+    return left + "".join(f"  {group}" for group in groups)
+
+
+def corpus_section(report: dict[str, Any]) -> list[str]:
+    """The corpus a headline was measured on, most expensive task first.
+
+    Discovery cost is the baseline arm's requests per attempt: what a task took
+    to work out with nothing carried in. Ordering by it is the point of the
+    section, because it is what tells a reader at a glance whether the corpus
+    holds any expensive task at all. Nothing here is measured; every figure is
+    the reducer's own cell, and the metadata beside it is the manifest's.
+    """
+    tasks = report.get("corpus_tasks") or []
+    if not tasks:
+        return []
+    arms = sorted(report.get("arms") or {})
+    baseline = report.get("baseline")
+    cost = {task["task_id"]: _cell(report, baseline or "", task["task_id"]).get("requests_per_attempt") for task in tasks}
+    ordered = sorted(tasks, key=lambda task: (cost[task["task_id"]] is None, -(cost[task["task_id"]] or 0.0), task["task_id"]))
+    shown = ordered[:CORPUS_ROWS]
+    widths = [max([len(label)] + [len(str(task[key])) for task in shown]) for label, key in CORPUS_COLUMNS]
+    left = " ".join(label.ljust(width) for (label, _), width in zip(CORPUS_COLUMNS, widths)) + " " + "fixture".ljust(FIXTURE_WIDTH)
+    # An arm whose every attempt was invalid has no cell for any task, so the
+    # order is nothing but the task ids and the heading says that rather than
+    # claiming a ranking the run never measured.
+    if any(value is not None for value in cost.values()):
+        heading = f"corpus: {plural(len(ordered), 'task')}, most expensive first by discovery cost, requests per attempt in {baseline}"
+    else:
+        why = f"{baseline} scored no attempt" if baseline else "no baseline arm is named"
+        heading = f"corpus: {plural(len(ordered), 'task')}, ordered by task id: {why}, so no discovery cost is known"
+    # Two header lines because each arm owns three columns: the arm names sit
+    # over their own group rather than over one shared row of labels.
+    group = len(ARM_GROUP) - 1 + sum(int(spec.split(".", 1)[0]) for spec in ARM_GROUP)
+    labels = " ".join(label.rjust(int(spec.split(".", 1)[0])) for label, spec in zip(ARM_LABELS, ARM_GROUP))
+    lines = [
+        heading,
+        _row(" " * len(left), [(f"{arm_id} (baseline)" if arm_id == baseline else arm_id).center(group) for arm_id in arms]),
+        _row(left, [labels for _ in arms]),
+    ]
+    for task in shown:
+        fixture = str(task["fixture_hash"]).removeprefix("sha256:")[:FIXTURE_WIDTH]
+        cells = " ".join(str(task[key]).ljust(size) for (_, key), size in zip(CORPUS_COLUMNS, widths))
+        lines.append(_row(f"{cells} {fixture.ljust(FIXTURE_WIDTH)}", [_group(report, arm_id, task["task_id"]) for arm_id in arms]))
+    if len(ordered) > len(shown):
+        lines.append(
+            f"... {plural(len(ordered) - len(shown), 'cheaper task')} not shown; "
+            f"all {len(ordered)} are in report.json under corpus_tasks"
+        )
+    # The arm banner centres a short name inside its group, which leaves the
+    # padding on the right of the last one; a log should not carry it.
+    return [line.rstrip() for line in lines]
+
+
 def render(report: dict[str, Any]) -> str:
     """A finished report as text, for a log or a step summary.
 
@@ -421,7 +532,7 @@ def render(report: dict[str, Any]) -> str:
     lines = [
         f"benchmark {report['benchmark_version']}, schema {report['schema']}",
         f"manifest {report['manifest_hash'][:12]}  schedule {report['schedule_hash'][:12]}  "
-        f"seed {report['seed']}  repeats {report['repeats']}",
+        f"seed {report['seed']}  repeats {report['repeats']}  concurrency {report.get('concurrency', 1)}",
         stamp_line,
     ]
     if report.get("shelf_secret_present", False):
@@ -541,4 +652,10 @@ def render(report: dict[str, Any]) -> str:
         f"{len(report['trials'])} attempts: " + ", ".join(f"{count} {name}" for name, count in sorted(outcomes.items())),
         f"{len(report['invalid'])} invalid, {plural(len(report['excluded']), 'record file')} excluded",
     ]
+    # Last, because it is the one block that grows with the manifest and the
+    # one this reading ever truncates: a cut here costs a reader the cheapest
+    # tasks rather than the arms, the ratios, or the accounting above.
+    rows = corpus_section(report)
+    if rows:
+        lines += ["", *rows]
     return "\n".join(lines)

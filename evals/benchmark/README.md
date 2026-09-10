@@ -1,9 +1,11 @@
 # Benchmark (Bench-1)
 
-Trustworthy measurement infrastructure for the developer token-savings benchmark. Eval-only,
-stdlib Python only. This package measures trials: for one task and one quality bar, how many
-model tokens did the complete agent run consume with and without a knowledge system. It does not
-itself produce a savings number, and nothing here touches the product runtime.
+Trustworthy measurement infrastructure for the developer token-savings benchmark. Eval-only.
+Every shipped command is standard-library Python; the offline suite is the one part that
+installs anything, and it installs exactly pytest. This package measures trials: for one task and
+one quality bar, how many model tokens did the complete agent run consume with and without a
+knowledge system. It does not itself produce a savings number, and nothing here touches the
+product runtime.
 
 **What this layer owns.** Bench-1 owns the frozen contracts, the executor and the live executor,
 the provisioning seam and daemon lifecycle, isolation, attestation, the corpus reset and
@@ -33,32 +35,32 @@ Each contract is stated once, in the module that owns it, and held by the test m
 The tests are the specification to reach for: each names its rule and holds to it on a fixture
 the suite builds.
 
-| Module                     | What it owns                                                      | Held by                              |
-| -------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
-| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                   |
-| `presets.py`               | named arm settings, expanded at load, an inline block over them   | `test_presets.py`                    |
-| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                   |
-| `runner.py`                | execution: fresh roots, settlement, caps, sentinels, resume       | `test_runner.py`, `test_fake_run.py` |
-| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                   |
-| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings    | `test_claude_live.py`                |
-| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial  | `test_tenjin_arm.py`                 |
-| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported             | `test_signature.py`                  |
-| `artifact.py`              | disposable roots, sentinels, the isolation attestation            | `test_artifact.py`                   |
-| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp        | `test_corpus.py`                     |
-| `verifier.py`              | hidden verifier registry, hidden layer, the run marker            | `test_verifier.py`                   |
-| `images.py`                | one pinned base image, one image per fixture, build and drift     | `test_images.py`                     |
-| `container.py`             | a trial inside its image: mounts, argv, the run's egress proxy    | `test_container.py`                  |
-| `producer.py`              | the natural arm's producer phase and its receipts                 | `test_phases.py`                     |
-| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                | `test_usage.py`                      |
-| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                   | `test_claude_usage.py`               |
-| `records.py`               | the immutable attempt record, publish, select                     | `test_records.py`                    |
-| `loop_join.py`             | read-only delivery join on exact actor keys                       | `test_loop_join.py`                  |
-| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                     |
-| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary    | `test_report.py`, `test_regress.py`  |
-| `cases.py`, `discovery.py` | the search-intent export and the discovery counters               | `test_cases.py`, `test_discovery.py` |
-| `reap.py`                  | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
-| `snapshot.py`              | the per-run corpus reading: post count and content hash           | `test_snapshot.py`                   |
-| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
+| Module                     | What it owns                                                             | Held by                              |
+| -------------------------- | ------------------------------------------------------------------------ | ------------------------------------ |
+| `manifest.py`              | frozen manifest: load, validate, hash, fixture hash over the tree        | `test_manifest.py`                   |
+| `presets.py`               | named arm settings, expanded at load, an inline block over them          | `test_presets.py`                    |
+| `schedule.py`              | balanced seeded schedule, `trial_id`, schedule SHA-256                   | `test_schedule.py`                   |
+| `runner.py`                | execution: fresh roots, settlement, caps, sentinels, resume, concurrency | `test_runner.py`, `test_fake_run.py` |
+| `executor.py`              | executor registry (code-owned argv, `shell=False`), fake agents          | `test_artifact.py`                   |
+| `claude_live.py`           | the live executor: argv, minted session id, per-trial settings           | `test_claude_live.py`                |
+| `tenjin_arm.py`            | the hooks arm: seeded data dir, keyed lesson, one daemon a trial         | `test_tenjin_arm.py`                 |
+| `signature.py`             | the product's `sig_v1` and `sig_v1_test` keys, ported                    | `test_signature.py`                  |
+| `artifact.py`              | disposable roots, sentinels, the isolation attestation                   | `test_artifact.py`                   |
+| `corpus.py`                | the corpus branch: the pre-run reset, its guard, its stamp               | `test_corpus.py`                     |
+| `verifier.py`              | hidden verifier registry, hidden layer, the run marker                   | `test_verifier.py`                   |
+| `images.py`                | one pinned base image, one image per fixture, build and drift            | `test_images.py`                     |
+| `container.py`             | a trial inside its image: mounts, argv, the run's egress proxy           | `test_container.py`                  |
+| `producer.py`              | the natural arm's producer phase and its receipts                        | `test_phases.py`                     |
+| `usage.py`                 | usage and receipt arithmetic, null-vs-zero, dedupe                       | `test_usage.py`                      |
+| `claude_usage.py`          | the Claude JSONL adapter and its reconciliation                          | `test_claude_usage.py`               |
+| `records.py`               | the immutable attempt record, publish, select                            | `test_records.py`                    |
+| `loop_join.py`             | read-only delivery join on exact actor keys                              | `test_loop_join.py`                  |
+| `reduce.py`                | task-equal reduction, amortization, seeded bootstrap                     | `test_reduce.py`                     |
+| `report.py`, `regress.py`  | publishable projection, redaction guard, the check-run summary           | `test_report.py`, `test_regress.py`  |
+| `cases.py`, `discovery.py` | the search-intent export and the discovery counters                      | `test_cases.py`, `test_discovery.py` |
+| `reap.py`                  | cleanup by recorded identity, never by process name                      | `test_reap.py`                       |
+| `snapshot.py`              | the per-run corpus reading: post count and content hash                  | `test_snapshot.py`                   |
+| `cli.py`, `selftest.py`    | the commands, and the offline entry the required lane runs               | `test_fake_run.py`                   |
 
 An arm's treatment is its `settings`, and most arms run the same one, so an arm may name a preset
 instead: `"settings_preset": "tenjin-hooks-and-cli-reads"` is the product's whole hook wiring plus
@@ -79,11 +81,15 @@ task, mounted only into the verifier's copy).
 ## Its CI lanes
 
 The offline suite is a step of the required `CI` workflow, on every pull request with no path
-filter: the interpreter floor, `python3 evals/benchmark/selftest.py`, then the fake manifest
-driven to a published report, the hidden verifiers re-run over it, and `summary` printed to the
-run page. It installs nothing (standard library on the runner's own `python3`, floor 3.11, and a
-runner below the floor fails rather than skips, because a skipped gate reads like a passing one),
-takes about 20 seconds, and the step's own timeout bounds it.
+filter: the interpreter floor, one pinned pytest installed into a throwaway venv,
+`selftest.py` run from that venv, then the fake manifest driven to a published report, the hidden
+verifiers re-run over it, and `summary` printed to the run page. It runs on the runner's own
+`python3`, floor 3.11, and a runner below the floor fails rather than skips, because a skipped
+gate reads like a passing one. The one install is `requirements-test.txt`: pytest at an exact
+version with every transitive dependency pinned by hash, so the required check never depends on
+what the index served that minute. Nothing else in the package needs it, so the `fake-run`,
+`verify` and `summary` steps beside it still call a bare interpreter. The whole chain takes about
+20 seconds, and each step's own timeout bounds it.
 
 The live plumbing smoke is `benchmark-live.yml`, on a pull request touching `evals/benchmark/**`
 and on dispatch: a pinned Claude Code, `live-run --plumbing --ci-live` over the smoke manifest
@@ -126,7 +132,11 @@ headline-eligible comparison, `neutral` when it produced a number nobody may quo
 python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
 python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake
 python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake
+# The suite alone needs pytest. Once, into a venv of your choosing:
+#   python3 -m pip install --require-hashes --only-binary=:all: \
+#     -r evals/benchmark/requirements-test.txt
 python3 evals/benchmark/selftest.py
+pytest evals/benchmark/tests            # the same cases, with pytest's own selection flags
 ```
 
 `fake-run` loads `fixtures/fake/manifest.json`, writes the expanded schedule and its SHA-256,
@@ -139,6 +149,15 @@ the trials where a fresh verdict disagrees with the recorded one; `reduce` and `
 the aggregates and the projection from the immutable records alone; `summary` reads a finished
 `report.json` as text and computes nothing, printing every arm rather than the best one, because
 an arm shown alone is a claim rather than a result.
+
+The readout ends with the corpus every number above was measured on: one row per task carrying
+its family, transfer distance, verifier and fixture hash from the manifest, and its round trips,
+tokens per attempt and pass rate in each arm from the reduction. The rows are ordered by
+discovery cost, the baseline arm's requests per attempt, most expensive first, which is what says
+whether the corpus holds an expensive task at all. It prints at most `report.CORPUS_ROWS` of
+them, because a check run's `output.summary` is capped at 65,535 characters and truncates
+silently past it; a corpus longer than that ends with a line naming how many cheaper tasks were
+left out, and `report.json` carries all of them under `corpus_tasks`.
 
 Everything under `--out` except `report.json` is private. The report carries counts, enums,
 opaque ids, and hashes only, plus the run's isolation stamp: `publishable`, `isolation` (`fake`,
@@ -948,6 +967,30 @@ no repository. 313 owns every real fixture as a container image, every real-task
 including the hooks and keys smokes, the four arms, the producer phase and the readouts; with
 the container fixtures green it also takes the `actor` fixture and the hooks-smoke and
 keys-smoke manifests, so 308's follow-up deletion leaves it with the plumbing smoke alone.
+
+## Running trials at once
+
+`pins.concurrency` is how many trials may be in flight, and it defaults to one, so a manifest
+that does not name it runs exactly as it always has. It is a pin because `environment_hash` is
+the hash of the pins: two runs at different degrees are already distinguishable in every record,
+and `report.json` states the number so a reader comparing two runs does not have to open one.
+
+The measurement is in tokens, so wall clock is overhead, but only trials that provision nothing
+may overlap. A provisioning arm seeds its lesson into the one shelf the operator's account owns,
+searches it through the product, and deletes it at the end; two seeded windows inside each other
+would let one trial's search answer with the other's piece, a duplicate for two trials of one
+task and a false positive for two tasks, in exactly the delivery numbers this benchmark exists to
+measure. A failed publish is worse still: `sweep_stamped` clears by title rather than by stamp,
+so it would delete a concurrent trial's live seed. So `runner.run` holds one mutual exclusion for
+the whole of a provisioning trial, covering the publish, the agent's searches, the delete, and
+the free port its daemon claimed, and lets everything else run freely. A four-arm matrix with one
+unprovisioned arm converges on the time its provisioned arms take alone, and the gain is the
+unprovisioned quarter hiding inside that.
+
+The schedule is untouched: trials are assigned in its order, the results come back in it whatever
+order they finish in, and no trial id, hash, or balance property depends on the degree. A run
+with a sentinel attached is refused above one, because the sentinel is one server for the whole
+run and its hits name no trial, so a trial claims whatever arrived while it ran.
 
 ## Cleanup
 
