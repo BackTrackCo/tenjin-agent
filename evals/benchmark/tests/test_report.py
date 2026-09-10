@@ -314,15 +314,23 @@ def test_the_trial_rows_sum_to_their_arm_total(corpus, project: Project, reducti
 
     The treatment arm carries a consumer-phase receipt on every attempt and one
     capture receipt on top. A row that dropped the first would sum below its
-    arm; a row that added the second would sum above it.
+    arm; a row that added the second would sum above it. The scored rows are
+    the ones that sum: an invalid attempt keeps the spend it really made, which
+    the reducer excludes, so the gap between the two sums is that spend and
+    nothing else.
     """
     _manifest, _digest, accepted, _excluded = corpus
     published = project()
     scored: dict[str, int] = {}
+    every: dict[str, int] = {}
     for trial in published["trials"]:
+        every[trial["arm_id"]] = every.get(trial["arm_id"], 0) + trial["tokens"]
         if trial["outcome"] != "invalid":
             scored[trial["arm_id"]] = scored.get(trial["arm_id"], 0) + trial["tokens"]
     assert scored == {arm_id: arm["tokens"] for arm_id, arm in reduction["arms"].items()}
+    invalid = next(row for row in published["trials"] if row["outcome"] == "invalid")
+    assert invalid["tokens"] > 0
+    assert every[invalid["arm_id"]] - scored[invalid["arm_id"]] == invalid["tokens"]
     # The consumer receipt is inside the row and the capture receipt is not.
     treatment = next(row for row in published["trials"] if row["arm_id"] == "on" and row["auxiliary_receipts"] == 2)
     record = accepted[treatment["trial_id"]]
