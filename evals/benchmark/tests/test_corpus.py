@@ -206,6 +206,27 @@ def test_an_operation_that_never_finishes_ends_the_run(http_api) -> None:
     assert caught.value.code == "reset_timeout"
 
 
+@pytest.mark.parametrize(
+    "restore",
+    (
+        pytest.param({}, id="no operations key"),
+        pytest.param({"operations": []}, id="empty operations"),
+        pytest.param({"operations": None}, id="null operations"),
+        pytest.param({"operations": {"id": "op-1"}}, id="operations is not a list"),
+        pytest.param({"operations": [{"action": "apply_config"}]}, id="an entry with no id"),
+        pytest.param({"operations": [{"id": ""}]}, id="an entry with a blank id"),
+        pytest.param({"operations": [{"id": "op-1"}, "op-2"]}, id="an entry that is not an object"),
+    ),
+)
+def test_a_restore_that_names_no_operation_is_not_a_finished_reset(http_api, restore: dict) -> None:
+    # Nothing to poll polls nothing, so an unwaited reset would otherwise return
+    # as a settled one and the run would be stamped against a corpus nobody
+    # watched come back.
+    with pytest.raises(CorpusError) as caught:
+        http_api([restore]).reset_to_parent(PROJECT, BRANCH, PARENT)
+    assert caught.value.code == "reset_unconfirmed"
+
+
 def test_a_branch_response_without_a_branch_is_refused(http_api) -> None:
     with pytest.raises(CorpusError) as caught:
         http_api([{"nothing": True}]).branch(PROJECT, BRANCH)
