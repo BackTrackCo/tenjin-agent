@@ -1,18 +1,22 @@
 """Executing a schedule: settlement, caps, outcomes, sentinels, resume, and concurrency.
 
 Every case injects the clock, the settlement barrier, and the process
-boundary. Two exceptions start a real short-lived process: the timeout case,
+boundary. Three exceptions start a real short-lived process: the timeout case,
 which proves that killing the trial's process group reaches a grandchild the
-root left behind, and the concurrent failure case, which proves the run that
-ends on one trial's exception leaves nothing of another trial's alive. The
+root left behind; the concurrent failure case, which proves the run that ends
+on one trial's exception leaves nothing of another trial's alive; and the
+interrupt case, which proves the way out kills the group whatever raised. The
 concurrency cases run on the real clock, because a clock a test advances by
 hand cannot be shared by threads.
 """
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -21,7 +25,7 @@ from typing import Callable
 
 import pytest
 
-from evals.benchmark import artifact, cli, executor, loop_join, reap, records, reduce as reduce_module, runner, schedule
+from evals.benchmark import artifact, cli, executor, loop_join, records, reduce as reduce_module, runner, schedule
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec
 from evals.benchmark.manifest import Manifest
@@ -807,13 +811,10 @@ def test_a_failing_trial_ends_the_run_without_stranding_another(tmp_path: Path, 
 
     with pytest.raises(RuntimeError):
         runner.run(manifest, trials, run_dir, "sha256:schedule", runner.Runtime(spawn=spawn, settle_cap_s=5.0))
-    # The trial that was running finished and published; the one that
-    # failed published nothing, and no process or ledger entry outlived
-    # either of them for a person to clean up by hand.
+    # The trial that was running finished and published; the one that failed
+    # published nothing.
     assert records.final_path(run_dir / "records", healthy).is_file()
     assert not records.final_path(run_dir / "records", doomed).exists()
-    assert reap.survivors(run_dir) == []
-    assert reap.read_records(run_dir) == []
 
 
 def test_a_run_with_a_sentinel_refuses_more_than_one_trial_at_a_time(tmp_path: Path, run_dir: Path) -> None:
@@ -834,3 +835,64 @@ def test_a_run_with_a_sentinel_refuses_more_than_one_trial_at_a_time(tmp_path: P
         assert not run_dir.exists()
     finally:
         sentinel.stop()
+
+
+# Two guarantees about the way out, both with a real process behind them.
+
+
+def test_an_interrupt_on_the_way_out_still_leaves_nothing_running(tmp_path: Path, run_dir: Path) -> None:
+    # The leak that once made a person reach for a name match: an exception
+    # between the spawn and the wait. The finally-path owns it.
+    fixture = tmp_path / "fixture" / "repo"
+    fixture.mkdir(parents=True)
+    (fixture / "TASK.md").write_text("nothing\n", encoding="utf-8")
+    roots = artifact.create(run_dir, "trial-1", fixture)
+    launch = executor.Launch(argv=[sys.executable, "-c", "import time; time.sleep(30)"], cwd=roots.repo, root_session_id="s1")
+    pids: list[int] = []
+    real_communicate = subprocess.Popen.communicate
+
+    def explode(self_process, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # The first wait raises; the finally-path's own wait is left real, so
+        # what the case measures is that path collecting a killed group.
+        if not pids:
+            pids.append(self_process.pid)
+            raise KeyboardInterrupt("operator stopped the run")
+        return real_communicate(self_process, *args, **kwargs)
+
+    subprocess.Popen.communicate = explode  # type: ignore[assignment]
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            runner.process_spawn(launch, roots, timeout_s=30)
+    finally:
+        subprocess.Popen.communicate = real_communicate  # type: ignore[assignment]
+
+    assert len(pids) == 1
+    assert _gone(pids[0]), "the interrupted spawn left a process running"
+
+
+def test_no_module_can_kill_by_matching_a_process_name() -> None:
+    # A name match is what reached an operator's unrelated sessions, so the
+    # ban is executable rather than remembered. Prose may name the mistake:
+    # only real code is searched, docstrings and comments excluded, and this
+    # module is skipped because the pattern it looks for is written here.
+    offenders: list[str] = []
+    for path in sorted(Path(runner.__file__).resolve().parent.rglob("*.py")):
+        if path.resolve() == Path(__file__).resolve():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = {
+            id(node.body[0].value)
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in docstrings:
+                if "pkill" in node.value or "killall" in node.value:
+                    offenders.append(f"{path.name}:{node.lineno}")
+            if isinstance(node, ast.Name) and ("pkill" in node.id or "killall" in node.id):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == [], "a name-matching kill is never the cleanup"

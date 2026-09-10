@@ -1,4 +1,4 @@
-"""`python3 -m evals.benchmark.cli fake-run|verify|reduce|report|summary|cleanup`.
+"""`python3 -m evals.benchmark.cli fake-run|verify|reduce|report|summary`.
 
 The fake path is the CI path: no model, no network, no spend. `verify` re-runs
 the hidden verifiers over a finished run's retained worktrees and reports where
@@ -25,7 +25,6 @@ from typing import Any
 
 from . import (
     FIXTURES,
-    reap as reap_module,
     executor,
     manifest as manifest_module,
     records,
@@ -183,18 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     # did without a reader piping JSON through another tool.
     summary = commands.add_parser("summary", help="read a finished run's report.json as text")
     summary.add_argument("--run", required=True, type=Path)
-    # The one supported way to clean up after an interrupted run. It acts on the
-    # run's own process ledger and verifies each record against the live process
-    # before signalling, so it cannot reach anything this package did not start.
-    # Matching a process by name instead, `pkill -f bin/claude` and its
-    # relatives, also matches an operator's unrelated sessions; do not.
-    cleanup = commands.add_parser("cleanup", help="kill any process this run started and left behind")
-    cleanup.add_argument("--run", required=True, type=Path)
     args = parser.parse_args(argv)
-    if args.command == "cleanup":
-        json.dump(reap_module.reap(args.run), sys.stdout, indent=2, sort_keys=True)
-        sys.stdout.write("\n")
-        return 0
     if args.command in ("summary", "verify", "reduce", "report"):
         try:
             return run_reader(args)

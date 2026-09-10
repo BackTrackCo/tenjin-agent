@@ -11,7 +11,7 @@ product runtime.
 whole offline chain. The frozen contracts (manifest, schedule, immutable record, usage), the
 executor and verifier registries with their fake specs, disposable roots, sentinels and the
 isolation attestation, the reducer, the report and its headline rule, and the `verify`,
-`reduce`, `report`, `summary` and `cleanup` commands. `fake-run` drives all of it end
+`reduce`, `report` and `summary` commands. `fake-run` drives all of it end
 to end with no model, no network and no spend, which is what the required CI lane runs and what
 this layer is for: the measurement machinery has to be trustworthy before anything real runs
 through it. The layer above adds the live executor, the vendored toolchain it needs, the
@@ -54,7 +54,6 @@ the suite builds.
 | `reduce.py`             | task-equal reduction, amortization, seeded bootstrap              | `test_reduce.py`                     |
 | `report.py`             | publishable projection, redaction guard, the headline rule        | `test_report.py`                     |
 | `discovery.py`          | the discovery counters read off a settled trial                   | `test_discovery.py`                  |
-| `reap.py`               | cleanup by recorded identity, never by process name               | `test_reap.py`                       |
 | `cli.py`, `selftest.py` | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                   |
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, and the
@@ -190,12 +189,10 @@ run and its hits name no trial, so a trial claims whatever arrived while it ran.
 
 ## Cleanup
 
-Every process this package starts leads its own session, and its group is recorded under
-`<run>/pids/` before the run waits on it. The spawn kills the group and clears the record on its
-way out whatever happened, an interrupt included. If a run is killed outright, `cli.py cleanup
---run <dir>` reads the ledger, and before signalling anything checks each record against the live
-process: same start time and same process group, or the record is dropped unkilled. A pid is
-reused, so killing a recycled one kills a stranger.
+Every process this package starts leads its own session, and the spawn kills the whole group on
+its way out whatever happened, an interrupt included. A harness SIGKILLed mid-trial leaves that
+child reparented to pid 1 and nothing reaps it, which is a cost this package accepts rather than
+a gap: this seam runs the fake and offline executors, which start no model and spend nothing.
 
 Never clean up by matching a process name. A pattern such as `pkill -f bin/claude` also matches
 the operator's own unrelated sessions, and on 2026-09-07 exactly that command, run to tidy one
