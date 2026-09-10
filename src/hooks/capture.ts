@@ -62,14 +62,35 @@ const CHILD_RESEARCH_SQL =
 /** The lead's own lookups that actually ran, as opposed to being skipped. */
 const LEAD_LOOKUP_SQL =
   "arm IN ('prompt', 'research', 'fetch') AND reason IN ('hit', 'no-hit', 'cached', 'seen', 'no-answer', 'rate-server')";
-/** A failure fire whose shelves had nothing: the two reasons that mean "asked,
- *  and came back empty". `no-hit` is a definite miss, `no-answer` a leg that
- *  never landed. `asked`, `cached` and `seen` are the same failure a second
- *  time and are not a second thing to write up. Its own constant rather than
- *  another arm in {@link LEAD_LOOKUP_SQL}, which would widen the ask to failure
- *  `hit` rows too and give the ASKED mark a value that no longer says which
- *  rule bit. */
-const FAILURE_MISS_SQL = "arm = 'failure' AND reason IN ('no-hit', 'no-answer')";
+/**
+ * A failure worth naming in the ask, by what HAPPENED rather than by what the
+ * lookup returned. `no-hit` and `no-answer` are asked-and-empty; `deadline` and
+ * `error` never finished, so they say nothing about the shelf's stock — and the
+ * agent hit that wall either way, which is the whole reason to ask. Excluding
+ * them dropped the failure entirely, because the re-runs behind it are `cached`
+ * rows this same list refuses (below).
+ *
+ * `asked`, `cached` and `seen` are the same failure a second time. They are not
+ * a second thing to write up and cannot stand in for a first, so a key known
+ * only by them is not named.
+ */
+const FAILURE_LISTABLE_SQL =
+  "arm = 'failure' AND reason IN ('no-hit', 'no-answer', 'deadline', 'error')";
+
+/** Every failure fire, listable or not. {@link failureLines} needs the rows it
+ *  will NOT list: a `hit` on one run is what disqualifies that key on all the
+ *  others, and it can only do that if it was selected. */
+const FAILURE_ANY_SQL = "arm = 'failure' AND reason != 'no-question'";
+
+/** The two outcomes that mean this actor already HAS the answer: a piece was
+ *  delivered for the key, or one was withheld only because the same piece had
+ *  already been injected into this actor. */
+const ANSWERED_REASONS: ReadonlySet<string> = new Set(['hit', 'seen']);
+
+/** The reasons {@link FAILURE_LISTABLE_SQL} admits, for the in-memory pass over
+ *  the wider row set. One definition would need a SQL parser; these two are
+ *  asserted equal by a test rather than kept in step by hand. */
+const LISTABLE_REASONS: ReadonlySet<string> = new Set(['no-hit', 'no-answer', 'deadline', 'error']);
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   return (
@@ -154,8 +175,19 @@ function missLines(db: LoopDb, session: string): string[] {
 }
 
 /**
- * The failures this actor hit that the shelves had nothing for, oldest first,
- * one line each. THE `fires` ROW IS THE RECORD: `fire.ts` sets the plan's
+ * The failures this actor hit and does not already have an answer to, oldest
+ * first, one line each.
+ *
+ * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED. Reading only the
+ * rows the shelf missed loses a failure to a `deadline` or an `error`, where
+ * the request never finished and so says nothing about whether the shelf holds
+ * an answer — and it loses the failure ENTIRELY, since the repeats behind it
+ * are `cached` rows the same filter drops. The agent still hit that wall and
+ * may still have the fix, which is the whole point of asking. Only `hit` and
+ * `seen` disqualify a key, because both mean this actor is already holding the
+ * piece ({@link ANSWERED_REASONS}).
+ *
+ * THE `fires` ROW IS THE RECORD: `fire.ts` sets the plan's
  * question key and its masked, cut text before the gates run, and `ledger.ts`
  * writes both on every outcome, so a failure that asked has already left
  * everything this needs. Nothing else is stored and nothing else is joined.
@@ -186,8 +218,8 @@ function missLines(db: LoopDb, session: string): string[] {
 function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] {
   const rows = db
     .prepare(
-      `SELECT question_key, question, at FROM fires
-       WHERE session = ? AND agent = ? AND ${FAILURE_MISS_SQL}
+      `SELECT question_key, question, at, reason FROM fires
+       WHERE session = ? AND agent = ? AND ${FAILURE_ANY_SQL}
          AND question_key IS NOT NULL AND question_key != ''
        ORDER BY at, rowid`,
     )
@@ -195,12 +227,26 @@ function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] 
     question_key?: unknown;
     question?: unknown;
     at?: unknown;
+    reason?: unknown;
   }>;
+  // ANSWERED IS DECIDED PER KEY, NOT PER ROW, and it has to be, because the two
+  // halves of one failure land in different rows: the fire that reached the
+  // shelf carries the verdict, and every re-run of the same command behind it
+  // is a `cached` or `asked` row carrying none. A per-row test would name a
+  // failure whose answer this actor is holding, on the strength of its repeats.
+  const answered = new Set<string>();
+  for (const row of rows) {
+    const key = typeof row.question_key === 'string' ? row.question_key : '';
+    if (key !== '' && ANSWERED_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) {
+      answered.add(key);
+    }
+  }
   const seen = new Set<string>();
   const out: string[] = [];
   for (const row of rows) {
     const key = typeof row.question_key === 'string' ? row.question_key : '';
-    if (key === '' || seen.has(key)) continue;
+    if (key === '' || seen.has(key) || answered.has(key)) continue;
+    if (!LISTABLE_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
     seen.add(key);
     if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
     // Already masked and cut at the shelf's bound on the way into the row; the
@@ -264,14 +310,14 @@ function evidence(ctx: FireContext): Evidence | null {
     if (hasMark(db, actor, EDITED_PREFIX)) return 'edited';
     if (fired(db, actor, CHILD_RESEARCH_SQL)) return 'research';
     if (getMark(db, actor, HANDOFF_MISS) !== null) return 'handoff-miss';
-    if (fired(db, actor, FAILURE_MISS_SQL)) return 'failure';
+    if (fired(db, actor, FAILURE_LISTABLE_SQL)) return 'failure';
     return null;
   }
   if (fired(db, actor, LEAD_LOOKUP_SQL)) return 'lookup';
   if (teamOrigin(ctx.deps.config()) !== null && hasMark(db, actor, ACTIVITY_PREFIX))
     return 'activity';
   if (childFindings(db, actor.session).length > 0) return 'finding';
-  if (fired(db, actor, FAILURE_MISS_SQL)) return 'failure';
+  if (fired(db, actor, FAILURE_LISTABLE_SQL)) return 'failure';
   return null;
 }
 

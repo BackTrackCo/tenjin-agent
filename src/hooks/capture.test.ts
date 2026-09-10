@@ -341,7 +341,7 @@ describe('the child ask', () => {
     // explain its own wall, and the lead never walked into it.
     const child = (await fire(db, childStop()))?.context ?? '';
     expect(child).toContain(
-      '- Came up this turn, and the shelf had nothing for it: `' +
+      '- Came up this turn, and you have no answer for it on hand: `' +
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
         '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
@@ -537,6 +537,54 @@ describe('the lead ask', () => {
     }
   });
 
+  it('names a failure whose lookup never finished, and the repeat behind it cannot stand in', async () => {
+    // The gap the outcome filter left: `deadline` and `error` say nothing about
+    // whether the shelf holds an answer, and reading only the misses dropped the
+    // failure entirely, because every re-run behind it is a `cached` row.
+    for (const reason of ['deadline', 'error']) {
+      const db = freshDb();
+      seedFailure(db, LEAD, { reason, at: NOW - 50 });
+      seedFailure(db, LEAD, { reason: 'cached', at: NOW - 40 });
+      const context = (await fire(db, leadStop()))?.context ?? '';
+      expect(context, reason).toContain(ENOENT_LINE);
+      expect(getMark(db, LEAD, 'capture:asked'), reason).toBe('failure');
+    }
+
+    // A repeat on its own is not a first sighting: `cached` alone earns nothing.
+    const repeatOnly = freshDb();
+    seedFailure(repeatOnly, LEAD, { reason: 'cached' });
+    expect(await fire(repeatOnly, leadStop())).toBeNull();
+  });
+
+  it('a key answered on any run is not named on the runs that were not', async () => {
+    // `answered` is decided over the key's whole history, not one row: the fire
+    // that reached the shelf carries the verdict, and a later `deadline` on the
+    // same key must not re-offer a piece this actor is already holding.
+    const db = freshDb();
+    seedFailure(db, LEAD, { reason: 'hit', at: NOW - 50 });
+    seedFailure(db, LEAD, { reason: 'deadline', at: NOW - 40 });
+    seedFailure(db, LEAD, { questionKey: 'sig_v1:ffff0000ffff0000', at: NOW - 30 });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    const lines = context.split('\n').filter((l) => l.startsWith('- Came up this turn'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('sig_v1:ffff0000ffff0000');
+    expect(context).not.toContain(ENOENT_KEY);
+  });
+
+  it('offers every fingerprint the arm resolves, one --key flag each', async () => {
+    // Naming only the first filed the piece under `sig_v1` while the arm went on
+    // asking `sig_v1_test` too, so the next teammate to hit that same test
+    // resolved under a key nothing had ever been published against.
+    const db = freshDb();
+    seedFailure(db, LEAD, {
+      questionKey: 'sig_v1:aaaabbbbccccdddd|sig_v1_test:0123456789abcdef',
+    });
+    const context = (await fire(db, leadStop()))?.context ?? '';
+    expect(context).toContain(
+      '`--key fingerprint=sig_v1:aaaabbbbccccdddd` `--key fingerprint=sig_v1_test:0123456789abcdef`',
+    );
+  });
+
   it('one line per failure, deduped by key, each naming what it can be filed under', async () => {
     const db = freshDb();
     // The same command re-run after a failed edit is one problem, not three.
@@ -558,13 +606,13 @@ describe('the lead ask', () => {
     const reason = (await fire(db, leadStop()))?.context ?? '';
     const lines = reason.split('\n').filter((l) => l.startsWith('- Came up this turn'));
     expect(lines).toEqual([
-      '- Came up this turn, and the shelf had nothing for it: `' +
+      '- Came up this turn, and you have no answer for it on hand: `' +
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
         '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
-      '- Came up this turn, and the shelf had nothing for it: `error: linting failed for the ' +
+      '- Came up this turn, and you have no answer for it on hand: `error: linting failed for the ' +
         'workspace`. If you settled it and the answer would save a teammate the same hour, publish it.',
-      '- Came up this turn, and the shelf had nothing for it: A failure filed under ' +
+      '- Came up this turn, and you have no answer for it on hand: A failure filed under ' +
         '`sig_v1_test:0123456789abcdef`. If you settled it and the answer would save a teammate the ' +
         'same hour, publish it with `--key fingerprint=sig_v1_test:0123456789abcdef`.',
     ]);

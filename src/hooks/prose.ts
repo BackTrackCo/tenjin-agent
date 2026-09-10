@@ -126,9 +126,11 @@ export const MISS_LINE = (question: string, id: string): string =>
  * the same command, which is "something passed later", not "you understood
  * it". An agent told it fixed something it worked around, or that a teammate's
  * push fixed, writes a piece about a fix that never happened. So the line
- * states what is on the row and no more: this came up, and the shelf was empty.
+ * states what is on the row and no more: this came up, and no answer to it
+ * reached this agent. It does not say the shelf was asked and came back empty,
+ * because a failure also reaches this line when the lookup never finished.
  * The publish is offered conditioned on the agent's own judgement, and the
- * fingerprint is what makes the answer findable next time.
+ * fingerprints are what make the answer findable next time.
  *
  * RENDERS WITH EITHER HALF MISSING. A failure with a test identity and no error
  * line has an empty `errorLine` and a real key — the case a fingerprint serves
@@ -143,15 +145,23 @@ export const FAILURE_LINE = (errorLine: string, keys: string[]): string => {
         ? 'A failure filed under `' + keys.join('`, `') + '`'
         : 'A failure'
       : '`' + errorLine + '`';
-  // One key, not all of them: the line has to stay a command an agent can
-  // paste, and `failureQuestionKey` composes `sig_v1` first.
+  // EVERY KEY, ONE FLAG EACH. `--key` is `collect` and takes up to 32, so two
+  // flags are still one command an agent can paste. Naming only the first
+  // filed the piece under `sig_v1` alone while the arm goes on resolving
+  // `sig_v1_test` too, so the next teammate to hit that same test asks under a
+  // key nothing was ever published against.
   const publish =
     keys.length > 0
-      ? ' If you settled it and the answer would save a teammate the same hour, publish it with `--key fingerprint=' +
-        (keys[0] ?? '') +
-        '`.'
+      ? ' If you settled it and the answer would save a teammate the same hour, publish it with ' +
+        keys.map((key) => '`--key fingerprint=' + key + '`').join(' ') +
+        '.'
       : ' If you settled it and the answer would save a teammate the same hour, publish it.';
-  return '- Came up this turn, and the shelf had nothing for it: ' + what + '.' + publish;
+  // NOT "the shelf had nothing for it". A failure reaches this line when the
+  // lookup missed AND when it never finished, and those are different facts;
+  // claiming the shelf was asked and came back empty would be a guess on the
+  // second. What is true of every one of them is that the agent hit it and has
+  // no answer in hand.
+  return '- Came up this turn, and you have no answer for it on hand: ' + what + '.' + publish;
 };
 
 /** What one of this session's children published, so the lead that cannot read
