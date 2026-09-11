@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import artifact, claude_usage, discovery, executor, loop_join, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
+from . import artifact, claude_usage, container, discovery, executor, images, loop_join, phases as phases_module, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from .schedule import Trial
 
@@ -49,10 +49,6 @@ Sleep = Callable[[float], None]
 # model calls returns them as receipts for one trial. The benchmark owns the
 # receipts; nothing in the manifest or the agent's output can mint one.
 Receipts = Callable[[str, artifact.TrialRoots], list[usage.AuxiliaryReceipt]]
-
-
-class ConcurrencyError(RuntimeError):
-    """A run asked for more than one trial at once under a seam that cannot attribute one."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +67,68 @@ class TrialResult:
     outcome: str
     resumed: bool
     path: Path
+
+
+def default_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
+    """Route one launch to the seam that can run it.
+
+    A launch that names a container recipe is a live attempt and runs inside
+    Harbor; anything else is a plain child process. The choice is the launch's
+    own shape rather than a runtime flag, so a manifest cannot ask for both.
+    """
+    return container_spawn(launch, roots, timeout_s) if launch.recipe is not None else process_spawn(launch, roots, timeout_s)
+
+
+def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
+    """The live seam: bring one Harbor container up, exec the agent in it, tear it down.
+
+    The container is the process boundary, so nothing starts in this process's
+    own session and there is no group to kill. `Container.close` runs on every
+    path out and sweeps the compose project afterwards in case `down` never ran,
+    and the project is recorded under `<run>/projects/` before the agent starts,
+    so `cli.py cleanup` reaches it after a kill this process never saw.
+
+    Three execs in one container, in order. The ENTRYPOINT has already started
+    the trial's daemon by the time `up --wait` returns, so its report is read
+    first: an unhealthy daemon ends the attempt before anything is spent. Then
+    the agent under the wall-clock cap. Then the daemon stop, which has to happen
+    while the container is up, because the host reads `loop.db` back after it is
+    gone.
+    """
+    recipe = launch.recipe
+    roots.output.mkdir(parents=True, exist_ok=True)
+    container.record_project(roots.run_dir, roots.trial_id, recipe.name)
+    stream = roots.stream.open("w", encoding="utf-8")
+    completed = Completed(returncode=1, stderr="", timed_out=False)
+    try:
+        with container.Container(recipe=recipe) as box:
+            refused = container.daemon_error(roots.output)
+            if refused is not None:
+                return Completed(returncode=container.DAEMON_REFUSED, stderr=refused, timed_out=False)
+            try:
+                ran = box.exec(
+                    launch.argv,
+                    cwd=recipe.workdir,
+                    environment=container.forwarded(recipe, os.environ),
+                    timeout_s=timeout_s,
+                    stream=stream,
+                )
+                completed = Completed(returncode=ran.returncode, stderr=ran.stderr, timed_out=False)
+            except RuntimeError as error:
+                # Harbor raises a plain RuntimeError on its own timeout, having
+                # already killed the host-side client. The command inside the
+                # container outlives that and dies with the container below,
+                # which is the same guarantee the process-group kill gave.
+                if "timed out" not in str(error):
+                    raise
+                completed = Completed(returncode=124, stderr=str(error), timed_out=True)
+            if recipe.daemon:
+                box.exec([container.TRIAL_ENTRY, container.STOP_ARG], timeout_s=container.STOP_TIMEOUT_S)
+    finally:
+        stream.close()
+        container.stop(recipe.name)
+        container.forget_project(roots.run_dir, roots.trial_id)
+    return completed
 
 
 def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s: float) -> Completed:
@@ -136,42 +194,6 @@ def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> No
         process.send_signal(sig)
 
 
-def process_start(argv: list[str], *, cwd: Path, env: dict[str, str], log: Path) -> subprocess.Popen[Any]:
-    """Start a helper the way the agent is started: own session, no shell.
-
-    The one other place a process begins. It exists for a provisioned arm's
-    daemon, which has to outlive the launch call and die before `loop.db` is
-    read, so it cannot be a child of the agent's group.
-    """
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a", encoding="utf-8") as handle:
-        return subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            shell=False,
-        )
-
-
-def process_stop(process: subprocess.Popen[Any], grace_s: float) -> int | None:
-    """SIGTERM the helper's group, wait, SIGKILL what is left."""
-    if process.poll() is None:
-        _kill_group(process, signal.SIGTERM)
-        try:
-            process.wait(timeout=grace_s)
-        except subprocess.TimeoutExpired:
-            _kill_group(process)
-            try:
-                process.wait(timeout=_ORPHAN_WAIT_S)
-            except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
-                pass
-    return process.returncode
-
-
 @dataclass(frozen=True)
 class Runtime:
     clock: Clock = time.monotonic
@@ -180,10 +202,9 @@ class Runtime:
     # plain default would bind the function object once and for all, and a
     # test that replaces `runner.process_spawn` to prove nothing starts would
     # then be guarding a name the runtime no longer reads.
-    spawn: Spawn = field(default_factory=lambda: process_spawn)
+    spawn: Spawn = field(default_factory=lambda: default_spawn)
     settle_cap_s: float = 30.0
     settle_interval_s: float = 0.25
-    sentinel: artifact.SentinelLike | None = None
     receipts: Receipts | None = None
     attestation: artifact.Attestation | None = None
     publishable: bool = True
@@ -197,6 +218,12 @@ class Runtime:
     # shelf: the CLI dedups a body per machine by content hash, and trial ids
     # repeat across runs of one manifest, so the body has to carry the run.
     run_nonce: str | None = None
+    # The run's egress (`container.Egress`), created before the first trial and
+    # removed after the last. Every live container joins its internal network.
+    egress: Any = None
+    # The run's one corpus reading (`snapshot.Once`), asked for once the first
+    # seed has reached the shelf, so the count is the corpus the trials searched.
+    snapshot: Any = None
 
 
 @dataclass(frozen=True)
@@ -264,7 +291,20 @@ def isolation_of(isolation: dict[str, Any], provision: executor.Provision | None
     """The record's isolation block: the gate's facts, the daemon's, and what became of the seeded piece."""
     if provision is None:
         return isolation
-    out = {**isolation, "daemon_respawned": bool((stop or {}).get("respawned", False))}
+    # `wal_checkpoint` is why an attempt that came back `delivery:wal_live`
+    # did. The ledger's WAL is closed explicitly at stop, so a surviving one
+    # is a checkpoint that refused and named its reason, not a wait that ran out.
+    out = {
+        **isolation,
+        "daemon_respawned": bool((stop or {}).get("respawned", False)),
+        "wal_checkpoint": (stop or {}).get("wal_checkpoint"),
+    }
+    # Which product hook arms the seeded config turned off, on every
+    # provisioned attempt and not only where the manifest named one: an empty
+    # list is the arm as shipped, and no key at all means no provisioning.
+    off = provision.facts.get("hooks_disabled")
+    if off is not None:
+        out["hooks_disabled"] = list(off)
     seeds = provision.facts.get("seed")
     if seeds is not None:
         deleted = (stop or {}).get("seed_deleted") or {}
@@ -313,13 +353,24 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         shelf_secret_present=bool(facts.get("shelf_secret_present", False)),
         shelf_origin=facts.get("shelf_origin"),
     )
-    origin = None if runtime.sentinel is None else runtime.sentinel.origin
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)
+    # The image is resolved before any root exists: a missing or drifted image
+    # is a refusal, and its id is what the record says the attempt ran in.
+    image = images.require(task, manifest.fixture_path(task), manifest.pins) if spec.live else None
+    if image is not None:
+        isolation = {**isolation, "image": image.facts}
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), image=image)
+    # The manifest's slice is identity of the run, stated in every record.
+    if manifest.slice is not None:
+        isolation = {**isolation, "slice": manifest.slice}
     provision = None
     if provisioned:
         assert spec.prepare is not None
         try:
-            provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce))
+            provision = spec.prepare(
+                executor.ProvisionRequest(
+                    trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce, image=None if image is None else image.id
+                )
+            )
         except executor.ProvisionError as error:
             # One trial's provisioning refused (a seed key that drifted, a
             # publish that failed, a daemon that never answered): the trial is
@@ -327,16 +378,58 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             # provisioner half-did it has already undone, fail-closed. A
             # run-wide condition (credential, platform, manifest) is refused
             # before any trial by `live-run`, never here.
-            (roots.output / "provision-refusal.txt").write_text(str(error) + "\n", encoding="utf-8")
-            return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", str(error))
-    launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
+            #
+            # The roots die with the runner, so the record is the only place the
+            # refusal survives to. It carries the text masked: a refusal that
+            # costs a whole arm has to say what it saw, and the reason code alone
+            # made `provision:seed_publish` mean "the publish failed somehow".
+            detail = refusal_detail(str(error), tuple(getattr(runtime.source, "secrets", ()) or ()))
+            (roots.output / "provision-refusal.txt").write_text(detail + "\n", encoding="utf-8")
+            return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", detail)
+        # The seed is on the shelf now, so this is the corpus every trial of
+        # this run searches. Asked once; `Once` ignores every later ask.
+        if runtime.snapshot is not None:
+            runtime.snapshot.fire()
+    # The natural arm: a producer session first, on the same store, verified;
+    # then the consumer on a fresh repository copy at the same path.
+    produced: producer_module.ProducerResult | None = None
+    foreign_sessions: tuple[str, ...] = ()
+    if provisioned and arm.get("producer"):
+        assert provision is not None
+        produced = producer_module.run(
+            spec=spec,
+            trial_id=trial.trial_id,
+            task=task,
+            arm=arm,
+            pins=manifest.pins,
+            fixture=manifest.fixture_path(task),
+            image=image,
+            roots=roots,
+            provision=provision,
+            runtime=runtime,
+            verifier_spec=verifier_spec,
+            wall_clock_s=float(manifest.pins["wall_clock_s"]),
+        )
+        provision = produced.provision
+        foreign_sessions = produced.foreign_sessions
+        isolation = {**isolation, "producer": produced.facts}
+        artifact.refresh_repo(roots, manifest.fixture_path(task), image)
+    launch = spec.launch(
+        executor.LaunchRequest(
+            trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress
+        )
+    )
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}
-    hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
 
     started = runtime.clock()
     try:
-        completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
+        if produced is not None and produced.invalid_reason is not None:
+            # The producer left nothing to reuse: no consumer is started, and
+            # the attempt is invalid under the producer's own reason.
+            completed = Completed(returncode=0, stderr="", timed_out=False)
+        else:
+            completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
     finally:
         # The daemon stops as soon as the agent has, before settlement and
         # before anything reads `loop.db`: a stopped daemon is what makes the
@@ -360,7 +453,6 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         roots.audit()
     except artifact.ArtifactError as error:
         isolation_reason = f"isolation:{error.code}"
-    hits = 0 if runtime.sentinel is None else len(runtime.sentinel.hits) - hits_before
     canaries = () if provision is None else provision.secrets
 
     session: claude_usage.SessionUsage | None = None
@@ -372,7 +464,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         usage_reason = f"usage:{error.code}"
     actors = [] if session is None else session.actors
     try:
-        delivery = loop_join.project(roots.data_dir / "loop.db", actors)
+        delivery = loop_join.project(roots.data_dir / "loop.db", actors, foreign_sessions)
     except loop_join.LoopJoinError:
         delivery = loop_join.unavailable()
         usage_reason = usage_reason or "delivery:wal_live"
@@ -381,17 +473,18 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if delivery.get("failure_key") is not None:
         # The product's test lane reads `.vitest-report.json` in the repository when a reporter is wired; its presence after the run is a fact.
         delivery["failure_key"] = {**delivery["failure_key"], "report_file_present": (roots.repo / ".vitest-report.json").is_file()}
-    # The team shelf and the public marketplace are the seeded config's two
-    # named origins, listed in the allowlist a provisioned run has to state. A
-    # leg to either is the product under test and is counted in the record; a
-    # local leg reaches nothing; only a leg to an origin outside that set is a
-    # public request for the sentinel.
-    hits += delivery["classes"]["other"]
-    sentinel = artifact.scan_sentinels(roots, hits, canaries=canaries, exclude=(roots.data_dir / "config.json",))
+    # `delivery["classes"]` still says which shelf each leg the product logged
+    # went to, `other` being one outside the seeded config's named set. It is
+    # the daemon's own ledger, not an observation of the network, so it is
+    # reported and no longer invalidates: nothing here can see a leg the
+    # product did not write down.
+    sentinel = artifact.scan_sentinels(roots, canaries=canaries, exclude=(roots.data_dir / "config.json",))
 
     auxiliary: list[dict[str, Any]] = []
+    collected = [] if produced is None else list(produced.receipts)
     if runtime.receipts is not None:
-        collected = runtime.receipts(trial.trial_id, roots)
+        collected = collected + list(runtime.receipts(trial.trial_id, roots))
+    if collected:
         try:
             if any(receipt.trial_id != trial.trial_id for receipt in collected):
                 raise usage.UsageError("foreign_trial", "an auxiliary receipt names another trial")
@@ -414,7 +507,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
-    invalid_reason = isolation_reason or sentinel.reason or usage_reason
+    invalid_reason = (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or usage_reason
     outcome = "invalid"
     verdict: verifier.Verdict | None = None
     patch_hash: str | None = None
@@ -453,6 +546,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         outcome = "invalid"
 
     root_transcript = sessions / f"{launch.root_session_id}.jsonl"
+    # What the attempt's own requests went to: the task, the turn-end nudge the
+    # Stop hook asked for, and a CLI search the primer sent the agent on. A
+    # decomposition of the usage above, never an addition to it.
+    attempt_phases = phases_module.split(
+        [] if session is None else session.records,
+        producer_module.request_times(root_transcript),
+        phases_module.read_marks(roots.data_dir / "loop.db", launch.root_session_id),
+    )
     usage_fields = (
         {
             "native_root_id": launch.root_session_id,
@@ -488,8 +589,9 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
         "unresolved_actors": settlement.unresolved,
+        "attempt_phases": attempt_phases,
         "delivery": delivery,
-        "discovery": discovery.derive(sessions, trial.task_id) if spec.live else None,
+        "discovery": discovery.derive(sessions, trial.task_id, verifier.TASK_SOURCES.get(trial.task_id)) if spec.live else None,
         "sentinel": sentinel.counts(),
         "isolation": isolation_of(isolation, provision, provision_stop),
         "private_hashes": {
@@ -500,10 +602,24 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     }
 
 
+def refusal_detail(text: str, secrets: tuple[str, ...]) -> str:
+    """A refusal's own words, with every secret the source holds replaced and the length bounded.
+
+    Masking is the same substitution the provisioner already applies to a CLI
+    tail, applied again here because the record is written by this module and a
+    provisioner that forgot would leak into a file the run keeps.
+    """
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[secret]")
+    text = " ".join(text.split())
+    return text if len(text) <= records.DETAIL_LIMIT else text[: records.DETAIL_LIMIT - 3] + "..."
+
+
 def refused_record(
     manifest: Manifest, trial: Trial, schedule_hash: str, spec: executor.ExecutorSpec, arm: dict[str, Any], isolation: dict[str, Any], reason: str, detail: str
 ) -> dict[str, Any]:
-    """An attempt that never started: no root, no usage, no delivery, invalid under the refusal's reason. The detail's hash, never its text."""
+    """An attempt that never started: no root, no usage, no delivery, invalid under the refusal's reason, which it quotes."""
     return {
         "schema": records.RECORD_SCHEMA,
         "trial_id": trial.trial_id,
@@ -527,14 +643,16 @@ def refused_record(
         "auxiliary": [],
         "outcome": "invalid",
         "invalid_reason": reason,
+        "invalid_detail": detail or None,
         "verifier": None,
         "patch_hash": None,
         "stop_reason": "exit",
         "wall_time_s": 0.0,
         "unresolved_actors": [],
+        "attempt_phases": phases_module.empty(),
         "delivery": loop_join.unavailable(),
         "discovery": None,
-        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "sentinel": {"credential_exposures": 0},
         "isolation": isolation,
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(detail) if detail else None, "resolved_settings": None},
     }
@@ -606,12 +724,6 @@ def run(
     records_dir = run_dir / "records"
     accepted, _ = records.select(records_dir, manifest.hash, schedule_hash)
     degree = manifest.concurrency
-    if degree > 1 and runtime.sentinel is not None:
-        # The sentinel is one server for the run and its hits carry no trial,
-        # so a trial claims the ones that arrived while it ran. That reads the
-        # wrong trial's hit the moment two overlap, and a hit invalidates an
-        # attempt, so the configuration is refused rather than measured.
-        raise ConcurrencyError("a run with a sentinel attached counts its hits per trial by delta and must run at pins.concurrency 1")
     done = {
         trial.trial_id: TrialResult(trial.trial_id, accepted[trial.trial_id]["outcome"], True, records.final_path(records_dir, trial.trial_id))
         for trial in trials

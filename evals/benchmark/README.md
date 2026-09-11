@@ -29,6 +29,21 @@ usage-limit percentages and surge multipliers, which move for reasons unrelated 
 LLM judge, which if ever added is benchmark overhead in its own field, neither product cost nor
 correctness. The outcome is raw provider token counts under an executable verifier; subscription dollar cost is supplementary.
 
+## Shared local and CI execution
+
+Local and CI runs use the same container runner, images, Docker Compose lifecycle, verifier,
+and reporting commands. Colima can provide Docker on macOS. Put run directories on a path
+shared with the Docker VM. The fake executor is an offline test double, not a second live runner.
+Build images with `python3 -m evals.benchmark.images --help`, then pass an explicit manifest to
+`python3 -m evals.benchmark.cli live-run --manifest PATH --out RUN`. Use `--dry-run` to inspect
+that same launch without starting it. Install `requirements-live.txt` for live execution.
+
+Every live attempt captures stdout and stderr, settles usage from retained transcripts and the
+stream envelope, and tears down its Compose project. After an interrupted run, `cleanup --run RUN`
+removes only projects recorded by that run. Provisioning, corpus reset, producer/consumer phases,
+images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
+and concrete preset/configuration data arrive in the next two layers.
+
 ## Layout, and where each contract lives
 
 Each contract is stated once, in the module that owns it, and held by the test module beside it.

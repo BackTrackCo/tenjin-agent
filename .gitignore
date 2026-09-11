@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# One exception, and it is the whole of a benchmark task: `shadow` hides the
+# fact that its consumers import a package's committed build output, so that
+# artifact is a fixture file rather than a build product. It is covered by the
+# task's `fixture_hash`, which a run refuses to start without.
+!evals/benchmark/fixtures/live/shadow/packages/range/dist/
 *.log
 *.tgz
 .eslintcache
@@ -8,3 +13,7 @@ __pycache__/
 # The tenjin-agent#267 test-identity key lane's own reporter output — an
 # artifact of the most recent local `vitest run`, never something to commit.
 .vitest-report.json
+
+# The Bench-2 image ledger: which local image id each fixture tag names on
+# this machine. `images build` rewrites it; nothing reads it across machines.
+evals/benchmark/fixtures/live/images.json
