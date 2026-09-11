@@ -252,16 +252,14 @@ resample means, so freezing them froze `random.Random`'s draw order rather than 
 amortization series at reuse 1, 2, 5 and 10 stays pinned exactly, because it is deterministic
 arithmetic over the reduction and a moved value there is a real change.
 
-The operator-side manifests, the regression baseline, the frozen Vitest task fixture, the
-seeded lessons and the code-owned hidden layers under `hidden/<task>/hidden-tests/` arrive with
-the live executor in the layer above, and `manifest.fixture_hash` folds the vendored archive's
-digest in there. Nothing offline extracts an archive: a trial's `node_modules` is derived, never
-committed, and this layer's fake tasks have none. **That whole vendored path is the darwin pin
-Bench-2 replaces with a container image per task.**
+The full reusable Vitest fixtures and lessons belong to the Bench-1 corpus layer, with hidden
+verifiers under `hidden/<task>/hidden-tests/`. Bench-1's shared container image build installs
+each fixture's dependencies. Local and CI live runs use that same runtime, including Docker
+Compose on Colima; later benchmarks add experiment selections and results on top of it.
 
 ## Extending the foundation
 
-Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture. A new task is a manifest
+Later benchmarks add experiments and results. Reusable adapters and reporting belong in Bench-1. A new task is a manifest
 entry, a fixture directory, a hidden layer, and a verifier spec in `verifier.REGISTRY`. A new arm
 is a manifest entry plus an `executor.REGISTRY` entry, and arms in one manifest share one
 executor, because arms running different harnesses do not have comparable token totals; a driver
