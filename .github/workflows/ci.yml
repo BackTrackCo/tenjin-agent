@@ -1,14 +1,15 @@
 name: CI
 
-# PR-gated (required check on main) plus manual dispatch for ad-hoc runs.
+# Ready PRs opt into CI with the ci label; manual dispatch remains available.
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
 
-# Cancel superseded runs on rapid pushes / PR updates.
+# Unrelated label events must not cancel an active CI run.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'ci' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 # Default-deny; the job opts into only what it needs.
@@ -17,6 +18,11 @@ permissions: {}
 jobs:
   ci:
     name: CI (lint, typecheck, build, test, audit)
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.pull_request.draft == false
+          && contains(github.event.pull_request.labels.*.name, 'ci')
+          && (github.event.action != 'labeled' || github.event.label.name == 'ci'))
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

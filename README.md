@@ -349,4 +349,14 @@ pnpm run typecheck
 pnpm run lint
 ```
 
+For pull requests into `main`, CI runs when the PR is ready for review and carries the `ci`
+label. Add the label when the change is ready for full validation; remove it before resuming
+heavy iteration. Adding it starts CI without another commit, and pushes while it remains
+present run CI again. Unrelated label changes do not restart or cancel an active run.
+Manual dispatch remains available from the Actions page.
+
+Drafts and PRs without `ci` show the required CI check as skipped. A skipped check is not proof
+of testing: before approval or merge, require the label and a successful
+`CI (lint, typecheck, build, test, audit)` run on the current head.
+
 Release notes live in [RELEASING.md](./RELEASING.md).
