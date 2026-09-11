@@ -526,3 +526,15 @@ def test_a_source_carrying_a_shelf_secret_is_refused(attest: Attest) -> None:
         attest(tenjin_source=secret)
     assert "never publishable" in str(caught.value)
     assert not attest.out.exists()
+
+
+def test_retained_corpus_evidence_refuses_before_another_reset(lane):
+    directory = lane.out / "records"
+    directory.mkdir(parents=True)
+    retained = directory / "retained.json"
+    retained.write_text("{}")
+    api = FakeApi()
+    with pytest.raises(cli.CliError, match="verified frozen database revision"):
+        lane.launch(api=api)
+    assert api.calls == []
+    assert retained.read_text() == "{}"
