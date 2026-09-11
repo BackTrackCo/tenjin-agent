@@ -389,6 +389,10 @@ def test_the_bootstrap_states_its_method_and_brackets_its_point(case: dict) -> N
         return
     assert interval is not None
     assert {key: interval[key] for key in case["expected"]} == case["expected"]
+    if len(case["ratios"]) == 1:
+        assert interval["low"] is None and interval["high"] is None
+        assert interval["reason"] == "insufficient_independent_tasks"
+        return
     assert interval["low"] <= interval["point"] <= interval["high"]
     # A degenerate corpus resamples one value forever, so only a corpus with
     # two different ratios in it can be asked for a non-empty interval.
@@ -410,18 +414,20 @@ def expected_cells(accepted: dict[str, Any]) -> dict[str, dict[str, Any]]:
     for record in accepted.values():
         if record["outcome"] == "invalid":
             continue
-        arm = cells.setdefault(record["arm_id"], {"tokens": {}, "passes": {}, "attempts": {}, "capture": 0})
+        arm = cells.setdefault(record["arm_id"], {"tokens": {}, "passes": {}, "attempts": {}, "capture": 0, "task_capture": {}, "producers": {}})
         task = record["task_id"]
         usage = sum(row["input_total"] + row["output_total"] for row in record["usage"])
         usage += sum(r["input_total"] + r["output_total"] for r in record["auxiliary"] if r["phase"] == "consumer")
         arm["tokens"][task] = arm["tokens"].get(task, 0) + usage
         arm["passes"][task] = arm["passes"].get(task, 0) + int(record["outcome"] == "pass")
         arm["attempts"][task] = arm["attempts"].get(task, 0) + 1
+        arm["producers"][task] = arm["producers"].get(task, 0) + int(any(r["phase"] in ("producer", "capture") for r in record["auxiliary"]))
+        arm["task_capture"][task] = arm["task_capture"].get(task, 0) + sum(r["input_total"] + r["output_total"] for r in record["auxiliary"] if r["phase"] == "capture")
         arm["capture"] += sum(r["input_total"] + r["output_total"] for r in record["auxiliary"] if r["phase"] == "capture")
     for arm in cells.values():
         # Per task: tokens per verified resolution, and tokens per attempt (the ratio's numerator and divisor).
         arm["per_task"] = {task: arm["tokens"][task] / arm["attempts"][task] for task in arm["tokens"]}
-        arm["per_resolution"] = sum(arm["tokens"][task] / arm["passes"][task] for task in arm["tokens"]) / len(arm["tokens"])
+        arm["per_resolution"] = sum((arm["tokens"][task] + arm["task_capture"][task] / (arm["producers"][task] or 1) * arm["attempts"][task]) / arm["passes"][task] for task in arm["tokens"]) / len(arm["tokens"])
     return cells
 
 
@@ -484,10 +490,42 @@ def test_the_corpus_comparison_reports_a_ratio_with_an_interval(corpus, reductio
 def test_consumer_time_per_completion_charges_failed_work_and_weights_tasks_equally() -> None:
     built = [support.reduction_record("a", "off", 0, 0, 100, "pass"), support.reduction_record("a", "off", 1, 0, 100, "fail"), support.reduction_record("b", "off", 0, 0, 100, "pass")]
     for record, seconds in zip(built, (10.0, 20.0, 50.0)):
-        record["wall_time_s"] = seconds
+        record["agent_time_s"] = seconds
     result = reduce_module.reduce(support.accept(*built), [], baseline="off")
     assert result["arms"]["off"]["consumer_seconds_per_verified_resolution"] == 40.0
-    built[0]["wall_time_s"] = None
+    built[0]["agent_time_s"] = None
     result = reduce_module.reduce(support.accept(*built), [], baseline="off")
     assert result["arms"]["off"]["consumer_seconds_per_verified_resolution"] is None
     assert result["arms"]["off"]["consumer_seconds_reason"] == "timing_unavailable"
+
+
+def test_completion_interval_uses_overview_ratio_not_mean_of_ratios() -> None:
+    rows = [support.reduction_record("small", "off", 0, 0, 100, "pass"),
+            support.reduction_record("large", "off", 0, 1, 1000, "pass"),
+            support.reduction_record("small", "on", 0, 2, 200, "pass"),
+            support.reduction_record("large", "on", 0, 3, 500, "pass")]
+    result = reduce_module.reduce(support.accept(*rows), [], "off")
+    interval = result["comparisons"]["on"]["completion_tokens"]
+    assert interval["point"] == pytest.approx(700 / 1100)
+    assert interval["point"] != pytest.approx((2 + 0.5) / 2)
+    assert interval["low"] <= interval["point"] <= interval["high"]
+    assert interval["tasks"] == 2
+
+
+def test_capture_and_failed_spend_are_charged_per_completion() -> None:
+    capture = (support.receipt("producer", "capture", "capture-1", 200, 100),)
+    rows = [support.reduction_record("task", "on", 0, 0, 100, "pass", auxiliary=capture),
+            support.reduction_record("task", "on", 1, 1, 200, "fail", auxiliary=capture)]
+    arm = reduce_module.reduce(support.accept(*rows), [])["arms"]["on"]
+    # The shared native capture receipt cost 300 once; failed consumer cost 200 remains.
+    assert arm["tokens_per_verified_resolution"] == 600
+    assert arm["system_completion_by_reuse"][1] == {"reuse": 2, "tokens": 450}
+
+
+def test_unequal_task_cohorts_do_not_produce_completion_comparisons() -> None:
+    rows = [support.reduction_record("a", "off", 0, 0, 100, "pass"),
+            support.reduction_record("b", "off", 0, 1, 100, "pass"),
+            support.reduction_record("a", "on", 0, 2, 100, "pass")]
+    comparison = reduce_module.reduce(support.accept(*rows), [], "off")["comparisons"]["on"]
+    assert comparison["headline"] is None
+    assert comparison["completion_tokens"]["reason"] == "incomplete_task_pairs"

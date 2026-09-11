@@ -284,10 +284,12 @@ def test_the_projection_carries_no_usage_body_or_delivery_detail(corpus, project
     trial = published["trials"][0]
     assert sorted(trial) == [
         "actors",
+        "agent_time_s",
         "arm_id",
         "auxiliary_receipts",
         "child_tokens",
         "credential_exposures",
+        "harness_time_s",
         "invalid_reason",
         "local_hits",
         "outcome",
@@ -301,6 +303,7 @@ def test_the_projection_carries_no_usage_body_or_delivery_detail(corpus, project
         "tokens",
         "trial_id",
         "unnamed_shelf_legs",
+        "verification_time_s",
     ]
     # The corpus predates leg classes, so every origin count reads as zero
     # rather than as a missing field.
@@ -362,7 +365,7 @@ def test_the_slice_and_the_producer_reach_the_report_and_its_reading() -> None:
     # task-paired interval; the reuse curve; the consumer-only ratio as the secondary line;
     # the producer's-own-work amortization last, as a diagnostic.
     comparison = projected["comparisons"]["on"]
-    assert (comparison["headline"], comparison["headline_rule"], comparison["headline_eligible"]) == (round(550 / 800, 12), "capture_only_amortized_reuse_1", True)
+    assert (comparison["headline"], comparison["headline_rule"], comparison["headline_eligible"]) == (round(550 / 800, 12), "system_tokens_per_verified_completion_reuse_1", True)
     assert (comparison["headline_interval"]["tasks"], comparison["headline_interval"]["point"]) == (1, round(550 / 800, 12))
     assert comparison["token_ratio"] == 0.5
     lines = text.splitlines()
@@ -615,11 +618,11 @@ def test_overview_names_the_experiment_schedule_model_and_all_arms(project: Proj
     assert "Ran: 12/12 attempts" in text
     assert "Verified / planned" in text
     assert "Consumer s / completion" in text
-    assert "Tokens / completion" in text
-    assert text.index("Tokens / completion") < text.index("<details>")
+    assert "System tokens / completion" in text
+    assert text.index("System tokens / completion") < text.index("<details>")
     assert "task-0, task-1, task-2" in text
     assert "| off |" in text and "| on |" in text
-    assert "Consumer time includes shutdown/settlement" in text
+    assert "Consumer time is measured around agent execution" in text
 
 
 def test_a_missing_arm_or_invalid_attempt_is_never_presented_as_a_complete_product_result(project: Project) -> None:

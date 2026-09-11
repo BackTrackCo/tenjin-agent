@@ -162,7 +162,7 @@ def protocol_hash(manifest: dict[str, Any]) -> str:
     Runtime product/image commit receipts are not manifest inputs. Explicit
     product version labels are excluded too; model/toolchain pins stay fixed.
     """
-    data = {**manifest, "arms": [{key: value for key, value in arm.items() if key != "product_version"}
+    data = {**manifest, "measurement_method": "completion-v2-agent-clock-capture-reuse1", "arms": [{key: value for key, value in arm.items() if key != "product_version"}
                                for arm in manifest.get("arms", [])]}
     return sha256_json(data)
 
