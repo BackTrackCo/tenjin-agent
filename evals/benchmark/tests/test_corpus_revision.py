@@ -12,7 +12,7 @@ def test_same_revision_retains_each_actual_reset_epoch():
     later = {**STAMP, "reset_at": "2026-09-11T02:00:00Z"}
     result = report.corpus_stamp(accepted(STAMP, later))
     assert result["source_lsn"] == STAMP["source_lsn"]
-    assert [epoch["reset_at"] for epoch in result["reset_epochs"] == [STAMP["reset_at"], later["reset_at"]]
+    assert [epoch["reset_at"] for epoch in result["reset_epochs"]] == [STAMP["reset_at"], later["reset_at"]]
 
 @pytest.mark.parametrize("change", [{"source_lsn": "0/456"}, {"baseline_id": "sha256:" + "b" * 64}, {"origin": "other.example"}, {"baseline_id": None}])
 def test_different_or_unproven_revision_cannot_be_pooled(change):
