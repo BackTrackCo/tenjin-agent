@@ -71,7 +71,8 @@ the suite builds.
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, the null
 manifest beside it, and the bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
 transcript). The full real-repository fixture library and hidden layers arrive in the corpus layer.
-Regression requires an explicit baseline; CI selects the last corresponding completed main run.
+Regression requires an explicit baseline. The planned CI policy selects the last corresponding
+completed main run; the promoted plumbing workflow still supplies its provisional baseline.
 
 ## Its CI lanes
 
