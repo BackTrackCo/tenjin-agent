@@ -16,6 +16,12 @@ ARG PNPM_VERSION
 ARG AGENT_PACKAGE
 ARG AGENT_VERSION
 ARG AGENT_COMMAND
+ARG CA_CERTIFICATES_VERSION
+
+# Native CLIs use the system trust store; the slim Node base does not carry it.
+RUN apt-get update -qq \
+  && apt-get install -y --no-install-recommends "ca-certificates=${CA_CERTIFICATES_VERSION}" \
+  && rm -rf /var/lib/apt/lists/*
 
 # One registry conversation, and the npm cache dropped: a trial never installs
 # anything, so the cache is dead weight in every image built from this one. The
