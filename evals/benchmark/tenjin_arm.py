@@ -226,13 +226,30 @@ class Probed:
     returncode: int
 
 
+def stream_text(path: Path) -> str:
+    """One redirected stream, or empty when the shell never wrote that file."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def probe_run(image: str, probe: Path, command: str, environment: dict[str, str]) -> Probed:
-    """Run one probe command in its own container, and tear that container down whatever happens."""
+    """Run one probe command in its own container, and tear that container down whatever happens.
+
+    Each stream to its own file (`container.split_streams`), because Harbor's
+    exec merges them and this output is keyed rather than logged.
+    """
     recipe = probe_recipe(image, probe, environment)
+    argv, out, err = container.split_streams(command.split(" "), recipe.trial_dir)
     try:
         with container.Container(recipe=recipe) as box:
-            ran = box.exec(command.split(" "), cwd=probe, timeout_s=PROBE_TIMEOUT_S)
-            return Probed(stdout=ran.stdout, stderr=ran.stderr, returncode=ran.returncode)
+            ran = box.exec(argv, cwd=probe, timeout_s=PROBE_TIMEOUT_S)
+            # Neither file written is a shell that never reached the command,
+            # and what stopped it is in the exec's own output.
+            if not out.exists() and not err.exists():
+                return Probed(stdout=ran.stdout, stderr=ran.stderr, returncode=ran.returncode)
+            return Probed(stdout=stream_text(out), stderr=stream_text(err), returncode=ran.returncode)
     except (OSError, RuntimeError) as error:
         container.stop(recipe.name)
         raise ProvisionError(f"the seed probe could not run {command!r}: {error.__class__.__name__}") from error

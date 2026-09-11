@@ -401,6 +401,26 @@ def shell_command(command: list[str]) -> str:
     return " ".join(shlex.quote(str(item)) for item in command)
 
 
+# The two files `split_streams` redirects into, under a directory the container
+# and the host both see.
+STREAM_FILES = ("command.stdout", "command.stderr")
+
+
+def split_streams(command: list[str], directory: Path) -> tuple[list[str], Path, Path]:
+    """One argv, rewritten to write each of its streams to its own file, and those two paths.
+
+    Harbor merges them: `_run_docker_compose_command` spawns the compose client
+    with `stderr=STDOUT`, so `ExecResult.stderr` is always empty and the order
+    of an exec's output is the order the two streams interleaved in. A caller
+    that KEYS the output cannot use that, because the product keys `stdout` and
+    then `stderr` (`src/hooks/arms/failure.ts`), and vitest prints its failures
+    to one and its totals to the other. Redirecting inside the container also
+    keeps the host-side compose client's own warnings out of the text.
+    """
+    out, err = directory / STREAM_FILES[0], directory / STREAM_FILES[1]
+    return ["bash", "-c", f"{shell_command(command)} > {shlex.quote(str(out))} 2> {shlex.quote(str(err))}"], out, err
+
+
 # The entrypoint, by the path the base image installs it at, and the argument
 # that ends the daemon it started.
 TRIAL_ENTRY = "/usr/local/bin/bench2-trial"

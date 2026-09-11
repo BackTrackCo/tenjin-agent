@@ -896,6 +896,64 @@ def test_the_probe_recipe_carries_what_the_image_entrypoint_needs_and_reaches_no
     assert recipe.daemon is False
 
 
+def test_the_probe_reads_each_stream_back_rather_than_the_merged_exec(tmp_path: Path) -> None:
+    """The product keys stdout and then stderr, and Harbor's exec returns the two merged into one."""
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    output = tmp_path / "probe-output"
+    seen: dict[str, Any] = {}
+
+    class Box:
+        def __init__(self, *, recipe: container.Recipe) -> None:
+            self.recipe = recipe
+
+        def __enter__(self) -> "Box":
+            self.recipe.trial_dir.mkdir(parents=True, exist_ok=True)
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def exec(self, command: list[str], **_: object) -> container.Completed:
+            seen["argv"] = command
+            (self.recipe.trial_dir / container.STREAM_FILES[0]).write_text("Tests  2 failed (2)\n", encoding="utf-8")
+            (self.recipe.trial_dir / container.STREAM_FILES[1]).write_text("TypeError: formatMoney is not a function\n", encoding="utf-8")
+            return container.Completed(returncode=1, stdout="TypeError: formatMoney is not a function\nTests  2 failed (2)\n", stderr="")
+
+    with mock.patch.object(container, "Container", Box):
+        ran = tenjin_arm.probe_run("sha256:image", probe, "pnpm exec vitest run tests/money.test.mjs", {container.OUTPUT_VAR: str(output)})
+    assert seen["argv"][:2] == ["bash", "-c"]
+    # Apart, and in the product's order: the merged exec has them the other way round.
+    assert ran.stdout == "Tests  2 failed (2)\n"
+    assert ran.stderr == "TypeError: formatMoney is not a function\n"
+    assert ran.returncode == 1
+
+
+def test_a_probe_whose_shell_wrote_no_stream_keeps_what_the_exec_saw(tmp_path: Path) -> None:
+    """A command the shell never reached leaves no file, and the refusal has to say what stopped it."""
+    probe = tmp_path / "probe"
+    probe.mkdir()
+
+    class Silent:
+        def __init__(self, *, recipe: container.Recipe) -> None:
+            self.recipe = recipe
+
+        def __enter__(self) -> "Silent":
+            self.recipe.trial_dir.mkdir(parents=True, exist_ok=True)
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def exec(self, command: list[str], **_: object) -> container.Completed:
+            return container.Completed(returncode=127, stdout="bash: pnpm: command not found\n", stderr="")
+
+    with mock.patch.object(container, "Container", Silent):
+        ran = tenjin_arm.probe_run("sha256:image", probe, "pnpm exec vitest run tests/money.test.mjs", {container.OUTPUT_VAR: str(tmp_path / "probe-output")})
+    assert ran.stdout == "bash: pnpm: command not found\n"
+    assert ran.returncode == 127
+
+
 def test_the_probe_gets_its_own_output_root_and_a_copy_that_keeps_its_symlinks(seed_roots, seed_lane: None) -> None:
     roots = seed_roots
     (roots.repo / "bin").mkdir()

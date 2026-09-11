@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -173,6 +174,17 @@ def test_an_argv_reaches_harbors_exec_as_a_quoted_line_rather_than_a_join() -> N
     # Harbor's exec takes a string and wraps it in a shell, so anything a task's
     # prompt could put in an argument is quoted here or it is a command.
     assert container.shell_command(["claude", "-p", "fix it; rm -rf /"]) == "claude -p 'fix it; rm -rf /'"
+
+
+def test_an_exec_whose_output_is_keyed_takes_the_two_streams_apart(tmp_path: Path) -> None:
+    # Harbor runs the compose client with `stderr=STDOUT`, so `ExecResult.stderr`
+    # is always empty and a merged read would key the order the two streams
+    # interleaved in. The product keys stdout and then stderr, and vitest prints
+    # its failures to one and its totals to the other, so the order decides the key.
+    argv, out, err = container.split_streams(["pnpm", "exec", "vitest", "run", "a b.test.mjs"], tmp_path)
+    assert (out, err) == (tmp_path / "command.stdout", tmp_path / "command.stderr")
+    assert argv[:2] == ["bash", "-c"]
+    assert argv[2] == f"pnpm exec vitest run 'a b.test.mjs' > {shlex.quote(str(out))} 2> {shlex.quote(str(err))}"
 
 
 def test_a_daemon_the_entrypoint_could_not_start_is_read_back_as_a_refusal(tmp_path: Path) -> None:
