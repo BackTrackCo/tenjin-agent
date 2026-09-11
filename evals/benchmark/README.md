@@ -8,31 +8,26 @@ one quality bar, how many model tokens did the complete agent run consume with a
 knowledge system. It does not itself produce a savings number, and nothing here touches the
 product runtime.
 
-**What this layer owns.** Bench-1 ships as three stacked layers, and this is the first: the
-whole offline chain. The frozen contracts (manifest, schedule, immutable record, usage), the
-executor and verifier registries with their fake specs, disposable roots, sentinels and the
-isolation attestation, the reducer, the report and its headline rule, and the `verify`,
-`reduce`, `report` and `summary` commands. `fake-run` drives all of it end
-to end with no model, no network and no spend, which is what the required CI lane runs and what
-this layer is for: the measurement machinery has to be trustworthy before anything real runs
-through it. The layer above adds the live executor, the vendored toolchain it needs, the
-`sig_v1` port, the `regress` warning and the Tenjin hooks arm; the one above that adds the
-corpus reset and the search-intent case export.
-Bench-2 (PR 313) then owns every real fixture as a container image, the four arms, the producer
-phase, and the readouts.
+**What this layer owns.** Bench-1 is the shared framework for all experiments, split into
+four reviewable layers: accounting/reporting, container execution, the full reusable fixture
+library, and configuration/CI. This first layer includes usage and immutable records, phase
+accounting, uncertainty, report rendering, explicit-baseline regression, saved-case export,
+signature parsing, and synthetic inputs that exercise the offline chain. The execution layer
+adds the shared container runtime and live adapters. The corpus layer adds the full task and
+lesson library; the configuration layer adds reusable workflow callers. Bench-2 and Bench-3
+select experiments on that same framework.
 
-Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. Run history through 2026-09-08,
-which is where the smoke runs, the retrieval findings, the corepack saga, and the pilot readout
-live: `tenjin-notes/audits/2026-09-08-bench1-runs/README.md`. Every contract below is frozen:
-changing one is a benchmark version bump, not an edit.
+Plan: `tenjin-notes/plans/2026-09-04-developer-token-savings-benchmark.md`. Historical run
+records remain in `tenjin-notes`; provisional runtime numbers are not compatibility contracts.
+The target headline measures time and tokens to verified task completion. Existing rendered
+capture/amortization diagnostics remain provisional until the planned metric hardening lands.
 
 Four things Bench-1 does not measure and will not be made to measure: the product's own `tokens
 saved` counter, which is computed from product state and so can never judge the product; `tenjin
 grade`, which stays explanatory while the hidden verifier decides pass and fail; provider
 usage-limit percentages and surge multipliers, which move for reasons unrelated to tokens; and an
 LLM judge, which if ever added is benchmark overhead in its own field, neither product cost nor
-correctness. The outcome is raw provider token counts under an executable verifier; cost and wall
-time are secondary.
+correctness. The outcome is raw provider token counts under an executable verifier; subscription dollar cost is supplementary.
 
 ## Layout, and where each contract lives
 
@@ -60,8 +55,8 @@ the suite builds.
 
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, the null
 manifest beside it, and the bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
-transcript). The real-repository fixtures, their vendored archive, the regression baseline and
-the code-owned hidden layers arrive with the live executor in the layer above.
+transcript). The full real-repository fixture library and hidden layers arrive in the corpus layer.
+Regression requires an explicit baseline; CI selects the last corresponding completed main run.
 
 ## Its CI lanes
 

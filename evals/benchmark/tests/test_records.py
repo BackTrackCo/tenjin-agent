@@ -43,7 +43,7 @@ def contradictions(base: dict) -> dict[str, dict]:
         "fire outside attempt": {**base, "delivery": {**base["delivery"], "status": "joined", "fires": [{"fire_id": "f", "actor": ["claude", "sess-family", "ghost"]}]}},
         "negative wall time": {**base, "wall_time_s": -1},
         "bad turns": {**base, "turns": "two"},
-        "sentinel count": {**base, "sentinel": {"public_requests": None}},
+        "sentinel count": {**base, "sentinel": {"credential_exposures": None}},
         "reconciliation shape": {**base, "usage_reconciliation": {}},
     }
 
@@ -66,6 +66,30 @@ def test_invalid_attempt_needs_a_reason_and_only_then(root_only_session: claude_
         records.validate({**invalid, "invalid_reason": None})
     with pytest.raises(RecordError):
         records.validate(attempt_record(root_only_session, invalid_reason="oops"))
+
+
+def test_a_refusal_may_quote_itself_and_only_a_refusal_may(family_session: claude_usage.SessionUsage) -> None:
+    """`invalid_reason` is the enum a reducer groups by; `invalid_detail` is what the refusal actually said."""
+    invalid = attempt_record(parse("sess-mismatch"), outcome="invalid", invalid_reason="provision:seed_publish", verifier=None)
+    records.validate({**invalid, "invalid_detail": "tenjin publish exited 1: No wallet passphrase is available."})
+    records.validate({**invalid, "invalid_detail": None})
+    for bad in ("", 7, "x" * (records.DETAIL_LIMIT + 1)):
+        with pytest.raises(RecordError):
+            records.validate({**invalid, "invalid_detail": bad})
+    with pytest.raises(RecordError):
+        records.validate({**attempt_record(family_session), "invalid_detail": "a scored attempt started"})
+
+
+def test_the_marketplace_leg_is_stated_per_attempt_or_not_at_all(family_session: claude_usage.SessionUsage) -> None:
+    # The two shelf arms carry byte-identical settings, so this field is the
+    # only thing in a record that tells them apart.
+    base = attempt_record(family_session)
+    for value in ("on", "off"):
+        records.validate({**base, "isolation": {**base["isolation"], "public_fallback": value}})
+    records.validate(base)
+    for value in ("false", "", True):
+        with pytest.raises(RecordError):
+            records.validate({**base, "isolation": {**base["isolation"], "public_fallback": value}})
 
 
 # The invariant lives in the record, not only in the runner that built it: a

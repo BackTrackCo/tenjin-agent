@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import loop_join, usage
+from . import loop_join, phases as phases_module, usage
 from .schedule import trial_id as derive_trial_id
 
 RECORD_SCHEMA = "bench1.attempt.v1"
@@ -72,9 +72,22 @@ REQUIRED = frozenset(
 
 
 # Keys a record may carry and a frozen corpus record predates: null or absent on the fake path.
-OPTIONAL = frozenset({"discovery"})
-PACKAGE_MANAGER_KINDS = frozenset({"corepack-shim", "binary", "missing"})
+OPTIONAL = frozenset({"discovery", "attempt_phases", "invalid_detail"})
+# `invalid_detail` is the refusal in its own words, for a reason code that
+# cannot carry them: `provision:seed_publish` says a publish failed and not what
+# it answered. Written masked by whoever refuses; private, like a transcript, so
+# `report.py` never projects it.
+DETAIL_LIMIT = 1024
+# `image` is a container trial's pnpm: installed into the fixture image at
+# build time by exact version, so nothing on the host decides which one ran.
+PACKAGE_MANAGER_KINDS = frozenset({"image", "corepack-shim", "binary", "missing"})
 SEED_KEYS = frozenset({"lesson", "title", "nonce", "key_hashes", "keys", "shelf_origin", "piece_id", "published", "probe", "deleted", "delete_error"})
+# The CLI build a container trial measured, under `isolation.image.cli`: the
+# packed package's content hash and the checkout commit it was built from.
+CLI_KEYS = frozenset({"build", "commit"})
+# The product's own `team.publicFallback`, stated per attempt because an arm may
+# choose it (`tenjin_arm.public_fallback_of`).
+PUBLIC_FALLBACK = frozenset({"on", "off"})
 # The corpus stamp a reset wrote into the attestation (`artifact.CorpusStamp`).
 CORPUS_KEYS = frozenset({"provider", "project_id", "branch_id", "parent_id", "origin", "api_origin", "reset_at"})
 
@@ -164,6 +177,14 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("an invalid attempt must carry invalid_reason")
     if record["outcome"] != "invalid" and reason is not None:
         raise RecordError("only an invalid attempt carries invalid_reason")
+    detail = record.get("invalid_detail")
+    if detail is not None:
+        if not isinstance(detail, str) or not detail:
+            raise RecordError("invalid_detail must be a non-empty string or null")
+        if len(detail) > DETAIL_LIMIT:
+            raise RecordError(f"invalid_detail must be at most {DETAIL_LIMIT} characters")
+        if record["outcome"] != "invalid":
+            raise RecordError("only an invalid attempt carries invalid_detail")
     if record["stop_reason"] not in STOP_REASONS:
         raise RecordError(f"unknown stop_reason {record['stop_reason']!r}")
 
@@ -238,6 +259,24 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError(
                 f"outcome {record['outcome']!r} cannot carry usage_reconciliation {reconciliation['status']!r}"
             )
+    # Optional, because the records of every run before it are immutable and
+    # still have to reduce: an attempt with no decomposition is undecomposed,
+    # never invalid.
+    attempt = record.get("attempt_phases")
+    if attempt is not None and (not isinstance(attempt, dict) or set(attempt) != set(phases_module.PHASES)):
+        raise RecordError(f"attempt_phases must name exactly {', '.join(phases_module.PHASES)}")
+    for phase, entry in (attempt or {}).items():
+        if not isinstance(entry, dict) or set(entry) != {"requests", "input_total", "output_total"}:
+            raise RecordError(f"attempt_phases.{phase} must carry requests, input_total and output_total")
+        if not all(_count(entry[name]) for name in entry):
+            raise RecordError(f"attempt_phases.{phase} counts must be non-negative integers")
+    # The phases partition the attempt's own usage, so their sum is that usage
+    # and never an addition to it.
+    if attempt is not None:
+        counted = sum(entry["input_total"] + entry["output_total"] for entry in attempt.values())
+        own = sum(item["input_total"] + item["output_total"] for item in record["usage"])
+        if counted != own:
+            raise RecordError(f"attempt_phases sum to {counted} tokens and the attempt's usage is {own}")
     delivery = record["delivery"]
     if not isinstance(delivery, dict) or delivery.get("status") not in loop_join.STATUSES:
         raise RecordError("delivery must carry a known status")
@@ -263,6 +302,23 @@ def validate(record: dict[str, Any]) -> None:
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):
             raise RecordError(f"isolation.{name} must be null or a host")
+    # A container trial names the CLI build it measured, not a version string:
+    # `tenjin-cli@0.1.0-alpha.15` on npm and the repository at that same version
+    # are different builds, so the version identifies nothing. `build` is the
+    # packed package's content hash, which is also an image input; `commit` is
+    # what a reader resolves back to source.
+    image = isolation.get("image")
+    if image is not None:
+        if not isinstance(image, dict):
+            raise RecordError("isolation.image must be an object")
+        cli = image.get("cli")
+        if not isinstance(cli, dict) or set(cli) != CLI_KEYS:
+            raise RecordError("isolation.image.cli must carry exactly the CLI build fields")
+        for name in sorted(CLI_KEYS):
+            if not isinstance(cli[name], str) or not cli[name]:
+                raise RecordError(f"isolation.image.cli.{name} must name the CLI build the trial ran")
+    if isolation.get("wal_checkpoint") is not None and (not isinstance(isolation["wal_checkpoint"], str) or not isolation["wal_checkpoint"]):
+        raise RecordError("isolation.wal_checkpoint must be null or the reason the ledger's WAL did not close")
     seeds = isolation.get("seed")
     if seeds is not None and not isinstance(seeds, list):
         raise RecordError("isolation.seed must be a list, one entry per seeded lesson")
@@ -280,6 +336,20 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("isolation.seed.deleted must be null or a boolean")
         if seed["published"] and (seed["piece_id"] is None or seed["nonce"] is None):
             raise RecordError("a seed that published names its piece and its run nonce")
+    off = isolation.get("hooks_disabled")
+    if off is not None and (not isinstance(off, list) or not all(isinstance(name, str) and name for name in off)):
+        raise RecordError("isolation.hooks_disabled must be a list of product hook arm names")
+    # The two shelf arms carry byte-identical settings, so this is the only
+    # field that tells them apart in a record.
+    fallback = isolation.get("public_fallback")
+    if fallback is not None and fallback not in PUBLIC_FALLBACK:
+        raise RecordError("isolation.public_fallback must be on or off")
+    if "producer" in isolation and not isinstance(isolation["producer"], dict):
+        raise RecordError("isolation.producer must be an object")
+    if "producer" in isolation and isolation["producer"].get("outcome") not in OUTCOMES:
+        raise RecordError("isolation.producer must carry an outcome")
+    if "slice" in isolation and (not isinstance(isolation["slice"], dict) or not isinstance(isolation["slice"].get("kind"), str)):
+        raise RecordError("isolation.slice must name a kind")
     corpus = isolation.get("corpus")
     if corpus is not None:
         if not isinstance(corpus, dict) or set(corpus) != CORPUS_KEYS:
@@ -306,6 +376,9 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("delivery.failure_key must name a lane and say whether the keys leg hit")
         if key.get("report_file_present") is not None and not isinstance(key["report_file_present"], bool):
             raise RecordError("delivery.failure_key.report_file_present must be null or a boolean")
+    phase_fires = delivery.get("phase_fires")
+    if phase_fires is not None and (not isinstance(phase_fires, dict) or not all(_count(value) for value in phase_fires.values())):
+        raise RecordError("delivery.phase_fires must map sessions to counts")
     searches = delivery.get("cli_searches")
     if searches is not None:
         if not isinstance(searches, dict) or not _count(searches.get("count")) or not isinstance(searches.get("decisions"), dict):
@@ -330,8 +403,8 @@ def validate(record: dict[str, Any]) -> None:
         raise RecordError("verifier must be null or carry an id")
     if record["outcome"] in ("pass", "fail") and verifier is None:
         raise RecordError("a pass or fail outcome needs a verifier verdict")
-    if "public_requests" not in record["sentinel"]:
-        raise RecordError("sentinel must carry public_requests")
+    if "credential_exposures" not in record["sentinel"]:
+        raise RecordError("sentinel must carry credential_exposures")
     for name, value in record["sentinel"].items():
         if not _count(value):
             raise RecordError(f"sentinel.{name} must be a count")

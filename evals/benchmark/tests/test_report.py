@@ -77,7 +77,7 @@ def test_hashes_counts_and_enums_are_publishable() -> None:
             "schedule_hash": "sha256:" + "b" * 64,
             "trial_id": "27d0f0fe30d9608939dadc4c",
             "outcome": "capped",
-            "invalid_reason": "sentinel:public_request",
+            "invalid_reason": "sentinel:credential_exposure",
             "token_ratio": 0.825,
             "attempts": 12,
             "headline_eligible": True,
@@ -286,21 +286,25 @@ def test_the_projection_carries_no_usage_body_or_delivery_detail(corpus, project
         "actors",
         "arm_id",
         "auxiliary_receipts",
+        "child_tokens",
+        "credential_exposures",
         "invalid_reason",
-        "other_requests",
+        "local_hits",
         "outcome",
+        "producer_outcome",
+        "producer_tokens",
         "public_hits",
         "public_legs",
         "requests",
-        "sentinel_hits",
         "stop_reason",
         "task_id",
         "tokens",
         "trial_id",
+        "unnamed_shelf_legs",
     ]
     # The corpus predates leg classes, so every origin count reads as zero
     # rather than as a missing field.
-    assert published["origins"] == {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "other_requests": 0}
+    assert published["origins"] == {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "unnamed_shelf_legs": 0}
     # The private record has fields the projection deliberately drops.
     private = accepted[trial["trial_id"]]
     assert "private_hashes" in private
@@ -340,7 +344,87 @@ def test_the_trial_rows_sum_to_their_arm_total(corpus, project: Project, reducti
     report.guard(published)
 
 
-def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(corpus, project: Project) -> None:
+def test_the_slice_and_the_producer_reach_the_report_and_its_reading() -> None:
+    record = support.reduction_record("t1", "on", 0, 1, 400, auxiliary=(support.receipt("producer", "producer", "p_1", 600, 200), support.receipt("producer", "capture", "p_2", 100, 50)))
+    record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 0}, "phase_tokens": {"producer": 800, "capture": 150}, "wal_live_between_phases": False}, "slice": {"kind": "recursive"}}
+    off = support.reduction_record("t1", "off", 0, 0, 800)
+    accepted = support.accept(off, record)
+    manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1, "slice": {"kind": "recursive"}, "pins": {}, "tasks": []}
+    reduction = reduce_module.reduce(accepted, [], baseline="off")
+    projected = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+    assert projected["slice"] == {"kind": "recursive"}
+    row = next(trial for trial in projected["trials"] if trial["arm_id"] == "on")
+    assert (row["producer_outcome"], row["producer_tokens"], row["local_hits"], row["child_tokens"]) == ("pass", 950, 0, 0)
+    text = report.render(projected)
+    assert "slice: kind=recursive" in text
+    assert "on producer phases: 1 run, 1 passed, 1 left a closed local record" in text
+    # The pre-registered headline: capture-only amortized at reuse 1, first, with its own
+    # task-paired interval; the reuse curve; the consumer-only ratio as the secondary line;
+    # the producer's-own-work amortization last, as a diagnostic.
+    comparison = projected["comparisons"]["on"]
+    assert (comparison["headline"], comparison["headline_rule"], comparison["headline_eligible"]) == (round(550 / 800, 12), "capture_only_amortized_reuse_1", True)
+    assert (comparison["headline_interval"]["tasks"], comparison["headline_interval"]["point"]) == (1, round(550 / 800, 12))
+    assert comparison["token_ratio"] == 0.5
+    lines = text.splitlines()
+    headline = next(index for index, line in enumerate(lines) if line.startswith("  headline on: 0.688 (" + report.HEADLINE_LABEL + ")"))
+    assert "headline eligible" in lines[headline]
+    assert lines[headline + 1].startswith("    reuse 2/5/10: 0.594/0.537/0.519")
+    assert lines[headline + 2].startswith("    " + report.CAPTURE_FREE_LABEL + ": 0.500  interval")
+    # The retrieval-only decomposition sits between the capture-free line
+    # and the producer diagnostic, labelled where it is printed.
+    assert "retrieval only, decomposition" in lines[headline + 3]
+    assert lines[headline + 4].startswith("    diagnostic, the producer's own work charged too, reuse 1/10: 1.688/0.619")
+    assert report.CAPTURE_FREE_LABEL == "capture-free (future: capture on an operator-run model)"
+    # A non-publishable run keeps the number and loses the claim, on the headline line.
+    for stamped_record in accepted.values():
+        stamped_record["isolation"] = {**stamped_record["isolation"], "publishable": False}
+    plumbing = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+    assert plumbing["comparisons"]["on"]["headline_eligible"] is False
+    assert "headline on: 0.688" in report.render(plumbing)
+    assert "NOT headline eligible" in report.render(plumbing).splitlines()[headline]
+
+
+def test_every_ratio_is_printed_beside_what_it_decomposes_into() -> None:
+    """Round trips, unique ingestion, and the pass rate, under the headline and labelled apart from it."""
+    accepted = support.accept(
+        support.reduction_record("t1", "off", 0, 0, 108000, "pass", requests=8, preamble=9000),
+        support.reduction_record("t1", "on", 0, 1, 99000, "fail", requests=7, preamble=9000),
+    )
+    manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1, "pins": {}, "tasks": []}
+    reduction = reduce_module.reduce(accepted, [], baseline="off")
+    projected = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+    report.guard(projected)
+    lines = report.render(projected).splitlines()
+    headline = next(index for index, line in enumerate(lines) if line.startswith("  headline on: "))
+    rows = lines[headline : headline + 8]
+    requests = next(line for line in rows if report.REQUESTS_LABEL in line)
+    new_tokens = next(line for line in rows if report.NEW_TOKENS_LABEL in line)
+    delta = next(line for line in rows if report.PASS_DELTA_LABEL in line)
+    assert "7.00 versus    8.00, ratio 0.875" in requests
+    # The arm spent 9,000 fewer tokens and sent nothing new less: the whole
+    # gap is one request that replayed the preamble.
+    assert "45000.0 versus    45000.0, ratio 1.000" in new_tokens
+    assert "-1.000" in delta
+    # Each one says what it is, and none of them claims to be the headline.
+    for line in (requests, new_tokens, delta):
+        assert ("decomposition" if line is not delta else "the other axis") in line
+        assert report.HEADLINE_LABEL not in line
+
+
+def test_a_hidden_category_prints_a_reason_where_the_new_token_ratio_would_be() -> None:
+    accepted = support.accept(
+        support.reduction_record("t1", "off", 0, 0, 10000, "pass"),
+        support.reduction_record("t1", "on", 0, 1, 8000, "pass"),
+    )
+    manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1, "pins": {}, "tasks": []}
+    reduction = reduce_module.reduce(accepted, [], baseline="off")
+    projected = report.project(manifest_data, "sha256:m", "sha256:s", reduction, accepted)
+    text = report.render(projected)
+    assert report.NEW_TOKENS_LABEL + ":       none versus       none, ratio none (categories_unexposed)" in text
+    assert report.REQUESTS_LABEL + ":    1.00 versus    1.00, ratio 1.000" in text
+
+
+def test_the_origin_counts_sum_the_public_legs_and_the_unnamed_shelf_legs(corpus, project: Project) -> None:
     _manifest, _digest, accepted, _excluded = corpus
     records_in = {}
     for trial_id, record in accepted.items():
@@ -350,9 +434,9 @@ def test_the_origin_counts_sum_the_public_legs_and_the_unknown_requests(corpus, 
         records_in[trial_id] = copy
     published = project(accepted_records=records_in)
     count = len(records_in)
-    assert published["origins"] == {"public_legs": 2 * count, "public_hits": count, "public_timeouts": count, "other_requests": count}
+    assert published["origins"] == {"public_legs": 2 * count, "public_hits": count, "public_timeouts": count, "unnamed_shelf_legs": count}
     assert published["trials"][0]["public_legs"] == 2
-    assert published["trials"][0]["other_requests"] == 1
+    assert published["trials"][0]["unnamed_shelf_legs"] == 1
     report.guard(published)
 
 
@@ -364,6 +448,46 @@ def test_a_record_may_hold_what_the_report_may_not() -> None:
     # private-input slice, so a projection that wants any of it has to give
     # it a public name rather than forward the field.
     assert refusal(record).code == "private_field"
+
+
+# The readout an anonymous reader can reach, and the cap GitHub imposes on it.
+
+
+def test_the_summary_carries_the_headline_the_interval_and_the_method(corpus, project: Project) -> None:
+    manifest, _digest, _accepted, _excluded = corpus
+    text = report.check_summary(project())
+    assert "## " + manifest.data["benchmark_version"] in text
+    assert "headline on:" in text
+    assert "interval [" in text
+    assert "evals/benchmark/README.md" in text
+    assert text.rstrip().endswith("```"), text[-40:]
+
+
+def test_a_run_that_may_not_be_quoted_says_so_before_its_first_number(project: Project, stamped: Stamped) -> None:
+    published = project(accepted_records=stamped(live=True, publishable=False))
+    text = report.check_summary(published)
+    assert text.index("not publishable") < text.index("headline on:")
+
+
+def test_the_corpus_reading_is_stated_or_its_absence_is(project: Project) -> None:
+    assert "was not read" in report.check_summary(project())
+    published = {
+        **project(),
+        "corpus_snapshot": {"origin": "bench.tenjin.sh", "posts": 12, "content_hash": "sha256:ab", "taken_at": "2026-09-09T12:00:00Z"},
+    }
+    assert "12 pieces on `bench.tenjin.sh`" in report.check_summary(published)
+
+
+def test_a_summary_over_the_cap_is_cut_and_says_it_was(project: Project) -> None:
+    text = report.check_summary(project(), limit=900)
+    assert len(text) <= 900
+    assert "truncated" in text
+    assert text.rstrip().endswith("```")
+
+
+def test_the_cap_is_the_one_github_imposes(project: Project) -> None:
+    assert report.CHECK_SUMMARY_LIMIT == 65535
+    assert len(report.check_summary(project())) < report.CHECK_SUMMARY_LIMIT
 
 
 # The corpus section. Its input is the projection, so the cases below build a

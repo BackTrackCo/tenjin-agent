@@ -24,6 +24,21 @@ from .artifact import CANARY_PREFIX
 from .reduce import consumer_auxiliary
 
 REPORT_SCHEMA = "bench1.report.v1"
+# The pre-registered headline: the capture-only amortized ratio at reuse 1, every
+# token the capture ask added charged to a single consumer. The consumer-only
+# ratio is the secondary line.
+HEADLINE_LABEL = "capture-only amortized, reuse 1: every capture token charged to one consumer"
+CAPTURE_FREE_LABEL = "capture-free (future: capture on an operator-run model)"
+# The as-shipped number is the one to quote as Tenjin. This one takes the
+# product's own turn-end nudge and the primer's CLI search out of both arms and
+# answers a narrower question; it is a decomposition, and it says so wherever
+# it appears.
+RETRIEVAL_ONLY_LABEL = "retrieval only, decomposition: the turn-end nudge and the CLI search subtracted from both arms"
+# What the headline decomposes into, printed under every ratio and never as
+# one: round trips, unique ingestion, and the axis a token ratio never states.
+REQUESTS_LABEL = "requests, decomposition: model requests per attempt"
+NEW_TOKENS_LABEL = "new tokens, decomposition: uncached input plus cache writes plus output, per attempt"
+PASS_DELTA_LABEL = "pass rate delta, the other axis: not a token figure"
 # How a run was isolated, weakest first. A report takes the weakest kind any
 # accepted record carries, so one plumbing record marks the whole run.
 ISOLATION_KINDS = ("team_shelf_secret", "automated_plumbing", "operator_plumbing", "attested", "fake")
@@ -150,12 +165,25 @@ def stamp(accepted: dict[str, dict[str, Any]]) -> tuple[bool, str]:
     return publishable, kind
 
 
+def snapshot_fields(taken: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What the corpus reading may say in public: counts, a hash, a time, or a refusal code.
+
+    The reading's own `detail` names a host and an exception, which is a private
+    string; the run directory keeps it and the report states the code alone.
+    """
+    if not taken:
+        return None
+    fields = {key: taken.get(key) for key in ("origin", "posts", "content_hash", "taken_at", "error")}
+    return {key: value for key, value in fields.items() if value is not None}
+
+
 def project(
     manifest_data: dict[str, Any],
     manifest_hash: str,
     schedule_hash: str,
     reduction: dict[str, Any],
     accepted: dict[str, dict[str, Any]],
+    corpus_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The whole publishable artifact, refused as a unit if anything private rides along."""
     excluded: dict[str, int] = {}
@@ -163,16 +191,18 @@ def project(
         reason = item["reason"].split(":", 1)[0]
         excluded[reason] = excluded.get(reason, 0) + 1
     publishable, kind = stamp(accepted)
-    # The delivery legs by origin, summed over the accepted attempts, so the
-    # plan's canary gate reads as two separate counts: requests to an origin
-    # outside the known set, and legs the public marketplace answered.
-    origins = {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "other_requests": 0}
+    # The delivery legs by shelf, summed over the accepted attempts. Every
+    # count here comes from the daemon's own ledger, so it says which legs the
+    # product recorded, never which requests left the container: the container
+    # harness reports no denials, and `unnamed_shelf_legs` is named for what it
+    # is rather than dressed up as observed egress.
+    origins = {"public_legs": 0, "public_hits": 0, "public_timeouts": 0, "unnamed_shelf_legs": 0}
     for record in accepted.values():
         public = record["delivery"].get("public", {})
         origins["public_legs"] += public.get("legs", 0)
         origins["public_hits"] += public.get("hits", 0)
         origins["public_timeouts"] += public.get("timeouts", 0)
-        origins["other_requests"] += record["delivery"].get("classes", {}).get("other", 0)
+        origins["unnamed_shelf_legs"] += record["delivery"].get("classes", {}).get("other", 0)
     # The seeded pieces: how many trials wrote one to the team shelf, and how
     # many left it there because the delete failed, which the summary warns on.
     seeds = {"published": 0, "not_deleted": 0}
@@ -208,9 +238,22 @@ def project(
         row["attempts"] += 1
         row["test_run_before_fix"] += int(bool(facts.get("test_run_before_fix")))
         row["setup_read"] += int(bool(facts.get("setup_read")))
+    # An arm's own configuration, off the records rather than off the manifest,
+    # because the record is what the attempt actually ran under. `off` is the
+    # one value worth stating: the shelf arms are byte-identical otherwise.
+    fallbacks: dict[str, str] = {}
+    for record in accepted.values():
+        value = record["isolation"].get("public_fallback")
+        if value is not None:
+            fallbacks[record["arm_id"]] = value
+    arms = {
+        arm_id: arm if arm_id not in fallbacks else {**arm, "public_fallback": fallbacks[arm_id]}
+        for arm_id, arm in reduction["arms"].items()
+    }
     report = {
         "schema": REPORT_SCHEMA,
         "benchmark_version": manifest_data["benchmark_version"],
+        "slice": manifest_data.get("slice"),
         "price_sheet_version": manifest_data["price_sheet_version"],
         "manifest_hash": manifest_hash,
         "schedule_hash": schedule_hash,
@@ -228,6 +271,7 @@ def project(
         # is entitled to know which.
         "automated": any(record["isolation"].get("automated", False) for record in accepted.values()),
         "corpus": corpus_stamp(accepted),
+        "corpus_snapshot": snapshot_fields(corpus_snapshot),
         # What the arms above were measured on, one entry per manifest task.
         # A headline is a ratio over this set, so a reader who cannot see the
         # set cannot tell a corpus that is too easy from one that is too small.
@@ -244,7 +288,7 @@ def project(
             for task in manifest_data["tasks"]
         ],
         "baseline": reduction["baseline"],
-        "arms": reduction["arms"],
+        "arms": arms,
         # A headline needs complete accounting and a publishable run; the
         # reducer knows the first and only the records know the second.
         "comparisons": {
@@ -276,10 +320,16 @@ def project(
                 # is the same set the reducer aggregates. An arm total is
                 # `arms[arm].tokens` and is the figure to read instead.
                 "tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record),
-                "sentinel_hits": sum(record["sentinel"].values()),
+                "credential_exposures": record["sentinel"].get("credential_exposures", 0),
                 "public_legs": record["delivery"].get("public", {}).get("legs", 0),
                 "public_hits": record["delivery"].get("public", {}).get("hits", 0),
-                "other_requests": record["delivery"].get("classes", {}).get("other", 0),
+                "unnamed_shelf_legs": record["delivery"].get("classes", {}).get("other", 0),
+                "local_hits": sum(1 for leg in record["delivery"].get("legs", []) if leg.get("shelf") == "local" and leg.get("outcome") == "hit"),
+                "child_tokens": sum(item["input_total"] + item["output_total"] for item in record["usage"] if item["actor_key"][2] != ""),
+                "producer_outcome": None if not isinstance(record["isolation"].get("producer"), dict) else record["isolation"]["producer"].get("outcome"),
+                "producer_tokens": None
+                if not isinstance(record["isolation"].get("producer"), dict)
+                else sum(int(value) for value in record["isolation"]["producer"].get("phase_tokens", {}).values()),
             }
             for record in sorted(accepted.values(), key=lambda item: item["position"])
         ],
@@ -298,6 +348,86 @@ def _number(value: float | None, spec: str) -> str:
 
 def plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _pair(report: dict[str, Any], arm_id: str, baseline: str | None, field: str, spec: str) -> str:
+    """One per-attempt figure for the arm and for the baseline, in that order."""
+    arms = report["arms"]
+    base = None if baseline is None else arms.get(baseline, {}).get(field)
+    return f"{_number(arms[arm_id].get(field), spec)} versus {_number(base, spec)}"
+
+
+def _decomposition(report: dict[str, Any], arm_id: str, baseline: str | None, comparison: dict[str, Any]) -> list[str]:
+    """What the ratios above decompose into: round trips, unique ingestion, and the pass rate.
+
+    Printed under every ratio because the headline is a ratio of token totals,
+    and a reader who sees only that cannot tell an arm that sent less from an
+    arm that made fewer requests carrying the same replayed preamble.
+    """
+    requests = comparison.get("request_ratio")
+    new_tokens = comparison.get("new_token_ratio")
+    delta = comparison.get("pass_rate_delta")
+    return [
+        f"    {REQUESTS_LABEL}: {_pair(report, arm_id, baseline, 'requests_per_attempt', '7.2f')}, ratio "
+        + (f"{requests:.3f}" if requests is not None else f"none ({comparison.get('request_ratio_reason') or 'no shared task'})"),
+        f"    {NEW_TOKENS_LABEL}: {_pair(report, arm_id, baseline, 'new_tokens_per_attempt', '10.1f')}, ratio "
+        + (f"{new_tokens:.3f}" if new_tokens is not None else f"none ({comparison.get('new_token_ratio_reason') or 'no shared task'})"),
+        f"    {PASS_DELTA_LABEL}: " + ("none" if delta is None else f"{delta:+.3f}"),
+    ]
+
+
+# GitHub caps a check run's `output.summary` here. A run that ever approached
+# it would be truncated silently by the API, which is a readout that lies about
+# its own length, so `check_summary` truncates and says it did.
+CHECK_SUMMARY_LIMIT = 65535
+METHODOLOGY = "https://github.com/BackTrackCo/tenjin-agent/blob/main/evals/benchmark/README.md"
+
+
+def check_summary(report: dict[str, Any], methodology: str = METHODOLOGY, limit: int = CHECK_SUMMARY_LIMIT) -> str:
+    """The readout an anonymous reader can reach: a check run's `output.summary`.
+
+    Measured on this public repository with no token, the artifact bytes answer
+    401, the artifact route 404, and the job logs 403, while
+    `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` answers 200 with its
+    whole `output`. So the headline, the intervals and the link to the method
+    go here, and the per-attempt records stay a workflow artifact for whoever is
+    logged in and wants to recompute.
+
+    Nothing here computes: it is `render` with a heading and a caveat a reader
+    meeting a number cold is owed.
+    """
+    verdict = (
+        "This run is publishable: every accepted attempt ran under an attestation this run built for itself."
+        if report["publishable"]
+        else f"**This run is not publishable** (`{report['isolation']}`). No number below is a result."
+    )
+    taken = report.get("corpus_snapshot")
+    corpus_line = "The corpus this run measured was not read, so this report does not say what was on the shelf."
+    if taken and not taken.get("error"):
+        corpus_line = (
+            f"The corpus was {taken['posts']} pieces on `{taken['origin']}`, read at {taken['taken_at']} "
+            f"once the run's own seed had landed (`{taken['content_hash']}`)."
+        )
+    head = "\n".join(
+        [
+            f"## {report['benchmark_version']}",
+            "",
+            verdict,
+            "",
+            corpus_line,
+            "",
+            f"Method, arms, and what this does not measure: [`evals/benchmark/README.md`]({methodology}).",
+            "",
+            "```text",
+        ]
+    )
+    tail = "\n```\n"
+    body = render(report)
+    room = limit - len(head) - len(tail) - 1
+    if len(body) > room:
+        note = "\n[truncated: the whole report is report.json in this run's artifact]"
+        body = body[: room - len(note)] + note
+    return head + "\n" + body + tail
 
 
 # The corpus block is the readout's only per-task section, so it is the only
@@ -409,6 +539,13 @@ def render(report: dict[str, Any]) -> str:
     ]
     if report.get("shelf_secret_present", False):
         lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
+    if report.get("slice"):
+        lines.append("slice: " + " ".join(f"{key}={value}" for key, value in sorted(report["slice"].items())))
+    taken = report.get("corpus_snapshot")
+    if taken and taken.get("error"):
+        lines.append(f"corpus snapshot unavailable ({taken['error']}): this report does not say which corpus produced it")
+    elif taken:
+        lines.append(f"corpus snapshot: {taken['posts']} pieces on {taken['origin']} at {taken['taken_at']}, {taken['content_hash']}")
     corpus = report.get("corpus")
     if corpus:
         lines.append(
@@ -440,30 +577,73 @@ def render(report: dict[str, Any]) -> str:
             f"failure key {arm_id}: keyed {row['keyed']}/{row['attempts']} ({lanes}), keys leg hit {row['keys_leg_hits']}, "
             f"report file {row['report_files']}, delivered {row['delivered']}"
         )
+    for arm_id, arm in sorted(report["arms"].items()):
+        producer = arm.get("producer")
+        if producer:
+            lines.append(
+                f"{arm_id} producer phases: {producer['attempts']} run, {producer['passes']} passed, {producer['captured']} left a closed local record, "
+                f"{producer['findings']} finding(s) harvested, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
+            )
+        diagnostics = [task.get("diagnostics", {}) for task in arm.get("tasks", {}).values()]
+        spent = {phase: sum(item.get("attempt_phase_tokens", {}).get(phase, 0) for item in diagnostics) for phase in ("consumer", "nudge", "cli_search")}
+        if spent["nudge"] or spent["cli_search"]:
+            lines.append(
+                f"{arm_id} attempt phases: task {spent['consumer']}, turn-end nudge {spent['nudge']}, CLI search {spent['cli_search']} "
+                "(the product as shipped; the nudge and the search are inside the arm's total)"
+            )
+        local_hits = sum(item.get("local_hits", 0) for item in diagnostics)
+        local_legs = sum(item.get("local_legs", 0) for item in diagnostics)
+        child_tokens = sum(item.get("child_tokens", 0) for item in diagnostics)
+        if local_legs or child_tokens:
+            lines.append(f"{arm_id} local legs: {local_legs}, hits: {local_hits}; descendant tokens: {child_tokens}")
     seeds = report.get("seeds")
     if seeds is not None and seeds["published"]:
         lines.append(f"seeded pieces: {seeds['published']} published to the team shelf, {seeds['published'] - seeds['not_deleted']} deleted")
         if seeds["not_deleted"]:
             lines.append(f"WARNING: {seeds['not_deleted']} seeded piece(s) still on the team shelf: delete them by hand (isolation.seed.piece_id in the records)")
+    # The two shelf arms are byte-identical in their settings, so the reading
+    # names which one had the marketplace leg on.
+    for arm_id, arm in sorted(report["arms"].items()):
+        fallback = arm.get("public_fallback")
+        if fallback == "off":
+            lines.append(f"{arm_id}: public fallback off, so a team miss never reached the marketplace")
     origins = report.get("origins")
     if origins is not None:
         lines.append(
             f"public legs: {origins['public_legs']}, hits: {origins['public_hits']}, "
-            f"timeouts: {origins['public_timeouts']}; requests to an unknown origin: {origins['other_requests']}"
+            f"timeouts: {origins['public_timeouts']}; legs the daemon logged to an unnamed shelf: {origins['unnamed_shelf_legs']}"
         )
     if report["comparisons"]:
         lines.append(f"token ratio versus {baseline}, 1.0 means no change, lower means fewer tokens:")
         for arm_id, comparison in sorted(report["comparisons"].items()):
+            headline = comparison.get("headline")
+            eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
+            interval = comparison.get("headline_interval")
+            if headline is None:
+                lines.append(f"  headline {arm_id}: none ({comparison['token_ratio_reason'] or 'no capture-only ratio'}), {eligible}")
+            else:
+                span = "" if not interval else f"  interval [{interval['low']:.3f}, {interval['high']:.3f}] at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}"
+                lines.append(f"  headline {arm_id}: {headline:.3f} ({HEADLINE_LABEL}){span}, {eligible}")
+            curve = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_capture_only_token_ratio", [])}
+            lines.append(f"    reuse 2/5/10: {_number(curve.get(2), '5.3f')}/{_number(curve.get(5), '5.3f')}/{_number(curve.get(10), '5.3f')}")
             ratio = comparison["token_ratio"]
             if ratio is None:
-                lines.append(f"  {arm_id}: none ({comparison['token_ratio_reason']})")
-                continue
-            interval = comparison["interval"]
-            eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
-            lines.append(
-                f"  {arm_id}: {ratio:.3f}  interval [{interval['low']:.3f}, {interval['high']:.3f}] "
-                f"at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}, {eligible}"
-            )
+                lines.append(f"    {CAPTURE_FREE_LABEL}: none ({comparison['token_ratio_reason']})")
+            else:
+                free_interval = comparison["interval"]
+                lines.append(
+                    f"    {CAPTURE_FREE_LABEL}: {ratio:.3f}  interval [{free_interval['low']:.3f}, {free_interval['high']:.3f}] "
+                    f"at {free_interval['confidence']:.0%} over {plural(free_interval['tasks'], 'task')}"
+                )
+            retrieval = comparison.get("retrieval_only_token_ratio")
+            if retrieval is None:
+                lines.append(f"    {RETRIEVAL_ONLY_LABEL}: none ({comparison.get('retrieval_only_token_ratio_reason') or 'no phase decomposition'})")
+            else:
+                lines.append(f"    {RETRIEVAL_ONLY_LABEL}: {retrieval:.3f}")
+            amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
+            if any(value is not None for value in amortized.values()):
+                lines.append(f"    diagnostic, the producer's own work charged too, reuse 1/10: {_number(amortized.get(1), '5.3f')}/{_number(amortized.get(10), '5.3f')}")
+            lines += _decomposition(report, arm_id, baseline, comparison)
     else:
         lines.append(f"no comparison: {baseline} is the only arm with a result")
     outcomes: dict[str, int] = {}

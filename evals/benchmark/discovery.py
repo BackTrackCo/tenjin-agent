@@ -76,9 +76,9 @@ def _reads_setup(block: dict[str, Any]) -> bool:
     return False
 
 
-def derive(sessions: Path, task_id: str) -> dict[str, Any]:
-    """The two discovery facts for one attempt, from every transcript of its session."""
-    source = f"src/{task_id}.mjs"
+def derive(sessions: Path, task_id: str, source: str | None = None) -> dict[str, Any]:
+    """The two discovery facts for one attempt, from every transcript of its session. `source` is the file the fix touches."""
+    source = f"src/{task_id}.mjs" if source is None else source
     results: dict[str, str] = {}
     errors: dict[str, bool] = {}
     for row in _rows(sessions):

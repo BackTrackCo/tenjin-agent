@@ -148,6 +148,70 @@ def test_capture_cost_amortizes_at_reuse_1_2_5_and_10(amortized: dict) -> None:
     )
 
 
+def test_the_producer_phase_and_the_capture_overhead_amortize_apart() -> None:
+    producer = support.receipt("producer", "producer", "p_1", 600, 200)
+    capture = support.receipt("producer", "capture", "p_2", 100, 50)
+    natural = [
+        support.reduction_record("t1", "on", 0, 1, 400, auxiliary=(producer, capture)),
+        support.reduction_record("t2", "on", 0, 3, 400, auxiliary=(producer, capture)),
+    ]
+    off = [support.reduction_record("t1", "off", 0, 0, 800), support.reduction_record("t2", "off", 0, 2, 800)]
+    reduction = reduce_module.reduce(support.accept(*off, *natural), [], baseline="off")
+    arm = reduction["arms"]["on"]
+    assert (arm["capture_tokens"], arm["phase_tokens"]) == (950, {"capture": 150, "producer": 800})
+    assert [point["capture_tokens_per_use"] for point in arm["amortization"]] == [950.0, 475.0, 190.0, 95.0]
+    assert [point["capture_tokens_per_use"] for point in arm["amortization_capture_only"]] == [150.0, 75.0, 30.0, 15.0]
+    comparison = reduction["comparisons"]["on"]
+    assert comparison["token_ratio"] == 0.5
+    assert [point["token_ratio"] for point in comparison["amortized_capture_only_token_ratio"]] == [round((400 + 150) / 800, 12), round((400 + 75) / 800, 12), round((400 + 30) / 800, 12), round((400 + 15) / 800, 12)]
+    assert comparison["amortized_token_ratio"][0]["token_ratio"] == round((400 + 950) / 800, 12)
+    assert arm["producer"] is None
+    cell = arm["tasks"]["t1"]["diagnostics"]
+    assert (cell["local_legs"], cell["local_hits"], cell["child_tokens"], cell["child_requests"], cell["actors"]) == (0, 0, 0, 0, 1)
+
+
+def test_amortization_charges_each_task_its_own_lesson_at_the_mean_producer_cost() -> None:
+    # t1 ran three producers (one per repeat), t2 ran one; the arm-wide capture sum
+    # (3 x 300 + 900 = 1800) is never what a consumer is charged.
+    def producer(request: str, capture: int) -> tuple[dict, dict]:
+        return support.receipt("producer", "producer", f"p_{request}", 1000, 0), support.receipt("producer", "capture", f"c_{request}", capture, 0)
+
+    natural = [
+        support.reduction_record("t1", "on", 0, 1, 400, auxiliary=producer("a", 300)),
+        support.reduction_record("t1", "on", 1, 3, 400, auxiliary=producer("b", 300)),
+        support.reduction_record("t1", "on", 2, 5, 400, auxiliary=producer("c", 300)),
+        support.reduction_record("t2", "on", 0, 7, 400, auxiliary=producer("d", 900)),
+    ]
+    off = [support.reduction_record("t1", "off", 0, 0, 800), support.reduction_record("t2", "off", 0, 6, 800)]
+    reduction = reduce_module.reduce(support.accept(*off, *natural), [], baseline="off")
+    arm = reduction["arms"]["on"]
+    assert (arm["capture_tokens"], arm["phase_tokens"]) == (4000 + 1800, {"capture": 1800, "producer": 4000})
+    assert (arm["tasks"]["t1"]["producers"], arm["tasks"]["t2"]["producers"]) == (3, 1)
+    assert arm["tasks"]["t1"]["capture_per_producer"] == {"capture": 300.0, "producer": 1000.0}
+    assert arm["tasks"]["t2"]["capture_per_producer"] == {"capture": 900.0, "producer": 1000.0}
+    # Per task at reuse 1: t1 (400 + 300) / 800, t2 (400 + 900) / 800; the arm figure is their mean.
+    comparison = reduction["comparisons"]["on"]
+    assert comparison["headline"] == round(((700 / 800) + (1300 / 800)) / 2, 12)
+    assert comparison["amortized_capture_only_token_ratio"][3]["token_ratio"] == round(((430 / 800) + (490 / 800)) / 2, 12)
+    assert comparison["amortized_token_ratio"][0]["token_ratio"] == round(((1700 / 800) + (2300 / 800)) / 2, 12)
+    assert comparison["headline_interval"]["tasks"] == 2
+    assert arm["amortization_capture_only"][0] == {"reuse": 1, "capture_tokens_per_use": 600.0, "tokens_per_attempt": 1000.0}
+    assert arm["amortization"][0]["tokens_per_attempt"] == 2000.0
+    assert reduction["arms"]["off"]["amortization"][0] == {"reuse": 1, "capture_tokens_per_use": 0.0, "tokens_per_attempt": 800.0}
+
+
+def test_producer_facts_and_local_hits_are_summarised_per_arm() -> None:
+    record = support.reduction_record("t1", "on", 0, 1, 400)
+    record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 2}, "wal_live_between_phases": False}}
+    other = support.reduction_record("t2", "on", 0, 3, 400, outcome="invalid")
+    other["isolation"] = {**other["isolation"], "producer": {"outcome": "invalid", "capture": {"pairings": {"open": 1, "unverified": 0, "verified": 0}, "findings": 0}, "wal_live_between_phases": True}}
+    seeded = support.reduction_record("t1", "seeded", 0, 0, 500)
+    seeded["delivery"] = {**seeded["delivery"], "legs": [{"fire_id": "f", "stage": 0, "shelf": "local", "status": "ok", "outcome": "hit", "actor": ["claude", seeded["native_root_id"], ""]}]}
+    reduction = reduce_module.reduce(support.accept(record, other, seeded), [])
+    assert reduction["arms"]["on"]["producer"] == {"attempts": 2, "passes": 1, "captured": 1, "findings": 2, "invalid": 1, "wal_live": 1}
+    assert reduction["arms"]["seeded"]["tasks"]["t1"]["diagnostics"]["local_hits"] == 1
+
+
 def test_capture_spend_is_counted_once_however_many_attempts_record_it() -> None:
     capture = (support.receipt("compressor", "capture", "aux-capture-1", 4000, 1000),)
     accepted = support.accept(
@@ -227,6 +291,81 @@ def test_a_declared_cap_is_a_named_gap_rather_than_an_incomplete_one() -> None:
     arm = reduce_module.reduce(accepted, [])["arms"]["on"]
     assert arm["accounting"] == "partial_by_cap"
     assert arm["headline_eligible"]
+
+
+# What a token ratio is made of: round trips, unique ingestion, and the pass rate.
+#
+# The arms here are the shape the 2026-09-09 four-arm run measured. Every
+# request replays a 9,000-token preamble, so the arm that makes one fewer
+# request spends 9,000 fewer tokens without sending one token less that the
+# provider had not already been given.
+
+PREAMBLE = 9000
+
+
+@pytest.fixture
+def decomposition() -> dict:
+    accepted = support.accept(
+        support.reduction_record("t1", "off", 0, 0, 108000, "pass", requests=8, preamble=PREAMBLE),
+        support.reduction_record("t1", "on", 0, 1, 99000, "pass", requests=7, preamble=PREAMBLE),
+    )
+    return reduce_module.reduce(accepted, [], "off")
+
+
+def test_requests_per_attempt_and_the_request_ratio_are_reported(decomposition: dict) -> None:
+    assert decomposition["arms"]["off"]["requests_per_attempt"] == 8
+    assert decomposition["arms"]["on"]["requests_per_attempt"] == 7
+    comparison = decomposition["comparisons"]["on"]
+    assert comparison["request_ratio"] == 0.875
+    assert comparison["request_ratio_reason"] is None
+
+
+def test_new_tokens_count_uncached_input_cache_writes_and_output_only(decomposition: dict) -> None:
+    off, on = decomposition["arms"]["off"], decomposition["arms"]["on"]
+    # 108,000 tokens, of which 63,000 are the preamble replayed seven times.
+    assert off["tasks"]["t1"]["tokens_per_attempt"] == 108000
+    assert off["new_tokens_per_attempt"] == 45000
+    assert on["new_tokens_per_attempt"] == 45000
+    assert off["new_tokens_reason"] is None
+
+
+def test_the_token_ratio_here_is_entirely_the_removed_request(decomposition: dict) -> None:
+    comparison = decomposition["comparisons"]["on"]
+    # The whole 9,000-token gap is one request's replayed preamble: the
+    # headline moves, and not one token of unique ingestion was saved.
+    assert comparison["token_ratio"] == round(99000 / 108000, 12)
+    assert comparison["new_token_ratio"] == 1.0
+    assert comparison["new_token_ratio_reason"] is None
+    assert comparison["pass_rate_delta"] == 0.0
+
+
+def test_a_provider_that_hides_the_categories_gets_a_reason_and_not_a_zero() -> None:
+    accepted = support.accept(
+        support.reduction_record("t1", "off", 0, 0, 10000, "pass"),
+        support.reduction_record("t1", "on", 0, 1, 8000, "pass"),
+    )
+    reduction = reduce_module.reduce(accepted, [], "off")
+    arm = reduction["arms"]["on"]
+    assert arm["tasks"]["t1"]["new_tokens"] is None
+    assert arm["new_tokens_per_attempt"] is None
+    assert arm["new_tokens_reason"] == "categories_unexposed"
+    comparison = reduction["comparisons"]["on"]
+    assert comparison["new_token_ratio"] is None
+    assert comparison["new_token_ratio_reason"] == "categories_unexposed"
+    # Round trips are counted whatever the provider exposes.
+    assert comparison["request_ratio"] == 1.0
+
+
+def test_each_task_weighs_the_same_in_both_new_figures() -> None:
+    accepted = support.accept(
+        support.reduction_record("big", "on", 0, 0, 108000, "pass", requests=8, preamble=PREAMBLE),
+        support.reduction_record("big", "on", 1, 1, 108000, "pass", requests=8, preamble=PREAMBLE),
+        support.reduction_record("small", "on", 0, 2, 30000, "pass", requests=2, preamble=PREAMBLE),
+    )
+    arm = reduce_module.reduce(accepted, [])["arms"]["on"]
+    # Two repeats of the big task do not outweigh the one small task.
+    assert arm["requests_per_attempt"] == 5
+    assert arm["new_tokens_per_attempt"] == (45000 + 21000) / 2
 
 
 def test_bootstrap_output_is_deterministic_for_a_frozen_seed() -> None:
@@ -332,7 +471,10 @@ def test_the_corpus_comparison_reports_a_ratio_with_an_interval(corpus, reductio
     assert comparison["token_ratio"] <= comparison["interval"]["high"]
     # Cheaper per attempt and more often right, on two separate axes.
     assert comparison["pass_rate_delta"] > 0
-    # Capture only pays for itself once the knowledge is reused.
+    # Amortization is per lesson: only the corpus task whose attempt carried the
+    # producer and capture receipts is charged them, at its own per-producer cost,
+    # so the reuse-1 ratio sits just under 1 and falls from there.
     ratios_by_reuse = {point["reuse"]: point["token_ratio"] for point in comparison["amortized_token_ratio"]}
-    assert ratios_by_reuse[1] > 1
+    assert ratios_by_reuse[1] == round(0.991666666667, 12)
+    assert ratios_by_reuse[10] < ratios_by_reuse[1]
     assert ratios_by_reuse[10] < 1

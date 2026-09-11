@@ -21,13 +21,15 @@ import secrets
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from . import (
     FIXTURES,
     executor,
     manifest as manifest_module,
     records,
+    regress as regress_module,
+    snapshot as snapshot_module,
     reduce as reduce_module,
     report as report_module,
     runner,
@@ -165,9 +167,19 @@ def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
-    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted)
+    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir))
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
+
+
+
+def do_regress(run_dir: Path, baseline_path: Path, environ: Mapping[str, str] | None = None, stream: Any = None) -> dict[str, Any]:
+    """Warn where the run is worse than the committed baseline. Never a failure."""
+    manifest, digest = load_run(run_dir)
+    accepted, _ = records.select(run_dir / "records", manifest.hash, digest)
+    published = read_run_file(run_dir, "report.json")
+    return regress_module.check(published, accepted, baseline_path, environ, stream)
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -182,11 +194,17 @@ def main(argv: list[str] | None = None) -> int:
     # did without a reader piping JSON through another tool.
     summary = commands.add_parser("summary", help="read a finished run's report.json as text")
     summary.add_argument("--run", required=True, type=Path)
+    headline = commands.add_parser("headline", help="render a finished report for a check summary")
+    headline.add_argument("--run", required=True, type=Path)
+    headline.add_argument("--methodology", default=report_module.METHODOLOGY)
+    regress = commands.add_parser("regress", help="compare a finished run with an explicit baseline")
+    regress.add_argument("--run", required=True, type=Path)
+    regress.add_argument("--baseline", required=True, type=Path)
     args = parser.parse_args(argv)
-    if args.command in ("summary", "verify", "reduce", "report"):
+    if args.command in ("summary", "headline", "regress", "verify", "reduce", "report"):
         try:
             return run_reader(args)
-        except (CliError, manifest_module.ManifestError, records.RecordError) as error:
+        except (CliError, manifest_module.ManifestError, records.RecordError, regress_module.BaselineError) as error:
             sys.stderr.write(f"{error}\n")
             return 2
     payload = fake_run(args.out)
@@ -200,10 +218,17 @@ def run_reader(args: argparse.Namespace) -> int:
     if args.command == "summary":
         sys.stdout.write(report_module.render(read_run_file(args.run, "report.json")) + "\n")
         return 0
+    if args.command == "headline":
+        sys.stdout.write(report_module.check_summary(read_run_file(args.run, "report.json"), args.methodology))
+        return 0
+    if args.command == "regress":
+        do_regress(args.run, args.baseline)
+        return 0
     payload = {"verify": do_verify, "reduce": do_reduce, "report": do_report}[args.command](args.run)
     json.dump(payload, sys.stdout, indent=2, sort_keys=True)
     sys.stdout.write("\n")
     return 0
+
 
 
 if __name__ == "__main__":
