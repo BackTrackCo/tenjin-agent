@@ -50,3 +50,13 @@ def test_exception_still_writes_an_empty_readable_checkpoint(tmp_path, monkeypat
     partial = json.loads((tmp_path / "report.json").read_text())
     assert all(arm["attempts"] == 0 for arm in partial["arms"].values())
     assert f"0/{len(schedule.expand(config))} attempts" in report.overview(partial)
+
+
+def test_saved_schedule_is_validated_without_mutating_it(tmp_path):
+    config = manifest.load(cli.FAKE_MANIFEST)
+    path = tmp_path / "schedule.json"
+    path.write_text(json.dumps({"manifest_hash": config.hash, "schedule_hash": "changed"}))
+    before = path.read_bytes()
+    with pytest.raises(cli.CliError, match="existing schedule differs"):
+        cli.validate_schedule_identity(config, tmp_path)
+    assert path.read_bytes() == before
