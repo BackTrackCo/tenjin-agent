@@ -685,7 +685,17 @@ def main(argv: list[str] | None = None) -> int:
     cases.add_argument("--tenjin-source", type=Path, help="the data dir whose team shelf the questions are replayed on")
     cases.add_argument("--out", type=Path, help="the JSONL file to write")
     cases.add_argument("--dry-run", action="store_true", help="list the cases that would be replayed and call nothing")
+    describe = commands.add_parser("describe", help="show the exact experiment matrix without running it")
+    describe.add_argument("--manifest", type=Path, required=True)
     args = parser.parse_args(argv)
+    if args.command == "describe":
+        try:
+            manifest = manifest_module.load(args.manifest)
+        except REFUSALS as error:
+            sys.stderr.write(f"{error}\n")
+            return 2
+        sys.stdout.write(report_module.plan_summary(manifest.data) + "\n")
+        return 0
     if args.command == "cleanup":
         try:
             payload = container.sweep(args.run)

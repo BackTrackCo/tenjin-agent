@@ -44,6 +44,21 @@ removes only projects recorded by that run. Provisioning, corpus reset, producer
 images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
 and concrete preset/configuration data arrive in the next two layers.
 
+## Read the result at a glance
+
+Every text summary and CI check starts with the experiment identity, model/harness, task list,
+planned versus recorded attempts, and a row for every arm. Verified completions, failed/capped/
+invalid attempts, consumer seconds per completion, and tokens per completion stay together.
+The table labels the control and shows percentage changes only for a complete measured run.
+Synthetic tests and plumbing smokes explicitly say they contain no product result; missing
+attempts or incomplete accounting cannot masquerade as a completed comparison.
+
+The current completion figures divide scored consumer spend by verified passes within each
+task, then weight tasks equally. Failed and capped work remains in the numerator. Consumer
+time includes shutdown and settlement, and excludes setup, producer work and hidden verification.
+Producer/capture amortization and existing intervals are diagnostic details below the overview.
+Endpoint and completion-metric uncertainty hardening are still required before a product claim.
+
 ## Layout, and where each contract lives
 
 Each contract is stated once, in the module that owns it, and held by the test module beside it.
@@ -71,7 +86,8 @@ the suite builds.
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, the null
 manifest beside it, and the bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
 transcript). The full real-repository fixture library and hidden layers arrive in the corpus layer.
-Regression requires an explicit baseline; CI selects the last corresponding completed main run.
+Regression requires an explicit baseline. The planned CI policy selects the last corresponding
+completed main run; the promoted plumbing workflow still supplies its provisional baseline.
 
 ## Its CI lanes
 
@@ -288,3 +304,7 @@ estimated from text length.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
+
+The internal `bench2-` image/container names and marker filenames are retained implementation
+identifiers from the original container runner. They name shared Bench-1 infrastructure and
+are used unchanged by every experiment, locally and in CI.
