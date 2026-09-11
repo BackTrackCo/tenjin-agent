@@ -94,6 +94,7 @@ def node_test_spec(task: str) -> VerifierSpec:
 
 
 REGISTRY: dict[str, VerifierSpec] = {
+    "node_test_actor": node_test_spec("actor"),
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),
     "fake_crash": VerifierSpec(name="fake_crash", argv=_fake_crash, timeout_s=30),
 }
