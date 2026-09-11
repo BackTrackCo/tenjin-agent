@@ -201,9 +201,15 @@ unprovisioned arm converges on the time its provisioned arms take alone, and the
 unprovisioned quarter hiding inside that.
 
 The schedule is untouched: trials are assigned in its order, the results come back in it whatever
-order they finish in, and no trial id, hash, or balance property depends on the degree. A run
-with a sentinel attached is refused above one, because the sentinel is one server for the whole
-run and its hits name no trial, so a trial claims whatever arrived while it ran.
+order they finish in, and no trial id, hash, or balance property depends on the degree.
+
+## Execution boundary
+
+The foundation injects `Runtime.spawn` and owns the common result/accounting contract. Its
+host subprocess helper is for synthetic offline tests. #335 supplies the shared container
+implementation used by both local and CI live runs. No host-daemon lifecycle or package-manager
+cache is part of this foundation. Credential exposures are observable; attempted blocked
+network requests are not, and the record does not claim that counter.
 
 ## Cleanup
 
@@ -226,7 +232,7 @@ rather than remembered: a test parses every module here and fails on a name-matc
   incomplete or contradictory and never scores. `invalid` is never a miss, never a failure, and
   never a zero-token run, and its reason names the gate that refused it (`executor:exit_N`,
   `usage:<code>`, `delivery:<code>`, `verifier:<id>`, `auxiliary:<code>`, `provision:<code>`,
-  `isolation:symlink_escape`, `sentinel:public_request`, `sentinel:credential_exposure`).
+  `isolation:symlink_escape`, `sentinel:credential_exposure`).
 - **Every task weighs the same.** A cell is one `(arm, task)` pair and an arm figure is the mean
   over its cells, never a sum over attempts, so a task with more repeats does not speak louder.
   Pass rate and token ratio are separate axes and nothing folds them into one number. Producer

@@ -51,8 +51,7 @@ class Provision:
     (a daemon URL, a bearer token, the data dir). `secrets` are values that
     must never appear in anything the agent writes; the sentinel scan treats
     each as a canary. `origins` are hosts the arm's own product reaches, which
-    the attestation has to list and the public-request sentinel must not
-    count. `facts` is the slice of the record's isolation block the provision
+    the attestation has to list. `facts` is the slice of the record's isolation block the provision
     owns: booleans and hosts, never a value from `secrets`.
     """
 

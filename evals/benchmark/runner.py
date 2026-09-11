@@ -51,10 +51,6 @@ Sleep = Callable[[float], None]
 Receipts = Callable[[str, artifact.TrialRoots], list[usage.AuxiliaryReceipt]]
 
 
-class ConcurrencyError(RuntimeError):
-    """A run asked for more than one trial at once under a seam that cannot attribute one."""
-
-
 @dataclass(frozen=True)
 class Completed:
     returncode: int
@@ -136,42 +132,6 @@ def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> No
         process.send_signal(sig)
 
 
-def process_start(argv: list[str], *, cwd: Path, env: dict[str, str], log: Path) -> subprocess.Popen[Any]:
-    """Start a helper the way the agent is started: own session, no shell.
-
-    The one other place a process begins. It exists for a provisioned arm's
-    daemon, which has to outlive the launch call and die before `loop.db` is
-    read, so it cannot be a child of the agent's group.
-    """
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with log.open("a", encoding="utf-8") as handle:
-        return subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            shell=False,
-        )
-
-
-def process_stop(process: subprocess.Popen[Any], grace_s: float) -> int | None:
-    """SIGTERM the helper's group, wait, SIGKILL what is left."""
-    if process.poll() is None:
-        _kill_group(process, signal.SIGTERM)
-        try:
-            process.wait(timeout=grace_s)
-        except subprocess.TimeoutExpired:
-            _kill_group(process)
-            try:
-                process.wait(timeout=_ORPHAN_WAIT_S)
-            except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
-                pass
-    return process.returncode
-
-
 @dataclass(frozen=True)
 class Runtime:
     clock: Clock = time.monotonic
@@ -183,7 +143,6 @@ class Runtime:
     spawn: Spawn = field(default_factory=lambda: process_spawn)
     settle_cap_s: float = 30.0
     settle_interval_s: float = 0.25
-    sentinel: artifact.SentinelLike | None = None
     receipts: Receipts | None = None
     attestation: artifact.Attestation | None = None
     publishable: bool = True
@@ -313,8 +272,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         shelf_secret_present=bool(facts.get("shelf_secret_present", False)),
         shelf_origin=facts.get("shelf_origin"),
     )
-    origin = None if runtime.sentinel is None else runtime.sentinel.origin
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), public_origin=origin)
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task))
     provision = None
     if provisioned:
         assert spec.prepare is not None
@@ -332,7 +290,6 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     launch = spec.launch(executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision))
     if launch.package_manager is not None:
         isolation = {**isolation, "package_manager": launch.package_manager}
-    hits_before = 0 if runtime.sentinel is None else len(runtime.sentinel.hits)
 
     started = runtime.clock()
     try:
@@ -360,7 +317,6 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         roots.audit()
     except artifact.ArtifactError as error:
         isolation_reason = f"isolation:{error.code}"
-    hits = 0 if runtime.sentinel is None else len(runtime.sentinel.hits) - hits_before
     canaries = () if provision is None else provision.secrets
 
     session: claude_usage.SessionUsage | None = None
@@ -381,13 +337,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if delivery.get("failure_key") is not None:
         # The product's test lane reads `.vitest-report.json` in the repository when a reporter is wired; its presence after the run is a fact.
         delivery["failure_key"] = {**delivery["failure_key"], "report_file_present": (roots.repo / ".vitest-report.json").is_file()}
-    # The team shelf and the public marketplace are the seeded config's two
-    # named origins, listed in the allowlist a provisioned run has to state. A
-    # leg to either is the product under test and is counted in the record; a
-    # local leg reaches nothing; only a leg to an origin outside that set is a
-    # public request for the sentinel.
-    hits += delivery["classes"]["other"]
-    sentinel = artifact.scan_sentinels(roots, hits, canaries=canaries, exclude=(roots.data_dir / "config.json",))
+    sentinel = artifact.scan_sentinels(roots, canaries=canaries, exclude=(roots.data_dir / "config.json",))
 
     auxiliary: list[dict[str, Any]] = []
     if runtime.receipts is not None:
@@ -534,7 +484,7 @@ def refused_record(
         "unresolved_actors": [],
         "delivery": loop_join.unavailable(),
         "discovery": None,
-        "sentinel": {"public_requests": 0, "credential_exposures": 0},
+        "sentinel": {"credential_exposures": 0},
         "isolation": isolation,
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(detail) if detail else None, "resolved_settings": None},
     }
@@ -606,12 +556,6 @@ def run(
     records_dir = run_dir / "records"
     accepted, _ = records.select(records_dir, manifest.hash, schedule_hash)
     degree = manifest.concurrency
-    if degree > 1 and runtime.sentinel is not None:
-        # The sentinel is one server for the run and its hits carry no trial,
-        # so a trial claims the ones that arrived while it ran. That reads the
-        # wrong trial's hit the moment two overlap, and a hit invalidates an
-        # attempt, so the configuration is refused rather than measured.
-        raise ConcurrencyError("a run with a sentinel attached counts its hits per trial by delta and must run at pins.concurrency 1")
     done = {
         trial.trial_id: TrialResult(trial.trial_id, accepted[trial.trial_id]["outcome"], True, records.final_path(records_dir, trial.trial_id))
         for trial in trials
