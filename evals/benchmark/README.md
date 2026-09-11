@@ -440,3 +440,8 @@ masked and post-floor, and changes no record.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
+
+## Shipped Bench-1 inputs
+
+See [the corpus](fixtures/live/README.md) for tasks, lessons and hidden verifiers, and
+[run configuration](RUNS.md) for the smoke/hooks/keys selections and live workflow.
