@@ -52,8 +52,9 @@ jobs:
       check_name: benchmark canary (dispatched)
       timeout_minutes: 180
       budget_note: >-
-        Dispatched canary: 24 attempts, budget capped at 0.75 USD an attempt,
-        about 5.69 USD a run at the measured 0.237 USD an attempt.
+        Dispatched Bench-2 canary: four tasks, two arms, three repeats
+        (24 planned attempts). Results are provisional; the overview states
+        coverage and verified completion costs before detailed diagnostics.
 
   live:
     if: inputs.lane != 'canary'

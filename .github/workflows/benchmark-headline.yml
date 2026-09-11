@@ -50,7 +50,7 @@ jobs:
       check_name: benchmark headline (core suite)
       timeout_minutes: 720
       budget_note: >-
-        Full core suite: ten tasks across every arm, three attempts each, plus
-        the natural arm's producer phase. Budget capped at 0.75 USD an attempt.
-        This is the run whose number is meant to be quoted; the nightly canary
-        is the health check.
+        Bench-2 full core experiment: ten tasks across every configured arm,
+        three repeats, plus the natural arm's producer phase. The overview
+        reports actual coverage and verified time/token costs for every arm.
+        These are provisional measurements until metric hardening is complete.

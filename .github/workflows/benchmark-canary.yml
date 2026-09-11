@@ -48,8 +48,7 @@ jobs:
       check_name: benchmark canary (nightly)
       timeout_minutes: 180
       budget_note: >-
-        Canary: 24 attempts, budget capped at 0.75 USD an attempt, about 5.12 USD
-        a run at the 0.213 USD an attempt measured over 149 valid attempts on
-        2026-09-10. Nightly, and on a pull request that touches the product or
-        the benchmark, where it is a warning and not a gate. The weekly headline
-        lane runs the full core suite.
+        Bench-2 canary: four tasks, control versus the shelf arm, three repeats
+        (24 planned attempts). This is a product health measurement, not the
+        full team workload. Read coverage, verified completions and consumer
+        time/token costs above; incomplete runs provide no product headline.
