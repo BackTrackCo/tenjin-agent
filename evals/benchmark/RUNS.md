@@ -48,3 +48,12 @@ the repository-level copies; a label or a job condition alone is not that securi
 Shelf experiments share one concurrency group because reset mutates their shared corpus.
 `queue: max` retains up to 100 pending runs instead of replacing the previous pending PR;
 additional arrivals beyond that GitHub limit are canceled. Queue time is additional to run time.
+
+A terminal Claude subscription/rate-limit error is an invalid measurement with the opaque
+reason `provider:rate_limit`, not a failed task or a zero-token completion. Readouts say
+`UNAVAILABLE — model subscription/rate limit; no product result`, the benchmark check is
+neutral, and the live command still completes its report/artifact path. Invalid attempts
+cannot enter a product comparison or main regression baseline. Only structured CLI error
+fields trigger this classification; quoted task text and later successful retries do not.
+Experiment turn/budget caps and ordinary verifier failures keep their outcome classifications.
+Raw provider text remains private; public artifacts carry the reason code and usage evidence.
