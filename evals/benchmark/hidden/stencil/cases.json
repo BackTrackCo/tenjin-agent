@@ -1,0 +1,22 @@
+[
+  {
+    "args": ["Hi {name}, welcome to {place}.", { "name": "Ada", "place": "the shop floor" }],
+    "expected": "Hi Ada, welcome to the shop floor."
+  },
+  {
+    "args": ["{greeting} {name}", { "greeting": "Hello {name}", "name": "Ada" }],
+    "expected": "Hello {name} Ada"
+  },
+  {
+    "args": ["{name} {sign}", { "name": "Ada", "sign": "signed {name}" }],
+    "expected": "Ada signed {name}"
+  },
+  {
+    "args": ["{note}", { "note": "see {appendix}" }],
+    "expected": "see {appendix}"
+  },
+  {
+    "args": ["{title}: {body}", { "title": "Re {body}", "body": "the notes" }],
+    "expected": "Re {body}: the notes"
+  }
+]

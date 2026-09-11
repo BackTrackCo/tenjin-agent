@@ -1,0 +1,22 @@
+[
+  {
+    "args": [[{ "badge": "K-14" }, { "badge": "k-14" }, { "badge": "R-02" }]],
+    "expected": { "people": 2, "visits": 3 }
+  },
+  {
+    "args": [[{ "badge": "R-02" }, { "badge": "T-09" }, { "badge": "r-02" }]],
+    "expected": { "people": 2, "visits": 3 }
+  },
+  {
+    "args": [[{ "badge": "K-14" }, { "badge": "T-09" }]],
+    "expected": { "people": 2, "visits": 2 }
+  },
+  {
+    "args": [[{ "badge": "W-31" }]],
+    "expected": { "people": 1, "visits": 1 }
+  },
+  {
+    "args": [[{ "badge": "W-31" }, { "badge": "w-31" }, { "badge": "K-14" }, { "badge": "R-02" }]],
+    "expected": { "people": 3, "visits": 4 }
+  }
+]

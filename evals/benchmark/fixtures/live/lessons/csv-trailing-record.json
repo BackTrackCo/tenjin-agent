@@ -1,0 +1,27 @@
+{
+  "id": "csv-trailing-record",
+  "title": "Papa Parse counts the newline at the end of a file as a row",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/{task}.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "f6f1412dfc14ab13",
+      "check": true,
+      "reason": "the identity lane reads the last FAIL header, which on the pristine fixture names the highest-numbered failing case; re-derive if the case list changes"
+    },
+    {
+      "command": "pnpm exec vitest run tests/{task}.test.mjs",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "an assertion diff carries no errno and vitest's frame line ends the block, so the message lane derives nothing"
+    },
+    {
+      "command": "pnpm test -- tests/{task}.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "f6f1412dfc14ab13",
+      "check": true,
+      "reason": "the package script forwards the file to the same runner and prints the same header"
+    }
+  ]
+}

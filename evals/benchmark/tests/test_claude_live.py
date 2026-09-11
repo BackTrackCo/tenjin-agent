@@ -1638,3 +1638,88 @@ def test_the_spawn_keeps_stdout_rather_than_discarding_it(tmp_path: Path) -> Non
     runner.process_spawn(launch, roots, timeout_s=30)
     assert roots.stream.is_file(), "the harness stream must be captured"
     assert '"type": "result"' in roots.stream.read_text(encoding="utf-8").replace('"type":"result"', '"type": "result"')
+
+
+# Corpus candidates: built, verified offline, and in no manifest. A task nobody
+# has run is not evidence, so these are held to the fixture contract and to the
+# prompt and lesson rules here rather than by a manifest's own cases. The prompt
+# each one would carry is frozen here, before any arm has seen the task.
+# Each was cold-probed on 2026-09-10, the source and one failing run handed to
+# the model with no tools: `roster`, `census` and `stencil` were solved 3 of 3,
+# `relay` 2 of 3, `upstream` 3 of 3 on the mechanism and 1 of 3 on the whole
+# answer. None of these five is admitted on a claim of discovery cost.
+CANDIDATES = {
+    "upstream": (
+        "csv-trailing-record",
+        "src/stock.mjs",
+        "Fix src/stock.mjs so that tests/upstream.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+    ),
+    "roster": (
+        "integer-key-order",
+        "src/roster.mjs",
+        "Fix src/roster.mjs so that tests/roster.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+    ),
+    "relay": (
+        "swallowed-parse-fallback",
+        "src/spans.mjs",
+        "Fix the source under src/ so that tests/relay.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+    ),
+    "census": (
+        "module-scoped-state",
+        "src/ids.mjs",
+        "Fix the source under src/ so that tests/census.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+    ),
+    "stencil": (
+        "sequential-substitution",
+        "src/stencil.mjs",
+        "Fix src/stencil.mjs so that tests/stencil.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+    ),
+}
+# What each candidate's lesson says, which its prompt may not.
+CANDIDATE_PHRASES = (
+    "insertion",
+    "Object.keys",
+    "Object.entries",
+    "sort",
+    "catch",
+    "fallback",
+    "default",
+    "parse",
+    "module scope",
+    "cache",
+    "twice",
+    "sequence",
+    "replace",
+    "traversal",
+    "newline",
+    "skipEmptyLines",
+    "Papa",
+)
+
+
+def test_every_registered_task_is_either_in_a_manifest_or_a_declared_candidate() -> None:
+    """A task cannot sit in the registry unclaimed: it is corpus, or it is a candidate held to the same contract."""
+    assert set(verifier.TASK_PACKAGES) == set(BENCH2) | set(HIGH_DISCOVERY) | set(CANDIDATES)
+    corpus = {task["id"] for path in (cli.REAL_MANIFEST, cli.LOCAL_ARMS_MANIFEST, cli.CANARY_MANIFEST, cli.HIGH_DISCOVERY_MANIFEST) for task in manifest_module.load(path).tasks}
+    assert corpus & set(CANDIDATES) == set(), "a candidate is in a manifest and is no longer a candidate"
+
+
+@pytest.mark.parametrize("task_id", sorted(CANDIDATES))
+def test_a_corpus_candidate_meets_the_fixture_prompt_and_lesson_contract(task_id: str) -> None:
+    family, source, prompt = CANDIDATES[task_id]
+    fixture = verifier.HIDDEN.parent / "fixtures" / "live" / task_id
+    claude_live.refuse_project_settings(fixture)
+    support.assert_vitest_fixture(fixture, task_id, trap=False)
+    assert verifier.TASK_SOURCES[task_id] == source
+    assert (fixture / source).is_file()
+    spec = verifier.lookup(f"node_test_{task_id}")
+    assert (spec.hidden_layer / verifier.HIDDEN_TESTS / f"{task_id}.test.mjs").is_file()
+    assert not (fixture / verifier.HIDDEN_TESTS).exists()
+    # The prompt states the goal and never the lesson.
+    for phrase in LESSON_PHRASES + HIGH_DISCOVERY_PHRASES + CANDIDATE_PHRASES:
+        assert phrase.lower() not in prompt.lower(), (task_id, phrase)
+    # One lesson, the mechanism, and no `<task>-fix` beside it: what the fixture
+    # still gets wrong lives only in the injected cases.
+    task = {"id": task_id, "family": family}
+    assert [lesson.id for lesson in tenjin_arm.lessons_for(task)] == [family]
+    assert tenjin_arm.lesson_named(f"{task_id}-fix") is None

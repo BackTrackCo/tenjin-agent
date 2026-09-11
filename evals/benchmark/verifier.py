@@ -104,11 +104,11 @@ def node_test_spec(task: str, package: str = "") -> VerifierSpec:
 # pnpm workspace whose tests and marker live in `packages/core`. `shadow` is a
 # workspace too, but its one Vitest project is the root, so its marker is the
 # root's and only the library it consumes lives under `packages/`.
-TASK_PACKAGES = {"actor": "", "budget": "", "candidate": "", "slug": "", "alias": "", "level": "", "money": "", "core": "packages/core", "shadow": "", "ambient": "", "upstream": ""}
+TASK_PACKAGES = {"actor": "", "budget": "", "candidate": "", "slug": "", "alias": "", "level": "", "money": "", "core": "packages/core", "shadow": "", "ambient": "", "upstream": "", "roster": "", "relay": "", "census": "", "stencil": ""}
 # The file the task's fix touches, which the discovery facts read edits against.
 # `shadow` names the library source rather than the built artifact the test
 # imports, because an edit there is the edit the task is about.
-TASK_SOURCES = {"actor": "src/actor.mjs", "budget": "src/budget.mjs", "candidate": "src/candidate.mjs", "slug": "src/slug.mjs", "alias": "src/window.mjs", "level": "src/level.ts", "money": "src/cli.mjs", "core": "packages/core/src/core.mjs", "shadow": "packages/range/src/range.mjs", "ambient": "src/price.mjs", "upstream": "src/stock.mjs"}
+TASK_SOURCES = {"actor": "src/actor.mjs", "budget": "src/budget.mjs", "candidate": "src/candidate.mjs", "slug": "src/slug.mjs", "alias": "src/window.mjs", "level": "src/level.ts", "money": "src/cli.mjs", "core": "packages/core/src/core.mjs", "shadow": "packages/range/src/range.mjs", "ambient": "src/price.mjs", "upstream": "src/stock.mjs", "roster": "src/roster.mjs", "relay": "src/spans.mjs", "census": "src/ids.mjs", "stencil": "src/stencil.mjs"}
 # Tasks whose hidden test reaches a pinned third-party package through the
 # fixture's source. `upstream` is the shape whose difficulty is a library's real
 # behaviour, so its hidden test needs the dependency tree the image installs. A

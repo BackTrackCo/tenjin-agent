@@ -1,0 +1,71 @@
+[
+  {
+    "args": [
+      [
+        { "hour": "7", "event": "open" },
+        { "hour": "9", "event": "pick" },
+        { "hour": "9", "event": "pack" },
+        { "hour": "23", "event": "close" }
+      ]
+    ],
+    "expected": [
+      { "hour": "7", "count": 1 },
+      { "hour": "9", "count": 2 },
+      { "hour": "23", "count": 1 }
+    ]
+  },
+  {
+    "args": [
+      [
+        { "hour": "23", "event": "close" },
+        { "hour": "7", "event": "open" },
+        { "hour": "7", "event": "pick" }
+      ]
+    ],
+    "expected": [
+      { "hour": "23", "count": 1 },
+      { "hour": "7", "count": 2 }
+    ]
+  },
+  {
+    "args": [
+      [
+        { "hour": "5", "event": "open" },
+        { "hour": "22", "event": "close" },
+        { "hour": "5", "event": "pick" }
+      ]
+    ],
+    "expected": [
+      { "hour": "5", "count": 2 },
+      { "hour": "22", "count": 1 }
+    ]
+  },
+  {
+    "args": [
+      [
+        { "hour": "9", "event": "pick" },
+        { "hour": "0", "event": "sweep" },
+        { "hour": "9", "event": "pack" }
+      ]
+    ],
+    "expected": [
+      { "hour": "9", "count": 2 },
+      { "hour": "0", "count": 1 }
+    ]
+  },
+  {
+    "args": [
+      [
+        { "hour": "12", "event": "pick" },
+        { "hour": "3", "event": "sweep" },
+        { "hour": "12", "event": "pack" },
+        { "hour": "3", "event": "open" },
+        { "hour": "3", "event": "close" }
+      ]
+    ],
+    "expected": [
+      { "hour": "12", "count": 2 },
+      { "hour": "3", "count": 3 }
+    ]
+  }
+]

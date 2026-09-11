@@ -1,0 +1,27 @@
+{
+  "id": "integer-key-order",
+  "title": "A plain object never keeps insertion order for keys that look like whole numbers",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/{task}.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "300c3a22c513bb71",
+      "check": true,
+      "reason": "the identity lane reads the last FAIL header, which on the pristine fixture names the highest-numbered failing case; re-derive if the case list changes"
+    },
+    {
+      "command": "pnpm exec vitest run tests/{task}.test.mjs",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "an assertion diff carries no errno and vitest's frame line ends the block, so the message lane derives nothing"
+    },
+    {
+      "command": "pnpm test -- tests/{task}.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "300c3a22c513bb71",
+      "check": true,
+      "reason": "the package script forwards the file to the same runner and prints the same header"
+    }
+  ]
+}

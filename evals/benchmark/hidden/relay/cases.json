@@ -1,0 +1,7 @@
+[
+  { "args": [60, "30s"], "expected": { "perSecond": 2 } },
+  { "args": [60, "5min"], "expected": { "perSecond": 0.2 } },
+  { "args": [720, "2hr"], "expected": { "perSecond": 0.1 } },
+  { "args": [45, "90s"], "expected": { "perSecond": 0.5 } },
+  { "args": [30, "1min"], "expected": { "perSecond": 0.5 } }
+]
