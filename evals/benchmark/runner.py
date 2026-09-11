@@ -509,8 +509,9 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
+    cleanup_reason = "isolation:seed_cleanup" if any(value is not None for value in (provision_stop or {}).get("seed_deleted", {}).values()) else None
     provider_reason = "provider:rate_limit" if claude_usage.provider_limit(roots.stream) else None
-    invalid_reason = (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or provider_reason or usage_reason
+    invalid_reason = cleanup_reason or (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or provider_reason or usage_reason
     outcome = "invalid"
     verification_time_s = None
     verdict: verifier.Verdict | None = None
@@ -676,6 +677,8 @@ def attempt(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str,
     path, won = records.publish(run_dir / "records", record)
     if not won:
         raise records.RecordError(f"another writer published trial {trial.trial_id} first")
+    if record.get("invalid_reason") in {"isolation:seed_cleanup", "provision:seed_cleanup"}:
+        raise executor.ProvisionError("shelf cleanup failed; evidence was saved and no more trials will be admitted", code="seed_cleanup")
     return TrialResult(trial.trial_id, record["outcome"], False, path)
 
 

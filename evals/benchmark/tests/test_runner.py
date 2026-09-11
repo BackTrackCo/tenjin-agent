@@ -1002,3 +1002,23 @@ def test_launch_refusal_still_cleans_a_successfully_prepared_trial(tmp_path, run
     with pytest.raises(ValueError, match="launch refused"):
         runner.run_trial(manifest, trial, run_dir, "sha256:schedule", make_runtime())
     assert stopped == [trial.trial_id]
+
+
+@pytest.mark.parametrize("degree", (1, 3))
+def test_cleanup_failure_records_evidence_and_stops_new_shelf_trials(tmp_path, run_dir, register_executor, make_runtime, degree):
+    prepared = []
+    def prepare(request):
+        prepared.append(request.trial_id)
+        return executor.Provision()
+    name = register_executor("poisoned_shelf", ExecutorSpec(
+        name="poisoned_shelf", harness="claude", launch=executor.REGISTRY["fake"].launch,
+        prepare=prepare, stop=lambda roots, provision: {"seed_deleted": {"piece": "delete failed"}}))
+    manifest = support.synthetic_manifest(tmp_path, executor_name=name, arms=("on", "on2"), concurrency=degree)
+    for arm in manifest.data["arms"]:
+        arm["provision"] = "tenjin"
+    with pytest.raises(executor.ProvisionError, match="cleanup failed"):
+        runner.run(manifest, schedule.expand(manifest), run_dir, "sha256:schedule", make_runtime())
+    assert len(prepared) == 1
+    written = json.loads(records.final_path(run_dir / "records", prepared[0]).read_text())
+    assert written["invalid_reason"] == "isolation:seed_cleanup"
+    assert written["usage"]
