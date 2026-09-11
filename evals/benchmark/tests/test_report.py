@@ -460,7 +460,7 @@ def test_the_summary_carries_the_headline_the_interval_and_the_method(corpus, pr
     assert "headline on:" in text
     assert "interval [" in text
     assert "evals/benchmark/README.md" in text
-    assert text.rstrip().endswith("```"), text[-40:]
+    assert text.rstrip().endswith("</details>"), text[-40:]
 
 
 def test_a_run_that_may_not_be_quoted_says_so_before_its_first_number(project: Project, stamped: Stamped) -> None:
@@ -482,7 +482,8 @@ def test_a_summary_over_the_cap_is_cut_and_says_it_was(project: Project) -> None
     text = report.check_summary(project(), limit=900)
     assert len(text) <= 900
     assert "truncated" in text
-    assert text.rstrip().endswith("```")
+    assert text.count("```text") == text.count("\n```\n")
+    assert text.count("<details>") == text.count("</details>")
 
 
 def test_the_cap_is_the_one_github_imposes(project: Project) -> None:
@@ -603,3 +604,41 @@ def test_the_corpus_section_reads_the_run(corpus, project: Project) -> None:
     assert f"{cell['requests_per_attempt']:7.2f} {cell['tokens_per_attempt']:10.1f}" in "\n".join(section)
     # The readout ends with it: it is the only block a cut may reach.
     assert report.render(published).endswith("\n".join(section))
+
+
+
+def test_overview_names_the_experiment_schedule_model_and_all_arms(project: Project) -> None:
+    published = project()
+    text = report.check_summary(published)
+    assert "SYNTHETIC TEST — no product result" in text
+    assert "Model: fake-model-0" in text
+    assert "Ran: 12/12 attempts" in text
+    assert "Verified / planned" in text
+    assert "Consumer s / completion" in text
+    assert "Tokens / completion" in text
+    assert text.index("Tokens / completion") < text.index("<details>")
+    assert "task-0, task-1, task-2" in text
+    assert "| off |" in text and "| on |" in text
+    assert "Consumer time includes shutdown/settlement" in text
+
+
+def test_a_missing_arm_or_invalid_attempt_is_never_presented_as_a_complete_product_result(project: Project) -> None:
+    published = project()
+    published.update(isolation="attested", publishable=True, excluded={}, invalid=[])
+    published["arms"].pop("on")
+    assert report.run_status(published).startswith("INCOMPLETE")
+    assert "| on | 0 / 6 |" in report.overview(published, markdown=True)
+    assert "lower" not in report.overview(published)
+
+
+def test_model_identity_is_guarded_before_it_reaches_the_public_summary(corpus, project: Project) -> None:
+    manifest = corpus[0]
+    with pytest.raises(ReportError):
+        project({**manifest.data, "pins": {**manifest.pins, "model": HOST_PATH}})
+
+
+def test_plan_summary_names_the_actual_matrix_without_claiming_results(corpus) -> None:
+    text = report.plan_summary(corpus[0].data)
+    assert "12 attempts = 3 tasks × 2 arms × 2 repeats" in text
+    assert "Arm: off" in text and "Arm: on" in text
+    assert "No result yet" in text

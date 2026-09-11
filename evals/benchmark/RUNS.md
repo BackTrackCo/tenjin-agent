@@ -13,3 +13,10 @@ The next planned regression change in Bench-1 #334/#347 will select the last com
 main-run artifact for PR comparisons, then remove that old numerical input. This promotion
 preserves the existing comparison until that replacement is tested. History stays in
 `tenjin-notes`; neither these smoke numbers nor the existing capture-only headline is hardened.
+
+CI prints the exact experiment matrix before execution. After execution, the check summary and
+`report.md` begin with status, matrix coverage, verified completions and consumer time/token costs
+for every arm. Detailed accounting and task diagnostics follow in an expandable section. The
+artifact includes `experiment.txt`, `report.md` and machine-readable `report.json`. The shared
+`describe --manifest PATH`, `summary --run RUN`, and `headline --run RUN` commands expose the
+same reading locally. A provisional measurement is explicitly labeled, never called hardened.

@@ -1384,3 +1384,12 @@ def test_overlay_resolves_data_dir_only_into_the_trial_copy(request_for: Request
     assert (request.roots.repo / "probe.mjs").read_text() == f"export default '{request.roots.data_dir}/hooks/probe.mjs';"
     assert not (manifest.fixture_path(manifest.tasks[0]) / "probe.mjs").exists()
     assert "overlay" not in json.loads(claude_live.settings_path(request.roots).read_text())
+
+
+
+def test_describe_prints_the_experiment_without_launching_it(capsys) -> None:
+    with no_process():
+        assert cli.main(["describe", "--manifest", str(cli.SMOKE_MANIFEST)]) == 0
+    text = capsys.readouterr().out
+    assert "Planned: 2 attempts" in text
+    assert "No result yet" in text

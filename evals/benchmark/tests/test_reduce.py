@@ -478,3 +478,16 @@ def test_the_corpus_comparison_reports_a_ratio_with_an_interval(corpus, reductio
     assert ratios_by_reuse[1] == round(0.991666666667, 12)
     assert ratios_by_reuse[10] < ratios_by_reuse[1]
     assert ratios_by_reuse[10] < 1
+
+
+
+def test_consumer_time_per_completion_charges_failed_work_and_weights_tasks_equally() -> None:
+    built = [support.reduction_record("a", "off", 0, 0, 100, "pass"), support.reduction_record("a", "off", 1, 0, 100, "fail"), support.reduction_record("b", "off", 0, 0, 100, "pass")]
+    for record, seconds in zip(built, (10.0, 20.0, 50.0)):
+        record["wall_time_s"] = seconds
+    result = reduce_module.reduce(support.accept(*built), [], baseline="off")
+    assert result["arms"]["off"]["consumer_seconds_per_verified_resolution"] == 40.0
+    built[0]["wall_time_s"] = None
+    result = reduce_module.reduce(support.accept(*built), [], baseline="off")
+    assert result["arms"]["off"]["consumer_seconds_per_verified_resolution"] is None
+    assert result["arms"]["off"]["consumer_seconds_reason"] == "timing_unavailable"

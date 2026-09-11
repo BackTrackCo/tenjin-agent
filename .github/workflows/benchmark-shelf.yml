@@ -134,6 +134,21 @@ jobs:
           # is legible rather than inside a paid trial.
           tenjin daemon --help > /dev/null
 
+      - name: Bench live dependencies
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bench-live-venv"
+          "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
+            -r evals/benchmark/requirements-live.txt
+          echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Experiment that will run
+        if: steps.gate.outputs.live == 'true'
+        env:
+          BENCH_MANIFEST: ${{ inputs.manifest }}
+        run: |
+          "$BENCH_PY" -m evals.benchmark.cli describe --manifest "$BENCH_MANIFEST" | tee "$RUNNER_TEMP/experiment.txt"
+          { echo '## Experiment planned'; echo '```text'; cat "$RUNNER_TEMP/experiment.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       # The one knob. `tenjin_arm.load_source` reads `baseUrl` from this
       # directory, and that value drives both the runner's own CLI calls and the
       # config injected into every trial. It names the bench shelf, so nothing
@@ -167,7 +182,7 @@ jobs:
           chmod 600 "$data/wallet.json"
           # The CLI calls below are the benchmark's traffic too, and this step
           # runs outside `live-run`, which arms the identity for a trial itself.
-          TENJIN_CALLER_USER_AGENT="$(python3 -c 'import sys; from evals.benchmark import tenjin_arm; print(tenjin_arm.caller_user_agent(sys.argv[1]))' "gha${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}")"
+          TENJIN_CALLER_USER_AGENT="$("$BENCH_PY" -c 'import sys; from evals.benchmark import tenjin_arm; print(tenjin_arm.caller_user_agent(sys.argv[1]))' "gha${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}")"
           export TENJIN_CALLER_USER_AGENT
           # The only path that materializes the three hook bundles is a daemon
           # start. It is stopped again on the next line: this run wants the
@@ -184,13 +199,6 @@ jobs:
       # python3. It pins scipy and jsonschema too, which every shipped command
       # imports, so `$BENCH_PY` is the only interpreter that can import this
       # package once the venv exists.
-      - name: Bench live dependencies
-        if: steps.gate.outputs.live == 'true'
-        run: |
-          python3 -m venv "$RUNNER_TEMP/bench-live-venv"
-          "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
-            -r evals/benchmark/requirements-live.txt
-          echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
       - name: Write the attestation
         if: steps.gate.outputs.live == 'true'
         run: |
@@ -242,7 +250,7 @@ jobs:
           "$BENCH_PY" -m evals.benchmark.cli verify --run "$run"
           echo "::endgroup::"
           "$BENCH_PY" -m evals.benchmark.cli summary --run "$run"
-          "$BENCH_PY" -m evals.benchmark.cli headline --run "$run" >> "$GITHUB_STEP_SUMMARY"
+          "$BENCH_PY" -m evals.benchmark.cli headline --run "$run" | tee "$run/report.md" >> "$GITHUB_STEP_SUMMARY"
           # `report.json` is publishable, so it carries reason codes and no free
           # text. An attempt that never started says why only in its own record,
           # and a whole arm can be lost to one repeated refusal, so the distinct
@@ -287,11 +295,11 @@ jobs:
           if path.is_file():
               published = json.loads(path.read_text(encoding="utf-8"))
               summary = report_module.check_summary(published)
-              eligible = any(row["headline_eligible"] for row in published["comparisons"].values())
+              eligible = report_module.run_status(published).startswith("PROVISIONAL")
               # `neutral`, not `failure`: a run that produced no quotable number
               # is a fact about the run, and this lane blocks nothing either way.
               conclusion = "success" if published["publishable"] and eligible else "neutral"
-              title = f"{published['benchmark_version']}: {'publishable' if published['publishable'] else 'not publishable'}"
+              title = report_module.run_status(published)
           else:
               summary = (
                   "## No report\n\nThis run produced no `report.json`: the reset, the images, or the "
@@ -322,6 +330,8 @@ jobs:
           name: ${{ inputs.lane }}-records
           path: |
             ${{ runner.temp }}/bench-run/report.json
+            ${{ runner.temp }}/bench-run/report.md
+            ${{ runner.temp }}/experiment.txt
             ${{ runner.temp }}/bench-run/records/
             ${{ runner.temp }}/bench-run/schedule.json
             ${{ runner.temp }}/bench-run/corpus-snapshot.json

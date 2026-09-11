@@ -255,6 +255,15 @@ def project(
         "benchmark_version": manifest_data["benchmark_version"],
         "slice": manifest_data.get("slice"),
         "price_sheet_version": manifest_data["price_sheet_version"],
+        "run_configuration": {
+            "model": manifest_data["pins"].get("model"),
+            "harness": manifest_data.get("harness"),
+            "harness_version": manifest_data["pins"].get("harness_version"),
+            "effort": manifest_data["pins"].get("effort"),
+            "planned_per_arm": len(manifest_data["tasks"]) * manifest_data["repeats"],
+            "arm_ids": [arm["id"] for arm in manifest_data.get("arms", [])] or sorted(arms),
+            "product_commits": sorted({record["isolation"].get("image", {}).get("cli", {}).get("commit") for record in accepted.values() if isinstance(record["isolation"].get("image"), dict) and record["isolation"]["image"].get("cli", {}).get("commit")}),
+        },
         "manifest_hash": manifest_hash,
         "schedule_hash": schedule_hash,
         "seed": manifest_data["seed"],
@@ -383,51 +392,92 @@ CHECK_SUMMARY_LIMIT = 65535
 METHODOLOGY = "https://github.com/BackTrackCo/tenjin-agent/blob/main/evals/benchmark/README.md"
 
 
+def run_status(report: dict[str, Any]) -> str:
+    if report.get("isolation") == "fake":
+        return "SYNTHETIC TEST — no product result"
+    if not report.get("publishable"):
+        return "PLUMBING — not publishable; no product result"
+    config = report.get("run_configuration") or {}
+    expected = config.get("planned_per_arm")
+    ids = config.get("arm_ids") or sorted(report.get("arms") or {})
+    if not expected or any((report.get("arms", {}).get(arm) or {}).get("attempts") != expected for arm in ids):
+        return "INCOMPLETE — planned attempts are missing; no headline"
+    if report.get("invalid") or sum(report.get("excluded", {}).values()):
+        return "INCOMPLETE — invalid or excluded attempts; no headline"
+    if any(arm.get("accounting") != "complete" for arm in report.get("arms", {}).values()):
+        return "INCOMPLETE — token accounting is not complete; no headline"
+    return "PROVISIONAL MEASUREMENT — not a hardened product claim"
+
+
+def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
+    """Experiment identity and completion-normalized product numbers, before diagnostics."""
+    config = report.get("run_configuration") or {}
+    arms = report.get("arms") or {}
+    ids = config.get("arm_ids") or sorted(arms)
+    planned = config.get("planned_per_arm")
+    tasks = report.get("corpus_tasks") or []
+    recorded = sum(arm.get("attempts", 0) for arm in arms.values())
+    expected = "unknown" if not planned else str(planned * len(ids))
+    lines = [run_status(report), f"Experiment: {report['benchmark_version']}",
+             f"Model: {config.get('model') or 'unknown'} | Harness: {config.get('harness') or 'unknown'} {config.get('harness_version') or ''} | Effort: {config.get('effort') or 'unknown'}",
+             f"Ran: {recorded}/{expected} attempts | Tasks: {len(tasks)} | Arms: {len(ids)} | Repeats: {report.get('repeats', 'unknown')}",
+             "Tasks: " + (", ".join(task["task_id"] for task in tasks) or "unknown"),
+             "Control: " + str(report.get("baseline") or "none"), ""]
+    columns = ["Arm", "Verified / planned", "Failed / capped / invalid", "Consumer s / completion", "Tokens / completion", "Time vs control", "Tokens vs control"]
+    rows = []
+    baseline = arms.get(report.get("baseline"), {})
+    def display(value: Any, digits: int = 0) -> str:
+        return "n/a" if value is None else f"{value:,.{digits}f}"
+    def delta(value: Any, base: Any, comparable: bool) -> str:
+        if not comparable or value is None or base is None or base <= 0:
+            return "n/a"
+        pct = (value / base - 1) * 100
+        return f"{abs(pct):.1f}% {'lower' if pct < 0 else 'higher' if pct > 0 else 'change'}"
+    complete = run_status(report).startswith("PROVISIONAL")
+    for arm_id in ids:
+        arm = arms.get(arm_id, {})
+        outcomes = arm.get("outcomes", {})
+        seconds = arm.get("consumer_seconds_per_verified_resolution")
+        tokens = arm.get("tokens_per_verified_resolution")
+        rows.append([arm_id, f"{outcomes.get('pass', 0)} / {planned or '?'}",
+                     f"{outcomes.get('fail', 0)} / {outcomes.get('capped', 0) + outcomes.get('interrupted', 0)} / {outcomes.get('invalid', 0)}",
+                     display(seconds, 1), display(tokens),
+                     "control" if arm_id == report.get("baseline") else delta(seconds, baseline.get("consumer_seconds_per_verified_resolution"), complete),
+                     "control" if arm_id == report.get("baseline") else delta(tokens, baseline.get("tokens_per_verified_resolution"), complete)])
+    if markdown:
+        lines = [line + "  " for line in lines]
+        lines += ["| " + " | ".join(columns) + " |", "| " + " | ".join("---" for _ in columns) + " |"]
+        lines += ["| " + " | ".join(row) + " |" for row in rows]
+    else:
+        widths = [max(len(columns[i]), *(len(row[i]) for row in rows)) for i in range(len(columns))] if rows else [len(c) for c in columns]
+        lines += [" | ".join(cell.ljust(width) for cell, width in zip(row, widths)) for row in [columns, *rows]]
+    lines += ["", "Per completion = total scored consumer spend / verified passes within each task, then equal-weighted across tasks; failed and capped work is included.",
+              "Consumer time includes shutdown/settlement, but excludes setup, producer work and the hidden verifier. Producer/capture costs are separate below.",
+              "n/a means no verified completion, missing timing, or an incomplete comparison. Completion-metric uncertainty and endpoint hardening are pending.",
+              "Product commit(s): " + (", ".join(config.get("product_commits") or []) or "not recorded")]
+    return "\n".join(lines)
+
+
 def check_summary(report: dict[str, Any], methodology: str = METHODOLOGY, limit: int = CHECK_SUMMARY_LIMIT) -> str:
-    """The readout an anonymous reader can reach: a check run's `output.summary`.
-
-    Measured on this public repository with no token, the artifact bytes answer
-    401, the artifact route 404, and the job logs 403, while
-    `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` answers 200 with its
-    whole `output`. So the headline, the intervals and the link to the method
-    go here, and the per-attempt records stay a workflow artifact for whoever is
-    logged in and wants to recompute.
-
-    Nothing here computes: it is `render` with a heading and a caveat a reader
-    meeting a number cold is owed.
-    """
-    verdict = (
-        "This run is publishable: every accepted attempt ran under an attestation this run built for itself."
-        if report["publishable"]
-        else f"**This run is not publishable** (`{report['isolation']}`). No number below is a result."
-    )
+    """One shared overview for CI checks, step summaries and exported Markdown."""
+    head = f"## {report['benchmark_version']}\n\n"
     taken = report.get("corpus_snapshot")
-    corpus_line = "The corpus this run measured was not read, so this report does not say what was on the shelf."
+    corpus = "The corpus this run measured was not read."
     if taken and not taken.get("error"):
-        corpus_line = (
-            f"The corpus was {taken['posts']} pieces on `{taken['origin']}`, read at {taken['taken_at']} "
-            f"once the run's own seed had landed (`{taken['content_hash']}`)."
-        )
-    head = "\n".join(
-        [
-            f"## {report['benchmark_version']}",
-            "",
-            verdict,
-            "",
-            corpus_line,
-            "",
-            f"Method, arms, and what this does not measure: [`evals/benchmark/README.md`]({methodology}).",
-            "",
-            "```text",
-        ]
-    )
-    tail = "\n```\n"
-    body = render(report)
-    room = limit - len(head) - len(tail) - 1
+        corpus = f"Corpus: {taken['posts']} pieces on `{taken['origin']}`, read at {taken['taken_at']}."
+    body = overview(report, markdown=True) + "\n\n" + corpus + f"\n\n[Method: evals/benchmark/README.md]({methodology}).\n\n"
+    body += "<details><summary>Accounting, phase costs, uncertainty and task details</summary>\n\n```text\n" + render(report, include_overview=False)
+    tail = "\n```\n</details>\n"
+    room = max(0, limit - len(head) - len(tail))
     if len(body) > room:
         note = "\n[truncated: the whole report is report.json in this run's artifact]"
-        body = body[: room - len(note)] + note
-    return head + "\n" + body + tail
+        # A small custom limit may cut before the details block starts.
+        body = body[:max(0, room - len(note))] + note
+        if "<details>" not in body:
+            tail = "\n"
+        elif "```text" not in body:
+            tail = "\n</details>\n"
+    return (head + body + tail)[:limit]
 
 
 # The corpus block is the readout's only per-task section, so it is the only
@@ -514,7 +564,7 @@ def corpus_section(report: dict[str, Any]) -> list[str]:
     return [line.rstrip() for line in lines]
 
 
-def render(report: dict[str, Any]) -> str:
+def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
     """A finished report as text, for a log or a step summary.
 
     The projection is the artifact; this is only a reading of it. It adds no
@@ -537,6 +587,8 @@ def render(report: dict[str, Any]) -> str:
         f"seed {report['seed']}  repeats {report['repeats']}  concurrency {report.get('concurrency', 1)}",
         stamp_line,
     ]
+    if include_overview:
+        lines = [overview(report), "", "Detailed accounting (provisional diagnostics):", *lines]
     if report.get("shelf_secret_present", False):
         lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
     if report.get("slice"):
@@ -614,7 +666,7 @@ def render(report: dict[str, Any]) -> str:
             f"timeouts: {origins['public_timeouts']}; legs the daemon logged to an unnamed shelf: {origins['unnamed_shelf_legs']}"
         )
     if report["comparisons"]:
-        lines.append(f"token ratio versus {baseline}, 1.0 means no change, lower means fewer tokens:")
+        lines.append(f"legacy capture/amortization diagnostic versus {baseline}, 1.0 means no change; this is not the product headline:")
         for arm_id, comparison in sorted(report["comparisons"].items()):
             headline = comparison.get("headline")
             eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
@@ -660,4 +712,20 @@ def render(report: dict[str, Any]) -> str:
     rows = corpus_section(report)
     if rows:
         lines += ["", *rows]
+    return "\n".join(lines)
+
+
+def plan_summary(manifest: dict[str, Any]) -> str:
+    """Human-readable experiment plan, using only declared configuration."""
+    tasks, arms, pins = manifest["tasks"], manifest["arms"], manifest["pins"]
+    count = len(tasks) * len(arms) * manifest["repeats"]
+    lines = [f"Experiment to run: {manifest['benchmark_version']}",
+             f"Model: {pins['model']} | Harness: {manifest['harness']} {pins['harness_version']} | Effort: {pins['effort']}",
+             f"Planned: {count} attempts = {len(tasks)} tasks × {len(arms)} arms × {manifest['repeats']} repeats",
+             f"Caps per attempt: {pins['wall_clock_s']} seconds, {pins['turn_budget']} turns | Concurrency: {pins.get('concurrency', 1)}",
+             "Tasks: " + ", ".join(task["id"] for task in tasks),
+             "Control: " + arms[0]["id"]]
+    for arm in arms:
+        lines.append(f"Arm: {arm['id']} | executor={arm['executor']} | producer={'yes' if arm.get('producer') else 'no'} | auxiliary={arm['auxiliary_usage']} | settings={arm['settings_hash']}")
+    lines.append("No result yet. Execution and verified outcomes determine what can be reported.")
     return "\n".join(lines)

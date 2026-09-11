@@ -126,6 +126,11 @@ jobs:
           "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
             -r evals/benchmark/requirements-live.txt
           echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Experiment that will run
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          "$BENCH_PY" -m evals.benchmark.cli describe --manifest evals/benchmark/fixtures/live/smoke-manifest.json | tee "$RUNNER_TEMP/experiment.txt"
+          { echo '## Experiment planned'; echo '```text'; cat "$RUNNER_TEMP/experiment.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Build the fixture images
         if: steps.gate.outputs.live == 'true'
         run: |
@@ -144,33 +149,27 @@ jobs:
           "$BENCH_PY" -m evals.benchmark.cli live-run \
             --manifest evals/benchmark/fixtures/live/smoke-manifest.json \
             --out "$RUNNER_TEMP/bench1-live" --plumbing --ci-live
-      # `regress` warns on the checks tab where the run is worse than the
-      # committed baseline and exits 0 whatever it finds; the lane stays
-      # informational.
-      - name: Verify, summary, regress
-        if: steps.gate.outputs.live == 'true'
+      - name: Verified results and regression diagnostics
+        if: always() && steps.gate.outputs.live == 'true'
         run: |
           set -o pipefail
           run="$RUNNER_TEMP/bench1-live"
+          if [ ! -f "$run/report.json" ]; then
+            echo "## No product result: the run produced no report. See the failed step above." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           echo "::group::verify (hidden verifiers re-run over the finished run)"
           "$BENCH_PY" -m evals.benchmark.cli verify --run "$run"
           echo "::endgroup::"
           "$BENCH_PY" -m evals.benchmark.cli summary --run "$run" | tee "$RUNNER_TEMP/bench1-live-summary.txt"
-          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
-          ## Bench-1 live plumbing smoke: non-publishable evidence
-
-          Real Claude Code attempts under `--plumbing --ci-live`. Every record is stamped
-          automated and non-publishable; this proves the chain runs, and no number here
-          is a result or a savings claim.
-
-          SUMMARY
-          {
-            echo '```text'
-            cat "$RUNNER_TEMP/bench1-live-summary.txt"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          "$BENCH_PY" -m evals.benchmark.cli headline --run "$run" | tee "$run/report.md" >> "$GITHUB_STEP_SUMMARY"
           "$BENCH_PY" -m evals.benchmark.cli regress --run "$run" \
             --baseline evals/benchmark/fixtures/live/baseline.json
+      - name: Clean up the run's containers
+        if: always() && steps.gate.outputs.live == 'true'
+        run: |
+          [ -d "$RUNNER_TEMP/bench1-live" ] || exit 0
+          "$BENCH_PY" -m evals.benchmark.cli cleanup --run "$RUNNER_TEMP/bench1-live"
       # report.json is the only publishable projection and the only thing
       # retained. Records, transcripts, and worktrees stay on the runner and
       # die with it.
@@ -179,6 +178,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bench1-live-report
-          path: ${{ runner.temp }}/bench1-live/report.json
+          path: |
+            ${{ runner.temp }}/bench1-live/report.json
+            ${{ runner.temp }}/bench1-live/report.md
+            ${{ runner.temp }}/experiment.txt
           if-no-files-found: error
           retention-days: 14
