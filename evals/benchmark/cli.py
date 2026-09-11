@@ -676,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
     # cannot reach an object this run did not create. Matching by name instead,
     # `pkill -f bin/claude` and its relatives, also reaches an operator's
     # unrelated sessions; do not.
-    cleanup = commands.add_parser("cleanup", help="remove any container this run started and left behind")
+    cleanup = commands.add_parser("cleanup", help="stop and remove this run's recorded containers, including active trials")
     cleanup.add_argument("--run", required=True, type=Path)
     # Case records for the search-intent experiment: after settlement only,
     # one JSONL row per hook fire, each question replayed through the shelf.

@@ -473,6 +473,8 @@ def forget_project(run_dir: Path, trial_id: str) -> None:
 def sweep(run_dir: Path, docker: Docker | None = None) -> dict[str, Any]:
     """Remove every compose project this run recorded and never released. The whole of `cli.py cleanup`.
 
+    This is explicit cancellation/teardown, not a background orphan collector.
+    Calling it during execution intentionally stops this run's active trials.
     A SIGKILLed run leaves the trial container, its egress sidecar, the network
     and an orphaned host-side `docker compose exec` client. Removing the project
     reaches all four: the client is blocked on a container that just went, so it
