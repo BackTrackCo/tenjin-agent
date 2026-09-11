@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
+from . import sha256_json
+
 BASELINE_SCHEMA = "bench1.baseline.v1"
 ARM_KEYS = frozenset({"attempts", "pass", "mean_tokens", "mean_cost_usd"})
 TITLE = "benchmark regression"
@@ -154,6 +156,17 @@ def check(
     return {"baseline": baseline["date"], "findings": found, "observed": observed}
 
 
+def protocol_hash(manifest: dict[str, Any]) -> str:
+    """Freeze measurement inputs while allowing the tested product revision to change.
+
+    Runtime product/image commit receipts are not manifest inputs. Explicit
+    product version labels are excluded too; model/toolchain pins stay fixed.
+    """
+    data = {**manifest, "arms": [{key: value for key, value in arm.items() if key != "product_version"}
+                               for arm in manifest.get("arms", [])]}
+    return sha256_json(data)
+
+
 COMPLETION_METRICS = ("pass_rate", "consumer_seconds_per_verified_resolution", "tokens_per_verified_resolution")
 
 
@@ -161,7 +174,7 @@ def compare_reports(current: dict[str, Any], baseline: dict[str, Any], tolerance
     """Compare matching complete runs; missing evidence never becomes a clean result."""
     if not 0 <= tolerance < 1:
         raise BaselineError("tolerance must be a fraction in [0, 1)")
-    for key in ("schema", "manifest_hash", "isolation", "automated"):
+    for key in ("schema", "regression_protocol_hash", "isolation", "automated"):
         if key not in current or current[key] != baseline.get(key):
             return {"status": "unavailable", "reason": f"different or missing {key}", "rows": [], "findings": []}
     for name, report in (("current", current), ("main", baseline)):

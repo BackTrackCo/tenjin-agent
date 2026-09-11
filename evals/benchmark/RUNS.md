@@ -13,8 +13,11 @@ The plumbing smoke runs one control attempt. Hooks smoke (4 consumers) and failu
 
 PR workflows compare completion rate, consumer seconds per verified completion, and tokens per
 verified completion against the last matching completed main run's retained artifact. Matching
-requires the same expanded manifest hash and execution mode. Lookup checks the newest 100
-completed main runs of the same workflow and selects the newest matching artifact, even if its
+requires the same measurement protocol and execution mode, while allowing product revisions
+to differ. The protocol hashes the expanded manifest except arm product-version labels; actual
+product image/commit receipts are provenance rather than matching inputs. Lookup checks the newest 100
+completed main runs of the same workflow, completed before the PR run began, and selects the
+newest matching artifact, even if its
 report is invalid; missing, expired, incomplete or invalid evidence produces an explicit
 unavailable comparison. No baseline model run is launched. The plumbing workflow records main
 runs after benchmark changes; product lanes use their existing main schedules/manual runs.
