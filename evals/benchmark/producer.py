@@ -102,7 +102,7 @@ def request_times(transcript: Path) -> dict[str, int]:
 
 def store_facts(loop_db: Path, session: str, project: str) -> dict[str, Any]:
     """What the producer left in the settled store: pairings for the project, harvested findings, and its own fires."""
-    facts: dict[str, Any] = {"pairings": summarize([]), "pairing_key_hashes": [], "findings": 0, "fires": 0, "turn_end_fires": 0, "first_turn_end_at": None}
+    facts: dict[str, Any] = {"pairings": summarize([]), "pairing_key_hashes": [], "findings": 0, "fires": 0, "turn_end_fires": 0, "first_turn_end_at": None, "actor_capture_from": {}}
     if not loop_db.is_file():
         return facts
     rows = pairings_of(loop_db, project)
@@ -113,7 +113,9 @@ def store_facts(loop_db: Path, session: str, project: str) -> dict[str, Any]:
     try:
         facts["findings"] = int(connection.execute("SELECT count(*) FROM facts WHERE substr(key, 1, ?) = ?", (len(FINDING_PREFIX), FINDING_PREFIX)).fetchone()[0])
         facts["fires"] = int(connection.execute("SELECT count(*) FROM fires WHERE session = ?", (session,)).fetchone()[0])
-        ends = connection.execute("SELECT at FROM fires WHERE session = ? AND event = ? ORDER BY at", (session, TURN_END)).fetchall()
+        boundaries = connection.execute("SELECT agent, min(at) FROM fires WHERE session = ? AND event IN ('turn.end', 'agent.stop') GROUP BY agent", (session,)).fetchall()
+        facts["actor_capture_from"] = {str(agent): int(at) for agent, at in boundaries}
+        ends = connection.execute("SELECT at FROM fires WHERE session = ? AND event = ? AND agent = '' ORDER BY at", (session, TURN_END)).fetchall()
     except sqlite3.Error as error:
         raise ProvisionError(f"the settled loop.db could not be read after the producer phase: {error}") from error
     finally:
@@ -123,12 +125,13 @@ def store_facts(loop_db: Path, session: str, project: str) -> dict[str, Any]:
     return facts
 
 
-def receipts_of(trial_id: str, records: list[usage.UsageRecord], times: dict[str, int], capture_from: int | None) -> list[usage.AuxiliaryReceipt]:
+def receipts_of(trial_id: str, records: list[usage.UsageRecord], times: dict[str, int], capture_from: int | None, actor_capture_from: dict[str, int] | None = None) -> list[usage.AuxiliaryReceipt]:
     """One receipt per producer request. Requests from the first turn-end fire on are the capture ask's cost."""
     receipts = []
     for record in records:
         at = times.get(record.native_request_id)
-        phase = CAPTURE_PHASE if capture_from is not None and at is not None and at >= capture_from else PHASE
+        boundary = capture_from if actor_capture_from is None else actor_capture_from.get(record.actor_key[2])
+        phase = CAPTURE_PHASE if boundary is not None and at is not None and at >= boundary else PHASE
         receipts.append(
             usage.AuxiliaryReceipt(
                 trial_id=trial_id,
@@ -215,6 +218,8 @@ def run(
         "wal_live_between_phases": bool(between["wal_live"]),
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
+        "agent_time_s": completed.agent_time_s,
+        "verification_time_s": None,
         "unresolved_actors": settlement.unresolved,
         "outcome": "invalid",
         "verifier": None,
@@ -255,7 +260,7 @@ def run(
     receipts: list[usage.AuxiliaryReceipt] = []
     if session is not None:
         root_transcript = spec.evidence.transcript(sessions, session_id)
-        receipts = receipts_of(trial_id, session.records, spec.evidence.times(sessions, session_id), facts["capture"]["first_turn_end_at"])
+        receipts = receipts_of(trial_id, session.records, spec.evidence.times(sessions, session_id), facts["capture"]["first_turn_end_at"], facts["capture"]["actor_capture_from"])
         totals = usage.totals(session.records)
         facts.update(
             {
@@ -288,7 +293,9 @@ def run(
             invalid = f"producer:isolation_{error.code}"
         else:
             facts["patch_hash"] = "sha256:" + sha256_dir(copy)
+            verification_started = runtime.clock()
             verdict = verifier.run(verifier_spec, copy, roots.run_dir)
+            facts["verification_time_s"] = runtime.clock() - verification_started
             facts["verifier"] = {"id": verdict.verifier_id, "exit_code": verdict.exit_code}
             if outcome != "capped":
                 outcome = verdict.outcome

@@ -275,9 +275,26 @@ Native JSON stdout and diagnostic stderr are retained separately for strict reco
 The coordinator fills free workers with independent trials while admitting only one trial
 that provisions the shared shelf. A cleanup failure stops further admission. Run-directory
 leases protect local writers; CI owns the shared shelf through its workflow concurrency group.
-A retained corpus run currently refuses continuation before resetting: equivalent resets need
-an immutable database revision and per-epoch receipts, not a reused reset timestamp. Offline
-and corpus-free runs retain full-schedule identity and can resume completed trials.
+Start a resumable corpus run with `--freeze-corpus`; every continuation restores its saved
+source LSN, validates source generation and the settled target revision, and retains a unique
+reset receipt. `--max-new-trials N` executes at most N additional trials while retaining the
+full schedule and incomplete-coverage status. Repeat the same command/output directory to
+continue. These chunks need not be independently balanced; only the complete schedule supports
+the complete experiment. Without a frozen baseline, retained corpus evidence refuses before reset.
+Offline and corpus-free runs also preserve full-schedule identity across continuation.
+
+`--neon-cli` uses an existing Neon CLI login through the same guarded provider contract as CI's
+API credential. A target-scoped local lease prevents two runs from resetting the same branch
+through different origin aliases; CI additionally serializes the shared shelf workflow.
+Changed source generation, expired restore history, missing/modified epoch receipts or a
+changed schedule refuse continuation without falling back to parent head. Each report retains
+all reset epochs beside one logical baseline identity. This freezes initial Postgres state;
+it does not freeze an independently deployed application or external search/cache state.
+
+Producer records retain agent and verifier duration separately. Capture-token attribution uses
+each actor's own stop boundary; child capture before the root finishes cannot be mislabeled as
+ordinary producer work. The primary time endpoint remains consumer execution per completion;
+producer task work and total pipeline latency must not be inferred from that label.
 
 ## Completion readout
 
