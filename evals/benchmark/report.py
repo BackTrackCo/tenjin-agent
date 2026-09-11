@@ -124,6 +124,8 @@ def guard(value: Any, trail: str = "report") -> None:
 
 
 def _guard_string(value: str, trail: str) -> None:
+    if trail == "report.corpus.source_lsn" and re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", value):
+        return
     if HASH.match(value):
         return
     if CREDENTIAL.search(value):
@@ -158,10 +160,10 @@ def corpus_stamp(accepted: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
         epochs = [json.loads(stamp) for stamp in sorted(stamps)]
         # Different reset times are comparable only with the same verified,
         # schedule-bound immutable source revision. Legacy stamps still refuse.
-        if (any(not item or not item.get("baseline_id") or not item.get("source_lsn") for item in epochs)
-                or len({canonical_json({k: v for k, v in item.items() if k != "reset_at"}) for item in epochs}) != 1):
+        if (any(not item or not item.get("baseline_id") or not item.get("source_lsn") or not item.get("epoch_id") for item in epochs)
+                or len({canonical_json({k: v for k, v in item.items() if k not in {"reset_at", "epoch_id"}}) for item in epochs}) != 1):
             raise ReportError("corpus_mixed", "report.corpus", "the accepted attempts measured more than one corpus")
-        return {**epochs[0], "reset_epochs": sorted({item["reset_at"] for item in epochs})}
+        return {**epochs[0], "reset_epochs": [{"epoch_id": item["epoch_id"], "reset_at": item["reset_at"]} for item in sorted(epochs, key=lambda item: (item["reset_at"], item["epoch_id"]))]}
     return next(iter(accepted.values()))["isolation"].get("corpus")
 
 

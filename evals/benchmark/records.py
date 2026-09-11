@@ -94,7 +94,7 @@ PUBLIC_FALLBACK = frozenset({"on", "off"})
 # The corpus stamp a reset wrote into the attestation (`artifact.CorpusStamp`).
 CORPUS_KEYS = frozenset({"provider", "project_id", "branch_id", "parent_id", "origin", "api_origin", "reset_at"})
 
-CORPUS_REVISION_KEYS = frozenset({"baseline_id", "source_lsn"})
+CORPUS_REVISION_KEYS = frozenset({"baseline_id", "source_lsn", "epoch_id"})
 
 class RecordError(ValueError):
     pass
@@ -361,8 +361,8 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("isolation.corpus must carry exactly the corpus fields")
         if not all(isinstance(value, str) and value for key, value in corpus.items() if key in CORPUS_KEYS):
             raise RecordError("isolation.corpus fields must each be a non-empty string")
-        revision = (corpus.get("baseline_id"), corpus.get("source_lsn"))
-        if revision != (None, None) and not (isinstance(revision[0], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", revision[0]) and isinstance(revision[1], str) and re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", revision[1])):
+        revision = (corpus.get("baseline_id"), corpus.get("source_lsn"), corpus.get("epoch_id"))
+        if revision != (None, None, None) and not (isinstance(revision[0], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", revision[0]) and isinstance(revision[1], str) and re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", revision[1]) and isinstance(revision[2], str) and re.fullmatch(r"sha256:[0-9a-f]{64}", revision[2])):
             raise RecordError("isolation.corpus frozen revision must have a baseline hash and source LSN")
     manager = isolation.get("package_manager")
     if manager is not None:

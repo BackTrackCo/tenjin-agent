@@ -249,6 +249,7 @@ class CorpusStamp:
     reset_at: str
     baseline_id: str | None = None
     source_lsn: str | None = None
+    epoch_id: str | None = None
 
     @property
     def origins(self) -> tuple[str, ...]:
