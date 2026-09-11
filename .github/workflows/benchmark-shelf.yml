@@ -1,0 +1,329 @@
+name: benchmark shelf run
+
+# One measured run against the bench shelf, called by the two lanes that decide
+# when it happens. Every step here is the same whichever lane called it; only
+# the manifest, the check name, and the timeout differ, so a canary and a
+# headline can never drift into measuring different things two ways.
+#
+# The run is automated and attested: it builds its own containers, an internal
+# network and an allowlist proxy, and `attest` derives the network allowlist
+# from the manifest and the source rather than letting this file retype it. The
+# bench deployment is on a custom domain and so holds no protection-bypass
+# secret; no trial receives one, and `shelf_secret_present` is false.
+#
+# Nothing here is on push. Each run spends model budget, and a per-push trigger
+# would spend it on every review round.
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        required: true
+        type: string
+      lane:
+        required: true
+        type: string
+      check_name:
+        required: true
+        type: string
+      timeout_minutes:
+        required: true
+        type: number
+      budget_note:
+        required: true
+        type: string
+
+# One group for BOTH lanes, and a queued run waits rather than cancelling a
+# paid one. The reset is destructive and the bench branch is one branch: two
+# runs at once would empty the corpus under each other and neither number
+# would mean anything.
+concurrency:
+  group: benchmark-shelf
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  measure:
+    name: ${{ inputs.lane }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    permissions:
+      contents: read
+      # The one surface an anonymous reader can reach on a public repository.
+      checks: write
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # A missing secret is a skip that says so, never a failure and never a
+      # fake pass: a lane that quietly measured nothing would still publish a
+      # check run, and a reader cannot tell that from a result.
+      - name: Check for the run's secrets
+        id: gate
+        env:
+          MODEL: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+          NEON: ${{ secrets.NEON_API_KEY != '' }}
+          WALLET: ${{ secrets.TENJIN_BENCH_WALLET != '' && secrets.TENJIN_BENCH_WALLET_PASSPHRASE != '' }}
+        run: |
+          if [ "$MODEL" = "true" ] && [ "$NEON" = "true" ] && [ "$WALLET" = "true" ]; then
+            echo "live=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "## ${{ inputs.lane }}: skipped"
+              echo
+              echo "This lane needs three repository secrets and does not have all of them:"
+              echo "\`CLAUDE_CODE_OAUTH_TOKEN\` present: $MODEL, \`NEON_API_KEY\` present: $NEON, \`TENJIN_BENCH_WALLET\` and its passphrase present: $WALLET."
+              echo
+              echo "No attempt ran, nothing was reset, and no number was published."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check the interpreter floor
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || {
+            echo "::error title=python::evals/benchmark needs Python 3.12 or later (scipy 1.18)"
+            exit 1
+          }
+
+      # One CLI build serves the whole run. The runner makes CLI calls of its
+      # own (the seeding publish, the stamped sweep, the in-run shortlist and
+      # the delete) and `images build` packs this same `dist/` into the base
+      # image, so the `tenjin` an agent runs in a Bash tool, the daemon under
+      # test, and the runner's own calls are one build of the product. That is
+      # what makes a CLI regression redden this lane: a pinned release is
+      # frozen, so a CLI change would never reach the measured agent.
+      #
+      # The version string does not identify a build. `tenjin-cli@0.1.0-alpha.15`
+      # on npm carries no `daemon` command at all while the repository at the
+      # same version string does, so installing the release failed here with
+      # `unknown command 'daemon'` after the gate had already passed. The image
+      # recipe hashes the packed package instead, and the attempt record carries
+      # the commit under `isolation.image.cli`.
+      # The toolchain that build needs. A runner has node but no pnpm, and the
+      # step below failed with `pnpm: command not found` while this lane had no
+      # build of its own to do. Pinned by sha and versioned like `ci.yml`,
+      # because two lanes building one product from two toolchains is the drift
+      # this whole change exists to remove.
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        if: steps.gate.outputs.live == 'true'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: steps.gate.outputs.live == 'true'
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Build the Tenjin CLI from this checkout
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/index.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/tenjin"
+          chmod +x "$RUNNER_TEMP/bin/tenjin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Check the CLI answers
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          tenjin --version
+          # The step that follows needs this command, and the release at the
+          # same version string does not have it, so fail here where the reason
+          # is legible rather than inside a paid trial.
+          tenjin daemon --help > /dev/null
+
+      # The one knob. `tenjin_arm.load_source` reads `baseUrl` from this
+      # directory, and that value drives both the runner's own CLI calls and the
+      # config injected into every trial. It names the bench shelf, so nothing
+      # this run publishes or searches can reach the team shelf; `live-run`
+      # refuses a source that names any other shelf than the manifest's corpus.
+      #
+      # No `shelfBypassSecret`: the bench deployment is on a custom domain and
+      # is exempt from the account's `all_except_custom_domains` protection.
+      - name: Build the bench data dir
+        if: steps.gate.outputs.live == 'true'
+        env:
+          TENJIN_BENCH_WALLET: ${{ secrets.TENJIN_BENCH_WALLET }}
+          # `wallet.json` is an encrypted keystore whose passphrase lives in the
+          # OS keychain, not in the file, so the file alone opens nothing on a
+          # runner. `TENJIN_WALLET_PASSPHRASE` is the product's headless seam
+          # (`src/lib/wallet/passphrase.ts`), and the wallet in the secret was
+          # created with this passphrase rather than an interactive one.
+          TENJIN_WALLET_PASSPHRASE: ${{ secrets.TENJIN_BENCH_WALLET_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          data="$RUNNER_TEMP/bench-data"
+          mkdir -p "$data"
+          chmod 700 "$data"
+          cat > "$data/config.json" <<'CONFIG'
+          {
+            "baseUrl": "https://bench.tenjin.sh",
+            "publicShelfUrl": "https://tenjin.blog"
+          }
+          CONFIG
+          printf '%s' "$TENJIN_BENCH_WALLET" > "$data/wallet.json"
+          chmod 600 "$data/wallet.json"
+          # The CLI calls below are the benchmark's traffic too, and this step
+          # runs outside `live-run`, which arms the identity for a trial itself.
+          TENJIN_CALLER_USER_AGENT="$(python3 -c 'import sys; from evals.benchmark import tenjin_arm; print(tenjin_arm.caller_user_agent(sys.argv[1]))' "gha${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}")"
+          export TENJIN_CALLER_USER_AGENT
+          # The only path that materializes the three hook bundles is a daemon
+          # start. It is stopped again on the next line: this run wants the
+          # files, and every trial starts a daemon of its own inside its image.
+          TENJIN_DATA_DIR="$data" tenjin daemon start
+          TENJIN_DATA_DIR="$data" tenjin daemon stop
+          ls "$data/hooks"
+
+      # Harbor owns image identity and the container lifecycle, and it is
+      # deliberately absent from the offline closure the required CI job
+      # installs. Every command below that builds an image or runs a trial
+      # needs it, so this lane builds its own venv from the live requirements
+      # and the steps use it instead of the runner's externally managed
+      # python3. It pins scipy and jsonschema too, which every shipped command
+      # imports, so `$BENCH_PY` is the only interpreter that can import this
+      # package once the venv exists.
+      - name: Bench live dependencies
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bench-live-venv"
+          "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
+            -r evals/benchmark/requirements-live.txt
+          echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Write the attestation
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          "$BENCH_PY" -m evals.benchmark.cli attest \
+            --manifest "${{ inputs.manifest }}" \
+            --tenjin-source "$RUNNER_TEMP/bench-data" \
+            --instance "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --image "${ImageOS:-ubuntu}-${ImageVersion:-unknown}" \
+            --kind vm \
+            --out "$RUNNER_TEMP/attestation.json"
+
+      # This packs the `dist/` built above into the base image, so it has to run
+      # after that step. A build it cannot find is a refusal naming `pnpm build`,
+      # never a silent fall back to a release.
+      - name: Build the fixture images
+        if: steps.gate.outputs.live == 'true'
+        run: '"$BENCH_PY" -m evals.benchmark.images build --manifest "${{ inputs.manifest }}"'
+
+      # `live-run` resets the bench branch from its emptied parent before the
+      # first trial and refuses the run if the reset fails, so the corpus this
+      # measures is the one it seeded. The model credential reaches this one
+      # step; the docker client forwards it into each container by name as the
+      # manifest's credential seam, and nothing else from this environment
+      # crosses.
+      - name: Live run (attested, automated)
+        if: steps.gate.outputs.live == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          NEON_API_KEY: ${{ secrets.NEON_API_KEY }}
+          # The run's own CLI calls seed and delete pieces on the bench shelf,
+          # and each one opens the wallet. Without this the publish fails after
+          # the reset has already happened.
+          TENJIN_WALLET_PASSPHRASE: ${{ secrets.TENJIN_BENCH_WALLET_PASSPHRASE }}
+        run: |
+          "$BENCH_PY" -m evals.benchmark.cli live-run \
+            --manifest "${{ inputs.manifest }}" \
+            --out "$RUNNER_TEMP/bench-run" \
+            --attestation "$RUNNER_TEMP/attestation.json" \
+            --tenjin-source "$RUNNER_TEMP/bench-data" \
+            --automated
+
+      - name: Verify and read the run
+        if: always() && steps.gate.outputs.live == 'true'
+        run: |
+          set -o pipefail
+          run="$RUNNER_TEMP/bench-run"
+          [ -f "$run/report.json" ] || exit 0
+          echo "::group::verify (hidden verifiers re-run over the finished run)"
+          "$BENCH_PY" -m evals.benchmark.cli verify --run "$run"
+          echo "::endgroup::"
+          "$BENCH_PY" -m evals.benchmark.cli summary --run "$run"
+          "$BENCH_PY" -m evals.benchmark.cli headline --run "$run" >> "$GITHUB_STEP_SUMMARY"
+          # `report.json` is publishable, so it carries reason codes and no free
+          # text. An attempt that never started says why only in its own record,
+          # and a whole arm can be lost to one repeated refusal, so the distinct
+          # ones go in the log rather than only in the artifact.
+          python3 - "$run" <<'PY'
+          import collections, json, pathlib, sys
+
+          seen = collections.Counter()
+          for path in sorted((pathlib.Path(sys.argv[1]) / "records").glob("*.json")):
+              detail = json.loads(path.read_text(encoding="utf-8")).get("invalid_detail")
+              if detail:
+                  seen[detail] += 1
+          for detail, count in seen.most_common():
+              print(f"::warning title=refused::{count} attempt(s): {detail}")
+          PY
+
+      - name: Clean up whatever the run started
+        if: always() && steps.gate.outputs.live == 'true'
+        run: |
+          [ -d "$RUNNER_TEMP/bench-run" ] || exit 0
+          "$BENCH_PY" -m evals.benchmark.cli cleanup --run "$RUNNER_TEMP/bench-run"
+
+      # The headline where a signed-out reader can reach it. Measured on this
+      # public repository with no token: the artifact bytes answer 401, the
+      # artifact route 404, and the job logs 403, while
+      # `GET /repos/{owner}/{repo}/commits/{sha}/check-runs` answers 200 with
+      # its whole `output`. `output.summary` caps at 65,535 characters, which
+      # `report.check_summary` enforces and says when it has.
+      - name: Publish the headline as a check run
+        if: always() && steps.gate.outputs.live == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_NAME: ${{ inputs.check_name }}
+          BUDGET_NOTE: ${{ inputs.budget_note }}
+        run: |
+          set -euo pipefail
+          "$BENCH_PY" - > "$RUNNER_TEMP/check-run.json" <<'PY'
+          import json, os, pathlib
+          from evals.benchmark import report as report_module
+
+          path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "bench-run" / "report.json"
+          if path.is_file():
+              published = json.loads(path.read_text(encoding="utf-8"))
+              summary = report_module.check_summary(published)
+              eligible = any(row["headline_eligible"] for row in published["comparisons"].values())
+              # `neutral`, not `failure`: a run that produced no quotable number
+              # is a fact about the run, and this lane blocks nothing either way.
+              conclusion = "success" if published["publishable"] and eligible else "neutral"
+              title = f"{published['benchmark_version']}: {'publishable' if published['publishable'] else 'not publishable'}"
+          else:
+              summary = (
+                  "## No report\n\nThis run produced no `report.json`: the reset, the images, or the "
+                  "attestation refused it before any number existed. The job log says which.\n"
+              )
+              conclusion = "failure"
+              title = "no report"
+          payload = {
+              "name": os.environ["CHECK_NAME"],
+              "head_sha": os.environ["GITHUB_SHA"],
+              "status": "completed",
+              "conclusion": conclusion,
+              "details_url": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+              "output": {"title": title, "summary": summary + "\n" + os.environ["BUDGET_NOTE"] + "\n"},
+          }
+          print(json.dumps(payload))
+          PY
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" --input "$RUNNER_TEMP/check-run.json" > /dev/null
+          echo "published check run ${CHECK_NAME} on ${GITHUB_SHA}"
+
+      # The per-attempt records, for whoever is logged in and wants to
+      # recompute. Transcripts, worktrees and roots stay on the runner and die
+      # with it; `report.json` is the only projection that ever leaves.
+      - name: Upload the report and the records
+        if: always() && steps.gate.outputs.live == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.lane }}-records
+          path: |
+            ${{ runner.temp }}/bench-run/report.json
+            ${{ runner.temp }}/bench-run/records/
+            ${{ runner.temp }}/bench-run/schedule.json
+            ${{ runner.temp }}/bench-run/corpus-snapshot.json
+          if-no-files-found: warn
+          retention-days: 90

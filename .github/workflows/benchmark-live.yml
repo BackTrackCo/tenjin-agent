@@ -1,0 +1,151 @@
+name: benchmark live
+
+# The Bench-1 plumbing smoke against a real Claude Code, run as automated
+# evidence and nothing more. Every record is stamped non-publishable and
+# automated (`live-run --plumbing --ci-live`), so no number from this lane can
+# be quoted as a result; a publishable run still needs an operator, an attested
+# disposable instance, and no automation. This check is informational: it is
+# not in the ruleset's required checks and never blocks a pull request. It is
+# not `continue-on-error` either, because a red run is meant to be seen.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'evals/benchmark/**'
+      - '.github/workflows/benchmark-live.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-live-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default-deny; the job opts into only what it needs.
+permissions: {}
+
+jobs:
+  live:
+    name: benchmark live (plumbing smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # A fork pull request sees no repository secret. That is a skip that says
+      # so on the run page, never a failure and never a fake pass: the step
+      # summary states that no live attempt ran.
+      - name: Check for the repository secret
+        id: gate
+        env:
+          TOKEN_PRESENT: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
+        run: |
+          echo "live=$TOKEN_PRESENT" >> "$GITHUB_OUTPUT"
+          if [ "$TOKEN_PRESENT" != "true" ]; then
+            cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Bench-1 live plumbing smoke: skipped
+
+          The repository secret `CLAUDE_CODE_OAUTH_TOKEN` is not available to this run
+          (fork pull request, or the secret is unset). No live attempt ran.
+          SUMMARY
+          fi
+      - name: Check the interpreter floor
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          python3 --version
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || {
+            echo "::error title=python::evals/benchmark needs Python 3.12 or later (scipy 1.18)"
+            exit 1
+          }
+      # A trial runs inside its fixture's image, so the toolchain is built
+      # rather than installed here: node, pnpm, Claude Code at the manifest's
+      # `pins.harness_version`, and the Tenjin CLI, each by exact version on a
+      # base pinned by digest. `live-run` refuses a missing or drifted image.
+      # The image installs the CLI THIS checkout builds, not a published
+      # release, so `dist/` has to exist before the build. Without this the
+      # step exits 2 with `cli_unbuilt` and no image is ever produced.
+      - uses: pnpm/action-setup@0e279bb959325dab635dd2c09392533439d90093 # v6.0.8
+        if: steps.gate.outputs.live == 'true'
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        if: steps.gate.outputs.live == 'true'
+        with:
+          node-version: '24'
+          cache: pnpm
+      - name: Build the CLI the images install
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      # Harbor owns image identity and the container lifecycle, and it is
+      # deliberately absent from the offline closure the required CI job
+      # installs. Every command below that builds an image or runs a trial
+      # needs it, so this lane builds its own venv from the live requirements
+      # and the steps use it instead of the runner's externally managed
+      # python3. It pins scipy and jsonschema too, which every shipped command
+      # imports, so `$BENCH_PY` is the only interpreter this lane needs and
+      # every command below runs under it.
+      - name: Bench live dependencies
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/bench-live-venv"
+          "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
+            -r evals/benchmark/requirements-live.txt
+          echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Build the fixture images
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          "$BENCH_PY" -m evals.benchmark.images build \
+            --manifest evals/benchmark/fixtures/live/smoke-manifest.json
+      # The secret reaches this one step only. The docker client forwards it
+      # into the container by name as the manifest's credential seam, and
+      # nothing else from this environment crosses; the budget cap, the
+      # wall-clock cap, and the job timeout are the supervision a human would
+      # otherwise be.
+      - name: Live run (plumbing, non-publishable)
+        if: steps.gate.outputs.live == 'true'
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          "$BENCH_PY" -m evals.benchmark.cli live-run \
+            --manifest evals/benchmark/fixtures/live/smoke-manifest.json \
+            --out "$RUNNER_TEMP/bench1-live" --plumbing --ci-live
+      # `regress` warns on the checks tab where the run is worse than the
+      # committed baseline and exits 0 whatever it finds; the lane stays
+      # informational.
+      - name: Verify, summary, regress
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          set -o pipefail
+          run="$RUNNER_TEMP/bench1-live"
+          echo "::group::verify (hidden verifiers re-run over the finished run)"
+          "$BENCH_PY" -m evals.benchmark.cli verify --run "$run"
+          echo "::endgroup::"
+          "$BENCH_PY" -m evals.benchmark.cli summary --run "$run" | tee "$RUNNER_TEMP/bench1-live-summary.txt"
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Bench-1 live plumbing smoke: non-publishable evidence
+
+          Real Claude Code attempts under `--plumbing --ci-live`. Every record is stamped
+          automated and non-publishable; this proves the chain runs, and no number here
+          is a result or a savings claim.
+
+          SUMMARY
+          {
+            echo '```text'
+            cat "$RUNNER_TEMP/bench1-live-summary.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          "$BENCH_PY" -m evals.benchmark.cli regress --run "$run" \
+            --baseline evals/benchmark/fixtures/live/baseline.json
+      # report.json is the only publishable projection and the only thing
+      # retained. Records, transcripts, and worktrees stay on the runner and
+      # die with it.
+      - name: Upload report.json
+        if: steps.gate.outputs.live == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench1-live-report
+          path: ${{ runner.temp }}/bench1-live/report.json
+          if-no-files-found: error
+          retention-days: 14

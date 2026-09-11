@@ -61,6 +61,11 @@ jobs:
       # externally managed, and `--require-hashes` because a required check
       # must not depend on whatever the index served that minute. scipy and
       # numpy carry the download; the install runs in well under a minute.
+      #
+      # `requirements-live.txt` is deliberately not part of this closure:
+      # Harbor is the live lane's container harness and this lane starts no
+      # container. Nothing under evals/benchmark/ imports it at module scope,
+      # and `test_container.py` fails if that ever stops being true.
       - name: Bench-1 test dependency
         timeout-minutes: 5
         run: |
