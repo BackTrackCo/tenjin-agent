@@ -380,7 +380,7 @@ def test_the_bootstrap_states_its_method_and_brackets_its_point(case: dict) -> N
     # The method's fields are pinned; the endpoints are not. `point` is the
     # plain mean of the ratios and owes nothing to the generator, so it is a
     # fact. `low` and `high` are the 2.5th and 97.5th resample means, and
-    # pinning those froze `random.Random`'s draw order rather than the
+    # pinning those froze the resampler's own draw order rather than the
     # contract: every resampling-order change would have been a fixture to
     # regenerate, which is a check that reports on itself.
     interval = reduce_module.paired_bootstrap(case["ratios"], case["seed"])

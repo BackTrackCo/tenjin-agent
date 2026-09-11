@@ -3,8 +3,9 @@
 The package measures trials, not transcripts. Every module is a seam the plan
 freezes: manifest -> schedule -> executor -> verifier -> immutable record ->
 reducer -> report. `cli.py fake-run` drives the whole chain offline. Every
-shipped command runs on the standard library alone; `selftest.py` is the one
-module that imports anything installed, and what it imports is pytest.
+command runs from a venv built from `requirements-test.txt`, which pins the
+package's whole closure by hash; the CI job builds that venv before it calls
+one.
 """
 
 from __future__ import annotations

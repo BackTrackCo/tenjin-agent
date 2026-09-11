@@ -85,8 +85,8 @@ jobs:
         if: steps.gate.outputs.live == 'true'
         run: |
           python3 --version
-          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' || {
-            echo "::error title=python::evals/benchmark needs Python 3.11 or later"
+          python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' || {
+            echo "::error title=python::evals/benchmark needs Python 3.12 or later (scipy 1.18)"
             exit 1
           }
 
@@ -181,7 +181,9 @@ jobs:
       # installs. Every command below that builds an image or runs a trial
       # needs it, so this lane builds its own venv from the live requirements
       # and the steps use it instead of the runner's externally managed
-      # python3.
+      # python3. It pins scipy and jsonschema too, which every shipped command
+      # imports, so `$BENCH_PY` is the only interpreter that can import this
+      # package once the venv exists.
       - name: Bench live dependencies
         if: steps.gate.outputs.live == 'true'
         run: |
@@ -278,7 +280,7 @@ jobs:
           BUDGET_NOTE: ${{ inputs.budget_note }}
         run: |
           set -euo pipefail
-          python3 - > "$RUNNER_TEMP/check-run.json" <<'PY'
+          "$BENCH_PY" - > "$RUNNER_TEMP/check-run.json" <<'PY'
           import json, os, pathlib
           from evals.benchmark import report as report_module
 
