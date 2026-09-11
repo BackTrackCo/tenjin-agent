@@ -196,13 +196,19 @@ def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], ou
         return _execute(manifest, trials, out, runtime)
 
 
+def validate_schedule_identity(manifest: manifest_module.Manifest, out: Path) -> None:
+    """Validate saved execution identity before any reset or sidecar overwrite."""
+    if (out / "schedule.json").exists():
+        saved = read_run_file(out, "schedule.json")
+        digest = schedule.schedule_hash(schedule.expand(manifest))
+        if saved.get("manifest_hash") != manifest.hash or saved.get("schedule_hash") != digest:
+            raise CliError("existing schedule differs; refusing to overwrite run evidence")
+
+
 def _execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
     full_schedule = schedule.expand(manifest)
     digest = schedule.schedule_hash(full_schedule)
-    if (out / "schedule.json").exists():
-        saved = read_run_file(out, "schedule.json")
-        if saved.get("manifest_hash") != manifest.hash or saved.get("schedule_hash") != digest:
-            raise CliError("existing schedule differs; refusing to overwrite run evidence")
+    validate_schedule_identity(manifest, out)
     if any(trial not in full_schedule for trial in trials):
         raise CliError("selected trials do not belong to the full frozen schedule")
     nonce = run_nonce(out, manifest)
@@ -521,6 +527,9 @@ def _live_run(
     # ends the run rather than producing a differently isolated one.
     # The run's nonce is its identity to the marketplace, and the refusal here
     # is the last one that costs nothing.
+    validate_schedule_identity(manifest, out)
+    if manifest.corpus is not None and any((out / "records").glob("*.json")):
+        raise CliError("corpus resume requires a verified frozen database revision; retained evidence is unchanged, use a new run directory")
     nonce = run_nonce(out, manifest)
     arm_caller_user_agent(nonce, environ)
     egress = container.plan_egress(allowlist)
