@@ -192,22 +192,32 @@ class Manifest:
     data: dict[str, Any]
     path: Path
     hash: str
+    # Why this manifest has no body, or None when `data` is the loaded bytes. A
+    # settled run records the hash of the manifest it ran, so the run stays
+    # readable on that identity after the file itself is gone or replaced; see
+    # `cli.load_run`. Every field behind the body refuses instead of guessing.
+    absent: str | None = None
+
+    def body(self) -> dict[str, Any]:
+        if self.absent is not None:
+            raise ManifestError(f"this run's manifest ({self.hash[:12]}) has no body here: {self.absent}")
+        return self.data
 
     @property
     def tasks(self) -> list[dict[str, Any]]:
-        return list(self.data["tasks"])
+        return list(self.body()["tasks"])
 
     @property
     def arms(self) -> list[dict[str, Any]]:
-        return list(self.data["arms"])
+        return list(self.body()["arms"])
 
     @property
     def pins(self) -> dict[str, Any]:
-        return dict(self.data["pins"])
+        return dict(self.body()["pins"])
 
     @property
     def harness(self) -> str:
-        return str(self.data["harness"])
+        return str(self.body()["harness"])
 
     @property
     def concurrency(self) -> int:
@@ -217,7 +227,7 @@ class Manifest:
         schedule, and `environment_hash` is the hash of the pins: a reader
         comparing two runs sees a different environment without a new field.
         """
-        return int(self.data["pins"].get("concurrency", 1))
+        return int(self.body()["pins"].get("concurrency", 1))
 
     def fixture_path(self, task: dict[str, Any]) -> Path:
         return (self.path.parent / task["fixture"]).resolve()
@@ -225,13 +235,23 @@ class Manifest:
     @property
     def corpus(self) -> corpus_module.Corpus | None:
         """The database branch a run resets before its first trial, when it names one."""
-        if "corpus" not in self.data:
+        if "corpus" not in self.body():
             return None
         return corpus_module.parse(self.data["corpus"])
 
     @property
     def slice(self) -> dict[str, Any] | None:
-        return None if "slice" not in self.data else dict(self.data["slice"])
+        return None if "slice" not in self.body() else dict(self.data["slice"])
+
+
+def recorded(digest: str, path: Path, reason: str) -> Manifest:
+    """A settled run's own record of the manifest it ran: the identity it hashed to, and no body.
+
+    The run wrote this hash beside the schedule that hashed the same bytes, so
+    it identifies the manifest as well as the file did. What it cannot do is
+    stand in for the tasks, arms and pins, which is why `body` refuses.
+    """
+    return Manifest(data={}, path=path, hash=digest, absent=reason)
 
 
 def fixture_hash(fixture: Path) -> str:

@@ -16,6 +16,11 @@ preference is the whole point. The seeded pieces are deleted when a trial
 stops, so a search run after the run cannot return one and measures precision
 alone; only the in-run snapshot can say whether the right piece was there.
 
+A run whose manifest file is gone or has since been rewritten is still
+exportable, on the hash the run recorded for it (`cli.load_run`). The fields
+only the manifest knew are then empty and `revisions.manifest_body_absent`
+says why; nothing is read out of a file that hashes to something else.
+
 It runs only after settlement: a live process from the run or a live WAL on a
 trial ledger is a refusal, never a read. Seeded pieces are marked apart from
 real ones, by the trial's own `isolation.seed` ids, so a seeded positive is
@@ -204,8 +209,16 @@ def trial_cases(manifest: Manifest, run_dir: Path, nonce: str | None, record: di
     rows = ledger(run_dir / "trials" / trial_id / "data" / "loop.db")
     if rows is None:
         return []
-    task = next(item for item in manifest.tasks if item["id"] == record["task_id"])
-    arm = next(item for item in manifest.arms if item["id"] == record["arm_id"])
+    # A run whose manifest body is gone keeps every field the ledger and the
+    # record hold; what the manifest alone knew is empty and says so, rather
+    # than being guessed from a file that is now a different manifest.
+    task: dict[str, Any] = {"id": record["task_id"]}
+    arm: dict[str, Any] = {"id": record["arm_id"]}
+    pins: dict[str, Any] = {}
+    if manifest.absent is None:
+        task = next(item for item in manifest.tasks if item["id"] == record["task_id"])
+        arm = next(item for item in manifest.arms if item["id"] == record["arm_id"])
+        pins = manifest.pins
     isolation = record.get("isolation", {})
     seeds = isolation.get("seed") or []
     seeded_ids = {seed["piece_id"] for seed in seeds if seed.get("piece_id")}
@@ -218,15 +231,15 @@ def trial_cases(manifest: Manifest, run_dir: Path, nonce: str | None, record: di
         failure = fire.get("arm") == "failure"
         packet = {
             "fixture": task["id"],
-            "fixture_hash": task["fixture_hash"],
-            "family": task["family"],
-            "transfer_distance": task["transfer_distance"],
+            "fixture_hash": task.get("fixture_hash"),
+            "family": task.get("family"),
+            "transfer_distance": task.get("transfer_distance"),
             "situation": situation(fire, rows["pairings"]) if failure else None,
             "runner": {
                 "package_manager": isolation.get("package_manager"),
                 "vendor": task.get("vendor"),
-                "harness_version": manifest.pins.get("harness_version"),
-                "model": manifest.pins.get("model"),
+                "harness_version": pins.get("harness_version"),
+                "model": pins.get("model"),
             },
         }
         cases.append(
@@ -250,8 +263,9 @@ def trial_cases(manifest: Manifest, run_dir: Path, nonce: str | None, record: di
                 "labels_schema": LABELS_SCHEMA,
                 "corpus_snapshot": {"shelf_origin": shelf_origin, "post_floor": True, "limit": SEARCH_LIMIT, "replayed_at": None},
                 "revisions": {
-                    "benchmark_version": manifest.data["benchmark_version"],
+                    "benchmark_version": manifest.data.get("benchmark_version"),
                     "manifest_hash": manifest.hash,
+                    "manifest_body_absent": manifest.absent,
                     "schedule_hash": record.get("schedule_hash"),
                     "product_version": arm.get("product_version"),
                     "run_nonce": nonce,
@@ -332,6 +346,7 @@ def export(
     return {
         "cases": len(cases),
         "trials": len(accepted),
+        "manifest_body_absent": manifest.absent,
         "replayed": 0 if dry_run else sum(1 for case in cases if case["replay"] and "candidates" in case["replay"]),
         "from_snapshot": from_snapshot,
         "seeded_candidates": seeded_candidates,

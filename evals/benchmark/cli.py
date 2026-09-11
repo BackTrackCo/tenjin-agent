@@ -114,10 +114,34 @@ def read_run_file(run_dir: Path, name: str) -> Any:
 
 
 def load_run(run_dir: Path) -> tuple[manifest_module.Manifest, str]:
+    """The manifest a settled run ran, and its schedule digest.
+
+    A run records the manifest's identity in its own `manifest.json` sidecar
+    (path, hash, nonce) beside the `schedule.json` that hashed the same bytes.
+    The body is loaded from the recorded path and used **only** when it hashes
+    to that identity: a file that is now a different manifest is never read
+    against this run's records, which is the whole point of the check.
+
+    When no body hashes to the identity, the run is still readable on the
+    identity it recorded. `reduce`, `report` and `verify` need tasks, arms or
+    the seed and so refuse by name; `cases` needs the hash and the ledgers, so
+    it exports with the manifest-derived context fields empty.
+    """
     payload = read_run_file(run_dir, "schedule.json")
-    manifest = manifest_module.load(Path(read_run_file(run_dir, "manifest.json")["path"]))
-    if manifest.hash != payload["manifest_hash"]:
-        raise manifest_module.ManifestError("manifest changed since the schedule was written")
+    sidecar = read_run_file(run_dir, "manifest.json")
+    expected = payload["manifest_hash"]
+    if sidecar.get("hash") != expected:
+        raise manifest_module.ManifestError(
+            f"{run_dir}/manifest.json records hash {sidecar.get('hash')} and its schedule records {expected}: "
+            "the run does not agree with itself about what it ran"
+        )
+    source = Path(sidecar["path"])
+    if not source.is_file():
+        return manifest_module.recorded(expected, source, f"{source} is gone"), payload["schedule_hash"]
+    manifest = manifest_module.load(source)
+    if manifest.hash != expected:
+        reason = f"{source} is a different manifest now ({manifest.hash[:12]}), and the one this run hashed is not on disk"
+        return manifest_module.recorded(expected, source, reason), payload["schedule_hash"]
     return manifest, payload["schedule_hash"]
 
 
@@ -560,7 +584,7 @@ def do_verify(run_dir: Path) -> dict[str, Any]:
 def do_reduce(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
-    return reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
+    return reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.body()["seed"], manifest.arms)
 
 
 def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image: str, kind: str, out: Path) -> dict[str, Any]:
@@ -606,7 +630,7 @@ def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image:
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
-    reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
+    reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.body()["seed"], manifest.arms)
     report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir))
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report

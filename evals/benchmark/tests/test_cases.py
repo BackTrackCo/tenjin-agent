@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 from inline_snapshot import snapshot
 
-from evals.benchmark import cases, cli, records, tenjin_arm
+from evals.benchmark import cases, cli, manifest as manifest_module, records, tenjin_arm
 from evals.benchmark.tests import support
 
 FAKE_CLI = str(Path(__file__).with_name("fake_cli.py"))
@@ -283,3 +283,75 @@ def test_a_trial_without_a_ledger_yields_no_case(fake_run: Path, source_dir: Pat
     # Every trial in the run was read, and none of them held a ledger.
     assert (summary["cases"], summary["trials"]) == (0, len(trials))
     assert out.read_text(encoding="utf-8") == ""
+
+
+def point_sidecar_at(run_dir: Path, path: Path) -> dict:
+    """Rewrite the run's manifest record to name another file, leaving the hash it ran."""
+    sidecar = run_dir / "manifest.json"
+    recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar.write_text(json.dumps({**recorded, "path": str(path)}), encoding="utf-8")
+    return recorded
+
+
+def test_a_settled_run_exports_on_its_own_recorded_hash_when_the_manifest_it_ran_is_not_on_disk(
+    fake_run: Path, source_dir: Path, trials: list[str], tmp_path: Path
+) -> None:
+    """`bench2-pilot`'s case: the manifest was an uncommitted file, and it is gone.
+
+    The run recorded its hash beside a schedule that hashed the same bytes, so
+    the identity survives. What the manifest alone knew does not, and the
+    export says so rather than filling it from somewhere else.
+    """
+    ledger_for(fake_run, trials[0])
+    missing = tmp_path / "gone" / "real-manifest.json"
+    recorded = point_sidecar_at(fake_run, missing)
+    manifest, digest = cli.load_run(fake_run)
+    assert (manifest.hash, manifest.absent) == (recorded["hash"], f"{missing} is gone")
+    assert digest == json.loads((fake_run / "schedule.json").read_text(encoding="utf-8"))["schedule_hash"]
+    with pytest.raises(manifest_module.ManifestError) as caught:
+        manifest.arms  # noqa: B018
+    assert "has no body here" in str(caught.value)
+    out = tmp_path / "cases.jsonl"
+    summary = cli.do_cases(fake_run, source_dir, out)
+    assert (summary["cases"], summary["replayed"], summary["manifest_body_absent"]) == (2, 1, manifest.absent)
+    prompt = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+    # The ledger and the record still carry everything they carried.
+    assert (prompt["baseline"]["delivered_piece_id"], prompt["prompt"]["text"]) == ("piece-real", "How do I run one vitest file here?")
+    assert prompt["replay"]["source"] == cases.REPLAY and prompt["context_packet"]["fixture"] == prompt["source"]["task_id"]
+    # What only the manifest knew is empty, and one field says why.
+    assert prompt["revisions"]["manifest_body_absent"] == manifest.absent
+    assert [prompt["context_packet"][name] for name in ("fixture_hash", "family", "transfer_distance")] == [None, None, None]
+    assert [prompt["context_packet"]["runner"][name] for name in ("harness_version", "model")] == [None, None]
+    assert [prompt["revisions"][name] for name in ("benchmark_version", "product_version")] == [None, None]
+
+
+def test_a_different_manifest_at_the_recorded_path_is_never_read_against_this_run(
+    fake_run: Path, trials: list[str], tmp_path: Path
+) -> None:
+    """The guard that matters: bytes that hash to something else are not this run's manifest.
+
+    They are not reduced against, not reported from, and not exported from
+    either; the export falls back to the recorded identity exactly as an absent
+    file does, so no field can be filled from the wrong manifest.
+    """
+    ledger_for(fake_run, trials[0])
+    other = cli.FIXTURES / "fake" / "nop-manifest.json"
+    recorded = point_sidecar_at(fake_run, other)
+    manifest, _ = cli.load_run(fake_run)
+    assert manifest.hash == recorded["hash"] != manifest_module.load(other).hash
+    assert manifest.data == {} and "is a different manifest now" in str(manifest.absent)
+    for command in (cli.do_reduce, cli.do_report, cli.do_verify):
+        with pytest.raises(manifest_module.ManifestError):
+            command(fake_run)
+    out = tmp_path / "cases.jsonl"
+    assert cli.do_cases(fake_run, None, out, dry_run=True)["manifest_body_absent"] == manifest.absent
+    assert "bench1-nop-0" not in json.dumps(cli.do_cases(fake_run, None, out, dry_run=True))
+
+
+def test_a_run_whose_manifest_record_disagrees_with_its_own_schedule_is_refused(fake_run: Path) -> None:
+    sidecar = fake_run / "manifest.json"
+    recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar.write_text(json.dumps({**recorded, "hash": "0" * 64}), encoding="utf-8")
+    with pytest.raises(manifest_module.ManifestError) as caught:
+        cli.load_run(fake_run)
+    assert "does not agree with itself" in str(caught.value)
