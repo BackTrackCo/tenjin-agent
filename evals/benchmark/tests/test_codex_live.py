@@ -105,3 +105,20 @@ def test_native_stream_excludes_harbor_merged_stderr(tmp_path, monkeypatch):
     result = runner.container_spawn(launch, item.roots, 5)
     assert json.loads(item.roots.stream.read_text())["thread_id"] == "native-root"
     assert result.stderr == "native CLI diagnostic\n"
+
+
+def test_shared_read_grants_do_not_use_claude_permission_mode(tmp_path):
+    from dataclasses import replace
+    item = request(tmp_path)
+    settings = {"permissions": {"allow": ["Bash(tenjin read:*)"]}}
+    item = replace(item, arm={"settings": settings, "settings_hash": "sha256:" + sha256_json(settings)})
+    assert codex_live.launch(item).recipe is not None
+
+
+def test_custom_permission_restrictions_are_not_silently_dropped(tmp_path):
+    from dataclasses import replace
+    item = request(tmp_path)
+    settings = {"permissions": {"deny": ["Bash"]}}
+    item = replace(item, arm={"settings": settings, "settings_hash": "sha256:" + sha256_json(settings)})
+    with pytest.raises(executor.ExecutorError, match="custom Claude permission"):
+        codex_live.launch(item)
