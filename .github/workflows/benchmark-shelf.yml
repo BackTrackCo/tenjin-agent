@@ -14,8 +14,7 @@ name: benchmark shelf run
 # bench deployment is on a custom domain and so holds no protection-bypass
 # secret; no trial receives one, and `shelf_secret_present` is false.
 #
-# Nothing here is on push. Each run spends model budget, and a per-push trigger
-# would spend it on every review round.
+# Trigger and label policy belong to callers; this reusable workflow owns execution.
 on:
   workflow_call:
     inputs:
@@ -42,6 +41,8 @@ on:
 concurrency:
   group: benchmark-shelf
   cancel-in-progress: false
+  # Keep queued PRs instead of replacing the single pending run. GitHub caps this at 100.
+  queue: max
 
 permissions: {}
 
