@@ -13,8 +13,10 @@ results remain in `tenjin-notes/benchmark/`; no provisional number here is harde
 
 ## What runs
 
-All selections use Claude Code with one trial at a time. Producer sessions are additional model
-work. The smoke configurations live in Bench-1: plumbing is one control launch, hooks smoke is
+Claude selections use Opus 5; matched Codex selections use CLI 0.154.0 / `gpt-5.6-sol`,
+low reasoning and requested fast service. Both use subscription allowance only. Claude core
+admits up to three workers, with only one shelf-provisioning trial at a time. Codex serializes
+its managed auth file; preflight/canary/recursive are also serial. Producer sessions are additional model work. The smoke configurations live in Bench-1: plumbing is one control launch, hooks smoke is
 4 consumers, and failure-key smoke is 6 consumers. They check different delivery paths.
 
 | Experiment              | Tasks × arms × repeats | Consumers | Producers | Purpose / trigger                                                                                                                                            |
@@ -22,7 +24,7 @@ work. The smoke configurations live in Bench-1: plumbing is one control launch, 
 | Natural-reuse preflight | 3 × 2 × 1              |         6 |         3 | Manual capture/reuse check: actor, alias and core cover convention, path-alias and workspace setup.                                                          |
 | Full core               | 10 × 5 × 3             |       150 |        30 | Main comparison: off, flat notes, seeded, seeded without public fallback, natural. Weekly/release/manual; ready PRs require `ci` plus `benchmark: headline`. |
 | Seeded canary           | 2 × 2 × 1              |         4 |         0 | Alias/workspace health check. Ready PRs use `ci`; adding it and subsequent pushes run the canary. Main pushes/nightly/manual supply baselines.               |
-| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Manual delegated diagnosis and capture/delivery check.                                                                                                       |
+| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Delegated diagnosis and capture/delivery check, also run after full core with a separate report.                                                             |
 
 The canary has no path filter: every ready PR into main with `ci` gets the same four attempts,
 including changes outside the benchmark directory. #349 introduces the matching normal-CI
@@ -65,5 +67,14 @@ setup if healthy sessions take 1–2 minutes. This is a planning assumption, not
 Its session-cap ceiling is 90 minutes before setup and verification. Full core remains 180 model
 sessions: the earlier conditional 4–8 hour planning allowance has not been validated by a healthy
 current-container run. The existing launch failures must be resolved before forecasting from it.
-GitHub-hosted jobs stop at six hours; the caller's 720-minute timeout cannot override that limit.
-Resume/sharding remains Bench-1 work. Codex CLI execution is also pending shared framework work.
+GitHub-hosted jobs stop at six hours; the caller now uses a 360-minute timeout. Corpus
+resume/sharding remains Bench-1 work and currently refuses continuation before another reset.
+A frozen database revision and per-reset provenance must be verified before combining chunks.
+The Codex answer-file plumbing smoke passed on September 11 in 9.2 agent seconds with native
+usage reconciliation; that trivial task cannot forecast core duration or establish a product gain.
+
+Matched Codex files are `codex-preflight-selection.json`, `codex-core-selection.json` and
+`codex-recursive-selection.json`. Each reuses the corresponding Claude experiment's tasks and
+treatments with complete Codex pins. Keep their reports separate from Claude. The reusable CI
+workflow currently has Claude credentials; Codex selections are operator-run until a managed
+subscription credential is configured for CI.
