@@ -1,9 +1,9 @@
 {
-  "benchmark_version": "bench2-local-pilot-3",
+  "benchmark_version": "bench2-local-preflight-1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
-  "repeats": 3,
+  "repeats": 1,
   "pins": {
     "model": "claude-opus-5",
     "harness_version": "2.1.263",
@@ -53,33 +53,6 @@
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
     {
-      "id": "budget",
-      "family": "test-harness-convention",
-      "transfer_distance": "same_family",
-      "fixture": "budget",
-      "fixture_hash": "sha256:02a88306b5328ffabb6f0cc49b4a7f1a0cee77d3094e6ae0bbc9abc66d4d7843",
-      "verifier": "node_test_budget",
-      "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
-      "id": "candidate",
-      "family": "test-harness-convention",
-      "transfer_distance": "same_family",
-      "fixture": "candidate",
-      "fixture_hash": "sha256:7f7568eee16e3e5800ffb29d767dfcd7995d3c729116401b1d1de58560400f63",
-      "verifier": "node_test_candidate",
-      "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
-      "id": "slug",
-      "family": "test-harness-convention",
-      "transfer_distance": "same_family",
-      "fixture": "slug",
-      "fixture_hash": "sha256:c7a58a66c89ca549042ea0451cc84c1a7f2b50f7db82431060d16ea395ae6a42",
-      "verifier": "node_test_slug",
-      "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
       "id": "alias",
       "family": "vitest-path-alias",
       "transfer_distance": "same_task",
@@ -87,24 +60,6 @@
       "fixture_hash": "sha256:a55879c23cb5a8ca370836d70d64c13f809fa1313a4aa5b0f8d9cb87575c8414",
       "verifier": "node_test_alias",
       "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
-      "id": "level",
-      "family": "node-type-stripping",
-      "transfer_distance": "same_task",
-      "fixture": "level",
-      "fixture_hash": "sha256:e6d1aac9eb50f375646068c8d57a6a1417b64a5151d203fd0e44203879491c56",
-      "verifier": "node_test_level",
-      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
-      "id": "money",
-      "family": "esm-cjs-interop",
-      "transfer_distance": "same_task",
-      "fixture": "money",
-      "fixture_hash": "sha256:4f36ad3354281cc88fa87b0d5129deb323894e6e32dad622ac653300e5f7fd11",
-      "verifier": "node_test_money",
-      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
     {
       "id": "core",

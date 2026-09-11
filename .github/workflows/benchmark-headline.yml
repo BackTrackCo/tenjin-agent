@@ -28,6 +28,7 @@ jobs:
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read
+      actions: read
       checks: write
     secrets: inherit
     with:

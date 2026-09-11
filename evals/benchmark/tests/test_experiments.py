@@ -90,8 +90,8 @@ LESSON_PHRASES = ("pnpm test --", "pnpm exec", "vitest", "repository-specific", 
 
 
 def assert_bench2_tasks(manifest: manifest_module.Manifest) -> None:
-    assert [task["id"] for task in manifest.tasks] == list(BENCH2)
-    assert len({task["family"] for task in manifest.tasks}) == 5
+    assert [task["id"] for task in manifest.tasks] == ["actor", "alias", "core"]
+    assert len({task["family"] for task in manifest.tasks}) == 3
     for task in manifest.tasks:
         family, trap, package_dir, ext = BENCH2[task["id"]]
         assert task["family"] == family
@@ -114,7 +114,7 @@ def assert_bench2_tasks(manifest: manifest_module.Manifest) -> None:
 def test_the_real_manifest_is_the_phase_one_local_pilot() -> None:
     manifest = manifest_module.load(experiments.REAL_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (48, 3, "bench2-local-pilot-3")
+    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-1")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_natural"]
     off, natural = manifest.arms
@@ -157,22 +157,20 @@ def test_the_core_suite_runs_the_five_arms_over_the_ten_tasks() -> None:
     claude_live._settings_overlay(flat["settings"]["overlay"])
     # The corpus is the phase-one pilot's, with the two high-discovery tasks
     # appended. The core suite selects from the corpus, it never invents a task.
-    pilot = manifest_module.load(experiments.REAL_MANIFEST).tasks
-    high_discovery = manifest_module.load(experiments.HIGH_DISCOVERY_MANIFEST).tasks
-    assert manifest.tasks == pilot + high_discovery
+    assert [task["id"] for task in manifest.tasks] == list(BENCH2) + list(HIGH_DISCOVERY)
 
 
 def test_the_canary_manifest_is_the_four_same_task_transfers_off_against_the_shelf_arm() -> None:
-    """The nightly lane's manifest: one task per lesson family, three attempts an arm."""
+    """The nightly lane's manifest: one task per lesson family, one attempt per task and arm."""
     manifest = manifest_module.load(experiments.CANARY_MANIFEST)
     core = manifest_module.load(experiments.LOCAL_ARMS_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["benchmark_version"]) == (24, "bench2-canary-1")
+    assert (len(trials), manifest.data["benchmark_version"]) == (8, "bench2-canary-2")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_seeded"]
     assert [task["id"] for task in manifest.tasks] == ["alias", "level", "money", "core"]
     # Every task is a same-task transfer, and no two share a lesson family,
-    # so 24 attempts still touch every delivery path the core suite has.
+    # so eight attempts cover these four transfer families.
     assert {task["transfer_distance"] for task in manifest.tasks} == {"same_task"}
     assert len({task["family"] for task in manifest.tasks}) == len(manifest.tasks)
     # The canary is a subset of the core suite, never a second definition of it.
@@ -191,7 +189,8 @@ def test_the_high_discovery_manifest_is_the_two_task_pilot_with_the_caps_raised(
     manifest = manifest_module.load(experiments.HIGH_DISCOVERY_MANIFEST)
     canary = manifest_module.load(experiments.CANARY_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["benchmark_version"]) == (12, "bench2-high-discovery-1")
+    assert len(trials) == 12
+    assert manifest.data["benchmark_version"] == manifest_module.load(experiments.LOCAL_ARMS_MANIFEST).data["benchmark_version"]
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_seeded"]
     # The arms are the canary's, unedited: the treatment is the same and the tasks are what changed.
@@ -301,3 +300,17 @@ def hooks_smoke() -> manifest_module.Manifest:
 
 
 HIGH_DISCOVERY_PHRASES = ("dist", "built", "build", "artifact", "rebuild", "code point", "no-break", "U+00A0", "Intl", "separator", "locale", "whitespace", "invisible")
+
+
+def test_diagnostic_selections_inherit_core_without_copied_definitions() -> None:
+    core = manifest_module.load(experiments.LOCAL_ARMS_MANIFEST)
+    for path, task_ids in ((experiments.CORPUS_MANIFEST, [task["id"] for task in core.tasks]),
+                           (experiments.HIGH_DISCOVERY_MANIFEST, ["shadow", "ambient"])):
+        source = json.loads(path.read_text())
+        assert source["source"] == experiments.LOCAL_ARMS_MANIFEST.name
+        assert "pins" not in source
+        selected = manifest_module.load(path)
+        assert selected.tasks == [task for task in core.tasks if task["id"] in task_ids]
+        assert selected.arms == [arm for arm in core.arms if arm["id"] in ("off", "tenjin_seeded")]
+        assert selected.pins == core.pins
+        assert selected.data["repeats"] == core.data["repeats"]

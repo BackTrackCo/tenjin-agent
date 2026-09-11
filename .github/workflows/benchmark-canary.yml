@@ -1,6 +1,6 @@
 name: benchmark canary
 
-# Seeded product-health experiment: four tasks, two arms, three repeats.
+# Seeded product-health experiment: four tasks, two arms, one repeat.
 # A report may be incomplete or invalid even when its workflow succeeds.
 on:
   schedule:
@@ -9,6 +9,7 @@ on:
     - cron: '17 7 * * *'
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     paths:
       - 'src/**'
       - 'evals/benchmark/**'
@@ -22,18 +23,24 @@ permissions: {}
 
 jobs:
   canary:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'benchmark: canary') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'benchmark: canary'))
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read
+      actions: read
       checks: write
     secrets: inherit
     with:
       manifest: evals/benchmark/fixtures/live/canary-manifest.json
       lane: benchmark-canary
-      check_name: benchmark canary (nightly)
-      timeout_minutes: 180
+      check_name: benchmark canary
+      timeout_minutes: 120
       budget_note: >-
-        Bench-2 canary: four tasks, control versus the shelf arm, three repeats
-        (24 planned attempts). This is a product health measurement, not the
+        Bench-2 canary: four tasks, control versus the shelf arm, one repeat
+        (8 planned attempts). This is a product health measurement, not the
         full team workload. Read coverage, verified completions and consumer
         time/token costs above; incomplete runs provide no product headline.

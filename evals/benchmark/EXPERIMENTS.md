@@ -2,35 +2,58 @@
 
 Bench-2 selects tasks, treatments, producer/consumer protocol, repeats and caps from the shared
 Bench-1 framework. It adds no runtime, reporting engine, or replacement fixture library.
-`experiments.py` names the pilot, core, canary, high-discovery and recursive configurations.
-`benchmark-canary.yml` and `benchmark-headline.yml` select when to call Bench-1's reusable
-`benchmark-shelf.yml`. The `benchmark-live.yml` dispatch bridge selects the canary on demand.
+`benchmark-canary.yml` and `benchmark-headline.yml` call Bench-1's reusable `benchmark-shelf.yml`.
+The `benchmark-live.yml` dispatch bridge selects the canary on demand before its own workflow
+is registered on main.
 
 Use the same `images build` and `cli live-run --manifest PATH` commands locally and in CI.
-Docker Compose runs against Docker or Colima locally. The shared framework handles execution,
-verification, phase accounting, reports, artifacts and cleanup. Results and historical runs
-belong in `tenjin-notes/benchmark/` and its audits. No provisional number here is hardened.
+Docker Compose runs against Docker or Colima locally. Bench-1 handles execution, verification,
+phase accounting, reports, artifacts, main regression comparisons and cleanup. Historical
+results remain in `tenjin-notes/benchmark/`; no provisional number here is hardened.
 
-The next planned framework work stays in Bench-1: error visibility, main-run regression
-selection, time/token completion metrics and Codex CLI support. Bench-3 adds team-representative
-experiments on the same framework.
+## What runs
 
-## Configured experiments
+All selections use Claude Code with one trial at a time. Producer sessions are additional model
+work. The smoke configurations live in Bench-1: plumbing is one control launch, hooks smoke is
+4 consumers, and failure-key smoke is 6 consumers. They check different delivery paths.
 
-All selections currently use Claude Code and one trial at a time. Producer sessions are
-additional model work, separate from the consumer attempt count.
+| Experiment              | Tasks × arms × repeats | Consumers | Producers | Purpose / trigger                                                                                                                                |
+| ----------------------- | ---------------------- | --------: | --------: | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Natural-reuse preflight | 3 × 2 × 1              |         6 |         3 | Manual capture/reuse check: actor, alias and core cover convention, path-alias and workspace setup.                                              |
+| Full core               | 10 × 5 × 3             |       150 |        30 | Main comparison: off, flat notes, seeded, seeded without public fallback, natural. Weekly/release/manual; PRs opt in with `benchmark: headline`. |
+| Seeded canary           | 4 × 2 × 1              |         8 |         0 | Four same-task transfer families. Nightly/manual; ready PRs opt in with `benchmark: canary`. Subsequent pushes rerun while the label remains.    |
+| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Manual delegated diagnosis and capture/delivery check.                                                                                           |
 
-| Selection                 | Tasks × arms × repeats | Consumers | Producers |
-| ------------------------- | ---------------------- | --------: | --------: |
-| Natural-reuse pilot       | 8 × 2 × 3              |        48 |        24 |
-| Full core                 | 10 × 5 × 3             |       150 |        30 |
-| Seeded canary             | 4 × 2 × 3              |        24 |         0 |
-| Full corpus diagnostic    | 10 × 2 × 3             |        60 |         0 |
-| High-discovery diagnostic | 2 × 2 × 3              |        12 |         0 |
-| Recursive diagnostic      | 1 × 4 × 3              |        12 |         3 |
+Preflight and canary use 600-second consumer caps; core uses 1,500 seconds. Their results do not
+pool. One-repeat health checks cannot establish a reliable speedup or replace the full core run.
+A configured experiment is not a completed result: read verified versus planned attempts,
+invalid/capped outcomes, and time/tokens to verified completion before interpreting comparisons.
 
-A configured experiment is not a completed result. Read the report's status and verified versus
-planned attempts before interpreting time or token comparisons. Run state, retained historical
-results and conditional duration estimates are recorded in the benchmark plan in tenjin-notes.
-The full-core workflow's 720-minute setting cannot extend GitHub-hosted execution beyond six
-hours; reliable long runs require the shared resume/sharding work in Bench-1.
+## Targeted selections of core
+
+The copied full-corpus and high-discovery manifests are removed. Two small selection files
+inherit the core definitions and pins, so the same treatments cannot drift between diagnostics:
+
+- `fixtures/live/corpus-selection.json`: all ten tasks, off/seeded, three repeats (60 consumers).
+- `fixtures/live/high-discovery-selection.json`: shadow/ambient, off/seeded, three repeats (12 consumers).
+
+These are optional targeted reruns, not additional scheduled experiments or independent headline
+replications. Their task and arm rows already exist in a completed core report. To inspect or run
+a selection, pass its path to the same commands, for example:
+
+```sh
+python -m evals.benchmark.cli describe --manifest evals/benchmark/fixtures/live/high-discovery-selection.json
+```
+
+No fixture, lesson, verifier, full-core treatment or recursive experiment was removed. Historical
+notes and exports are unchanged. Bench-3 adds representative team experiments on this framework.
+
+## Runtime and remaining limits
+
+The reduced preflight is 9 model sessions instead of 72: allow roughly 20–40 minutes including
+setup if healthy sessions take 1–2 minutes. This is a planning assumption, not a measured result.
+Its session-cap ceiling is 90 minutes before setup and verification. Full core remains 180 model
+sessions: the earlier conditional 4–8 hour planning allowance has not been validated by a healthy
+current-container run. The existing launch failures must be resolved before forecasting from it.
+GitHub-hosted jobs stop at six hours; the caller's 720-minute timeout cannot override that limit.
+Resume/sharding remains Bench-1 work. Codex CLI execution is also pending shared framework work.

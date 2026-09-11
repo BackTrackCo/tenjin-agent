@@ -55,10 +55,10 @@ jobs:
       manifest: evals/benchmark/fixtures/live/canary-manifest.json
       lane: benchmark-live-canary
       check_name: benchmark canary (dispatched)
-      timeout_minutes: 180
+      timeout_minutes: 120
       budget_note: >-
-        Dispatched Bench-2 canary: four tasks, two arms, three repeats
-        (24 planned attempts). Results are provisional; the overview states
+        Dispatched Bench-2 canary: four tasks, two arms, one repeat
+        (8 planned attempts). Results are provisional; the overview states
         coverage and verified completion costs before detailed diagnostics.
 
   live:

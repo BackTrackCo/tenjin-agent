@@ -1,9 +1,9 @@
 {
-  "benchmark_version": "bench2-canary-1",
+  "benchmark_version": "bench2-canary-2",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260909,
-  "repeats": 3,
+  "repeats": 1,
   "pins": {
     "model": "claude-opus-5",
     "harness_version": "2.1.263",
