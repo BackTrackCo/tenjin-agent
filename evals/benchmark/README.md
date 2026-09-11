@@ -29,6 +29,21 @@ usage-limit percentages and surge multipliers, which move for reasons unrelated 
 LLM judge, which if ever added is benchmark overhead in its own field, neither product cost nor
 correctness. The outcome is raw provider token counts under an executable verifier; subscription dollar cost is supplementary.
 
+## Read the result at a glance
+
+Every text summary and CI check starts with the experiment identity, model/harness, task list,
+planned versus recorded attempts, and a row for every arm. Verified completions, failed/capped/
+invalid attempts, consumer seconds per completion, and tokens per completion stay together.
+The table labels the control and shows percentage changes only for a complete measured run.
+Synthetic tests and plumbing smokes explicitly say they contain no product result; missing
+attempts or incomplete accounting cannot masquerade as a completed comparison.
+
+The current completion figures divide scored consumer spend by verified passes within each
+task, then weight tasks equally. Failed and capped work remains in the numerator. Consumer
+time includes shutdown and settlement, and excludes setup, producer work and hidden verification.
+Producer/capture amortization and existing intervals are diagnostic details below the overview.
+Endpoint and completion-metric uncertainty hardening are still required before a product claim.
+
 ## Layout, and where each contract lives
 
 Each contract is stated once, in the module that owns it, and held by the test module beside it.
