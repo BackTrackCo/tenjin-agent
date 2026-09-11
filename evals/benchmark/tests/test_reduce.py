@@ -529,3 +529,11 @@ def test_unequal_task_cohorts_do_not_produce_completion_comparisons() -> None:
     comparison = reduce_module.reduce(support.accept(*rows), [], "off")["comparisons"]["on"]
     assert comparison["headline"] is None
     assert comparison["completion_tokens"]["reason"] == "incomplete_task_pairs"
+
+
+def test_an_empty_checkpoint_preserves_every_declared_arm() -> None:
+    result = reduce_module.reduce({}, [], "off", declared_arms=[{"id": "off"}, {"id": "on"}])
+    assert set(result["arms"]) == {"off", "on"}
+    assert result["arms"]["off"]["attempts"] == 0
+    assert result["comparisons"]["on"]["headline"] is None
+    assert not result["comparisons"]["on"]["headline_eligible"]
