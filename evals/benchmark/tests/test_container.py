@@ -296,3 +296,20 @@ def test_a_trial_id_that_is_not_a_docker_name_is_refused_rather_than_written(tmp
     # The path is built from the id, so a `../` in one would write outside the run.
     with pytest.raises(ImageError):
         container.record_project(tmp_path, "../escape", container.container_name("trial-a"))
+
+
+
+def test_sweep_continues_when_a_finishing_trial_removes_its_marker(tmp_path: Path, monkeypatch) -> None:
+    container.record_project(tmp_path, "a", "bench2-a")
+    container.record_project(tmp_path, "b", "bench2-b")
+    read_text = Path.read_text
+    def racing_read(path, *args, **kwargs):
+        if path.name == "a.project":
+            container.forget_project(tmp_path, "a")
+        return read_text(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", racing_read)
+    removed = []
+    monkeypatch.setattr(container, "remove_project", lambda name, docker: removed.append(name) or True)
+    assert container.sweep(tmp_path)["projects"] == {"bench2-b": True}
+    assert removed == ["bench2-b"]
+    assert container.sweep(tmp_path)["projects"] == {}
