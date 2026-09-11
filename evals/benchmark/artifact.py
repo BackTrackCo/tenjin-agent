@@ -5,22 +5,13 @@ roots under the run directory, and the process sees only an allowlisted
 environment. The verifier's copy of the worktree is built after the agent has
 stopped, so hidden verifier bytes are never on the agent-visible mount.
 
-A temp directory is not a sandbox. Two things follow. First, the roots carry a
-canary credential planted in the disposable home, so a credential that walks
-into a trial artifact is visible as a count rather than as trust. Second, a
-publishable live run needs an external isolation attestation (container or VM
-id, fresh roots, no wallet, an explicit credential seam, and a network
-allowlist); without one it is refused.
+A temp directory is not a sandbox. Roots carry a planted credential so its
+appearance in trial artifacts is observable. Publishable live execution needs
+an external isolation attestation with fresh roots, an explicit credential
+seam and a network allowlist. Execution adapters supply those facts.
 
-There was a second sentinel here: a loopback origin standing in for anything
-off the allowlist, counted per attempt and invalidating the attempt that
-reached it. The container harness is Harbor, whose egress allowlist is an
-nftables ruleset with no `log` statement and no reader inside the framework,
-so no layer of this package can observe an attempt to leave the allowlist any
-more. The counter and the `sentinel:public_request` reason are gone rather
-than pinned at zero: a run states what it measured, and this is no longer one
-of those things. Containment is unchanged; only the evidence of an attempt is
-lost.
+The record reports credential exposures, not attempted off-allowlist requests:
+the shared container backend does not expose that counter.
 
 Publishability follows that attestation and nothing else. Who launched a run
 is a fact about the run, not a claim about its isolation, so `automated` is
