@@ -405,6 +405,11 @@ python -m evals.benchmark.checkpoint export --run RUN --out CHECKPOINT --manifes
 python -m evals.benchmark.checkpoint import --run CHECKPOINT --out RESUMED_RUN --manifest MANIFEST --revision GIT_SHA
 ```
 
+Continuation preserves accepted final attempts, including invalid ones. It does not retry a
+recorded quota/instrumentation failure or erase its spend. After such a failure, retain the
+partial evidence and start a fresh run when the cause is fixed; clean deadline checkpoints
+can continue without repeating completed work.
+
 The importer verifies file inventory and hashes, runtime revision, Git revision, manifest,
 full schedule and every referenced epoch before writing. It rewrites only the local manifest
 path and preserves the nonce. Then use the ordinary `live-run --freeze-corpus` command against
