@@ -481,7 +481,11 @@ def sweep(run_dir: Path, docker: Docker | None = None) -> dict[str, Any]:
     directory = run_dir / PROJECTS
     removed: dict[str, bool] = {}
     for path in sorted(directory.glob("*.project")) if directory.is_dir() else []:
-        project = path.read_text(encoding="utf-8").strip()
+        try:
+            project = path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            # A finishing trial already removed its project and marker.
+            continue
         if project:
             removed[project] = remove_project(project, docker)
         path.unlink(missing_ok=True)
