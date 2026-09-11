@@ -19,7 +19,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from . import canonical_json
+from . import canonical_json, regress
 from .artifact import CANARY_PREFIX
 from .reduce import consumer_auxiliary
 
@@ -265,6 +265,7 @@ def project(
             "product_commits": sorted({record["isolation"].get("image", {}).get("cli", {}).get("commit") for record in accepted.values() if isinstance(record["isolation"].get("image"), dict) and record["isolation"]["image"].get("cli", {}).get("commit")}),
         },
         "manifest_hash": manifest_hash,
+        "regression_protocol_hash": regress.protocol_hash(manifest_data),
         "schedule_hash": schedule_hash,
         "seed": manifest_data["seed"],
         "repeats": manifest_data["repeats"],

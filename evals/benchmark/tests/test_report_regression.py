@@ -4,7 +4,7 @@ from evals.benchmark import regress
 
 
 def report():
-    return {"schema": "bench1.report.v1", "manifest_hash": "fixed", "isolation": "attested", "automated": True,
+    return {"schema": "bench1.report.v1", "manifest_hash": "fixed", "regression_protocol_hash": "protocol", "isolation": "attested", "automated": True,
             "invalid": [], "excluded": {}, "run_configuration": {"planned_per_arm": 2, "arm_ids": ["off"]},
             "arms": {"off": {"attempts": 2, "accounting": "complete", "outcomes": {"pass": 2},
                              "pass_rate": 1, "consumer_seconds_per_verified_resolution": 30, "tokens_per_verified_resolution": 100}}}
@@ -21,7 +21,7 @@ def test_completion_metrics_compare_and_regressions_are_named():
 
 def test_missing_or_invalid_evidence_cannot_be_called_clean():
     for mutate in (
-        lambda r: r.update(manifest_hash="changed"),
+        lambda r: r.update(regression_protocol_hash="changed"),
         lambda r: r.update(invalid=[{}]),
         lambda r: r["arms"]["off"].update(attempts=1),
         lambda r: r["arms"]["off"].update(accounting="incomplete"),
@@ -38,3 +38,15 @@ def test_zero_completions_never_fabricate_a_time_or_token_ratio():
     result = regress.compare_reports(current, report())
     assert len(result["findings"]) == 1
     assert result["rows"][1]["current"] is None
+
+
+def test_product_revisions_can_change_but_measurement_inputs_cannot():
+    manifest = {"pins": {"model": "model-1"}, "arms": [{"id": "off", "product_version": "v1"}]}
+    new = copy.deepcopy(manifest)
+    new["arms"][0]["product_version"] = "v2"
+    assert regress.protocol_hash(new) == regress.protocol_hash(manifest)
+    new["pins"]["model"] = "model-2"
+    assert regress.protocol_hash(new) != regress.protocol_hash(manifest)
+    current = report()
+    current["manifest_hash"] = "new-product-version"
+    assert regress.compare_reports(current, report())["status"] == "compared"
