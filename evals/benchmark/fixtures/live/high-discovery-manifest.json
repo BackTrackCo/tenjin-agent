@@ -1,0 +1,87 @@
+{
+  "benchmark_version": "bench2-high-discovery-1",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260910,
+  "repeats": 3,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 1500,
+    "turn_budget": 80,
+    "max_budget_usd": 2.5,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ]
+  },
+  "price_sheet_version": "real-2026-09",
+  "phases": {
+    "producer": "natural-or-shelf-seeded",
+    "capture": "local-store",
+    "consumer": "local"
+  },
+  "corpus": {
+    "provider": "neon",
+    "project_id": "weathered-paper-24312028",
+    "branch_id": "br-ancient-dream-ave43t84",
+    "parent_id": "br-shiny-mountain-av1jfsuq",
+    "origin": "bench.tenjin.sh"
+  },
+  "tasks": [
+    {
+      "id": "shadow",
+      "family": "stale-build-artifact",
+      "transfer_distance": "same_task",
+      "fixture": "shadow",
+      "fixture_hash": "sha256:797f7257f48069b877bc0932fb7a3ff13610ab2c86897205d46c95c5b3aa9d9c",
+      "verifier": "node_test_shadow",
+      "prompt": "Make tests/shadow.test.mjs pass by fixing the @fixture/range package, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "ambient",
+      "family": "invisible-whitespace-mismatch",
+      "transfer_distance": "same_task",
+      "fixture": "ambient",
+      "fixture_hash": "sha256:7462f9bc277872f008f8eeb40c08c282e599d2279cbeca8b5a1f0bfb3e97a304",
+      "verifier": "node_test_ambient",
+      "prompt": "Fix src/price.mjs so that tests/ambient.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_seeded",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"]
+    }
+  ]
+}

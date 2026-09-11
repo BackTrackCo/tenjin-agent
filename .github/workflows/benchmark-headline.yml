@@ -1,0 +1,56 @@
+name: benchmark headline
+
+# The evidence lane: the plan's Tier 3 full core suite over every task and every
+# arm, weekly and on a published release. Its number is the one meant to be
+# quoted, so it runs where a reader can check it: the headline, its intervals
+# and a link to the method go in a check run's `output.summary`, which answers
+# an anonymous reader over the public API, and the per-attempt records ride
+# along as a workflow artifact.
+#
+# Schedule, release, manual dispatch, and one label. Never on push.
+#
+# The `benchmark: headline` label is how a branch runs this lane before the
+# workflow is registered on the default branch: `schedule` and
+# `workflow_dispatch` are keyed on registration against the DEFAULT branch, so
+# neither reaches a ref whose workflow file has not merged, while a
+# `pull_request` trigger reads the workflow from the PR's own ref. A label
+# rather than a path filter because this lane spends about 32 USD and takes
+# roughly two hours: it runs when somebody asks for it, never because a file
+# changed. Remove the label to stop it running on the next push.
+on:
+  schedule:
+    # 03:41 UTC on Sunday. Off the hour and off the canary's slot, and the two
+    # lanes share one concurrency group anyway, so neither resets under the
+    # other.
+    - cron: '41 3 * * 0'
+  release:
+    types: [published]
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+
+permissions: {}
+
+jobs:
+  headline:
+    # On a pull request this lane is opt-in and costly, so it runs only while
+    # the label is on. Every other trigger carries no label and runs as before.
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'benchmark: headline')
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/local-arms-manifest.json
+      lane: benchmark-headline
+      check_name: benchmark headline (core suite)
+      timeout_minutes: 720
+      budget_note: >-
+        Full core suite: ten tasks across every arm, three attempts each, plus
+        the natural arm's producer phase. Budget capped at 0.75 USD an attempt.
+        This is the run whose number is meant to be quoted; the nightly canary
+        is the health check.
