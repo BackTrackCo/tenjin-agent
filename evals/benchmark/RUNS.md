@@ -35,3 +35,12 @@ for every arm. Detailed accounting and task diagnostics follow in an expandable 
 artifact includes `experiment.txt`, `report.md` and machine-readable `report.json`. The shared
 `describe --manifest PATH`, `summary --run RUN`, and `headline --run RUN` commands expose the
 same reading locally. A provisional measurement is explicitly labeled, never called hardened.
+
+Repository writers are trusted with benchmark credentials. Random fork PRs receive no repository
+secrets and the credentialed lanes skip; these workflows use `pull_request`, never
+`pull_request_target`. Review before merging into main remains required, but does not gate a
+same-repository writer's pre-merge workflow execution. The canary/headline labels control which
+experiments run, not secret access. Container isolation applies to trial execution; it does not
+isolate the repository-local Python parent from credentials. If writers later need to be
+untrusted, move the credentials into a protected environment with required reviewers and remove
+the repository-level copies; a label or a job condition alone is not that security boundary.

@@ -1,5 +1,8 @@
 name: benchmark shelf run
 
+# Repository writers are trusted with credentials; forks receive none.
+# Opt-in experiment labels do not form a secret-access boundary.
+
 # One measured run against the bench shelf, called by the two lanes that decide
 # when it happens. Every step here is the same whichever lane called it; only
 # the manifest, the check name, and the timeout differ, so a canary and a
