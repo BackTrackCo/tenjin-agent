@@ -193,3 +193,23 @@ def test_searches_the_agent_ran_through_the_cli_are_counted_apart_from_the_hooks
     connection.close()
     assert loop_join.project(path, [])["cli_searches"] == {"count": 3, "decisions": {"hit": 2, "miss": 1}}
     assert loop_join.unavailable()["cli_searches"] == {"count": 0, "decisions": {}}
+
+
+def test_ledger_session_namespace_roundtrip_preserves_native_identity():
+    from evals.benchmark.loop_join import native_session, stored_session
+    for harness in ("claude", "codex"):
+        assert native_session(harness, stored_session(harness, "root")) == "root"
+    assert native_session("claude", "codex:root") == "codex:root"
+
+
+@pytest.mark.parametrize("harness", ["claude", "codex"])
+def test_namespaced_ledger_joins_native_root_and_children_without_aliasing(db, harness):
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE fires SET harness = ?, session = ?", (harness, f"{harness}:{SESSION}"))
+    actors = [(harness, SESSION, ""), (harness, SESSION, "child01")]
+    joined = loop_join.project(db, actors)
+    assert [fire["fire_id"] for fire in joined["fires"]] == ["fire-root", "fire-child"]
+    assert [fire["fire_id"] for fire in joined["unmatched_fires"]] == ["fire-sib"]
+    foreign = loop_join.project(db, [], (f"{harness}:{SESSION}",))
+    assert foreign["unmatched_fires"] == []
+    assert foreign["phase_fires"] == {f"{harness}:{SESSION}": 3}

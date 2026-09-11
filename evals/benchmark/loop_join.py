@@ -169,6 +169,16 @@ def public_summary(legs: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def stored_session(harness: str, native: str) -> str:
+    """Product src/lib/session.ts namespaces ledger identity by harness."""
+    return f"{harness}:{native}"
+
+
+def native_session(harness: str, stored: str) -> str:
+    prefix = f"{harness}:"
+    return stored[len(prefix):] if stored.startswith(prefix) else stored
+
+
 def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tuple[str, ...] = ()) -> dict[str, Any]:
     """Fires and legs for exactly these actors, plus fires for actors that are not in the set.
 
@@ -199,7 +209,7 @@ def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tupl
         except sqlite3.Error as error:
             raise LoopJoinError(f"loop.db has no readable fires table: {error}") from error
         for row in rows:
-            actor: ActorKey = (row["harness"], row["session"], row["agent"])
+            actor: ActorKey = (row["harness"], native_session(row["harness"], row["session"]), row["agent"])
             fire = {
                 "fire_id": row["id"],
                 "actor": list(actor),
