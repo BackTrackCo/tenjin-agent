@@ -8,6 +8,11 @@ name: benchmark live
 # not in the ruleset's required checks and never blocks a pull request. It is
 # not `continue-on-error` either, because a red run is meant to be seen.
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'evals/benchmark/**'
+      - '.github/workflows/benchmark-live.yml'
   pull_request:
     branches: [main]
     paths:
@@ -29,6 +34,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
@@ -130,24 +136,26 @@ jobs:
           echo "::endgroup::"
           "$BENCH_PY" -m evals.benchmark.cli summary --run "$run" | tee "$RUNNER_TEMP/bench1-live-summary.txt"
           "$BENCH_PY" -m evals.benchmark.cli headline --run "$run" | tee "$run/report.md" >> "$GITHUB_STEP_SUMMARY"
-          "$BENCH_PY" -m evals.benchmark.cli regress --run "$run" \
-            --baseline evals/benchmark/fixtures/live/baseline.json
+      - name: Compare with the last matching main benchmark
+        if: always() && steps.gate.outputs.live == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: '"$BENCH_PY" -m evals.benchmark.main_regression --run "$RUNNER_TEMP/bench1-live" --artifact bench1-live-report'
       - name: Clean up the run's containers
         if: always() && steps.gate.outputs.live == 'true'
         run: |
           [ -d "$RUNNER_TEMP/bench1-live" ] || exit 0
           "$BENCH_PY" -m evals.benchmark.cli cleanup --run "$RUNNER_TEMP/bench1-live"
-      # report.json is the only publishable projection and the only thing
-      # retained. Records, transcripts, and worktrees stay on the runner and
-      # die with it.
+      # Retain readouts even when execution failed; transcripts and roots stay local.
       - name: Upload report.json
-        if: steps.gate.outputs.live == 'true'
+        if: always() && steps.gate.outputs.live == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: bench1-live-report
           path: |
             ${{ runner.temp }}/bench1-live/report.json
             ${{ runner.temp }}/bench1-live/report.md
+            ${{ runner.temp }}/bench1-live/regression.*
             ${{ runner.temp }}/experiment.txt
           if-no-files-found: error
           retention-days: 14

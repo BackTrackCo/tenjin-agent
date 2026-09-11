@@ -174,8 +174,9 @@ def test_the_smoke_manifest_validates_and_expands_to_a_balanced_schedule() -> No
     manifest = smoke()
     trials = schedule.expand(manifest)
     assert len(trials) == len(manifest.tasks) * len(manifest.arms) * manifest.data["repeats"]
-    # Gate 3 is four to eight attempts, and this manifest sits at the floor on purpose.
-    assert 4 <= len(trials) <= 8
+    # Plumbing checks one launch and its accounting; there is no product treatment.
+    assert len(trials) == 1
+    assert [arm["id"] for arm in manifest.arms] == ["off"]
     assert {trial.arm_id for trial in trials} == {arm["id"] for arm in manifest.arms}
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert all(executor.lookup(arm["executor"]).live for arm in manifest.arms)

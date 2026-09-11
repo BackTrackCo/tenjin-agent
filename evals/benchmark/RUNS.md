@@ -8,11 +8,23 @@ Pass `--manifest PATH` to `live-run` and `--baseline PATH` to `regress`. The fra
 configurations live in `configuration.py`. Bench-2 experiment selections and their callers
 live above this layer. Configuration tests are in `tests/test_framework_configuration.py`.
 
-The promoted plumbing workflow still explicitly selects its provisional September 7 baseline.
-The next planned regression change in Bench-1 #334/#347 will select the last completed matching
-main-run artifact for PR comparisons, then remove that old numerical input. This promotion
-preserves the existing comparison until that replacement is tested. History stays in
-`tenjin-notes`; neither these smoke numbers nor the existing capture-only headline is hardened.
+The plumbing smoke runs one control attempt. Hooks smoke (4 consumers) and failure-key smoke
+(6 consumers) remain distinct delivery checks. None is a product headline.
+
+PR workflows compare completion rate, consumer seconds per verified completion, and tokens per
+verified completion against the last matching completed main run's retained artifact. Matching
+requires the same expanded manifest hash and execution mode. Lookup checks the newest 100
+completed main runs of the same workflow and selects the newest matching artifact, even if its
+report is invalid; missing, expired, incomplete or invalid evidence produces an explicit
+unavailable comparison. No baseline model run is launched. The plumbing workflow records main
+runs after benchmark changes; product lanes use their existing main schedules/manual runs.
+The fixed September 7 numerical baseline is removed. Historical evidence stays in tenjin-notes.
+Regression is informational, with a 25% cost-increase diagnostic threshold, not a significance test.
+
+For targeted runs, a sibling JSON selection can name `schema: bench1.selection.v1`, `source`
+(the full manifest filename), and optional `tasks` and `arms` ID lists. It inherits the source's
+pins, repeats and task/arm definitions before hashing. Every command accepting `--manifest`
+uses the same selection, including image building, attestation, scheduling and readout.
 
 CI prints the exact experiment matrix before execution. After execution, the check summary and
 `report.md` begin with status, matrix coverage, verified completions and consumer time/token costs

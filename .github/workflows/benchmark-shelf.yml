@@ -49,6 +49,7 @@ jobs:
     timeout-minutes: ${{ inputs.timeout_minutes }}
     permissions:
       contents: read
+      actions: read
       # The one surface an anonymous reader can reach on a public repository.
       checks: write
     steps:
@@ -267,6 +268,13 @@ jobs:
               print(f"::warning title=refused::{count} attempt(s): {detail}")
           PY
 
+      - name: Compare with the last matching main benchmark
+        if: always() && steps.gate.outputs.live == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BENCH_ARTIFACT: ${{ inputs.lane }}-records
+        run: '"$BENCH_PY" -m evals.benchmark.main_regression --run "$RUNNER_TEMP/bench-run" --artifact "$BENCH_ARTIFACT"'
+
       - name: Clean up whatever the run started
         if: always() && steps.gate.outputs.live == 'true'
         run: |
@@ -295,6 +303,9 @@ jobs:
           if path.is_file():
               published = json.loads(path.read_text(encoding="utf-8"))
               summary = report_module.check_summary(published)
+              regression = path.with_name("regression.md")
+              if regression.is_file():
+                  summary += "\n" + regression.read_text()
               eligible = report_module.run_status(published).startswith("PROVISIONAL")
               # `neutral`, not `failure`: a run that produced no quotable number
               # is a fact about the run, and this lane blocks nothing either way.
@@ -331,6 +342,7 @@ jobs:
           path: |
             ${{ runner.temp }}/bench-run/report.json
             ${{ runner.temp }}/bench-run/report.md
+            ${{ runner.temp }}/bench-run/regression.*
             ${{ runner.temp }}/experiment.txt
             ${{ runner.temp }}/bench-run/records/
             ${{ runner.temp }}/bench-run/schedule.json
