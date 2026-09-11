@@ -44,6 +44,21 @@ removes only projects recorded by that run. Provisioning, corpus reset, producer
 images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
 and concrete preset/configuration data arrive in the next two layers.
 
+## Read the result at a glance
+
+Every text summary and CI check starts with the experiment identity, model/harness, task list,
+planned versus recorded attempts, and a row for every arm. Verified completions, failed/capped/
+invalid attempts, consumer seconds per completion, and tokens per completion stay together.
+The table labels the control and shows percentage changes only for a complete measured run.
+Synthetic tests and plumbing smokes explicitly say they contain no product result; missing
+attempts or incomplete accounting cannot masquerade as a completed comparison.
+
+The current completion figures divide scored consumer spend by verified passes within each
+task, then weight tasks equally. Failed and capped work remains in the numerator. Consumer
+time includes shutdown and settlement, and excludes setup, producer work and hidden verification.
+Producer/capture amortization and existing intervals are diagnostic details below the overview.
+Endpoint and completion-metric uncertainty hardening are still required before a product claim.
+
 ## Layout, and where each contract lives
 
 Each contract is stated once, in the module that owns it, and held by the test module beside it.
@@ -71,7 +86,8 @@ the suite builds.
 The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, the null
 manifest beside it, and the bootstrap golden) and `fixtures/claude/` (sanitized synthetic Claude sessions; no real
 transcript). The full real-repository fixture library and hidden layers arrive in the corpus layer.
-Regression requires an explicit baseline; CI selects the last corresponding completed main run.
+Regression requires an explicit baseline. The planned CI policy selects the last corresponding
+completed main run; the promoted plumbing workflow still supplies its provisional baseline.
 
 ## Its CI lanes
 
@@ -267,16 +283,14 @@ resample means, so freezing them froze `random.Random`'s draw order rather than 
 amortization series at reuse 1, 2, 5 and 10 stays pinned exactly, because it is deterministic
 arithmetic over the reduction and a moved value there is a real change.
 
-The operator-side manifests, the regression baseline, the frozen Vitest task fixture, the
-seeded lessons and the code-owned hidden layers under `hidden/<task>/hidden-tests/` arrive with
-the live executor in the layer above, and `manifest.fixture_hash` folds the vendored archive's
-digest in there. Nothing offline extracts an archive: a trial's `node_modules` is derived, never
-committed, and this layer's fake tasks have none. **That whole vendored path is the darwin pin
-Bench-2 replaces with a container image per task.**
+The full reusable Vitest fixtures and lessons belong to the Bench-1 corpus layer, with hidden
+verifiers under `hidden/<task>/hidden-tests/`. Bench-1's shared container image build installs
+each fixture's dependencies. Local and CI live runs use that same runtime, including Docker
+Compose on Colima; later benchmarks add experiment selections and results on top of it.
 
 ## Extending the foundation
 
-Bench-2, Bench-3, and Bench-6 add data and adapters, not architecture. A new task is a manifest
+Later benchmarks add experiments and results. Reusable adapters and reporting belong in Bench-1. A new task is a manifest
 entry, a fixture directory, a hidden layer, and a verifier spec in `verifier.REGISTRY`. A new arm
 is a manifest entry plus an `executor.REGISTRY` entry, and arms in one manifest share one
 executor, because arms running different harnesses do not have comparable token totals; a driver
@@ -290,3 +304,7 @@ estimated from text length.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
+
+The internal `bench2-` image/container names and marker filenames are retained implementation
+identifiers from the original container runner. They name shared Bench-1 infrastructure and
+are used unchanged by every experiment, locally and in CI.

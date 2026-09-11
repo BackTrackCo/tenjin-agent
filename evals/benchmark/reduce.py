@@ -198,7 +198,11 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     overhead = sum(overhead_tokens(record) for record in records)
     requests = sum(summed["requests"] for summed in per_attempt)
     new = new_tokens(per_attempt, auxiliary)
+    durations = [record.get("wall_time_s") for record in records]
+    timed = all(value is not None for value in durations)
     return {
+        "consumer_seconds_per_verified_resolution": None if not passes or not timed else _round(sum(durations) / passes),
+        "consumer_seconds_reason": "no_verified_resolution" if not passes else (None if timed else "timing_unavailable"),
         "attempts": attempts,
         "passes": passes,
         "pass_rate": _round(passes / attempts),
@@ -487,6 +491,9 @@ def reduce(
         else:
             arm["tokens_per_verified_resolution"] = _mean(per_task)
             arm["tokens_per_verified_resolution_reason"] = None
+        durations = [task["consumer_seconds_per_verified_resolution"] for task in tasks]
+        arm["consumer_seconds_per_verified_resolution"] = _mean(durations) if durations and all(value is not None for value in durations) else None
+        arm["consumer_seconds_reason"] = None if arm["consumer_seconds_per_verified_resolution"] is not None else ("timing_unavailable" if any(task["consumer_seconds_reason"] == "timing_unavailable" for task in tasks) else "no_verified_resolution")
         arm["amortization"] = amortize_tasks(tasks, ("producer", "capture"))
         arm["amortization_capture_only"] = amortize_tasks(tasks, ("capture",))
     comparisons: dict[str, Any] = {}
