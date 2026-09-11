@@ -98,6 +98,7 @@ def test_native_stream_excludes_harbor_merged_stderr(tmp_path, monkeypatch):
             (item.roots.output / "command.stderr").write_text("native CLI diagnostic\n")
             return container.Completed(returncode=0, stdout="compose diagnostic", stderr="")
     monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
     monkeypatch.setattr(container, "stop", lambda name: None)
     result = runner.container_spawn(launch, item.roots, 5)
     assert json.loads(item.roots.stream.read_text())["thread_id"] == "native-root"
