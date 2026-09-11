@@ -302,10 +302,10 @@ jobs:
           path = pathlib.Path(os.environ["RUNNER_TEMP"]) / "bench-run" / "report.json"
           if path.is_file():
               published = json.loads(path.read_text(encoding="utf-8"))
-              summary = report_module.check_summary(published)
               regression = path.with_name("regression.md")
-              if regression.is_file():
-                  summary += "\n" + regression.read_text()
+              extra = "\n" + regression.read_text() if regression.is_file() else ""
+              room = report_module.CHECK_SUMMARY_LIMIT - len(extra) - len(os.environ["BUDGET_NOTE"]) - 2
+              summary = report_module.check_summary(published, limit=room) + extra
               eligible = report_module.run_status(published).startswith("PROVISIONAL")
               # `neutral`, not `failure`: a run that produced no quotable number
               # is a fact about the run, and this lane blocks nothing either way.
