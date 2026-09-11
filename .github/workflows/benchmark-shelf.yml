@@ -191,7 +191,6 @@ jobs:
           "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
             -r evals/benchmark/requirements-live.txt
           echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
-      - name: Build the fixture images
       - name: Write the attestation
         if: steps.gate.outputs.live == 'true'
         run: |
