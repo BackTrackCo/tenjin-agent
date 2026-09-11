@@ -2498,7 +2498,7 @@ describe('runDoctor — Codex loop hook wiring', () => {
     // the config file settles it: no rows, therefore inert.
     const trusted = find(result.checks, 'codex trusted');
     expect(trusted.status).toBe('warn');
-    expect(trusted.fix).toContain('/hooks');
+    expect(trusted.fix).toContain('tenjin install');
 
     const observed = find(result.checks, 'codex observed');
     expect(observed).toMatchObject({ status: 'ok', required: false });
@@ -2512,7 +2512,7 @@ describe('runDoctor — Codex loop hook wiring', () => {
    * nothing observed. Every one of those has to be visible and separately
    * remediable, and none of them may read as a working loop.
    */
-  it('an installed-but-untrusted Codex reads as inert, with the /hooks step on it', async () => {
+  it('an installed-but-untrusted Codex reads as inert, and points at install', async () => {
     await wireCodex();
     const result = await page();
     expect(find(result.checks, 'codex configured').status).toBe('ok');
@@ -2521,7 +2521,27 @@ describe('runDoctor — Codex loop hook wiring', () => {
     expect(trusted.detail).toMatch(/inert/);
     const observed = find(result.checks, 'codex observed');
     expect(observed.status).toBe('warn');
-    expect(observed.fix).toContain('/hooks');
+    // `install` is the remedy now that it completes trust; the manual `/hooks`
+    // walkthrough is gone from every surface (tenjin-agent#343).
+    expect(observed.fix).toContain('tenjin install');
+    expect(`${trusted.fix} ${observed.fix}`).not.toContain('/hooks');
+  });
+
+  /**
+   * Unknown is not ok. Neither Codex nor its config could settle whether these
+   * entries run, and a green line there reads as a working loop -- which, with
+   * one fire still inside the seven-day window, makes an inert install look
+   * healthy on both lines (tenjin-agent#343).
+   */
+  it('warns, never passes, when trust cannot be settled at all', async () => {
+    await wireCodex();
+    // A config.toml that exists and cannot be read: trust is unknown, not
+    // absent, and `codex` is unreachable with env {}.
+    await mkdir(join(skillHome, '.codex', 'config.toml'), { recursive: true });
+    const trusted = find((await page()).checks, 'codex trusted');
+    expect(trusted.status).toBe('warn');
+    expect(trusted.detail).toMatch(/could not be asked/);
+    expect(trusted.fix).toBeTruthy();
   });
 
   /**

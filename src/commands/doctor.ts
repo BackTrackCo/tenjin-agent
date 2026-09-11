@@ -1351,13 +1351,19 @@ async function checkCodexHooks(
     .filter((k): k is string => k !== null);
   const trust = await readCodexTrust(homeDir, keys, { env });
   const willRun = trust.state === 'trusted';
+  // `unknown` is NOT ok. It means neither Codex nor its config could settle
+  // whether these entries run, and a green line there reads as a working loop
+  // -- which, with one fire still inside the observation window, makes an
+  // inert install look healthy on both lines (tenjin-agent#343). It warns,
+  // like the equivalent unknown permission state, and carries its own remedy
+  // rather than the trust one, because re-trusting is not what it needs.
   out.push({
     result: {
       name: 'codex trusted',
-      status: willRun || trust.state === 'unknown' ? 'ok' : 'warn',
+      status: willRun ? 'ok' : 'warn',
       required: false,
       detail: TRUST_DETAIL[trust.state](trust),
-      ...(willRun || trust.state === 'unknown' ? {} : { fix: TRUST_FIX }),
+      ...(willRun ? {} : { fix: trust.state === 'unknown' ? TRUST_UNKNOWN_FIX : TRUST_FIX }),
     },
   });
   const observed = codexFiresThisWeek(dataDir, open);
@@ -1375,7 +1381,9 @@ async function checkCodexHooks(
         : {
             fix: willRun
               ? 'Start a new Codex session: hooks are read at session start.'
-              : TRUST_FIX,
+              : trust.state === 'unknown'
+                ? TRUST_UNKNOWN_FIX
+                : TRUST_FIX,
           }),
     },
   });
@@ -1383,8 +1391,12 @@ async function checkCodexHooks(
 }
 
 /** The `/hooks` gesture, exact enough to follow without a second lookup. */
-const TRUST_FIX =
-  'In Codex, run /hooks, press t to trust the tenjin entries, then start a new session.';
+const TRUST_FIX = 'Run `tenjin install` to trust the entries it wrote.';
+
+/** Unknown is a different problem: nothing is known to be wrong, and nothing
+ *  is known to be right, so the remedy is to make Codex answerable. */
+const TRUST_UNKNOWN_FIX =
+  'Check that `codex` is on PATH and $CODEX_HOME/config.toml is readable, then re-run `tenjin doctor`.';
 
 /** One sentence per trust state, kept beside the vocabulary that names them. */
 const TRUST_DETAIL: Readonly<Record<CodexTrust, (r: CodexTrustReport) => string>> = {

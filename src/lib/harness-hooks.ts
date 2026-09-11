@@ -70,8 +70,11 @@ export interface HooksResult {
   /** The loopback URL the `http` entries carry, when the harness has any. */
   url?: string;
   /** What the operator still has to do before the harness runs the entries,
-   *  one line per step. */
+   *  one line per step. Empty for a harness this CLI can activate itself. */
   activation?: string[];
+  /** Entries this run got the harness to trust, where trust is a separate
+   *  step from writing. Absent for a harness with no such gate. */
+  trusted?: number;
   skipped?: HooksSkipReason;
   /** Human-readable detail for a skip that is a problem rather than a choice. */
   warning?: string;

@@ -1,4 +1,4 @@
-import { lstat, mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, realpath, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic-json';
 import { codexRulesPath, grantedPrefixes, rulesFileBody, verifyPrefixAllowed } from './codex-rules';
@@ -226,6 +226,14 @@ export async function inspectHarnessPermissions(
  * "the file matches" would report `granted` over a file Codex is discarding.
  * With no `codex` to ask, the file's answer stands and the detail says so.
  */
+/** Bring an already-correct grant file back to 0600 if something widened it. */
+async function tighten(path: string): Promise<void> {
+  if (process.platform === 'win32') return;
+  const found = await stat(path).catch(() => null);
+  if (found === null || (found.mode & 0o077) === 0) return;
+  await chmod(path, 0o600).catch(() => undefined);
+}
+
 async function inspectCodexGrant(
   homeDir: string,
   mode: PublishMode,
@@ -330,7 +338,16 @@ export async function wireCodexGrant(
   try {
     await mkdir(dirname(path), { recursive: true });
     const current = await readFile(path, 'utf8').catch(() => null);
-    if (current === body) return { path, granted, wrote: false };
+    if (current === body) {
+      // Byte-identical is not the same as correct. This file is a standing
+      // decision about which commands run unattended, so a dotfiles sync or a
+      // stray chmod that widened it must be converged even on the run that
+      // writes nothing -- otherwise re-installing leaves a group-writable
+      // grant exactly as it found it. Mirrors `tightenFile` in
+      // lib/harness-hooks.ts, for the same reason.
+      await tighten(path);
+      return { path, granted, wrote: false };
+    }
     // 0600 for the same reason the hooks file gets it: this is a standing
     // decision about which commands run without asking, and a file another
     // account can append to is a file that can widen it.

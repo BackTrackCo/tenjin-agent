@@ -4,30 +4,36 @@ import { join } from 'node:path';
 import { codexHome } from '../adapters/codex';
 
 /**
- * READ-ONLY. What Codex itself says about the hook handlers this CLI
- * registered, so `doctor` and `install` can tell "the file exists" from "the
- * harness will run it".
+ * What Codex says about the hook handlers this CLI registered, and the one
+ * write that makes them run: `doctor` needs to tell "the file exists" from
+ * "the harness will run it", and `install` needs to move it from the first to
+ * the second.
  *
- * NOTHING HERE WRITES, AND NOTHING IN THIS REPO MAY. Codex gates a handler on
- * `[hooks.state]` in `$CODEX_HOME/config.toml`: a row keyed
+ * Codex gates a handler on `[hooks.state]` in `$CODEX_HOME/config.toml`: a row keyed
  * `"<source path>:<event_snake>:<group>:<handler>"` carrying `enabled` and a
  * `trusted_hash`, and the handler runs only when it is enabled and that hash
  * still matches the one Codex recomputes from the file.
  *
- * There IS a mechanical way to write that row: the `/hooks` browser has no
- * privileged path, it sends a generic `config/batchWrite`, and anything could
- * send the same. This CLI deliberately does not. The hash is the control that
- * stops an edited hooks.json running under trust granted to an earlier version
- * of itself, and it protects the operator from us among others; echoing
- * `currentHash` back would be granting ourselves the review the browser exists
- * to obtain, on the run that wrote the file being reviewed. So the keypress
- * stays with a person (tenjin-agent#342).
+ * TRUSTING IS PART OF INSTALLING, and it goes through Codex's own supported
+ * path: read the rows and their `currentHash` from `hooks/list`, upsert those
+ * keys through `config/batchWrite`, then list again and require them back
+ * trusted. That is the same call the `/hooks` browser makes, and it matches
+ * Claude Code's contract that installing a hook activates it, rather than
+ * reporting success over a loop that cannot run (tenjin-agent#342/#343).
  *
- * NOR IS THE HASH RECOMPUTED HERE. It comes from a normalized, TOML-projected,
- * canonical-JSON form private to Codex's build; a second copy of someone
- * else's versioned grammar would drift and make `doctor` confidently wrong
- * about a security state. `hooks/list` reports `trustStatus` as the running
- * binary computed it, which is the answer rather than a model of it.
+ * WHAT STAYS FORBIDDEN, and the distinction is the whole of the boundary:
+ *
+ *  - COMPUTING a `trusted_hash`. The value is a normalized, TOML-projected,
+ *    canonical-JSON form private to Codex's build. We only ever echo back the
+ *    `currentHash` Codex itself just reported, so trust cannot outlive the
+ *    bytes Codex hashed. A hash of our own would be an assertion about a file
+ *    Codex has not read.
+ *  - Trusting a row we did not generate. Every key is matched against the
+ *    complete handler identity this install wrote: our source file, our
+ *    command, our event and index. Another tool's entry in the same file is
+ *    never touched.
+ *  - Reporting success on a partial result. Listing, writing and verifying all
+ *    have to land, or the install fails and says which step did not.
  */
 
 /** Codex's snake-case event labels, in the order its `hooks.state` keys use. */
@@ -99,6 +105,8 @@ interface ListedHook {
   enabled?: unknown;
   trustStatus?: unknown;
   sourcePath?: unknown;
+  currentHash?: unknown;
+  command?: unknown;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -135,6 +143,9 @@ export interface TrustProbeOptions {
   timeoutMs?: number;
   /** Seam for tests: what `hooks/list` returned, without spawning anything. */
   listHooks?: (home: string, env: NodeJS.ProcessEnv) => Promise<ListedHook[] | null>;
+  /** Seam for tests: answer requests directly instead of spawning an app
+   *  server. `undefined` from it means the same as no reply. */
+  connect?: (method: string, params: unknown) => Promise<unknown>;
 }
 
 /**
@@ -145,78 +156,99 @@ export interface TrustProbeOptions {
 const PROBE_MS = 8_000;
 
 /**
- * Ask the installed `codex` what it thinks of our hooks, over the app server's
- * read-only `hooks/list`.
+ * One app-server connection, for the length of `fn`.
  *
- * NEVER LEAVES A SERVER BEHIND: three lines in, read until the answer or the
- * deadline, then stdin closed and the process killed either way.
+ * NEVER LEAVES A SERVER BEHIND: the handshake goes in, `fn` issues whatever
+ * requests it needs on the same connection, and the process has its stdin
+ * closed and is killed on every exit path including a throw. Trusting needs
+ * three round trips (list, write, list again) and they must see the same
+ * process, so a one-shot helper per request would not do.
  *
- * Null is "could not ask" — no `codex`, no such method, a timeout — and the
- * caller falls back to the config file. It is never "nothing is trusted".
+ * Resolves null when the connection cannot be had at all: no `codex`, a build
+ * without the method, a handshake that timed out. Null is "could not ask", and
+ * no caller may read it as an answer.
  */
-async function listHooksViaAppServer(
+async function withAppServer<T>(
   home: string,
   env: NodeJS.ProcessEnv,
   timeoutMs: number,
-): Promise<ListedHook[] | null> {
-  return await new Promise<ListedHook[] | null>((resolve) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn('codex', ['app-server'], {
-        env: { ...env, CODEX_HOME: codexHome(home, env) },
-        stdio: ['pipe', 'pipe', 'ignore'],
-      });
-    } catch {
-      resolve(null);
-      return;
-    }
-    let settled = false;
-    const finish = (value: ListedHook[] | null): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try {
-        child.stdin?.end();
-      } catch {
-        // Already closed.
-      }
-      child.kill('SIGTERM');
-      resolve(value);
-    };
-    const timer = setTimeout(() => finish(null), timeoutMs);
-    child.on('error', () => finish(null));
-    child.on('exit', () => finish(null));
+  fn: (request: (method: string, params: unknown) => Promise<unknown>) => Promise<T>,
+): Promise<T | null> {
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn('codex', ['app-server'], {
+      env: { ...env, CODEX_HOME: codexHome(home, env) },
+      stdio: ['pipe', 'pipe', 'ignore'],
+    });
+  } catch {
+    return null;
+  }
 
-    let buffered = '';
-    child.stdout?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => {
-      buffered += chunk;
-      let cut = buffered.indexOf('\n');
-      while (cut !== -1) {
-        const line = buffered.slice(0, cut);
-        buffered = buffered.slice(cut + 1);
-        cut = buffered.indexOf('\n');
-        let msg: unknown;
-        try {
-          msg = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (!isRecord(msg) || msg.id !== LIST_ID) continue;
-        finish(rowsOf(msg.result));
-        return;
+  let dead = false;
+  const pending = new Map<number, (value: unknown) => void>();
+  const fail = (): void => {
+    dead = true;
+    for (const resolve of pending.values()) resolve(undefined);
+    pending.clear();
+  };
+  child.on('error', fail);
+  child.on('exit', fail);
+
+  let buffered = '';
+  child.stdout?.setEncoding('utf8');
+  child.stdout?.on('data', (chunk: string) => {
+    buffered += chunk;
+    let cut = buffered.indexOf('\n');
+    while (cut !== -1) {
+      const line = buffered.slice(0, cut);
+      buffered = buffered.slice(cut + 1);
+      cut = buffered.indexOf('\n');
+      let msg: unknown;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!isRecord(msg) || typeof msg.id !== 'number') continue;
+      const waiting = pending.get(msg.id);
+      if (waiting === undefined) continue;
+      pending.delete(msg.id);
+      waiting(msg.error !== undefined ? undefined : msg.result);
+    }
+  });
+
+  let nextId = 1;
+  const send = (payload: unknown): boolean => {
+    try {
+      child.stdin?.write(`${JSON.stringify(payload)}\n`);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const request = async (method: string, params: unknown): Promise<unknown> => {
+    if (dead) return undefined;
+    const id = ++nextId;
+    return await new Promise<unknown>((resolve) => {
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve(undefined);
+      }, timeoutMs);
+      pending.set(id, (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+      if (!send({ jsonrpc: '2.0', id, method, params })) {
+        pending.delete(id);
+        clearTimeout(timer);
+        resolve(undefined);
       }
     });
+  };
 
-    const send = (o: unknown): void => {
-      try {
-        child.stdin?.write(`${JSON.stringify(o)}\n`);
-      } catch {
-        finish(null);
-      }
-    };
-    // The handshake is load-bearing in this order: a `hooks/list` sent before
-    // the `initialized` notification is dropped with no reply and no error.
+  try {
+    // Load-bearing in this order: a request sent before the `initialized`
+    // notification is dropped with no reply and no error.
     send({
       jsonrpc: '2.0',
       id: 1,
@@ -224,11 +256,30 @@ async function listHooksViaAppServer(
       params: { clientInfo: { name: 'tenjin', title: 'tenjin', version: '1' } },
     });
     send({ jsonrpc: '2.0', method: 'initialized', params: {} });
-    send({ jsonrpc: '2.0', id: LIST_ID, method: 'hooks/list', params: { cwds: [] } });
-  });
+    return await fn(request);
+  } catch {
+    return null;
+  } finally {
+    try {
+      child.stdin?.end();
+    } catch {
+      // Already closed.
+    }
+    child.kill('SIGTERM');
+  }
 }
 
-const LIST_ID = 2;
+/** `hooks/list`, or null when the connection could not be had. */
+async function listHooksViaAppServer(
+  home: string,
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+): Promise<ListedHook[] | null> {
+  return await withAppServer(home, env, timeoutMs, async (request) => {
+    const result = await request('hooks/list', { cwds: [] });
+    return result === undefined ? null : rowsOf(result);
+  });
+}
 
 /** The handler rows out of a `hooks/list` result, flattened across its cwds. */
 function rowsOf(result: unknown): ListedHook[] {
@@ -239,6 +290,140 @@ function rowsOf(result: unknown): ListedHook[] {
     for (const hook of group.hooks) if (isRecord(hook)) out.push(hook as ListedHook);
   }
   return out;
+}
+
+/** What one trust attempt did, in the terms `install` reports it. */
+export interface TrustResult {
+  ok: boolean;
+  /** Keys Codex confirmed enabled and trusted on the verifying read. */
+  trusted: string[];
+  /** Which step did not complete, on a failure. */
+  failedAt?: 'list' | 'write' | 'verify';
+  /** One line naming what went wrong, for the operator. */
+  reason?: string;
+}
+
+/**
+ * Trust exactly the handlers this install wrote, and prove it.
+ *
+ * THREE ROUND TRIPS, ALL REQUIRED. List to learn the hashes Codex computed for
+ * OUR rows; upsert only those keys; list again and require the same keys back
+ * with the same hashes, enabled and trusted. The verifying read is the point:
+ * a write that returned without error still has not been shown to have taken
+ * effect, and an install that skipped this could report success over a loop
+ * that will not run, which is the failure this whole change exists to end.
+ *
+ * `ownedBy` is the second half of "only our rows". The keys already come from
+ * the file we wrote, but a key is a path and two indices; this also requires
+ * the listed handler's command to be the one we generated, so a row that moved
+ * under our key is left alone rather than trusted on its position.
+ */
+export async function trustCodexHooks(
+  home: string,
+  keys: readonly string[],
+  ownedBy: (row: { command?: unknown; sourcePath?: unknown }) => boolean,
+  opts: TrustProbeOptions = {},
+): Promise<TrustResult> {
+  const env = opts.env ?? process.env;
+  const timeoutMs = opts.timeoutMs ?? PROBE_MS;
+  if (keys.length === 0) return { ok: true, trusted: [] };
+
+  const run = async (
+    request: (method: string, params: unknown) => Promise<unknown>,
+  ): Promise<TrustResult> => {
+    const before = await request('hooks/list', { cwds: [] });
+    if (before === undefined) {
+      return {
+        ok: false,
+        trusted: [],
+        failedAt: 'list' as const,
+        reason: 'hooks/list did not answer',
+      };
+    }
+    const wanted = new Set(keys);
+    const mine = rowsOf(before).filter(
+      (r) => typeof r.key === 'string' && wanted.has(r.key) && ownedBy(r),
+    );
+    if (mine.length !== keys.length) {
+      return {
+        ok: false,
+        trusted: [],
+        failedAt: 'list' as const,
+        reason: `Codex listed ${mine.length} of the ${keys.length} entries this install wrote`,
+      };
+    }
+    // Only the rows we generated, each carrying the hash Codex just reported
+    // for it. `upsert` leaves every other row in `hooks.state` untouched.
+    const value: Record<string, { trusted_hash: string; enabled: true }> = {};
+    for (const row of mine) {
+      const hash = typeof row.currentHash === 'string' ? row.currentHash : null;
+      if (hash === null) {
+        return {
+          ok: false,
+          trusted: [],
+          failedAt: 'list' as const,
+          reason: 'Codex reported an entry with no currentHash',
+        };
+      }
+      value[row.key as string] = { trusted_hash: hash, enabled: true };
+    }
+    const wrote = await request('config/batchWrite', {
+      edits: [{ keyPath: 'hooks.state', value, mergeStrategy: 'upsert' }],
+      reloadUserConfig: true,
+    });
+    if (wrote === undefined) {
+      return {
+        ok: false,
+        trusted: [],
+        failedAt: 'write' as const,
+        reason: 'config/batchWrite was refused',
+      };
+    }
+
+    // VERIFY. Same keys, same hashes, enabled and trusted, read back from the
+    // binary rather than inferred from a write that did not error.
+    const after = await request('hooks/list', { cwds: [] });
+    if (after === undefined) {
+      return {
+        ok: false,
+        trusted: [],
+        failedAt: 'verify' as const,
+        reason: 'the verifying hooks/list did not answer',
+      };
+    }
+    const confirmed = rowsOf(after).filter(
+      (r) =>
+        typeof r.key === 'string' &&
+        wanted.has(r.key) &&
+        ownedBy(r) &&
+        r.enabled !== false &&
+        (r.trustStatus === 'trusted' || r.trustStatus === 'managed') &&
+        r.currentHash === value[r.key]?.trusted_hash,
+    );
+    if (confirmed.length !== keys.length) {
+      return {
+        ok: false,
+        trusted: confirmed.map((r) => r.key as string),
+        failedAt: 'verify' as const,
+        reason: `Codex confirmed ${confirmed.length} of ${keys.length} entries as trusted after the write`,
+      };
+    }
+    return { ok: true, trusted: confirmed.map((r) => r.key as string) };
+  };
+
+  const outcome =
+    opts.connect !== undefined
+      ? await run(opts.connect)
+      : await withAppServer(home, env, timeoutMs, run);
+
+  return (
+    outcome ?? {
+      ok: false,
+      trusted: [],
+      failedAt: 'list',
+      reason: 'the codex app server could not be reached',
+    }
+  );
 }
 
 /**
@@ -320,10 +505,19 @@ export async function readCodexTrust(
     return { ...base, trusted, state, source: 'app-server' };
   }
 
-  const raw = await readFile(configPath, 'utf8').catch(() => null);
-  // No config file at all is still a definite answer: Codex has recorded no
-  // trust, so the entries are inert and `/hooks` is the step.
-  if (raw === null) return { ...base, state: 'untrusted', source: 'config-file' };
+  // ONLY A MISSING FILE MEANS ABSENT. A file that exists and cannot be read --
+  // permissions, a directory in its place, an I/O error -- says nothing about
+  // trust, and reporting it as definitely untrusted both hides the real
+  // problem and recommends a fix that would not touch it (tenjin-agent#343).
+  const read = await readFile(configPath, 'utf8').then(
+    (text) => ({ text }),
+    (err: NodeJS.ErrnoException) => ({ err }),
+  );
+  if ('err' in read) {
+    if (read.err.code === 'ENOENT') return { ...base, state: 'untrusted', source: 'config-file' };
+    return { ...base, state: 'unknown', source: 'config-file' };
+  }
+  const raw = read.text;
   const rows = parseHooksState(raw);
   if (rows === null) return { ...base, state: 'unknown', source: 'config-file' };
   const found = keys.map((k) => rows.get(k)).filter((r) => r !== undefined);

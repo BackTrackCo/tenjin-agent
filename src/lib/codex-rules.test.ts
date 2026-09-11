@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { platform } from 'node:process';
@@ -133,6 +133,21 @@ describe('wireCodexGrant: install, retract, and leave the operator’s own file 
     const second = await wireCodexGrant(home, 'auto', {});
     expect(second.wrote).toBe(false);
     expect(await readFile(rulesPath(), 'utf8')).toBe(before);
+  });
+
+  /**
+   * Byte-identical is not the same as correct. This file decides which
+   * commands run unattended, so a widened mode has to be converged even on the
+   * run that writes nothing; otherwise reinstalling leaves a group-writable
+   * command grant exactly as it found it (tenjin-agent#343).
+   */
+  it('re-tightens a grant file something widened, on the run that writes nothing', async () => {
+    if (platform === 'win32') return;
+    await wireCodexGrant(home, 'auto', {});
+    await chmod(rulesPath(), 0o664);
+    const again = await wireCodexGrant(home, 'auto', {});
+    expect(again.wrote).toBe(false);
+    expect((await stat(rulesPath())).mode & 0o777).toBe(0o600);
   });
 
   /**

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -12,7 +12,7 @@ import tsupConfigs from '../../tsup.config';
 import pkg from '../../package.json';
 import { installDaemonFiles } from './control';
 import { codexAdapter } from '../adapters/codex';
-import { readCodexTrust, trustKey } from '../lib/codex-trust';
+import { readCodexTrust, trustCodexHooks, trustKey } from '../lib/codex-trust';
 import { registeredHooks, writeHooks } from '../lib/harness-hooks';
 import { HARNESS_MS } from '../hooks/constants';
 import { ensureDaemon, health, readToken } from '../hooks/shim';
@@ -904,13 +904,12 @@ describe('the daemon, cold-started from the real bundle', () => {
      *   -> a fresh session's captured events, through the real shim
      *   -> recorded fires, and doctor flips to observed.
      *
-     * The trust step is written here as a FIXTURE standing in for Codex's
-     * `/hooks` browser, and that is the only place in this repository where a
-     * `[hooks.state]` row is ever produced. Product code must not write one:
-     * the hash is the control that stops an edited hooks.json running under
-     * trust granted to an earlier version of itself (lib/codex-trust.ts). A
-     * test may stage the state a person would have created; an installer may
-     * not create it.
+     * The trust hop runs the REAL `trustCodexHooks` against a scripted app
+     * server: its three round trips, its ownership filter and its verifying
+     * read are all exercised, without requiring a Codex install on the machine
+     * running the suite. What the script cannot prove is that Codex accepts
+     * the write, and that is settled by a live probe recorded in the PR rather
+     * than in CI (tenjin-agent#343).
      */
     it('install -> trust -> fresh session -> recorded fires, with doctor honest at each step', async () => {
       const home = await mkdtemp(join(tmpdir(), 'tenjin-activation-home-'));
@@ -941,7 +940,11 @@ describe('the daemon, cold-started from the real bundle', () => {
         });
         expect(wired.skipped).toBeUndefined();
         expect(wired.entries).toBe(7);
-        expect(wired.activation?.length ?? 0).toBeGreaterThan(1);
+        // One note, not a walkthrough: trust is step 3 below, not the
+        // operator's job (tenjin-agent#343).
+        expect(wired.activation).toEqual([
+          'Start a new Codex session: hooks are read at session start.',
+        ]);
 
         const registered = await registeredHooks(codexAdapter, home, dataDir, env);
         expect(registered.handlers).toHaveLength(7);
@@ -958,24 +961,36 @@ describe('the daemon, cold-started from the real bundle', () => {
         });
         expect(before.state).toBe('untrusted');
 
-        // 3. THE OPERATOR'S KEYPRESS, staged. `/hooks` writes exactly this.
-        await mkdir(codexHome, { recursive: true });
-        await writeFile(
-          join(codexHome, 'config.toml'),
-          `[hooks.state]\n${(keys as string[])
-            .map((k) => `"${k}" = { enabled = true, trusted_hash = "sha256:staged" }`)
-            .join('\n')}\n`,
+        // 3. TRUST, through the real writer. The scripted server answers as
+        // Codex does: untrusted rows with hashes first, the same rows trusted
+        // once the upsert has landed.
+        const rows = (status: string): Record<string, unknown>[] =>
+          (keys as string[]).map((key) => ({
+            key,
+            command: `node ${JSON.stringify(shimBundlePath(dataDir))} --harness codex`,
+            sourcePath: registered.path,
+            enabled: true,
+            trustStatus: status,
+            currentHash: `sha256:${key.length}`,
+          }));
+        let wrote = false;
+        const trust = await trustCodexHooks(
+          home,
+          keys as string[],
+          (r) => typeof r.command === 'string' && r.command.includes(shimBundlePath(dataDir)),
+          {
+            env,
+            connect: async (method) => {
+              if (method === 'config/batchWrite') {
+                wrote = true;
+                return {};
+              }
+              return { data: [{ cwd: '/r', hooks: rows(wrote ? 'trusted' : 'untrusted') }] };
+            },
+          },
         );
-        const trusted = await readCodexTrust(home, keys as string[], {
-          env,
-          // As Codex would answer once the rows are in place and the file is
-          // unchanged since. Asking the real binary here would make this test
-          // require a Codex install; the wire shape is pinned in codex-trust's
-          // own tests.
-          listHooks: async () =>
-            (keys as string[]).map((key) => ({ key, enabled: true, trustStatus: 'trusted' })),
-        });
-        expect(trusted.state).toBe('trusted');
+        expect(trust.ok).toBe(true);
+        expect(trust.trusted).toHaveLength(7);
 
         // 4. A FRESH SESSION: every captured event of one root turn.
         //

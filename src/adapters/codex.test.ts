@@ -438,16 +438,15 @@ describe('registrar', () => {
     expect(text).not.toContain('http');
   });
 
-  it('spells the trust step out, naming the file Codex will show', () => {
-    // Steps, not one sentence: an install that buried this read as finished
-    // while the entries sat inert (tenjin-agent#342).
+  it('leaves one note, not a walkthrough: install trusts what it writes', () => {
+    // The six-step `/hooks` flow is gone. `install` completes trust through
+    // Codex's own supported path, so the only remaining fact is the one no
+    // installer can change: the session already open predates these hooks
+    // (tenjin-agent#343).
     const steps = registrar.activation?.('/tmp/codex-home/hooks.json') ?? [];
-    expect(steps.length).toBeGreaterThan(1);
-    expect(steps.some((s) => s.includes('/hooks'))).toBe(true);
-    expect(steps.some((s) => s.includes('/tmp/codex-home/hooks.json'))).toBe(true);
-    // A trusted hook still does nothing until the next session reads it, and
-    // an operator who does not know that concludes the trust step failed.
-    expect(steps.some((s) => s.includes('NEW Codex session'))).toBe(true);
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatch(/new Codex session/);
+    expect(steps.join(' ')).not.toContain('/hooks');
   });
 });
 

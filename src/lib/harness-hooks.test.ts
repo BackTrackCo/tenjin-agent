@@ -432,11 +432,12 @@ describe('writeHooks (codex): seven command entries in hooks.json', () => {
       wrote: true,
     });
     expect(result.url).toBeUndefined();
-    // Steps, not a sentence, and they name the file the operator will actually
-    // see in Codex's own /hooks browser rather than a generic `~/.codex` (#342).
-    expect(result.activation?.some((s) => s.includes('/hooks'))).toBe(true);
-    expect(result.activation?.some((s) => s.includes(codexHooksPath()))).toBe(true);
-    expect(result.activation?.some((s) => s.includes('NEW Codex session'))).toBe(true);
+    // `writeHooks` writes; `install` trusts what it wrote. So the activation
+    // left here is one note about the open session, not a walkthrough, and it
+    // never sends the operator to `/hooks` (tenjin-agent#343).
+    expect(result.activation).toEqual([
+      'Start a new Codex session: hooks are read at session start.',
+    ]);
     const entries = allEntries(await readCodex());
     expect(entries).toHaveLength(7);
     for (const [, entry] of entries) {

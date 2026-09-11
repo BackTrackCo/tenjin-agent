@@ -267,6 +267,10 @@ function deps(over: Partial<InstallDeps> = {}): InstallDeps {
     // the real creator with `realWalletCreate()`, which still goes through the
     // fake keychain above.
     createWallet: async () => STUB_ADDRESS,
+    // Codex's trust step, answered in-process: the real one spawns `codex
+    // app-server`, and no unit test may depend on a Codex being installed.
+    // The cases that are ABOUT trust override this with a refusal.
+    trustHooks: async (_home, keys) => ({ ok: true, trusted: [...keys] }),
     promptPublishMode: async () => null,
     // NEVER the real one. Steps 1-3 of the hook cutover spawn a detached daemon;
     // this writes exactly what one leaves behind (the bundles, the token, the pid
@@ -1913,6 +1917,25 @@ describe('runInstall: permissions decision', () => {
     expect(human(res)).toContain('unchanged (dry run)');
   });
 
+  /**
+   * `effective` is about the `Bash(...)` payload beside it, which is Claude
+   * Code's grammar. Codex has a grant surface of its own and cannot carry one
+   * line of it, so a Codex-only envelope claiming these rules are in force is
+   * #342's defect one level up (tenjin-agent#343).
+   */
+  it('never marks Claude rules effective on a codex-only install', async () => {
+    const res = await runInstall({ harness: ['codex'] }, makeCtx({ json: true }), deps());
+    const perms = (res.data as { permissions: { effective: boolean } }).permissions;
+    expect(perms.effective).toBe(false);
+
+    const both = await runInstall(
+      { harness: ['claude', 'codex'] },
+      makeCtx({ json: true }),
+      deps(),
+    );
+    expect((both.data as { permissions: { effective: boolean } }).permissions.effective).toBe(true);
+  });
+
   it('writes no Claude rules on a codex-only install, and grants Codex its own', async () => {
     // The Claude writer must not create a settings.json on a machine with no
     // Claude on it, and the envelope must not read as though it did. Codex is
@@ -3331,6 +3354,7 @@ describe('runInstall: harness hooks', () => {
       url?: string;
       daemon?: { pid: number; port: number; version: string };
       activation?: string[];
+      trusted?: number;
       removed: string[];
       skipped?: string;
       fix?: string;
@@ -3436,7 +3460,10 @@ describe('runInstall: harness hooks', () => {
     expect(h.skipped).toBeUndefined();
     expect(h.path).toBe(join(home, '.codex', 'hooks.json'));
     expect(h.url).toBeUndefined();
-    expect(h.activation?.some((step) => step.includes('/hooks'))).toBe(true);
+    // Install trusts what it wrote, so the only step left is the new session
+    // the operator has to start; no `/hooks` walkthrough (tenjin-agent#343).
+    expect(h.trusted).toBe(7);
+    expect(h.activation).toEqual(['Start a new Codex session: hooks are read at session start.']);
     expect(existsSync(join(data, 'hooks'))).toBe(true);
     expect(existsSync(claudeSettingsPath(home))).toBe(false);
     const file = JSON.parse(await readFile(h.path ?? '', 'utf8')) as {
@@ -3446,7 +3473,7 @@ describe('runInstall: harness hooks', () => {
     expect(JSON.stringify(file)).not.toContain(DAEMON_PORT.toString());
   });
 
-  it('both harnesses: one outcome each, one daemon, and the Codex trust step in the walkthrough', async () => {
+  it('both harnesses: one outcome each, one daemon, and Codex reported as trusted', async () => {
     const res = await runInstall(
       { harness: ['claude', 'codex'] },
       makeCtx(),
@@ -3460,9 +3487,11 @@ describe('runInstall: harness hooks', () => {
     expect(hooks[0]?.daemon?.port).toBe(hooks[1]?.daemon?.port);
     const text = (res.humanLines ?? []).join('\n').replace(/\x1b\[[0-9;]*m/g, ''); // eslint-disable-line no-control-regex
     expect(text).toContain('hooks        Claude Code: 7 enabled');
-    expect(text).toContain('hooks        Codex: 7 enabled');
+    // Codex's row names the trust it obtained; "7 enabled" over entries the
+    // harness will not run is the claim #342 was filed about.
+    expect(text).toContain('hooks        Codex: 7 trusted, 7 enabled');
     expect(text).toContain('Restart Claude Code to load the hooks.');
-    expect(text).toContain('run /hooks');
+    expect(text).not.toContain('/hooks');
   });
 });
 

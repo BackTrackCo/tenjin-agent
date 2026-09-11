@@ -59,11 +59,14 @@ import {
 } from '../lib/harness-permissions';
 import type { CodexGrantResult, PermissionsResult } from '../lib/harness-permissions';
 import { codexRulesPath } from '../lib/codex-rules';
-import { hasHooks, hooksSkipped, writeHooks } from '../lib/harness-hooks';
+import { hasHooks, hooksSkipped, registeredHooks, writeHooks } from '../lib/harness-hooks';
+import { trustCodexHooks, trustKey } from '../lib/codex-trust';
+import type { TrustResult } from '../lib/codex-trust';
+import { shimBundlePath } from '../lib/paths';
 import type { WriteHooksOptions } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
 import { HARNESSES } from '../adapters/types';
-import type { Harness } from '../adapters/types';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import { healWiredSkills } from '../lib/skill-heal';
 import type { HealOutcome } from '../lib/skill-heal';
 import type { HooksResult } from '../lib/harness-hooks';
@@ -240,6 +243,14 @@ export interface InstallDeps {
   ) => Promise<{ pending: string[] | null; satisfied?: PermissionsResult }>;
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
+  /** Codex's hook-trust step; defaults to the real app-server round trip.
+   *  A seam so tests never spawn `codex app-server`. */
+  trustHooks?: (
+    home: string,
+    keys: readonly string[],
+    ours: (row: { command?: unknown; sourcePath?: unknown }) => boolean,
+    opts: { env: NodeJS.ProcessEnv },
+  ) => Promise<TrustResult>;
   /** Codex's grant writer; defaults to the real one. Injected so tests never
    *  shell out to `codex execpolicy` or touch a real $CODEX_HOME. */
   writeCodexGrant?: (
@@ -751,14 +762,16 @@ async function installBody(
     // `wired` is the outcome of THIS run's settings.json write; the three
     // recommendation tiers beside it are unchanged, so a machine consumer that
     // read `alwaysSafe` / `optIn` / `neverAllowlisted` before still does.
-    // `effective` is the run's own answer: true only when a harness this
-    // install targeted can actually carry the rules, so a Codex-only envelope
-    // never reads as though `Bash(tenjin publish:*)` were in force there
-    // (tenjin-agent#342).
+    // `effective` is about THESE rules, which are Claude Code's `Bash(...)`
+    // grammar -- not about whether the harness has some grant surface of its
+    // own. Codex has one and cannot carry a single line of this payload, so
+    // asking `kind === 'writable'` made a Codex-only envelope claim the rules
+    // were in force there: the very defect of #342, one level up. The Codex
+    // grant is reported on `codexGrant`, in its own grammar.
     permissions: {
       ...recommendedPermissions(
         publishMode.value,
-        plans.some((p) => grantSurfaceFor(p.harness).kind === 'writable'),
+        plans.some((p) => usesGrantWriter(p.harness, 'claude-settings')),
       ),
       wired: permissions,
     },
@@ -871,6 +884,13 @@ function activationBlock(io: Io, s: WalkthroughState): string[] {
   for (const h of s.hooks) {
     const steps = h.entries > 0 ? h.activation : undefined;
     if (steps === undefined || steps.length === 0) continue;
+    // One line reads as a note; a numbered list reads as unfinished work. A
+    // harness this CLI fully activates has exactly one thing left to say, and
+    // it is not a task (tenjin-agent#343).
+    if (steps.length === 1) {
+      lines.push(paint(io, 'dim', `${harnessLabel(h.harness as Harness)}: ${steps[0]}`), '');
+      continue;
+    }
     lines.push(
       paint(io, 'bold', `${harnessLabel(h.harness as Harness)} needs one more step from you:`),
     );
@@ -1065,7 +1085,10 @@ function codexGrantValue(g: CodexGrantResult, mode: PublishMode): string {
  */
 function hooksValue(h: HooksResult, enabled: number): string {
   if (h.skipped === undefined) {
-    return `${enabled} enabled; change: tenjin hooks disable <arm>`;
+    // `trusted` is named where the harness has that gate, because "7 enabled"
+    // over entries the harness will not run is the claim #342 was filed about.
+    const trusted = h.trusted !== undefined ? `${h.trusted} trusted, ` : '';
+    return `${trusted}${enabled} enabled; change: tenjin hooks disable <arm>`;
   }
   if (h.skipped === 'dry-run') return `${h.entries} entries unchanged (dry run)`;
   if (h.skipped === 'declined') return 'none registered (--no-hooks)';
@@ -1573,18 +1596,70 @@ async function resolveHooks(args: {
     // later bare re-run wires them.
     if (noHooks) out.push(hooksSkipped(adapter.id, home, dataDir, 'declined', env));
     else if (dryRun) out.push(hooksSkipped(adapter.id, home, dataDir, 'dry-run', env));
-    else
+    else {
+      const written = await writeHooks({
+        adapter,
+        homeDir: home,
+        dataDir,
+        env,
+        ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
+      });
+      // Writing the entries is half of installing them. A harness that gates
+      // its entries on trust gets that trust here, through its own supported
+      // path, so a successful install means a loop that runs rather than one
+      // waiting on a manual step (tenjin-agent#343).
       out.push(
-        await writeHooks({
-          adapter,
-          homeDir: home,
-          dataDir,
-          env,
-          ...(deps.startDaemon !== undefined ? { start: deps.startDaemon } : {}),
-        }),
+        written.skipped !== undefined
+          ? written
+          : await activateHooks(adapter, written, home, dataDir, deps, env),
       );
+    }
   }
   return out;
+}
+
+/**
+ * Complete a harness's activation, where its entries do not run until trusted.
+ *
+ * FAILS THE INSTALL RATHER THAN DEGRADE. Every other writer here reports a
+ * skip and lets the run succeed, because what each wrote is useful on its own.
+ * This one is different: entries that exist and cannot run are the exact state
+ * this command exists to prevent, and reporting success over them is what sent
+ * operators diagnosing an inert loop by hand. A failure to list, write or
+ * verify throws, naming the step that did not complete.
+ *
+ * `--no-hooks` remains the opt-out; it never reaches here.
+ */
+async function activateHooks(
+  adapter: HarnessAdapter,
+  written: HooksResult,
+  home: string,
+  dataDir: string,
+  deps: InstallDeps,
+  env: NodeJS.ProcessEnv,
+): Promise<HooksResult> {
+  if (adapter.id !== 'codex') return written;
+  const registered = await registeredHooks(adapter, home, dataDir, env);
+  const keys = registered.handlers
+    .map((h) => trustKey(registered.path, h.event, h.groupIndex, h.handlerIndex))
+    .filter((k): k is string => k !== null);
+  // The complete generated handler identity, not a position in a file: a row
+  // that moved under one of our keys is someone else's and is never trusted.
+  const ours = (row: { command?: unknown; sourcePath?: unknown }): boolean =>
+    typeof row.command === 'string' &&
+    row.command.includes(shimBundlePath(dataDir)) &&
+    row.sourcePath === registered.path;
+  const result = await (deps.trustHooks ?? trustCodexHooks)(home, keys, ours, { env });
+  if (!result.ok) {
+    throw new CliError(
+      'INTERNAL',
+      `Codex hook trust could not be completed at the ${result.failedAt} step: ${result.reason}`,
+      {
+        fix: `The ${written.entries} entries are written to ${written.path}. Re-run \`tenjin install\`, or \`tenjin install --no-hooks\` to skip hooks entirely.`,
+      },
+    );
+  }
+  return { ...written, trusted: result.trusted.length };
 }
 
 // --- Detection + planning --------------------------------------------------------
