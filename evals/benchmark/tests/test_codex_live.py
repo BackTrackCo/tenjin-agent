@@ -78,3 +78,28 @@ def test_codex_image_pins_the_cli_without_changing_model():
     assert args["AGENT_COMMAND"] == "codex"
     with pytest.raises(images.ImageError):
         images.build_args({**PINS, "agent_package": "other"})
+
+
+def test_native_stream_excludes_harbor_merged_stderr(tmp_path, monkeypatch):
+    from evals.benchmark import container, runner
+    item = request(tmp_path)
+    launch = codex_live.launch(item)
+    class Box:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def exec(self, command, **kwargs):
+            assert command[:2] == ["bash", "-c"]
+            assert kwargs["stream"] is None
+            (item.roots.output / "command.stdout").write_text('{"type":"thread.started","thread_id":"native-root"}\n')
+            (item.roots.output / "command.stderr").write_text("native CLI diagnostic\n")
+            return container.Completed(returncode=0, stdout="compose diagnostic", stderr="")
+    monkeypatch.setattr(container, "Container", Box)
+    monkeypatch.setattr(container, "daemon_error", lambda output: None)
+    monkeypatch.setattr(container, "stop", lambda name: None)
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert json.loads(item.roots.stream.read_text())["thread_id"] == "native-root"
+    assert result.stderr == "native CLI diagnostic\n"
