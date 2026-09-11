@@ -540,7 +540,9 @@ def test_retained_corpus_evidence_refuses_before_another_reset(lane):
     assert retained.read_text() == "{}"
 
 
-def test_automatic_container_attestation_includes_corpus_control_plane(lane):
-    payload = lane.launch(attestation_path=None, automated=False, environ={})
+def test_automatic_container_attestation_includes_corpus_control_plane(lane, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setitem(executor.REGISTRY, LIVE, replace(executor.REGISTRY[LIVE], credential_seam=lambda pins: "TEST_MODEL_AUTH"))
+    payload = lane.launch(attestation_path=None, automated=False, environ={"TEST_MODEL_AUTH": "synthetic"})
     report_data = json.loads(Path(payload["report"]).read_text())
     assert report_data["corpus"]["api_origin"] == corpus_module.API_ORIGIN
