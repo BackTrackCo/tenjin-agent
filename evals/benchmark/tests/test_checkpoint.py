@@ -60,3 +60,22 @@ def test_saved_schedule_is_validated_without_mutating_it(tmp_path):
     with pytest.raises(cli.CliError, match="existing schedule differs"):
         cli.validate_schedule_identity(config, tmp_path)
     assert path.read_bytes() == before
+
+
+def test_resource_lock_does_not_split_one_target_across_aliases(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from evals.benchmark.tests import support
+    config = {"provider": "neon", "project_id": "project", "branch_id": "target", "parent_id": "source", "origin": "bench.example"}
+    paths = []
+    @contextmanager
+    def acquire(path):
+        paths.append(path)
+        yield
+    monkeypatch.setattr(lease, "acquire", acquire)
+    monkeypatch.setattr(cli, "_live_run", lambda *args, **kwargs: {})
+    first = support.synthetic_manifest(tmp_path / "a", corpus=config)
+    second = support.synthetic_manifest(tmp_path / "b", corpus={**config, "parent_id": "other-source", "origin": "alias.example"})
+    cli.live_run(tmp_path / "out-a", first.path)
+    cli.live_run(tmp_path / "out-b", second.path)
+    assert paths[1] == paths[3]
+    assert paths[0] != paths[2]

@@ -1456,6 +1456,10 @@ def producer_spawn(start_daemon) -> Callable[..., runner.Spawn]:
             if roots.phase != "producer":
                 return
             stop_daemon(roots, daemon[-1])
+            # Match the product ingress namespace; the stand-in predates it.
+            with sqlite3.connect(roots.data_dir / "loop.db") as connection:
+                connection.execute("UPDATE fires SET session = ? WHERE session = ?",
+                                   ("claude:" + launch.root_session_id, launch.root_session_id))
             if not fix:
                 (roots.repo / "answer.txt").write_text("41\n", encoding="utf-8")
             # The fake executor reuses request ids per session; a real harness mints unique ones.
@@ -1493,7 +1497,7 @@ def test_the_producer_runs_first_is_verified_and_its_capture_reaches_the_consume
     assert {receipt["component"] for receipt in record["auxiliary"]} == {"producer"}
     assert {receipt["phase"] for receipt in record["auxiliary"]} == {"producer"}
     assert sum(receipt["input_total"] + receipt["output_total"] for receipt in record["auxiliary"]) == produced["tokens"]["input_total"] + produced["tokens"]["output_total"]
-    assert record["delivery"]["phase_fires"] == {produced["native_root_id"]: 2}
+    assert record["delivery"]["phase_fires"] == {"claude:" + produced["native_root_id"]: 2}
     assert record["delivery"]["unmatched_fires"] == []
     assert produced["native_root_id"] != record["native_root_id"]
     # Producer roots beside the consumer's, on the shared data dir; the consumer's repository was fresh.
@@ -1695,3 +1699,16 @@ def write_ledger(roots: artifact.TrialRoots, rows: list[tuple[str, str, str, str
         db.commit()
     finally:
         db.close()
+
+
+def test_child_capture_uses_its_own_stop_boundary():
+    from dataclasses import replace
+    from evals.benchmark import producer, usage
+    record = usage.from_json({"adapter": "claude", "adapter_version": "1", "trial_id": "t",
+        "actor_key": ["claude", "root", "child"], "native_request_id": "child-request",
+        "input_total": 10, "uncached_input": None, "cache_read": None, "cache_write": None,
+        "output_total": 5, "reasoning_output_subset": None, "provider_total": None, "native_request_cost": None,
+        "completion_state": "complete", "source_hash": "sha256:fixture"})
+    root = replace(record, actor_key=("claude", "root", ""), native_request_id="root-request")
+    result = producer.receipts_of("t", [record, root], {"child-request": 200, "root-request": 200}, 300, {"": 300, "child": 100})
+    assert [(item.native_request_id, item.phase) for item in result] == [("child-request", "capture"), ("root-request", "producer")]
