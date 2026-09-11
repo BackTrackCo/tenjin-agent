@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 import io
 import json
 import os
@@ -9,7 +10,7 @@ from pathlib import Path
 import subprocess
 import zipfile
 
-from . import regress
+from . import regress, sha256_json
 
 
 def api(repository: str, route: str) -> bytes:
@@ -25,10 +26,13 @@ def latest_main(current: dict, repository: str, run_id: str, artifact_name: str,
     """
     run = json.loads(fetch(repository, f"actions/runs/{run_id}"))
     workflow = run["workflow_id"]
+    cutoff = run["created_at"]
     runs = json.loads(fetch(repository, f"actions/workflows/{workflow}/runs?branch=main&status=completed&per_page=100"))["workflow_runs"]
     for candidate in sorted(runs, key=lambda item: (item["created_at"], item["id"]), reverse=True):
         if (str(candidate["id"]) == str(run_id) or candidate["head_branch"] != "main"
-                or candidate["event"] == "pull_request" or candidate["status"] != "completed"
+                or candidate["event"] not in {"push", "schedule", "workflow_dispatch", "release"}
+                or candidate["workflow_id"] != workflow
+                or candidate["status"] != "completed" or candidate["updated_at"] > cutoff
                 or candidate["head_repository"]["full_name"] != repository):
             continue
         artifacts = json.loads(fetch(repository, f"actions/runs/{candidate['id']}/artifacts?per_page=100"))["artifacts"]
@@ -42,8 +46,12 @@ def latest_main(current: dict, repository: str, run_id: str, artifact_name: str,
             if len(reports) != 1 or reports[0].file_size > 10_000_000:
                 raise ValueError("main artifact must contain exactly one bounded report.json")
             baseline = json.loads(zipped.read(reports[0]))
-        if baseline.get("manifest_hash") == current.get("manifest_hash"):
-            return baseline, {"run_id": candidate["id"], "sha": candidate["head_sha"], "url": candidate["html_url"], "artifact_id": artifact["id"]}
+        protocol = current.get("regression_protocol_hash")
+        if protocol and baseline.get("regression_protocol_hash") == protocol:
+            age = datetime.fromisoformat(cutoff.replace("Z", "+00:00")) - datetime.fromisoformat(candidate["updated_at"].replace("Z", "+00:00"))
+            return baseline, {"run_id": candidate["id"], "workflow_id": workflow, "sha": candidate["head_sha"],
+                              "url": candidate["html_url"], "artifact_id": artifact["id"], "report_hash": sha256_json(baseline),
+                              "updated_at": candidate["updated_at"], "age_hours_at_run_start": age.total_seconds() / 3600}
     return None
 
 
@@ -51,7 +59,7 @@ def render(result: dict) -> str:
     lines = [f"## Main regression: {result['status']}", ""]
     if result.get("source"):
         source = result["source"]
-        lines += [f"Baseline: [main run {source['run_id']}]({source['url']}) at `{source['sha']}`.", ""]
+        lines += [f"Baseline: [main run {source['run_id']}]({source['url']}) at `{source['sha']}`; {source['age_hours_at_run_start']:.1f} hours old at run start.", ""]
     if result.get("reason"):
         lines += [result["reason"], ""]
     if result.get("rows"):
@@ -79,7 +87,8 @@ def main() -> int:
         if match:
             baseline, source = match
             result = {**regress.compare_reports(current, baseline), "source": source}
-    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
+        print(f"Main artifact lookup failed ({type(error).__name__}).")
         result = {"status": "unavailable", "reason": "Main artifact lookup failed; inspect Actions access and artifact availability. No comparison was made."}
     text = render(result)
     print(text)
