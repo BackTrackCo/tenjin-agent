@@ -260,6 +260,7 @@ def project(
             "harness": manifest_data.get("harness"),
             "harness_version": manifest_data["pins"].get("harness_version"),
             "effort": manifest_data["pins"].get("effort"),
+            "speed_mode_requested": manifest_data["pins"].get("speed_mode", "standard"),
             "planned_per_arm": len(manifest_data["tasks"]) * manifest_data["repeats"],
             "arm_ids": [arm["id"] for arm in manifest_data.get("arms", [])] or sorted(arms),
             "product_commits": sorted({record["isolation"].get("image", {}).get("cli", {}).get("commit") for record in accepted.values() if isinstance(record["isolation"].get("image"), dict) and record["isolation"]["image"].get("cli", {}).get("commit")}),
@@ -426,6 +427,7 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
     expected = "unknown" if not planned else str(planned * len(ids))
     lines = [run_status(report), f"Experiment: {report['benchmark_version']}",
              f"Model: {config.get('model') or 'unknown'} | Harness: {config.get('harness') or 'unknown'} {config.get('harness_version') or ''} | Effort: {config.get('effort') or 'unknown'}",
+             f"Speed mode requested: {config.get('speed_mode_requested', 'standard')} | Concurrency: {report.get('concurrency', 1)} | Provider acceptance: not independently observed",
              f"Ran: {recorded}/{expected} attempts | Tasks: {len(tasks)} | Arms: {len(ids)} | Repeats: {report.get('repeats', 'unknown')}",
              "Tasks: " + (", ".join(task["task_id"] for task in tasks) or "unknown"),
              "Control: " + str(report.get("baseline") or "none"), ""]
