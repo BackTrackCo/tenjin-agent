@@ -22,7 +22,7 @@ BAD_SHAPES = {
     "unknown harness": {**BASE, "harness": "other"},
     "duplicate task": {**BASE, "tasks": [TASK, TASK]},
     "duplicate arm": {**BASE, "arms": [ARM, ARM]},
-    "one arm": {**BASE, "arms": [ARM]},
+    "no arms": {**BASE, "arms": []},
     "missing fixture": {**BASE, "tasks": [{**TASK, "fixture": "nope"}]},
     "absolute fixture": {**BASE, "tasks": [{**TASK, "fixture": "/etc"}]},
     "escaping fixture": {**BASE, "tasks": [{**TASK, "fixture": "../fake/repo"}]},
