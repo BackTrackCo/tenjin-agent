@@ -239,7 +239,7 @@ def test_the_project_sweep_removes_containers_and_networks_by_the_compose_label(
 
 
 def test_stopping_an_attempt_that_started_nothing_is_not_an_error() -> None:
-    docker = fake_docker(ps=images.Completed(returncode=1, stdout="", stderr="no such object"))
+    docker = fake_docker(ps=images.Completed(returncode=0, stdout="", stderr=""))
     assert container.stop("bench2-trial-a", docker) is False
 
 
@@ -313,3 +313,39 @@ def test_sweep_continues_when_a_finishing_trial_removes_its_marker(tmp_path: Pat
     assert container.sweep(tmp_path)["projects"] == {"bench2-b": True}
     assert removed == ["bench2-b"]
     assert container.sweep(tmp_path)["projects"] == {}
+
+
+@pytest.mark.parametrize("failed", ("container-list", "container-remove", "network-list", "network-remove"))
+def test_cleanup_failure_keeps_the_project_marker_for_retry(tmp_path, failed):
+    container.record_project(tmp_path, "trial-a", "bench2-trial-a")
+    def docker(argv, timeout_s=0):
+        operation = ("container-list" if argv[0] == "ps" else "container-remove" if argv[0] == "rm"
+                     else "network-list" if argv[1] == "ls" else "network-remove")
+        if operation == failed:
+            return images.Completed(returncode=1, stdout="", stderr="Docker unavailable")
+        return images.Completed(returncode=0, stdout="object-1" if operation.endswith("list") else "", stderr="")
+    with pytest.raises(ImageError, match="cleanup_failed"):
+        container.sweep(tmp_path, docker)
+    assert (tmp_path / container.PROJECTS / "trial-a.project").is_file()
+    assert container.sweep(tmp_path, fake_docker())["projects"] == {"bench2-trial-a": False}
+    assert not (tmp_path / container.PROJECTS / "trial-a.project").exists()
+
+
+def test_stop_propagates_a_docker_failure_instead_of_claiming_the_project_is_gone():
+    def docker(argv, timeout_s=0):
+        raise ImageError("docker_unavailable", "offline")
+    with pytest.raises(ImageError, match="docker_unavailable"):
+        container.stop("bench2-trial-a", docker)
+
+
+def test_a_concurrent_removal_is_confirmed_before_accepting_a_failed_remove():
+    listed = False
+    def docker(argv, timeout_s=0):
+        nonlocal listed
+        if argv[0] == "ps" and not listed:
+            listed = True
+            return images.Completed(returncode=0, stdout="object-1", stderr="")
+        if argv[0] == "rm":
+            return images.Completed(returncode=1, stdout="", stderr="already removed")
+        return images.Completed(returncode=0, stdout="", stderr="")
+    assert container.stop("bench2-trial-a", docker) is True
