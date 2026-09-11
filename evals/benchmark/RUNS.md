@@ -39,8 +39,12 @@ same reading locally. A provisional measurement is explicitly labeled, never cal
 Repository writers are trusted with benchmark credentials. Random fork PRs receive no repository
 secrets and the credentialed lanes skip; these workflows use `pull_request`, never
 `pull_request_target`. Review before merging into main remains required, but does not gate a
-same-repository writer's pre-merge workflow execution. The canary/headline labels control which
+same-repository writer's pre-merge workflow execution. CI and benchmark labels control which
 experiments run, not secret access. Container isolation applies to trial execution; it does not
 isolate the repository-local Python parent from credentials. If writers later need to be
 untrusted, move the credentials into a protected environment with required reviewers and remove
 the repository-level copies; a label or a job condition alone is not that security boundary.
+
+Shelf experiments share one concurrency group because reset mutates their shared corpus.
+`queue: max` retains up to 100 pending runs instead of replacing the previous pending PR;
+additional arrivals beyond that GitHub limit are canceled. Queue time is additional to run time.
