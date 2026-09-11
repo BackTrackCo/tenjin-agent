@@ -245,9 +245,9 @@ def test_an_automated_run_whose_attestation_is_invalid_is_refused() -> None:
     assert caught.value.code == "open_network"
 
 
-def test_the_shipped_executor_registry_has_no_live_entry() -> None:
-    # The live Claude executor registers itself when its module is imported, and it is the only live spec there can be.
-    assert {spec.name for spec in executor.REGISTRY.values() if spec.live} <= {"claude_live"}
+def test_the_registry_contains_only_supported_live_adapters() -> None:
+    # Native adapters register lazily; collection order may have imported either.
+    assert {spec.name for spec in executor.REGISTRY.values() if spec.live} <= {"claude_live", "codex_live"}
 
 
 @pytest.mark.parametrize(
