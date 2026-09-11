@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from . import sha256_text, usage
-from .native_usage import ParentEdge, SessionUsage
+from .native_usage import Adapter, ParentEdge, SessionUsage
 
 VERSION = "0.154.0"
 MODEL = "gpt-5.6-sol"
@@ -213,3 +213,21 @@ def request_times(directory: Path, root: str) -> dict[str, int]:
 def provider_limit(directory: Path, root: str) -> bool:
     final = terminal(family(directory, root)[root][1])
     return final is not None and error_code(final.get("error")) in LIMITS
+
+
+def transcript_path(directory: Path, root: str) -> Path:
+    for path in sorted(directory.rglob("*.jsonl")):
+        if any(row.get("type") == "session_meta" and row.get("payload", {}).get("id") == root for row, _ in rows(path)):
+            return path
+    return directory / "missing-root.jsonl"
+
+
+EVIDENCE = Adapter(
+    parse=parse_session_dir,
+    root=lambda expected, stream: root_id(stream),
+    scan=scan,
+    transcript=transcript_path,
+    times=request_times,
+    limited=lambda directory, root, stream: provider_limit(directory, root),
+    errors=(CodexUsageError, usage.UsageError),
+)

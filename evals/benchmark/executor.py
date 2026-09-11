@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import REPO_ROOT, artifact
+from . import REPO_ROOT, artifact, claude_usage
+from .native_usage import Adapter
 
 NATIVE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 BEHAVIORS = ("pass", "wrong-answer", "hang")
@@ -168,6 +169,7 @@ class ExecutorSpec:
     credential_seam: CredentialSeam | None = None
     prepare: Prepare | None = None
     stop: Stop | None = None
+    evidence: Adapter = claude_usage.EVIDENCE
 
 
 class ExecutorError(ValueError):
