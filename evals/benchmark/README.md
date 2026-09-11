@@ -251,6 +251,34 @@ omitted usage. The live Codex launch/activation integration is a separate contai
 across arms. Readouts state the request rather than claiming provider acceptance. Claude remains
 standard for subscription-only runs because its fast mode requires separate usage credits.
 
+## Subscription container execution
+
+The live adapters share Harbor/Docker Compose locally and in CI. Codex pins CLI 0.154.0,
+`gpt-5.6-sol`, explicit reasoning effort and ChatGPT login. Supply a private 0600 auth-only
+file through `CODEX_BENCH_AUTH_FILE`, outside the run directory. API-key authentication is
+refused. The generated profile mounts only that file, not the operator's Codex home.
+One Codex trial runs at a time because refresh writes share the managed credential.
+
+Subscription login does not itself disable a provider account's credit fallback. Before a
+live run, verify that purchased-credit/extra-usage fallback is unavailable or disabled. Never
+buy credits, enable extra usage, redeem resets or switch to API billing to finish a run.
+Codex fast mode may use included allowance faster. Claude fast mode is always disabled here
+because it requires separate credits. Provider exhaustion saves the partial report, stops new
+trial admission and produces UNAVAILABLE, not a product pass or a usable main baseline.
+
+The pinned Codex build uses legacy Landlock inside default-privilege Docker containers;
+protected workspace metadata directories are also mounted read-only. Image-owned protected
+names under `/tmp` keep the native policy representable. The native default Bubblewrap path
+cannot create its namespace under this container policy. No extra Docker privileges are used.
+Native JSON stdout and diagnostic stderr are retained separately for strict reconciliation.
+
+The coordinator fills free workers with independent trials while admitting only one trial
+that provisions the shared shelf. A cleanup failure stops further admission. Run-directory
+leases protect local writers; CI owns the shared shelf through its workflow concurrency group.
+A retained corpus run currently refuses continuation before resetting: equivalent resets need
+an immutable database revision and per-epoch receipts, not a reused reset timestamp. Offline
+and corpus-free runs retain full-schedule identity and can resume completed trials.
+
 ## Completion readout
 
 The first table reports verified/planned attempts, failures/caps/invalid attempts, consumer
