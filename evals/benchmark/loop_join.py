@@ -38,8 +38,8 @@ SHELVES = ("team", "public", "keys", "local")
 # What each leg is as a request. Under a seeded config the reachable set is
 # known by construction: `team` is the seeded shelf, `public` is the public
 # marketplace host and covers the keys leg too, `local` reaches nothing, and
-# `other` is an origin outside that set, which is the only class the
-# public-request sentinel counts.
+# `other` is an origin outside that set. These are daemon ledger facts,
+# not observations of network traffic blocked by the execution backend.
 CLASSES = ("team", "public", "local", "other")
 CLASS_OF = {"team": "team", "public": "public", "keys": "public", "local": "local"}
 # A leg the product planned but never sent: public fallback off, or a stage
@@ -145,7 +145,7 @@ def count_shelves(legs: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def classify(legs: list[dict[str, Any]]) -> dict[str, int]:
-    """How many legs fell in each request class. `other` is what the sentinel reads."""
+    """How many sent legs fell in each request class."""
     counts = {name: 0 for name in CLASSES}
     for leg in _sent(legs):
         counts[class_of(leg)] += 1
