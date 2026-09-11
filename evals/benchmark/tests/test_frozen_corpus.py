@@ -101,3 +101,13 @@ def test_reporting_refuses_missing_or_changed_epoch_receipts(tmp_path):
     receipt.unlink()
     with pytest.raises(corpus.CorpusError, match="epoch_unconfirmed"):
         frozen_corpus.verify_records(tmp_path, accepted)
+
+
+def test_changed_runtime_refuses_before_provider_calls(tmp_path, monkeypatch):
+    api = Api()
+    frozen_corpus.reset(CONFIG, api, tmp_path, "manifest")
+    api.calls.clear()
+    monkeypatch.setattr(frozen_corpus, "RUNTIME_REVISION", "sha256:changed")
+    with pytest.raises(corpus.CorpusError, match="baseline_mismatch"):
+        frozen_corpus.reset(CONFIG, api, tmp_path, "manifest")
+    assert api.calls == []

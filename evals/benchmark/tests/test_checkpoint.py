@@ -79,3 +79,57 @@ def test_resource_lock_does_not_split_one_target_across_aliases(tmp_path, monkey
     cli.live_run(tmp_path / "out-b", second.path)
     assert paths[1] == paths[3]
     assert paths[0] != paths[2]
+
+
+@pytest.mark.parametrize("degree", [1, 3])
+def test_admission_deadline_finishes_active_work_and_preserves_pending(tmp_path, monkeypatch, degree):
+    from evals.benchmark.tests import support
+    import threading
+    config = support.synthetic_manifest(tmp_path, arms=("off", "off2"), repeats=3, concurrency=degree)
+    trials = schedule.expand(config)
+    expired = threading.Event()
+    calls = []
+    def attempt(config, trial, *args):
+        calls.append(trial.trial_id)
+        expired.set()
+        return runner.TrialResult(trial.trial_id, "pass", False, tmp_path / (trial.trial_id + ".json"))
+    monkeypatch.setattr(runner, "attempt", attempt)
+    runtime = runner.Runtime(clock=lambda: 2 if expired.is_set() else 0, admit_until=1)
+    results = runner.run(config, trials, tmp_path / "out", schedule.schedule_hash(trials), runtime)
+    assert 1 <= len(results) <= degree
+    assert len(results) == len(calls) < len(trials)
+    assert [r.trial_id for r in results] == [t.trial_id for t in trials if t.trial_id in calls]
+
+
+def test_chunk_loop_stops_at_admission_deadline(tmp_path, monkeypatch):
+    from evals.benchmark.tests import support
+    config = support.synthetic_manifest(tmp_path)
+    now = [0]
+    calls = []
+    def chunk(*args, **kwargs):
+        calls.append(kwargs)
+        now[0] = 6
+        return {"trials": 1}
+    monkeypatch.setattr(cli, "_live_run", chunk)
+    result = cli.live_run(tmp_path / "out", config.path, max_new_trials=1, until_complete=True,
+                          admission_seconds=5, runtime=runner.Runtime(clock=lambda: now[0]))
+    assert len(calls) == 1
+    assert calls[0]["runtime"].admit_until == 5
+    assert result["deadline_reached"] is True
+
+
+def test_chunk_loop_continues_until_complete(tmp_path, monkeypatch):
+    from evals.benchmark.tests import support
+    config = support.synthetic_manifest(tmp_path)
+    remaining = iter([{"trials": 1}, {"complete": True}])
+    monkeypatch.setattr(cli, "_live_run", lambda *a, **kw: next(remaining))
+    assert cli.live_run(tmp_path / "out", config.path, max_new_trials=1, until_complete=True)["complete"]
+
+
+def test_cli_dry_run_does_not_forward_loop_options(tmp_path, monkeypatch):
+    def dry(*args, **kwargs):
+        assert "until_complete" not in kwargs
+        assert "admission_seconds" not in kwargs
+        return {"dry_run": True}
+    monkeypatch.setattr(cli, "_live_run", dry)
+    assert cli.live_run(tmp_path, cli.FAKE_MANIFEST, dry_run=True, until_complete=False, admission_seconds=None)["dry_run"]
