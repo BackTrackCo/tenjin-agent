@@ -500,29 +500,31 @@ def remove_project(project: str, docker: Docker | None = None) -> bool:
     label = f"label={COMPOSE_PROJECT_LABEL}={project}"
     removed = False
     for token in _listed(docker, "container", label):
-        docker(["rm", "--force", token])
+        result = docker(["rm", "--force", token])
+        if result.returncode != 0 and token in _listed(docker, "container", label):
+            raise ImageError("cleanup_failed", f"could not remove container in project {project}")
         removed = True
     for token in _listed(docker, "network", label):
-        docker(["network", "rm", token])
+        result = docker(["network", "rm", token])
+        if result.returncode != 0 and token in _listed(docker, "network", label):
+            raise ImageError("cleanup_failed", f"could not remove network in project {project}")
         removed = True
     return removed
 
 
 def _listed(docker: Docker, kind: str, label: str) -> list[str]:
     argv = ["ps", "--all", "--quiet", "--filter", label] if kind == "container" else ["network", "ls", "--quiet", "--filter", label]
-    try:
-        completed = docker(argv)
-    except ImageError:
-        return []
-    return completed.stdout.split() if completed.returncode == 0 else []
+    completed = docker(argv)
+    if completed.returncode != 0:
+        raise ImageError("cleanup_failed", f"could not list {kind} objects for cleanup")
+    return completed.stdout.split()
 
 
 def stop(name: str, docker: Docker | None = None) -> bool:
     """Stop and remove one attempt's compose project by container name. True when it was there to stop."""
-    try:
-        return remove_project(compose_project(name), docker)
-    except ImageError:
-        return False
+    # An unavailable Docker daemon is not evidence that the project is gone.
+    # Propagate failures so callers keep the marker for a later cleanup retry.
+    return remove_project(compose_project(name), docker)
 
 
 def check_mount(run_dir: Path, image: str, docker: Docker | None = None) -> None:
