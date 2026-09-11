@@ -105,6 +105,10 @@ export function createHookServer(d: ServerDeps): HookServer {
           idle_ms: now - d.lastRequestAt(),
           data_dir: d.dataDir,
           rss: process.memoryUsage().rss,
+          // The route table THIS PROCESS holds, not the one its version
+          // implies: a build that gained a harness left the running daemon
+          // 404ing every fire of it (tenjin-agent#342).
+          harnesses: Object.keys(d.deps.adapters).sort(),
         }),
       );
       return;

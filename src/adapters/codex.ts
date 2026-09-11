@@ -185,8 +185,16 @@ export const registrar: Registrar = {
       { event: 'Stop', hooks: command },
     ];
   },
-  activation:
-    'Codex runs a hook entry only once it is trusted: open Codex, run /hooks, and enable the tenjin entries.',
+  /**
+   * Codex reads hooks once, at session start. `install` now trusts the entries
+   * it writes through Codex's own supported path (lib/codex-trust.ts), so the
+   * `/hooks` walkthrough this used to carry is gone; what is left is the one
+   * fact no installer can change, which is that the session already open still
+   * has the hook set it started with (tenjin-agent#343).
+   */
+  activation() {
+    return ['Start a new Codex session: hooks are read at session start.'];
+  },
 };
 
 export const codexAdapter: HarnessAdapter = { id: 'codex', decode, encode, registrar };

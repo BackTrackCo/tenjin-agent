@@ -438,8 +438,15 @@ describe('registrar', () => {
     expect(text).not.toContain('http');
   });
 
-  it('names the trust step the operator has to take', () => {
-    expect(registrar.activation).toContain('/hooks');
+  it('leaves one note, not a walkthrough: install trusts what it writes', () => {
+    // The six-step `/hooks` flow is gone. `install` completes trust through
+    // Codex's own supported path, so the only remaining fact is the one no
+    // installer can change: the session already open predates these hooks
+    // (tenjin-agent#343).
+    const steps = registrar.activation?.('/tmp/codex-home/hooks.json') ?? [];
+    expect(steps).toHaveLength(1);
+    expect(steps[0]).toMatch(/new Codex session/);
+    expect(steps.join(' ')).not.toContain('/hooks');
   });
 });
 
