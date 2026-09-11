@@ -51,6 +51,7 @@ from urllib.parse import urlsplit
 
 from . import artifact, sha256_json, tenjin_arm, toolchain, verifier
 from .discovery import SETUP_PATH
+from .schema import check, enum
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest, Provision, ProvisionRequest
 
 NAME = "claude_live"
@@ -86,10 +87,6 @@ SETTINGS_KEYS = frozenset({"env", "hooks", "permissions", "overlay"})
 # where the seeded hooks live. Hashed with the rest of the settings template.
 OVERLAY_FILE_LIMIT = 16_000
 OVERLAY_PLACEHOLDERS = frozenset({"data_dir"})
-# Inside `permissions`: rules that narrow, plus a default mode that has to
-# agree with the pinned one. `additionalDirectories` is absent on purpose,
-# because it widens the filesystem past the trial's own roots.
-PERMISSION_KEYS = frozenset({"allow", "ask", "deny", "defaultMode"})
 HOOK_EVENTS = frozenset(
     {
         "PreToolUse",
@@ -105,12 +102,9 @@ HOOK_EVENTS = frozenset(
         "PostToolUseFailure",
     }
 )
-HOOK_ENTRY_KEYS = frozenset({"matcher", "hooks"})
-COMMAND_HOOK_KEYS = frozenset({"type", "command", "timeout"})
 # An `http` hook is a POST from the CLI to a URL. The only URL an arm may name
 # is a loopback one: the product's own daemon on this machine, which the
 # provisioning seam starts per trial. Any other host is refused.
-HTTP_HOOK_KEYS = frozenset({"type", "url", "headers", "timeout"})
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
 HTTP_HEADER_LIMIT = 512
 # The values a provisioned arm's settings template resolves to, per trial.
@@ -133,6 +127,7 @@ MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 # cannot smuggle one even though no shell ever sees it.
 ALLOWED_TOOL = re.compile(r"^(?P<name>[A-Za-z]{1,32})(\((?P<pattern>[A-Za-z0-9 ./*:_-]{1,64})\))?\Z")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+HEADER_NAME = r"^[A-Za-z][A-Za-z0-9-]{0,63}\Z"
 # The CLI's own validator for `CLAUDE_CODE_PROJECT_DIR_NAME`.
 PROJECT_DIR_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 PROJECT_DIR_VAR = "CLAUDE_CODE_PROJECT_DIR_NAME"
@@ -149,6 +144,103 @@ SETTINGS_FILE = "settings.json"
 # arm's fragment is the only settings channel a record can name, so a fixture
 # carrying that directory is refused rather than silently obeyed.
 PROJECT_SETTINGS_DIR = ".claude"
+
+
+def argv_value(limit: int) -> dict[str, Any]:
+    """A string this module turns into an argument.
+
+    Non-blank, bounded, no NUL, and not readable as a flag of its own: there is
+    no escaping in an argv list, so a value that could be read as a flag is
+    refused here rather than quoted.
+    """
+    return {"type": "string", "maxLength": limit, "pattern": r"\S", "not": {"anyOf": [{"pattern": "\x00"}, {"pattern": "^-"}]}}
+
+
+# Values the manifest supplies. Membership in a declared set is an `enum`, and
+# a shape the argv depends on is a `pattern`, so both are the schema's.
+PROMPT = argv_value(PROMPT_LIMIT)
+MODEL_ID = {"type": "string", "maxLength": 64, "pattern": MODEL.pattern}
+PERMISSION_MODE = enum(PERMISSION_MODES)
+CREDENTIAL_ENV = enum(CREDENTIAL_ENVS)
+BUDGET = {"type": "number", "exclusiveMinimum": 0, "maximum": BUDGET_CEILING_USD}
+TOOL_LIST = {"type": "array", "minItems": 1, "items": enum(TOOLS)}
+# `Name` or `Name(pattern)`. The pattern alphabet excludes the shell
+# metacharacters outright, and the whole-string match is what makes a blank, a
+# NUL byte or a leading `-` a non-rule.
+RULE = {"type": "string", "maxLength": 96, "pattern": ALLOWED_TOOL.pattern}
+RULE_LIST = {"type": "array", "minItems": 1, "items": RULE}
+
+# Strings the CLI reads that this module never turns into an argument, so the
+# flag guard does not apply to them.
+HOOK_COMMAND = {"type": "string", "maxLength": HOOK_COMMAND_LIMIT, "pattern": r"\S", "not": {"pattern": "\x00"}}
+HOOK_URL = {"type": "string", "maxLength": HOOK_COMMAND_LIMIT, "pattern": r"\S", "not": {"pattern": "\x00"}}
+# An empty matcher is the CLI's own "every tool", so this is a shape check
+# rather than the non-blank rule an argument gets.
+MATCHER = {"type": "string", "maxLength": 128, "not": {"pattern": "\x00"}}
+HEADER_VALUE = {"type": "string", "maxLength": HTTP_HEADER_LIMIT, "not": {"pattern": "[\x00\n]"}}
+TIMEOUT = {"type": "integer", "minimum": 1}
+
+HOOK_HANDLER = {
+    "type": "object",
+    "required": ["type"],
+    "oneOf": [
+        {
+            "additionalProperties": False,
+            "required": ["command"],
+            "properties": {"type": {"const": "command"}, "command": HOOK_COMMAND, "timeout": TIMEOUT},
+        },
+        {
+            "additionalProperties": False,
+            "required": ["url"],
+            "properties": {
+                "type": {"const": "http"},
+                # Which URL is `_hook_url`: a loopback one, or the daemon
+                # placeholder while the fragment is still a template.
+                "url": HOOK_URL,
+                "headers": {"type": "object", "propertyNames": {"pattern": HEADER_NAME}, "additionalProperties": HEADER_VALUE},
+                "timeout": TIMEOUT,
+            },
+        },
+    ],
+}
+HOOKS_SCHEMA = {
+    "type": "object",
+    "propertyNames": enum(HOOK_EVENTS),
+    "additionalProperties": {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["hooks"],
+            "properties": {"matcher": MATCHER, "hooks": {"type": "array", "minItems": 1, "items": HOOK_HANDLER}},
+        },
+    },
+}
+ENV_SCHEMA = {"type": "object", "propertyNames": {"pattern": ENV_NAME.pattern}, "additionalProperties": argv_value(512)}
+# Rules that narrow, plus a default mode that has to agree with the pinned
+# one. `additionalDirectories` is absent on purpose, because it widens the
+# filesystem past the trial's own roots.
+PERMISSIONS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "allow": {"type": "array", "items": RULE},
+        "ask": {"type": "array", "items": RULE},
+        "deny": {"type": "array", "items": {"type": "string"}},
+        "defaultMode": {"type": "string"},
+    },
+}
+# Paths are relative and inside the repository, transcribed from
+# `Path(value).is_absolute()` and `".." in Path(value).parts`.
+OVERLAY_SCHEMA = {
+    "type": "object",
+    "minProperties": 1,
+    "propertyNames": {"type": "string", "pattern": r"^[^/]", "not": {"pattern": r"(^|/)\.\.(/|$)"}},
+    "additionalProperties": {"type": "string", "minLength": 1, "maxLength": OVERLAY_FILE_LIMIT},
+}
+# Which keys an arm may name. Each key's own shape belongs to the function
+# below that also owns its cross-field rules.
+SETTINGS_SCHEMA = {"type": "object", "additionalProperties": False, "properties": {key: True for key in sorted(SETTINGS_KEYS)}}
 
 
 class LiveExecutorError(ExecutorError):
@@ -218,127 +310,86 @@ def settings_path(roots: artifact.TrialRoots) -> Path:
     return roots.base / SETTINGS_FILE
 
 
-def _string(where: str, value: Any, limit: int) -> str:
-    if not isinstance(value, str) or isinstance(value, bool):
-        raise LiveExecutorError(f"{where} must be a plain string")
-    if not value.strip():
-        raise LiveExecutorError(f"{where} is empty")
-    if len(value) > limit:
-        raise LiveExecutorError(f"{where} is longer than {limit} characters")
-    if "\x00" in value:
-        raise LiveExecutorError(f"{where} contains a NUL byte")
-    # A value the CLI could read as a flag of its own is refused here rather
-    # than escaped, because there is no escaping in an argv list.
-    if value.startswith("-"):
-        raise LiveExecutorError(f"{where} starts with '-' and would be read as a flag")
-    return value
-
-
 def prompt_of(task: Mapping[str, Any]) -> str:
     if "prompt" not in task:
         raise LiveExecutorError(f"task {task.get('id')!r} has no prompt, which a live executor needs")
-    return _string("task prompt", task["prompt"], PROMPT_LIMIT)
+    check("task prompt", task["prompt"], PROMPT, LiveExecutorError)
+    return str(task["prompt"])
 
 
 def model_of(pins: Mapping[str, Any]) -> str:
-    model = _string("pins.model", pins.get("model"), 64)
-    if not MODEL.match(model):
-        raise LiveExecutorError(f"pins.model {model!r} is not a model id")
-    return model
+    check("pins.model", pins.get("model"), MODEL_ID, LiveExecutorError)
+    return str(pins["model"])
 
 
 def permission_mode_of(pins: Mapping[str, Any]) -> str:
-    mode = _string("pins.permission_mode", pins.get("permission_mode"), 32)
-    if mode not in PERMISSION_MODES:
-        raise LiveExecutorError(f"pins.permission_mode {mode!r} is not one of {', '.join(sorted(PERMISSION_MODES))}")
-    return mode
+    check("pins.permission_mode", pins.get("permission_mode"), PERMISSION_MODE, LiveExecutorError)
+    return str(pins["permission_mode"])
 
 
 def budget_of(pins: Mapping[str, Any]) -> str:
-    value = pins.get("max_budget_usd")
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise LiveExecutorError("pins.max_budget_usd must be a number")
-    if not 0 < value <= BUDGET_CEILING_USD:
-        raise LiveExecutorError(f"pins.max_budget_usd must be above 0 and at most {BUDGET_CEILING_USD}")
+    check("pins.max_budget_usd", pins.get("max_budget_usd"), BUDGET, LiveExecutorError)
     # Formatted by this module, so no manifest string reaches the argument.
-    return f"{float(value):.2f}"
+    return f"{float(pins['max_budget_usd']):.2f}"
 
 
 def tools_of(pins: Mapping[str, Any]) -> list[str]:
-    values = pins.get("tools")
-    if not isinstance(values, list) or not values:
-        raise LiveExecutorError("pins.tools must be a non-empty list")
-    tools = []
-    for value in values:
-        tool = _string("a tool name", value, 32)
-        if tool not in TOOLS:
-            raise LiveExecutorError(f"tool {tool!r} is not in the declared tool set")
-        tools.append(tool)
-    return tools
+    check("pins.tools", pins.get("tools"), TOOL_LIST, LiveExecutorError)
+    return [str(tool) for tool in pins["tools"]]
 
 
-def _rule(where: str, value: Any, tools: list[str]) -> str:
-    rule = _string(where, value, 96)
-    match = ALLOWED_TOOL.match(rule)
-    if match is None or match.group("name") not in TOOLS:
-        raise LiveExecutorError(f"{where} {rule!r} is not a declared tool with an optional pattern")
-    # A rule for a tool the trial does not pass to `--tools` is a widening
-    # that the argv would not otherwise allow.
-    if match.group("name") not in tools:
-        raise LiveExecutorError(f"{where} {rule!r} names a tool outside pins.tools")
-    return rule
+def _rules(where: str, values: Any, tools: list[str]) -> list[str]:
+    """Rule shapes from the schema; which tool a rule may name from the pins.
+
+    A rule for a tool the trial does not pass to `--tools` is a widening that
+    the argv would not otherwise allow, and no schema can see the pins from
+    inside the fragment being checked.
+    """
+    check(where, values, RULE_LIST, LiveExecutorError)
+    for rule in values:
+        name = ALLOWED_TOOL.match(rule).group("name")  # type: ignore[union-attr]
+        if name not in tools:
+            raise LiveExecutorError(f"{where} {rule!r} names a tool outside pins.tools")
+    return [str(rule) for rule in values]
 
 
 def allowed_tools_of(pins: Mapping[str, Any]) -> list[str]:
-    values = pins.get("allowed_tools")
-    if not isinstance(values, list) or not values:
-        raise LiveExecutorError("pins.allowed_tools must be a non-empty list")
-    tools = tools_of(pins)
-    return [_rule("an allowed tool rule", value, tools) for value in values]
+    return _rules("pins.allowed_tools", pins.get("allowed_tools"), tools_of(pins))
 
 
 def credential_env_of(pins: Mapping[str, Any]) -> str:
     name = pins.get("credential_env", DEFAULT_CREDENTIAL_ENV)
-    # Shape before membership: `name in CREDENTIAL_ENVS` raises TypeError on an
-    # unhashable value, which would escape this module's refusal contract.
-    name = _string("pins.credential_env", name, 64)
-    if name not in CREDENTIAL_ENVS:
-        raise LiveExecutorError(f"pins.credential_env must be one of {', '.join(sorted(CREDENTIAL_ENVS))}")
-    return name
+    check("pins.credential_env", name, CREDENTIAL_ENV, LiveExecutorError)
+    return str(name)
 
 
 def _settings_env(env: Any) -> None:
-    """An arm may add its own variables. It may not reach the trial's own."""
-    if not isinstance(env, dict):
-        raise LiveExecutorError("arm settings.env must be an object")
-    for name, value in env.items():
-        if not isinstance(name, str) or not ENV_NAME.match(name):
-            raise LiveExecutorError(f"arm settings.env name {name!r} is not an environment variable name")
+    """An arm may add its own variables. It may not reach the trial's own.
+
+    Which names those are is this package's own list, built at import from the
+    trial's roots and seams, so it is a rule about the runtime rather than
+    about the document and stays here.
+    """
+    check("arm settings.env", env, ENV_SCHEMA, LiveExecutorError)
+    for name in env:
         if name in RESERVED_ENV_NAMES or name.startswith(RESERVED_ENV_PREFIXES):
             raise LiveExecutorError(f"arm settings.env may not set {name}: the trial's own roots and seams own it")
-        _string(f"arm settings.env {name}", value, 512)
 
 
 def _settings_permissions(permissions: Any, pins: Mapping[str, Any]) -> None:
-    """Permission rules may narrow the flag pins. They may not widen them."""
-    if not isinstance(permissions, dict):
-        raise LiveExecutorError("arm settings.permissions must be an object")
-    unknown = sorted(key for key in permissions if key not in PERMISSION_KEYS)
-    if unknown:
-        raise LiveExecutorError(f"arm settings.permissions has unknown keys: {', '.join(unknown)}")
-    mode = permissions.get("defaultMode")
-    if mode is not None and mode != permission_mode_of(pins):
+    """Permission rules may narrow the flag pins. They may not widen them.
+
+    Both widenings compare the fragment with the pins, which is outside the
+    fragment a schema is checking: a default mode that disagrees with the
+    pinned one, and a rule for a tool `--tools` never passes.
+    """
+    check("arm settings.permissions", permissions, PERMISSIONS_SCHEMA, LiveExecutorError)
+    if permissions.get("defaultMode") not in (None, permission_mode_of(pins)):
         raise LiveExecutorError("arm settings.permissions.defaultMode disagrees with pins.permission_mode")
     tools = tools_of(pins)
     for key in ("allow", "ask"):
-        rules = permissions.get(key, [])
-        if not isinstance(rules, list):
-            raise LiveExecutorError(f"arm settings.permissions.{key} must be a list")
-        for rule in rules:
-            _rule(f"arm settings.permissions.{key} rule", rule, tools)
-    deny = permissions.get("deny", [])
-    if not isinstance(deny, list) or not all(isinstance(rule, str) for rule in deny):
-        raise LiveExecutorError("arm settings.permissions.deny must be a list of strings")
+        if permissions.get(key):
+            _rules(f"arm settings.permissions.{key}", permissions[key], tools)
 
 
 def _hook_url(where: str, url: Any, templated: bool) -> None:
@@ -354,43 +405,10 @@ def _hook_url(where: str, url: Any, templated: bool) -> None:
         raise LiveExecutorError(f"{where} url must be http on 127.0.0.1 or localhost with a port")
 
 
-def _hook_handler(where: str, handler: Any, templated: bool) -> None:
-    if not isinstance(handler, dict):
-        raise LiveExecutorError(f"{where} entries must be objects")
-    kind = handler.get("type")
-    if kind == "command":
-        if set(handler) - COMMAND_HOOK_KEYS:
-            raise LiveExecutorError(f"{where} command entries hold {', '.join(sorted(COMMAND_HOOK_KEYS))} only")
-        text = handler.get("command")
-        if not isinstance(text, str) or not text.strip() or len(text) > HOOK_COMMAND_LIMIT or "\x00" in text:
-            raise LiveExecutorError(f"{where} command must be a plain string")
-    elif kind == "http":
-        if set(handler) - HTTP_HOOK_KEYS:
-            raise LiveExecutorError(f"{where} http entries hold {', '.join(sorted(HTTP_HOOK_KEYS))} only")
-        _hook_url(where, handler.get("url"), templated)
-        headers = handler.get("headers", {})
-        if not isinstance(headers, dict):
-            raise LiveExecutorError(f"{where} headers must be an object")
-        for name, value in headers.items():
-            if not isinstance(name, str) or not re.match(r"^[A-Za-z][A-Za-z0-9-]{0,63}\Z", name):
-                raise LiveExecutorError(f"{where} header name {name!r} is not a header name")
-            if not isinstance(value, str) or "\x00" in value or "\n" in value or len(value) > HTTP_HEADER_LIMIT:
-                raise LiveExecutorError(f"{where} header {name} must be a plain string")
-    else:
-        raise LiveExecutorError(f"{where} entries must be {{type: command, ...}} or {{type: http, url: ...}}")
-    timeout = handler.get("timeout", 1)
-    if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0:
-        raise LiveExecutorError(f"{where} timeout must be a positive integer")
-
-
 def _settings_overlay(overlay: Any) -> None:
-    if not isinstance(overlay, dict) or not overlay:
-        raise LiveExecutorError("arm settings.overlay must be a non-empty object of relative path to file text")
+    """Paths and file text from the schema; which placeholder a file may name from this package."""
+    check("arm settings.overlay", overlay, OVERLAY_SCHEMA, LiveExecutorError)
     for path, text in overlay.items():
-        if not isinstance(path, str) or not path or Path(path).is_absolute() or ".." in Path(path).parts or path.startswith("/"):
-            raise LiveExecutorError(f"arm settings.overlay path {path!r} must be relative and inside the repository")
-        if not isinstance(text, str) or not text or len(text) > OVERLAY_FILE_LIMIT:
-            raise LiveExecutorError(f"arm settings.overlay {path!r} must be a non-empty string under {OVERLAY_FILE_LIMIT} characters")
         foreign = placeholders_of(text) - OVERLAY_PLACEHOLDERS
         if foreign:
             raise LiveExecutorError(f"arm settings.overlay {path!r} names {', '.join(sorted(foreign))}; an overlay may name {{data_dir}} only")
@@ -436,30 +454,17 @@ def apply_overlay(roots: artifact.TrialRoots, overlay: Mapping[str, str]) -> lis
 def _settings_hooks(hooks: Any, templated: bool = True) -> None:
     """Shape only. A hook command is operator-authored code, and it says so.
 
-    `templated` is whether the daemon placeholders may still stand in for
-    values: true for the arm's declared fragment, false for the resolved one
-    the child reads.
+    The schema states which events, which keys and which value shapes; what
+    stays here is the one rule about the world rather than the document, which
+    is where an `http` hook may POST. `templated` is whether the daemon
+    placeholders may still stand in for values: true for the arm's declared
+    fragment, false for the resolved one the child reads.
     """
-    if not isinstance(hooks, dict):
-        raise LiveExecutorError("arm settings.hooks must be an object")
+    check("arm settings.hooks", hooks, HOOKS_SCHEMA, LiveExecutorError)
     for event, entries in hooks.items():
-        if event not in HOOK_EVENTS:
-            raise LiveExecutorError(f"arm settings.hooks names an unknown event {event!r}")
-        if not isinstance(entries, list):
-            raise LiveExecutorError(f"arm settings.hooks.{event} must be a list")
-        for entry in entries:
-            if not isinstance(entry, dict) or set(entry) - HOOK_ENTRY_KEYS:
-                raise LiveExecutorError(f"arm settings.hooks.{event} entries hold {', '.join(sorted(HOOK_ENTRY_KEYS))} only")
-            matcher = entry.get("matcher", "")
-            # An empty matcher is the CLI's own "every tool", so this is a
-            # shape check rather than the non-empty rule an argument gets.
-            if not isinstance(matcher, str) or len(matcher) > 128 or "\x00" in matcher:
-                raise LiveExecutorError(f"arm settings.hooks.{event} matcher must be a plain string")
-            handlers = entry.get("hooks")
-            if not isinstance(handlers, list) or not handlers:
-                raise LiveExecutorError(f"arm settings.hooks.{event} needs a non-empty hooks list")
-            for handler in handlers:
-                _hook_handler(f"arm settings.hooks.{event}", handler, templated)
+        for handler in (handler for entry in entries for handler in entry["hooks"]):
+            if handler["type"] == "http":
+                _hook_url(f"arm settings.hooks.{event}", handler["url"], templated)
 
 
 def placeholders_of(value: Any) -> set[str]:
@@ -489,9 +494,7 @@ def settings_of(arm: Mapping[str, Any], pins: Mapping[str, Any]) -> dict[str, An
     settings = arm.get("settings")
     if not isinstance(settings, dict):
         raise LiveExecutorError(f"arm {arm.get('id')!r} has no settings object, which a live executor needs")
-    unknown = sorted(key for key in settings if key not in SETTINGS_KEYS)
-    if unknown:
-        raise LiveExecutorError(f"arm settings has unknown top-level keys: {', '.join(unknown)}")
+    check("arm settings", settings, SETTINGS_SCHEMA, LiveExecutorError)
     if "env" in settings:
         _settings_env(settings["env"])
     if "permissions" in settings:

@@ -1,8 +1,9 @@
 # Benchmark (Bench-1)
 
 Trustworthy measurement infrastructure for the developer token-savings benchmark. Eval-only.
-Every shipped command is standard-library Python; the offline suite is the one part that
-installs anything, and it installs pytest and inline-snapshot. This package measures trials: for one task and
+Every command here runs from a venv built from `requirements-test.txt`, which is the package's
+whole hash-pinned closure: pytest and inline-snapshot for the suite, scipy for the reducer's
+interval, jsonschema for the validators. This package measures trials: for one task and
 one quality bar, how many model tokens did the complete agent run consume with and without a
 knowledge system. It does not itself produce a savings number, and nothing here touches the
 product runtime.
@@ -38,6 +39,7 @@ the suite builds.
 | Module                      | What it owns                                                      | Held by                               |
 | --------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
 | `manifest.py`               | frozen manifest: load, validate, hash, fixture hash over the tree | `test_manifest.py`                    |
+| `schema.py`                 | JSON Schema checking under each module's own refusal              | `test_manifest.py`                    |
 | `schedule.py`               | balanced seeded schedule, `trial_id`, schedule SHA-256            | `test_schedule.py`                    |
 | `runner.py`                 | execution: fresh roots, settlement, caps, resume, concurrency     | `test_runner.py`, `test_fake_run.py`  |
 | `executor.py`               | executor registry (code-owned argv, `shell=False`), fake agents   | `test_artifact.py`                    |
@@ -68,14 +70,14 @@ task, mounted only into the verifier's copy).
 The offline suite is a step of the required `CI` workflow, on every pull request with no path
 filter: the interpreter floor, the pinned test dependencies installed into a throwaway venv,
 `selftest.py` run from that venv, then the fake manifest driven to a published report, the hidden
-verifiers re-run over it, and `summary` printed to the run page. It runs on the runner's own
-`python3`, floor 3.11, and a runner below the floor fails rather than skips, because a skipped
-gate reads like a passing one. The one install is `requirements-test.txt`: pytest and
-inline-snapshot at exact versions with every transitive dependency pinned by hash, so the required
-check never depends on what the index served that minute. Every wheel in it is `py3-none-any`, so
-one hash per package covers every runner. Nothing else in the package needs either, so the
-`fake-run`, `verify` and `summary` steps beside it still call a bare interpreter. The whole chain takes about
-20 seconds, and each step's own timeout bounds it.
+verifiers re-run over it, and `summary` printed to the run page. The venv is built from the
+runner's own `python3`, floor 3.12, and a runner below the floor fails rather than skips, because a
+skipped gate reads like a passing one. The one install is `requirements-test.txt`, which is the
+package's whole closure and not just the suite's: exact versions with every transitive dependency
+pinned by hash, so the required check never depends on what the index served that minute. scipy,
+numpy and rpds-py ship platform wheels, so those carry one hash per wheel across CPython 3.12 to
+3.14 on manylinux x86_64 and macOS arm64. Every step from the install onwards runs that venv's
+interpreter, `fake-run`, `verify` and `summary` included. Each step's own timeout bounds it.
 
 The live plumbing smoke is `benchmark-live.yml`, on a pull request touching `evals/benchmark/**`
 and on dispatch: a pinned Claude Code, `live-run --plumbing --ci-live` over the smoke manifest
@@ -88,32 +90,38 @@ run is meant to be seen; on a fork the secret is absent and the live steps skip.
 ## Where a dependency may go
 
 One line decides it, and it is not line count: reach for a maintained library
-before hand-rolling, but only on the side of the package that installs one.
+before hand-rolling. `requirements-test.txt` is the package's whole closure,
+suite and shipped commands alike, so there is no stdlib-only side to keep.
 
-- **The suite may depend on anything.** `requirements-test.txt` is hash-pinned and
-  the required job installs it into a throwaway venv, so pytest and
-  inline-snapshot are there and the next useful test library may join them. Keep
-  every wheel `py3-none-any`: a platform wheel turns one hash per package into one
-  hash per runner and per Python minor.
-- **Every shipped command stays standard-library.** The required job runs
-  `fake-run`, `verify` and `summary` on the runner's own `python3`, never the
-  venv, and an operator runs them on a bare interpreter too. So `manifest.py`,
-  `claude_live.py` and `reduce.py` may not import a third party, and that, not the shape of any
-  individual rule, is why the manifest and arm validators are written out rather
-  than handed to `jsonschema` or `pydantic`, and why `paired_bootstrap` is 29 lines
-  rather than a `scipy.stats.bootstrap` call. Moving that line is a decision about
-  what this package is, not a refactor.
+- **A published number's method should be a citable one.** `paired_bootstrap`
+  is `scipy.stats.bootstrap` at `method="percentile"`, seeded from the
+  manifest, because "the percentile bootstrap as scipy implements it" is a
+  method line a reader can check and a hand-rolled rank rule is not. What the
+  package still owns is the sampling unit: one ratio per task, so a task with
+  more repeats cannot speak louder.
+- **A schema keyword should be a schema keyword.** The shape half of
+  `manifest.py` and `claude_live.py` is one JSON Schema document each, checked
+  by `jsonschema` through
+  `schema.check`, which raises the caller's own error class so a refusal stays
+  the refusal the contract names. What stays written out is every rule a schema
+  cannot state: the ones that cost money, that let an arm widen its own pins,
+  or that read something outside the document (a fixture on disk, the hash of
+  its bytes, a constant this package computes at import).
+- **A new pin is a real cost.** Each one is exact, hashed, and installed by a
+  required check on every pull request, and a platform wheel is one hash per
+  runner and per Python minor. Add one when it replaces logic this package
+  should not be maintaining, not to save a few lines.
 
 ## The fake command
 
 ```bash
-python3 -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
-python3 -m evals.benchmark.cli verify --run /tmp/bench1-fake
-python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake
-# The suite alone needs pytest and inline-snapshot. Once, into a venv of your choosing:
-#   python3 -m pip install --require-hashes --only-binary=:all: \
-#     -r evals/benchmark/requirements-test.txt
-python3 evals/benchmark/selftest.py
+# Everything below runs from a venv built from this file. Once, into one of your choosing:
+#   python3 -m venv .venv && .venv/bin/python -m pip install --require-hashes \
+#     --only-binary=:all: -r evals/benchmark/requirements-test.txt
+python -m evals.benchmark.cli fake-run --out /tmp/bench1-fake
+python -m evals.benchmark.cli verify --run /tmp/bench1-fake
+python -m evals.benchmark.cli summary --run /tmp/bench1-fake
+python evals/benchmark/selftest.py
 pytest -c evals/benchmark/pytest.ini    # the same cases, with pytest's own selection flags
 pytest -c evals/benchmark/pytest.ini --inline-snapshot=fix   # rewrite the goldens in place
 ```
