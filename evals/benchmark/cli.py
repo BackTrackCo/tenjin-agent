@@ -210,14 +210,18 @@ def _execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], o
     digest = schedule.write(out, manifest, full_schedule)
     try:
         results = runner.run(manifest, trials, out, digest, runtime)
-    except BaseException:
+    except BaseException as execution_error:
         # Retain a readable partial result even if the active trial failed.
         # A reporter defect must not replace the execution traceback.
         try:
-            do_report(out)
+            partial = do_report(out)
             refuse_secret_in_report(out, tuple(getattr(runtime.source, "secrets", ()) or ()))
         except Exception as reporting_error:
             print(f"partial benchmark report unavailable: {type(reporting_error).__name__}", file=sys.stderr)
+        else:
+            if isinstance(execution_error, executor.ProvisionError) and execution_error.code == "provider_unavailable":
+                return {"unavailable": True, "reason": "provider:rate_limit", "trials": len(partial.get("trials", [])),
+                        "report": str(out / "report.json"), "schedule_hash": digest}
         raise
     report = do_report(out)
     refuse_secret_in_report(out, tuple(getattr(runtime.source, "secrets", ()) or ()))
