@@ -967,3 +967,38 @@ def test_subscription_exhaustion_is_unavailable_not_a_task_failure(one_trial, ma
     reduction = reduce_module.reduce({record["trial_id"]: record}, [])
     assert reduction["arms"][record["arm_id"]]["outcomes"]["fail"] == 0
     assert reduction["arms"][record["arm_id"]]["tokens_per_verified_resolution"] is None
+
+
+def test_waiting_shelf_trials_do_not_occupy_independent_worker_slots(tmp_path, run_dir, monkeypatch) -> None:
+    manifest = support.synthetic_manifest(tmp_path, arms=("on", "on2", "off"), concurrency=2)
+    trials = schedule.expand(manifest)
+    # Put two exclusive trials ahead of an independent one. Admission must
+    # bypass the second exclusive trial to fill the other worker.
+    trials = sorted(trials, key=lambda trial: trial.arm_id == "off")
+    monkeypatch.setattr(runner, "seeds_shelf", lambda manifest, trial: trial.arm_id != "off")
+    independent_started = threading.Event()
+    def attempt(manifest, trial, out, digest, runtime):
+        if trial == trials[0]:
+            assert independent_started.wait(5), "an idle worker was trapped behind the shelf gate"
+        elif trial.arm_id == "off":
+            independent_started.set()
+        return runner.TrialResult(trial.trial_id, "pass", False, out / trial.trial_id)
+    monkeypatch.setattr(runner, "attempt", attempt)
+    result = runner.run_concurrently(manifest, trials, run_dir, "sha256:schedule", runner.Runtime(), 2)
+    assert len(result) == 3
+
+
+def test_launch_refusal_still_cleans_a_successfully_prepared_trial(tmp_path, run_dir, register_executor, make_runtime) -> None:
+    stopped = []
+    def launch(request):
+        raise ValueError("launch refused")
+    name = register_executor("launch_refusal_cleanup", ExecutorSpec(
+        name="launch_refusal_cleanup", harness="claude", launch=launch,
+        prepare=lambda request: executor.Provision(),
+        stop=lambda roots, provision: stopped.append(roots.trial_id) or {}))
+    manifest = support.synthetic_manifest(tmp_path, executor_name=name, arms=("on",))
+    manifest.data["arms"][0]["provision"] = "tenjin"
+    trial = schedule.expand(manifest)[0]
+    with pytest.raises(ValueError, match="launch refused"):
+        runner.run_trial(manifest, trial, run_dir, "sha256:schedule", make_runtime())
+    assert stopped == [trial.trial_id]
