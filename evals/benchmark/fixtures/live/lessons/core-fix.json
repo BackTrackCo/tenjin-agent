@@ -1,0 +1,13 @@
+{
+  "id": "core-fix",
+  "title": "clampPct: clamp to the 0 to 100 range",
+  "commands": [
+    {
+      "command": "pnpm --filter core exec vitest run tests/core.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "10b92520a2b4b048",
+      "check": true,
+      "reason": "run inside the package, vitest's FAIL header names tests/core.test.mjs and the case"
+    }
+  ]
+}

@@ -30,6 +30,9 @@ const read = (path: string): string => readFileSync(`${EVALS_DIR}${path}`, 'utf8
  */
 function walkFixtures(dir = EVALS_DIR, prefix = ''): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    // The benchmark's frozen task fixtures commit their vitest tree; a vendored
+    // dependency's README is not a payload anything seeds.
+    if (entry.isDirectory() && entry.name === 'node_modules') return [];
     if (entry.isDirectory()) return walkFixtures(`${dir}${entry.name}/`, `${prefix}${entry.name}/`);
     return /\.(json|md)$/.test(entry.name) ? [`${prefix}${entry.name}`] : [];
   });
@@ -109,9 +112,11 @@ const RETIRED_VERBS: ReadonlyArray<{ verb: string; replacement: string }> = [
   { verb: 'lookup', replacement: 'search' },
 ];
 
-// `scripts/eval-lookup-recall.ts` is a script in the tenjin repo, not a CLI verb,
-// and it kept its name through the search rename.
-const RETIRED_EXEMPT = /eval-lookup-recall/g;
+// Names that contain a retired verb without being one. `scripts/eval-lookup-recall.ts`
+// is a script in the tenjin repo, not a CLI verb, and it kept its name through the
+// search rename. `lookups` is the Tenjin database table, and a benchmark readout that
+// explains where a search's text is stored has to be able to name its column.
+const RETIRED_EXEMPT = /eval-lookup-recall|lookups\.\w+|`lookups`/g;
 
 interface Registry {
   /** Top-level verbs: `search`, `publish`, `wallet`. */

@@ -1,0 +1,27 @@
+{
+  "id": "vitest-path-alias",
+  "title": "Vitest does not read tsconfig paths: the `@/` alias needs `resolve.alias` in the Vitest config",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/alias.test.ts",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "a suite-level import failure: no errno, and vitest's frame line ends the block, so the failure arm derives no sig_v1"
+    },
+    {
+      "command": "pnpm exec vitest run tests/alias.test.ts",
+      "kind": "sig_v1_test",
+      "key": null,
+      "check": true,
+      "reason": "no test ran, so vitest prints no FAIL header with a test name and the test-identity lane derives nothing"
+    },
+    {
+      "command": "pnpm test -- tests/alias.test.ts",
+      "kind": "sig_v1",
+      "key": null,
+      "check": true,
+      "reason": "the package script forwards the file and hits the same alias error"
+    }
+  ]
+}

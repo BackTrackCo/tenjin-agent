@@ -1,0 +1,20 @@
+{
+  "id": "esm-cjs-interop",
+  "title": "A CommonJS module's `exports.default` is not an ESM default import",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/money.test.mjs",
+      "kind": "sig_v1",
+      "key": "76a2c4c19adbbe0d",
+      "check": true,
+      "reason": "the spawned CLI's TypeError travels into the assertion message, with the cli.mjs frame beneath it"
+    },
+    {
+      "command": "node src/cli.mjs 1500000",
+      "kind": "sig_v1",
+      "key": "76a2c4c19adbbe0d",
+      "check": true,
+      "reason": "run directly, the same line and the same frame key the same"
+    }
+  ]
+}
