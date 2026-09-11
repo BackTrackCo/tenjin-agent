@@ -223,8 +223,8 @@ def expand_selection(data: dict[str, Any], path: Path) -> dict[str, Any]:
     """
     if "source" not in data:
         return data
-    if set(data) - {"schema", "source", "tasks", "arms"} or data.get("schema") != "bench1.selection.v1":
-        raise ManifestError("selection must name schema, source and optional task/arm ids")
+    if set(data) - {"schema", "source", "tasks", "arms", "pins", "harness", "executor"} or data.get("schema") != "bench1.selection.v1":
+        raise ManifestError("selection must name schema, source and optional task/arm ids or harness pins")
     source = data["source"]
     if not isinstance(source, str) or not re.fullmatch(r"[A-Za-z0-9_-]+\.json", source):
         raise ManifestError("selection source must be a sibling JSON filename")
@@ -249,6 +249,15 @@ def expand_selection(data: dict[str, Any], path: Path) -> dict[str, Any]:
         if set(ids) - {item["id"] for item in available}:
             raise ManifestError(f"selection {key} contains unknown ids")
         selected[key] = [item for item in available if item["id"] in ids]
+    # A harness selection keeps the same corpus and treatment definitions.
+    # Complete pins replace the source pins so unsupported caps cannot leak
+    # between CLIs. Normal validation and executor launch gates run afterward.
+    for key in ("pins", "harness"):
+        if key in data:
+            selected[key] = data[key]
+    if "executor" in data:
+        for arm in selected["arms"]:
+            arm["executor"] = data["executor"]
     return selected
 
 
