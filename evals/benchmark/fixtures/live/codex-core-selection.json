@@ -1,0 +1,23 @@
+{
+  "schema": "bench1.selection.v1",
+  "source": "local-arms-manifest.json",
+  "harness": "codex",
+  "executor": "codex_live",
+  "pins": {
+    "model": "gpt-5.6-sol",
+    "harness_version": "0.154.0",
+    "effort": "low",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "workspace-write",
+    "wall_clock_s": 1500,
+    "turn_budget": null,
+    "max_budget_usd": null,
+    "credential_env": "CODEX_BENCH_AUTH_FILE",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "billing_mode": "subscription",
+    "speed_mode": "fast",
+    "concurrency": 1,
+    "agent_package": "@openai/codex"
+  }
+}

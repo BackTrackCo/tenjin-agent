@@ -1,8 +1,7 @@
 name: benchmark headline
 
-# Full core experiment: 150 consumer attempts plus 30 natural-arm producers.
-# Results remain provisional until metric hardening. GitHub-hosted jobs stop
-# at six hours even with a longer timeout; resumable shards are still needed.
+# Full Bench-2: core and recursive experiments, each with its own readout.
+# The shared shelf workflow serializes corpus resets across both jobs.
 on:
   schedule:
     # 03:41 UTC on Sunday. Off the hour and off the canary's slot, and the two
@@ -39,9 +38,28 @@ jobs:
       manifest: evals/benchmark/fixtures/live/local-arms-manifest.json
       lane: benchmark-headline
       check_name: benchmark headline (core suite)
-      timeout_minutes: 720
+      timeout_minutes: 360
       budget_note: >-
         Bench-2 full core experiment: ten tasks across every configured arm,
         three repeats, plus the natural arm's producer phase. The overview
         reports actual coverage and verified time/token costs for every arm.
         These are provisional measurements until metric hardening is complete.
+
+  recursive:
+    needs: headline
+    if: always() && needs.headline.result == 'success'
+    uses: ./.github/workflows/benchmark-shelf.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    secrets: inherit
+    with:
+      manifest: evals/benchmark/fixtures/live/recursive-manifest.json
+      lane: benchmark-recursive
+      check_name: benchmark headline (recursive suite)
+      timeout_minutes: 360
+      budget_note: >-
+        Bench-2 recursive experiment: actual root and descendant task work,
+        reported separately from the core suite. Native actor coverage,
+        verified completion, time and tokens are shown in the overview.

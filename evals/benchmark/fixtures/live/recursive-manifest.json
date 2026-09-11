@@ -27,7 +27,10 @@
       "Write(./**)",
       "Glob(./**)",
       "Grep(./**)"
-    ]
+    ],
+    "billing_mode": "subscription",
+    "speed_mode": "standard",
+    "concurrency": 1
   },
   "price_sheet_version": "real-2026-09",
   "phases": {

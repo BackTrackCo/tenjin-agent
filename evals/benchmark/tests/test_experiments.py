@@ -124,7 +124,7 @@ def test_the_real_manifest_is_the_phase_one_local_pilot() -> None:
     hooks = hooks_smoke()
     assert off == hooks.arms[0]
     assert natural["settings"] == hooks.arms[1]["settings"]
-    assert manifest.pins == hooks.pins
+    assert manifest.pins == {**hooks.pins, "concurrency": 1}
     assert manifest.pins["max_budget_usd"] == 0.75
     assert_bench2_tasks(manifest)
 
@@ -179,7 +179,7 @@ def test_the_canary_manifest_is_two_same_task_transfers_off_against_the_shelf_ar
     # The caps are the only pins the canary and the core suite differ on: the
     # core suite raised them for the two high-discovery tasks. The canary
     # retains its existing caps; records from these protocols never pool.
-    assert manifest.pins == {**core.pins, "wall_clock_s": 600, "turn_budget": 40, "max_budget_usd": 0.75}
+    assert manifest.pins == {**core.pins, "wall_clock_s": 600, "turn_budget": 40, "max_budget_usd": 0.75, "concurrency": 1}
 
 
 def test_the_high_discovery_manifest_is_the_two_task_pilot_with_the_caps_raised() -> None:
@@ -199,7 +199,7 @@ def test_the_high_discovery_manifest_is_the_two_task_pilot_with_the_caps_raised(
     # it is the baseline arm that does the extra work, so a ceiling sized
     # for 7.5 requests would censor the quantity these tasks exist to move.
     raised = {"wall_clock_s": 1500, "turn_budget": 80, "max_budget_usd": 2.50}
-    assert manifest.pins == {**canary.pins, **raised}
+    assert manifest.pins == {**canary.pins, **raised, "concurrency": 3}
     for key, value in raised.items():
         assert value > canary.pins[key]
     for task in manifest.tasks:
@@ -312,3 +312,15 @@ def test_diagnostic_selections_inherit_core_without_copied_definitions() -> None
         assert selected.arms == [arm for arm in core.arms if arm["id"] in ("off", "tenjin_seeded")]
         assert selected.pins == core.pins
         assert selected.data["repeats"] == core.data["repeats"]
+
+
+@pytest.mark.parametrize("path", experiments.CODEX_MANIFESTS, ids=lambda path: path.name)
+def test_codex_selections_keep_the_same_corpus_and_treatments(path):
+    selection = json.loads(path.read_text())
+    original = manifest_module.load(path.parent / selection["source"])
+    matched = manifest_module.load(path)
+    assert matched.tasks == original.tasks
+    assert [{**arm, "executor": "codex_live"} for arm in original.arms] == matched.arms
+    assert matched.pins["model"] == "gpt-5.6-sol"
+    assert matched.pins["billing_mode"] == "subscription"
+    assert matched.pins["speed_mode"] == "fast"
