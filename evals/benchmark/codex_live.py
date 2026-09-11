@@ -136,7 +136,13 @@ def launch(request: LaunchRequest) -> Launch:
         if target_instructions.exists():
             raise ExecutorError("fixture carries conflicting harness instruction files")
         target_instructions.write_text(instructions.read_text())
-    settings = claude_live.settings_of(request.arm, pins)
+    # Shared presets carry Claude read-command grants. Validate their shape,
+    # then interpret only those additive grants under Codex's own workspace policy.
+    settings = claude_live.settings_of(request.arm, {**pins, "permission_mode": "dontAsk"})
+    permissions = settings.get("permissions", {})
+    supported_reads = {"Bash(tenjin search:*)", "Bash(tenjin read:*)", "Bash(tenjin inspect:*)"}
+    if set(permissions) - {"allow"} or set(permissions.get("allow", [])) - supported_reads:
+        raise ExecutorError("Codex cannot translate custom Claude permission rules")
     if settings.get("env"):
         raise ExecutorError("Codex benchmark arms may not override the generated process environment")
     overlay = claude_live.overlay_of(request.arm, roots)
