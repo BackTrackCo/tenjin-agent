@@ -1,22 +1,7 @@
 name: benchmark canary
 
-# The nightly lane. Four tasks, `off` against the shelf arm, three attempts an
-# arm: 24 attempts, about 5.69 USD a run at the 0.237 USD an attempt the pilot
-# measured. It is a health check on the whole chain against a real corpus, not
-# the evidence run; the headline lane is that.
-#
-# Nightly, on demand, and on a pull request that could move the number.
-#
-# The pull-request lane is a REGRESSION WARNING, never a gate. It is not a
-# required check, and the shelf lane it calls reports `neutral` rather than
-# `failure` for any run that produced no quotable number, so a PR is blocked by
-# nothing here. Only a run that produced no report at all goes red, which is
-# the case where the change under review broke the harness itself.
-#
-# The path filter is what keeps it honest. A live lane spends real money and
-# about 17 minutes, so a docs-only or skills-only pull request must not pay for
-# it; a change to the product, the benchmark package or this lane's own
-# plumbing is exactly what can move a measurement, so those do.
+# Seeded product-health experiment: four tasks, two arms, three repeats.
+# A report may be incomplete or invalid even when its workflow succeeds.
 on:
   schedule:
     # 07:17 UTC. Off the hour, because every workflow scheduled on one competes

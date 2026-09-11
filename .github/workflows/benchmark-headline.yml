@@ -1,22 +1,8 @@
 name: benchmark headline
 
-# The evidence lane: the plan's Tier 3 full core suite over every task and every
-# arm, weekly and on a published release. Its number is the one meant to be
-# quoted, so it runs where a reader can check it: the headline, its intervals
-# and a link to the method go in a check run's `output.summary`, which answers
-# an anonymous reader over the public API, and the per-attempt records ride
-# along as a workflow artifact.
-#
-# Schedule, release, manual dispatch, and one label. Never on push.
-#
-# The `benchmark: headline` label is how a branch runs this lane before the
-# workflow is registered on the default branch: `schedule` and
-# `workflow_dispatch` are keyed on registration against the DEFAULT branch, so
-# neither reaches a ref whose workflow file has not merged, while a
-# `pull_request` trigger reads the workflow from the PR's own ref. A label
-# rather than a path filter because this lane spends about 32 USD and takes
-# roughly two hours: it runs when somebody asks for it, never because a file
-# changed. Remove the label to stop it running on the next push.
+# Full core experiment: 150 consumer attempts plus 30 natural-arm producers.
+# Results remain provisional until metric hardening. GitHub-hosted jobs stop
+# at six hours even with a longer timeout; resumable shards are still needed.
 on:
   schedule:
     # 03:41 UTC on Sunday. Off the hour and off the canary's slot, and the two
