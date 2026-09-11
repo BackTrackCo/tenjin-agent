@@ -223,6 +223,19 @@ the operator's own unrelated sessions, and on 2026-09-07 exactly that command, r
 spawned child, killed every other Claude Code session on the machine. The ban is executable
 rather than remembered: a test parses every module here and fails on a name-matching kill.
 
+## Native usage adapters
+
+Claude and Codex normalize native per-request receipts into the same session evidence contract.
+The Codex parser is pinned to CLI 0.154.0 and `gpt-5.6-sol`; it checks native session/parent IDs,
+model context and cumulative thread totals. Only `token_usage_record.usage` is additive. The
+exec total is a cross-check, never another request. Missing optional category presence remains
+unknown. These receipts are best-effort provider evidence; the CLI cannot prove a provider never
+omitted usage. The live Codex launch/activation integration is a separate container-layer concern.
+
+`pins.speed_mode` records the requested `standard` or `fast` service configuration, identically
+across arms. Readouts state the request rather than claiming provider acceptance. Claude remains
+standard for subscription-only runs because its fast mode requires separate usage credits.
+
 ## Completion readout
 
 The first table reports verified/planned attempts, failures/caps/invalid attempts, consumer

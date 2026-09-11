@@ -78,6 +78,7 @@ SCHEMA: dict[str, Any] = {
                 "model": PINNED,
                 "harness_version": PINNED,
                 "effort": PINNED,
+                "speed_mode": enum({"standard", "fast"}),
                 "image": PINNED,
                 "permission_mode": PINNED,
                 "dependency_lock_hash": HASH_TOKEN,
