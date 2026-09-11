@@ -206,7 +206,10 @@ class HttpApi:
         while pending:
             operation_id = pending[0]
             body = self._call("GET", f"/projects/{_quote(project_id)}/operations/{_quote(operation_id)}")
-            status = str((body.get("operation") or {}).get("status", ""))
+            operation = body.get("operation")
+            if not isinstance(operation, dict) or not isinstance(operation.get("status"), str) or not operation["status"]:
+                raise CorpusError("operation_unreadable", "the operation response carried no readable status")
+            status = operation["status"]
             if status in OPERATION_FAILED:
                 raise CorpusError("reset_failed", f"the reset operation ended {status}")
             if status in OPERATION_DONE:

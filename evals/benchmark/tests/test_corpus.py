@@ -414,3 +414,10 @@ def test_a_manifest_without_a_corpus_needs_no_provider(lane: Lane) -> None:
     )
     published = json.loads((lane.out / "report.json").read_text(encoding="utf-8"))
     assert (published["publishable"], published["automated"], published["corpus"]) == (True, True, None)
+
+
+@pytest.mark.parametrize("operation", [None, True, 1, "finished", ["finished"], {}, {"status": None}, {"status": 3}, {"status": ""}])
+def test_an_unreadable_operation_status_is_a_protocol_refusal(http_api, operation) -> None:
+    with pytest.raises(CorpusError) as caught:
+        http_api([{"operations": [{"id": "op-1"}]}, {"operation": operation}]).reset_to_parent(PROJECT, BRANCH, PARENT)
+    assert caught.value.code == "operation_unreadable"
