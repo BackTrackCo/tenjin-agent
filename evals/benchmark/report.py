@@ -16,6 +16,8 @@ value is even read.
 
 from __future__ import annotations
 
+import json
+
 import re
 from typing import Any
 
@@ -122,6 +124,8 @@ def guard(value: Any, trail: str = "report") -> None:
 
 
 def _guard_string(value: str, trail: str) -> None:
+    if trail == "report.corpus.source_lsn" and re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", value):
+        return
     if HASH.match(value):
         return
     if CREDENTIAL.search(value):
@@ -153,7 +157,13 @@ def corpus_stamp(accepted: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
         return None
     stamps = {canonical_json(record["isolation"].get("corpus")) for record in accepted.values()}
     if len(stamps) > 1:
-        raise ReportError("corpus_mixed", "report.corpus", "the accepted attempts measured more than one corpus")
+        epochs = [json.loads(stamp) for stamp in sorted(stamps)]
+        # Different reset times are comparable only with the same verified,
+        # schedule-bound immutable source revision. Legacy stamps still refuse.
+        if (any(not item or not item.get("baseline_id") or not item.get("source_lsn") or not item.get("epoch_id") for item in epochs)
+                or len({canonical_json({k: v for k, v in item.items() if k not in {"reset_at", "epoch_id"}}) for item in epochs}) != 1):
+            raise ReportError("corpus_mixed", "report.corpus", "the accepted attempts measured more than one corpus")
+        return {**epochs[0], "reset_epochs": [{"epoch_id": item["epoch_id"], "reset_at": item["reset_at"]} for item in sorted(epochs, key=lambda item: (item["reset_at"], item["epoch_id"]))]}
     return next(iter(accepted.values()))["isolation"].get("corpus")
 
 
@@ -619,6 +629,8 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
             f"corpus {corpus['provider']} project {corpus['project_id']} branch {corpus['branch_id']} "
             f"reset from {corpus['parent_id']} at {corpus['reset_at']}, serving {corpus['origin']}"
         )
+    if corpus and corpus.get("reset_epochs"):
+        lines.append(f"frozen source revision {corpus['source_lsn']}; {len(corpus['reset_epochs'])} actual reset epochs retained")
     lines += [
         "",
         f"{'arm'.ljust(width)} {'attempts':>8s} {'passes':>7s} {'pass rate':>9s} {'tokens':>10s} "

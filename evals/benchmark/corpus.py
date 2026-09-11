@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -191,13 +192,16 @@ class HttpApi:
             raise CorpusError("branch_unreadable", "the branch response carried no branch object")
         return branch
 
-    def reset_to_parent(self, project_id: str, branch_id: str, parent_id: str) -> None:
+    def reset_to_parent(self, project_id: str, branch_id: str, parent_id: str, source_lsn: str | None = None) -> Mapping[str, Any]:
+        if source_lsn is not None and not re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", source_lsn):
+            raise CorpusError("revision_invalid", "source LSN is malformed")
         payload = self._call(
             "POST",
             f"/projects/{_quote(project_id)}/branches/{_quote(branch_id)}/restore",
-            {"source_branch_id": parent_id},
+            {"source_branch_id": parent_id, **({} if source_lsn is None else {"source_lsn": source_lsn})},
         )
         self._settle(project_id, payload)
+        return payload
 
     def _settle(self, project_id: str, payload: Mapping[str, Any]) -> None:
         """Wait for the restore's operations, so a started reset is not a finished one."""
@@ -267,3 +271,24 @@ def _operation_ids(payload: Mapping[str, Any]) -> list[str]:
 
 def _quote(value: str) -> str:
     return urllib.parse.quote(value, safe="")
+
+
+@dataclass(frozen=True)
+class CliApi(HttpApi):
+    """The same provider contract through an existing authenticated Neon CLI."""
+    api_key: str = ""
+
+    def _call(self, method: str, path: str, body: Mapping[str, Any] | None = None) -> Mapping[str, Any]:
+        argv = ["neon", "api", path, "--method", method, "--output", "json"]
+        if body is not None:
+            argv.append("--data=" + json.dumps(body))
+        try:
+            ran = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_s, check=False)
+            if ran.returncode:
+                raise CorpusError("cli_refused", f"Neon CLI refused {method} {path}; no credential fallback used")
+            payload = json.loads(ran.stdout)
+        except (OSError, subprocess.TimeoutExpired, ValueError) as error:
+            raise CorpusError("cli_unavailable", f"Neon CLI did not return usable evidence: {type(error).__name__}") from error
+        if not isinstance(payload, dict):
+            raise CorpusError("cli_unreadable", "Neon CLI returned no API object")
+        return payload

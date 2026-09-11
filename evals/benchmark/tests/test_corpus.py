@@ -546,3 +546,27 @@ def test_automatic_container_attestation_includes_corpus_control_plane(lane, mon
     payload = lane.launch(attestation_path=None, automated=False, environ={"TEST_MODEL_AUTH": "synthetic"})
     report_data = json.loads(Path(payload["report"]).read_text())
     assert report_data["corpus"]["api_origin"] == corpus_module.API_ORIGIN
+
+
+def test_bounded_frozen_chunks_keep_full_schedule_and_resume_without_duplicate_work(lane):
+    class FrozenApi(FakeApi):
+        def branch(self, project_id, branch_id):
+            if branch_id == PARENT:
+                return {"id": PARENT, "created_at": "2026-09-01T00:00:00Z"}
+            return {**ROW, "parent_lsn": "0/ABC"}
+        def reset_to_parent(self, project_id, branch_id, parent_id, source_lsn=None):
+            self.calls.append(("restore", source_lsn))
+            return {"operations": [{"id": f"restore-{len(self.calls)}"}]}
+    api = FrozenApi()
+    first = lane.launch(api=api, freeze_corpus=True, max_new_trials=1)
+    frozen = json.loads((lane.out / "schedule.json").read_text())
+    assert first["trials"] == 1
+    assert len(frozen["trials"]) > 1
+    second = lane.launch(api=api, freeze_corpus=True, max_new_trials=100)
+    assert second["trials"] == len(frozen["trials"]) - 1
+    assert first["schedule_hash"] == second["schedule_hash"]
+    assert json.loads((lane.out / "schedule.json").read_text()) == frozen
+    assert api.calls == [("restore", None), ("restore", "0/ABC")]
+    assert len(json.loads((lane.out / "report.json").read_text())["corpus"]["reset_epochs"]) == 2
+    complete = lane.launch(api=api, freeze_corpus=True, max_new_trials=100)
+    assert complete["complete"] and len(api.calls) == 2

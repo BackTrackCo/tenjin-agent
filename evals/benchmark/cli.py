@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import contextlib
+import tempfile
 import json
 import os
 import re
@@ -46,6 +48,8 @@ from . import (
     container,
     corpus as corpus_module,
     executor,
+    frozen_corpus,
+    sha256_json,
     images,
     lease,
     manifest as manifest_module,
@@ -435,7 +439,12 @@ def live_run(out: Path, manifest_path: Path, attestation_path: Path | None = Non
     """Own the run before any corpus reset, nonce write, or trial setup."""
     if options.get("dry_run"):
         return _live_run(out, manifest_path, attestation_path, **options)
-    with lease.acquire(Path(os.path.abspath(out))):
+    config = manifest_module.load(manifest_path)
+    with contextlib.ExitStack() as locks:
+        locks.enter_context(lease.acquire(Path(os.path.abspath(out))))
+        if config.corpus is not None:
+            resource = Path(tempfile.gettempdir()) / "tenjin-benchmark-corpus" / sha256_json({key: config.corpus.facts[key] for key in ("provider", "project_id", "branch_id")})
+            locks.enter_context(lease.acquire(resource))
         return _live_run(out, manifest_path, attestation_path, **options)
 
 
@@ -456,6 +465,9 @@ def _live_run(
     tenjin_source: Path | None = None,
     corpus_api: corpus_module.Api | None = None,
     corpus_snapshot: Any = None,
+    freeze_corpus: bool = False,
+    max_new_trials: int | None = None,
+    neon_cli: bool = False,
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
     # The product compares data dir strings, so every root has to be spelled
@@ -464,6 +476,12 @@ def _live_run(
     manifest = manifest_module.load(manifest_path)
     spec = require_executor(manifest, live=True)
     trials = schedule.expand(manifest)
+    if max_new_trials is not None and (isinstance(max_new_trials, bool) or not isinstance(max_new_trials, int) or max_new_trials < 1):
+        raise CliError("--max-new-trials must be a positive integer")
+    if max_new_trials is not None and manifest.corpus is not None and not freeze_corpus:
+        raise CliError("bounded corpus chunks require --freeze-corpus from the first chunk")
+    if freeze_corpus and plumbing:
+        raise CliError("frozen corpus chunks require recorded corpus attestations, not plumbing mode")
     provisioned = provisioned_arms(manifest)
     if ci_live and provisioned:
         raise CliError(f"--ci-live refuses a manifest that provisions an arm ({', '.join(provisioned)}): the live lane is smoke-only")
@@ -529,8 +547,16 @@ def _live_run(
     # The run's nonce is its identity to the marketplace, and the refusal here
     # is the last one that costs nothing.
     validate_schedule_identity(manifest, out)
-    if manifest.corpus is not None and any((out / "records").glob("*.json")):
+    if manifest.corpus is not None and not freeze_corpus and any((out / "records").glob("*.json")):
         raise CliError("corpus resume requires a verified frozen database revision; retained evidence is unchanged, use a new run directory")
+    if manifest.corpus is not None and freeze_corpus:
+        frozen_corpus.load(out, manifest.corpus, manifest.hash)
+    if max_new_trials is not None:
+        accepted, _ = records.select(out / "records", manifest.hash, schedule.schedule_hash(trials))
+        trials = [trial for trial in trials if trial.trial_id not in accepted][:max_new_trials]
+        if not trials:
+            do_report(out)
+            return {"complete": True, "trials": 0, "report": str(out / "report.json")}
     nonce = run_nonce(out, manifest)
     arm_caller_user_agent(nonce, environ)
     egress = container.plan_egress(allowlist)
@@ -559,8 +585,9 @@ def _live_run(
     # reset that does not happen ends the run here rather than in the numbers.
     stamp = None
     if manifest.corpus is not None:
-        api = corpus_module.HttpApi.from_env(environ) if corpus_api is None else corpus_api
-        stamp = corpus_module.reset(manifest.corpus, api)
+        api = corpus_api or (corpus_module.CliApi() if neon_cli else corpus_module.HttpApi.from_env(environ))
+        stamp = (frozen_corpus.reset(manifest.corpus, api, out, manifest.hash) if freeze_corpus
+                 else corpus_module.reset(manifest.corpus, api))
         if attestation is not None:
             attestation = artifact.with_corpus(attestation, stamp)
     runtime = dataclasses.replace(
@@ -649,6 +676,7 @@ def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image:
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
+    frozen_corpus.verify_records(run_dir, accepted)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
     report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir))
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -669,6 +697,9 @@ def main(argv: list[str] | None = None) -> int:
     fake = commands.add_parser("fake-run", help="run the fake manifest end to end, offline")
     fake.add_argument("--out", required=True, type=Path)
     live = commands.add_parser("live-run", help="operator only: run a live manifest, or print what it would run")
+    live.add_argument("--freeze-corpus", action="store_true", help="pin and verify one source LSN across bounded continuations")
+    live.add_argument("--max-new-trials", type=int, help="stop cleanly after this many additional trials, retaining the full schedule")
+    live.add_argument("--neon-cli", action="store_true", help="use the existing Neon CLI login for corpus API calls")
     live.add_argument("--manifest", required=True, type=Path)
     live.add_argument("--out", required=True, type=Path)
     live.add_argument("--attestation", type=Path, help="isolation attestation JSON; required without --dry-run")
@@ -794,6 +825,9 @@ def main(argv: list[str] | None = None) -> int:
                 ci_live=args.ci_live,
                 automated=args.automated,
                 tenjin_source=args.tenjin_source,
+                freeze_corpus=args.freeze_corpus,
+                max_new_trials=args.max_new_trials,
+                neon_cli=args.neon_cli,
             )
         except REFUSALS as error:
             sys.stderr.write(f"{error}\n")
