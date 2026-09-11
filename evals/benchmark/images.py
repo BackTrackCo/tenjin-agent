@@ -258,7 +258,8 @@ def build_args(pins: Mapping[str, Any]) -> dict[str, str]:
     if package not in commands:
         raise ImageError("recipe_pins", "agent package must be a code-owned supported CLI")
     return {"BASE_IMAGE": BASE_IMAGE, "BASE_DIGEST": BASE_DIGEST, "PNPM_VERSION": PNPM_VERSION,
-            "AGENT_PACKAGE": package, "AGENT_VERSION": version, "AGENT_COMMAND": commands[package]}
+            "AGENT_PACKAGE": package, "AGENT_VERSION": version, "AGENT_COMMAND": commands[package],
+            "CA_CERTIFICATES_VERSION": "20250419~deb12u1"}
 
 
 # The staged contexts of this process, held so their directories outlive the

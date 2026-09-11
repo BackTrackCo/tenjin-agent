@@ -101,6 +101,10 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
     container.record_project(roots.run_dir, roots.trial_id, recipe.name)
     stream = roots.stream.open("w", encoding="utf-8")
     completed = Completed(returncode=1, stderr="", timed_out=False)
+    command = launch.argv
+    separated_out = separated_err = None
+    if launch.separate_streams:
+        command, separated_out, separated_err = container.split_streams(command, roots.output)
     try:
         with container.Container(recipe=recipe) as box:
             refused = container.daemon_error(roots.output)
@@ -109,11 +113,11 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
             agent_started = time.monotonic()
             try:
                 ran = box.exec(
-                    launch.argv,
+                    command,
                     cwd=recipe.workdir,
                     environment=container.forwarded(recipe, os.environ),
                     timeout_s=timeout_s,
-                    stream=stream,
+                    stream=None if launch.separate_streams else stream,
                 )
                 completed = Completed(returncode=ran.returncode, stderr=ran.stderr, timed_out=False, agent_time_s=time.monotonic() - agent_started)
             except RuntimeError as error:
@@ -127,6 +131,10 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
             if recipe.daemon:
                 box.exec([container.TRIAL_ENTRY, container.STOP_ARG], timeout_s=container.STOP_TIMEOUT_S)
     finally:
+        if separated_out is not None and separated_out.is_file():
+            stream.write(separated_out.read_text(encoding="utf-8"))
+        if separated_err is not None and separated_err.is_file():
+            completed = replace(completed, stderr=separated_err.read_text(encoding="utf-8"))
         stream.close()
         container.stop(recipe.name)
         container.forget_project(roots.run_dir, roots.trial_id)

@@ -179,7 +179,7 @@ def launch(request: LaunchRequest) -> Launch:
     )
     argv = ["codex", "exec", "--json", "--strict-config", "--ignore-rules", "--skip-git-repo-check",
             "--sandbox", "workspace-write", "-m", codex_usage.MODEL, "-C", str(roots.repo), claude_live.prompt_of(request.task)]
-    return Launch(argv, roots.repo, "pending-" + request.trial_id, recipe=recipe,
+    return Launch(argv, roots.repo, "pending-" + request.trial_id, recipe=recipe, separate_streams=True,
                   resolved_settings_hash="sha256:" + sha256_json({"config": config, "hooks": generated}),
                   package_manager=claude_live.package_manager(), container_plan={**recipe.to_json(), "agent": argv})
 

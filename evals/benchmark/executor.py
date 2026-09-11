@@ -121,6 +121,7 @@ class Launch:
     argv: list[str]
     cwd: Path
     root_session_id: str
+    separate_streams: bool = False
     # A spec that needs more than the roots' own allowlist (a live one needs
     # the credential seam) owns its child environment here. `None` keeps the
     # roots' default, which is what every fake spec uses.
