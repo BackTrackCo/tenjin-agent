@@ -579,3 +579,40 @@ def assert_vitest_fixture(fixture: Path, task: str, vendored: vendor.Vendor) -> 
     for artefact in RUN_ARTEFACTS:
         assert not (fixture / artefact).exists(), artefact
     assert [path for path in fixture.rglob("*") if path.is_symlink()] == []
+
+
+def generated_live_inputs(tmp: Path) -> tuple[Path, Path]:
+    """Minimal executor inputs, independent of shipped tasks, lessons, or run settings.
+
+    The two manifests exercise an unprovisioned launch and a template-backed
+    launch. Corpus and configuration tests validate the actual shipped inputs.
+    """
+    plain = synthetic_manifest(tmp / "plain", live=True, executor_name="claude_live", repeats=2)
+    plain.data["pins"]["credential_env"] = "CLAUDE_CODE_OAUTH_TOKEN"
+    plain.data["tasks"][0]["id"] = "answer-file"
+    for arm in plain.arms:
+        arm["settings"] = {} if arm["id"] == "off" else {"env": {"BENCH1_SMOKE_ARM": "on"}}
+        arm["settings_hash"] = "sha256:" + sha256_json(arm["settings"])
+    plain.path.write_text(json.dumps(plain.data), encoding="utf-8")
+
+    seeded = synthetic_manifest(tmp / "seeded", live=True, executor_name="claude_live", arms=("off", "tenjin_seeded"), repeats=2)
+    seeded.data["pins"].update(credential_env="CLAUDE_CODE_OAUTH_TOKEN", tools=["Bash", "Read", "Write"], allowed_tools=["Bash(pnpm:*)", "Read(./**)", "Write(./**)"])
+    task = seeded.tasks[0]
+    task.update(id="actor", family="synthetic")
+    fixture = seeded.fixture_path(task)
+    (fixture / "package.json").write_text(json.dumps({"packageManager": "pnpm@11.11.0"}), encoding="utf-8")
+    task["fixture_hash"] = manifest_module.fixture_hash(fixture)
+    http = {"type": "http", "url": "{daemon_url}", "headers": {"Authorization": "Bearer {daemon_token}"}, "timeout": 5}
+    shim = {"type": "command", "command": 'node "{data_dir}/hooks/tenjin-shim.mjs" --harness claude', "timeout": 5}
+    seeded.arms[0]["settings"] = {}
+    arm = seeded.arms[1]
+    arm["provision"] = "tenjin"
+    arm["settings"] = {"hooks": {
+        "SessionStart": [{"matcher": "startup|clear|compact", "hooks": [shim]}],
+        "SubagentStart": [{"hooks": [http]}],
+        "Stop": [{"hooks": [http]}],
+    }}
+    for entry in seeded.arms:
+        entry["settings_hash"] = "sha256:" + sha256_json(entry["settings"])
+    seeded.path.write_text(json.dumps(seeded.data), encoding="utf-8")
+    return plain.path, seeded.path

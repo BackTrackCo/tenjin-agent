@@ -22,12 +22,12 @@ python3 -m evals.benchmark.cli summary --run /tmp/bench1-fake     # read that re
 python3 evals/benchmark/selftest.py                              # the offline suite the required CI runs
 ```
 
-`live-run` is the only command that reaches a live executor, and publishing anything from one
-requires a disposable container or VM attestation. `--dry-run` prints the argv and the roots each
-trial would use and starts no process; `--plumbing --ci-live` is the non-publishable smoke the
-informational `benchmark-live.yml` lane runs; `--automated --attestation <file>` is a scheduled
-run, publishable on that attestation's strength, with every record still stamped automated. The
-benchmark README's live section is the whole rule.
+`live-run --manifest <path>` is the only command that reaches a live executor. Its
+infrastructure and generated-input tests do not require an experiment corpus. Bench-1 ships
+its actor/lesson/verifier corpus in the next layer and its smoke manifests/live workflow in
+the configuration layer above that. `--dry-run` validates and prints a supplied configuration
+without starting an agent. Regression takes an explicit `--baseline <path>`; run selection
+and baseline policy belong to configuration.
 
 What the README covers: the manifest, attempt, usage, verifier, and invalid-run contracts; the
 reduction and interval rules; the private versus publishable artifact boundary; and how

@@ -77,10 +77,6 @@ def check(path: Path) -> Check:
     return run
 
 
-def test_the_committed_baseline_loads() -> None:
-    data = regress.load_baseline(regress.BASELINE)
-    assert set(data["arms"]) == {"off", "on"}
-    assert "non-publishable" in data["source"]
 
 
 def test_a_clean_run_says_so_and_finds_nothing(check: Check) -> None:

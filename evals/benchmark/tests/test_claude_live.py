@@ -46,6 +46,9 @@ from evals.benchmark.claude_live import LiveExecutorError
 from evals.benchmark.tests import support
 from evals.benchmark.tests.support import ATTESTED
 
+SMOKE_MANIFEST: Path
+HOOKS_SMOKE_MANIFEST: Path
+
 # The smoke manifest's own provider origin, which `SPEC.required_origins`
 # makes the attestation state.
 LIVE_ATTESTED = dataclasses.replace(ATTESTED, network_allowlist=("api.anthropic.com",), credential_seam="CLAUDE_CODE_OAUTH_TOKEN")
@@ -70,7 +73,7 @@ AttestationFile = Callable[..., Path]
 
 
 def smoke() -> manifest_module.Manifest:
-    return manifest_module.load(cli.SMOKE_MANIFEST)
+    return manifest_module.load(SMOKE_MANIFEST)
 
 
 def arm_with(settings: dict[str, Any]) -> dict[str, Any]:
@@ -316,7 +319,7 @@ def test_a_prompt_holding_shell_text_stays_one_argument(edited: Edited) -> None:
 
 
 def hooks_smoke() -> manifest_module.Manifest:
-    return manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    return manifest_module.load(HOOKS_SMOKE_MANIFEST)
 
 
 @pytest.fixture
@@ -329,93 +332,10 @@ def seeded_request(request_for: Request) -> Callable[[executor.Provision | None]
     return build
 
 
-def test_the_hooks_smoke_manifest_is_the_installed_hook_set_as_a_template() -> None:
-    manifest = hooks_smoke()
-    assert len(schedule.expand(manifest)) == len(manifest.tasks) * len(manifest.arms) * manifest.data["repeats"]
-    arm = next(arm for arm in manifest.arms if arm["id"] == "tenjin_seeded")
-    assert arm["provision"] == "tenjin"
-    handlers = [handler for entries in arm["settings"]["hooks"].values() for entry in entries for handler in entry["hooks"]]
-    http = [handler for handler in handlers if handler["type"] == "http"]
-    # The shape rather than the tally: adding a hook to the installed set is
-    # not a regression, and every http one addressing the trial's own daemon is.
-    assert {handler["type"] for handler in handlers} == {"http", "command"}
-    assert http and len(http) < len(handlers)
-    assert {handler["url"] for handler in http} == {"{daemon_url}"}
-    assert claude_live.placeholders_of(arm["settings"]) == {"daemon_url", "daemon_token", "data_dir"}
-    assert "PostToolUseFailure" in arm["settings"]["hooks"]
-    # The seeded arm may read the shelf by hand; the pins, and so the off arm, are unchanged.
-    assert arm["settings"]["permissions"] == SEEDED_PERMISSIONS
-    assert "permissions" not in next(other for other in manifest.arms if other["id"] == "off")["settings"]
-    assert "SubagentStart" in arm["settings"]["hooks"]
-    # The declared hash names the template: a fragment that does not hash to it is refused.
-    claude_live.settings_of(arm, manifest.pins)
-    with pytest.raises(LiveExecutorError):
-        claude_live.settings_of({**arm, "settings_hash": "sha256:" + "0" * 64}, manifest.pins)
-    # The pin no longer encodes the lesson: every rule opens a whole binary
-    # rather than one command line, so the wrong commands fail inside the
-    # repository and not at the permission gate. The rule shape rather than
-    # the roster, because allowing another binary is not a regression.
-    bash = [rule for rule in manifest.pins["allowed_tools"] if rule.startswith("Bash(")]
-    assert bash and all(re.fullmatch(r"Bash\([a-z0-9_-]+:\*\)", rule) for rule in bash)
-    assert "WebFetch" not in manifest.pins["tools"]
-    for task in manifest.tasks:
-        claude_live.refuse_project_settings(manifest.fixture_path(task))
-        assert verifier.lookup(task["verifier"]).hidden_layer == verifier.HIDDEN / task["id"]
-        vendored = manifest.vendor_for(task)
-        assert vendored is not None
-        support.assert_vitest_fixture(manifest.fixture_path(task), task["id"], vendored)
-        # The prompt states the task and never the lesson.
-        for phrase in ("pnpm test --", "pnpm exec", "vitest", "wrong set"):
-            assert phrase not in task["prompt"]
 
 
-def test_the_keys_smoke_arms_seed_the_key_only_lesson_and_the_reporter_arm_overlays_the_config(request_for: Request, run_dir: Path) -> None:
-    manifest = manifest_module.load(cli.KEYS_SMOKE_MANIFEST)
-    assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_keyed_console", "tenjin_keyed_reporter"]
-    assert len(schedule.expand(manifest)) == len(manifest.tasks) * len(manifest.arms) * manifest.data["repeats"]
-    console, reporter = manifest.arms[1], manifest.arms[2]
-    assert (console["lessons"], reporter["lessons"]) == (["actor-fix-keyonly"], ["actor-fix-keyonly"])
-    assert "overlay" not in console["settings"]
-    overlay = reporter["settings"]["overlay"]
-    assert list(overlay) == ["vitest.config.mjs"]
-    assert "['{data_dir}/hooks/tenjin-vitest-reporter.mjs', { outputFile: '.vitest-report.json' }]" in overlay["vitest.config.mjs"]
-    assert support.PNPM_GUARD in overlay["vitest.config.mjs"]
-    for arm in (console, reporter):
-        claude_live.settings_of(arm, manifest.pins)
-        with pytest.raises(LiveExecutorError):
-            claude_live.settings_of({**arm, "settings": {**arm["settings"], "env": {"X": "1"}}}, manifest.pins)
-        assert arm["settings"]["permissions"] == SEEDED_PERMISSIONS
-    assert manifest.arms[0] == next(arm for arm in hooks_smoke().arms if arm["id"] == "off")
-    # The overlay lands in the trial copy with the data dir resolved, and never in the child's settings file.
-    index = next(index for index, trial in enumerate(schedule.expand(manifest)) if trial.arm_id == "tenjin_keyed_reporter")
-    provision = executor.Provision(values={"daemon_url": "http://127.0.0.1:1/hook/claude", "daemon_token": "t", "data_dir": str(run_dir / "d")})
-    request = dataclasses.replace(request_for(manifest, index), provision=provision, dry_run=True)
-    launch = claude_live.launch(request)
-    written = (request.roots.repo / "vitest.config.mjs").read_text(encoding="utf-8")
-    assert f"['{request.roots.data_dir}/hooks/tenjin-vitest-reporter.mjs', {{ outputFile: '.vitest-report.json' }}]" in written
-    assert "{data_dir}" not in written
-    assert "overlay" not in json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8"))
-    assert launch.resolved_settings_hash is not None
-    assert launch.resolved_settings_hash != reporter["settings_hash"]
-    # The product's config regex (test-identity.ts) finds the reporter and its output file in the overlaid config.
-    assert re.search(r"reporters\s*:[\s\S]{0,600}?['\"][^'\"]*tenjin-vitest-reporter[^'\"]*['\"][\s\S]{0,300}?outputFile\s*:\s*['\"]\.vitest-report\.json['\"]", written)
 
 
-def test_the_launch_injects_the_hidden_cases_as_a_setup_file_the_fixture_never_holds(request_for: Request) -> None:
-    manifest = hooks_smoke()
-    index = next(index for index, trial in enumerate(schedule.expand(manifest)) if trial.arm_id == "off")
-    request = dataclasses.replace(request_for(manifest, index), dry_run=True)
-    fixture = manifest.fixture_path(request.task)
-    assert not (fixture / ".bench1").exists()
-    assert not (request.roots.repo / ".bench1").exists()
-    claude_live.launch(request)
-    setup = (request.roots.repo / ".bench1" / "cases.setup.mjs").read_text(encoding="utf-8")
-    assert "globalThis.__bench1Cases = " in setup
-    hidden = json.loads((verifier.HIDDEN / "actor" / "cases.json").read_text(encoding="utf-8"))
-    assert json.dumps({"actor": hidden}) in setup
-    # The fixture's config names the setup file, so the run reads it; nothing under the fixture names the value.
-    assert "setupFiles: ['./.bench1/cases.setup.mjs']" in (fixture / "vitest.config.mjs").read_text(encoding="utf-8")
-    assert claude_live.inject_cases(request.roots, {"id": "answer-file"}) is None
 
 
 @pytest.mark.parametrize(
@@ -733,7 +653,7 @@ def test_the_seam_intercepts_the_spawn_a_real_live_run_would_reach(run_dir: Path
     # shell: everything except the spawn happens, and what the runtime
     # calls is the replaced seam rather than `subprocess.Popen`.
     with spawn_seam(), pytest.raises(SpawnReached) as caught:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ=LIVE_ENV)
+        cli.live_run(run_dir, SMOKE_MANIFEST, attestation_file(), environ=LIVE_ENV)
     assert str(caught.value) == "process_spawn"
 
 
@@ -746,14 +666,14 @@ def test_an_injected_runtime_cannot_supply_the_isolation_contract(run_dir: Path,
         # constructed, which is why the `subprocess.Popen` backstop is
         # there for the runtimes a caller built earlier.
         runtime = runner.Runtime(attestation=None, publishable=False)
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ=LIVE_ENV, runtime=runtime)
+        cli.live_run(run_dir, SMOKE_MANIFEST, attestation_file(), environ=LIVE_ENV, runtime=runtime)
     assert str(caught.value) == "process_spawn"
 
 
 def test_the_dry_run_prints_every_trials_argv_and_roots_and_starts_nothing(run_dir: Path) -> None:
     stream = io.StringIO()
     with no_process():
-        payload = cli.live_run(run_dir, cli.SMOKE_MANIFEST, dry_run=True, stream=stream, environ={})
+        payload = cli.live_run(run_dir, SMOKE_MANIFEST, dry_run=True, stream=stream, environ={})
     printed = stream.getvalue()
     assert len(payload["trials"]) == len(schedule.expand(smoke()))
     for plan in payload["trials"]:
@@ -770,7 +690,7 @@ def test_the_dry_run_prints_every_trials_argv_and_roots_and_starts_nothing(run_d
 def test_the_dry_run_names_the_variables_the_arms_settings_file_adds(run_dir: Path) -> None:
     stream = io.StringIO()
     with no_process():
-        payload = cli.live_run(run_dir, cli.SMOKE_MANIFEST, dry_run=True, stream=stream, environ={})
+        payload = cli.live_run(run_dir, SMOKE_MANIFEST, dry_run=True, stream=stream, environ={})
     arms = {plan["arm_id"]: plan for plan in payload["trials"]}
     declared = {arm["id"]: sorted(arm["settings"].get("env", {})) for arm in smoke().arms}
     assert arms["on"]["settings_env"] == declared["on"]
@@ -785,28 +705,28 @@ def test_the_dry_run_names_the_variables_the_arms_settings_file_adds(run_dir: Pa
 def test_the_dry_run_is_the_only_live_behavior_an_automated_environment_reaches_without_ci_live(run_dir: Path) -> None:
     stream = io.StringIO()
     with no_process():
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, dry_run=True, stream=stream, environ={"CI": "1"})
+        cli.live_run(run_dir, SMOKE_MANIFEST, dry_run=True, stream=stream, environ={"CI": "1"})
     assert "claude -p" in stream.getvalue().replace("'", "")
 
 
 def test_the_command_line_dry_run_exits_zero(run_dir: Path) -> None:
     printed = io.StringIO()
     with no_process(), contextlib.redirect_stdout(printed):
-        code = cli.main(["live-run", "--manifest", str(cli.SMOKE_MANIFEST), "--out", str(run_dir), "--dry-run"])
+        code = cli.main(["live-run", "--manifest", str(SMOKE_MANIFEST), "--out", str(run_dir), "--dry-run"])
     assert code == 0
     assert "claude" in printed.getvalue()
 
 
 def test_a_live_run_without_an_attestation_is_refused(run_dir: Path) -> None:
     with no_process(), pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, environ=LIVE_ENV)
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, environ=LIVE_ENV)
     assert "--attestation" in str(caught.value)
     assert not run_dir.exists()
 
 
 def test_a_live_run_from_a_shell_without_the_credential_seam_is_refused(run_dir: Path, attestation_file: AttestationFile) -> None:
     with no_process(), pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ={})
+        cli.live_run(run_dir, SMOKE_MANIFEST, attestation_file(), environ={})
     assert "CLAUDE_CODE_OAUTH_TOKEN" in str(caught.value)
     assert not run_dir.exists()
 
@@ -814,7 +734,7 @@ def test_a_live_run_from_a_shell_without_the_credential_seam_is_refused(run_dir:
 @pytest.mark.parametrize("name", cli.AUTOMATION_ENV)
 def test_a_live_run_in_an_automated_environment_is_refused(run_dir: Path, attestation_file: AttestationFile, name: str) -> None:
     with no_process(), pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ={**LIVE_ENV, name: "1"})
+        cli.live_run(run_dir, SMOKE_MANIFEST, attestation_file(), environ={**LIVE_ENV, name: "1"})
     assert name in str(caught.value)
 
 
@@ -830,7 +750,7 @@ def test_reading_a_run_that_never_started_is_one_sentence_and_exit_two(tmp_path:
     empty.mkdir(exist_ok=True)
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
-        code = cli.main([command, "--run", str(empty)])
+        code = cli.main([command, "--run", str(empty)] + (["--baseline", str(empty / "baseline.json")] if command == "regress" else []))
     assert code == 2
     assert "the run did not start" in stderr.getvalue()
     assert "Traceback" not in stderr.getvalue()
@@ -871,7 +791,7 @@ def test_every_gate_live_run_reaches_is_a_refusal_the_entry_point_catches() -> N
 
 def test_fake_run_refuses_a_live_executor_manifest(run_dir: Path) -> None:
     with no_process(), pytest.raises(cli.CliError) as caught:
-        cli.fake_run(run_dir, cli.SMOKE_MANIFEST)
+        cli.fake_run(run_dir, SMOKE_MANIFEST)
     assert "is live" in str(caught.value)
 
 
@@ -890,7 +810,7 @@ def test_fake_run_refuses_a_live_executor_manifest(run_dir: Path) -> None:
 def test_a_refusal_exits_two_instead_of_raising_at_the_operator(
     run_dir: Path, attestation_file: AttestationFile, expected: str, environ: dict
 ) -> None:
-    argv = ["live-run", "--manifest", str(cli.SMOKE_MANIFEST), "--out", str(run_dir)]
+    argv = ["live-run", "--manifest", str(SMOKE_MANIFEST), "--out", str(run_dir)]
     if expected != "--attestation":
         argv += ["--attestation", str(attestation_file())]
     stderr = io.StringIO()
@@ -921,27 +841,8 @@ def test_an_attestation_missing_a_field_is_refused(tmp_path: Path) -> None:
     assert caught.value.code == "attestation_shape"
 
 
-def test_the_smoke_manifest_validates_and_expands_to_a_balanced_schedule() -> None:
-    manifest = smoke()
-    trials = schedule.expand(manifest)
-    assert len(trials) == len(manifest.tasks) * len(manifest.arms) * manifest.data["repeats"]
-    # Gate 3 is four to eight attempts, and this manifest sits at the floor on purpose.
-    assert 4 <= len(trials) <= 8
-    assert {trial.arm_id for trial in trials} == {arm["id"] for arm in manifest.arms}
-    schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
-    assert all(executor.lookup(arm["executor"]).live for arm in manifest.arms)
 
 
-def test_the_smoke_fixture_carries_no_verifier_bytes_and_no_project_settings() -> None:
-    manifest = smoke()
-    task = manifest.tasks[0]
-    fixture = manifest.fixture_path(task)
-    # The expected answer is in the prompt on purpose: this smoke measures
-    # plumbing, not difficulty. What must stay off the agent's mount is the
-    # verifier, which lives in `verifier.py` and mounts no hidden layer.
-    assert sorted(path.name for path in fixture.iterdir()) == ["TASK.md"]
-    assert verifier.lookup(task["verifier"]).hidden_layer is None
-    claude_live.refuse_project_settings(fixture)
 
 
 def test_the_registry_finds_the_live_spec_by_name_alone() -> None:
@@ -978,19 +879,19 @@ def captured_runtime(monkeypatch: pytest.MonkeyPatch) -> list[runner.Runtime]:
 
 def test_a_run_without_an_attestation_is_refused_unless_it_says_plumbing(run_dir: Path) -> None:
     with pytest.raises(cli.CliError) as refusal:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
     assert "--plumbing" in str(refusal.value)
 
 
 def test_plumbing_still_refuses_an_automated_environment(run_dir: Path) -> None:
     with pytest.raises(cli.CliError) as refusal:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, environ={"CI": "1"})
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, environ={"CI": "1"})
     assert "automated" in str(refusal.value)
 
 
 def test_plumbing_still_needs_the_credential_seam(run_dir: Path) -> None:
     with pytest.raises(cli.CliError) as refusal:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, environ={})
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, environ={})
     assert "CLAUDE_CODE_OAUTH_TOKEN" in str(refusal.value)
 
 
@@ -1003,7 +904,7 @@ def test_a_plumbing_run_is_stamped_unpublishable_before_anything_starts(run_dir:
         seen.append(True)
         raise AssertionError("a test must not start a live process")
 
-    cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"}, runtime=runner.Runtime(spawn=refuse))
+    cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"}, runtime=runner.Runtime(spawn=refuse))
     assert len(captured_runtime) == 1
     assert not captured_runtime[0].publishable, "a plumbing run must never be publishable"
     assert captured_runtime[0].attestation is None
@@ -1012,7 +913,7 @@ def test_a_plumbing_run_is_stamped_unpublishable_before_anything_starts(run_dir:
 
 def test_ci_live_is_refused_without_plumbing(run_dir: Path) -> None:
     with pytest.raises(cli.CliError) as refusal:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, ci_live=True, environ={"CI": "1", **LIVE_ENV})
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, ci_live=True, environ={"CI": "1", **LIVE_ENV})
     assert "--plumbing" in str(refusal.value)
 
 
@@ -1020,14 +921,14 @@ def test_ci_live_is_refused_with_an_attestation(run_dir: Path, tmp_path: Path) -
     attestation = tmp_path / "empty-attestation.json"
     attestation.write_text("{}", encoding="utf-8")
     with pytest.raises(cli.CliError) as refusal:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation, plumbing=True, ci_live=True, environ={"CI": "1", **LIVE_ENV})
+        cli.live_run(run_dir, SMOKE_MANIFEST, attestation, plumbing=True, ci_live=True, environ={"CI": "1", **LIVE_ENV})
     assert "--attestation" in str(refusal.value)
 
 
 def test_ci_live_plumbing_reaches_the_spawn_seam_under_ci_stamped_automated(run_dir: Path) -> None:
     environ = {"CI": "1", "GITHUB_ACTIONS": "true", **LIVE_ENV}
     with spawn_seam(), pytest.raises(SpawnReached) as caught:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ=environ)
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ=environ)
     assert str(caught.value) == "process_spawn"
     # The seam is reached from `runner.run_trial`, after `require_isolation`
     # accepted the run, so the roots it built are the automated stamp's proof.
@@ -1035,7 +936,7 @@ def test_ci_live_plumbing_reaches_the_spawn_seam_under_ci_stamped_automated(run_
 
 
 def test_ci_live_plumbing_hands_the_executor_the_automated_stamp(run_dir: Path, captured_runtime: list) -> None:
-    cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"CI": "1", "GITHUB_ACTIONS": "true", **LIVE_ENV})
+    cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"CI": "1", "GITHUB_ACTIONS": "true", **LIVE_ENV})
     assert (captured_runtime[0].publishable, captured_runtime[0].ci, captured_runtime[0].automated) == (False, True, True)
     assert captured_runtime[0].attestation is None
 
@@ -1044,7 +945,7 @@ def test_ci_live_plumbing_writes_automated_non_publishable_records(run_dir: Path
     completed = runner.Completed(returncode=1, stderr="refused by the test, not by the CLI", timed_out=False)
     runtime = runner.Runtime(spawn=lambda launch, roots, timeout_s: completed, settle_cap_s=0.0)
     with mock.patch.object(subprocess, "Popen", _refuse("subprocess.Popen")):
-        payload = cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"GITHUB_ACTIONS": "true", **LIVE_ENV}, runtime=runtime)
+        payload = cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"GITHUB_ACTIONS": "true", **LIVE_ENV}, runtime=runtime)
     assert payload["trials"] == len(schedule.expand(smoke()))
     for path in (run_dir / "records").glob("*.json"):
         record = json.loads(path.read_text(encoding="utf-8"))
@@ -1058,7 +959,7 @@ def test_ci_live_plumbing_writes_automated_non_publishable_records(run_dir: Path
 def test_the_command_line_refuses_ci_live_without_plumbing(run_dir: Path) -> None:
     printed = io.StringIO()
     with no_process(), contextlib.redirect_stderr(printed), mock.patch.dict(os.environ, {"CI": "1", **LIVE_ENV}):
-        code = cli.main(["live-run", "--manifest", str(cli.SMOKE_MANIFEST), "--out", str(run_dir), "--ci-live"])
+        code = cli.main(["live-run", "--manifest", str(SMOKE_MANIFEST), "--out", str(run_dir), "--ci-live"])
     assert code == 2
     assert "--plumbing" in printed.getvalue()
 
@@ -1079,7 +980,7 @@ def test_an_attested_run_stays_publishable(run_dir: Path, tmp_path: Path, captur
         ),
         encoding="utf-8",
     )
-    cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
+    cli.live_run(run_dir, SMOKE_MANIFEST, attestation, environ={"CLAUDE_CODE_OAUTH_TOKEN": "x"})
     assert captured_runtime[0].publishable
     assert captured_runtime[0].attestation is not None
 
@@ -1182,7 +1083,7 @@ def test_a_missing_stream_is_not_an_error(tmp_path: Path) -> None:
 def test_the_spawn_keeps_stdout_rather_than_discarding_it(tmp_path: Path) -> None:
     # The regression in one line: a run whose stdout went to /dev/null had
     # no envelope to settle from, whatever the agent actually did.
-    roots = artifact.create(tmp_path / "spawn", "t1", cli.SMOKE_MANIFEST.parent / "repo")
+    roots = artifact.create(tmp_path / "spawn", "t1", smoke().fixture_path(smoke().tasks[0]))
     launch = executor.Launch(
         argv=[sys.executable, "-c", 'print(\'{"type":"result","subtype":"success","is_error":false}\')'],
         cwd=roots.repo,

@@ -73,3 +73,13 @@ def register_executor() -> Iterator[Callable[[str, executor.ExecutorSpec], str]]
     yield register
     for name in names:
         executor.REGISTRY.pop(name, None)
+
+
+@pytest.fixture(autouse=True)
+def generated_live_inputs(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Infrastructure tests do not read the experiment's manifests or corpus."""
+    if request.module.__name__.rsplit(".", 1)[-1] not in {"test_claude_live", "test_tenjin_arm", "test_toolchain"}:
+        return
+    smoke, hooks = support.generated_live_inputs(tmp_path / "live-inputs")
+    monkeypatch.setattr(request.module, "SMOKE_MANIFEST", smoke, raising=False)
+    monkeypatch.setattr(request.module, "HOOKS_SMOKE_MANIFEST", hooks, raising=False)

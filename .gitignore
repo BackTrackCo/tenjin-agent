@@ -14,10 +14,3 @@ __pycache__/
 # good. `evals/benchmark/vendor.py` fetches it beside its committed record.
 evals/benchmark/fixtures/live/vendor/*.tar.gz
 evals/benchmark/fixtures/live/vendor/*.partial
-
-# Bench-1 task fixtures track only the hand-written vitest shim under
-# node_modules; the tree itself is evals/benchmark/fixtures/live/vendor/,
-# one archive extracted into each trial.
-!evals/benchmark/fixtures/live/*/node_modules/
-evals/benchmark/fixtures/live/*/node_modules/*
-!evals/benchmark/fixtures/live/*/node_modules/.bin/

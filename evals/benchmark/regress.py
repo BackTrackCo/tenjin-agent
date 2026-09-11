@@ -1,6 +1,6 @@
-"""Informational regression check: a finished run against a committed baseline.
+"""Informational regression check: a finished run against an explicitly supplied baseline.
 
-The baseline is a hand-shaped document of plumbing figures, never a result:
+The baseline is a caller-supplied document of plumbing figures, never a result:
 per arm, how many attempts passed and what an attempt cost in tokens and in
 USD the last time an operator ran the smoke. `findings` names each way the
 run is worse (pass rate down, tokens or cost up by more than the tolerance,
@@ -17,9 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import FIXTURES
 
-BASELINE = FIXTURES / "live" / "baseline.json"
 BASELINE_SCHEMA = "bench1.baseline.v1"
 ARM_KEYS = frozenset({"attempts", "pass", "mean_tokens", "mean_cost_usd"})
 TITLE = "benchmark regression"
@@ -146,7 +144,7 @@ def emit(text: str, found: list[str], environ: Mapping[str, str], stream: Any = 
 def check(
     report: dict[str, Any],
     accepted: Mapping[str, dict[str, Any]],
-    baseline_path: Path = BASELINE,
+    baseline_path: Path,
     environ: Mapping[str, str] | None = None,
     stream: Any = None,
 ) -> dict[str, Any]:

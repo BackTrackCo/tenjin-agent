@@ -248,6 +248,9 @@ def test_a_wal_the_daemon_leaves_behind_is_closed_at_stop_not_waited_out(make_ro
     assert not (roots.data_dir / "loop.db-wal").exists()
 
 
+SMOKE_MANIFEST: Path
+HOOKS_SMOKE_MANIFEST: Path
+
 # A daemon that died without closing its database, which is what the container
 # teardown produces: the frames are committed and the `-wal` is real.
 ORPHAN_WAL = """
@@ -554,12 +557,12 @@ def cli_environ() -> dict[str, str]:
 def test_ci_live_refuses_a_manifest_that_provisions_an_arm(write_source: WriteSource, run_dir: Path, cli_environ: dict) -> None:
     source = write_source()
     with pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"CI": "1", **cli_environ}, tenjin_source=source)
+        cli.live_run(run_dir, HOOKS_SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"CI": "1", **cli_environ}, tenjin_source=source)
     assert "--ci-live" in str(caught.value)
     assert not run_dir.exists()
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), mock.patch.dict(os.environ, {"CI": "1", **cli_environ}):
-        code = cli.main(["live-run", "--manifest", str(cli.HOOKS_SMOKE_MANIFEST), "--out", str(run_dir), "--plumbing", "--ci-live", "--tenjin-source", str(source)])
+        code = cli.main(["live-run", "--manifest", str(HOOKS_SMOKE_MANIFEST), "--out", str(run_dir), "--plumbing", "--ci-live", "--tenjin-source", str(source)])
     assert code == 2
     assert "smoke-only" in stderr.getvalue()
 
@@ -569,24 +572,24 @@ def test_a_provisioned_manifest_needs_a_source_and_a_secret_source_refuses_an_at
 ) -> None:
     source = write_source()
     with pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, None, plumbing=True, environ=cli_environ)
+        cli.live_run(run_dir, HOOKS_SMOKE_MANIFEST, None, plumbing=True, environ=cli_environ)
     assert "--tenjin-source" in str(caught.value)
     attestation = tmp_path / "attestation.json"
     attestation.write_text("{}", encoding="utf-8")
     with pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, attestation, environ=cli_environ, tenjin_source=source)
+        cli.live_run(run_dir, HOOKS_SMOKE_MANIFEST, attestation, environ=cli_environ, tenjin_source=source)
     assert "never publishable" in str(caught.value)
     with pytest.raises(cli.CliError) as caught:
-        cli.live_run(run_dir, cli.SMOKE_MANIFEST, None, plumbing=True, environ=cli_environ, tenjin_source=source)
+        cli.live_run(run_dir, SMOKE_MANIFEST, None, plumbing=True, environ=cli_environ, tenjin_source=source)
     assert "no provisioned arm" in str(caught.value).replace("has none", "no provisioned arm")
 
 
 def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_source: WriteSource, run_dir: Path) -> None:
     stream = io.StringIO()
     with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a dry run starts nothing")):
-        payload = cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, dry_run=True, stream=stream, environ={}, tenjin_source=write_source())
+        payload = cli.live_run(run_dir, HOOKS_SMOKE_MANIFEST, dry_run=True, stream=stream, environ={}, tenjin_source=write_source())
     printed = stream.getvalue()
-    installed = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    installed = manifest_module.load(HOOKS_SMOKE_MANIFEST)
     trials = schedule.expand(installed)
     handlers = [
         handler
@@ -606,15 +609,7 @@ def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_
         assert any(hook.startswith("SubagentStart http http://127.0.0.1:0/hook/claude headers=Authorization") for hook in plan["hooks"])
         assert any("tenjin-shim.mjs" in hook and hook.startswith("SessionStart command") for hook in plan["hooks"])
     assert "shelf_secret_present=true shelf_origin=team-shelf.example" in printed
-    # The vendored toolchain is named, with the host verdict, and nothing was extracted.
-    assert "vendor    vitest-3.2.4-node24-darwin-arm64 platform=darwin-arm64 node_abi=137 host=" in printed
-    assert ("extracted into repo/node_modules" if vendor.host_platform() == "darwin-arm64" else "MISMATCH") in printed
-    # The archive is a release asset, so the line states whether this checkout has it.
-    assert ("live-run fetches it first" in printed) is not payload["trials"][0]["vendor"]["present"]
-    for plan in payload["trials"]:
-        assert plan["vendor"]["id"] == "vitest-3.2.4-node24-darwin-arm64"
-        assert plan["vendor"]["present"] is installed.vendor_for(installed.tasks[0]).archive.is_file()
-        assert not (Path(plan["roots"]["cwd"]) / "node_modules" / "vitest").exists()
+    assert all(plan["vendor"] is None for plan in payload["trials"])
     assert SECRET not in printed
     assert tenjin_arm.DRY_TOKEN not in printed
     for plan in payload["trials"]:
@@ -624,7 +619,7 @@ def test_the_dry_run_resolves_the_hooks_and_prints_no_token_and_no_secret(write_
 
 
 def test_the_dry_run_needs_no_source(run_dir: Path) -> None:
-    payload = cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, dry_run=True, stream=io.StringIO(), environ={})
+    payload = cli.live_run(run_dir, HOOKS_SMOKE_MANIFEST, dry_run=True, stream=io.StringIO(), environ={})
     seeded = next(plan for plan in payload["trials"] if plan["arm_id"] == "tenjin_seeded")
     assert seeded["provision"]["shelf_secret_present"] is False
 
@@ -919,50 +914,3 @@ def test_an_arm_may_name_exactly_the_lessons_it_seeds(lessons: Path, seed_roots,
     assert "tenjin-vitest-reporter.mjs" in tenjin_arm.BUNDLES
     with pytest.raises(ProvisionError):
         tenjin_arm.lessons_for({"id": "probe", "family": "fam"}, selected=["absent"])
-
-
-def actor_failure_key() -> str:
-    """The `sig_v1_test` key the actor fixture's own failing case yields.
-
-    Unfixed, `actorKey` interpolates a missing agent, so the hidden case
-    that passes no agent is the one vitest names in its FAIL header. The
-    file, the title template and the case index all come off the fixture,
-    and the product's own console rule turns the header into the key, so a
-    regenerated fixture moves the lesson and this expectation together.
-    """
-    test_file = tenjin_arm.FIXTURES / "live" / "actor" / "tests" / "actor.test.mjs"
-    template = re.search(r"test\.each\(cases\)\('([^']+)'", test_file.read_text(encoding="utf-8"))
-    hidden = json.loads((verifier.HIDDEN / "actor" / "cases.json").read_text(encoding="utf-8"))
-    assert template is not None
-    index = next(position for position, case in enumerate(hidden) if len(case["args"]) == 1)
-    identity = signature.identity_from_console(f" FAIL  tests/{test_file.name} > {template.group(1).replace('%#', str(index))}")
-    assert identity is not None
-    return f"sig_v1_test:{signature.sig_v1_test(identity)}"
-
-
-def test_the_key_only_lesson_shares_no_file_name_with_the_prompt() -> None:
-    live = tenjin_arm.FIXTURES / "live" / "lessons"
-    lesson = tenjin_arm.lesson_named("actor-fix-keyonly", live)
-    assert lesson is not None
-    prompt = next(task for task in json.loads(cli.KEYS_SMOKE_MANIFEST.read_text(encoding="utf-8"))["tasks"])["prompt"]
-    text = lesson.title + "\n" + lesson.body.read_text(encoding="utf-8")
-    assert cases.shared_file_names(prompt, text) == []
-    for word in ("actor", "actorKey", "src/actor.mjs", "tests/actor.test.mjs"):
-        assert word.lower() not in text.lower()
-    assert lesson.keys == (actor_failure_key(),)
-    assert cases.shared_file_names(prompt, "edit src/actor.mjs") == ["actor", "actor.mjs"]
-
-
-def test_the_live_lesson_is_loadable_and_its_keys_are_the_fixture_failures() -> None:
-    live = tenjin_arm.FIXTURES / "live" / "lessons"
-    lessons = tenjin_arm.lessons_for({"id": "actor", "family": "test-harness-convention"}, live)
-    assert [lesson.id for lesson in lessons] == ["test-harness-convention", "actor-fix"]
-    convention, fix = lessons
-    assert convention.keys == ("sig_v1:ee9fd96defcffbeb",)
-    assert [entry.command for entry in convention.commands if entry.check and entry.key is None] == ["pnpm test -- tests/{task}.test.mjs"]
-    assert "pnpm exec vitest run" in convention.body.read_text(encoding="utf-8")
-    # The fix lesson carries the key run seven's fires table recorded for this failure.
-    assert fix.keys == (actor_failure_key(),)
-    assert tenjin_arm.key_hash("sig_v1:ee9fd96defcffbeb") == "ed094b3427f6e7e2"
-    assert "s9" not in fix.body.read_text(encoding="utf-8")
-    assert tenjin_arm.lessons_for({"id": "answer-file", "family": "smoke"}, live) == []

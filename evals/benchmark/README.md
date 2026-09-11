@@ -8,14 +8,14 @@ one quality bar, how many model tokens did the complete agent run consume with a
 knowledge system. It does not itself produce a savings number, and nothing here touches the
 product runtime.
 
-**What this layer owns.** Bench-1 owns the frozen contracts, the executor and the live executor,
-the provisioning seam and daemon lifecycle, isolation, attestation, the corpus reset and
-sentinels, the reducer,
-the report and its headline rule, `verify`, `cases` and `regress`, and one fake plumbing smoke
-that needs no repository. Bench-2 (PR 313) owns every real fixture as a container image, every
-real-task manifest including the hooks and keys smokes, the four arms, the producer phase, and
-the readouts. The real-repository fixtures under `fixtures/live/` sit on this side of that line
-only until the first image-backed fixture is green.
+**What this layer owns.** Offline measurement contracts and live execution infrastructure:
+provisioning, daemon lifecycle, isolation, attestation, corpus reset/export, reduction and
+reporting. Native transcript fixtures and generated test inputs stay with this code. The
+actor task, lessons and hidden verifier are a separate Bench-1 corpus layer; the smoke/key/hook
+manifests, model settings and live workflow are a later Bench-1 configuration layer. Bench-2
+(PR 313) builds on those completed layers with containers, natural producers and more tasks.
+`live-run` requires an explicit manifest and `regress` requires an explicit baseline. Neither
+command silently selects an experiment defined elsewhere.
 
 Plan: `tenjin-notes/plans/2026-09-04-benchmark-foundation.md`. Run history through 2026-09-08,
 which is where the smoke runs, the retrieval findings, the corepack saga, and the pilot readout
@@ -59,11 +59,10 @@ the suite builds.
 | `cases.py`, `discovery.py`  | the search-intent export and the discovery counters               | `test_cases.py`, `test_discovery.py`  |
 | `cli.py`, `selftest.py`     | the commands, and the offline entry the required lane runs        | `test_fake_run.py`                    |
 
-The data beside them: `fixtures/fake/` (the manifest and repo `fake-run` drives, the null
-manifest beside it, and the bootstrap golden), `fixtures/live/` (the smoke manifests, the frozen Vitest task fixture and its
-vendored archive, the seeded lessons, the regression baseline), `fixtures/claude/` (sanitized
-synthetic Claude sessions; no real transcript), and `hidden/` (code-owned hidden layers, one per
-task, mounted only into the verifier's copy).
+The infrastructure data are `fixtures/fake/` (fake-run inputs and the bootstrap reference),
+`fixtures/claude/` (sanitized external-format examples). Tests build their own live manifests
+and temporary inputs. Real task and
+lesson content is reviewed with the corpus; executable run selections with configuration.
 
 ## Its CI lanes
 
@@ -79,13 +78,8 @@ numpy and rpds-py ship platform wheels, so those carry one hash per wheel across
 3.14 on manylinux x86_64 and macOS arm64. Every step from the install onwards runs that venv's
 interpreter, `fake-run`, `verify` and `summary` included. Each step's own timeout bounds it.
 
-The live plumbing smoke is `benchmark-live.yml`, on a pull request touching `evals/benchmark/**`
-and on dispatch: a pinned Claude Code, `live-run --plumbing --ci-live` over the smoke manifest
-with `CLAUDE_CODE_OAUTH_TOKEN` on that one step, then `verify`, `summary`, `regress`, and
-`report.json` uploaded alone. Every record is stamped automated and non-publishable, so the
-lane is evidence that the chain runs on a real agent and never a number anyone may quote. It is
-informational: not required, never blocking, and not `continue-on-error` either, because a red
-run is meant to be seen; on a fork the secret is absent and the live steps skip.
+The configuration layer supplies the informational live workflow. Infrastructure tests start
+no model, read no operator credentials, and need no shipped experiment manifest or task corpus.
 
 ## Where a dependency may go
 
@@ -281,19 +275,6 @@ this instance actually runs. Project-scoped tool permissions and transcript reda
 retention controls, not an operating-system sandbox, and a temp directory does not isolate a
 keychain (tenjin-agent#71).
 
-### The smoke manifests
-
-`fixtures/live/smoke-manifest.json` is a plumbing smoke, not a task set: one trivial task under
-the fixed hidden verifier, two arms differing by a marker in their settings, two repeats. Gate 3
-of the plan is four to eight live attempts of it, and what they prove is plumbing (disposable
-isolation, recursive settlement, usage capture from real transcripts, verifier execution after
-shutdown, the sentinels), never a savings claim; `fixtures/live/baseline.json` holds the last
-operator run's per-arm figures and the 25% tolerance `regress` warns against. The two
-real-repository smokes, `hooks-smoke-manifest.json` and `keys-smoke-manifest.json`, one per
-delivery path, move to Bench-2 with the container images; an operator runs them with `live-run
---manifest <manifest> --out <dir> --plumbing --tenjin-source <tenjin data dir>`, and neither ever
-runs in CI, a refusal that lives in code rather than in the workflow.
-
 ## The Tenjin hooks arm
 
 The product's hooks are not an environment difference: the CLI reads
@@ -436,32 +417,10 @@ resample means, so freezing them froze `random.Random`'s draw order rather than 
 amortization series at reuse 1, 2, 5 and 10 stays pinned exactly, because it is deterministic
 arithmetic over the reduction and a moved value there is a real change.
 
-`fixtures/live/` holds the operator-side manifests, `repo/` for the plumbing smoke, one frozen
-Vitest project per task, the seeded lessons (arm-side data, never copied into a trial), and the
-regression baseline. Frozen means no run artefacts, and `manifest.fixture_hash` covers every
-committed file plus the vendor archive's digest; hidden layers live in
-`hidden/<task>/hidden-tests/` as plain Node assert files.
-
-A trial's `node_modules` is derived, never committed. `fixtures/live/vendor/` commits one record
-per toolchain and platform (`archive_sha256`, `tree_sha256`, `files`, `platform`, `node_abi`,
-`vitest`, `lock_sha256`, `pnpm`) and no archive: the archive is 7.4 MB of build output, and a
-squash merge would leave it in `main`'s history even on a branch that deletes it. It is published
-instead as a release asset on the `bench-vendor-<id>` tag, which is not a product release, and
-`live-run` fetches it once, before any root exists, against the digest the record pins. Set
-`BENCH_VENDOR_SOURCE` to a directory or base URL to fetch from a mirror instead; the digest is
-checked either way, so the pin does not move with the bytes. `python3 -m evals.benchmark.vendor
-fetch --base evals/benchmark/fixtures/live --id <id>` does it by hand.
-
-`artifact.create` then extracts the archive into the trial's fixture copy offline, checking the
-archive against its record and the host against the platform pin, then the extracted tree against
-`tree_sha256`. Extraction never fetches, so no trial and no container a trial runs in has a reason
-to leave the machine, and `live-run` refuses a manifest whose vendor was built for another
-platform or node ABI before it downloads anything. CI neither fetches nor extracts: the offline
-suite packs tiny archives of its own, and the one case that reads the released bytes skips when
-the checkout does not have them.
-**This whole path is the darwin pin Bench-2 replaces with a container image per task**: when the
-first image-backed fixture is green, `vendor.py`, the archive, the lockfiles, the corepack
-seeding, and the actor fixture leave this package with the two real-repository smokes.
+Real tasks, lessons, hidden layers and their toolchain records are supplied by the corpus layer.
+Its tests prove task/verifier behavior. The configuration layer supplies and validates the run
+manifests against that corpus. Generic infrastructure tests generate their own inputs instead
+of loading either layer's data.
 
 ## Extending the foundation
 

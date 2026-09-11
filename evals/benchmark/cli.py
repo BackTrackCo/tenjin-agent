@@ -59,9 +59,6 @@ from . import (
 )
 
 FAKE_MANIFEST = FIXTURES / "fake" / "manifest.json"
-SMOKE_MANIFEST = FIXTURES / "live" / "smoke-manifest.json"
-HOOKS_SMOKE_MANIFEST = FIXTURES / "live" / "hooks-smoke-manifest.json"
-KEYS_SMOKE_MANIFEST = FIXTURES / "live" / "keys-smoke-manifest.json"
 # These names mean nobody is watching. A live run under them needs `--ci-live`,
 # which trades the human for the budget cap, the wall-clock cap, and the job
 # timeout, and gives up any claim to a publishable number in return.
@@ -349,7 +346,7 @@ def refuse_package_manager(manifest: manifest_module.Manifest, environ: Mapping[
 
 def live_run(
     out: Path,
-    manifest_path: Path = SMOKE_MANIFEST,
+    manifest_path: Path,
     attestation_path: Path | None = None,
     *,
     dry_run: bool = False,
@@ -526,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     # whatever it finds, so the live lane can warn without ever blocking.
     regress = commands.add_parser("regress", help="warn where a finished run is worse than the committed baseline")
     regress.add_argument("--run", required=True, type=Path)
-    regress.add_argument("--baseline", type=Path, default=regress_module.BASELINE)
+    regress.add_argument("--baseline", type=Path, required=True)
     # Case records for the search-intent experiment: after settlement only,
     # one JSONL row per hook fire, each question replayed through the shelf.
     cases = commands.add_parser("cases", help="export a settled run's hook fires as search-intent case records")

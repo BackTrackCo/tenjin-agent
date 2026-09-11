@@ -78,12 +78,6 @@ def test_an_unusable_pin_is_refused_by_code(fixture: Path, value: str | None, co
     assert caught.value.code == code
 
 
-def test_every_live_fixture_pins_the_validated_pnpm() -> None:
-    manifest = manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
-    for task in manifest.tasks:
-        assert toolchain.package_manager_pin(manifest.fixture_path(task)) == "11.11.0"
-    smoke = manifest_module.load(cli.SMOKE_MANIFEST)
-    assert toolchain.package_manager_pin(smoke.fixture_path(smoke.tasks[0])) is None
 
 
 def test_a_corepack_shim_is_told_from_a_binary_by_its_first_lines(tmp_path: Path, binary: Binary) -> None:
@@ -146,13 +140,16 @@ def test_the_trial_gets_one_pinned_version_copied_and_network_off(tmp_path: Path
     assert toolchain.child_variables(destination) == {"COREPACK_HOME": os.path.abspath(destination), "COREPACK_ENABLE_NETWORK": "0"}
 
 
+SMOKE_MANIFEST: Path
+HOOKS_SMOKE_MANIFEST: Path
+
 # What `claude_live.launch` does with the pin: seeds and records on a live
 # launch, reports on a dry run, refuses a miss.
 
 
 @pytest.fixture
 def hooks_smoke() -> manifest_module.Manifest:
-    return manifest_module.load(cli.HOOKS_SMOKE_MANIFEST)
+    return manifest_module.load(HOOKS_SMOKE_MANIFEST)
 
 
 @pytest.fixture
@@ -210,7 +207,7 @@ def test_the_cli_refuses_before_any_root_and_passes_a_pinning_fixture_with_the_p
     assert "corepack install -g pnpm@11.11.0" in str(caught.value)
     shutil.rmtree(tmp_path / "toolchain")
     cli.refuse_package_manager(hooks_smoke, support.fake_toolchain(tmp_path, cached=("11.11.0",)))
-    cli.refuse_package_manager(manifest_module.load(cli.SMOKE_MANIFEST), {"PATH": str(tmp_path / "empty")})
+    cli.refuse_package_manager(manifest_module.load(SMOKE_MANIFEST), {"PATH": str(tmp_path / "empty")})
 
 
 def test_the_record_keeps_the_package_manager_in_its_isolation_block(family_session) -> None:
