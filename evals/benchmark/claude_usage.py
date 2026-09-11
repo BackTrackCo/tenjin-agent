@@ -662,3 +662,40 @@ def reconcile(envelope: Envelope | None, records: list[UsageRecord], root_actor:
             return {"status": "envelope_partial", "categories": detail, "unattributed": None, "envelope": "partial"}
     _, detail = compare(root_sums, none)
     return {"status": "mismatch", "categories": detail, "unattributed": None, "envelope": "complete"}
+
+
+def provider_limit(stream: Path) -> bool:
+    """Recognize terminal Claude limit errors without treating quoted task text as an outage.
+
+    Only structured CLI error fields count. A later successful result clears a
+    transient rate limit. Raw stderr, prompts and tool output are never searched.
+    """
+    if not stream.is_file():
+        return False
+    limited = False
+    for line in stream.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") == "assistant":
+            limited = row.get("error") == "rate_limit"
+        elif row.get("type") == "result":
+            if row.get("is_error") is not True:
+                limited = False
+                continue
+            # Declared experiment caps are outcomes, not subscription outages.
+            if row.get("subtype") in CAPPED_SUBTYPES:
+                limited = False
+                continue
+            messages = row.get("errors", [])
+            if not isinstance(messages, list):
+                messages = []
+            messages = [*messages, row.get("result", "")]
+            prefixes = ("you've hit your limit", "you have hit your limit", "rate limit exceeded",
+                        "usage limit reached", "weekly limit reached", "subscription limit reached")
+            limited = limited or any(isinstance(message, str) and message.lower().strip().startswith(prefixes)
+                                     for message in messages)
+    return limited

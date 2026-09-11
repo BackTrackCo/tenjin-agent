@@ -507,7 +507,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
-    invalid_reason = (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or usage_reason
+    provider_reason = "provider:rate_limit" if claude_usage.provider_limit(roots.stream) else None
+    invalid_reason = (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or provider_reason or usage_reason
     outcome = "invalid"
     verdict: verifier.Verdict | None = None
     patch_hash: str | None = None

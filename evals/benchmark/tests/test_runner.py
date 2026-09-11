@@ -954,3 +954,16 @@ def test_no_module_can_kill_by_matching_a_process_name() -> None:
             if isinstance(node, ast.Name) and ("pkill" in node.id or "killall" in node.id):
                 offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == [], "a name-matching kill is never the cleanup"
+
+
+def test_subscription_exhaustion_is_unavailable_not_a_task_failure(one_trial, make_manifest, make_runtime):
+    def exhausted(launch, roots):
+        roots.stream.write_text(json.dumps({"type": "result", "is_error": True,
+            "subtype": "error_during_execution", "errors": ["You've hit your limit · resets tomorrow"]}) + "\n")
+    record = one_trial(make_manifest(), make_runtime(spawn=support.fake_spawn(returncode=1, after=exhausted)))
+    assert record["outcome"] == "invalid"
+    assert record["invalid_reason"] == "provider:rate_limit"
+    assert record["verifier"] is None
+    reduction = reduce_module.reduce({record["trial_id"]: record}, [])
+    assert reduction["arms"][record["arm_id"]]["outcomes"]["fail"] == 0
+    assert reduction["arms"][record["arm_id"]]["tokens_per_verified_resolution"] is None
