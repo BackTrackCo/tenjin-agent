@@ -1,24 +1,25 @@
 {
-  "benchmark_version": "bench1-live-smoke-2",
+  "benchmark_version": "bench1-codex-smoke-1",
   "schema_version": 1,
-  "harness": "claude",
+  "harness": "codex",
   "seed": 20260907,
   "repeats": 1,
   "pins": {
-    "model": "claude-opus-5",
-    "harness_version": "2.1.263",
-    "effort": "default",
+    "model": "gpt-5.6-sol",
+    "harness_version": "0.154.0",
+    "effort": "low",
     "image": "operator-container",
     "dependency_lock_hash": "sha256:none",
-    "permission_mode": "dontAsk",
+    "permission_mode": "workspace-write",
     "wall_clock_s": 600,
-    "turn_budget": 20,
-    "max_budget_usd": 0.5,
-    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "turn_budget": null,
+    "max_budget_usd": null,
+    "credential_env": "CODEX_BENCH_AUTH_FILE",
     "tools": ["Read", "Edit", "Write", "Glob", "Grep"],
-    "allowed_tools": ["Read(./**)", "Edit(./**)", "Write(./**)", "Glob(./**)", "Grep(./**)"],
     "billing_mode": "subscription",
-    "speed_mode": "standard"
+    "speed_mode": "fast",
+    "agent_package": "@openai/codex",
+    "concurrency": 1
   },
   "price_sheet_version": "smoke-2026-09",
   "phases": {
@@ -40,7 +41,7 @@
   "arms": [
     {
       "id": "off",
-      "executor": "claude_live",
+      "executor": "codex_live",
       "product_version": "none",
       "settings": {},
       "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
