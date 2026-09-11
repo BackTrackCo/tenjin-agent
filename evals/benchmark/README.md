@@ -288,3 +288,7 @@ estimated from text length.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
+
+The internal `bench2-` image/container names and marker filenames are retained implementation
+identifiers from the original container runner. They name shared Bench-1 infrastructure and
+are used unchanged by every experiment, locally and in CI.
