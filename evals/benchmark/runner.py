@@ -56,6 +56,7 @@ class Completed:
     returncode: int
     stderr: str
     timed_out: bool
+    agent_time_s: float | None = None
 
 
 Spawn = Callable[[executor.Launch, artifact.TrialRoots, float], Completed]
@@ -84,6 +85,7 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
     """
     roots.output.mkdir(parents=True, exist_ok=True)
     stream = roots.stream.open("w", encoding="utf-8")
+    agent_started = time.monotonic()
     process = subprocess.Popen(
         launch.argv,
         cwd=launch.cwd,
@@ -115,7 +117,7 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
             except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
                 pass
         stream.close()
-    return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
+    return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out, agent_time_s=time.monotonic() - agent_started)
 
 
 # How long the finally-path waits for a SIGKILLed group before giving up on
@@ -367,6 +369,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     provider_reason = "provider:rate_limit" if claude_usage.provider_limit(roots.stream) else None
     invalid_reason = isolation_reason or sentinel.reason or provider_reason or usage_reason
     outcome = "invalid"
+    verification_time_s = None
     verdict: verifier.Verdict | None = None
     patch_hash: str | None = None
     if invalid_reason is not None:
@@ -395,7 +398,9 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             invalid_reason = f"isolation:{error.code}"
         if copy is not None:
             patch_hash = "sha256:" + sha256_dir(copy)
+            verification_started = time.monotonic()
             verdict = verifier.run(verifier_spec, copy, run_dir)
+            verification_time_s = time.monotonic() - verification_started
             if outcome != "capped":
                 outcome = verdict.outcome
                 if outcome == "invalid":
@@ -438,6 +443,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "patch_hash": patch_hash,
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
+        "agent_time_s": completed.agent_time_s,
+        "verification_time_s": verification_time_s,
         "unresolved_actors": settlement.unresolved,
         "delivery": delivery,
         "discovery": discovery.derive(sessions, trial.task_id) if spec.live else None,

@@ -198,9 +198,13 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     overhead = sum(overhead_tokens(record) for record in records)
     requests = sum(summed["requests"] for summed in per_attempt)
     new = new_tokens(per_attempt, auxiliary)
-    durations = [record.get("wall_time_s") for record in records]
+    durations = [record.get("agent_time_s") for record in records]
     timed = all(value is not None for value in durations)
+    capture_share = per_producer(records)["capture"]
+    system_tokens = tokens + capture_share * attempts
     return {
+        "consumer_tokens_per_verified_resolution": None if not passes else _round(tokens / passes),
+        "system_completion_by_reuse": [{"reuse": reuse, "tokens": None if not passes else _round((tokens + capture_share * attempts / reuse) / passes)} for reuse in REUSE_POINTS],
         "consumer_seconds_per_verified_resolution": None if not passes or not timed else _round(sum(durations) / passes),
         "consumer_seconds_reason": "no_verified_resolution" if not passes else (None if timed else "timing_unavailable"),
         "attempts": attempts,
@@ -226,7 +230,7 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
         # search the primer sent the agent on taken out. A decomposition of the
         # number above, never a replacement for it.
         "retrieval_only_tokens_per_attempt": _round((tokens - overhead) / attempts),
-        "tokens_per_verified_resolution": None if passes == 0 else _round(tokens / passes),
+        "tokens_per_verified_resolution": None if passes == 0 else _round(system_tokens / passes),
         "tokens_per_verified_resolution_reason": "no_verified_resolution" if passes == 0 else None,
         "outcomes": {name: sum(1 for record in records if record["outcome"] == name) for name in SCORED},
         "diagnostics": {
@@ -296,9 +300,7 @@ def paired_bootstrap(
         return None
     point = _mean(ratios)
     if len(ratios) == 1:
-        # scipy refuses a one-observation sample. It is right to: every
-        # resample of one task is that task, so the interval is the point.
-        low = high = point
+        low = high = None
     else:
         interval = stats.bootstrap(
             (np.asarray(ratios, dtype=float),), np.mean,
@@ -306,6 +308,7 @@ def paired_bootstrap(
         ).confidence_interval
         low, high = _round(float(interval.low)), _round(float(interval.high))
     return {
+        "reason": "insufficient_independent_tasks" if len(ratios) < 2 else None,
         "method": "task_paired_percentile",
         "point": point,
         "low": low,
@@ -331,6 +334,31 @@ def per_task_ratio(arm: dict[str, Any], base: dict[str, Any], shared: list[str],
             return None, "baseline_zero"
         ratios.append(numerator / divisor)
     return _mean(ratios), None
+
+
+def completion_interval(arm: dict[str, Any], base: dict[str, Any], field: str, seed: int, *, difference: bool = False) -> dict[str, Any]:
+    """Paired task bootstrap of the same ratio-of-means displayed in the overview."""
+    tasks = sorted(arm["tasks"])
+    result = {"method": "paired_task_ratio_of_means" if not difference else "paired_task_mean_difference",
+              "point": None, "low": None, "high": None, "tasks": len(tasks),
+              "confidence": CONFIDENCE, "resamples": RESAMPLES, "seed": seed, "reason": None}
+    if not tasks or set(tasks) != set(base["tasks"]):
+        return {**result, "reason": "incomplete_task_pairs"}
+    numerator = [arm["tasks"][task][field] for task in tasks]
+    denominator = [base["tasks"][task][field] for task in tasks]
+    if any(value is None for value in numerator + denominator):
+        return {**result, "reason": "endpoint_unavailable"}
+    if not difference and statistics.fmean(denominator) <= 0:
+        return {**result, "reason": "baseline_zero"}
+    def estimate(left, right, axis=-1):
+        return np.mean(left, axis=axis) - np.mean(right, axis=axis) if difference else np.mean(left, axis=axis) / np.mean(right, axis=axis)
+    result["point"] = _round(float(estimate(numerator, denominator)))
+    if len(tasks) < 2:
+        return {**result, "reason": "insufficient_independent_tasks"}
+    ci = stats.bootstrap((np.asarray(numerator), np.asarray(denominator)), estimate,
+                         paired=True, method="percentile", n_resamples=RESAMPLES,
+                         confidence_level=CONFIDENCE, rng=np.random.default_rng(seed)).confidence_interval
+    return {**result, "low": _round(float(ci.low)), "high": _round(float(ci.high))}
 
 
 def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, Any]:
@@ -395,7 +423,13 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
     # say whether an arm sent less or merely sent fewer times.
     request_ratio, request_reason = per_task_ratio(arm, base, shared, "requests_per_attempt")
     new_token_ratio, new_token_reason = per_task_ratio(arm, base, shared, "new_tokens_per_attempt")
+    completion_tokens = completion_interval(arm, base, "tokens_per_verified_resolution", seed)
+    completion_time = completion_interval(arm, base, "consumer_seconds_per_verified_resolution", seed)
+    completion_rate = completion_interval(arm, base, "pass_rate", seed, difference=True)
     return {
+        "completion_tokens": completion_tokens,
+        "completion_time": completion_time,
+        "completion_rate": completion_rate,
         "tasks": len(shared),
         "token_ratio": ratio,
         "token_ratio_reason": reason,
@@ -409,10 +443,10 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         "interval": paired_bootstrap(ratios, seed),
         "amortized_token_ratio": capture_ratio,
         "amortized_capture_only_token_ratio": capture_only,
-        "headline": capture_only[0]["token_ratio"],
-        "headline_rule": "capture_only_amortized_reuse_1",
-        "headline_interval": paired_bootstrap(headline_ratios, seed),
-        "headline_eligible": bool(arm["headline_eligible"] and base["headline_eligible"] and capture_only[0]["token_ratio"] is not None),
+        "headline": completion_tokens["point"],
+        "headline_rule": "system_tokens_per_verified_completion_reuse_1",
+        "headline_interval": completion_tokens,
+        "headline_eligible": bool(arm["headline_eligible"] and base["headline_eligible"] and completion_tokens["point"] is not None),
     }
 
 
@@ -475,6 +509,12 @@ def reduce(
         arm["capture_tokens"] = capture_tokens(scored)
         arm["phase_tokens"] = phase_tokens(scored)
         arm["producer"] = producer_summary(all_by_arm.get(arm_id, []))
+        invalid_records = [record for record in all_by_arm.get(arm_id, []) if record["outcome"] == "invalid"]
+        arm["invalid_observed_effort"] = {
+            "tokens": sum(sum(item["input_total"] + item["output_total"] for item in record["usage"]) + consumer_auxiliary(record) for record in invalid_records),
+            "agent_seconds": sum(record["agent_time_s"] for record in invalid_records if record.get("agent_time_s") is not None),
+            "missing_timing": sum(record.get("agent_time_s") is None for record in invalid_records),
+        }
         tasks = list(arm["tasks"].values())
         arm["tokens"] = sum(task["tokens"] for task in tasks)
         arm["pass_rate"] = _mean([task["pass_rate"] for task in tasks])
@@ -494,6 +534,10 @@ def reduce(
         durations = [task["consumer_seconds_per_verified_resolution"] for task in tasks]
         arm["consumer_seconds_per_verified_resolution"] = _mean(durations) if durations and all(value is not None for value in durations) else None
         arm["consumer_seconds_reason"] = None if arm["consumer_seconds_per_verified_resolution"] is not None else ("timing_unavailable" if any(task["consumer_seconds_reason"] == "timing_unavailable" for task in tasks) else "no_verified_resolution")
+        arm["system_completion_by_reuse"] = [
+            {"reuse": reuse, "tokens": _mean([task["system_completion_by_reuse"][index]["tokens"] for task in tasks])
+             if tasks and all(task["passes"] for task in tasks) else None}
+            for index, reuse in enumerate(REUSE_POINTS)]
         arm["amortization"] = amortize_tasks(tasks, ("producer", "capture"))
         arm["amortization_capture_only"] = amortize_tasks(tasks, ("capture",))
     comparisons: dict[str, Any] = {}
