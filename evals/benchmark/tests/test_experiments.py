@@ -238,7 +238,7 @@ def test_the_pilot_tasks_are_additions_and_the_control_corpus_is_untouched() -> 
 
 @pytest.mark.parametrize(
     "path",
-    [experiments.REAL_MANIFEST, experiments.LOCAL_ARMS_MANIFEST, experiments.CANARY_MANIFEST, experiments.HIGH_DISCOVERY_MANIFEST, *experiments.SLICE_MANIFESTS.values()],
+    experiments.MANIFESTS,
     ids=lambda path: path.name,
 )
 def test_every_real_task_manifest_resets_the_bench_corpus_and_names_no_other_shelf(path: Path) -> None:
