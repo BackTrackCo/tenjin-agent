@@ -208,6 +208,7 @@ def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> No
 @dataclass(frozen=True)
 class Runtime:
     clock: Clock = time.monotonic
+    admit_until: float | None = None
     sleep: Sleep = time.sleep
     # Resolved when a Runtime is built, not when this class is defined. A
     # plain default would bind the function object once and for all, and a
@@ -699,7 +700,12 @@ def run_concurrently(
     with ThreadPoolExecutor(max_workers=degree, thread_name_prefix="bench1-trial") as pool:
         submitted: dict[Future[TrialResult], Trial] = {}
         while waiting or submitted:
+            if runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
+                waiting.clear()
             while waiting and len(submitted) < degree and not failures:
+                if runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
+                    waiting.clear()
+                    break
                 shelf_busy = any(seeds_shelf(manifest, trial) for trial in submitted.values())
                 index = next((index for index, trial in enumerate(waiting)
                               if not shelf_busy or not seeds_shelf(manifest, trial)), None)
@@ -741,8 +747,10 @@ def run(
     pending = [trial for trial in trials if trial.trial_id not in done]
     if degree == 1:
         for trial in pending:
+            if runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
+                break
             done[trial.trial_id] = attempt(manifest, trial, run_dir, schedule_hash, runtime)
     else:
         done.update(run_concurrently(manifest, pending, run_dir, schedule_hash, runtime, degree))
     # Schedule order, whatever order they finished in.
-    return [done[trial.trial_id] for trial in trials]
+    return [done[trial.trial_id] for trial in trials if trial.trial_id in done]

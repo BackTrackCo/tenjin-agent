@@ -570,3 +570,12 @@ def test_bounded_frozen_chunks_keep_full_schedule_and_resume_without_duplicate_w
     assert len(json.loads((lane.out / "report.json").read_text())["corpus"]["reset_epochs"]) == 2
     complete = lane.launch(api=api, freeze_corpus=True, max_new_trials=100)
     assert complete["complete"] and len(api.calls) == 2
+
+
+def test_zero_admission_budget_writes_checkpoint_without_resetting_corpus(lane):
+    api = FakeApi()
+    result = lane.launch(api=api, admission_seconds=0, freeze_corpus=True, max_new_trials=1, until_complete=True)
+    assert result["deadline_reached"]
+    assert result["trials"] == 0
+    assert api.calls == []
+    assert (lane.out / "report.json").is_file()
