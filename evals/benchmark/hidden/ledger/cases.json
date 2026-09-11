@@ -1,0 +1,5 @@
+[
+  { "args": ["EURC", 100], "expected": "109.00 USD" },
+  { "args": ["GBPC", 40], "expected": "50.80 USD" },
+  { "args": ["USDC", 12.5], "expected": "12.50 USD" }
+]

@@ -1,0 +1,20 @@
+{
+  "id": "cwd-relative-resource",
+  "title": "A path with no root is read against the caller's working directory, not against the file that names it",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/{task}.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "b0cd04aa0bd911e2",
+      "check": true,
+      "reason": "the identity lane reads the last FAIL header, which on the pristine fixture names the highest-numbered failing case; re-derive if the case list changes"
+    },
+    {
+      "command": "pnpm test -- tests/{task}.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "b0cd04aa0bd911e2",
+      "check": true,
+      "reason": "the package script forwards the file to the same runner and prints the same header"
+    }
+  ]
+}

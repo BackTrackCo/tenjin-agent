@@ -1645,9 +1645,12 @@ def test_the_spawn_keeps_stdout_rather_than_discarding_it(tmp_path: Path) -> Non
 # prompt and lesson rules here rather than by a manifest's own cases. The prompt
 # each one would carry is frozen here, before any arm has seen the task.
 # Each was cold-probed on 2026-09-10, the source and one failing run handed to
-# the model with no tools: `roster`, `census` and `stencil` were solved 3 of 3,
-# `relay` 2 of 3, `upstream` 3 of 3 on the mechanism and 1 of 3 on the whole
-# answer. None of these five is admitted on a claim of discovery cost.
+# the model with no tools, no settings and no shelf: `roster`, `census`,
+# `stencil` and `ledger` were solved 3 of 3, `relay` 2 of 3, `upstream` 3 of 3
+# on the mechanism. The same probe over `money`, `level` and `alias`, whose
+# measured token ratios run 0.441, 0.794 and 1.108, also solved 3 of 3 each, so
+# cold solvability separates none of them and none of these six is admitted on
+# a claim of discovery cost.
 CANDIDATES = {
     "upstream": (
         "csv-trailing-record",
@@ -1674,6 +1677,11 @@ CANDIDATES = {
         "src/stencil.mjs",
         "Fix src/stencil.mjs so that tests/stencil.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
     ),
+    "ledger": (
+        "cwd-relative-resource",
+        "src/ledger.mjs",
+        "Fix src/ledger.mjs so that tests/ledger.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents.",
+    ),
 }
 # What each candidate's lesson says, which its prompt may not.
 CANDIDATE_PHRASES = (
@@ -1694,6 +1702,10 @@ CANDIDATE_PHRASES = (
     "newline",
     "skipEmptyLines",
     "Papa",
+    "working directory",
+    "cwd",
+    "relative",
+    "ENOENT",
 )
 
 
