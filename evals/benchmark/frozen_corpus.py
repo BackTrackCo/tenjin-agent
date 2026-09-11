@@ -7,10 +7,11 @@ import re
 from dataclasses import asdict, replace
 from pathlib import Path
 
-from . import corpus, sha256_json
+from . import corpus, sha256_file, sha256_json
 
 SCHEMA = "bench1.corpus-baseline.v1"
 BASELINE = "corpus-baseline.json"
+RUNTIME_REVISION = "sha256:" + sha256_json({path.name: sha256_file(path) for path in sorted(Path(__file__).parent.glob("*.py"))})
 LSN = re.compile(r"[0-9A-F]+/[0-9A-F]+")
 
 
@@ -32,7 +33,7 @@ def load(out: Path, config: corpus.Corpus, identity: str):
         facts = saved["identity"]
         expected = "sha256:" + sha256_json(facts)
         valid = (saved["schema"] == SCHEMA and saved["baseline_id"] == expected
-                 and facts["manifest_hash"] == identity and facts["corpus"] == config.facts
+                 and facts["runtime_revision"] == RUNTIME_REVISION and facts["manifest_hash"] == identity and facts["corpus"] == config.facts
                  and set(facts["source_generation"]) == {"id", "parent_id", "created_at", "last_reset_at"}
                  and facts["source_generation"]["id"] == config.parent_id
                  and isinstance(facts["source_lsn"], str) and LSN.fullmatch(facts["source_lsn"]))
@@ -60,7 +61,7 @@ def reset(config: corpus.Corpus, api, out: Path, identity: str):
     if generation(api, config) != source:
         raise corpus.CorpusError("source_changed", "source branch changed during restore; no trial may start")
     if saved is None:
-        facts = {"manifest_hash": identity, "corpus": config.facts, "source_generation": source, "source_lsn": resolved}
+        facts = {"runtime_revision": RUNTIME_REVISION, "manifest_hash": identity, "corpus": config.facts, "source_generation": source, "source_lsn": resolved}
         saved = {"schema": SCHEMA, "identity": facts, "baseline_id": "sha256:" + sha256_json(facts)}
         out.mkdir(parents=True, exist_ok=True)
         # Exclusive creation; the outer run lease owns the whole operation.

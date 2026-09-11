@@ -279,7 +279,10 @@ Start a resumable corpus run with `--freeze-corpus`; every continuation restores
 source LSN, validates source generation and the settled target revision, and retains a unique
 reset receipt. `--max-new-trials N` executes at most N additional trials while retaining the
 full schedule and incomplete-coverage status. Repeat the same command/output directory to
-continue. These chunks need not be independently balanced; only the complete schedule supports
+continue, or add `--until-complete` to repeat chunks under one resource lease.
+`--admission-seconds N` stops new admissions after N seconds; active trials finish and
+checkpoint. A changed benchmark runtime refuses frozen continuation before provider calls.
+These chunks need not be independently balanced; only the complete schedule supports
 the complete experiment. Without a frozen baseline, retained corpus evidence refuses before reset.
 Offline and corpus-free runs also preserve full-schedule identity across continuation.
 
@@ -391,3 +394,25 @@ that does is a benchmark version bump, and a treatment-informed rewrite is alway
 The internal `bench2-` image/container names and marker filenames are retained implementation
 identifiers from the original container runner. They name shared Bench-1 infrastructure and
 are used unchanged by every experiment, locally and in CI.
+
+Portable checkpoints contain the original nonce, full schedule, validated final records with
+private refusal text removed, and the frozen corpus/epoch receipts. They contain no trial
+worktrees, model transcripts, profiles or credentials. Export from a stopped run and import
+into an empty directory using the same checkout revision and manifest:
+
+```sh
+python -m evals.benchmark.checkpoint export --run RUN --out CHECKPOINT --manifest MANIFEST --revision GIT_SHA
+python -m evals.benchmark.checkpoint import --run CHECKPOINT --out RESUMED_RUN --manifest MANIFEST --revision GIT_SHA
+```
+
+The importer verifies file inventory and hashes, runtime revision, Git revision, manifest,
+full schedule and every referenced epoch before writing. It rewrites only the local manifest
+path and preserves the nonce. Then use the ordinary `live-run --freeze-corpus` command against
+RESUMED_RUN. Re-verification of retained worktrees remains an explicit `verify` command; a
+record-only checkpoint has no worktree to re-verify and uses the recorded hidden verdict.
+
+CI uses `admission.py` to subtract elapsed setup, the longest producer-plus-consumer model
+caps and a conservative cleanup/upload reserve from the job timeout. It is a practical margin,
+not a guarantee against a stalled external service. Deadline stops retain incomplete coverage.
+The reusable workflow accepts an explicit prior run/artifact pair for recovery; it never picks
+an arbitrary latest checkpoint. A different tested commit or runtime requires a fresh run.

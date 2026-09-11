@@ -32,6 +32,7 @@ import dataclasses
 import contextlib
 import tempfile
 import json
+import math
 import os
 import re
 import secrets
@@ -437,15 +438,34 @@ def refuse_without_images(manifest: manifest_module.Manifest, out: Path | None =
 
 def live_run(out: Path, manifest_path: Path, attestation_path: Path | None = None, **options) -> dict[str, Any]:
     """Own the run before any corpus reset, nonce write, or trial setup."""
+    until_complete = options.pop("until_complete", False)
+    admission_seconds = options.pop("admission_seconds", None)
     if options.get("dry_run"):
         return _live_run(out, manifest_path, attestation_path, **options)
+    if until_complete and options.get("max_new_trials") is None:
+        raise CliError("--until-complete requires --max-new-trials")
+    if admission_seconds is not None:
+        if not math.isfinite(admission_seconds) or admission_seconds < 0:
+            raise CliError("--admission-seconds must be finite and nonnegative")
+        runtime = options.get("runtime") or runner.Runtime()
+        options["runtime"] = dataclasses.replace(runtime, admit_until=runtime.clock() + admission_seconds)
     config = manifest_module.load(manifest_path)
     with contextlib.ExitStack() as locks:
         locks.enter_context(lease.acquire(Path(os.path.abspath(out))))
         if config.corpus is not None:
             resource = Path(tempfile.gettempdir()) / "tenjin-benchmark-corpus" / sha256_json({key: config.corpus.facts[key] for key in ("provider", "project_id", "branch_id")})
             locks.enter_context(lease.acquire(resource))
-        return _live_run(out, manifest_path, attestation_path, **options)
+        while True:
+            payload = _live_run(out, manifest_path, attestation_path, **options)
+            if not until_complete or payload.get("complete") or payload.get("unavailable"):
+                return payload
+            accepted, _ = records.select(out / "records", config.hash, schedule.schedule_hash(schedule.expand(config)))
+            print(f"benchmark checkpoint: {len(accepted)}/{len(schedule.expand(config))} recorded attempts", file=sys.stderr)
+            runtime = options.get("runtime")
+            if runtime and runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
+                return {**payload, "deadline_reached": True}
+            if any(record["outcome"] == "invalid" for record in accepted.values()):
+                return {**payload, "invalid_measurement": True}
 
 
 def _live_run(
@@ -583,6 +603,8 @@ def _live_run(
     # The last thing before the first trial, and after every refusal that costs
     # nothing: the corpus a run measures is the one this reset left behind, so a
     # reset that does not happen ends the run here rather than in the numbers.
+    if runtime is not None and runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
+        return {**_execute(manifest, [], out, runtime), "deadline_reached": True}
     stamp = None
     if manifest.corpus is not None:
         api = corpus_api or (corpus_module.CliApi() if neon_cli else corpus_module.HttpApi.from_env(environ))
@@ -697,6 +719,8 @@ def main(argv: list[str] | None = None) -> int:
     fake = commands.add_parser("fake-run", help="run the fake manifest end to end, offline")
     fake.add_argument("--out", required=True, type=Path)
     live = commands.add_parser("live-run", help="operator only: run a live manifest, or print what it would run")
+    live.add_argument("--until-complete", action="store_true", help="repeat bounded chunks, saving a report after each, until complete or refused")
+    live.add_argument("--admission-seconds", type=float, help="stop admitting trials after this many seconds; active trials finish and checkpoint")
     live.add_argument("--freeze-corpus", action="store_true", help="pin and verify one source LSN across bounded continuations")
     live.add_argument("--max-new-trials", type=int, help="stop cleanly after this many additional trials, retaining the full schedule")
     live.add_argument("--neon-cli", action="store_true", help="use the existing Neon CLI login for corpus API calls")
@@ -828,6 +852,8 @@ def main(argv: list[str] | None = None) -> int:
                 freeze_corpus=args.freeze_corpus,
                 max_new_trials=args.max_new_trials,
                 neon_cli=args.neon_cli,
+                until_complete=args.until_complete,
+                admission_seconds=args.admission_seconds,
             )
         except REFUSALS as error:
             sys.stderr.write(f"{error}\n")

@@ -30,6 +30,14 @@ on:
       timeout_minutes:
         required: true
         type: number
+      checkpoint_run:
+        description: Explicit prior workflow run ID; zero starts a new run.
+        type: number
+        default: 0
+      checkpoint_artifact:
+        description: Exact checkpoint artifact from that run; never select latest.
+        type: string
+        default: ''
       budget_note:
         required: true
         type: string
@@ -57,6 +65,8 @@ jobs:
       # The one surface an anonymous reader can reach on a public repository.
       checks: write
     steps:
+      - name: Record the job clock
+        run: echo "BENCH_JOB_STARTED=$(date +%s)" >> "$GITHUB_ENV"
       - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
         with:
           egress-policy: audit
@@ -222,6 +232,20 @@ jobs:
         if: steps.gate.outputs.live == 'true'
         run: '"$BENCH_PY" -m evals.benchmark.images build --manifest "${{ inputs.manifest }}"'
 
+      - name: Restore an explicitly selected matching checkpoint
+        if: steps.gate.outputs.live == 'true' && inputs.checkpoint_run > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKPOINT_RUN: ${{ inputs.checkpoint_run }}
+          CHECKPOINT_ARTIFACT: ${{ inputs.checkpoint_artifact }}
+          BENCH_MANIFEST: ${{ inputs.manifest }}
+        run: |
+          [ -n "$CHECKPOINT_ARTIFACT" ] || { echo 'checkpoint artifact name is required'; exit 1; }
+          gh run download "$CHECKPOINT_RUN" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_ARTIFACT" --dir "$RUNNER_TEMP/checkpoint-download"
+          "$BENCH_PY" -m evals.benchmark.checkpoint import \
+            --run "$RUNNER_TEMP/checkpoint-download" --out "$RUNNER_TEMP/bench-run" \
+            --manifest "$BENCH_MANIFEST" --revision "$(git rev-parse HEAD)"
+
       # `live-run` resets the bench branch from its emptied parent before the
       # first trial and refuses the run if the reset fails, so the corpus this
       # measures is the one it seeded. The model credential reaches this one
@@ -238,22 +262,29 @@ jobs:
           # the reset has already happened.
           TENJIN_WALLET_PASSPHRASE: ${{ secrets.TENJIN_BENCH_WALLET_PASSPHRASE }}
         run: |
+          admission_seconds="$("$BENCH_PY" -m evals.benchmark.admission --manifest "${{ inputs.manifest }}" --job-minutes "${{ inputs.timeout_minutes }}" --started-at "$BENCH_JOB_STARTED")"
           "$BENCH_PY" -m evals.benchmark.cli live-run \
             --manifest "${{ inputs.manifest }}" \
             --out "$RUNNER_TEMP/bench-run" \
             --attestation "$RUNNER_TEMP/attestation.json" \
             --tenjin-source "$RUNNER_TEMP/bench-data" \
-            --automated
+            --automated --freeze-corpus --max-new-trials 10 --until-complete \
+            --admission-seconds "$admission_seconds"
 
-      - name: Verify and read the run
+      - name: Clean up whatever the run started
+        if: always() && steps.gate.outputs.live == 'true'
+        run: |
+          [ -d "$RUNNER_TEMP/bench-run" ] || exit 0
+          "$BENCH_PY" -m evals.benchmark.cli cleanup --run "$RUNNER_TEMP/bench-run"
+
+      - name: Read recorded completion verdicts
         if: always() && steps.gate.outputs.live == 'true'
         run: |
           set -o pipefail
           run="$RUNNER_TEMP/bench-run"
           [ -f "$run/report.json" ] || exit 0
-          echo "::group::verify (hidden verifiers re-run over the finished run)"
-          "$BENCH_PY" -m evals.benchmark.cli verify --run "$run"
-          echo "::endgroup::"
+          # Each attempt already ran its hidden verifier. Re-verification stays
+          # an explicit operator command, not an unbounded tail on a long job.
           "$BENCH_PY" -m evals.benchmark.cli summary --run "$run"
           "$BENCH_PY" -m evals.benchmark.cli headline --run "$run" | tee "$run/report.md" >> "$GITHUB_STEP_SUMMARY"
           # `report.json` is publishable, so it carries reason codes and no free
@@ -272,18 +303,31 @@ jobs:
               print(f"::warning title=refused::{count} attempt(s): {detail}")
           PY
 
+      - name: Export sanitized recovery evidence
+        if: always() && steps.gate.outputs.live == 'true'
+        env:
+          BENCH_MANIFEST: ${{ inputs.manifest }}
+        run: |
+          [ -f "$RUNNER_TEMP/bench-run/corpus-baseline.json" ] || exit 0
+          "$BENCH_PY" -m evals.benchmark.checkpoint export \
+            --run "$RUNNER_TEMP/bench-run" --out "$RUNNER_TEMP/bench-checkpoint" \
+            --manifest "$BENCH_MANIFEST" --revision "$(git rev-parse HEAD)"
+
+      - name: Save the checkpoint before publishing checks
+        if: always() && steps.gate.outputs.live == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.lane }}-checkpoint
+          path: ${{ runner.temp }}/bench-checkpoint/
+          if-no-files-found: warn
+          retention-days: 90
+
       - name: Compare with the last matching main benchmark
         if: always() && steps.gate.outputs.live == 'true' && github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
           BENCH_ARTIFACT: ${{ inputs.lane }}-records
         run: '"$BENCH_PY" -m evals.benchmark.main_regression --run "$RUNNER_TEMP/bench-run" --artifact "$BENCH_ARTIFACT"'
-
-      - name: Clean up whatever the run started
-        if: always() && steps.gate.outputs.live == 'true'
-        run: |
-          [ -d "$RUNNER_TEMP/bench-run" ] || exit 0
-          "$BENCH_PY" -m evals.benchmark.cli cleanup --run "$RUNNER_TEMP/bench-run"
 
       # The headline where a signed-out reader can reach it. Measured on this
       # public repository with no token: the artifact bytes answer 401, the
@@ -335,9 +379,8 @@ jobs:
           gh api --method POST "repos/${GITHUB_REPOSITORY}/check-runs" --input "$RUNNER_TEMP/check-run.json" > /dev/null
           echo "published check run ${CHECK_NAME} on ${GITHUB_SHA}"
 
-      # The per-attempt records, for whoever is logged in and wants to
-      # recompute. Transcripts, worktrees and roots stay on the runner and die
-      # with it; `report.json` is the only projection that ever leaves.
+      # Validated per-attempt records omit private invalid_detail. Transcripts,
+      # worktrees, profiles and credentials stay on the runner and die with it.
       - name: Upload the report and the records
         if: always() && steps.gate.outputs.live == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -348,7 +391,7 @@ jobs:
             ${{ runner.temp }}/bench-run/report.md
             ${{ runner.temp }}/bench-run/regression.*
             ${{ runner.temp }}/experiment.txt
-            ${{ runner.temp }}/bench-run/records/
+            ${{ runner.temp }}/bench-checkpoint/records/
             ${{ runner.temp }}/bench-run/schedule.json
             ${{ runner.temp }}/bench-run/corpus-snapshot.json
           if-no-files-found: warn
