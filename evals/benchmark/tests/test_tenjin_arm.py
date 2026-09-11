@@ -689,7 +689,7 @@ def test_ci_live_refuses_a_manifest_that_provisions_an_arm(write_source: WriteSo
     with pytest.raises(cli.CliError) as caught:
         cli.live_run(run_dir, cli.HOOKS_SMOKE_MANIFEST, None, plumbing=True, ci_live=True, environ={"CI": "1", **cli_environ}, tenjin_source=source)
     assert "--ci-live" in str(caught.value)
-    assert not run_dir.exists()
+    assert sorted(path.name for path in run_dir.iterdir()) == [".run.lock"]
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr), mock.patch.dict(os.environ, {"CI": "1", **cli_environ}):
         code = cli.main(["live-run", "--manifest", str(cli.HOOKS_SMOKE_MANIFEST), "--out", str(run_dir), "--plumbing", "--ci-live", "--tenjin-source", str(source)])

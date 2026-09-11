@@ -170,3 +170,10 @@ def test_publish_refuses_an_invalid_record_before_writing(tmp_path: Path) -> Non
     with pytest.raises(RecordError):
         records.publish(tmp_path, {"schema": records.RECORD_SCHEMA})
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("field", ("wall_time_s", "agent_time_s", "verification_time_s"))
+@pytest.mark.parametrize("value", (-1, True, float("inf"), float("nan")))
+def test_timing_requires_finite_nonnegative_observations(field, value) -> None:
+    with pytest.raises(RecordError):
+        records.validate({**attempt_record(parse("sess-family")), field: value})

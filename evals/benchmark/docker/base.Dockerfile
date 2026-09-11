@@ -13,17 +13,19 @@ ARG BASE_DIGEST
 FROM ${BASE_IMAGE}@${BASE_DIGEST}
 
 ARG PNPM_VERSION
-ARG CLAUDE_VERSION
+ARG AGENT_PACKAGE
+ARG AGENT_VERSION
+ARG AGENT_COMMAND
 
 # One registry conversation, and the npm cache dropped: a trial never installs
 # anything, so the cache is dead weight in every image built from this one. The
 # CLI is a layer of its own below, so a CLI change does not re-run this.
 RUN npm install -g \
       "pnpm@${PNPM_VERSION}" \
-      "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+      "${AGENT_PACKAGE}@${AGENT_VERSION}" \
   && npm cache clean --force \
   && pnpm --version \
-  && claude --version
+  && "${AGENT_COMMAND}" --version
 
 # The `tenjin` an agent runs in a Bash tool, from THIS CHECKOUT: `package.json`
 # and every path its `files` names, staged by `images.stage_cli`. A pinned

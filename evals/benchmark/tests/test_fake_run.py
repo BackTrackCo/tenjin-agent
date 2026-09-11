@@ -122,7 +122,8 @@ def test_run_interrupt_resume_verify_reduce_and_report(tmp_path: Path) -> None:
     # The interrupted trial published nothing; the ones before it are final.
     assert len(list(records_dir.glob("*.json"))) == len(spawns) - 1
     assert list(records_dir.glob("*.partial.*")) == []
-    assert not (out / "report.json").exists()
+    checkpoint = json.loads((out / "report.json").read_text())
+    assert sum(arm["attempts"] for arm in checkpoint["arms"].values()) == 1
     first = {path.name: (path.read_bytes(), path.stat().st_ino) for path in records_dir.glob("*.json")}
 
     resumed = cli.fake_run(out)

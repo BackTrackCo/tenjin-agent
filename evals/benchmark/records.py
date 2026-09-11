@@ -11,6 +11,7 @@ machine-readable reason and never reaches the reducer.
 from __future__ import annotations
 
 import json
+import math
 import os
 import uuid
 from dataclasses import dataclass
@@ -72,7 +73,7 @@ REQUIRED = frozenset(
 
 
 # Keys a record may carry and a frozen corpus record predates: null or absent on the fake path.
-OPTIONAL = frozenset({"discovery", "attempt_phases", "invalid_detail"})
+OPTIONAL = frozenset({"discovery", "attempt_phases", "invalid_detail", "agent_time_s", "verification_time_s"})
 # `invalid_detail` is the refusal in its own words, for a reason code that
 # cannot carry them: `provision:seed_publish` says a publish failed and not what
 # it answered. Written masked by whoever refuses; private, like a transcript, so
@@ -385,10 +386,10 @@ def validate(record: dict[str, Any]) -> None:
             raise RecordError("delivery.cli_searches must carry a count and decisions")
         if not all(_count(value) for value in searches["decisions"].values()) or sum(searches["decisions"].values()) != searches["count"]:
             raise RecordError("delivery.cli_searches decisions must sum to its count")
-    if record["wall_time_s"] is not None and (
-        isinstance(record["wall_time_s"], bool) or not isinstance(record["wall_time_s"], (int, float)) or record["wall_time_s"] < 0
-    ):
-        raise RecordError("wall_time_s must be null or a non-negative number")
+    for field in ("wall_time_s", "agent_time_s", "verification_time_s"):
+        value = record.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+            raise RecordError(f"{field} must be null or a finite non-negative number")
     if record["turns"] is not None and not _count(record["turns"]):
         raise RecordError("turns must be null or a count")
     if record["cost_usd"] is not None and (

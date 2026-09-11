@@ -263,7 +263,7 @@ def test_a_provisioned_arm_asks_the_entrypoint_for_a_daemon_and_an_unprovisioned
 def test_the_arm_fragment_becomes_the_trials_own_settings_file(request_for: Request) -> None:
     request = request_for(smoke())
     claude_live.launch(request)
-    assert json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8")) == request.arm["settings"]
+    assert json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8")) == {**request.arm["settings"], "fastMode": False}
     # Not in the worktree and not in the output root: it is not agent output.
     assert not (request.roots.repo / "settings.json").exists()
 
@@ -276,7 +276,7 @@ def test_a_well_formed_hooks_arm_is_accepted_and_written_verbatim(edited: Edited
     fragment = {"hooks": {"SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": "echo arm-on"}]}]}}
     request = edited(arm=arm_with(fragment))
     claude_live.launch(request)
-    assert json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8")) == fragment
+    assert json.loads(claude_live.settings_path(request.roots).read_text(encoding="utf-8")) == {**fragment, "fastMode": False}
 
 
 PIN_REFUSALS = {
@@ -885,7 +885,7 @@ def test_a_live_run_from_a_shell_without_the_credential_seam_is_refused(run_dir:
     with no_process(), pytest.raises(cli.CliError) as caught:
         cli.live_run(run_dir, cli.SMOKE_MANIFEST, attestation_file(), environ={})
     assert "CLAUDE_CODE_OAUTH_TOKEN" in str(caught.value)
-    assert not run_dir.exists()
+    assert sorted(path.name for path in run_dir.iterdir()) == [".run.lock"]
 
 
 @pytest.mark.parametrize("name", cli.AUTOMATION_ENV)
@@ -1125,7 +1125,7 @@ def captured_runtime(monkeypatch: pytest.MonkeyPatch) -> list[runner.Runtime]:
         captured.append(runtime)
         return {"trials": 0}
 
-    monkeypatch.setattr(cli, "execute", capture)
+    monkeypatch.setattr(cli, "_execute", capture)
     return captured
 
 
@@ -1393,3 +1393,16 @@ def test_describe_prints_the_experiment_without_launching_it(capsys) -> None:
     text = capsys.readouterr().out
     assert "Planned: 2 attempts" in text
     assert "No result yet" in text
+
+
+def test_subscription_mode_refuses_api_auth_and_claude_fast_mode(request_for):
+    original = request_for(smoke())
+    for changed in ({"credential_env": "ANTHROPIC_API_KEY"}, {"speed_mode": "fast"}):
+        item = dataclasses.replace(original, pins={**original.pins, "billing_mode": "subscription", **changed})
+        with pytest.raises(LiveExecutorError):
+            claude_live.launch(item)
+    item = dataclasses.replace(original, pins={**original.pins, "billing_mode": "subscription"})
+    claude_live.launch(item)
+    generated = json.loads(claude_live.settings_path(item.roots).read_text())
+    assert generated["fastMode"] is False
+    assert generated["forceLoginMethod"] == "claudeai"

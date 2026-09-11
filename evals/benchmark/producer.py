@@ -190,13 +190,21 @@ def run(
         completed = runtime.spawn(launch, producer_roots, wall_clock_s)
     finally:
         between = tenjin_arm.settle_daemon(roots, producer_roots.output)
+    identity_reason = None
+    try:
+        session_id = spec.evidence.root(session_id, producer_roots.stream)
+    except spec.evidence.errors as error:
+        identity_reason = f"producer:usage_{error.code}"
     sessions = spec.sessions(producer_roots, session_id)
-    if completed.timed_out:
-        result_row, unresolved = runner.scan(sessions, session_id, producer_roots.stream)
+    if identity_reason:
+        settlement = runner.Settlement(None, [""], 0.0, False)
+        stop_reason = "timeout" if completed.timed_out else "exit"
+    elif completed.timed_out:
+        result_row, unresolved = spec.evidence.scan(sessions, session_id, producer_roots.stream)
         settlement = runner.Settlement(result_row, unresolved, 0.0, False)
         stop_reason = "timeout"
     else:
-        settlement = runner.settle(sessions, session_id, runtime, producer_roots.stream)
+        settlement = runner.settle(sessions, session_id, runtime, producer_roots.stream, scan_fn=spec.evidence.scan)
         stop_reason = "interrupted" if settlement.capped else "exit"
     producer_roots.mark_stopped()
     wall_time_s = runtime.clock() - started
@@ -221,7 +229,12 @@ def run(
         "sentinel": {"credential_exposures": 0},
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None},
     }
-    invalid: str | None = None
+    invalid: str | None = identity_reason
+    try:
+        if spec.evidence.limited(sessions, session_id, producer_roots.stream):
+            invalid = "provider:rate_limit"
+    except spec.evidence.errors:
+        pass
     if between["wal_live"]:
         invalid = "producer:wal_live"
     try:
@@ -234,15 +247,15 @@ def run(
         invalid = invalid or "producer:" + sentinel.reason.replace(":", "_")
     session: claude_usage.SessionUsage | None = None
     try:
-        session = claude_usage.parse_session_dir(sessions, session_id, trial_id, producer_roots.stream)
+        session = spec.evidence.parse(sessions, session_id, trial_id, producer_roots.stream)
         if session.invalid_reason is not None:
             invalid = invalid or "producer:" + session.invalid_reason.replace(":", "_")
-    except claude_usage.ClaudeUsageError as error:
+    except spec.evidence.errors as error:
         invalid = invalid or f"producer:usage_{error.code}"
     receipts: list[usage.AuxiliaryReceipt] = []
     if session is not None:
-        root_transcript = sessions / f"{session_id}.jsonl"
-        receipts = receipts_of(trial_id, session.records, request_times(root_transcript), facts["capture"]["first_turn_end_at"])
+        root_transcript = spec.evidence.transcript(sessions, session_id)
+        receipts = receipts_of(trial_id, session.records, spec.evidence.times(root_transcript), facts["capture"]["first_turn_end_at"])
         totals = usage.totals(session.records)
         facts.update(
             {

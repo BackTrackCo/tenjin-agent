@@ -272,8 +272,10 @@ beforeAll(async () => {
   }
   // Both single-file configs: `installDaemonFiles` copies all three, so a
   // missing one would fail the fixture before a single case ran.
-  await build({ ...daemonConfig, outDir: tmpOutDir, silent: true });
-  await build({ ...reporterConfig, outDir: tmpOutDir, silent: true });
+  // Config is already selected above. Auto-loading tsup.config.ts again runs
+  // its entire array with these overrides, racing several writers on one file.
+  await build({ ...daemonConfig, config: false, outDir: tmpOutDir, silent: true });
+  await build({ ...reporterConfig, config: false, outDir: tmpOutDir, silent: true });
 
   dataDir = await mkdtemp(join(tmpdir(), 'tenjin-b-smoke-data-'));
   // Every arm is pinned off rather than defaulted: they are on out of the box

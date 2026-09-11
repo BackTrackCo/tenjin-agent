@@ -27,7 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from . import REPO_ROOT, artifact
+from . import REPO_ROOT, artifact, claude_usage
+from .native_usage import Adapter
 
 NATIVE = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
 BEHAVIORS = ("pass", "wrong-answer", "hang")
@@ -168,6 +169,7 @@ class ExecutorSpec:
     credential_seam: CredentialSeam | None = None
     prepare: Prepare | None = None
     stop: Stop | None = None
+    evidence: Adapter = claude_usage.EVIDENCE
 
 
 class ExecutorError(ValueError):
@@ -214,7 +216,7 @@ REGISTRY: dict[str, ExecutorSpec] = {
 # module is imported. Naming the module here keeps `lookup` the single entry
 # point without importing a live executor into every process that loads this
 # one, and without a circular import back from that module.
-DEFERRED = {"claude_live": "evals.benchmark.claude_live"}
+DEFERRED = {"claude_live": "evals.benchmark.claude_live", "codex_live": "evals.benchmark.codex_live"}
 
 
 def lookup(name: str) -> ExecutorSpec:

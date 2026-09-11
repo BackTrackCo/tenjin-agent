@@ -112,7 +112,7 @@ def build(monkeypatch: pytest.MonkeyPatch) -> FakeBuild:
 def test_the_build_arguments_carry_the_pinned_base_and_every_version() -> None:
     args = images.build_args(PINS)
     assert args["BASE_DIGEST"] == images.BASE_DIGEST
-    assert args["CLAUDE_VERSION"] == "2.1.263"
+    assert args["AGENT_VERSION"] == "2.1.263"
     assert args["PNPM_VERSION"] == images.PNPM_VERSION
 
 
