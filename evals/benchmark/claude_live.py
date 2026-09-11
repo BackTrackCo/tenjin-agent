@@ -700,12 +700,19 @@ def launch(request: LaunchRequest) -> Launch:
     daemon, and the agent's own argv after `--`. Nothing here starts anything,
     so a dry run builds exactly this and prints it.
     """
+    if request.pins.get("speed_mode", "standard") != "standard":
+        raise LiveExecutorError("Claude fast mode requires usage credits; subscription benchmarks use standard mode")
+    if request.pins.get("billing_mode") == "subscription" and credential_env_of(request.pins) != "CLAUDE_CODE_OAUTH_TOKEN":
+        raise LiveExecutorError("subscription benchmarks require Claude subscription OAuth, never API billing")
     provisioned = provision_of(request.arm) is not None
     settings, resolved_hash = settings_for_launch(request)
     credential_env = credential_env_of(request.pins)
     refuse_project_settings(request.roots.repo)
     session_id = root_session_id(request.trial_id, request.phase)
     path = settings_path(request.roots)
+    settings = {**settings, "fastMode": False}
+    if request.pins.get("billing_mode") == "subscription":
+        settings["forceLoginMethod"] = "claudeai"
     path.write_text(json.dumps(settings, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     apply_overlay(request.roots, overlay_of(request.arm, request.roots))
     inject_cases(request.roots, request.task)

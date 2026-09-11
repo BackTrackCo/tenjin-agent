@@ -27,7 +27,7 @@ REPORT_SCHEMA = "bench1.report.v1"
 # The pre-registered headline: the capture-only amortized ratio at reuse 1, every
 # token the capture ask added charged to a single consumer. The consumer-only
 # ratio is the secondary line.
-HEADLINE_LABEL = "capture-only amortized, reuse 1: every capture token charged to one consumer"
+HEADLINE_LABEL = "system tokens per verified completion, capture at reuse 1"
 CAPTURE_FREE_LABEL = "capture-free (future: capture on an operator-run model)"
 # The as-shipped number is the one to quote as Tenjin. This one takes the
 # product's own turn-end nudge and the primer's CLI search out of both arms and
@@ -260,6 +260,7 @@ def project(
             "harness": manifest_data.get("harness"),
             "harness_version": manifest_data["pins"].get("harness_version"),
             "effort": manifest_data["pins"].get("effort"),
+            "speed_mode_requested": manifest_data["pins"].get("speed_mode", "standard"),
             "planned_per_arm": len(manifest_data["tasks"]) * manifest_data["repeats"],
             "arm_ids": [arm["id"] for arm in manifest_data.get("arms", [])] or sorted(arms),
             "product_commits": sorted({record["isolation"].get("image", {}).get("cli", {}).get("commit") for record in accepted.values() if isinstance(record["isolation"].get("image"), dict) and record["isolation"]["image"].get("cli", {}).get("commit")}),
@@ -319,6 +320,9 @@ def project(
                 "outcome": record["outcome"],
                 "invalid_reason": record["invalid_reason"],
                 "stop_reason": record["stop_reason"],
+                "agent_time_s": record.get("agent_time_s"),
+                "verification_time_s": record.get("verification_time_s"),
+                "harness_time_s": record.get("wall_time_s"),
                 "actors": len(record.get("actors", [])),
                 "requests": len(record["usage"]),
                 "auxiliary_receipts": len(record["auxiliary"]),
@@ -423,10 +427,11 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
     expected = "unknown" if not planned else str(planned * len(ids))
     lines = [run_status(report), f"Experiment: {report['benchmark_version']}",
              f"Model: {config.get('model') or 'unknown'} | Harness: {config.get('harness') or 'unknown'} {config.get('harness_version') or ''} | Effort: {config.get('effort') or 'unknown'}",
+             f"Speed mode requested: {config.get('speed_mode_requested', 'standard')} | Concurrency: {report.get('concurrency', 1)} | Provider acceptance: not independently observed",
              f"Ran: {recorded}/{expected} attempts | Tasks: {len(tasks)} | Arms: {len(ids)} | Repeats: {report.get('repeats', 'unknown')}",
              "Tasks: " + (", ".join(task["task_id"] for task in tasks) or "unknown"),
              "Control: " + str(report.get("baseline") or "none"), ""]
-    columns = ["Arm", "Verified / planned", "Failed / capped / invalid", "Consumer s / completion", "Tokens / completion", "Time vs control", "Tokens vs control"]
+    columns = ["Arm", "Verified / planned", "Failed / capped / invalid", "Consumer s / completion", "System tokens / completion", "Time vs control", "Tokens vs control"]
     rows = []
     baseline = arms.get(report.get("baseline"), {})
     def display(value: Any, digits: int = 0) -> str:
@@ -454,9 +459,16 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
     else:
         widths = [max(len(columns[i]), *(len(row[i]) for row in rows)) for i in range(len(columns))] if rows else [len(c) for c in columns]
         lines += [" | ".join(cell.ljust(width) for cell, width in zip(row, widths)) for row in [columns, *rows]]
-    lines += ["", "Per completion = total scored consumer spend / verified passes within each task, then equal-weighted across tasks; failed and capped work is included.",
-              "Consumer time includes shutdown/settlement, but excludes setup, producer work and the hidden verifier. Producer/capture costs are separate below.",
-              "n/a means no verified completion, missing timing, or an incomplete comparison. Completion-metric uncertainty and endpoint hardening are pending.",
+    if complete:
+        for arm_id, comparison in sorted(report.get("comparisons", {}).items()):
+            for key, label in (("completion_time", "Time ratio"), ("completion_tokens", "Token ratio"), ("completion_rate", "Pass-rate difference")):
+                interval = comparison.get(key) or {}
+                span = (f"95% interval [{interval['low']:.3f}, {interval['high']:.3f}]"
+                        if interval.get("low") is not None else f"interval unavailable ({interval.get('reason') or 'no_evidence'})")
+                lines.append(f"{arm_id} vs control — {label}: {display(interval.get('point'), 3)}; {span}; {interval.get('tasks', 0)} paired tasks")
+    lines += ["", "Per completion = scored consumer spend plus incremental capture allocated at reuse 1 / verified passes within each task, then equal-weighted across tasks; failed and capped work is included.",
+              "Consumer time is measured around agent execution, including its tools/hooks; container setup/teardown, producer work and hidden verification are separate. Producer task tokens are excluded; capture amortization at reuse 2/5/10 is secondary.",
+              "n/a means no verified completion, missing timing, or an incomplete comparison. Intervals resample paired tasks, never repeated attempts; one-task intervals are unavailable.",
               "Product commit(s): " + (", ".join(config.get("product_commits") or []) or "not recorded")]
     return "\n".join(lines)
 
@@ -669,7 +681,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
             f"timeouts: {origins['public_timeouts']}; legs the daemon logged to an unnamed shelf: {origins['unnamed_shelf_legs']}"
         )
     if report["comparisons"]:
-        lines.append(f"legacy capture/amortization diagnostic versus {baseline}, 1.0 means no change; this is not the product headline:")
+        lines.append(f"Completion token comparison versus {baseline}, 1.0 means no change; decomposition follows:")
         for arm_id, comparison in sorted(report["comparisons"].items()):
             headline = comparison.get("headline")
             eligible = "headline eligible" if comparison["headline_eligible"] else "NOT headline eligible"
@@ -677,7 +689,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
             if headline is None:
                 lines.append(f"  headline {arm_id}: none ({comparison['token_ratio_reason'] or 'no capture-only ratio'}), {eligible}")
             else:
-                span = "" if not interval else f"  interval [{interval['low']:.3f}, {interval['high']:.3f}] at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}"
+                span = "" if not interval or interval.get("low") is None else f"  interval [{interval['low']:.3f}, {interval['high']:.3f}] at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}"
                 lines.append(f"  headline {arm_id}: {headline:.3f} ({HEADLINE_LABEL}){span}, {eligible}")
             curve = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_capture_only_token_ratio", [])}
             lines.append(f"    reuse 2/5/10: {_number(curve.get(2), '5.3f')}/{_number(curve.get(5), '5.3f')}/{_number(curve.get(10), '5.3f')}")
@@ -686,10 +698,11 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
                 lines.append(f"    {CAPTURE_FREE_LABEL}: none ({comparison['token_ratio_reason']})")
             else:
                 free_interval = comparison["interval"]
-                lines.append(
-                    f"    {CAPTURE_FREE_LABEL}: {ratio:.3f}  interval [{free_interval['low']:.3f}, {free_interval['high']:.3f}] "
+                span = "interval unavailable: insufficient independent tasks" if free_interval["low"] is None else (
+                    f"interval [{free_interval['low']:.3f}, {free_interval['high']:.3f}] "
                     f"at {free_interval['confidence']:.0%} over {plural(free_interval['tasks'], 'task')}"
                 )
+                lines.append(f"    {CAPTURE_FREE_LABEL}: {ratio:.3f}  {span}")
             retrieval = comparison.get("retrieval_only_token_ratio")
             if retrieval is None:
                 lines.append(f"    {RETRIEVAL_ONLY_LABEL}: none ({comparison.get('retrieval_only_token_ratio_reason') or 'no phase decomposition'})")

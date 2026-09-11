@@ -252,8 +252,13 @@ def build_args(pins: Mapping[str, Any]) -> dict[str, str]:
     """The base's build arguments, which Harbor's hash makes part of its name. The harness version is the manifest's, so a pin change is a rebuild."""
     version = pins.get("harness_version")
     if not isinstance(version, str) or not version.strip():
-        raise ImageError("recipe_pins", "pins.harness_version must name the Claude Code version the image installs")
-    return {"BASE_IMAGE": BASE_IMAGE, "BASE_DIGEST": BASE_DIGEST, "PNPM_VERSION": PNPM_VERSION, "CLAUDE_VERSION": version}
+        raise ImageError("recipe_pins", "pins.harness_version must name the agent CLI version the image installs")
+    package = pins.get("agent_package", "@anthropic-ai/claude-code")
+    commands = {"@anthropic-ai/claude-code": "claude", "@openai/codex": "codex"}
+    if package not in commands:
+        raise ImageError("recipe_pins", "agent package must be a code-owned supported CLI")
+    return {"BASE_IMAGE": BASE_IMAGE, "BASE_DIGEST": BASE_DIGEST, "PNPM_VERSION": PNPM_VERSION,
+            "AGENT_PACKAGE": package, "AGENT_VERSION": version, "AGENT_COMMAND": commands[package]}
 
 
 # The staged contexts of this process, held so their directories outlive the
@@ -320,7 +325,7 @@ def _plan(pins: Mapping[str, Any], resolved: Plan | None = None) -> Plan:
     """Resolved at the call and once per run: staging the CLI copies 15MB, and every trial asks for it."""
     if resolved is not None:
         return resolved
-    key = str(pins.get("harness_version"))
+    key = json.dumps(build_args(pins), sort_keys=True)
     if key not in _PLANS:
         _PLANS[key] = plan(pins)
     return _PLANS[key]

@@ -34,8 +34,8 @@ import signal
 import subprocess
 import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,6 +56,7 @@ class Completed:
     returncode: int
     stderr: str
     timed_out: bool
+    agent_time_s: float | None = None
 
 
 Spawn = Callable[[executor.Launch, artifact.TrialRoots, float], Completed]
@@ -105,6 +106,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
             refused = container.daemon_error(roots.output)
             if refused is not None:
                 return Completed(returncode=container.DAEMON_REFUSED, stderr=refused, timed_out=False)
+            agent_started = time.monotonic()
             try:
                 ran = box.exec(
                     launch.argv,
@@ -113,7 +115,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
                     timeout_s=timeout_s,
                     stream=stream,
                 )
-                completed = Completed(returncode=ran.returncode, stderr=ran.stderr, timed_out=False)
+                completed = Completed(returncode=ran.returncode, stderr=ran.stderr, timed_out=False, agent_time_s=time.monotonic() - agent_started)
             except RuntimeError as error:
                 # Harbor raises a plain RuntimeError on its own timeout, having
                 # already killed the host-side client. The command inside the
@@ -121,7 +123,7 @@ def container_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout
                 # which is the same guarantee the process-group kill gave.
                 if "timed out" not in str(error):
                     raise
-                completed = Completed(returncode=124, stderr=str(error), timed_out=True)
+                completed = Completed(returncode=124, stderr=str(error), timed_out=True, agent_time_s=time.monotonic() - agent_started)
             if recipe.daemon:
                 box.exec([container.TRIAL_ENTRY, container.STOP_ARG], timeout_s=container.STOP_TIMEOUT_S)
     finally:
@@ -146,6 +148,7 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
     """
     roots.output.mkdir(parents=True, exist_ok=True)
     stream = roots.stream.open("w", encoding="utf-8")
+    agent_started = time.monotonic()
     process = subprocess.Popen(
         launch.argv,
         cwd=launch.cwd,
@@ -177,7 +180,7 @@ def process_spawn(launch: executor.Launch, roots: artifact.TrialRoots, timeout_s
             except subprocess.TimeoutExpired:  # pragma: no cover - the group is already SIGKILLed
                 pass
         stream.close()
-    return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out)
+    return Completed(returncode=process.returncode, stderr=stderr or "", timed_out=timed_out, agent_time_s=time.monotonic() - agent_started)
 
 
 # How long the finally-path waits for a SIGKILLed group before giving up on
@@ -238,39 +241,10 @@ class Settlement:
         return self.result_row is not None and not self.unresolved
 
 
-def _terminal(path: Path) -> dict[str, Any] | None:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        event = json.loads(line)
-        if event.get("type") == "result":
-            return event
-    return None
+scan = claude_usage.scan
 
 
-def scan(sessions: Path, root_session_id: str, stream: Path | None = None) -> tuple[dict[str, Any] | None, list[str]]:
-    """The root's result row, plus every actor still without a terminal row.
-
-    The row is looked for in the transcript first and then in the captured
-    stream, because a real Claude run puts its envelope only on stdout while
-    the fake executors write theirs into the transcript. Either source settles
-    the root; neither is read for usage, so nothing is counted twice.
-    """
-    root = sessions / f"{root_session_id}.jsonl"
-    if not root.is_file():
-        return None, [""]
-    unresolved = [
-        child.stem.removeprefix("agent-")
-        for child in sorted((sessions / root_session_id / "subagents").glob("agent-*.jsonl"))
-        if _terminal(child) is None
-    ]
-    result_row = _terminal(root)
-    if result_row is None and stream is not None and stream.is_file():
-        result_row = _terminal(stream)
-    return result_row, ([""] if result_row is None else []) + unresolved
-
-
-def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path | None = None) -> Settlement:
+def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path | None = None, *, scan_fn=None) -> Settlement:
     """Wait for descendants to stop, up to the declared settlement cap.
 
     A root that exits while a child is live is not a complete attempt, so the
@@ -278,7 +252,7 @@ def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path 
     """
     started = runtime.clock()
     while True:
-        result_row, unresolved = scan(sessions, root_session_id, stream)
+        result_row, unresolved = (scan_fn or scan)(sessions, root_session_id, stream)
         waited = runtime.clock() - started
         if result_row is not None and not unresolved:
             return Settlement(result_row, [], waited, False)
@@ -386,47 +360,46 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             detail = refusal_detail(str(error), tuple(getattr(runtime.source, "secrets", ()) or ()))
             (roots.output / "provision-refusal.txt").write_text(detail + "\n", encoding="utf-8")
             return refused_record(manifest, trial, schedule_hash, spec, arm, isolation, f"provision:{error.code}", detail)
-        # The seed is on the shelf now, so this is the corpus every trial of
-        # this run searches. Asked once; `Once` ignores every later ask.
-        if runtime.snapshot is not None:
-            runtime.snapshot.fire()
-    # The natural arm: a producer session first, on the same store, verified;
-    # then the consumer on a fresh repository copy at the same path.
-    produced: producer_module.ProducerResult | None = None
-    foreign_sessions: tuple[str, ...] = ()
-    if provisioned and arm.get("producer"):
-        assert provision is not None
-        produced = producer_module.run(
-            spec=spec,
-            trial_id=trial.trial_id,
-            task=task,
-            arm=arm,
-            pins=manifest.pins,
-            fixture=manifest.fixture_path(task),
-            image=image,
-            roots=roots,
-            provision=provision,
-            runtime=runtime,
-            verifier_spec=verifier_spec,
-            wall_clock_s=float(manifest.pins["wall_clock_s"]),
-        )
-        provision = produced.provision
-        foreign_sessions = produced.foreign_sessions
-        isolation = {**isolation, "producer": produced.facts}
-        artifact.refresh_repo(roots, manifest.fixture_path(task), image)
-    launch = spec.launch(
-        executor.LaunchRequest(
-            trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress
-        )
-    )
-    if launch.package_manager is not None:
-        isolation = {**isolation, "package_manager": launch.package_manager}
-
-    started = runtime.clock()
     try:
+        if provisioned:
+            # The seed is on the shelf now, so this is the corpus every trial of
+            # this run searches. Asked once; `Once` ignores every later ask.
+            if runtime.snapshot is not None:
+                runtime.snapshot.fire()
+        # The natural arm: a producer session first, on the same store, verified;
+        # then the consumer on a fresh repository copy at the same path.
+        produced: producer_module.ProducerResult | None = None
+        foreign_sessions: tuple[str, ...] = ()
+        if provisioned and arm.get("producer"):
+            assert provision is not None
+            produced = producer_module.run(
+                spec=spec,
+                trial_id=trial.trial_id,
+                task=task,
+                arm=arm,
+                pins=manifest.pins,
+                fixture=manifest.fixture_path(task),
+                image=image,
+                roots=roots,
+                provision=provision,
+                runtime=runtime,
+                verifier_spec=verifier_spec,
+                wall_clock_s=float(manifest.pins["wall_clock_s"]),
+            )
+            provision = produced.provision
+            foreign_sessions = produced.foreign_sessions
+            isolation = {**isolation, "producer": produced.facts}
+            artifact.refresh_repo(roots, manifest.fixture_path(task), image)
+        launch = spec.launch(
+            executor.LaunchRequest(
+                trial.trial_id, roots, task, arm, manifest.pins, provision, image=None if image is None else image.id, egress=runtime.egress
+            )
+        )
+        if launch.package_manager is not None:
+            isolation = {**isolation, "package_manager": launch.package_manager}
+
+        started = runtime.clock()
         if produced is not None and produced.invalid_reason is not None:
-            # The producer left nothing to reuse: no consumer is started, and
-            # the attempt is invalid under the producer's own reason.
             completed = Completed(returncode=0, stderr="", timed_out=False)
         else:
             completed = runtime.spawn(launch, roots, float(manifest.pins["wall_clock_s"]))
@@ -437,13 +410,21 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         provision_stop = None if provision is None or spec.stop is None else spec.stop(roots, provision)
     # The spec says where its harness left the transcripts; the parser and the
     # settlement scan read that directory whatever the harness is.
+    identity_reason = None
+    try:
+        launch = replace(launch, root_session_id=spec.evidence.root(launch.root_session_id, roots.stream))
+    except spec.evidence.errors as error:
+        identity_reason = f"usage:{error.code}"
     sessions = spec.sessions(roots, launch.root_session_id)
-    if completed.timed_out:
-        result_row, unresolved = scan(sessions, launch.root_session_id, roots.stream)
+    if identity_reason:
+        settlement = Settlement(None, [""], 0.0, False)
+        stop_reason = "timeout" if completed.timed_out else "exit"
+    elif completed.timed_out:
+        result_row, unresolved = spec.evidence.scan(sessions, launch.root_session_id, roots.stream)
         settlement = Settlement(result_row, unresolved, 0.0, False)
         stop_reason = "timeout"
     else:
-        settlement = settle(sessions, launch.root_session_id, runtime, roots.stream)
+        settlement = settle(sessions, launch.root_session_id, runtime, roots.stream, scan_fn=spec.evidence.scan)
         stop_reason = "interrupted" if settlement.capped else "exit"
     roots.mark_stopped()
     wall_time_s = runtime.clock() - started
@@ -456,11 +437,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     canaries = () if provision is None else provision.secrets
 
     session: claude_usage.SessionUsage | None = None
-    usage_reason: str | None = None
+    usage_reason: str | None = identity_reason
     try:
-        session = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id, roots.stream)
+        session = spec.evidence.parse(sessions, launch.root_session_id, trial.trial_id, roots.stream)
         usage_reason = session.invalid_reason
-    except claude_usage.ClaudeUsageError as error:
+    except spec.evidence.errors as error:
         usage_reason = f"usage:{error.code}"
     actors = [] if session is None else session.actors
     try:
@@ -507,9 +488,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # Isolation first: an attempt that reached outside its roots is invalid
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
-    provider_reason = "provider:rate_limit" if claude_usage.provider_limit(roots.stream) else None
-    invalid_reason = (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or provider_reason or usage_reason
+    cleanup_reason = "isolation:seed_cleanup" if any(value is not None for value in (provision_stop or {}).get("seed_deleted", {}).values()) else None
+    try:
+        provider_reason = "provider:rate_limit" if spec.evidence.limited(sessions, launch.root_session_id, roots.stream) else None
+    except spec.evidence.errors:
+        provider_reason = None  # The parser's precise accounting refusal survives below.
+    invalid_reason = cleanup_reason or (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or provider_reason or usage_reason
     outcome = "invalid"
+    verification_time_s = None
     verdict: verifier.Verdict | None = None
     patch_hash: str | None = None
     if invalid_reason is not None:
@@ -538,7 +524,9 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             invalid_reason = f"isolation:{error.code}"
         if copy is not None:
             patch_hash = "sha256:" + sha256_dir(copy)
+            verification_started = time.monotonic()
             verdict = verifier.run(verifier_spec, copy, run_dir)
+            verification_time_s = time.monotonic() - verification_started
             if outcome != "capped":
                 outcome = verdict.outcome
                 if outcome == "invalid":
@@ -546,13 +534,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if invalid_reason is not None:
         outcome = "invalid"
 
-    root_transcript = sessions / f"{launch.root_session_id}.jsonl"
-    # What the attempt's own requests went to: the task, the turn-end nudge the
-    # Stop hook asked for, and a CLI search the primer sent the agent on. A
-    # decomposition of the usage above, never an addition to it.
+    try:
+        root_transcript = spec.evidence.transcript(sessions, launch.root_session_id)
+    except spec.evidence.errors:
+        root_transcript = sessions / "unavailable-transcript.jsonl"
+    # Phase spend partitions the native usage above; it is never added twice.
     attempt_phases = phases_module.split(
         [] if session is None else session.records,
-        producer_module.request_times(root_transcript),
+        spec.evidence.times(root_transcript),
         phases_module.read_marks(roots.data_dir / "loop.db", launch.root_session_id),
     )
     usage_fields = (
@@ -589,6 +578,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "patch_hash": patch_hash,
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,
+        "agent_time_s": completed.agent_time_s,
+        "verification_time_s": verification_time_s,
         "unresolved_actors": settlement.unresolved,
         "attempt_phases": attempt_phases,
         "delivery": delivery,
@@ -669,6 +660,10 @@ def attempt(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str,
     path, won = records.publish(run_dir / "records", record)
     if not won:
         raise records.RecordError(f"another writer published trial {trial.trial_id} first")
+    if record.get("invalid_reason") == "provider:rate_limit":
+        raise executor.ProvisionError("model subscription allowance unavailable; checkpoint saved and new admission stopped", code="provider_unavailable")
+    if record.get("invalid_reason") in {"isolation:seed_cleanup", "provision:seed_cleanup"}:
+        raise executor.ProvisionError("shelf cleanup failed; evidence was saved and no more trials will be admitted", code="seed_cleanup")
     return TrialResult(trial.trial_id, record["outcome"], False, path)
 
 
@@ -684,33 +679,34 @@ def run_concurrently(
     would answer a search with another trial's piece. Trials that provision
     nothing take no gate and overlap with anything.
     """
-    gate = threading.Lock()
-
-    def one(trial: Trial) -> TrialResult:
-        if not seeds_shelf(manifest, trial):
-            return attempt(manifest, trial, run_dir, schedule_hash, runtime)
-        with gate:
-            return attempt(manifest, trial, run_dir, schedule_hash, runtime)
-
+    # Admission happens before submission: workers never sit idle waiting
+    # behind a shared-shelf lock while independent work remains queued.
+    waiting = list(pending)
     done: dict[str, TrialResult] = {}
     failures: list[tuple[int, BaseException]] = []
     with ThreadPoolExecutor(max_workers=degree, thread_name_prefix="bench1-trial") as pool:
-        submitted: dict[Future[TrialResult], Trial] = {pool.submit(one, trial): trial for trial in pending}
-        for future in as_completed(submitted):
-            if future.cancelled():
-                continue
-            error = future.exception()
-            if error is None:
-                result = future.result()
-                done[result.trial_id] = result
-                continue
-            failures.append((submitted[future].position, error))
-            # A failure ends the run the way it does serially. A trial already
-            # started runs to its own end first, because the call that started
-            # it is what kills its process group and clears its ledger entry;
-            # only trials that have not begun are dropped.
-            for waiting in submitted:
-                waiting.cancel()
+        submitted: dict[Future[TrialResult], Trial] = {}
+        while waiting or submitted:
+            while waiting and len(submitted) < degree and not failures:
+                shelf_busy = any(seeds_shelf(manifest, trial) for trial in submitted.values())
+                index = next((index for index, trial in enumerate(waiting)
+                              if not shelf_busy or not seeds_shelf(manifest, trial)), None)
+                if index is None:
+                    break
+                trial = waiting.pop(index)
+                submitted[pool.submit(attempt, manifest, trial, run_dir, schedule_hash, runtime)] = trial
+            if not submitted:
+                break
+            finished, _ = wait(submitted, return_when=FIRST_COMPLETED)
+            for future in finished:
+                trial = submitted.pop(future)
+                try:
+                    result = future.result()
+                    done[result.trial_id] = result
+                except BaseException as error:
+                    failures.append((trial.position, error))
+            if failures:
+                waiting.clear()
     if failures:
         # The earliest trial in the schedule owns the refusal, so what a run
         # raises does not depend on which thread lost the race to fail.

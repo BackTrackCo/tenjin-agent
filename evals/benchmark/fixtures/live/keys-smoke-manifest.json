@@ -27,7 +27,9 @@
       "Write(./**)",
       "Glob(./**)",
       "Grep(./**)"
-    ]
+    ],
+    "billing_mode": "subscription",
+    "speed_mode": "standard"
   },
   "price_sheet_version": "keys-2026-09",
   "phases": {

@@ -88,17 +88,20 @@ SCHEMA: dict[str, Any] = {
                 "model": PINNED,
                 "harness_version": PINNED,
                 "effort": PINNED,
+                "speed_mode": enum({"standard", "fast"}),
+                "agent_package": enum({"@anthropic-ai/claude-code", "@openai/codex"}),
+                "billing_mode": enum({"subscription"}),
                 "image": PINNED,
                 "permission_mode": PINNED,
                 "dependency_lock_hash": HASH_TOKEN,
                 "wall_clock_s": POSITIVE,
-                "turn_budget": POSITIVE,
+                "turn_budget": {"anyOf": [POSITIVE, {"type": "null"}]},
                 # What a live executor needs and a fake one has no use for.
                 # Coarse shapes here so a bad manifest costs nothing; the
                 # executor that turns these into argv owns the flag and value
                 # allowlists (`claude_live.py`).
                 "concurrency": POSITIVE,
-                "max_budget_usd": {"type": "number", "exclusiveMinimum": 0},
+                "max_budget_usd": {"anyOf": [{"type": "number", "exclusiveMinimum": 0}, {"type": "null"}]},
                 "tools": STRINGS,
                 "allowed_tools": STRINGS,
                 "credential_env": NON_BLANK,
