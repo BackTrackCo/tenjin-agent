@@ -15,7 +15,7 @@ PR workflows compare completion rate, consumer seconds per verified completion, 
 verified completion against the last matching completed main run's retained artifact. Matching
 requires the same measurement protocol and execution mode, while allowing product revisions
 to differ. The protocol hashes the expanded manifest except arm product-version labels; actual
-product image/commit receipts are provenance rather than matching inputs. Lookup checks the newest 100
+product image/commit receipts are provenance rather than matching inputs. Artifact selection checks the newest 100
 completed main runs of the same workflow, completed before the PR run began, and selects the
 newest matching artifact, even if its
 report is invalid; missing, expired, incomplete or invalid evidence produces an explicit
