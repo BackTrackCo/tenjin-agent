@@ -465,7 +465,7 @@ def reduce(
     when every one of its records reconciles.
     """
     declared = {arm["id"]: arm.get("auxiliary_usage") for arm in declared_arms or []}
-    arms: dict[str, dict[str, Any]] = {}
+    arms: dict[str, dict[str, Any]] = {arm_id: {"attempts": 0, "outcomes": {name: 0 for name in OUTCOMES}, "tasks": {}, "accounting_reasons": []} for arm_id in declared}
     invalid: list[dict[str, str]] = []
     cells: dict[tuple[str, str], list[dict[str, Any]]] = {}
     scored_by_arm: dict[str, list[dict[str, Any]]] = {}
