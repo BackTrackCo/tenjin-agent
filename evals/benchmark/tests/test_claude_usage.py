@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -411,3 +412,21 @@ def test_synthetic_rows_are_not_requests(tmp_path: Path) -> None:
     session = edited(tmp_path, "sess-root-only", _synthetic)
     assert session.diagnostics["synthetic_rows"] == 1
     assert len(session.records) == 2
+
+
+@pytest.mark.parametrize("rows, expected", [
+    ([{"type": "assistant", "error": "rate_limit"}], True),
+    ([{"type": "result", "is_error": True, "subtype": "error_during_execution", "errors": ["You've hit your limit · resets tomorrow"]}], True),
+    ([{"type": "result", "is_error": True, "result": "Usage limit reached"}], True),
+    ([{"type": "assistant", "message": {"content": "You've hit your limit"}}], False),
+    ([{"type": "result", "is_error": False, "result": "You've hit your limit"}], False),
+    ([{"type": "assistant", "error": "rate_limit"}, {"type": "result", "is_error": False}], False),
+    ([{"type": "assistant", "error": "rate_limit"}, {"type": "result", "is_error": True, "subtype": "error_max_turns"}], False),
+    ([{"type": "result", "is_error": True, "errors": ["Tests failed: rate limit exceeded"]}], False),
+    ([{"type": "result", "is_error": True, "errors": ["Authentication failed"]}], False),
+])
+def test_provider_limits_are_terminal_structured_errors(tmp_path, rows, expected):
+    from evals.benchmark.claude_usage import provider_limit
+    stream = tmp_path / "stream.jsonl"
+    stream.write_text("\n".join(json.dumps(row) for row in rows))
+    assert provider_limit(stream) is expected

@@ -398,6 +398,8 @@ def run_status(report: dict[str, Any]) -> str:
         return "SYNTHETIC TEST — no product result"
     if not report.get("publishable"):
         return "PLUMBING — not publishable; no product result"
+    if any(row.get("invalid_reason") == "provider:rate_limit" for row in report.get("trials", [])):
+        return "UNAVAILABLE — model subscription/rate limit; no product result"
     config = report.get("run_configuration") or {}
     expected = config.get("planned_per_arm")
     ids = config.get("arm_ids") or sorted(report.get("arms") or {})

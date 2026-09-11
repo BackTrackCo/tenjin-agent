@@ -642,3 +642,9 @@ def test_plan_summary_names_the_actual_matrix_without_claiming_results(corpus) -
     assert "12 attempts = 3 tasks × 2 arms × 2 repeats" in text
     assert "Arm: off" in text and "Arm: on" in text
     assert "No result yet" in text
+
+
+def test_subscription_exhaustion_has_an_unavailable_readout():
+    value = {"isolation": "attested_container", "publishable": True,
+             "trials": [{"invalid_reason": "provider:rate_limit"}]}
+    assert report.run_status(value) == "UNAVAILABLE — model subscription/rate limit; no product result"

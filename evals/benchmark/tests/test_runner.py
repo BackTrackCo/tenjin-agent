@@ -857,3 +857,16 @@ def test_a_record_states_only_the_sentinel_evidence_the_harness_can_still_gather
     # scan and nothing standing in for egress the harness cannot see.
     record = one_trial(make_manifest(), make_runtime())
     assert record["sentinel"] == {"credential_exposures": 0}
+
+
+def test_subscription_exhaustion_is_unavailable_not_a_task_failure(one_trial, make_manifest, make_runtime):
+    def exhausted(launch, roots):
+        roots.stream.write_text(json.dumps({"type": "result", "is_error": True,
+            "subtype": "error_during_execution", "errors": ["You've hit your limit · resets tomorrow"]}) + "\n")
+    record = one_trial(make_manifest(), make_runtime(spawn=support.fake_spawn(returncode=1, after=exhausted)))
+    assert record["outcome"] == "invalid"
+    assert record["invalid_reason"] == "provider:rate_limit"
+    assert record["verifier"] is None
+    reduction = reduce_module.reduce({record["trial_id"]: record}, [])
+    assert reduction["arms"][record["arm_id"]]["outcomes"]["fail"] == 0
+    assert reduction["arms"][record["arm_id"]]["tokens_per_verified_resolution"] is None
