@@ -546,10 +546,14 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         root_transcript = spec.evidence.transcript(sessions, launch.root_session_id)
     except spec.evidence.errors:
         root_transcript = sessions / "unavailable-transcript.jsonl"
+    try:
+        native_times = spec.evidence.times(sessions, launch.root_session_id)
+    except spec.evidence.errors:
+        native_times = {}
     # Phase spend partitions the native usage above; it is never added twice.
     attempt_phases = phases_module.split(
         [] if session is None else session.records,
-        spec.evidence.times(root_transcript),
+        native_times,
         phases_module.read_marks(roots.data_dir / "loop.db", launch.root_session_id),
     )
     usage_fields = (

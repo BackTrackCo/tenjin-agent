@@ -34,6 +34,8 @@ def test_codex_plan_has_only_subscription_auth_and_generated_configuration(tmp_p
     assert 'model = "gpt-5.6-sol"' in config
     assert 'forced_login_method = "chatgpt"' in config
     assert 'service_tier = "fast"' in config
+    assert 'use_legacy_landlock = true' in config
+    assert {mount.target.name for mount in result.recipe.plan if mount.mode == 'ro'} >= {'.git', '.codex', '.agents'}
     assert (item.roots.repo / "AGENTS.md").read_text() == "Run the task's tests.\n"
     assert (item.roots.profile / "auth.json").read_bytes() == b""
     assert executor.lookup("codex_live") is codex_live.SPEC
