@@ -147,13 +147,18 @@ def launch(request: LaunchRequest) -> Launch:
     provisioned = request.provision is not None
     auth = auth_path(roots, dry_run=request.dry_run)
     allow_agents = "Agent" in request.task.get("tools", pins.get("tools", []))
+    protected = [roots.repo / name for name in (".git", ".codex", ".agents")]
+    for path in protected:
+        path.mkdir(exist_ok=True)
     config = '\n'.join([
         'model = "gpt-5.6-sol"', f'model_reasoning_effort = {json.dumps(pins["effort"])}',
         f'service_tier = {json.dumps("fast" if pins.get("speed_mode") == "fast" else "default")}',
         'approval_policy = "never"', 'sandbox_mode = "workspace-write"',
         'forced_login_method = "chatgpt"',
         'cli_auth_credentials_store = "file"', 'web_search = "disabled"',
-        '[features]', f'codex_hooks = {str(provisioned).lower()}',
+        '[sandbox_workspace_write]', 'network_access = true',
+        '[features]', f'hooks = {str(provisioned).lower()}',
+        'use_legacy_landlock = true',
         f'fast_mode = {str(pins.get("speed_mode") == "fast").lower()}',
         f'multi_agent = {str(allow_agents).lower()}', '',
     ])
@@ -174,7 +179,8 @@ def launch(request: LaunchRequest) -> Launch:
         image=request.image or images.fixture_stem(request.task["id"]), workdir=roots.repo,
         trial_dir=roots.base / claude_live.HARBOR_DIR,
         environment_dir=roots.base / claude_live.HARBOR_DIR / claude_live.ENVIRONMENT_DIR,
-        plan=[*container.mounts(roots), container.Mount(auth, target)], environment=environment,
+        plan=[*container.mounts(roots), container.Mount(auth, target),
+              *(container.Mount(path, path, "ro") for path in protected)], environment=environment,
         egress=request.egress or container.plan_egress(()), daemon=provisioned,
     )
     argv = ["codex", "exec", "--json", "--strict-config", "--ignore-rules", "--skip-git-repo-check",
