@@ -489,7 +489,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     # whatever else it did. A sentinel hit outranks an accounting gap for the
     # same reason.
     cleanup_reason = "isolation:seed_cleanup" if any(value is not None for value in (provision_stop or {}).get("seed_deleted", {}).values()) else None
-    provider_reason = "provider:rate_limit" if claude_usage.provider_limit(roots.stream) else None
+    try:
+        provider_reason = "provider:rate_limit" if spec.evidence.limited(sessions, launch.root_session_id, roots.stream) else None
+    except spec.evidence.errors:
+        provider_reason = None  # The parser's precise accounting refusal survives below.
     invalid_reason = cleanup_reason or (None if produced is None else produced.invalid_reason) or isolation_reason or sentinel.reason or provider_reason or usage_reason
     outcome = "invalid"
     verification_time_s = None
@@ -531,7 +534,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if invalid_reason is not None:
         outcome = "invalid"
 
-    root_transcript = spec.evidence.transcript(sessions, launch.root_session_id)
+    try:
+        root_transcript = spec.evidence.transcript(sessions, launch.root_session_id)
+    except spec.evidence.errors:
+        root_transcript = sessions / "unavailable-transcript.jsonl"
     # Phase spend partitions the native usage above; it is never added twice.
     attempt_phases = phases_module.split(
         [] if session is None else session.records,
@@ -654,6 +660,8 @@ def attempt(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: str,
     path, won = records.publish(run_dir / "records", record)
     if not won:
         raise records.RecordError(f"another writer published trial {trial.trial_id} first")
+    if record.get("invalid_reason") == "provider:rate_limit":
+        raise executor.ProvisionError("model subscription allowance unavailable; checkpoint saved and new admission stopped", code="provider_unavailable")
     if record.get("invalid_reason") in {"isolation:seed_cleanup", "provision:seed_cleanup"}:
         raise executor.ProvisionError("shelf cleanup failed; evidence was saved and no more trials will be admitted", code="seed_cleanup")
     return TrialResult(trial.trial_id, record["outcome"], False, path)

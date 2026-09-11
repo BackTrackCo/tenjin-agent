@@ -421,7 +421,15 @@ def refuse_without_images(manifest: manifest_module.Manifest, out: Path | None =
         raise CliError(f"live-run refuses this manifest: {error.detail}") from error
 
 
-def live_run(
+def live_run(out: Path, manifest_path: Path, attestation_path: Path | None = None, **options) -> dict[str, Any]:
+    """Own the run before any corpus reset, nonce write, or trial setup."""
+    if options.get("dry_run"):
+        return _live_run(out, manifest_path, attestation_path, **options)
+    with lease.acquire(Path(os.path.abspath(out))):
+        return _live_run(out, manifest_path, attestation_path, **options)
+
+
+def _live_run(
     out: Path,
     manifest_path: Path,
     attestation_path: Path | None = None,
@@ -551,7 +559,7 @@ def live_run(
         source=source,
         egress=egress,
     )
-    payload = execute(manifest, trials, out, runtime)
+    payload = _execute(manifest, trials, out, runtime)
     return payload if stamp is None else {**payload, "corpus": dataclasses.asdict(stamp)}
 
 

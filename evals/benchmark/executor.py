@@ -216,7 +216,7 @@ REGISTRY: dict[str, ExecutorSpec] = {
 # module is imported. Naming the module here keeps `lookup` the single entry
 # point without importing a live executor into every process that loads this
 # one, and without a circular import back from that module.
-DEFERRED = {"claude_live": "evals.benchmark.claude_live"}
+DEFERRED = {"claude_live": "evals.benchmark.claude_live", "codex_live": "evals.benchmark.codex_live"}
 
 
 def lookup(name: str) -> ExecutorSpec:
