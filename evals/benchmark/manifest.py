@@ -139,7 +139,7 @@ SCHEMA: dict[str, Any] = {
         },
         "arms": {
             "type": "array",
-            "minItems": 2,
+            "minItems": 1,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -299,6 +299,43 @@ def validate(data: dict[str, Any], base: Path) -> None:
         raise ManifestError(f"only a recursive slice may give a task the {SUBAGENT_TOOL} tool")
 
 
+def expand_selection(data: dict[str, Any], path: Path) -> dict[str, Any]:
+    """Select from one sibling manifest before validation, hashing and scheduling.
+
+    No inherited selections or path traversal: fixture paths keep their original
+    base directory and a selection cannot form an inheritance cycle.
+    """
+    if "source" not in data:
+        return data
+    if set(data) - {"schema", "source", "tasks", "arms"} or data.get("schema") != "bench1.selection.v1":
+        raise ManifestError("selection must name schema, source and optional task/arm ids")
+    source = data["source"]
+    if not isinstance(source, str) or not re.fullmatch(r"[A-Za-z0-9_-]+\.json", source):
+        raise ManifestError("selection source must be a sibling JSON filename")
+    source_path = path.parent / source
+    if source_path.resolve().parent != path.parent:
+        raise ManifestError("selection source must remain in its directory")
+    try:
+        selected = json.loads(source_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ManifestError(f"cannot read selection source: {error}") from error
+    if not isinstance(selected, dict) or "source" in selected:
+        raise ManifestError("selection source must be a full manifest, not another selection")
+    for key in ("tasks", "arms"):
+        if key not in data:
+            continue
+        ids = data[key]
+        if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids) or len(ids) != len(set(ids)):
+            raise ManifestError(f"selection {key} must be unique, nonempty ids")
+        available = selected.get(key)
+        if not isinstance(available, list) or not all(isinstance(item, dict) and "id" in item for item in available):
+            raise ManifestError(f"selection source has malformed {key}")
+        if set(ids) - {item["id"] for item in available}:
+            raise ManifestError(f"selection {key} contains unknown ids")
+        selected[key] = [item for item in available if item["id"] in ids]
+    return selected
+
+
 def load(path: Path) -> Manifest:
     path = path.resolve()
     try:
@@ -307,6 +344,7 @@ def load(path: Path) -> Manifest:
         raise ManifestError(f"cannot read manifest: {error}") from error
     if not isinstance(data, dict):
         raise ManifestError("manifest must be a JSON object")
+    data = expand_selection(data, path)
     try:
         data = presets.expand(data)
     except presets.PresetError as error:

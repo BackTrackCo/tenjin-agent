@@ -152,3 +152,38 @@ def check(
     found = findings(report, observed, baseline)
     emit(render(found, baseline, report), found, os.environ if environ is None else environ, stream)
     return {"baseline": baseline["date"], "findings": found, "observed": observed}
+
+
+COMPLETION_METRICS = ("pass_rate", "consumer_seconds_per_verified_resolution", "tokens_per_verified_resolution")
+
+
+def compare_reports(current: dict[str, Any], baseline: dict[str, Any], tolerance: float = 0.25) -> dict[str, Any]:
+    """Compare matching complete runs; missing evidence never becomes a clean result."""
+    if not 0 <= tolerance < 1:
+        raise BaselineError("tolerance must be a fraction in [0, 1)")
+    for key in ("schema", "manifest_hash", "isolation", "automated"):
+        if key not in current or current[key] != baseline.get(key):
+            return {"status": "unavailable", "reason": f"different or missing {key}", "rows": [], "findings": []}
+    for name, report in (("current", current), ("main", baseline)):
+        configuration = report.get("run_configuration", {})
+        planned = configuration.get("planned_per_arm", 0)
+        arms = report.get("arms", {})
+        if not planned or not arms or set(arms) != set(configuration.get("arm_ids", [])):
+            return {"status": "unavailable", "reason": f"{name} run lacks planned coverage", "rows": [], "findings": []}
+        if report.get("invalid") or report.get("excluded") or any(
+            arm.get("attempts") != planned or arm.get("outcomes", {}).get("interrupted", 0)
+            or arm.get("outcomes", {}).get("invalid", 0) or arm.get("accounting") != "complete"
+            for arm in arms.values()
+        ):
+            return {"status": "unavailable", "reason": f"{name} run incomplete or invalid", "rows": [], "findings": []}
+    rows, found = [], []
+    for arm_id, arm in current["arms"].items():
+        for metric in COMPLETION_METRICS:
+            now, before = arm.get(metric), baseline["arms"].get(arm_id, {}).get(metric)
+            rows.append({"arm": arm_id, "metric": metric, "main": before, "current": now})
+            if now is None or before is None:
+                continue
+            worse = now < before if metric == "pass_rate" else now > before * (1 + tolerance)
+            if worse:
+                found.append(f"{arm_id}: {metric} {now:.3g} vs main {before:.3g}")
+    return {"status": "regressions found" if found else "compared", "rows": rows, "findings": found}
