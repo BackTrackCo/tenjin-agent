@@ -1,5 +1,8 @@
 name: benchmark live
 
+# Repository writers are trusted with credentials; forks receive none.
+# Trial isolation is not isolation of the repository-local Python parent.
+
 # The Bench-1 plumbing smoke against a real Claude Code, run as automated
 # evidence and nothing more. Every record is stamped non-publishable and
 # automated (`live-run --plumbing --ci-live`), so no number from this lane can
