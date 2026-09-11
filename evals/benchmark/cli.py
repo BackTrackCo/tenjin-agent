@@ -470,7 +470,8 @@ def _live_run(
     if tenjin_source is not None and not provisioned:
         raise CliError("--tenjin-source is for a manifest with a provisioned arm; this one has none")
     source = None if tenjin_source is None else tenjin_arm.load_source(tenjin_source)
-    allowlist = allowlist_for(spec, source or tenjin_arm.dry_source())
+    allowlist = tuple(sorted(set(allowlist_for(spec, source or tenjin_arm.dry_source())) |
+                             (set() if manifest.corpus is None else set(manifest.corpus.origins))))
     if dry_run:
         # A dry run plans the egress and starts nothing, so the printed argv is
         # the one a real run would use, network and proxy included. The run

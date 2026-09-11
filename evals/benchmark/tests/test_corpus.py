@@ -538,3 +538,9 @@ def test_retained_corpus_evidence_refuses_before_another_reset(lane):
         lane.launch(api=api)
     assert api.calls == []
     assert retained.read_text() == "{}"
+
+
+def test_automatic_container_attestation_includes_corpus_control_plane(lane):
+    payload = lane.launch(attestation_path=None, automated=False, environ={})
+    report_data = json.loads(Path(payload["report"]).read_text())
+    assert report_data["corpus"]["api_origin"] == corpus_module.API_ORIGIN
