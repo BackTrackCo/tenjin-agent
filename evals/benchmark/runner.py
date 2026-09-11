@@ -35,7 +35,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -172,39 +172,10 @@ class Settlement:
         return self.result_row is not None and not self.unresolved
 
 
-def _terminal(path: Path) -> dict[str, Any] | None:
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        event = json.loads(line)
-        if event.get("type") == "result":
-            return event
-    return None
+scan = claude_usage.scan
 
 
-def scan(sessions: Path, root_session_id: str, stream: Path | None = None) -> tuple[dict[str, Any] | None, list[str]]:
-    """The root's result row, plus every actor still without a terminal row.
-
-    The row is looked for in the transcript first and then in the captured
-    stream, because a real Claude run puts its envelope only on stdout while
-    the fake executors write theirs into the transcript. Either source settles
-    the root; neither is read for usage, so nothing is counted twice.
-    """
-    root = sessions / f"{root_session_id}.jsonl"
-    if not root.is_file():
-        return None, [""]
-    unresolved = [
-        child.stem.removeprefix("agent-")
-        for child in sorted((sessions / root_session_id / "subagents").glob("agent-*.jsonl"))
-        if _terminal(child) is None
-    ]
-    result_row = _terminal(root)
-    if result_row is None and stream is not None and stream.is_file():
-        result_row = _terminal(stream)
-    return result_row, ([""] if result_row is None else []) + unresolved
-
-
-def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path | None = None) -> Settlement:
+def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path | None = None, *, scan_fn=None) -> Settlement:
     """Wait for descendants to stop, up to the declared settlement cap.
 
     A root that exits while a child is live is not a complete attempt, so the
@@ -212,7 +183,7 @@ def settle(sessions: Path, root_session_id: str, runtime: Runtime, stream: Path 
     """
     started = runtime.clock()
     while True:
-        result_row, unresolved = scan(sessions, root_session_id, stream)
+        result_row, unresolved = (scan_fn or scan)(sessions, root_session_id, stream)
         waited = runtime.clock() - started
         if result_row is not None and not unresolved:
             return Settlement(result_row, [], waited, False)
@@ -303,13 +274,21 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         provision_stop = None if provision is None or spec.stop is None else spec.stop(roots, provision)
     # The spec says where its harness left the transcripts; the parser and the
     # settlement scan read that directory whatever the harness is.
+    identity_reason = None
+    try:
+        launch = replace(launch, root_session_id=spec.evidence.root(launch.root_session_id, roots.stream))
+    except spec.evidence.errors as error:
+        identity_reason = f"usage:{error.code}"
     sessions = spec.sessions(roots, launch.root_session_id)
-    if completed.timed_out:
-        result_row, unresolved = scan(sessions, launch.root_session_id, roots.stream)
+    if identity_reason:
+        settlement = Settlement(None, [""], 0.0, False)
+        stop_reason = "timeout" if completed.timed_out else "exit"
+    elif completed.timed_out:
+        result_row, unresolved = spec.evidence.scan(sessions, launch.root_session_id, roots.stream)
         settlement = Settlement(result_row, unresolved, 0.0, False)
         stop_reason = "timeout"
     else:
-        settlement = settle(sessions, launch.root_session_id, runtime, roots.stream)
+        settlement = settle(sessions, launch.root_session_id, runtime, roots.stream, scan_fn=spec.evidence.scan)
         stop_reason = "interrupted" if settlement.capped else "exit"
     roots.mark_stopped()
     wall_time_s = runtime.clock() - started
@@ -322,11 +301,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     canaries = () if provision is None else provision.secrets
 
     session: claude_usage.SessionUsage | None = None
-    usage_reason: str | None = None
+    usage_reason: str | None = identity_reason
     try:
-        session = claude_usage.parse_session_dir(sessions, launch.root_session_id, trial.trial_id, roots.stream)
+        session = spec.evidence.parse(sessions, launch.root_session_id, trial.trial_id, roots.stream)
         usage_reason = session.invalid_reason
-    except claude_usage.ClaudeUsageError as error:
+    except spec.evidence.errors as error:
         usage_reason = f"usage:{error.code}"
     actors = [] if session is None else session.actors
     try:
@@ -408,7 +387,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if invalid_reason is not None:
         outcome = "invalid"
 
-    root_transcript = sessions / f"{launch.root_session_id}.jsonl"
+    root_transcript = spec.evidence.transcript(sessions, launch.root_session_id)
     usage_fields = (
         {
             "native_root_id": launch.root_session_id,

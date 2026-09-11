@@ -130,3 +130,29 @@ def test_limit_classification_uses_terminal_native_error_not_task_text(tmp_path)
     content[-1]["payload"]["error"] = {"codex_error_info": "usage_limit_exceeded"}
     write(tmp_path, content)
     assert codex.provider_limit(tmp_path, "root")
+
+
+def test_shared_runner_resolves_native_codex_root_and_verifies_the_task(tmp_path, monkeypatch):
+    import dataclasses
+    from evals.benchmark import executor, records, runner, schedule, sha256_json
+    from evals.benchmark.tests import support
+    spec = executor.ExecutorSpec(name='synthetic_codex', harness='codex',
+        launch=lambda request: executor.Launch([], request.roots.repo, 'pending-native-id'),
+        evidence=codex.EVIDENCE)
+    monkeypatch.setitem(executor.REGISTRY, spec.name, spec)
+    config = support.synthetic_manifest(tmp_path, executor_name=spec.name, arms=('off',))
+    data = {**config.data, 'harness': 'codex', 'pins': {**config.pins, 'model': codex.MODEL, 'harness_version': codex.VERSION}}
+    config = dataclasses.replace(config, data=data, hash=sha256_json(data))
+    def spawn(launch, roots, timeout_s):
+        (roots.repo / 'answer.txt').write_text('42\n')
+        directory = roots.output / 'sessions'; directory.mkdir()
+        write(directory, rollout())
+        roots.stream.write_text(json.dumps({'type':'thread.started', 'thread_id':'root'})+'\n')
+        return runner.Completed(0, '', False, agent_time_s=1.5)
+    trial = schedule.expand(config)[0]
+    result = runner.run_trial(config, trial, tmp_path/'run', 'sha256:schedule', runner.Runtime(spawn=spawn))
+    records.validate(result)
+    assert result['outcome'] == 'pass'
+    assert result['native_root_id'] == 'root'
+    assert result['usage'][0]['native_request_id'] == 'root-r1'
+    assert result['agent_time_s'] == 1.5

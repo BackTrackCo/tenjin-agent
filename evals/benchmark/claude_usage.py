@@ -29,9 +29,10 @@ can record an invalid attempt with a machine-readable reason.
 
 from __future__ import annotations
 
-from .native_usage import ParentEdge, SessionUsage
+from .native_usage import Adapter, ParentEdge, SessionUsage
 
 import json
+import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -641,3 +642,71 @@ def provider_limit(stream: Path) -> bool:
             limited = limited or any(isinstance(message, str) and message.lower().strip().startswith(prefixes)
                                      for message in messages)
     return limited
+
+
+def _terminal(path: Path) -> dict[str, Any] | None:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        event = json.loads(line)
+        if event.get("type") == "result":
+            return event
+    return None
+
+
+def scan(sessions: Path, root_session_id: str, stream: Path | None = None) -> tuple[dict[str, Any] | None, list[str]]:
+    """The root's result row, plus every actor still without a terminal row.
+
+    The row is looked for in the transcript first and then in the captured
+    stream, because a real Claude run puts its envelope only on stdout while
+    the fake executors write theirs into the transcript. Either source settles
+    the root; neither is read for usage, so nothing is counted twice.
+    """
+    root = sessions / f"{root_session_id}.jsonl"
+    if not root.is_file():
+        return None, [""]
+    unresolved = [
+        child.stem.removeprefix("agent-")
+        for child in sorted((sessions / root_session_id / "subagents").glob("agent-*.jsonl"))
+        if _terminal(child) is None
+    ]
+    result_row = _terminal(root)
+    if result_row is None and stream is not None and stream.is_file():
+        result_row = _terminal(stream)
+    return result_row, ([""] if result_row is None else []) + unresolved
+
+
+
+
+def request_times(transcript: Path) -> dict[str, int]:
+    """The first timestamp seen per native request id, in epoch milliseconds, off the root transcript."""
+    times: dict[str, int] = {}
+    if not transcript.is_file():
+        return times
+    for line in transcript.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        request_id, stamp = event.get("requestId"), event.get("timestamp")
+        if not isinstance(request_id, str) or request_id in times or not isinstance(stamp, str):
+            continue
+        try:
+            parsed = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        times[request_id] = int(parsed.timestamp() * 1000)
+    return times
+
+
+
+
+EVIDENCE = Adapter(
+    parse=parse_session_dir,
+    root=lambda expected, stream: expected,
+    scan=scan,
+    transcript=lambda directory, root: directory / f"{root}.jsonl",
+    times=lambda directory, root: request_times(directory / f"{root}.jsonl"),
+    limited=lambda directory, root, stream: provider_limit(stream),
+    errors=(ClaudeUsageError, UsageError),
+)

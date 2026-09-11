@@ -1,7 +1,7 @@
 """Harness-independent normalized session evidence; native parsers own envelopes."""
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from .usage import ActorKey, UsageRecord
 
 @dataclass(frozen=True)
@@ -64,3 +64,14 @@ class SessionUsage:
             )
         return entries
 
+
+
+@dataclass(frozen=True)
+class Adapter:
+    parse: Callable
+    root: Callable
+    scan: Callable
+    transcript: Callable
+    times: Callable
+    limited: Callable
+    errors: tuple[type[Exception], ...]
