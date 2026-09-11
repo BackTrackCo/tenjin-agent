@@ -62,16 +62,30 @@ The canary caps four consumers at 600 seconds each: at most 40 consumer minutes 
 and verification, with a 60-minute job timeout. This is a ceiling, not an expected duration.
 Its small sample flags possible regressions; it cannot establish a statistically reliable speedup.
 
-The reduced preflight is 9 model sessions instead of 72: allow roughly 20–40 minutes including
-setup if healthy sessions take 1–2 minutes. This is a planning assumption, not a measured result.
-Its session-cap ceiling is 90 minutes before setup and verification. Full core remains 180 model
-sessions: the earlier conditional 4–8 hour planning allowance has not been validated by a healthy
-current-container run. The existing launch failures must be resolved before forecasting from it.
-GitHub-hosted jobs stop at six hours; the caller now uses a 360-minute timeout. Corpus
-resume/sharding remains Bench-1 work and currently refuses continuation before another reset.
-A frozen database revision and per-reset provenance must be verified before combining chunks.
-The Codex answer-file plumbing smoke passed on September 11 in 9.2 agent seconds with native
-usage reconciliation; that trivial task cannot forecast core duration or establish a product gain.
+The reduced preflight is 9 model sessions instead of 72. On September 11, the matched Sol
+preflight passed 6/6 consumers and 3/3 producers with native usage reconciliation in **489.5
+seconds end to end**. Its consumer agent execution totaled 237.0 seconds; producer work and
+orchestration are separate. Natural capture sometimes produced no finding, so this establishes
+execution/accounting, not a reuse benefit.
+
+Full core remains 180 model sessions. Its first frozen ten-consumer chunk passed in 723.1
+seconds including producer and orchestration work. That early pace suggests roughly three
+hours, subject to harder tasks and subscription limits; it is not a validated full-run forecast.
+The earlier eight-hour planning allowance is superseded by these preliminary measurements.
+GitHub-hosted jobs stop at six hours. The shared runner now subtracts elapsed setup and reserves
+active-trial/cleanup/upload time, then stops admission and saves an incomplete checkpoint.
+
+Bench-1 owns frozen-LSN continuation and per-reset receipts. Two live resets confirmed the
+same source revision with distinct verified epoch receipts. The shared CLI can run bounded
+chunks with `--freeze-corpus --max-new-trials 10 --until-complete`; optional
+`--admission-seconds` stops new trials while active ones finish. Full coverage, not a chunk,
+is the experiment. Portable checkpoint import requires the same tested commit, runtime,
+manifest and full schedule. See the shared README for export/import commands.
+
+Manual headline dispatch accepts explicit core and recursive checkpoint run/artifact pairs.
+When recovering only recursive work, also provide its prior completed core checkpoint so core
+finishes without new model calls. A changed tested commit must start a fresh run. Checkpoint
+files carry normalized records and corpus proof, never credentials or transcripts.
 
 Matched Codex files are `codex-preflight-selection.json`, `codex-core-selection.json` and
 `codex-recursive-selection.json`. Each reuses the corresponding Claude experiment's tasks and
