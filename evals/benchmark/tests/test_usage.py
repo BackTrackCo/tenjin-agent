@@ -46,7 +46,7 @@ def record(request: str = "req_1", actor: tuple[str, str, str] = ACTOR, **overri
         pytest.param({"input_total": True}, id="boolean count"),
         pytest.param({"completion_state": "done"}, id="unknown state"),
         pytest.param({"actor_key": ("claude", "sess", "bad id")}, id="bad actor"),
-        pytest.param({"actor_key": ("codex", "sess", "")}, id="unknown harness"),
+        pytest.param({"actor_key": ("unknown", "sess", "")}, id="unknown harness"),
     ],
 )
 def test_subsets_are_validated_before_any_sum(overrides: dict) -> None:

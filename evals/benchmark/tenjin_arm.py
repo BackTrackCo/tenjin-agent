@@ -1069,10 +1069,12 @@ def prepare(request: ProvisionRequest) -> Provision:
             if not request.dry_run:
                 try:
                     piece_id = publish_lesson(source, roots, lesson, str(request.nonce), request.trial_id)
-                except ProvisionError:
-                    # A second piece that fails leaves no first piece behind.
-                    for published in pieces:
-                        delete_lesson(source, published)
+                except ProvisionError as error:
+                    # A partial publish must either clean up or stop admission;
+                    # another trial cannot search a shelf with leftover seeds.
+                    cleanup = [delete_lesson(source, published) for published in pieces]
+                    if any(failure is not None for failure in cleanup):
+                        raise ProvisionError("partial seed publish cleanup failed", code="seed_cleanup") from error
                     raise
                 pieces.append(piece_id)
             seeds.append(seed_facts(lesson, source, piece_id, probed, request.nonce, task_id))

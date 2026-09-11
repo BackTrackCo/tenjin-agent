@@ -15,7 +15,7 @@ from typing import Any
 
 ActorKey = tuple[str, str, str]  # (harness, root_session_id, native_actor_id)
 
-HARNESSES = frozenset({"claude"})
+HARNESSES = frozenset({"claude", "codex"})
 COMPLETION_STATES = frozenset({"complete", "partial"})
 CATEGORIES = ("uncached_input", "cache_read", "cache_write", "reasoning_output_subset")
 # Mirrors AGENT_ID_RE in src/lib/grade.ts; '' is the lead.

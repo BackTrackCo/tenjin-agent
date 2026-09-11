@@ -203,8 +203,8 @@ that does not name it runs exactly as it always has. It is a pin because `enviro
 the hash of the pins: two runs at different degrees are already distinguishable in every record,
 and `report.json` states the number so a reader comparing two runs does not have to open one.
 
-The measurement is in tokens, so wall clock is overhead, but only trials that provision nothing
-may overlap. A provisioning arm seeds its lesson into the one shelf the operator's account owns,
+Time and tokens to verified completion are both measured. Only trials with isolated mutable
+state may overlap; concurrency is part of the protocol, not an invisible runtime tweak. A provisioning arm seeds its lesson into the one shelf the operator's account owns,
 searches it through the product, and deletes it at the end; two seeded windows inside each other
 would let one trial's search answer with the other's piece, a duplicate for two trials of one
 task and a false positive for two tasks, in exactly the delivery numbers this benchmark exists to
@@ -237,6 +237,38 @@ Never clean up by matching a process name. A pattern such as `pkill -f bin/claud
 the operator's own unrelated sessions, and on 2026-09-07 exactly that command, run to tidy one
 spawned child, killed every other Claude Code session on the machine. The ban is executable
 rather than remembered: a test parses every module here and fails on a name-matching kill.
+
+## Native usage adapters
+
+Claude and Codex normalize native per-request receipts into the same session evidence contract.
+The Codex parser is pinned to CLI 0.154.0 and `gpt-5.6-sol`; it checks native session/parent IDs,
+model context and cumulative thread totals. Only `token_usage_record.usage` is additive. The
+exec total is a cross-check, never another request. Missing optional category presence remains
+unknown. These receipts are best-effort provider evidence; the CLI cannot prove a provider never
+omitted usage. The live Codex launch/activation integration is a separate container-layer concern.
+
+`pins.speed_mode` records the requested `standard` or `fast` service configuration, identically
+across arms. Readouts state the request rather than claiming provider acceptance. Claude remains
+standard for subscription-only runs because its fast mode requires separate usage credits.
+
+## Completion readout
+
+The first table reports verified/planned attempts, failures/caps/invalid attempts, consumer
+execution seconds and system tokens per verified completion. Within each task, all scored
+attempt spend is divided by verified passes; the displayed arm averages those task cells.
+A task with no pass makes its completion endpoint unavailable. Incremental capture is charged
+at reuse 1, while producer task work and reuse 2/5/10 remain separate diagnostics.
+
+`agent_time_s` brackets the actual agent process, including its tools and hooks. Container
+startup/shutdown, settlement, producer work and hidden verification are excluded; verification
+and harness elapsed time have separate fields. Missing timing stays unavailable rather than
+falling back to the older harness clock. Failed/capped consumer time is retained.
+
+Completion comparisons use a paired task bootstrap of the displayed ratio of means, plus a
+paired pass-rate difference. Unequal task cohorts cannot produce a comparison. A single task
+has a point estimate and no confidence interval. Repeated attempts are not independent tasks.
+The regression protocol includes the measurement-method version, so older main artifacts with
+different endpoints cannot silently become this method's baseline.
 
 ## Four rules that cut across every contract
 

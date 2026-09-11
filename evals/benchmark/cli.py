@@ -47,6 +47,7 @@ from . import (
     corpus as corpus_module,
     executor,
     images,
+    lease,
     manifest as manifest_module,
     records,
     reduce as reduce_module,
@@ -153,9 +154,12 @@ def run_nonce(out: Path, manifest: manifest_module.Manifest) -> str:
     existing = None
     if sidecar.is_file():
         try:
-            existing = json.loads(sidecar.read_text(encoding="utf-8")).get("nonce")
-        except (OSError, json.JSONDecodeError, AttributeError):
-            existing = None
+            saved = json.loads(sidecar.read_text(encoding="utf-8"))
+            existing = saved.get("nonce")
+        except (OSError, json.JSONDecodeError, AttributeError) as error:
+            raise CliError("existing run identity is unreadable; choose a new output directory") from error
+        if saved.get("hash") != manifest.hash or not isinstance(existing, str) or not NONCE.fullmatch(existing):
+            raise CliError("existing run identity differs; choose a new output directory")
     nonce = existing if isinstance(existing, str) and NONCE.match(existing) else f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(4)}"
     out.mkdir(parents=True, exist_ok=True)
     sidecar.write_text(json.dumps({"path": str(manifest.path), "hash": manifest.hash, "nonce": nonce}, indent=2) + "\n", encoding="utf-8")
@@ -188,10 +192,33 @@ def arm_caller_user_agent(nonce: str, environ: MutableMapping[str, str]) -> str:
 
 def execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
     """Write the run's manifest pointer and schedule, execute it, publish the report."""
+    with lease.acquire(out):
+        return _execute(manifest, trials, out, runtime)
+
+
+def _execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], out: Path, runtime: runner.Runtime) -> dict[str, Any]:
+    full_schedule = schedule.expand(manifest)
+    digest = schedule.schedule_hash(full_schedule)
+    if (out / "schedule.json").exists():
+        saved = read_run_file(out, "schedule.json")
+        if saved.get("manifest_hash") != manifest.hash or saved.get("schedule_hash") != digest:
+            raise CliError("existing schedule differs; refusing to overwrite run evidence")
+    if any(trial not in full_schedule for trial in trials):
+        raise CliError("selected trials do not belong to the full frozen schedule")
     nonce = run_nonce(out, manifest)
     runtime = dataclasses.replace(runtime, run_nonce=nonce)
-    digest = schedule.write(out, manifest, trials)
-    results = runner.run(manifest, trials, out, digest, runtime)
+    digest = schedule.write(out, manifest, full_schedule)
+    try:
+        results = runner.run(manifest, trials, out, digest, runtime)
+    except BaseException:
+        # Retain a readable partial result even if the active trial failed.
+        # A reporter defect must not replace the execution traceback.
+        try:
+            do_report(out)
+            refuse_secret_in_report(out, tuple(getattr(runtime.source, "secrets", ()) or ()))
+        except Exception as reporting_error:
+            print(f"partial benchmark report unavailable: {type(reporting_error).__name__}", file=sys.stderr)
+        raise
     report = do_report(out)
     refuse_secret_in_report(out, tuple(getattr(runtime.source, "secrets", ()) or ()))
     return {
@@ -394,7 +421,15 @@ def refuse_without_images(manifest: manifest_module.Manifest, out: Path | None =
         raise CliError(f"live-run refuses this manifest: {error.detail}") from error
 
 
-def live_run(
+def live_run(out: Path, manifest_path: Path, attestation_path: Path | None = None, **options) -> dict[str, Any]:
+    """Own the run before any corpus reset, nonce write, or trial setup."""
+    if options.get("dry_run"):
+        return _live_run(out, manifest_path, attestation_path, **options)
+    with lease.acquire(Path(os.path.abspath(out))):
+        return _live_run(out, manifest_path, attestation_path, **options)
+
+
+def _live_run(
     out: Path,
     manifest_path: Path,
     attestation_path: Path | None = None,
@@ -524,7 +559,7 @@ def live_run(
         source=source,
         egress=egress,
     )
-    payload = execute(manifest, trials, out, runtime)
+    payload = _execute(manifest, trials, out, runtime)
     return payload if stamp is None else {**payload, "corpus": dataclasses.asdict(stamp)}
 
 
