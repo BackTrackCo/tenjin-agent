@@ -241,7 +241,7 @@ def expand_selection(data: dict[str, Any], path: Path) -> dict[str, Any]:
         if not isinstance(ids, list) or not ids or not all(isinstance(item, str) for item in ids) or len(ids) != len(set(ids)):
             raise ManifestError(f"selection {key} must be unique, nonempty ids")
         available = selected.get(key)
-        if not isinstance(available, list) or not all(isinstance(item, dict) and "id" in item for item in available):
+        if not isinstance(available, list) or not all(isinstance(item, dict) and isinstance(item.get("id"), str) for item in available):
             raise ManifestError(f"selection source has malformed {key}")
         if set(ids) - {item["id"] for item in available}:
             raise ManifestError(f"selection {key} contains unknown ids")
