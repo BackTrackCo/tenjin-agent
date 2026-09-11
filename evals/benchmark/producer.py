@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import artifact, claude_usage, sha256_dir, sha256_file, sha256_text, tenjin_arm, usage, verifier
+from . import loop_join, artifact, claude_usage, sha256_dir, sha256_file, sha256_text, tenjin_arm, usage, verifier
 from .executor import ExecutorSpec, LaunchRequest, Provision, ProvisionError
 
 PHASE = artifact.PRODUCER_PHASE
@@ -225,7 +225,7 @@ def run(
         "actors": 0,
         "usage_reconciliation": {"status": "unparsed"},
         "phase_tokens": {PHASE: 0, CAPTURE_PHASE: 0},
-        "capture": store_facts(roots.data_dir / tenjin_arm.LOOP_DB, session_id, project_id(str(launch.cwd))),
+        "capture": store_facts(roots.data_dir / tenjin_arm.LOOP_DB, loop_join.stored_session(spec.harness, session_id), project_id(str(launch.cwd))),
         "sentinel": {"credential_exposures": 0},
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None},
     }
@@ -303,4 +303,4 @@ def run(
     next_provision = provision
     if invalid is None:
         next_provision = tenjin_arm.start_phase(roots, provision, "consumer")
-    return ProducerResult(facts=facts, receipts=receipts, invalid_reason=invalid, provision=next_provision, foreign_sessions=(session_id,))
+    return ProducerResult(facts=facts, receipts=receipts, invalid_reason=invalid, provision=next_provision, foreign_sessions=(loop_join.stored_session(spec.harness, session_id),))

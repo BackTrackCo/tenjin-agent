@@ -554,7 +554,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     attempt_phases = phases_module.split(
         [] if session is None else session.records,
         native_times,
-        phases_module.read_marks(roots.data_dir / "loop.db", launch.root_session_id),
+        phases_module.read_marks(roots.data_dir / "loop.db", loop_join.stored_session(spec.harness, launch.root_session_id)),
     )
     usage_fields = (
         {
