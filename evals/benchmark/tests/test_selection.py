@@ -40,3 +40,15 @@ def test_invalid_selections_refuse_before_execution(source, change):
     path.write_text(json.dumps({"schema": "bench1.selection.v1", "source": source.name, **change}))
     with pytest.raises(manifest.ManifestError):
         manifest.load(path)
+
+
+def test_one_arm_run_reports_plumbing_without_a_product_comparison(source, tmp_path):
+    full = manifest.load(source)
+    path = source.with_name("selected.json")
+    path.write_text(json.dumps({"schema": "bench1.selection.v1", "source": source.name, "arms": [full.arms[0]["id"]]}))
+    out = tmp_path / "run"
+    cli.fake_run(out, manifest_path=path)
+    report = json.loads((out / "report.json").read_text())
+    assert len(report["arms"]) == 1
+    assert report["comparisons"] == {}
+    assert report["run_configuration"]["arm_ids"] == [full.arms[0]["id"]]
