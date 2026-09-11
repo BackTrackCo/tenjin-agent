@@ -72,6 +72,6 @@ class Adapter:
     root: Callable
     scan: Callable
     transcript: Callable
-    times: Callable
+    times: Callable  # (session directory, native root id) -> request-id timestamps
     limited: Callable
     errors: tuple[type[Exception], ...]
