@@ -160,27 +160,25 @@ def test_the_core_suite_runs_the_five_arms_over_the_ten_tasks() -> None:
     assert [task["id"] for task in manifest.tasks] == list(BENCH2) + list(HIGH_DISCOVERY)
 
 
-def test_the_canary_manifest_is_the_four_same_task_transfers_off_against_the_shelf_arm() -> None:
-    """The nightly lane's manifest: one task per lesson family, one attempt per task and arm."""
+def test_the_canary_manifest_is_two_same_task_transfers_off_against_the_shelf_arm() -> None:
+    """The PR/main health lane: two families, one attempt per task and arm."""
     manifest = manifest_module.load(experiments.CANARY_MANIFEST)
     core = manifest_module.load(experiments.LOCAL_ARMS_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["benchmark_version"]) == (8, "bench2-canary-2")
+    assert (len(trials), manifest.data["benchmark_version"]) == (4, "bench2-canary-3")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_seeded"]
-    assert [task["id"] for task in manifest.tasks] == ["alias", "level", "money", "core"]
+    assert [task["id"] for task in manifest.tasks] == ["alias", "core"]
     # Every task is a same-task transfer, and no two share a lesson family,
-    # so eight attempts cover these four transfer families.
+    # so four attempts cover two transfer families.
     assert {task["transfer_distance"] for task in manifest.tasks} == {"same_task"}
     assert len({task["family"] for task in manifest.tasks}) == len(manifest.tasks)
     # The canary is a subset of the core suite, never a second definition of it.
     assert manifest.arms == [arm for arm in core.arms if arm["id"] in ("off", "tenjin_seeded")]
-    assert manifest.tasks == [task for task in core.tasks if task["id"] in ("alias", "level", "money", "core")]
+    assert manifest.tasks == [task for task in core.tasks if task["id"] in ("alias", "core")]
     # The caps are the only pins the canary and the core suite differ on: the
-    # core suite raised them for the two high-discovery tasks, and none of the
-    # four the canary runs comes near either ceiling, so the nightly lane keeps
-    # the tighter one. Records from the two therefore never pool, which is the
-    # cost of the raise and the reason it is stated here rather than inferred.
+    # core suite raised them for the two high-discovery tasks. The canary
+    # retains its existing caps; records from these protocols never pool.
     assert manifest.pins == {**core.pins, "wall_clock_s": 600, "turn_budget": 40, "max_budget_usd": 0.75}
 
 

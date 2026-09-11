@@ -17,12 +17,18 @@ All selections use Claude Code with one trial at a time. Producer sessions are a
 work. The smoke configurations live in Bench-1: plumbing is one control launch, hooks smoke is
 4 consumers, and failure-key smoke is 6 consumers. They check different delivery paths.
 
-| Experiment              | Tasks × arms × repeats | Consumers | Producers | Purpose / trigger                                                                                                                                |
-| ----------------------- | ---------------------- | --------: | --------: | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Natural-reuse preflight | 3 × 2 × 1              |         6 |         3 | Manual capture/reuse check: actor, alias and core cover convention, path-alias and workspace setup.                                              |
-| Full core               | 10 × 5 × 3             |       150 |        30 | Main comparison: off, flat notes, seeded, seeded without public fallback, natural. Weekly/release/manual; PRs opt in with `benchmark: headline`. |
-| Seeded canary           | 4 × 2 × 1              |         8 |         0 | Four same-task transfer families. Nightly/manual; ready PRs opt in with `benchmark: canary`. Subsequent pushes rerun while the label remains.    |
-| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Manual delegated diagnosis and capture/delivery check.                                                                                           |
+| Experiment              | Tasks × arms × repeats | Consumers | Producers | Purpose / trigger                                                                                                                                            |
+| ----------------------- | ---------------------- | --------: | --------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Natural-reuse preflight | 3 × 2 × 1              |         6 |         3 | Manual capture/reuse check: actor, alias and core cover convention, path-alias and workspace setup.                                                          |
+| Full core               | 10 × 5 × 3             |       150 |        30 | Main comparison: off, flat notes, seeded, seeded without public fallback, natural. Weekly/release/manual; ready PRs require `ci` plus `benchmark: headline`. |
+| Seeded canary           | 2 × 2 × 1              |         4 |         0 | Alias/workspace health check. Ready PRs use `ci`; adding it and subsequent pushes run the canary. Main pushes/nightly/manual supply baselines.               |
+| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Manual delegated diagnosis and capture/delivery check.                                                                                                       |
+
+The canary has no path filter: every ready PR into main with `ci` gets the same four attempts,
+including changes outside the benchmark directory. #349 introduces the matching normal-CI
+label gate and is not yet merged; until it lands, normal tests retain their existing trigger.
+The full experiment requires both PR labels; unrelated label events start neither lane.
+Forks without credentials report a skip rather than a measured pass.
 
 Preflight and canary use 600-second consumer caps; core uses 1,500 seconds. Their results do not
 pool. One-repeat health checks cannot establish a reliable speedup or replace the full core run.
@@ -49,6 +55,10 @@ No fixture, lesson, verifier, full-core treatment or recursive experiment was re
 notes and exports are unchanged. Bench-3 adds representative team experiments on this framework.
 
 ## Runtime and remaining limits
+
+The canary caps four consumers at 600 seconds each: at most 40 consumer minutes before setup
+and verification, with a 60-minute job timeout. This is a ceiling, not an expected duration.
+Its small sample flags possible regressions; it cannot establish a statistically reliable speedup.
 
 The reduced preflight is 9 model sessions instead of 72: allow roughly 20–40 minutes including
 setup if healthy sessions take 1–2 minutes. This is a planning assumption, not a measured result.

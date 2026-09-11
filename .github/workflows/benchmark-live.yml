@@ -52,16 +52,17 @@ jobs:
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read
+      actions: read
       checks: write
     secrets: inherit
     with:
       manifest: evals/benchmark/fixtures/live/canary-manifest.json
       lane: benchmark-live-canary
       check_name: benchmark canary (dispatched)
-      timeout_minutes: 120
+      timeout_minutes: 60
       budget_note: >-
-        Dispatched Bench-2 canary: four tasks, two arms, one repeat
-        (8 planned attempts). Results are provisional; the overview states
+        Dispatched Bench-2 canary: two tasks, two arms, one repeat
+        (4 planned attempts). Results are provisional; the overview states
         coverage and verified completion costs before detailed diagnostics.
 
   live:

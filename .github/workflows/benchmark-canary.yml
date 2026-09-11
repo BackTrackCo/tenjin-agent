@@ -1,8 +1,11 @@
 name: benchmark canary
 
-# Seeded product-health experiment: four tasks, two arms, one repeat.
+# Seeded product-health experiment: two tasks, two arms, one repeat.
+# Ready PRs use the normal ci label, matching the gate proposed in #349.
 # A report may be incomplete or invalid even when its workflow succeeds.
 on:
+  push:
+    branches: [main]
   schedule:
     # 07:17 UTC. Off the hour, because every workflow scheduled on one competes
     # for the same runners and drifts.
@@ -10,13 +13,6 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled]
-    paths:
-      - 'src/**'
-      - 'evals/benchmark/**'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - '.github/workflows/benchmark-canary.yml'
-      - '.github/workflows/benchmark-shelf.yml'
   workflow_dispatch:
 
 permissions: {}
@@ -26,8 +22,8 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
-       contains(github.event.pull_request.labels.*.name, 'benchmark: canary') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'benchmark: canary'))
+       contains(github.event.pull_request.labels.*.name, 'ci') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'ci'))
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read
@@ -38,9 +34,9 @@ jobs:
       manifest: evals/benchmark/fixtures/live/canary-manifest.json
       lane: benchmark-canary
       check_name: benchmark canary
-      timeout_minutes: 120
+      timeout_minutes: 60
       budget_note: >-
-        Bench-2 canary: four tasks, control versus the shelf arm, one repeat
-        (8 planned attempts). This is a product health measurement, not the
+        Bench-2 canary: two tasks, control versus the shelf arm, one repeat
+        (4 planned attempts). This is a product health measurement, not the
         full team workload. Read coverage, verified completions and consumer
         time/token costs above; incomplete runs provide no product headline.

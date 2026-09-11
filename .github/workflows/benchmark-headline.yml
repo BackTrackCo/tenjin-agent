@@ -14,17 +14,21 @@ on:
   workflow_dispatch:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 permissions: {}
 
 jobs:
   headline:
     # On a pull request this lane is opt-in and costly, so it runs only while
-    # the label is on. Every other trigger carries no label and runs as before.
+    # both labels are on. Main schedules and explicit dispatch remain available.
     if: >-
       github.event_name != 'pull_request' ||
-      contains(github.event.pull_request.labels.*.name, 'benchmark: headline')
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'ci') &&
+       contains(github.event.pull_request.labels.*.name, 'benchmark: headline') &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'ci' || github.event.label.name == 'benchmark: headline'))
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read

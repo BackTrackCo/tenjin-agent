@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-canary-2",
+  "benchmark_version": "bench2-canary-3",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260909,
@@ -51,24 +51,6 @@
       "fixture_hash": "sha256:a55879c23cb5a8ca370836d70d64c13f809fa1313a4aa5b0f8d9cb87575c8414",
       "verifier": "node_test_alias",
       "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
-      "id": "level",
-      "family": "node-type-stripping",
-      "transfer_distance": "same_task",
-      "fixture": "level",
-      "fixture_hash": "sha256:e6d1aac9eb50f375646068c8d57a6a1417b64a5151d203fd0e44203879491c56",
-      "verifier": "node_test_level",
-      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
-    },
-    {
-      "id": "money",
-      "family": "esm-cjs-interop",
-      "transfer_distance": "same_task",
-      "fixture": "money",
-      "fixture_hash": "sha256:4f36ad3354281cc88fa87b0d5129deb323894e6e32dad622ac653300e5f7fd11",
-      "verifier": "node_test_money",
-      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
     {
       "id": "core",
