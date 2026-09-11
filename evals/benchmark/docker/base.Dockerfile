@@ -23,6 +23,10 @@ RUN apt-get update -qq \
   && apt-get install -y --no-install-recommends "ca-certificates=${CA_CERTIFICATES_VERSION}" \
   && rm -rf /var/lib/apt/lists/*
 
+# Legacy Landlock requires the protected names to exist in every writable root.
+# Root ownership also makes these metadata directories unwritable by trial UIDs.
+RUN mkdir -p /tmp/.git /tmp/.codex /tmp/.agents
+
 # One registry conversation, and the npm cache dropped: a trial never installs
 # anything, so the cache is dead weight in every image built from this one. The
 # CLI is a layer of its own below, so a CLI change does not re-run this.

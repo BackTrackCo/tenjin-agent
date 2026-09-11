@@ -255,7 +255,7 @@ def run(
     receipts: list[usage.AuxiliaryReceipt] = []
     if session is not None:
         root_transcript = spec.evidence.transcript(sessions, session_id)
-        receipts = receipts_of(trial_id, session.records, spec.evidence.times(root_transcript), facts["capture"]["first_turn_end_at"])
+        receipts = receipts_of(trial_id, session.records, spec.evidence.times(sessions, session_id), facts["capture"]["first_turn_end_at"])
         totals = usage.totals(session.records)
         facts.update(
             {

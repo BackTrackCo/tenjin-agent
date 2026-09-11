@@ -706,7 +706,7 @@ EVIDENCE = Adapter(
     root=lambda expected, stream: expected,
     scan=scan,
     transcript=lambda directory, root: directory / f"{root}.jsonl",
-    times=request_times,
+    times=lambda directory, root: request_times(directory / f"{root}.jsonl"),
     limited=lambda directory, root, stream: provider_limit(stream),
     errors=(ClaudeUsageError, UsageError),
 )
