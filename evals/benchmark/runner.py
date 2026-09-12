@@ -343,7 +343,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     image = images.require(task, manifest.fixture_path(task), manifest.pins) if spec.live else None
     if image is not None:
         isolation = {**isolation, "image": image.facts}
-    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), image=image)
+    # Natural prepare has no lesson probe. The producer installs this image's
+    # dependency tree before its first launch; avoid exporting it only to have
+    # producer.create immediately discard and export it again.
+    roots = artifact.create(run_dir, trial.trial_id, manifest.fixture_path(task), image=None if provisioned and arm.get("producer") else image)
     # The manifest's slice is identity of the run, stated in every record.
     if manifest.slice is not None:
         isolation = {**isolation, "slice": manifest.slice}
@@ -419,6 +422,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         # before anything reads `loop.db`: a stopped daemon is what makes the
         # WAL rule below decidable.
         provision_stop = None if provision is None or spec.stop is None else spec.stop(roots, provision)
+    if produced is not None and isinstance(produced.facts.get("publication"), dict):
+        deleted = (provision_stop or {}).get("seed_deleted", {})
+        for piece in produced.facts["publication"]["pieces"]:
+            if piece["piece_id"] in deleted:
+                piece["deleted"] = deleted[piece["piece_id"]] is None
     # The spec says where its harness left the transcripts; the parser and the
     # settlement scan read that directory whatever the harness is.
     identity_reason = None

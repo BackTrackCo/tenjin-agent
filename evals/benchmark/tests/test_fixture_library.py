@@ -193,4 +193,5 @@ def test_the_key_only_lesson_has_no_task_names_and_matches_the_actor_failure() -
 def test_actor_instructions_allow_recursive_experiments_without_loosening_network_scope():
     instructions = (ACTOR_FIXTURE / "CLAUDE.md").read_text()
     assert "do not spawn subagents" not in instructions
-    assert "do not access the network" in instructions
+    assert "Network access is limited to configured Tenjin search/read/inspect commands" in instructions
+    assert "Do not publish from the task container" in instructions

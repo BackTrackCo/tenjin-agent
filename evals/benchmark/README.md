@@ -445,3 +445,36 @@ or rule out a change and rollback between observations. Schema-changing work sti
 coordinated run window. A frozen database LSN preserves the old schema as well as the corpus;
 new schema/server releases require a fresh baseline. Next.js documents the identifier under
 [deploymentId](https://nextjs.org/docs/app/api-reference/config/next-config-js/deploymentId).
+
+### Host-assisted natural capture
+
+An arm may select `capture_publication: host` only with a producer and a pinned
+disposable corpus. The producer keeps its own task, hooks, verification and native
+usage accounting. Its phase prompt explains that the container has no publishing
+wallet and asks it to use the product's finding-fence fallback when capture is
+requested. The host publishes only that producer session/project's captured drafts,
+without substituting fixture lessons, adding fingerprint keys, or adding run-stamp
+prose. Identical drafts within one producer are deduplicated. No draft is a valid
+zero-capture result; it is never filled in by the harness.
+
+Publication uses a temporary host-only CLI data directory and a link to the existing
+benchmark wallet, with a free price and the configured disposable shelf. This avoids
+cross-run local publish dedup while keeping the signing wallet outside task mounts
+and artifacts. The directory is removed on every normal or exceptional exit. Normal
+CLI validation and content scanning still apply. The host records only opaque draft
+and body hashes, returned piece IDs, publication status and elapsed time.
+
+The consumer starts only after successful publication and receives a fresh repository
+with the intended producer store. The existing exclusive shelf window covers publish,
+consumer execution and deletion. Missing/ambiguous receipts stop further admission;
+known piece IDs are still cleaned up. A fresh corpus reset is required after an
+uncertain write. Failed producers are never published. Publication and confirmed
+cleanup are visible alongside drafts, closed local pairings, attributed team-hook
+delivery and verified completion. A delivery followed by a pass does not prove use.
+This treatment measures host-assisted publication, not autonomous agent publishing.
+Host publication time is separate from agent completion time and adds no model tokens.
+
+Natural execution exports fixture dependencies once before each agent phase, retaining
+the reset that removes producer edits before the consumer. Codex managed-auth runs
+remain serial; independent Claude work may fill three workers while provisioned trials
+keep the shared shelf exclusive.

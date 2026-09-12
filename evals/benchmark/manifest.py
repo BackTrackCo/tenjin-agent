@@ -178,6 +178,7 @@ SCHEMA: dict[str, Any] = {
                     # visible; an inline block with no preset is unchanged.
                     "lessons": {"type": "array", "minItems": 1, "items": IDENTIFIER},
                     "producer": {"type": "boolean"},
+                    "capture_publication": {"enum": ["host"]},
                     "hooks_disabled": {"type": "array", "minItems": 1, "items": IDENTIFIER},
                     "public_fallback": enum(PUBLIC_FALLBACK),
                 },
@@ -247,6 +248,8 @@ def _arm_rules(name: str, arm: dict[str, Any]) -> None:
     """What an arm's choices need of each other, which is what the schema cannot see."""
     if "producer" in arm and not arm.get("provision"):
         raise ManifestError(f"{name}.producer needs a provisioned arm")
+    if "capture_publication" in arm and not arm.get("producer"):
+        raise ManifestError(f"{name}.capture_publication needs a producer phase")
     if "hooks_disabled" in arm:
         if not arm.get("provision"):
             raise ManifestError(f"{name}.hooks_disabled needs a provisioned arm: there is no seeded config to write it into")
@@ -293,6 +296,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
             raise ManifestError(f"duplicate arm id {arm['id']!r}")
         seen.add(arm["id"])
         _arm_rules(f"arm {arm['id']!r}", arm)
+    if any(arm.get("capture_publication") == "host" for arm in data["arms"]) and not data.get("corpus"):
+        raise ManifestError("host capture publication needs a disposable corpus with a pinned shelf")
     # Arms that run different executors measure different harnesses, so their
     # token totals would not be comparable under one manifest.
     if len({arm["executor"] for arm in data["arms"]}) != 1:
