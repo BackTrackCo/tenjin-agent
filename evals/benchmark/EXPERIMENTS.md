@@ -76,6 +76,15 @@ recursive probe exposed contradictory fixture instructions and copied native for
 Those probes are diagnostic evidence only: the corrected actor fixture has a new hash and
 experiment versions, so fresh measurements cannot pool with their old results. Recursive
 producers and consumers now require a positive-usage native descendant to count as a pass.
+The corrected Sol recursive diagnostic on `f00c91a5` completed **12/12 consumers and 3/3
+producers**, all with two native actors and matched usage, in **24.2 minutes of active run
+time** including setup/cleanup and excluding operator pauses. Each natural producer captured
+one finding; none of its consumers received an injection. Seeded failure-hook delivery reached
+children. This one-fixture result establishes execution/accounting coverage, not a natural-reuse
+benefit or team-representative result. Codex does not expose the dispatch work order through
+its current product adapter, and its discovery counters remain unavailable until native parsing
+is implemented. Claude dispatch-reranker acceptance is still separate.
+
 The earlier eight-hour planning allowance is superseded by these preliminary measurements.
 GitHub-hosted jobs stop at six hours. The shared runner now subtracts elapsed setup and reserves
 active-trial/cleanup/upload time, then stops admission and saves an incomplete checkpoint.
