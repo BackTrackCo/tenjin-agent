@@ -87,6 +87,7 @@ SCHEMA: dict[str, Any] = {
             "properties": {
                 "model": PINNED,
                 "harness_version": PINNED,
+                "harness_integrity": {"type": "string", "pattern": "^sha512-[A-Za-z0-9+/]{86}==$"},
                 "effort": PINNED,
                 "speed_mode": enum({"standard", "fast"}),
                 "agent_package": enum({"@anthropic-ai/claude-code", "@openai/codex"}),
@@ -197,6 +198,8 @@ class Manifest:
     data: dict[str, Any]
     path: Path
     hash: str
+    fixture_base: Path | None = None
+    release: dict[str, Any] | None = None
 
     @property
     def tasks(self) -> list[dict[str, Any]]:
@@ -225,7 +228,7 @@ class Manifest:
         return int(self.data["pins"].get("concurrency", 1))
 
     def fixture_path(self, task: dict[str, Any]) -> Path:
-        return (self.path.parent / task["fixture"]).resolve()
+        return ((self.fixture_base or self.path.parent) / task["fixture"]).resolve()
 
     @property
     def corpus(self) -> corpus_module.Corpus | None:
@@ -367,6 +370,9 @@ def load(path: Path) -> Manifest:
         raise ManifestError(f"cannot read manifest: {error}") from error
     if not isinstance(data, dict):
         raise ManifestError("manifest must be a JSON object")
+    if data.get("schema") == "bench1.harness-lock.v1":
+        from . import harness_release
+        return harness_release.load_lock(data, path)
     data = expand_selection(data, path)
     try:
         data = presets.expand(data)

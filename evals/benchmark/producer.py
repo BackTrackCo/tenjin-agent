@@ -255,7 +255,8 @@ def run(
         invalid = invalid or "producer:" + sentinel.reason.replace(":", "_")
     session: claude_usage.SessionUsage | None = None
     try:
-        session = spec.evidence.parse(sessions, session_id, trial_id, producer_roots.stream)
+        session = spec.evidence.parse(sessions, session_id, trial_id, producer_roots.stream,
+                                      **({"expected_version": pins["harness_version"]} if spec.harness == "codex" else {}))
         if session.invalid_reason is not None:
             invalid = invalid or "producer:" + session.invalid_reason.replace(":", "_")
     except spec.evidence.errors as error:

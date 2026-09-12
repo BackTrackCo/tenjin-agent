@@ -38,6 +38,28 @@ Build images with `python3 -m evals.benchmark.images --help`, then pass an expli
 `python3 -m evals.benchmark.cli live-run --manifest PATH --out RUN`. Use `--dry-run` to inspect
 that same launch without starting it. Install `requirements-live.txt` for live execution.
 
+New local and CI runs resolve the latest official harness release once, before building images:
+
+```sh
+python3 -m evals.benchmark.harness_release --manifest MANIFEST --out harness-lock.json
+python3 -m evals.benchmark.images build --manifest harness-lock.json
+```
+
+Pass that same `harness-lock.json` to `describe`, `attest`, `live-run`, and checkpoint commands.
+The lock preserves the source experiment, exact package/version/integrity and resolution time;
+fixture paths still resolve against the source manifest. Existing locks and restored checkpoints
+never query today's tag. `--version X.Y.Z` requests an exact release for reproduction. The
+checked-in manifest pins remain reference configurations; the resolver's default is `latest`.
+Use a new lock path for a new run. Source changes refuse reuse instead of silently re-resolving.
+Root package integrity and installed CLI version are checked before any model call. Complete
+platform dependency identity is also captured by the built image; the receipt alone is not a
+lockfile for every transitive binary. In-run auto-updates are disabled.
+
+Codex hook trust is configured by the same resolved container image, without network or a
+subscription-auth mount. The host's installed Codex version cannot decide task hook trust.
+Native transcript versions must match the run's resolved pin; unknown or incomplete native
+usage still invalidates the attempt. Updating a CLI does not grant new dispatch capabilities.
+
 Every live attempt captures stdout and stderr, settles usage from retained transcripts and the
 stream envelope, and tears down its Compose project. After an interrupted run, `cleanup --run RUN`
 removes only projects recorded by that run. Provisioning, corpus reset, producer/consumer phases,

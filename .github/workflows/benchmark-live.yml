@@ -141,16 +141,23 @@ jobs:
           "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
             -r evals/benchmark/requirements-live.txt
           echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
+      - name: Resolve the latest CLI release once
+        if: steps.gate.outputs.live == 'true'
+        run: |
+          "$BENCH_PY" -m evals.benchmark.harness_release \
+            --manifest evals/benchmark/fixtures/live/smoke-manifest.json --out "$RUNNER_TEMP/harness-lock.json"
+          echo "BENCH_MANIFEST=$RUNNER_TEMP/harness-lock.json" >> "$GITHUB_ENV"
+
       - name: Experiment that will run
         if: steps.gate.outputs.live == 'true'
         run: |
-          "$BENCH_PY" -m evals.benchmark.cli describe --manifest evals/benchmark/fixtures/live/smoke-manifest.json | tee "$RUNNER_TEMP/experiment.txt"
+          "$BENCH_PY" -m evals.benchmark.cli describe --manifest "$BENCH_MANIFEST" | tee "$RUNNER_TEMP/experiment.txt"
           { echo '## Experiment planned'; echo '```text'; cat "$RUNNER_TEMP/experiment.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Build the fixture images
         if: steps.gate.outputs.live == 'true'
         run: |
           "$BENCH_PY" -m evals.benchmark.images build \
-            --manifest evals/benchmark/fixtures/live/smoke-manifest.json
+            --manifest "$BENCH_MANIFEST"
       # The secret reaches this one step only. The docker client forwards it
       # into the container by name as the manifest's credential seam, and
       # nothing else from this environment crosses; the budget cap, the
@@ -162,7 +169,7 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           "$BENCH_PY" -m evals.benchmark.cli live-run \
-            --manifest evals/benchmark/fixtures/live/smoke-manifest.json \
+            --manifest "$BENCH_MANIFEST" \
             --out "$RUNNER_TEMP/bench1-live" --plumbing --ci-live
       - name: Verified results and regression diagnostics
         if: always() && steps.gate.outputs.live == 'true'

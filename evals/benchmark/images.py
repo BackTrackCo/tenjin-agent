@@ -259,6 +259,7 @@ def build_args(pins: Mapping[str, Any]) -> dict[str, str]:
         raise ImageError("recipe_pins", "agent package must be a code-owned supported CLI")
     return {"BASE_IMAGE": BASE_IMAGE, "BASE_DIGEST": BASE_DIGEST, "PNPM_VERSION": PNPM_VERSION,
             "AGENT_PACKAGE": package, "AGENT_VERSION": version, "AGENT_COMMAND": commands[package],
+            "AGENT_INTEGRITY": pins.get("harness_integrity", ""),
             "CA_CERTIFICATES_VERSION": "20250419~deb12u1"}
 
 

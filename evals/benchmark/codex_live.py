@@ -8,8 +8,9 @@ import selectors
 import shlex
 import subprocess
 import time
+import uuid
 
-from . import protocol, claude_live, codex_usage, container, images, sha256_json, tenjin_arm
+from . import harness_release, protocol, claude_live, codex_usage, container, images, sha256_json, tenjin_arm
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest
 
 NAME = "codex_live"
@@ -19,11 +20,13 @@ EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Suba
 
 
 def validate_pins(pins):
-    required = {"model": codex_usage.MODEL, "harness_version": codex_usage.VERSION,
+    required = {"model": codex_usage.MODEL,
                 "permission_mode": "workspace-write", "credential_env": AUTH_ENV,
                 "agent_package": "@openai/codex", "billing_mode": "subscription"}
     if any(pins.get(key) != value for key, value in required.items()):
         raise ExecutorError("Codex requires the pinned Sol model, CLI, subscription auth and workspace sandbox")
+    if not isinstance(pins.get("harness_version"), str) or not harness_release.VERSION.fullmatch(pins["harness_version"]):
+        raise ExecutorError("Codex requires an exact resolved CLI release")
     if pins.get("effort") not in {"low", "medium", "high", "xhigh", "max"}:
         raise ExecutorError("Codex reasoning effort must be explicit; ultra delegates outside the core protocol")
     if pins.get("turn_budget") is not None or pins.get("max_budget_usd") is not None:
@@ -63,18 +66,36 @@ def hooks(roots):
                               "hooks": [{"type": "command", "command": command, "timeout": 5}]}] for event in EVENTS}}
 
 
-def trust_hooks(roots, expected):
+def trust_hooks(roots, expected, version, image):
+    name = "bench2-trust-" + uuid.uuid4().hex
+    try:
+        return _trust_hooks(roots, expected, version, image, name)
+    finally:
+        subprocess.run(["docker", "rm", "--force", name], env=docker_environment(), capture_output=True, timeout=15)
+
+
+def docker_environment():
+    return {key: os.environ[key] for key in ("PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG") if key in os.environ}
+
+
+def _trust_hooks(roots, expected, version, image, name):
     """Ask the pinned native catalog for identities; trust only our exact handlers.
 
     The profile has no auth file on the host. The native process only lists and
     writes hook settings, never starts a model. Container mount paths are the
     same absolute paths, so its hook catalog sees the same trusted identities.
     """
-    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(roots.home), "CODEX_HOME": str(roots.profile)}
-    version = subprocess.run(["codex", "--version"], env=env, capture_output=True, text=True, timeout=10, check=True)
-    if version.stdout.strip() != f"codex-cli {codex_usage.VERSION}":
-        raise ExecutorError("native hook trust setup requires the pinned Codex CLI")
-    process = subprocess.Popen(["codex", "app-server"], cwd=roots.repo, env=env, stdin=subprocess.PIPE,
+    # Use the same image as the task, with no network or auth mount. The host
+    # Codex installation may be another release and must not define hook trust.
+    env = docker_environment()
+    command = ["docker", "run", "--rm", "--name", name, "-i", "--network", "none", "--user", f"{os.getuid()}:{os.getgid()}",
+               "--mount", f"type=bind,src={roots.base},dst={roots.base}", "--workdir", str(roots.repo),
+               "--env", f"HOME={roots.home}", "--env", f"CODEX_HOME={roots.profile}",
+               "--entrypoint", "codex", image]
+    observed = subprocess.run([*command, "--version"], env=env, capture_output=True, text=True, timeout=30, check=True)
+    if observed.stdout.strip() != f"codex-cli {version}":
+        raise ExecutorError("native hook trust setup requires the resolved Codex CLI")
+    process = subprocess.Popen([*command, "app-server"], cwd=roots.repo, env=env, stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
@@ -172,7 +193,7 @@ def launch(request: LaunchRequest) -> Launch:
     generated = hooks(roots) if provisioned else {"hooks": {}}
     (roots.profile / "hooks.json").write_text(json.dumps(generated) + "\n")
     if provisioned and not request.dry_run:
-        trust_hooks(roots, generated)
+        trust_hooks(roots, generated, pins["harness_version"], request.image or images.fixture_stem(request.task["id"]))
     # Empty host placeholder only. Docker overlays the separately retained
     # auth file; collecting profile artifacts never copies the credential.
     target = roots.profile / "auth.json"

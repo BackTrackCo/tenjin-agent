@@ -156,7 +156,7 @@ def check(
     return {"baseline": baseline["date"], "findings": found, "observed": observed}
 
 
-def protocol_hash(manifest: dict[str, Any]) -> str:
+def protocol_hash(manifest: dict[str, Any], *, harness_update: bool = False) -> str:
     """Freeze measurement inputs while allowing the tested product revision to change.
 
     Runtime product/image commit receipts are not manifest inputs. Explicit
@@ -164,7 +164,33 @@ def protocol_hash(manifest: dict[str, Any]) -> str:
     """
     data = {**manifest, "measurement_method": "completion-v2-agent-clock-capture-reuse1", "arms": [{key: value for key, value in arm.items() if key != "product_version"}
                                for arm in manifest.get("arms", [])]}
+    if harness_update:
+        data["pins"] = {key: value for key, value in manifest.get("pins", {}).items() if key not in {"harness_version", "harness_integrity"}}
     return sha256_json(data)
+
+
+def compare_harness_updates(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
+    """Release-to-release signal, never a causal claim or product baseline."""
+    key = "harness_update_protocol_hash"
+    if not current.get(key) or current[key] != baseline.get(key):
+        return {"status": "unavailable", "reason": "different or missing harness update protocol", "rows": [], "findings": []}
+    configs = [item.get("run_configuration", {}) for item in (baseline, current)]
+    versions = [item.get("harness_version") for item in configs]
+    if not all(versions):
+        return {"status": "unavailable", "reason": "missing harness versions", "rows": [], "findings": []}
+    if versions[0] == versions[1]:
+        return {"status": "not changed", "reason": "Latest matching main run uses the same harness version.", "rows": [], "findings": []}
+    # Reuse all coverage/invalid/accounting checks; replace only the protocol identity.
+    result = compare_reports({**current, "regression_protocol_hash": current[key]},
+                             {**baseline, "regression_protocol_hash": baseline[key]})
+    commits = [item.get("product_commits") for item in configs]
+    servers = [(item.get("server_revision") or {}).get("deployment_id") for item in (baseline, current)]
+    matched = bool(commits[0] and commits[0] == commits[1] and servers[0] and servers[0] == servers[1])
+    return {**result, "harness_versions": {"main": versions[0], "current": versions[1]},
+            "product_commits": {"main": commits[0], "current": commits[1]},
+            "server_deployments": {"main": servers[0], "current": servers[1]},
+            "attribution": "recorded product/server identities match; causal attribution still requires a matched replay" if matched else "mixed or unknown product/server identities; cannot attribute this delta to the harness",
+            "comparison": "harness update diagnostic"}
 
 
 COMPLETION_METRICS = ("pass_rate", "consumer_seconds_per_verified_resolution", "tokens_per_verified_resolution")
