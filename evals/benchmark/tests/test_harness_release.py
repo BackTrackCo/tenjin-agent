@@ -102,6 +102,7 @@ def test_registry_client_runs_outside_project_and_without_credentials(monkeypatc
     def run(command, **kwargs):
         assert Path(kwargs["cwd"]) == Path(kwargs["env"]["HOME"])
         assert "CLAUDE_CODE_OAUTH_TOKEN" not in kwargs["env"]
+        assert kwargs["env"]["NPM_CONFIG_USERCONFIG"] != kwargs["env"]["NPM_CONFIG_GLOBALCONFIG"]
         assert "--@openai:registry=" + release.REGISTRY in command
         assert "--@anthropic-ai:registry=" + release.REGISTRY in command
         return SimpleNamespace(returncode=0, stdout=json.dumps(metadata()))

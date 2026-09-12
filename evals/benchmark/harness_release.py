@@ -29,14 +29,16 @@ def metadata(package, requested):
     """npm owns registry transport; no wallet, provider or private registry credentials."""
     with tempfile.TemporaryDirectory(prefix="bench-release-") as home:
         env = {"PATH": os.environ.get("PATH", ""), "HOME": home, "NPM_CONFIG_CACHE": home + "/cache",
-               "NPM_CONFIG_USERCONFIG": os.devnull, "NPM_CONFIG_GLOBALCONFIG": os.devnull}
+               "NPM_CONFIG_USERCONFIG": home + "/user.npmrc", "NPM_CONFIG_GLOBALCONFIG": home + "/global.npmrc"}
         try:
             result = subprocess.run(["npm", "view", f"{package}@{requested}", "version", "dist.integrity", "--json",
                                      "--registry=" + REGISTRY, "--@openai:registry=" + REGISTRY, "--@anthropic-ai:registry=" + REGISTRY],
                                     capture_output=True, text=True, timeout=45, env=env, cwd=home)
             if result.returncode or len(result.stdout) > 4096:
-                fail("npm metadata unavailable; no old-version fallback")
+                fail("npm metadata unavailable; no old-version fallback: " + result.stderr.strip()[-2000:])
             return json.loads(result.stdout)
+        except manifests.ManifestError:
+            raise
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             fail(f"metadata lookup failed ({type(error).__name__}); no old-version fallback")
 
