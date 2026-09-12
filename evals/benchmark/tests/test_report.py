@@ -651,3 +651,17 @@ def test_subscription_exhaustion_has_an_unavailable_readout():
     value = {"isolation": "attested_container", "publishable": True,
              "trials": [{"invalid_reason": "provider:rate_limit"}]}
     assert report.run_status(value) == "UNAVAILABLE — model subscription/rate limit; no product result"
+
+
+@pytest.mark.parametrize("status", ["changed", "unavailable"])
+def test_remote_server_drift_cannot_look_like_a_product_result(corpus, reduction, status):
+    manifest, digest, accepted, _ = corpus
+    state = {"status": status, "deployment_id": "dpl_original", "checks": 2}
+    value = report.project(manifest.data, manifest.hash, digest, reduction, accepted, server_revision=state)
+    assert value["publishable"] is False
+    assert all(not row["headline_eligible"] for row in value["comparisons"].values())
+    text = report.overview(value)
+    assert text.startswith("UNAVAILABLE")
+    assert "diagnostic evidence only" in text
+    assert "they do not lock the server or prove schema compatibility" in text
+    assert "lower" not in text

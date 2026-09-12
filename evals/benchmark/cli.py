@@ -53,6 +53,7 @@ from . import (
     sha256_json,
     images,
     lease,
+    server_revision,
     manifest as manifest_module,
     records,
     reduce as reduce_module,
@@ -230,6 +231,9 @@ def _execute(manifest: manifest_module.Manifest, trials: list[schedule.Trial], o
         except Exception as reporting_error:
             print(f"partial benchmark report unavailable: {type(reporting_error).__name__}", file=sys.stderr)
         else:
+            if isinstance(execution_error, server_revision.ServerError):
+                return {"unavailable": True, "reason": f"server:{execution_error.code}", "trials": len(partial.get("trials", [])),
+                        "report": str(out / "report.json"), "schedule_hash": digest}
             if isinstance(execution_error, executor.ProvisionError) and execution_error.code == "provider_unavailable":
                 return {"unavailable": True, "reason": "provider:rate_limit", "trials": len(partial.get("trials", [])),
                         "report": str(out / "report.json"), "schedule_hash": digest}
@@ -485,6 +489,7 @@ def _live_run(
     tenjin_source: Path | None = None,
     corpus_api: corpus_module.Api | None = None,
     corpus_snapshot: Any = None,
+    server_probe: Any = None,
     freeze_corpus: bool = False,
     max_new_trials: int | None = None,
     neon_cli: bool = False,
@@ -606,7 +611,17 @@ def _live_run(
     if runtime is not None and runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
         return {**_execute(manifest, [], out, runtime), "deadline_reached": True}
     stamp = None
+    server_check = None
     if manifest.corpus is not None:
+        server_check = lambda: server_revision.observe(out, manifest.corpus.origin, manifest.hash, server_probe or server_revision.probe)
+        try:
+            server_check()
+        except server_revision.ServerError as error:
+            # Evidence failures with no readable sidecar must refuse, never
+            # overwrite or turn an old run into an observed new baseline.
+            if error.code.startswith("evidence_"):
+                raise
+            return {**_execute(manifest, [], out, runtime or runner.Runtime()), "unavailable": True, "reason": f"server:{error.code}"}
         api = corpus_api or (corpus_module.CliApi() if neon_cli else corpus_module.HttpApi.from_env(environ))
         stamp = (frozen_corpus.reset(manifest.corpus, api, out, manifest.hash) if freeze_corpus
                  else corpus_module.reset(manifest.corpus, api))
@@ -621,6 +636,7 @@ def _live_run(
         automated=ci_live or automated,
         source=source,
         egress=egress,
+        server_check=server_check,
     )
     payload = _execute(manifest, trials, out, runtime)
     return payload if stamp is None else {**payload, "corpus": dataclasses.asdict(stamp)}
@@ -700,7 +716,7 @@ def do_report(run_dir: Path) -> dict[str, Any]:
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
     frozen_corpus.verify_records(run_dir, accepted)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
-    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir))
+    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir), server_revision.read(run_dir))
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 

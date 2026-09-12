@@ -424,3 +424,24 @@ caps and a conservative cleanup/upload reserve from the job timeout. It is a pra
 not a guarantee against a stalled external service. Deadline stops retain incomplete coverage.
 The reusable workflow accepts an explicit prior run/artifact pair for recovery; it never picks
 an arbitrary latest checkpoint. A different tested commit or runtime requires a fresh run.
+
+### Remote server observations
+
+Live runs that name a corpus automatically read the deployed Next.js identity from the shelf's
+public page before database reset and after each completed trial (after each completed group
+when concurrent). These HTTP checks run outside the agent timing bracket. The run stores only
+an opaque deployment ID and observation state in `server-revision.json`, carries that evidence
+through portable checkpoints, and checks the original ID again before a continuation starts.
+No server change, Vercel credential or private source checkout is required.
+
+A changed ID or unavailable observation stops new admission, lets active work settle, preserves
+completed records and makes the shared CI/local readout **UNAVAILABLE — diagnostic evidence
+only**. A later successful probe cannot rehabilitate that run; start a fresh run. Old records
+without server evidence cannot adopt a newly observed server on continuation. Failure to read
+the page never counts as a measured pass.
+
+This detects deployment changes; it does not lock deployments, inspect database migrations,
+or rule out a change and rollback between observations. Schema-changing work still needs a
+coordinated run window. A frozen database LSN preserves the old schema as well as the corpus;
+new schema/server releases require a fresh baseline. Next.js documents the identifier under
+[deploymentId](https://nextjs.org/docs/app/api-reference/config/next-config-js/deploymentId).

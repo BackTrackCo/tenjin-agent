@@ -289,6 +289,7 @@ class Lane:
             environ=kwargs.pop("environ", self.environ),
             runtime=self.runtime,
             corpus_api=FakeApi() if api is None else api,
+            server_probe=kwargs.pop("server_probe", lambda origin: "dpl_test"),
             **kwargs,
         )
 
@@ -579,3 +580,29 @@ def test_zero_admission_budget_writes_checkpoint_without_resetting_corpus(lane):
     assert result["trials"] == 0
     assert api.calls == []
     assert (lane.out / "report.json").is_file()
+
+
+@pytest.mark.parametrize('degree', [1, 3])
+def test_server_drift_stops_admission_and_keeps_completed_records(lane, degree):
+    data = json.loads(lane.manifest.read_text())
+    data['pins']['concurrency'] = degree
+    lane.manifest.write_text(json.dumps(data))
+    observations = iter(['dpl_before'] + ['dpl_after'] * 10)
+    result = lane.launch(server_probe=lambda _: next(observations))
+    assert result['unavailable'] and result['reason'] == 'server:changed'
+    kept = list((lane.out / 'records').glob('*.json'))
+    assert 1 <= len(kept) <= degree
+    value = json.loads((lane.out / 'report.json').read_text())
+    assert value['publishable'] is False
+    assert report.run_status(value).startswith('UNAVAILABLE')
+    assert value['server_revision']['deployment_id'] == 'dpl_before'
+    assert all(json.loads(p.read_text())['outcome'] == 'pass' for p in kept)
+
+
+def test_server_unavailable_before_run_does_not_reset_or_start_model(lane):
+    api = FakeApi()
+    result = lane.launch(api=api, server_probe=lambda _: None)
+    assert result['unavailable'] and result['reason'] == 'server:unavailable'
+    assert api.calls == []
+    assert not list((lane.out / 'records').glob('*.json'))
+    assert report.run_status(json.loads((lane.out / 'report.json').read_text())).startswith('UNAVAILABLE')
