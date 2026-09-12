@@ -70,3 +70,7 @@ def test_a_child_transcript_counts_too_and_an_empty_dir_is_all_false(sessions: P
     write(sessions, "child/agent.jsonl", [_row(1, "assistant", {"id": "t1", "name": "Bash", "input": {"command": "sed -i '' 's/a/b/' src/actor.mjs > /dev/null"}})])
     assert discovery.derive(sessions, "actor")["source_edited"]
     assert discovery.derive(sessions.parent / "absent", "actor")["test_runs"] == 0
+
+
+def test_unparsed_codex_discovery_is_unknown_instead_of_zero(tmp_path):
+    assert discovery.derive(tmp_path, "actor", harness="codex") is None
