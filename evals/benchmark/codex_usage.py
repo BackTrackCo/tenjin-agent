@@ -61,6 +61,7 @@ def root_id(stream: Path) -> str:
 
 def family(directory: Path, root: str) -> dict[str, tuple[dict[str, Any], list[tuple[dict[str, Any], str]]]]:
     found = {}
+    inherited = {}
     for path in sorted(directory.rglob("*.jsonl")):
         content = rows(path)
         metadata = [row.get("payload") for row, _ in content if row.get("type") == "session_meta"]
@@ -70,11 +71,12 @@ def family(directory: Path, root: str) -> dict[str, tuple[dict[str, Any], list[t
         if not isinstance(meta, dict) or meta.get("session_id") != root:
             continue
         thread = meta.get("id")
-        if not isinstance(thread, str) or not thread or thread in found or any(item != meta for item in metadata):
+        if not isinstance(thread, str) or not thread or thread in found:
             raise CodexUsageError("actor_identity", "ambiguous native thread metadata")
         if meta.get("cli_version") != VERSION:
             raise CodexUsageError("version_mismatch", "rollout CLI version differs from the pinned adapter")
         found[thread] = (meta, content)
+        inherited[thread] = metadata[1:]
     if root not in found:
         raise CodexUsageError("root_identity", "root rollout missing")
     for thread, (meta, _) in found.items():
@@ -87,6 +89,16 @@ def family(directory: Path, root: str) -> dict[str, tuple[dict[str, Any], list[t
                 raise CodexUsageError("actor_identity", "native parent cycle")
             seen.add(parent)
             parent = found[parent][0].get("parent_thread_id")
+        # Native fork histories copy ancestor metadata after the child's own
+        # header. Only exact metadata from its resolved native ancestry is
+        # admissible; a fork hint alone still cannot manufacture a parent.
+        ancestors = seen - {thread}
+        for copied in inherited[thread]:
+            if copied == meta:
+                continue
+            if (not isinstance(copied, dict) or copied.get("id") not in ancestors
+                    or copied != found[copied["id"]][0]):
+                raise CodexUsageError("actor_identity", "conflicting or unrelated inherited thread metadata")
     return found
 
 
@@ -217,7 +229,8 @@ def provider_limit(directory: Path, root: str) -> bool:
 
 def transcript_path(directory: Path, root: str) -> Path:
     for path in sorted(directory.rglob("*.jsonl")):
-        if any(row.get("type") == "session_meta" and row.get("payload", {}).get("id") == root for row, _ in rows(path)):
+        primary = next((row.get("payload", {}) for row, _ in rows(path) if row.get("type") == "session_meta"), {})
+        if primary.get("id") == root:
             return path
     return directory / "missing-root.jsonl"
 
