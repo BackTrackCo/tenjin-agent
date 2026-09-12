@@ -156,7 +156,10 @@ The readout ends with the corpus every number above was measured on: one row per
 its family, transfer distance, verifier and fixture hash from the manifest, and its round trips,
 tokens per attempt and pass rate in each arm from the reduction. The rows are ordered by
 discovery cost, the baseline arm's requests per attempt, most expensive first, which is what says
-whether the corpus holds an expensive task at all. It prints at most `report.CORPUS_ROWS` of
+whether the corpus holds an expensive task at all. Claude transcript discovery counters are
+reported only for the supported native format; Codex discovery is unavailable, never inferred
+as zero from unparsed events. Verified completion, native tokens, timing and hook delivery
+remain separately measured. It prints at most `report.CORPUS_ROWS` of
 them, because a check run's `output.summary` is capped at 65,535 characters and truncates
 silently past it; a corpus longer than that ends with a line naming how many cheaper tasks were
 left out, and `report.json` carries all of them under `corpus_tasks`.
