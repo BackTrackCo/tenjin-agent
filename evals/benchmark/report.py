@@ -195,6 +195,7 @@ def project(
     accepted: dict[str, dict[str, Any]],
     corpus_snapshot: dict[str, Any] | None = None,
     server_revision: dict[str, Any] | None = None,
+    harness_release: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The whole publishable artifact, refused as a unit if anything private rides along."""
     excluded: dict[str, int] = {}
@@ -273,6 +274,7 @@ def project(
             "model": manifest_data["pins"].get("model"),
             "harness": manifest_data.get("harness"),
             "harness_version": manifest_data["pins"].get("harness_version"),
+            "harness_release": harness_release,
             "effort": manifest_data["pins"].get("effort"),
             "speed_mode_requested": manifest_data["pins"].get("speed_mode", "standard"),
             "planned_per_arm": len(manifest_data["tasks"]) * manifest_data["repeats"],
@@ -281,6 +283,7 @@ def project(
         },
         "manifest_hash": manifest_hash,
         "regression_protocol_hash": regress.protocol_hash(manifest_data),
+        "harness_update_protocol_hash": regress.protocol_hash(manifest_data, harness_update=True),
         "schedule_hash": schedule_hash,
         "seed": manifest_data["seed"],
         "repeats": manifest_data["repeats"],
@@ -448,6 +451,9 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
              f"Ran: {recorded}/{expected} attempts | Tasks: {len(tasks)} | Arms: {len(ids)} | Repeats: {report.get('repeats', 'unknown')}",
              "Tasks: " + (", ".join(task["task_id"] for task in tasks) or "unknown"),
              "Control: " + str(report.get("baseline") or "none"), ""]
+    release = config.get("harness_release")
+    if release:
+        lines += [f"Harness release: {release['package']}@{release['version']} | Requested: {release['requested']} | Resolved: {release['resolved_at']}", ""]
     server = report.get("server_revision")
     if server:
         lines += [f"Remote server: {server.get('deployment_id') or 'unknown'} | Observations: {server.get('checks', 0)} | Status: {server.get('status')}",
