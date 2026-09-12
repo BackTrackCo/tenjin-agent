@@ -190,3 +190,17 @@ def test_fork_history_cannot_smuggle_metadata_or_parent_spend(tmp_path, variant)
     write(tmp_path, child, "child")
     with pytest.raises(codex.CodexUsageError):
         parse(tmp_path)
+
+
+def test_resolved_release_is_checked_without_relabeling_adapter_evidence(tmp_path):
+    content = rollout()
+    content[0]["payload"]["cli_version"] = "0.155.0"
+    write(tmp_path, content)
+    with pytest.raises(codex.CodexUsageError, match="version_mismatch"):
+        parse(tmp_path)
+    session = codex.parse_session_dir(tmp_path, "root", "trial", expected_version="0.155.0")
+    assert session.reconciliation["status"] == "matched"
+    assert session.records[0].adapter_version == codex.VERSION
+    write(tmp_path, rollout("child", "root"), "child")
+    with pytest.raises(codex.CodexUsageError, match="version_mismatch"):
+        codex.parse_session_dir(tmp_path, "root", "trial", expected_version="0.155.0")

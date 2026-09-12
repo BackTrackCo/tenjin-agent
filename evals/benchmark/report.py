@@ -124,6 +124,13 @@ def guard(value: Any, trail: str = "report") -> None:
 
 
 def _guard_string(value: str, trail: str) -> None:
+    release = "report.run_configuration.harness_release."
+    if trail == release + "package" and value in {"@anthropic-ai/claude-code", "@openai/codex"}:
+        return
+    if trail == release + "registry" and value == "https://registry.npmjs.org":
+        return
+    if trail == release + "integrity" and re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", value):
+        return
     if trail == "report.corpus.source_lsn" and re.fullmatch(r"[0-9A-F]+/[0-9A-F]+", value):
         return
     if HASH.match(value):
