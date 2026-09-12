@@ -56,6 +56,7 @@ def test_harness_update_signal_keeps_other_inputs_frozen_and_labels_attribution(
     manifest = {"pins": {"model": "same", "harness_version": "1.0.0"}, "arms": []}
     update = copy.deepcopy(manifest)
     update["pins"]["harness_version"] = "1.1.0"
+    update["pins"]["harness_integrity"] = "new-release-integrity"
     assert regress.protocol_hash(update) != regress.protocol_hash(manifest)
     assert regress.protocol_hash(update, harness_update=True) == regress.protocol_hash(manifest, harness_update=True)
     update["pins"]["model"] = "different"
