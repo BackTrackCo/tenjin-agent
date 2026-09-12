@@ -607,10 +607,10 @@ describe('the daemon, cold-started from the real bundle', () => {
    * THE ONE END-TO-END PASS OF PR D: the captured events of one dispatched
    * turn (2.1.261) against the stub shelf. The parent's dispatch parks a
    * handoff; the child claims it at its start and gets the finding whole; the
-   * child's stop is asked once and its answer turn says nothing; the lead's
-   * stop is asked on its own evidence.
+   * child's stop is asked once and its answer turn says nothing; the lead, which
+   * only dispatched, is not asked at all.
    */
-  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked once, the lead asked', async () => {
+  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked once, the lead left alone', async () => {
     const original = await readFile(configPath(dataDir), 'utf8');
     await writeFile(
       configPath(dataDir),
@@ -669,20 +669,22 @@ describe('the daemon, cold-started from the real bundle', () => {
       expect(contextOf(startRes)).toContain(SHELF_BODY);
       expect(handoffCount()).toBe(0);
 
-      // 3. The child reads a file: one context row, which is its evidence.
-      const read = await post({
-        hook_event_name: 'PostToolUse',
+      // 3. The child EDITS a file: one context row and an `edited:` mark, which
+      // is its evidence. A Read is deliberately not enough any more (owner,
+      // 2026-09-12): it is the cheapest row an agent can leave, and counting it
+      // asked nearly every child whatever it had been doing.
+      const edit = await post({
+        hook_event_name: 'PreToolUse',
         agent_id: agent,
         agent_type: 'Explore',
-        tool_name: 'Read',
-        tool_input: { file_path: '/tmp/proj/README.md' },
-        tool_response: { text: '# proj' },
+        tool_name: 'Edit',
+        tool_input: { file_path: '/tmp/proj/README.md', old_string: 'a', new_string: 'b' },
       });
-      expect(read.status).toBe(204);
-      // The child's stop is asked only when its Read is ALREADY in the ledger:
-      // `capture.ts` reads `fires` for the child's evidence (`arm = 'context'`
-      // on `tool.after`), and that row lands after this 204. Polling the total
-      // count would race the same way, so wait for the row itself.
+      expect(edit.status).toBe(204);
+      // The child's stop is asked only when its edit is ALREADY in the ledger:
+      // `capture.ts` reads the marks and `fires` rows for the child's evidence,
+      // and both land after this 204. Polling the total count would race the
+      // same way, so wait for the row itself.
       await expect
         .poll(() => firesOf(session, agent).filter((f) => f.arm === 'context').length, POLL)
         .toBe(1);
@@ -712,16 +714,16 @@ describe('the daemon, cold-started from the real bundle', () => {
       });
       expect(answered.status).toBe(204);
 
-      // 6. The lead stops: asked once, on its own evidence.
+      // 6. The lead stops and is NOT asked: it dispatched, and dispatching is
+      // not work of its own. Nothing its child did arms it either — the parent
+      // is asked on its OWN evidence or not at all (principle 5), and the rule
+      // that re-armed it from a child's stored finding is gone with the store.
       const leadRes = await post({
         hook_event_name: 'Stop',
         stop_hook_active: false,
         last_assistant_message: 'done',
       });
-      expect(leadRes.status).toBe(200);
-      const leadAsk = contextOf(leadRes) ?? '';
-      expect(leadAsk).toContain('Tenjin: this turn did work worth a second look.');
-      expect(leadRes.body?.decision).toBeUndefined();
+      expect(leadRes.status).toBe(204);
     } finally {
       await writeFile(configPath(dataDir), original);
     }
@@ -848,7 +850,7 @@ describe('the daemon, cold-started from the real bundle', () => {
       }
     });
 
-    it('a child with an edit is asked once at its stop as a block reason, and the fused stop harvests', async () => {
+    it('a child with an edit is asked once at its stop as a block reason, and never again', async () => {
       // The sibling child: its patch is in the fixtures, its stop is built from
       // the captured one so it has a start of its own to answer for.
       const start = codexFixtures.find((f) => f.name === 'SubagentStart-sibling.json');
