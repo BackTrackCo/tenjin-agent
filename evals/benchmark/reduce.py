@@ -183,7 +183,7 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
         "publication_observed": len(observed),
         "publication_mode": "host-assisted" if observed else "unobserved",
         "published": sum(sum(item.get("published") is True for item in phase.get("pieces", [])) for phase in observed) if len(observed) == len(phases) else None,
-        "publication_failed": sum(phase.get("status") != "complete" for phase in observed),
+        "publication_failed": sum(phase.get("status") == "unavailable" for phase in observed),
         "publication_time_s": sum(float(phase.get("wall_time_s", 0)) for phase in observed),
         "not_deleted": sum(sum(item.get("published") is True and item.get("deleted") is not True for item in phase.get("pieces", [])) for phase in observed),
         "consumer_deliveries": sum(counts) if len(observed) == len(phases) else None,
