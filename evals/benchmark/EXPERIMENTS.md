@@ -68,19 +68,27 @@ seconds end to end**. Its consumer agent execution totaled 237.0 seconds; produc
 orchestration are separate. Natural capture sometimes produced no finding, so this establishes
 execution/accounting, not a reuse benefit.
 
-Full core remains 180 model sessions. Its first frozen ten-consumer chunk passed in 723.1
-seconds including producer and orchestration work. That early pace suggests roughly three
-hours, subject to harder tasks and subscription limits; it is not a validated full-run forecast.
-Core paused cleanly at 40/150 passing consumers, balanced across all five arms. The first
+Full core remains 180 model sessions. Preliminary chunks suggest roughly three hours,
+subject to harder tasks and subscription limits; this is not a completed full-run measurement.
+The old fixture configuration paused at 40/150 passing consumers. The corrected September 12
+run stopped cleanly at 30/150 passing consumers and six passing producers after the remote
+server deployed a new revision during the schedule. No owned containers remain from either
+run. The benchmark parent also lacks the newer reranker schema fields present in its upstream
+team-shelf database. A fresh full run awaits schema alignment and a stable server window. The first
 recursive probe exposed contradictory fixture instructions and copied native fork metadata.
 Those probes are diagnostic evidence only: the corrected actor fixture has a new hash and
 experiment versions, so fresh measurements cannot pool with their old results. Recursive
 producers and consumers now require a positive-usage native descendant to count as a pass.
 The corrected Sol recursive diagnostic on `f00c91a5` completed **12/12 consumers and 3/3
 producers**, all with two native actors and matched usage, in **24.2 minutes of active run
-time** including setup/cleanup and excluding operator pauses. Each natural producer captured
-one finding; none of its consumers received an injection. Seeded failure-hook delivery reached
-children. This one-fixture result establishes execution/accounting coverage, not a natural-reuse
+time** including setup/cleanup and excluding operator pauses. The three natural producers retained three capture drafts, but zero reusable closed failure
+pairings; none of their consumers received an injection. The producer-to-consumer database
+transfer was intact. The current Codex adapter never establishes successful-shell evidence to
+close those pairings, and capture drafts are not a searchable shelf. Publication is also
+protocol-confounded: producer instructions ban network access while the Stop nudge requests
+publishing, and the retained traces contain no publish attempt. These observations do not
+establish a Codex 0.154.0 native hook limitation or isolate product quality. Seeded failure-hook
+delivery reached children. This one-fixture result establishes execution/accounting coverage, not a natural-reuse
 benefit or team-representative result. Codex does not expose the dispatch work order through
 its current product adapter, and its discovery counters remain unavailable until native parsing
 is implemented. Claude dispatch-reranker acceptance is still separate.
@@ -106,3 +114,23 @@ Matched Codex files are `codex-preflight-selection.json`, `codex-core-selection.
 treatments with complete Codex pins. Keep their reports separate from Claude. The reusable CI
 workflow currently has Claude credentials; Codex selections are operator-run until a managed
 subscription credential is configured for CI.
+
+## Remote server preparation
+
+Bench-1 automatically records the remote Next.js deployment ID and checks it after completed
+trials and before continuations. A changed or unavailable ID stops admission and qualifies the
+readout as diagnostic-only. This is observation, not a deployment lock or schema audit. Database
+preparation must update the parent used for resets, then a fresh run freezes that revision;
+migrating only the disposable child is lost at reset. A frozen LSN does not pin the remote
+server code. Record the server commit/deployment with the run and qualify or restart a
+comparison that spans a server change.
+
+On September 12, GitHub recorded a production tenjin-bench deployment of tenjin commit
+`98b5bc34` (reranker #844) at 12:35 UTC, after the first corrected core run had started. That
+run is retained as diagnostic evidence and will not pool with a future run against the
+updated server. Main pushes can deploy each connected Vercel project; manually redeploying
+public tenjin alone is a separate operation.
+
+A separately requested tenjin migration-workflow PR adds the benchmark parent and disposable
+database to the existing migration targets. It covers both local and CI benchmark runs; its
+secrets and applied migrations must be verified before the next full measurement.
