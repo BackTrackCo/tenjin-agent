@@ -122,3 +122,34 @@ def test_custom_permission_restrictions_are_not_silently_dropped(tmp_path):
     item = replace(item, arm={"settings": settings, "settings_hash": "sha256:" + sha256_json(settings)})
     with pytest.raises(executor.ExecutorError, match="custom Claude permission"):
         codex_live.launch(item)
+
+
+@pytest.mark.parametrize("mode", ["timeout", "wrong-version"])
+def test_native_trust_uses_resolved_image_and_cleans_failed_version_probe(tmp_path, monkeypatch, mode):
+    import subprocess
+    from types import SimpleNamespace
+    item = request(tmp_path)
+    calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-trust")
+    def run(command, **kwargs):
+        calls.append(command)
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+        if command[:2] == ["docker", "run"]:
+            assert command[-2:] == ["resolved-image", "--version"]
+            assert command[command.index("--network") + 1] == "none"
+            assert not any("auth.json" in arg for arg in command)
+            if mode == "timeout":
+                raise subprocess.TimeoutExpired(command, 30)
+            return SimpleNamespace(stdout="codex-cli 0.1.0\n")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises((subprocess.TimeoutExpired, executor.ExecutorError)):
+        codex_live.trust_hooks(item.roots, {}, "0.155.0", "resolved-image")
+    assert calls[-1][:3] == ["docker", "rm", "--force"]
+    assert calls[-1][-1] == calls[0][calls[0].index("--name") + 1]
+
+
+def test_codex_accepts_resolved_new_release_but_not_mutable_tags():
+    codex_live.validate_pins({**PINS, "harness_version": "0.155.0"})
+    with pytest.raises(executor.ExecutorError, match="exact"):
+        codex_live.validate_pins({**PINS, "harness_version": "latest"})

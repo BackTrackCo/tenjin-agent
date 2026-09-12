@@ -10,6 +10,7 @@ in those fields stays unknown here. See codex-rs/protocol/src/protocol.rs at
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -59,7 +60,7 @@ def root_id(stream: Path) -> str:
     return next(iter(ids))
 
 
-def family(directory: Path, root: str) -> dict[str, tuple[dict[str, Any], list[tuple[dict[str, Any], str]]]]:
+def family(directory: Path, root: str, expected_version: str | None = None) -> dict[str, tuple[dict[str, Any], list[tuple[dict[str, Any], str]]]]:
     found = {}
     inherited = {}
     for path in sorted(directory.rglob("*.jsonl")):
@@ -73,10 +74,13 @@ def family(directory: Path, root: str) -> dict[str, tuple[dict[str, Any], list[t
         thread = meta.get("id")
         if not isinstance(thread, str) or not thread or thread in found:
             raise CodexUsageError("actor_identity", "ambiguous native thread metadata")
-        if meta.get("cli_version") != VERSION:
+        version = meta.get("cli_version")
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) or (expected_version is not None and version != expected_version):
             raise CodexUsageError("version_mismatch", "rollout CLI version differs from the pinned adapter")
         found[thread] = (meta, content)
         inherited[thread] = metadata[1:]
+    if len({item[0]["cli_version"] for item in found.values()}) > 1:
+        raise CodexUsageError("version_mismatch", "family mixes CLI versions")
     if root not in found:
         raise CodexUsageError("root_identity", "root rollout missing")
     for thread, (meta, _) in found.items():
@@ -148,8 +152,8 @@ class Envelope:
     cap: str | None = None
 
 
-def parse_session_dir(directory: Path, root: str, trial_id: str, stream: Path | None = None) -> SessionUsage:
-    members = family(directory, root)
+def parse_session_dir(directory: Path, root: str, trial_id: str, stream: Path | None = None, *, expected_version: str = VERSION) -> SessionUsage:
+    members = family(directory, root, expected_version)
     records = []
     actors = [usage.actor_key("codex", root, "" if thread == root else thread) for thread in members]
     edges = []
