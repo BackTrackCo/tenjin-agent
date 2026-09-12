@@ -210,6 +210,7 @@ def _kill_group(process: subprocess.Popen[str], sig: int = signal.SIGKILL) -> No
 class Runtime:
     clock: Clock = time.monotonic
     admit_until: float | None = None
+    server_check: Callable[[], Any] | None = None
     sleep: Sleep = time.sleep
     # Resolved when a Runtime is built, not when this class is defined. A
     # plain default would bind the function object once and for all, and a
@@ -718,6 +719,7 @@ def run_concurrently(
             if not submitted:
                 break
             finished, _ = wait(submitted, return_when=FIRST_COMPLETED)
+            finished_positions = [submitted[future].position for future in finished]
             for future in finished:
                 trial = submitted.pop(future)
                 try:
@@ -725,6 +727,11 @@ def run_concurrently(
                     done[result.trial_id] = result
                 except BaseException as error:
                     failures.append((trial.position, error))
+            if runtime.server_check is not None:
+                try:
+                    runtime.server_check()
+                except BaseException as error:
+                    failures.append((min(finished_positions), error))
             if failures:
                 waiting.clear()
     if failures:
@@ -752,6 +759,8 @@ def run(
             if runtime.admit_until is not None and runtime.clock() >= runtime.admit_until:
                 break
             done[trial.trial_id] = attempt(manifest, trial, run_dir, schedule_hash, runtime)
+            if runtime.server_check is not None:
+                runtime.server_check()
     else:
         done.update(run_concurrently(manifest, pending, run_dir, schedule_hash, runtime, degree))
     # Schedule order, whatever order they finished in.
