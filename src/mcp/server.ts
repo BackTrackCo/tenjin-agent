@@ -146,28 +146,7 @@ const publishInput = {
     .string()
     .optional()
     .describe(
-      'Path to a regular Markdown file to publish (`-` stdin is available only on the CLI)',
-    ),
-  // A SOURCE, not a second publish path: the same scan, consent cascade, confirm
-  // and pricing govern it. The ONE gate that is its own is the cross-project
-  // confirm, and it is described because `full-auto` clears the consent cascade
-  // and does not clear this: a client that never sees it named meets an
-  // unexplained refusal carrying `details.crossProject`.
-  finding: z
-    .string()
-    .optional()
-    .describe(
-      'Publish a stored subagent finding as the body instead of a file, by the id the capture ask printed; pass a file or this, never both. The queue is machine-wide, so a finding captured in another project returns NEEDS_CONFIRMATION with details.crossProject until you pass yes:true, in every mode including full-auto',
-    ),
-  dryRun: z
-    .boolean()
-    .optional()
-    .describe('Report what would be published, whole body included, and write and spend nothing'),
-  discard: z
-    .boolean()
-    .optional()
-    .describe(
-      'With finding: take that stored finding off the local queue without publishing it, so no capture ask offers it again. Nothing is sent anywhere, and it is permanent: a finding captured in another project takes the same yes:true as publishing one. Never send it with dryRun:true, which is a usage error: read the finding in one call, discard it in another',
+      "Path to the Markdown document to publish: frontmatter with `title` and the answer-card keys (questionsAnswered, scope, exclusions, provenanceSummary, plus asOf when temporalMode is snapshot), then the body. It is validated before anything is written, so a missing title or an incomplete card comes back as a usage error naming the keys to add, with nothing sent, published or spent (`-` stdin is available only on the CLI)",
     ),
   // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z
@@ -191,17 +170,10 @@ const publishInput = {
     .describe(
       'The public preview a non-buyer reads (max 500 chars); omit to let the server derive one from the body',
     ),
-  question: z.array(z.string()).optional().describe('Questions this piece answers'),
-  task: z.array(z.string()).optional().describe('Tasks this piece supports'),
-  scope: z.string().optional().describe('What the piece covers (card scope)'),
-  exclusions: z.string().optional().describe('What the piece does not cover (card exclusions)'),
-  appliesTo: z.array(z.string()).optional().describe('Applicability key=value pairs'),
-  asOf: z.string().optional().describe('As-of timestamp, ISO-8601 with offset'),
-  validUntil: z.string().optional().describe('Valid-until timestamp, ISO-8601 with offset'),
-  artifactType: z.string().optional().describe('document | skill | dataset'),
-  temporalMode: z.string().optional().describe('snapshot | maintained | evergreen'),
-  provenance: z.string().optional().describe('Provenance summary (card)'),
-  methodology: z.string().optional().describe('Methodology summary (card)'),
+  // NO CARD FIELDS HERE. The answer card lives in the document's frontmatter,
+  // which is the one place it is written and the one place it is read back; a
+  // parameter copy meant the published card and the file on disk could disagree
+  // the moment either changed.
   key: z
     .array(z.string())
     .optional()
@@ -489,55 +461,38 @@ export function buildTenjinMcpServer(opts: BuildMcpOptions = {}): McpServer {
     {
       title: 'Publish a piece',
       description:
-        "Publish a regular Markdown file, or a finding one of this session's subagents stated at its own " +
-        'end (finding:"<id>", the id the capture ask printed), as a paid or free piece with an optional ' +
-        'answer card. Gated by a deterministic local scan and your publish.mode consent: the local scan ' +
-        'never refuses on its own — every finding it makes, block-tier included, is a flag — so in review ' +
-        'mode, or whenever it finds anything at all, this returns NEEDS_CONFIRMATION with the exact payload ' +
-        '(mode, price, findings, card, target, and for a stored finding its whole body and the child that ' +
-        'wrote it under details.finding) for you to show the user before re-calling with yes:true. ' +
-        'dryRun:true returns the same report with nothing published or spent — the way to read a stored ' +
-        "finding's body before deciding whether to publish it, since a real publish the marketplace blocks " +
-        'withholds the body; discard:true drops a stored finding from the local queue so no later ask offers ' +
-        'it, and the two are separate calls (sending both is a usage error, since dryRun writes nothing and ' +
-        'a discard is permanent). The marketplace runs its own ingest scan on the write itself, and it is the ' +
-        'one place that can still refuse: a hard block there (a live secret) returns PUBLISH_BLOCKED and is ' +
-        'NEVER cleared by yes or any mode, and a warn-tier finding it raises returns NEEDS_CONFIRMATION even ' +
-        'after the local scan passed, carrying findings marked source:"server" that a yes:true given before ' +
-        'them does not clear; render those and ask again. ' +
+        'Publish a finding: a Markdown document whose frontmatter carries `title` and the answer-card ' +
+        'keys (questionsAnswered, scope, exclusions, provenanceSummary) and whose body is the piece. ' +
+        'It is VALIDATED BEFORE ANYTHING IS WRITTEN — a missing title or an incomplete answer card comes ' +
+        'back as a usage error naming the frontmatter keys to add, with nothing sent, published or spent, ' +
+        'so there is no dry run to ask for. Then a deterministic local scan and your publish.mode consent ' +
+        'gate it: the local scan never refuses on its own — every finding it makes, block-tier included, ' +
+        'is a flag — so in review mode, or whenever it finds anything at all, this returns ' +
+        'NEEDS_CONFIRMATION with the exact payload (mode, price, findings, card, target) for you to show ' +
+        'the user before re-calling with yes:true. The marketplace runs its own ingest scan on the write ' +
+        'itself, and it is the one place that can still refuse: a hard block there (a live secret) returns ' +
+        'PUBLISH_BLOCKED and is NEVER cleared by yes or any mode, and a warn-tier finding it raises returns ' +
+        'NEEDS_CONFIRMATION even after the local scan passed, carrying findings marked source:"server" that ' +
+        'a yes:true given before them does not clear; render those and ask again. ' +
         'The wallet signs the write locally; the key never leaves this machine.',
       inputSchema: publishInput,
-      // DESTRUCTIVE, because `discard` is: it drops a stored finding
-      // permanently and no capture ask offers it again. The publish half alone
-      // would not be, but one tool carries one annotation and the honest one is
-      // the stronger.
-      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      // NOT DESTRUCTIVE: a publish creates a piece and `tenjin_delete` is the
+      // only verb that takes one away. It was annotated destructive while this
+      // tool also carried `discard`, which dropped a stored finding for good;
+      // that flag is gone with the queue it read.
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
     },
     async (args) =>
       runCore('publish', (ctx) =>
         runPublish(
           {
             ...(args.file !== undefined ? { file: args.file } : {}),
-            ...(args.finding !== undefined ? { finding: args.finding } : {}),
-            ...(args.dryRun !== undefined ? { dryRun: args.dryRun } : {}),
-            ...(args.discard !== undefined ? { discard: args.discard } : {}),
             ...(args.searchId !== undefined ? { searchId: args.searchId } : {}),
             ...(args.draft !== undefined ? { draft: args.draft } : {}),
             ...(args.yes !== undefined ? { yes: args.yes } : {}),
             ...(args.mode !== undefined ? { mode: args.mode } : {}),
             ...(args.price !== undefined ? { price: args.price } : {}),
             ...(args.excerpt !== undefined ? { excerpt: args.excerpt } : {}),
-            ...(args.question !== undefined ? { question: args.question } : {}),
-            ...(args.task !== undefined ? { task: args.task } : {}),
-            ...(args.scope !== undefined ? { scope: args.scope } : {}),
-            ...(args.exclusions !== undefined ? { exclusions: args.exclusions } : {}),
-            ...(args.appliesTo !== undefined ? { appliesTo: args.appliesTo } : {}),
-            ...(args.asOf !== undefined ? { asOf: args.asOf } : {}),
-            ...(args.validUntil !== undefined ? { validUntil: args.validUntil } : {}),
-            ...(args.artifactType !== undefined ? { artifactType: args.artifactType } : {}),
-            ...(args.temporalMode !== undefined ? { temporalMode: args.temporalMode } : {}),
-            ...(args.provenance !== undefined ? { provenance: args.provenance } : {}),
-            ...(args.methodology !== undefined ? { methodology: args.methodology } : {}),
             ...(args.key !== undefined ? { key: args.key } : {}),
           },
           ctx,
