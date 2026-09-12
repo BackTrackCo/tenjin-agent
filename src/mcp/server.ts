@@ -146,7 +146,7 @@ const publishInput = {
     .string()
     .optional()
     .describe(
-      "Path to the Markdown document to publish: frontmatter with `title` and the answer-card keys (questionsAnswered, scope, exclusions, provenanceSummary, plus asOf when temporalMode is snapshot), then the body. It is validated before anything is written, so a missing title or an incomplete card comes back as a usage error naming the keys to add, with nothing sent, published or spent (`-` stdin is available only on the CLI)",
+      'Path to the Markdown document to publish: frontmatter with `title` and the answer-card keys (questionsAnswered, scope, exclusions, provenanceSummary, plus asOf when temporalMode is snapshot), then the body. It is validated before anything is written, so a missing title or an incomplete card comes back as a usage error naming the keys to add, with nothing sent, published or spent (`-` stdin is available only on the CLI)',
     ),
   // A lone string stays valid: agents already send one, and the batch is additive.
   searchId: z

@@ -436,9 +436,13 @@ describe('runPublish — the publish document', () => {
       runPublish(
         baseArgs(
           await writeDoc(
-            ['---', 'questionsAnswered:', '  - what does it settle?', 'scope: this repo', '---'].join(
-              '\n',
-            ) + '\n# A finding\n\nbody\n',
+            [
+              '---',
+              'questionsAnswered:',
+              '  - what does it settle?',
+              'scope: this repo',
+              '---',
+            ].join('\n') + '\n# A finding\n\nbody\n',
           ),
           { mode: 'full-auto', yes: true },
         ),
@@ -447,7 +451,8 @@ describe('runPublish — the publish document', () => {
       ),
     ).rejects.toMatchObject({
       code: 'USAGE',
-      message: 'This document has no complete answer card, so there is nothing for the next ' +
+      message:
+        'This document has no complete answer card, so there is nothing for the next ' +
         'searcher to judge it by. Add to the frontmatter: `exclusions`: what it does not. ' +
         '`provenanceSummary`: how you know — what you ran, read, measured.',
     });
@@ -1650,8 +1655,7 @@ describe('runPublish — public card text is sanitized', () => {
   const RTL = 'safe‮txet dekcirt';
 
   it('strips a CSI sequence from a frontmatter card question', async () => {
-    const doc =
-      ['---', 'questionsAnswered:', `  - ${CSI}`, '---'].join('\n') + '\n# T\n\nbody\n';
+    const doc = ['---', 'questionsAnswered:', `  - ${CSI}`, '---'].join('\n') + '\n# T\n\nbody\n';
     const { fetch, body } = bodyServer();
     await runPublish(
       baseArgs(await writeDoc(doc), { mode: 'auto', draft: true }),
@@ -1662,8 +1666,7 @@ describe('runPublish — public card text is sanitized', () => {
   });
 
   it('strips a bidi override from a frontmatter card question', async () => {
-    const doc =
-      ['---', 'questionsAnswered:', `  - ${RTL}`, '---'].join('\n') + '\n# T\n\nbody\n';
+    const doc = ['---', 'questionsAnswered:', `  - ${RTL}`, '---'].join('\n') + '\n# T\n\nbody\n';
     const { fetch, body } = bodyServer();
     await runPublish(
       baseArgs(await writeDoc(doc), { mode: 'auto', draft: true }),
@@ -2980,64 +2983,64 @@ describe('runPublish — the undo line', () => {
  * gates NOTHING: the same scan, the same consent cascade, the same shelf.
  */
 describe('runPublish — publish --agent', () => {
-    /** Every publish recorded under one agent id, oldest first. One row per
-     *  publish, keyed `agent_published:<id>@<at>`, so this is a prefix read
-     *  rather than a point read: an upsert here would hide all but the last. */
-    async function publishedByAgent(agentId: string): Promise<string[]> {
-      const { factsWithPrefix } = await import('../hooks/facts');
-      const { withLoopDb } = await import('../lib/loop-db');
-      return withLoopDb(dir, (db) =>
-        factsWithPrefix(db, `agent_published:${agentId}@`).map(
-          (f) => (JSON.parse(f.value) as { url?: string }).url ?? '',
-        ),
-      );
-    }
+  /** Every publish recorded under one agent id, oldest first. One row per
+   *  publish, keyed `agent_published:<id>@<at>`, so this is a prefix read
+   *  rather than a point read: an upsert here would hide all but the last. */
+  async function publishedByAgent(agentId: string): Promise<string[]> {
+    const { factsWithPrefix } = await import('../hooks/facts');
+    const { withLoopDb } = await import('../lib/loop-db');
+    return withLoopDb(dir, (db) =>
+      factsWithPrefix(db, `agent_published:${agentId}@`).map(
+        (f) => (JSON.parse(f.value) as { url?: string }).url ?? '',
+      ),
+    );
+  }
 
-    it("records the publish under the child's own agent id", async () => {
-      const { fetch } = stubServer();
-      const result = await runPublish(
-        { file: await writeDoc(CLEAN), agent: 'agent-7f3a', mode: 'full-auto' },
-        makeCtx(),
-        hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
-      );
-      // The row the parent's turn end reads to report what its children did.
-      expect(await publishedByAgent('agent-7f3a')).toEqual([(result.data as { url: string }).url]);
-      // Echoed back, so an agent that passed it can see the attribution landed.
-      expect(result.data).toMatchObject({ publishedBy: { agentId: 'agent-7f3a' } });
-    });
+  it("records the publish under the child's own agent id", async () => {
+    const { fetch } = stubServer();
+    const result = await runPublish(
+      { file: await writeDoc(CLEAN), agent: 'agent-7f3a', mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
+    );
+    // The row the parent's turn end reads to report what its children did.
+    expect(await publishedByAgent('agent-7f3a')).toEqual([(result.data as { url: string }).url]);
+    // Echoed back, so an agent that passed it can see the attribution landed.
+    expect(result.data).toMatchObject({ publishedBy: { agentId: 'agent-7f3a' } });
+  });
 
-    it('changes no gate: a review-mode publish still needs its confirm', async () => {
-      await expect(
-        runPublish(
-          { file: await writeDoc(CLEAN), agent: 'agent-7f3a', mode: 'review' },
-          makeCtx(),
-          hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
-        ),
-      ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
-      expect(await publishedByAgent('agent-7f3a')).toEqual([]);
-    });
-
-    /** Refused rather than dropped: the caller's whole reason for passing it is
-     *  a later read, and a silently discarded id is a publish the parent is
-     *  never told about, reported as a success. */
-    it('refuses an id that would not be stored as given', async () => {
-      const { provider, getSignerCount } = spyProvider();
-      await expect(
-        runPublish(
-          { file: await writeDoc(CLEAN), agent: 'a1; rm -rf /', mode: 'full-auto' },
-          makeCtx(),
-          hermetic({ fetchImpl: stubServer().fetch, provider }),
-        ),
-      ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
-      expect(getSignerCount()).toBe(0);
-    });
-
-    it('records nothing when no agent is named', async () => {
-      await runPublish(
-        { file: await writeDoc(CLEAN), mode: 'full-auto' },
+  it('changes no gate: a review-mode publish still needs its confirm', async () => {
+    await expect(
+      runPublish(
+        { file: await writeDoc(CLEAN), agent: 'agent-7f3a', mode: 'review' },
         makeCtx(),
         hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
-      );
-      expect(await publishedByAgent('agent-7f3a')).toEqual([]);
-    });
+      ),
+    ).rejects.toMatchObject({ code: 'NEEDS_CONFIRMATION' });
+    expect(await publishedByAgent('agent-7f3a')).toEqual([]);
   });
+
+  /** Refused rather than dropped: the caller's whole reason for passing it is
+   *  a later read, and a silently discarded id is a publish the parent is
+   *  never told about, reported as a success. */
+  it('refuses an id that would not be stored as given', async () => {
+    const { provider, getSignerCount } = spyProvider();
+    await expect(
+      runPublish(
+        { file: await writeDoc(CLEAN), agent: 'a1; rm -rf /', mode: 'full-auto' },
+        makeCtx(),
+        hermetic({ fetchImpl: stubServer().fetch, provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', exitCode: 2 });
+    expect(getSignerCount()).toBe(0);
+  });
+
+  it('records nothing when no agent is named', async () => {
+    await runPublish(
+      { file: await writeDoc(CLEAN), mode: 'full-auto' },
+      makeCtx(),
+      hermetic({ fetchImpl: stubServer().fetch, provider: spyProvider().provider }),
+    );
+    expect(await publishedByAgent('agent-7f3a')).toEqual([]);
+  });
+});

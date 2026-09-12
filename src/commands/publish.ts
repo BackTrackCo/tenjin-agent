@@ -704,9 +704,7 @@ function receipt(
   // finishing it still needs. Server warnings of every other kind still print.
   const human = [
     `Published ${title} (${sanitizeForTerminal(result.status)}) for ${price.usd} USD → ${sanitizeForTerminal(result.url)}`,
-    ...(missing.length > 0
-      ? [`Answer card incomplete: ${missing.join(' ')}`]
-      : []),
+    ...(missing.length > 0 ? [`Answer card incomplete: ${missing.join(' ')}`] : []),
     ...searches.filter((s) => s.closed).map(closeLine),
     undoLine(undo),
     ...scanNoteLines(result.scan),
@@ -843,7 +841,7 @@ function resolveTitle(frontmatter: Frontmatter, body: string): string {
     'USAGE',
     'This document has no title: add `title:` to the frontmatter, or start the body with a single `# ` heading.',
     {
-      fix: 'A finding is a publish document — frontmatter (`title` plus the answer-card keys), then the body. The title is read from `title:` first and from the body\'s first `# ` heading otherwise; no other heading level counts.',
+      fix: "A finding is a publish document — frontmatter (`title` plus the answer-card keys), then the body. The title is read from `title:` first and from the body's first `# ` heading otherwise; no other heading level counts.",
     },
   );
 }
@@ -883,7 +881,7 @@ function requirePublishableCard(card: ResourceCardInput | undefined): void {
     'USAGE',
     `This document has no complete answer card, so there is nothing for the next searcher to judge it by. Add to the frontmatter: ${keys.join(' ')}`,
     {
-      fix: 'Write those keys into the document\'s frontmatter and re-run `tenjin publish <file>`. A piece that is genuinely unfinished can be parked with --draft, which skips this check.',
+      fix: "Write those keys into the document's frontmatter and re-run `tenjin publish <file>`. A piece that is genuinely unfinished can be parked with --draft, which skips this check.",
       details: { card: { missingKeys: tokens } },
     },
   );

@@ -278,7 +278,10 @@ describe('tenjin_publish consent', () => {
 
   it('review mode without yes returns NEEDS_CONFIRMATION carrying the confirm payload', async () => {
     const file = join(dir, 'clean.md');
-    await writeFile(file, publishable('# Caching notes\n\nSome clean public prose about caching.\n'));
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
@@ -311,7 +314,10 @@ describe('tenjin_publish consent', () => {
   // handler to forward them, and both were silently dropped.
   it('forwards searchId and excerpt through to the wire', async () => {
     const file = join(dir, 'clean.md');
-    await writeFile(file, publishable('# Caching notes\n\nSome clean public prose about caching.\n'));
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
     await recordSearch(dir, {
       searchId: SEARCH_ID,
       at: new Date().toISOString(),
@@ -379,7 +385,10 @@ describe('tenjin_publish consent', () => {
   it('forwards an array of searchIds to the wire and closes each loop', async () => {
     const second = '0197bbbb-cccc-7ddd-8eee-aaaaaaaaaaaa';
     const file = join(dir, 'thread.md');
-    await writeFile(file, publishable('# Thread answer\n\nClean public prose answering a whole thread.\n'));
+    await writeFile(
+      file,
+      publishable('# Thread answer\n\nClean public prose answering a whole thread.\n'),
+    );
     for (const id of [SEARCH_ID, second]) {
       await recordSearch(dir, {
         searchId: id,
@@ -445,7 +454,10 @@ describe('tenjin_publish consent', () => {
   // trusted one, and it must fail before any wallet touch.
   it('refuses a malformed searchId with USAGE, like the CLI', async () => {
     const file = join(dir, 'clean.md');
-    await writeFile(file, publishable('# Caching notes\n\nSome clean public prose about caching.\n'));
+    await writeFile(
+      file,
+      publishable('# Caching notes\n\nSome clean public prose about caching.\n'),
+    );
     const client = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
@@ -516,7 +528,10 @@ describe('tenjin_publish consent', () => {
     // review's default NEEDS_CONFIRMATION is what fires without yes:true, and
     // yes:true clears it like it would a warn. The server's ingest gate is the
     // one place left that can still refuse a live secret.
-    await writeFile(file, publishable('# Deploy\n\nSet AKIAIOSFODNN7EXAMPLE in the environment.\n'));
+    await writeFile(
+      file,
+      publishable('# Deploy\n\nSet AKIAIOSFODNN7EXAMPLE in the environment.\n'),
+    );
     const noYesClient = await connect({
       dataDir: dir,
       flags: { baseUrl: BASE },
