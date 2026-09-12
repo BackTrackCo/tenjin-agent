@@ -458,7 +458,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     session: claude_usage.SessionUsage | None = None
     usage_reason: str | None = identity_reason
     try:
-        session = spec.evidence.parse(sessions, launch.root_session_id, trial.trial_id, roots.stream)
+        session = spec.evidence.parse(sessions, launch.root_session_id, trial.trial_id, roots.stream,
+                                      **({"expected_version": manifest.pins["harness_version"]} if spec.harness == "codex" else {}))
         usage_reason = session.invalid_reason
     except spec.evidence.errors as error:
         usage_reason = f"usage:{error.code}"

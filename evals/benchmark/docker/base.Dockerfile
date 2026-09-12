@@ -15,6 +15,7 @@ FROM ${BASE_IMAGE}@${BASE_DIGEST}
 ARG PNPM_VERSION
 ARG AGENT_PACKAGE
 ARG AGENT_VERSION
+ARG AGENT_INTEGRITY
 ARG AGENT_COMMAND
 ARG CA_CERTIFICATES_VERSION
 
@@ -27,15 +28,19 @@ RUN apt-get update -qq \
 # Root ownership also makes these metadata directories unwritable by trial UIDs.
 RUN mkdir -p /tmp/.git /tmp/.codex /tmp/.agents
 
-# One registry conversation, and the npm cache dropped: a trial never installs
-# anything, so the cache is dead weight in every image built from this one. The
-# CLI is a layer of its own below, so a CLI change does not re-run this.
-RUN npm install -g \
-      "pnpm@${PNPM_VERSION}" \
-      "${AGENT_PACKAGE}@${AGENT_VERSION}" \
+# Download the root CLI package once and compare npm's computed tarball integrity
+# with the run's receipt before installation. Exact platform dependencies remain
+# npm-owned; the image ID records the complete installed environment.
+RUN mkdir /tmp/bench-agent \
+  && npm pack "${AGENT_PACKAGE}@${AGENT_VERSION}" --registry=https://registry.npmjs.org \
+       --pack-destination /tmp/bench-agent --json > /tmp/bench-agent/receipt.json \
+  && node -e 'const p=require("/tmp/bench-agent/receipt.json"); if(p.length!==1 || (process.env.AGENT_INTEGRITY && p[0].integrity!==process.env.AGENT_INTEGRITY)) process.exit(1)' \
+  && npm install -g "pnpm@${PNPM_VERSION}" /tmp/bench-agent/*.tgz \
+  && rm -rf /tmp/bench-agent \
   && npm cache clean --force \
   && pnpm --version \
-  && "${AGENT_COMMAND}" --version
+  && "${AGENT_COMMAND}" --version \
+  && test "$("${AGENT_COMMAND}" --version | sed -E 's/^[^0-9]*([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')" = "${AGENT_VERSION}"
 
 # The `tenjin` an agent runs in a Bash tool, from THIS CHECKOUT: `package.json`
 # and every path its `files` names, staged by `images.stage_cli`. A pinned
@@ -62,7 +67,9 @@ RUN printf '#!/bin/sh\nexec node /opt/bench2/trial.mjs "$@"\n' > /usr/local/bin/
 
 # A trial runs as the host's uid against bind mounts, so nothing may depend on
 # a writable image home; the trial's own HOME is a mount and is passed in.
-ENV npm_config_update_notifier=false \
+ENV DISABLE_AUTOUPDATER=1 \
+    DISABLE_UPDATES=1 \
+    npm_config_update_notifier=false \
     PNPM_HOME=/opt/bench2/pnpm \
     DO_NOT_TRACK=1
 

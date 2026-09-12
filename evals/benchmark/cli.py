@@ -168,7 +168,16 @@ def run_nonce(out: Path, manifest: manifest_module.Manifest) -> str:
             raise CliError("existing run identity differs; choose a new output directory")
     nonce = existing if isinstance(existing, str) and NONCE.match(existing) else f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{secrets.token_hex(4)}"
     out.mkdir(parents=True, exist_ok=True)
-    sidecar.write_text(json.dumps({"path": str(manifest.path), "hash": manifest.hash, "nonce": nonce}, indent=2) + "\n", encoding="utf-8")
+    retained_path = manifest.path
+    if manifest.release is not None:
+        retained_path = out / "harness-lock.json"
+        lock = manifest.path.read_bytes()
+        if retained_path.exists() and retained_path.read_bytes() != lock:
+            raise CliError("retained harness lock changed")
+        if not retained_path.exists():
+            with retained_path.open("xb") as stream:
+                stream.write(lock)
+    sidecar.write_text(json.dumps({"path": str(retained_path), "hash": manifest.hash, "nonce": nonce}, indent=2) + "\n", encoding="utf-8")
     return nonce
 
 
@@ -716,7 +725,7 @@ def do_report(run_dir: Path) -> dict[str, Any]:
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
     frozen_corpus.verify_records(run_dir, accepted)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
-    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir), server_revision.read(run_dir))
+    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir), server_revision.read(run_dir), harness_release=manifest.release)
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
