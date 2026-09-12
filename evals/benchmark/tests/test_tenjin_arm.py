@@ -1539,6 +1539,30 @@ def test_a_producer_that_captured_nothing_is_a_valid_natural_attempt(
     assert record["delivery"].get("phase_fires") == {}
 
 
+def test_producer_missing_required_native_descendants_keeps_verifier_and_spend(
+    natural_manifest, make_runtime, producer_spawn, run_dir: Path
+) -> None:
+    # The native fake family contains one child, so requiring two cannot pass.
+    for task in natural_manifest.data["tasks"]:
+        task["required_descendants"] = 2
+    spawns = []
+    base = producer_spawn(capture=False)
+
+    def spawn(launch, roots, timeout_s):
+        spawns.append(roots.phase)
+        return base(launch, roots, timeout_s)
+
+    record = runner.run_trial(natural_manifest, trial_of(natural_manifest, "tenjin_natural"), run_dir,
+                             "sha256:schedule", make_runtime(spawn=spawn))
+    records.validate(record)
+    assert spawns == ["producer"]
+    assert (record["outcome"], record["invalid_reason"]) == ("invalid", "protocol:missing_descendant")
+    produced = record["isolation"]["producer"]
+    assert produced["verifier"]["exit_code"] == 0
+    assert produced["tokens"]["input_total"] > 0
+    assert sum(receipt["input_total"] for receipt in record["auxiliary"]) > 0
+
+
 
 def test_producer_requests_from_the_first_turn_end_on_are_capture_cost(tmp_path: Path) -> None:
     def record(request_id: str) -> usage.UsageRecord:
