@@ -486,6 +486,12 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
             lines += ["", f"Producer {arm_id}: {producer['passes']}/{producer['attempts']} verified; "
                       f"{producer['captured']} left reusable local pairings; {producer['findings']} capture drafts retained. "
                       "Drafts are not published knowledge or proof of consumer delivery."]
+            if producer.get("publication_mode") == "host-assisted":
+                lines += [f"Host-assisted publication: {producer['published']} pieces published; {producer['consumers_with_delivery']} consumers received a producer piece through a team hook; {producer['verified_with_delivery']} of those passed. "
+                          f"{producer['publication_failed']} publication phases failed; {producer['not_deleted']} pieces lack confirmed cleanup; {producer['publication_time_s']:.1f}s host publication time.",
+                          "Publication is performed by the benchmark host. Delivery plus a pass does not establish that the piece was useful; compare completion time/tokens across treatments."]
+            else:
+                lines += ["Producer publication and attributed team delivery: unavailable in these records."]
     if complete:
         for arm_id, comparison in sorted(report.get("comparisons", {}).items()):
             for key, label in (("completion_time", "Time ratio"), ("completion_tokens", "Token ratio"), ("completion_rate", "Pass-rate difference")):

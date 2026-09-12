@@ -1736,3 +1736,74 @@ def test_child_capture_uses_its_own_stop_boundary():
     root = replace(record, actor_key=("claude", "root", ""), native_request_id="root-request")
     result = producer.receipts_of("t", [record, root], {"child-request": 200, "root-request": 200}, 300, {"": 300, "child": 100})
     assert [(item.native_request_id, item.phase) for item in result] == [("child-request", "capture"), ("root-request", "producer")]
+
+
+def test_host_publication_runs_after_verified_producer_before_fresh_consumer(
+    natural_manifest, make_runtime, producer_spawn, run_dir, monkeypatch
+):
+    from evals.benchmark import publication
+    natural_manifest.arms[1]["capture_publication"] = "host"
+    order = []
+    base = producer_spawn()
+    def publish(roots, provision, session, project):
+        assert (roots.repo / "answer.txt").read_text().strip() == "42"
+        order.append("publish")
+        provision.stop_state["pieces"].append("owned-piece")
+        return {"mode": "host-assisted", "status": "complete", "pieces": [{"piece_id": "owned-piece", "published": True, "deleted": None}], "wall_time_s": 1.0}, None
+    def spawn(launch, roots, timeout_s):
+        order.append(roots.phase or "consumer")
+        if roots.phase is None:
+            assert not (roots.repo / "answer.txt").exists()
+        return base(launch, roots, timeout_s)
+    monkeypatch.setattr(publication, "publish", publish)
+    monkeypatch.setattr(tenjin_arm, "write_shortlist", lambda *args: {})
+    monkeypatch.setattr(tenjin_arm, "delete_lesson", lambda source, piece: None if piece == "owned-piece" else "foreign")
+    record = runner.run_trial(natural_manifest, trial_of(natural_manifest, "tenjin_natural"), run_dir, "sha256:schedule", make_runtime(spawn=spawn))
+    assert order == ["producer", "publish", "consumer"]
+    assert record["isolation"]["producer"]["publication"]["pieces"][0]["deleted"] is True
+    records.validate(record)
+
+
+def test_uncertain_host_publication_preserves_spend_and_stops_before_consumer(
+    natural_manifest, make_runtime, producer_spawn, run_dir, monkeypatch
+):
+    from evals.benchmark import publication
+    natural_manifest.arms[1]["capture_publication"] = "host"
+    order = []
+    base = producer_spawn()
+    def spawn(launch, roots, timeout_s):
+        order.append(roots.phase)
+        return base(launch, roots, timeout_s)
+    monkeypatch.setattr(publication, "publish", lambda *args: ({"mode": "host-assisted", "status": "unavailable", "pieces": [], "wall_time_s": 1.0}, "isolation:seed_cleanup"))
+    trial = trial_of(natural_manifest, "tenjin_natural")
+    with pytest.raises(ProvisionError) as caught:
+        runner.attempt(natural_manifest, trial, run_dir, "sha256:schedule", make_runtime(spawn=spawn))
+    assert caught.value.code == "seed_cleanup"
+    assert order == ["producer"]
+    record = json.loads(records.final_path(run_dir / "records", trial.trial_id).read_text())
+    assert record["invalid_reason"] == "isolation:seed_cleanup"
+    assert record["isolation"]["producer"]["tokens"]["input_total"] > 0
+
+
+
+def test_natural_phase_exports_dependencies_only_before_each_agent(
+    natural_manifest, make_runtime, producer_spawn, run_dir, monkeypatch
+):
+    exports = []
+    base = producer_spawn(capture=False)
+    def export(image, target):
+        exports.append(target)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "ready").write_text("from-image")
+    from evals.benchmark import images
+    monkeypatch.setattr(images, "export_node_modules", export)
+    def spawn(launch, roots, timeout_s):
+        assert (roots.repo / "node_modules" / "ready").read_text() == "from-image"
+        assert not (roots.repo / "producer-only").exists()
+        result = base(launch, roots, timeout_s)
+        if roots.phase == "producer":
+            (roots.repo / "producer-only").write_text("must not reach consumer")
+        return result
+    record = runner.run_trial(natural_manifest, trial_of(natural_manifest, "tenjin_natural"), run_dir, "sha256:schedule", make_runtime(spawn=spawn))
+    assert record["outcome"] == "pass"
+    assert len(exports) == 2

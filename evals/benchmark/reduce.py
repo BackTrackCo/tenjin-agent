@@ -163,6 +163,16 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     phases = [record["isolation"]["producer"] for record in records if isinstance(record["isolation"].get("producer"), dict)]
     if not phases:
         return None
+    publication = [phase.get("publication") for phase in phases]
+    observed = [item for item in publication if isinstance(item, dict)]
+    paired = [record for record in records if isinstance(record["isolation"].get("producer"), dict)]
+    def deliveries(record):
+        ids = {item["piece_id"] for item in record["isolation"]["producer"].get("publication", {}).get("pieces", []) if item.get("published") is True}
+        # Exact piece identity and a team-leg hit on the same consumer fire.
+        # A draft, unrelated public hit or producer's own fire proves no transfer.
+        team_hits = {leg["fire_id"] for leg in record["delivery"].get("legs", []) if leg.get("shelf") == "team" and leg.get("outcome") == "hit"}
+        return sum(1 for fire in record["delivery"].get("fires", []) if fire.get("fire_id") in team_hits and fire.get("delivered") in {"inject:" + piece for piece in ids})
+    counts = [deliveries(record) for record in paired]
     return {
         "attempts": len(phases),
         "passes": sum(1 for phase in phases if phase.get("outcome") == "pass"),
@@ -170,6 +180,15 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
         "findings": sum(int(phase.get("capture", {}).get("findings", 0)) for phase in phases),
         "invalid": sum(1 for phase in phases if phase.get("outcome") == "invalid"),
         "wal_live": sum(1 for phase in phases if phase.get("wal_live_between_phases")),
+        "publication_observed": len(observed),
+        "publication_mode": "host-assisted" if observed else "unobserved",
+        "published": sum(sum(item.get("published") is True for item in phase.get("pieces", [])) for phase in observed) if len(observed) == len(phases) else None,
+        "publication_failed": sum(phase.get("status") == "unavailable" for phase in observed),
+        "publication_time_s": sum(float(phase.get("wall_time_s", 0)) for phase in observed),
+        "not_deleted": sum(sum(item.get("published") is True and item.get("deleted") is not True for item in phase.get("pieces", [])) for phase in observed),
+        "consumer_deliveries": sum(counts) if len(observed) == len(phases) else None,
+        "consumers_with_delivery": sum(count > 0 for count in counts) if len(observed) == len(phases) else None,
+        "verified_with_delivery": sum(count > 0 and record["outcome"] == "pass" for count, record in zip(counts, paired)) if len(observed) == len(phases) else None,
     }
 
 

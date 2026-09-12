@@ -5,7 +5,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "fixture_hash": "sha256:70a9c3c9881f404fc7cecc14af548a3d1d276d18b8662d462a5b130e433bd147",
+      "fixture_hash": "sha256:86b48d133f09b0bfccba62fb870f68b5017494a378b16de49d9aa29ace55a793",
       "verifier": "node_test_actor",
       "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -14,7 +14,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "budget",
-      "fixture_hash": "sha256:02a88306b5328ffabb6f0cc49b4a7f1a0cee77d3094e6ae0bbc9abc66d4d7843",
+      "fixture_hash": "sha256:e4bd2b6f17d48638a90e14ff49e4b3aff30f04072d30bd13292ea3efde3bbba2",
       "verifier": "node_test_budget",
       "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -23,7 +23,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "candidate",
-      "fixture_hash": "sha256:7f7568eee16e3e5800ffb29d767dfcd7995d3c729116401b1d1de58560400f63",
+      "fixture_hash": "sha256:b19f1811c593fd82481698d2032b65098ab25c22f070267706d31928ae75ce9e",
       "verifier": "node_test_candidate",
       "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -32,7 +32,7 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "slug",
-      "fixture_hash": "sha256:c7a58a66c89ca549042ea0451cc84c1a7f2b50f7db82431060d16ea395ae6a42",
+      "fixture_hash": "sha256:c95bc957792e675e3300127450a7a26cbda7bd5e1911faf10347f46fbf56d8ec",
       "verifier": "node_test_slug",
       "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -41,7 +41,7 @@
       "family": "vitest-path-alias",
       "transfer_distance": "same_task",
       "fixture": "alias",
-      "fixture_hash": "sha256:a55879c23cb5a8ca370836d70d64c13f809fa1313a4aa5b0f8d9cb87575c8414",
+      "fixture_hash": "sha256:d4c532673cd234e28c8080ebfb86d4df46016bdc68a34a4ea189ff4fb57c8fbf",
       "verifier": "node_test_alias",
       "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -50,7 +50,7 @@
       "family": "node-type-stripping",
       "transfer_distance": "same_task",
       "fixture": "level",
-      "fixture_hash": "sha256:e6d1aac9eb50f375646068c8d57a6a1417b64a5151d203fd0e44203879491c56",
+      "fixture_hash": "sha256:486d1901af2301820aa0a5a6133660025785dbda6c9784d4462615ddecbaa9be",
       "verifier": "node_test_level",
       "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -59,7 +59,7 @@
       "family": "esm-cjs-interop",
       "transfer_distance": "same_task",
       "fixture": "money",
-      "fixture_hash": "sha256:4f36ad3354281cc88fa87b0d5129deb323894e6e32dad622ac653300e5f7fd11",
+      "fixture_hash": "sha256:dd8bc00aaae31aa5085e99b5abcc42190944a3f51af2bfcdb93ece69ad153111",
       "verifier": "node_test_money",
       "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -68,7 +68,7 @@
       "family": "pnpm-workspace",
       "transfer_distance": "same_task",
       "fixture": "core",
-      "fixture_hash": "sha256:5fdf92945afa2e9cb61bee34ffb4c7e2657a9d9bd4d890ea63e30755416fd84c",
+      "fixture_hash": "sha256:3a79f5e5d0444dd951c5fcb095070137b93688e951e5b9399f79d17d938d60f1",
       "verifier": "node_test_core",
       "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -77,7 +77,7 @@
       "family": "stale-build-artifact",
       "transfer_distance": "same_task",
       "fixture": "shadow",
-      "fixture_hash": "sha256:797f7257f48069b877bc0932fb7a3ff13610ab2c86897205d46c95c5b3aa9d9c",
+      "fixture_hash": "sha256:4bd356f4aeda052c7eca6145fb64aa04acd1c6f62de8a00f677e243a9bdc5abd",
       "verifier": "node_test_shadow",
       "prompt": "Make tests/shadow.test.mjs pass by fixing the @fixture/range package, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -86,7 +86,7 @@
       "family": "invisible-whitespace-mismatch",
       "transfer_distance": "same_task",
       "fixture": "ambient",
-      "fixture_hash": "sha256:7462f9bc277872f008f8eeb40c08c282e599d2279cbeca8b5a1f0bfb3e97a304",
+      "fixture_hash": "sha256:5b1fe306328ebf13a5252a22c7b731aab78f6123a58748461018382d18511d1c",
       "verifier": "node_test_ambient",
       "prompt": "Fix src/price.mjs so that tests/ambient.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
