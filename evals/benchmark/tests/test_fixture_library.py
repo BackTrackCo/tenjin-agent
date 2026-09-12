@@ -188,3 +188,9 @@ def test_the_key_only_lesson_has_no_task_names_and_matches_the_actor_failure() -
     text = lesson.title + "\n" + lesson.body.read_text()
     assert all(word.lower() not in text.lower() for word in ("actor", "actorKey", "src/actor.mjs", "tests/actor.test.mjs"))
     assert lesson.keys == (actor_failure_key(),)
+
+
+def test_actor_instructions_allow_recursive_experiments_without_loosening_network_scope():
+    instructions = (ACTOR_FIXTURE / "CLAUDE.md").read_text()
+    assert "do not spawn subagents" not in instructions
+    assert "do not access the network" in instructions
