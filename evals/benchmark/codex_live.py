@@ -9,7 +9,7 @@ import shlex
 import subprocess
 import time
 
-from . import claude_live, codex_usage, container, images, sha256_json, tenjin_arm
+from . import protocol, claude_live, codex_usage, container, images, sha256_json, tenjin_arm
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest
 
 NAME = "codex_live"
@@ -190,7 +190,7 @@ def launch(request: LaunchRequest) -> Launch:
         egress=request.egress or container.plan_egress(()), daemon=provisioned,
     )
     argv = ["codex", "exec", "--json", "--strict-config", "--ignore-rules", "--skip-git-repo-check",
-            "--sandbox", "workspace-write", "-m", codex_usage.MODEL, "-C", str(roots.repo), claude_live.prompt_of(request.task)]
+            "--sandbox", "workspace-write", "-m", codex_usage.MODEL, "-C", str(roots.repo), protocol.phase_prompt(request, claude_live.prompt_of(request.task))]
     return Launch(argv, roots.repo, "pending-" + request.trial_id, recipe=recipe, separate_streams=True,
                   resolved_settings_hash="sha256:" + sha256_json({"config": config, "hooks": generated}),
                   package_manager=claude_live.package_manager(), container_plan={**recipe.to_json(), "agent": argv})

@@ -42,3 +42,12 @@ def completion_refusal(task, session, outcome, invalid_reason=None):
     if observed_descendants(session) < task.get("required_descendants", 0):
         return "protocol:missing_descendant"
     return None
+
+
+HOST_CAPTURE_BRIEF = """Benchmark capture protocol: this task container has no publishing wallet. If Tenjin asks you to retain a reusable finding, return your own finding in the requested tenjin-finding fence; do not run tenjin publish. The benchmark host will publish captured drafts to its disposable shelf after your task is verified. Do not invent a finding when there is nothing reusable."""
+
+
+def phase_prompt(request, prompt):
+    if request.phase == "producer" and request.arm.get("capture_publication") == "host":
+        return prompt + "\n\n" + HOST_CAPTURE_BRIEF
+    return prompt

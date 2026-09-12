@@ -49,7 +49,7 @@ from typing import Any, Mapping
 
 from urllib.parse import urlsplit
 
-from . import artifact, container, images, sha256_json, tenjin_arm, verifier
+from . import protocol, artifact, container, images, sha256_json, tenjin_arm, verifier
 from .discovery import SETUP_PATH
 from .schema import check, enum
 from .executor import REGISTRY, ExecutorError, ExecutorSpec, Launch, LaunchRequest, Provision, ProvisionRequest
@@ -665,7 +665,7 @@ def build_argv(request: LaunchRequest, settings: Path, session_id: str) -> list[
     return [
         CLI,
         "-p",
-        prompt_of(request.task),
+        protocol.phase_prompt(request, prompt_of(request.task)),
         "--output-format",
         "stream-json",
         "--verbose",
