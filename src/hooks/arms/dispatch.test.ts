@@ -16,9 +16,9 @@ import {
 } from './test-support';
 
 /**
- * The dispatch arm. Under test: the work order travels as typed and nothing
- * else does; the three modes; what each outcome parks for the child, and that
- * the parent is neither told nor charged a `seen:`.
+ * The dispatch arm. Under test: the description and the WHOLE work order travel
+ * as typed and nothing else does; the three modes; what each outcome parks for
+ * the child, and that the parent is neither told nor charged a `seen:`.
  */
 
 afterEach(() => {
@@ -30,14 +30,29 @@ const SEARCH_ID = '11111111-1111-4111-8111-111111111111';
 const POST_ID = '22222222-2222-4222-8222-222222222222';
 const ON = kernelConfig();
 
-function dispatch(prompt: string, over: Partial<HookInput> = {}): HookInput {
+function dispatch(prompt: string, over: Partial<HookInput> = {}, description?: string): HookInput {
   return hookInput({
     event: 'tool.before',
     native: { event: 'PreToolUse' },
     turn: 'p1',
-    tool: toolInput('dispatch', { task: prompt }),
+    tool: toolInput('dispatch', {
+      task: prompt,
+      ...(description === undefined ? {} : { description }),
+    }),
     ...over,
   });
+}
+
+/** The body the one stubbed leg was asked with, for a plan built but not fired. */
+async function sent(
+  bodies: Array<Record<string, unknown>>,
+  input: HookInput,
+): Promise<{ query: string; trigger: string }> {
+  const ctx = fireContext({ db: freshDb(), arm: dispatchArm, input, config: ON });
+  const plan = (await dispatchArm.plan?.(ctx)) as Plan;
+  expect(plan.stages.map((s) => s.map((l) => l.shelf))).toEqual([['team', 'public']]);
+  await plan.stages[0]?.[0]?.request(plan.question, 1000, new AbortController().signal);
+  return bodies[0] as { query: string; trigger: string };
 }
 
 function candidate(): Record<string, unknown> {
@@ -112,26 +127,45 @@ describe('the dispatch arm', () => {
     expect(delivery).toEqual({ mode: 'log', resourceId: POST_ID });
   });
 
-  it('sends the work order as typed, masked and cut at 512 by the leg, and never the description', async () => {
+  it('sends the description first, then the WHOLE work order, masked', async () => {
     const { bodies } = shelf([]);
     const token = 'ghp_0123456789abcdefghijklmnopqrstuvwxyz';
-    const order = `find why the ivfflat index test fails after the image bump, token ${token} ${'detail '.repeat(120)}`;
-    const ctx = fireContext({
-      db: freshDb(),
-      arm: dispatchArm,
-      input: dispatch(order),
-      config: ON,
-    });
-    const plan = (await dispatchArm.plan?.(ctx)) as Plan;
-    expect(plan.stages.map((s) => s.map((l) => l.shelf))).toEqual([['team', 'public']]);
-    await plan.stages[0]?.[0]?.request(plan.question, 1000, new AbortController().signal);
-    const body = bodies[0] as { query: string; trigger: string };
+    // The task is the LAST sentence of a work order whose first 512 characters
+    // are rules. It is the half the shelf has to rank on, so it has to be sent.
+    const tail = 'then say whether the ivfflat build is what flipped the collation';
+    const order = `find why the index test fails after the image bump, token ${token} ${'detail '.repeat(120)}${tail}`;
+    expect(order.length).toBeGreaterThan(512);
+    const body = await sent(bodies, dispatch(order, {}, 'Debug the collation flake'));
+
     expect(body.trigger).toBe('dispatch');
-    expect(body.query.startsWith('find why the ivfflat index test fails')).toBe(true);
+    expect(body.query.startsWith('Debug the collation flake\nfind why the index test fails')).toBe(
+      true,
+    );
+    expect(body.query).toContain(tail);
+    expect(body.query.length).toBeGreaterThan(512);
     expect(body.query).not.toContain(token);
-    expect(body.query).not.toContain('a label');
-    expect(body.query.length).toBeLessThanOrEqual(512);
+    // `subagent_type` ("Explore") is a label that names no task: no adapter
+    // carries it and nothing on the wire mentions it.
     expect(JSON.stringify(body)).not.toContain('Explore');
+  });
+
+  it('cuts a work order past 8,000 characters at a whole word', async () => {
+    const { bodies } = shelf([]);
+    const order = `${'detail '.repeat(2000)}the-tail-nobody-sent`;
+    expect(order.length).toBeGreaterThan(8000);
+    const body = await sent(bodies, dispatch(order));
+
+    expect(body.query.length).toBeLessThanOrEqual(8000);
+    expect(body.query.length).toBeGreaterThan(512);
+    expect(body.query.endsWith('detail')).toBe(true);
+    expect(body.query).not.toContain('the-tail-nobody-sent');
+    expect(order.startsWith(`${body.query} `)).toBe(true);
+  });
+
+  it('sends the trimmed task alone when the tool carried no description', async () => {
+    const { bodies } = shelf([]);
+    const body = await sent(bodies, dispatch('  the pgvector collation flip  '));
+    expect(body.query).toBe('the pgvector collation flip');
   });
 
   it('`hooks.subagent` off is silent: nothing asked, nothing parked', async () => {

@@ -6,6 +6,7 @@ import type { HookInput, HookTool } from '../adapters/types';
 import { CONFIG_DEFAULTS } from '../lib/config';
 import { claim, getMark } from './gates';
 import { runFire, selectArm } from './fire';
+import { question } from './question';
 import { openLoopDb, type LoopDb } from './store';
 import type { Actor, Answer, Arm, Deps, KernelConfig, Leg, LegResult, Question } from './types';
 
@@ -309,28 +310,50 @@ describe('runFire: a hit', () => {
     expect(JSON.parse(getMark(db, LEAD, 'q:qk-hit') ?? 'null')).toMatchObject({ status: 'done' });
   });
 
-  it('stores what was SENT: the row carries the search leg’s 512-character cut', async () => {
+  it('stores what was SENT: the row is the text the leg was handed, verbatim', async () => {
+    // `question()` made the only cut, at the trigger's bound, before the plan
+    // carried the text here. The row repeats no cut of its own, so a dispatch
+    // work order is stored past the 512 the ledger used to stop at and a prompt
+    // is stored at the length `question()` already cut it to.
     const db = await freshDb();
-    const text = 'why is vitest slow '.repeat(106).trim();
-    expect(text.length).toBeGreaterThan(2000);
-    const arm: Arm = {
-      id: 'long-arm',
-      wait: 'tool',
-      on: [{ event: 'prompt' }],
-      plan: () => ({
-        question: { text, questionKey: 'qk-long' },
-        stages: [[strongLeg('res-long')]],
-      }),
-      deliver: (answer) => ({ mode: 'inject', text: 'because', resourceId: answer.resourceId }),
+    const paste = 'why is vitest slow '.repeat(600).trim();
+    const seen: string[] = [];
+    const armFor = (q: Question): Arm => {
+      const leg = strongLeg('res-long');
+      return {
+        id: 'long-arm',
+        wait: 'tool',
+        on: [{ event: 'prompt' }],
+        plan: () => ({
+          question: q,
+          stages: [
+            [
+              {
+                ...leg,
+                request: (asked, budget, signal) => {
+                  seen.push(asked.text);
+                  return leg.request(asked, budget, signal);
+                },
+              },
+            ],
+          ],
+        }),
+        deliver: (answer) => ({ mode: 'inject', text: 'because', resourceId: answer.resourceId }),
+      };
     };
-    const { commit } = await runFire(input(), deps(db, [arm]));
-    commit();
 
-    const stored = fireRows(db)[0]?.question ?? '';
-    expect(stored.length).toBeLessThanOrEqual(512);
-    // On a word boundary, and a prefix of the prompt: the tail the leg never
-    // sent is not in the ledger either.
-    expect(text.startsWith(`${stored} `)).toBe(true);
+    const dispatched = question(paste, 'dispatch');
+    expect(dispatched.text.length).toBeGreaterThan(512);
+    (await runFire(input(), deps(db, [armFor(dispatched)]))).commit();
+
+    const asked = question(paste, 'prompt');
+    expect(asked.text.length).toBeLessThanOrEqual(512);
+    (await runFire(input(), deps(db, [armFor(asked)]))).commit();
+
+    // Stored == sent, for both, and nothing the leg never saw is in the ledger.
+    const stored = fireRows(db).map((r) => r.question);
+    expect(stored).toEqual([dispatched.text, asked.text]);
+    expect(seen).toEqual(stored);
   });
 
   it('a deliver() that throws after the verdict keeps the cached verdict', async () => {

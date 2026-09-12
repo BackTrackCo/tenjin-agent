@@ -9,9 +9,14 @@ import { lookupArm } from './lookup';
  * never saw that answer before writing the child's prompt, which is why this
  * handoff stays where the prompt-answer fallback went (decision 5).
  *
- * THE WORK ORDER GOES AS TYPED (decision 10): the tool's `task`, masked, cut
- * at 512 by the leg. A description is a label, not a question, and no adapter
- * carries one.
+ * THE WHOLE WORK ORDER GOES, AS TYPED (decision 10, tenjin-agent#346): the
+ * tool's `description` on its own line, then its `task`, masked and cut at the
+ * dispatch trigger's 8,000 characters. The first 512 of a work order are its
+ * rules, not its task (13 of 22 wrong deliveries on one machine reproduced
+ * from that head and 0 from the task text), and the shelf splits a long
+ * dispatch query into sentence sub-queries and reranks against all of it, so
+ * the task has to be in what is sent. `subagent_type` stays out: it is a label
+ * ("Explore") that names no task.
  *
  * `deliver: 'log'` (decision D): the child gets the piece whole and the parent
  * is not told. If the parent is ever told, it is one sentence in `prose.ts`
@@ -31,7 +36,12 @@ export const dispatchArm: Arm = lookupArm({
   on: [{ event: 'tool.before', kind: 'dispatch' }],
   trigger: 'dispatch',
   enabled: (cfg) => cfg.hooks.subagent,
-  text: (input) => (input.tool?.kind === 'dispatch' ? input.tool.task.trim() : null),
+  text: (input) => {
+    if (input.tool?.kind !== 'dispatch') return null;
+    const description = input.tool.description?.trim() ?? '';
+    const task = input.tool.task.trim();
+    return description.length > 0 ? `${description}\n${task}` : task;
+  },
   shelves: ['team', 'public'],
   deliver: 'log',
   after(ctx, result, question) {

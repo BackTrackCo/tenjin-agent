@@ -106,6 +106,27 @@ describe('runSearch', () => {
     });
   });
 
+  // An agent mid-task that pasted a long question gets its head answered rather
+  // than a USAGE refusal and a retry: the CLI cuts to the shelf's bound at a
+  // word boundary, silently, the way the daemon's arms do.
+  it('cuts a question past 512 characters at a word boundary, with no warning', async () => {
+    const { fetch, bodies } = stub(HIT);
+    const question = `${'why is the collation flipped '.repeat(24)}pgvector`;
+    expect(question.length).toBeGreaterThan(700);
+    const res = await runSearch({ question }, makeCtx(), { fetchImpl: fetch });
+
+    const sent = (bodies[0] as { query: string }).query;
+    expect(sent.length).toBeLessThanOrEqual(512);
+    expect(sent.length).toBeGreaterThan(450);
+    // A whole word: what the shelf reads is followed by a space in the original,
+    // so the cut never lands inside the last token.
+    expect(question.startsWith(`${sent} `)).toBe(true);
+    // Silently: nothing in the human output or the machine envelope says a word
+    // about the cut, because a warning is a line the agent has to act on.
+    expect((res.humanLines ?? []).join('\n')).not.toMatch(/cut|truncat|warn/i);
+    expect(JSON.stringify(res.data)).not.toMatch(/cut|truncat|warn/i);
+  });
+
   it('records the search so outcome --search-id and buy <id> can use it', async () => {
     const { fetch } = stub(HIT);
     await runSearch({ question: 'q' }, makeCtx(), { fetchImpl: fetch });
