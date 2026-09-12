@@ -42,6 +42,7 @@ from typing import Any, Callable
 from . import artifact, claude_usage, container, discovery, executor, images, loop_join, phases as phases_module, producer as producer_module, records, sha256_dir, sha256_file, sha256_json, sha256_text, usage, verifier
 from .manifest import Manifest
 from .schedule import Trial
+from . import protocol
 
 Clock = Callable[[], float]
 Sleep = Callable[[float], None]
@@ -540,6 +541,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
                 outcome = verdict.outcome
                 if outcome == "invalid":
                     invalid_reason = f"verifier:{verdict.verifier_id}"
+    invalid_reason = protocol.completion_refusal(task, session, outcome, invalid_reason)
     if invalid_reason is not None:
         outcome = "invalid"
 
