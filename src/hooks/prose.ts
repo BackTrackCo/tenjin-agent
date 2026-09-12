@@ -132,30 +132,29 @@ export const MISS_LINE = (question: string, id: string): string =>
  * The publish is offered conditioned on the agent's own judgement, and the
  * fingerprints are what make the answer findable next time.
  *
- * RENDERS WITH EITHER HALF MISSING. A failure with a test identity and no error
+ * A FINGERPRINT IS THE PRICE OF A LINE, and `capture.ts` does not call this
+ * without one. A failure too generic for `sigV1` to key — no errno, no frame,
+ * which is most of them on most machines — would render "Encountered this
+ * turn: `<line>`. If you settled it… publish it.", and every word of that is
+ * already two lines above in `CAPTURE_ASK`. Naming the fingerprint is the one
+ * thing the generic ask cannot do, so it is the one thing that earns the line.
+ *
+ * RENDERS WITH THE TEXT MISSING. A failure with a test identity and no error
  * line has an empty `errorLine` and a real key — the case a fingerprint serves
- * best, so it is named by the key instead of by text. A failure whose line is
- * too generic for `sigV1` to key has text and no fingerprint, and is named
- * without a publish suggestion, because there is nothing to file it under.
+ * best, so it is named by the key instead of by text.
  */
 export const FAILURE_LINE = (errorLine: string, keys: string[]): string => {
   const what =
-    errorLine === ''
-      ? keys.length > 0
-        ? 'A failure filed under `' + keys.join('`, `') + '`'
-        : 'A failure'
-      : '`' + errorLine + '`';
+    errorLine === '' ? 'A failure filed under `' + keys.join('`, `') + '`' : '`' + errorLine + '`';
   // EVERY KEY, ONE FLAG EACH. `--key` is `collect` and takes up to 32, so two
   // flags are still one command an agent can paste. Naming only the first
   // filed the piece under `sig_v1` alone while the arm goes on resolving
   // `sig_v1_test` too, so the next teammate to hit that same test asks under a
   // key nothing was ever published against.
   const publish =
-    keys.length > 0
-      ? ' If you settled it and the answer would save a teammate the same hour, publish it with ' +
-        keys.map((key) => '`--key fingerprint=' + key + '`').join(' ') +
-        '.'
-      : ' If you settled it and the answer would save a teammate the same hour, publish it.';
+    ' If you settled it and the answer would save a teammate the same hour, publish it with ' +
+    keys.map((key) => '`--key fingerprint=' + key + '`').join(' ') +
+    '.';
   // STATES THE ENCOUNTER AND NOTHING ELSE. A failure reaches this line when the
   // lookup missed, when it never landed, and when a note that answered another
   // failure had already been shown; "the shelf had nothing" is a guess on the

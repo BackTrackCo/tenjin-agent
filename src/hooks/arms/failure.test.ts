@@ -215,6 +215,40 @@ describe('the plan', () => {
     expect(plan?.question.questionKey).toMatch(/^sig_v1:[0-9a-f]{16}\|line:[0-9a-f]{32}$/);
   });
 
+  it('reads a coloured diagnostic as the same failure as an uncoloured one', async () => {
+    // A pty or `FORCE_COLOR` puts an SGR sequence in front of the line, and
+    // every marker that recognizes one is anchored to the start of the line.
+    const red = '\u001b[31m';
+    const off = '\u001b[39m';
+    const coloured =
+      red +
+      'Error:' +
+      off +
+      " ENOENT: no such file or directory, open 'drizzle.config.ts'\n" +
+      '\u001b[2m    at run (src/migrate.ts:12:3)\u001b[22m\n';
+    const plain = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: ENOENT }));
+    const plan = await planOf(shell({ command: 'pnpm db:migrate', ok: false, stderr: coloured }));
+    // The line reaches the wire as the person saw it — no `[31m` residue, which
+    // `mask` would not have taken off (it deletes the escape byte alone).
+    expect(plan?.question.text).toBe(
+      "Error: ENOENT: no such file or directory, open 'drizzle.config.ts'",
+    );
+    // And it is the SAME failure: colour must not fork the fingerprint, or one
+    // teammate's note is filed under a key the next one never asks.
+    expect(plan?.question.questionKey).toBe(plain?.question.questionKey);
+    expect(plan?.stages.map((s) => s.map((l) => l.shelf))).toEqual([['keys'], ['team']]);
+  });
+
+  it('reads a coloured diagnostic whose only marker is start-anchored', async () => {
+    // `npm ERR!`, `panic:`, `fatal:` and `error[E\d+]` are anchored and have no
+    // unanchored twin, so a colour in front of them left the arm with nothing
+    // to ask at all rather than with a worse question.
+    const coloured =
+      '\u001b[31mnpm ERR!\u001b[39m code ELIFECYCLE\n\u001b[31mnpm ERR!\u001b[39m errno 1\n';
+    const plan = await planOf(shell({ command: 'pnpm build', ok: false, stderr: coloured }));
+    expect(plan?.question.text).toBe('npm ERR! errno 1');
+  });
+
   it('asks in words with no fingerprint at all, under a key of its own', async () => {
     const generic = 'error: linting failed for the workspace\n';
     const plan = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: generic }));

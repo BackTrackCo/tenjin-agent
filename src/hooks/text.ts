@@ -38,6 +38,30 @@ export function stripControlKeepingLines(text: string): string {
   return text.replace(NON_LAYOUT_CONTROL_CHARS, ' ');
 }
 
+/**
+ * SGR and the rest of CSI, removed rather than spaced: a colour sequence is not
+ * layout and not a character, so the text a person saw is exactly what is left
+ * when it is gone. `stripControl` cannot serve here — it turns the escape byte
+ * into a space and leaves the `[31m` behind, which is worse than either keeping
+ * or dropping the whole sequence.
+ *
+ * It exists because every marker a runner's diagnostic is RECOGNIZED by is
+ * anchored to the start of the line (`^[ \t]*(?:\w*Error|error):`, `npm ERR!`,
+ * `error[E\d+]`, `panic:`, `fatal:`, and vitest's own ` FAIL <file> > <test>`
+ * header). A line that opens with a colour matches none of them, so under
+ * `FORCE_COLOR` or a pty the scanner walks straight past the real diagnostic.
+ *
+ * `normalizeForSig` keeps its own copy of this strip on purpose: that one is
+ * part of the frozen `sig_v1` formula and is not free to change, this one is
+ * about what the text SAYS. After this runs, that clause simply never fires.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE, '');
+}
+
 /** Drop a trailing high surrogate a cut left without its pair. */
 function whole(text: string): string {
   return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text;

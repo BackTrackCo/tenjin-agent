@@ -626,7 +626,9 @@ describe('the lead ask', () => {
     // The same command re-run after a failed edit is one problem, not three.
     seedFailure(db, LEAD, { at: NOW - 50 });
     seedFailure(db, LEAD, { at: NOW - 40 });
-    // A line too generic for `sigV1` to key: named, with no key to offer.
+    // A line too generic for `sigV1` to key. NOT NAMED: there is no key to
+    // offer, so the line would say only what `CAPTURE_ASK` says already. The
+    // arm still asks the shelf about it in words; only the nudge is dropped.
     seedFailure(db, LEAD, {
       questionKey: 'line:' + '0'.repeat(32),
       question: 'error: linting failed for the workspace',
@@ -646,8 +648,6 @@ describe('the lead ask', () => {
         ENOENT_LINE +
         '`. If you settled it and the answer would save a teammate the same hour, publish it with ' +
         '`--key fingerprint=sig_v1:aaaabbbbccccdddd`.',
-      '- Encountered this turn: `error: linting failed for the ' +
-        'workspace`. If you settled it and the answer would save a teammate the same hour, publish it.',
       '- Encountered this turn: A failure filed under ' +
         '`sig_v1_test:0123456789abcdef`. If you settled it and the answer would save a teammate the ' +
         'same hour, publish it with `--key fingerprint=sig_v1_test:0123456789abcdef`.',

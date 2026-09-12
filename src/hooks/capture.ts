@@ -241,11 +241,21 @@ function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] 
     if (key === '' || seen.has(key)) continue;
     if (REPEAT_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
     seen.add(key);
+    // NO FINGERPRINT, NO LINE. A key that is nothing but the line hash belongs
+    // to a failure below `sigV1`'s specificity floor, and there is nothing to
+    // publish it under. The line it would render says only "this failed, and
+    // publish if it was worth it", which `CAPTURE_ASK` already says two lines
+    // above — so on a machine where most failures are too generic to key, the
+    // ask grew one such line per failure and told the agent nothing each time.
+    // It is still looked up: the arm asks the shelf in words for exactly these
+    // (`arms/failure.ts`, the text stage). Only the publish nudge is dropped.
+    const fingerprints = failureKeyFingerprints(key);
+    if (fingerprints.length === 0) continue;
     if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
     // Already masked and cut at the shelf's bound on the way into the row; the
     // second cut here is for the line's own width and nothing else.
     const line = clean(typeof row.question === 'string' ? row.question : '', 200);
-    out.push(FAILURE_LINE(line, failureKeyFingerprints(key)));
+    out.push(FAILURE_LINE(line, fingerprints));
   }
   return out;
 }

@@ -12,6 +12,7 @@ import { sigV1Test, testIdentityOf, type TestSignature } from '../failure/test-i
 import { getMark } from '../gates';
 import { keysLeg, searchLeg, teamOrigin } from '../legs/shelf';
 import { question } from '../question';
+import { stripAnsi } from '../text';
 import type { Arm, Leg, Question } from '../types';
 import { BASH_START } from './context';
 
@@ -55,9 +56,20 @@ function commandOf(tool: HookTool | undefined): string {
  *  runner prints its verdict to STDOUT with an empty stderr. */
 function failureText(tool: HookTool | undefined): string {
   const r = tool?.result;
-  return [r?.stdout, r?.stderr, r?.error, r?.text]
-    .filter((t): t is string => typeof t === 'string')
-    .join('\n');
+  // COLOUR COMES OFF HERE, ONCE, because everything downstream reads this text
+  // by line and every marker that recognizes a diagnostic line is anchored to
+  // the start of it. A pty or `FORCE_COLOR` puts an SGR sequence in front of
+  // `Error:`, `npm ERR!`, `panic:`, `fatal:` and vitest's own ` FAIL <file> >
+  // <test>` header, and the scanner walks past all of them: `errorLine` then
+  // keys the failure on whatever unanchored marker it finds further down (a
+  // `FAIL` header, or `exit code 128`), `testIdentityOf`'s console fallback
+  // finds no header, and whatever line does survive carries `[31m` onto the
+  // wire, since `mask` deletes the escape byte and leaves the rest.
+  return stripAnsi(
+    [r?.stdout, r?.stderr, r?.error, r?.text]
+      .filter((t): t is string => typeof t === 'string')
+      .join('\n'),
+  );
 }
 
 /**
