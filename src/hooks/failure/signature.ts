@@ -14,7 +14,7 @@ import { shortHash } from './keys';
 
 /**
  * The heads this arm may fire behind: only a toolchain command is a failure
- * worth pairing. NOT GIT: every historical false positive (14 of 14,
+ * worth asking about. NOT GIT: every historical false positive (14 of 14,
  * tenjin-agent#212) was `git show … | grep ENOENT`, source that MENTIONS an
  * errno read through a pipe. A git failure that matters surfaces behind the
  * head that ran it.
@@ -237,7 +237,7 @@ export function commandHeads(command: string): CommandHead[] {
 
 /** The heads in this line the arm may fire behind, in order. Any, not all: in
  *  `pnpm test && echo done` the failure belongs to the FIRST half, which is
- *  why a pairing keys on an allowlisted head rather than on whichever segment
+ *  why the arm gates on an allowlisted head rather than on whichever segment
  *  ran last. */
 export function allowedHeads(command: string): string[] {
   const out: string[] = [];
@@ -338,6 +338,40 @@ function blockEnd(lines: string[], at: number): number {
   return end;
 }
 
+/** How many blank lines may sit between a failure block and the totals row of
+ *  the same run. `blockStart` stops at two — correctly, two blanks are what
+ *  keep two failures apart — but the arm's `failureText` joins `stdout`,
+ *  `stderr`, `error` and `text` with a newline apiece, so a run of blanks in
+ *  front of a totals row is a splice artifact, not structure. Four covers
+ *  every splice plus the blank the runner printed itself. */
+const TOTALS_GAP_MAX = 4;
+
+/**
+ * The failure block belonging to the run whose totals block starts at
+ * `totalsStart`: the block directly above it, across nothing but blank lines,
+ * and OPENED BY A RUNNER HEADER.
+ *
+ * The header is the bound, and it is the whole reason this is not a plain
+ * `continue` in `errorLine`. Resuming the outer scan walks up to
+ * `LINE_SCAN_MAX` lines of scrollback and keys a totals-only run on whatever
+ * an earlier command left behind — exactly what the block machinery exists to
+ * prevent. One hop, into a block a runner opened, keeps "the scanner stopped
+ * one block short" apart from "this output really is totals only": free text
+ * above a totals row is still nothing.
+ */
+function precedingFailureBlock(lines: string[], totalsStart: number): [number, number] | null {
+  let j = totalsStart - 1;
+  while (j >= 0 && isBlank(lines, j)) {
+    if (totalsStart - j > TOTALS_GAP_MAX) return null;
+    j -= 1;
+  }
+  if (j < 0) return null;
+  const start = blockStart(lines, j);
+  const header = lines[start] ?? '';
+  if (!RUNNER_HEADER_RE.test(header) || isAggregateLine(header.trim())) return null;
+  return [start, j];
+}
+
 export interface ErrorLine {
   line: string;
   /** The failure block the line sits in, which is what the top frame is read
@@ -350,9 +384,12 @@ export interface ErrorLine {
  * The most informative line: the LAST error-shaped, non-frame line, because
  * runners print the real cause after pages of summary — except when that line
  * is a bare TOTAL, in which case the nearest non-aggregate marker above it in
- * the same block is what the failure is about. A block whose only marker is
- * its totals row yields nothing: a key over "2 failed" is a key every repo
- * shares.
+ * the same block is what the failure is about, and failing that, the same
+ * search over the failure block the run printed DIRECTLY above its totals,
+ * across nothing but blank lines. One hop, never a resumed scan: a totals
+ * block with free text, or nothing, above it yields nothing, because a key
+ * over "2 failed" is a key every repo shares and a key over an unrelated
+ * error in the scrollback is worse than none.
  */
 export function errorLine(text: string): ErrorLine | null {
   const lines = text.split('\n');
@@ -368,6 +405,16 @@ export function errorLine(text: string): ErrorLine | null {
       if (candidate.length === 0 || STACK_FRAME_RE.test(candidate)) continue;
       if (!hasErrorMarker(candidate) || isAggregateLine(candidate)) continue;
       return { line: candidate, block };
+    }
+    const above = precedingFailureBlock(lines, start);
+    if (above === null) return null;
+    const [aboveStart, aboveEnd] = above;
+    const aboveBlock = lines.slice(aboveStart, aboveEnd + 1).join('\n');
+    for (let j = aboveEnd; j >= aboveStart; j -= 1) {
+      const candidate = (lines[j] ?? '').trim();
+      if (candidate.length === 0 || STACK_FRAME_RE.test(candidate)) continue;
+      if (!hasErrorMarker(candidate) || isAggregateLine(candidate)) continue;
+      return { line: candidate, block: aboveBlock };
     }
     return null;
   }
@@ -484,28 +531,22 @@ export interface Signature {
 /**
  * The `sig_v1` key for one failure — message + errno + frame — or null below
  * the SPECIFICITY FLOOR: no errno and no top frame means "N tests failed"
- * normalizes to the same bytes in every repo on earth, and a pairing keyed on
- * it would replay somebody else's fix at everybody.
+ * normalizes to the same bytes in every repo on earth, and a key sent on it
+ * would resolve somebody else's fix at everybody.
+ *
+ * THE FRAME GOES THROUGH THE SAME REDUCTION AS THE MESSAGE. A bundler builds
+ * the file it points at, and names it after the content: a stack through
+ * Vite's `chunk-4f2a91.js` keys the identical failure differently on every
+ * rebuild, so the shelf never sees the same hash twice and the fingerprint
+ * resolves nothing it was published under. `normalizeForSig` folds the hex run
+ * and the digits out of the basename, which is the same trade the message
+ * already makes: `main2.rs` and `main3.rs` collapse together, and erring
+ * toward a match is the direction a fingerprint is for.
  */
 export function sigV1(line: string, block: string): Signature | null {
   const message = normalizeForSig(line);
   const errno = errnoOf(line);
   const frame = topFrameFile(block);
   if (errno === '' && frame === '') return null;
-  return { key: shortHash('sig_v1|' + message + '|' + errno + '|' + frame) };
-}
-
-/** Traceback locations that are not files: an evaluated string or a piped
- *  stdin. Nothing a tracked edit could ever be matched against. */
-const NOT_A_FILE = new Set(['<string>', '<stdin>']);
-
-/** File basenames the error itself named — what the close rule checks a
- *  change against. Frames, tsc/rustc locations, and Python tracebacks. */
-export function filesInError(text: string): string[] {
-  const found = new Set<string>();
-  for (const m of text.matchAll(/([A-Za-z0-9_.+-]+\.[A-Za-z]{1,5})[:(]\d+/g)) found.add(m[1] ?? '');
-  for (const m of text.matchAll(/File "([^"]+)", line \d+/g)) {
-    found.add((m[1] ?? '').split(/[/\\]/).pop() ?? '');
-  }
-  return [...found].filter((f) => f.length > 0 && f.length <= 80 && !NOT_A_FILE.has(f));
+  return { key: shortHash('sig_v1|' + message + '|' + errno + '|' + normalizeForSig(frame)) };
 }

@@ -17,7 +17,7 @@ import type { Arm, FireContext } from '../types';
  * the old code faked with an `agentKey()` prefix, and a subagent's edit is the
  * subagent's:
  *  - `bashstart`, the failure arm's test-identity clock (PR D);
- *  - `edited:<pathKey>`, its close rule, with the path as the value;
+ *  - `edited:<pathKey>`, the publish arm's evidence that this actor did work;
  *  - `activity:inspection` / `activity:mutation`, the capture ask's gate.
  *
  * It stays registered on the same three (event, kind) pairs because those marks
@@ -57,15 +57,16 @@ export const contextArm: Arm = {
     { event: 'tool.after', kind: 'read' },
   ],
   /**
-   * EVERY edited path is marked whatever its extension: the close rule asks
-   * "did a tracked file change since this pairing opened", and a hook cannot
+   * EVERY edited path is marked whatever its extension: the reader asks "did
+   * this actor edit anything at all" (`capture.ts`, `hasMark(db, actor,
+   * EDITED_PREFIX)`, the publish arm's `edited` evidence), and a hook cannot
    * ask git that in front of a tool call.
    */
   before(ctx) {
     const { db, clock } = ctx.deps;
-    // Bookkeeping for the failure and publish arms — the marks are read by
-    // their close rule and their evidence test — so it runs while either is on
-    // and stops when both are off.
+    // Bookkeeping for the failure and publish arms — the shell stamp is the
+    // failure arm's, the edit marks are the publish arm's evidence test — so it
+    // runs while either is on and stops when both are off.
     const { hooks } = ctx.deps.config();
     if (!hooks.failure && !hooks.publish) return;
     const kind = ctx.input.tool?.kind;
@@ -78,11 +79,12 @@ export const contextArm: Arm = {
     }
     // One mark per path, all in this fire: a patch that touches three files is
     // one native call and one row, and every file it named is attempted work.
-    // Upserted, so a re-edit moves `marks.at` and nothing else. The VALUE is
-    // the path as given: the failure arm's close rule asks whether it is
-    // under the checkout (tenjin-agent#269), compares its basename with the
-    // files the error named, records it repo-relative, and reads the time
-    // off `marks.at`.
+    // Upserted, so a re-edit moves `marks.at` and nothing else. NOTHING READS
+    // THE VALUE: the one reader asks whether this actor edited anything at all
+    // (`capture.ts`, `hasMark(db, actor, EDITED_PREFIX)`, the publish arm's
+    // `edited` evidence), and the key answers that by itself. The path is kept
+    // because the key is a one-way hash, so a row an operator opens on their
+    // own machine would otherwise say nothing about which file it stands for.
     for (const path of editedPaths(ctx)) {
       setMark(db, ctx.actor, EDITED_PREFIX + pathKey(path), stripControl(path), clock());
     }

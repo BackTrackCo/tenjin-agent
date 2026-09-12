@@ -559,15 +559,15 @@ describe('runGrade', () => {
           { shelf: 'public', url: 'https://team.example/p/the-collation-trap', searchId: SEARCH },
         ],
       },
-      // A local pairing has no shelf to tell, and no url to tell it at.
+      // A parked handoff read off this machine has no url to tell a shelf at.
       {
-        id: 'f-local',
+        id: 'f-parked',
         at: NOW - 800,
-        arm: 'failure',
+        arm: 'subagent-start',
         reason: 'hit',
         session: 's3',
         delivered: 'inject:',
-        legs: [{ shelf: 'local', title: 'local pairing', searchId: SEARCH }],
+        legs: [{ shelf: 'team', title: 'the parked answer', searchId: SEARCH }],
       },
     ]);
     const { fetchImpl, calls } = acceptingShelf();
@@ -581,7 +581,7 @@ describe('runGrade', () => {
         ...transcriptDeps({
           s1: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
           s2: [contextRow(SHOWN), toolUse({ command: `tenjin read ${RES}` })].join('\n'),
-          s3: [contextRow('Tenjin replayed "local pairing".'), toolUse({ command: 'ls' })].join(
+          s3: [contextRow('Tenjin replayed "the parked answer".'), toolUse({ command: 'ls' })].join(
             '\n',
           ),
         }),
@@ -596,9 +596,9 @@ describe('runGrade', () => {
     const pub = calls[1]?.init.headers as Record<string, string>;
     expect(Object.keys(team).some((k) => k.includes('bypass'))).toBe(true);
     expect(Object.keys(pub).some((k) => k.includes('bypass'))).toBe(false);
-    // The verdict on the local leg stands; only the posted stamp is withheld.
+    // The verdict on the parked leg stands; only the posted stamp is withheld.
     expect(result.data).toMatchObject({ posted: 2, postSkipped: 1 });
-    expect(result.humanLines?.join('\n')).toContain('not posted: f-local');
+    expect(result.humanLines?.join('\n')).toContain('not posted: f-parked');
   });
 
   /**
@@ -742,16 +742,16 @@ describe('runGrade', () => {
     expect(gradedLegs()).toEqual([{ fire_id: 'f-old', graded: 'used:hand', posted_at: NOW }]);
   });
 
-  it('never selects a local-pairing leg for posting: no search id, no shelf owed', async () => {
+  it('never selects a leg read off this machine for posting: no search id, no shelf owed', async () => {
     seedFires([
       {
-        id: 'f-local',
+        id: 'f-parked',
         at: NOW - 1000,
-        arm: 'failure',
+        arm: 'subagent-start',
         reason: 'hit',
         session: 's1',
-        delivered: 'inject:pairing:7',
-        legs: [{ shelf: 'local', graded: 'used:hand' }],
+        delivered: 'inject:parked-7',
+        legs: [{ shelf: 'team', graded: 'used:hand' }],
       },
     ]);
     const { fetchImpl, calls } = acceptingShelf();
@@ -765,7 +765,7 @@ describe('runGrade', () => {
     // query selected the leg, failed the uuid guard and counted it as skipped.
     expect(result.data).toMatchObject({ posted: 0, postSkipped: 0 });
     expect(calls).toHaveLength(0);
-    expect(gradedLegs()).toEqual([{ fire_id: 'f-local', graded: 'used:hand', posted_at: null }]);
+    expect(gradedLegs()).toEqual([{ fire_id: 'f-parked', graded: 'used:hand', posted_at: null }]);
   });
 
   it('--explain names the anchor line and the evidence behind each verdict', async () => {

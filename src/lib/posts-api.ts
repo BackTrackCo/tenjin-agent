@@ -61,8 +61,8 @@ export interface PublishInput {
   /**
    * Exact-match keys `POST /api/keys/resolve` answers on (tenjin#774): a
    * failure fingerprint (`sig_v1:<hash>`), a `name@version`, a command head, a
-   * repo. Its own top-level field, not a card field, because a mechanical
-   * pairing carries keys and no card. `verified` is the writer's own claim and
+   * repo. Its own top-level field, not a card field, because a
+   * key-only publish carries keys and no card. `verified` is the writer's own claim and
    * defaults to false; see {@link normalizePostKeys} for the bounds.
    */
   keys?: PostKeyInput[];
@@ -961,7 +961,7 @@ function keysRefusal(res: HttpResponse, keys: PostKeyWire[] | undefined): CliErr
     'PUBLISH_FAILED',
     `${what} is already verified on ${where}; publish it unverified.`,
     {
-      fix: 'Publish the key unverified (`--key` never claims verified; the close rule does), or wait until outcomes demote that piece.',
+      fix: 'Publish the key unverified (`--key` never claims verified; the shelf does, by its own rule), or wait until outcomes demote that piece.',
       details,
     },
   );

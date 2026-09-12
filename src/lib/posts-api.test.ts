@@ -467,7 +467,7 @@ function ok200(body: Record<string, unknown>, status = 200): Response {
 
 /**
  * Keys (tenjin-agent#212, tenjin#774): a top-level field, not a card field,
- * because a mechanical pairing carries keys and no card. Bounded before the
+ * because a key-only publish carries keys and no card. Bounded before the
  * wallet touch, spelled out on the wire, and the two 400s only a body carrying
  * keys can draw are named rather than left as a zod complaint after the
  * signature.
