@@ -135,6 +135,7 @@ SCHEMA: dict[str, Any] = {
                     "fixture": FIXTURE_PATH,
                     "fixture_hash": HASH_TOKEN,
                     "prompt": NON_BLANK,
+                    "required_descendants": {"type": "integer", "minimum": 0, "maximum": 64},
                     "tools": STRINGS,
                     "allowed_tools": STRINGS,
                 },
@@ -263,7 +264,7 @@ def _validate_slice(data: dict[str, Any]) -> None:
     kind = item["kind"]
     if set(item) != SLICE_KEYS[kind]:
         raise ManifestError(f"slice {kind!r} carries exactly {', '.join(sorted(SLICE_KEYS[kind]))}")
-    if kind == "recursive" and not any(SUBAGENT_TOOL in task.get("tools", []) for task in data["tasks"]):
+    if kind == "recursive" and not any(SUBAGENT_TOOL in task.get("tools", data["pins"].get("tools", [])) for task in data["tasks"]):
         raise ManifestError(f"a recursive slice needs a task whose tools include {SUBAGENT_TOOL}")
 
 
@@ -298,8 +299,13 @@ def validate(data: dict[str, Any], base: Path) -> None:
         raise ManifestError("arms are unbalanced: every arm must share one executor")
     if "slice" in data:
         _validate_slice(data)
-    if data.get("slice", {}).get("kind") != "recursive" and any(SUBAGENT_TOOL in task.get("tools", []) for task in data["tasks"]):
+    if data.get("slice", {}).get("kind") != "recursive" and any(SUBAGENT_TOOL in task.get("tools", data["pins"].get("tools", [])) for task in data["tasks"]):
         raise ManifestError(f"only a recursive slice may give a task the {SUBAGENT_TOOL} tool")
+    for task in data["tasks"]:
+        if task.get("required_descendants", 0) > 0 and (
+                data.get("slice", {}).get("kind") != "recursive"
+                or SUBAGENT_TOOL not in task.get("tools", data["pins"].get("tools", []))):
+            raise ManifestError("required_descendants needs a recursive slice and Agent permission on that task")
 
 
 def expand_selection(data: dict[str, Any], path: Path) -> dict[str, Any]:

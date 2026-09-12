@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import loop_join, artifact, claude_usage, sha256_dir, sha256_file, sha256_text, tenjin_arm, usage, verifier
+from . import protocol
 from .executor import ExecutorSpec, LaunchRequest, Provision, ProvisionError
 
 PHASE = artifact.PRODUCER_PHASE
@@ -301,6 +302,7 @@ def run(
                 outcome = verdict.outcome
                 if outcome == "invalid":
                     invalid = f"producer:verifier_{verdict.verifier_id}"
+    invalid = protocol.completion_refusal(task, session, outcome, invalid)
     if invalid is None and outcome != "pass":
         # A producer that did not fix the task left nothing a consumer could
         # reuse; the consumer is not run against an empty store.
