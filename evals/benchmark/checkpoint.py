@@ -9,13 +9,13 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 
-from . import frozen_corpus, manifest as manifests, records, schedule
+from . import frozen_corpus, manifest as manifests, records, schedule, server_revision
 
 SCHEMA = "bench1.checkpoint.v1"
 INDEX = "checkpoint.json"
 NONCE = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{8}")
 REVISION = re.compile(r"[0-9a-f]{40,64}")
-ALLOWED = re.compile(r"(?:manifest\.json|schedule\.json|corpus-baseline\.json|records/[0-9a-f]{24}\.json|corpus-epochs/[0-9a-f]{64}\.json)")
+ALLOWED = re.compile(r"(?:manifest\.json|schedule\.json|corpus-baseline\.json|server-revision\.json|records/[0-9a-f]{24}\.json|corpus-epochs/[0-9a-f]{64}\.json)")
 
 
 class CheckpointError(ValueError):
@@ -84,6 +84,11 @@ def evidence(root, manifest):
         accepted[path.stem] = record
         payload[name] = encoded(record)
     if manifest.corpus is not None:
+        observed = server_revision.read(root)
+        if observed is not None:
+            if observed["manifest_hash"] != manifest.hash or observed["origin"] != manifest.corpus.origin:
+                raise CheckpointError("remote server evidence differs")
+            payload[server_revision.FILE] = encoded(observed)
         # Check selected paths before existing validators dereference them.
         baseline = read(root, frozen_corpus.BASELINE)
         saved = frozen_corpus.load(root, manifest.corpus, manifest.hash)

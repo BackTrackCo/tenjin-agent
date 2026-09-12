@@ -5,7 +5,7 @@ from dataclasses import asdict
 
 import pytest
 
-from evals.benchmark import FIXTURES, artifact, checkpoint, corpus, frozen_corpus, manifest, schedule, sha256_json
+from evals.benchmark import FIXTURES, artifact, checkpoint, corpus, frozen_corpus, manifest, schedule, sha256_json, server_revision
 from . import support
 
 REVISION = "a" * 40
@@ -36,6 +36,7 @@ def source(tmp_path, with_corpus=False):
                                      manifest_hash=selected.hash, schedule_hash=digest)
     record["invalid_detail"] = "private host diagnostic must not leave"
     if with_corpus:
+        server_revision.observe(run, selected.corpus.origin, selected.hash, lambda _: "dpl_checkpoint")
         identity = {"runtime_revision": frozen_corpus.RUNTIME_REVISION, "manifest_hash": selected.hash,
                     "corpus": selected.corpus.facts, "source_lsn": "0/ABC",
                     "source_generation": {"id": "source", "parent_id": None, "created_at": "2026-09-01T00:00:00Z", "last_reset_at": None}}
@@ -62,6 +63,8 @@ def test_roundtrip_preserves_nonce_schedule_and_sanitized_records(tmp_path, with
     assert json.loads((bundle / "manifest.json").read_text()) == {"hash": manifest.load(path).hash, "nonce": NONCE}
     assert not (bundle / "trials").exists()
     checkpoint.import_run(bundle, restored, path, REVISION)
+    if with_corpus:
+        assert server_revision.read(restored) == server_revision.read(run)
     received = json.loads(next((restored / "records").glob("*.json")).read_text())
     assert received == {key: value for key, value in record.items() if key != "invalid_detail"}
     assert json.loads((restored / "manifest.json").read_text())["nonce"] == NONCE
