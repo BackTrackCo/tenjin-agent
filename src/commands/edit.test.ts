@@ -25,10 +25,11 @@ const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 /**
  * The stored post every test edits, card included (a snapshot, one question).
  *
- * ITS CARD IS COMPLETE, and that is load-bearing now: an edit whose RESULT is not
- * a draft takes the same card gate a publish does, so a fixture missing a rubric
- * key would refuse every edit in this file for a reason none of them is about.
- * The gate's own cases build their own posts.
+ * ITS CARD IS COMPLETE, and that is load-bearing: the promotion cases below open
+ * ONE hole in a copy of it and assert exactly which key the gate names, so a
+ * fixture with holes of its own would make every one of those assertions a list
+ * of coincidences. Editing this post is not gated — only a promotion is — so the
+ * completeness costs the other cases nothing.
  */
 const STORED = {
   id: POST_ID,
@@ -65,10 +66,8 @@ const STORED = {
 };
 
 /**
- * The same post, parked as a draft. A draft is exempt from the card gate, so it
- * is what the cases below about WIRE SHAPE use: clearing a required card key is
- * a legitimate thing to do to an unfinished piece and a refusal on a live one,
- * and neither of those cases is about the shape of the PUT.
+ * The same post, parked as a draft: what the promotion cases start from, since a
+ * promotion is the one transition the card gate reads.
  */
 const DRAFT = { ...STORED, status: 'draft' };
 
@@ -365,9 +364,8 @@ describe('runEdit — flag to body mapping', () => {
 describe('runEdit — --clear', () => {
   it('clears nullable scalars with an explicit null and containers with []/{}', async () => {
     // A card with every clearable field SET, so every clear is a real change.
-    // A draft, because clearing a required key on a live piece is refused.
     const full = {
-      ...DRAFT,
+      ...STORED,
       resource: {
         ...STORED.resource,
         exclusions: 'L1 data fees',
@@ -412,20 +410,17 @@ describe('runEdit — --clear', () => {
   });
 
   it('drops a clear of a field that is already empty, rather than re-clearing it', async () => {
-    // This draft already has methodologySummary/supersedesPostId null and
+    // STORED already has methodologySummary/supersedesPostId null and
     // tasksSupported empty. Sending those keys anyway would count as a card
     // write server-side and re-run the embedding for a card nobody changed.
-    const { stub } = await edit(
-      {
-        clear: ['scope', 'methodology', 'supersedesPostId', 'tasksSupported'],
-      },
-      { get: DRAFT },
-    );
+    const { stub } = await edit({
+      clear: ['scope', 'methodology', 'supersedesPostId', 'tasksSupported'],
+    });
     expect(stub.putBody()).toEqual({ resource: { scope: null } });
   });
 
   it('combines a clear with a set on a different field', async () => {
-    const { stub } = await edit({ clear: ['asOf'], scope: 'still scoped' }, { get: DRAFT });
+    const { stub } = await edit({ clear: ['asOf'], scope: 'still scoped' });
     expect(stub.putBody()).toEqual({ resource: { scope: 'still scoped', asOf: null } });
   });
 
@@ -816,7 +811,7 @@ describe('runEdit — notes and the summary', () => {
   });
 
   it('renders a clear as (cleared)', async () => {
-    const stub = stubServer({ get: DRAFT });
+    const stub = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
     await runEdit(
       args({ yes: true, clear: ['scope', 'questionsAnswered'] }),
@@ -1369,9 +1364,7 @@ describe('runEdit — the card gate on a promotion', () => {
 });
 
 describe('runEdit — a post with no answer card', () => {
-  // A DRAFT, necessarily: a live piece with no card is what the gate refuses,
-  // and these cases are about the wire shape of a card-less PUT.
-  const CARDLESS = { ...DRAFT, resource: undefined };
+  const CARDLESS = { ...STORED, resource: undefined };
 
   it('clearing a card field writes nothing (there is no card to clear)', async () => {
     const stub = stubServer({ get: CARDLESS });
@@ -1611,7 +1604,7 @@ describe('runEdit — the receipt echoes the mode that was actually used', () =>
 describe('runEdit — the notes never contradict the summary', () => {
   it('clearing asOf drops the "asOf is unchanged" note', async () => {
     const file = await writeDoc('# New\n\nA fresh body.\n');
-    const stub = stubServer({ get: DRAFT });
+    const stub = stubServer();
     const { ctx, stderr } = makeCtxCapturingStderr();
     await runEdit(
       args({ yes: true, body: file, clear: ['asOf'] }),
