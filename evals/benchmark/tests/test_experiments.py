@@ -114,7 +114,7 @@ def assert_bench2_tasks(manifest: manifest_module.Manifest) -> None:
 def test_the_real_manifest_is_the_phase_one_local_pilot() -> None:
     manifest = manifest_module.load(experiments.REAL_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-2")
+    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-2-host1")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_natural"]
     off, natural = manifest.arms
@@ -165,7 +165,7 @@ def test_the_canary_manifest_is_two_same_task_transfers_off_against_the_shelf_ar
     manifest = manifest_module.load(experiments.CANARY_MANIFEST)
     core = manifest_module.load(experiments.LOCAL_ARMS_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["benchmark_version"]) == (4, "bench2-canary-3")
+    assert (len(trials), manifest.data["benchmark_version"]) == (4, "bench2-canary-3-network1")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_seeded"]
     assert [task["id"] for task in manifest.tasks] == ["alias", "core"]
@@ -325,3 +325,11 @@ def test_codex_selections_keep_the_same_corpus_and_treatments(path):
     assert matched.pins["model"] == "gpt-5.6-sol"
     assert matched.pins["billing_mode"] == "subscription"
     assert matched.pins["speed_mode"] == "fast"
+
+
+@pytest.mark.parametrize("path", [experiments.REAL_MANIFEST, experiments.LOCAL_ARMS_MANIFEST, experiments.SLICE_MANIFESTS["recursive"]])
+def test_natural_experiments_explicitly_select_host_publication(path):
+    data = manifest_module.load(path)
+    producers = [arm for arm in data.arms if arm.get("producer")]
+    assert producers and all(arm.get("capture_publication") == "host" for arm in producers)
+    assert data.corpus is not None

@@ -84,14 +84,32 @@ producers**, all with two native actors and matched usage, in **24.2 minutes of 
 time** including setup/cleanup and excluding operator pauses. The three natural producers retained three capture drafts, but zero reusable closed failure
 pairings; none of their consumers received an injection. The producer-to-consumer database
 transfer was intact. The current Codex adapter never establishes successful-shell evidence to
-close those pairings, and capture drafts are not a searchable shelf. Publication is also
-protocol-confounded: producer instructions ban network access while the Stop nudge requests
-publishing, and the retained traces contain no publish attempt. These observations do not
+close those pairings, and capture drafts are not a searchable shelf. Publication in those recorded runs was protocol-confounded: producer instructions banned
+network access while the Stop nudge requested publishing, and the traces contain no publish attempt. These observations do not
 establish a Codex 0.154.0 native hook limitation or isolate product quality. Seeded failure-hook
 delivery reached children. This one-fixture result establishes execution/accounting coverage, not a natural-reuse
 benefit or team-representative result. Codex does not expose the dispatch work order through
 its current product adapter, and its discovery counters remain unavailable until native parsing
 is implemented. Claude dispatch-reranker acceptance is still separate.
+
+The current natural arm explicitly selects **host-assisted publication**. A verified producer
+responds to the product's capture ask with its own finding fence; the host publishes those
+captured drafts free on the disposable shelf before the consumer starts. It adds no lesson,
+fingerprint key or nonce prose. An empty capture stays empty. Task containers carry no wallet
+and allow only configured Tenjin read commands over the network. The readout separates drafts,
+closed local pairings, published pieces, exact producer-piece team-hook deliveries, verified
+consumers after delivery, publication failures and cleanup. Host publication time is separate
+from agent completion time; delivery plus a pass does not establish that knowledge helped.
+This intervention measures assisted publication, not autonomous publishing. The `host1`
+experiment versions require new measurements; old diagnostic records are not pooled.
+
+Full core still has 150 consumers and 30 producers; recursive stays 12 plus three. At the latest
+partial core's pace, combined runtime is provisionally **3–4 hours**, before added publication
+overhead. Natural trials now avoid one redundant dependency export each (30 core plus three
+recursive); the measured saving is not yet known. Codex managed-auth runs remain serial,
+Claude independent work may fill three workers, and shared-shelf trials remain exclusive through
+publication, consumption and cleanup. No model calls were spent validating this protocol change.
+A fresh full run still waits for benchmark schema alignment through tenjin#846.
 
 The earlier eight-hour planning allowance is superseded by these preliminary measurements.
 GitHub-hosted jobs stop at six hours. The shared runner now subtracts elapsed setup and reserves

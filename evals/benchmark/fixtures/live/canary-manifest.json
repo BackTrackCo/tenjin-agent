@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-canary-3",
+  "benchmark_version": "bench2-canary-3-network1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260909,
@@ -51,7 +51,7 @@
       "family": "vitest-path-alias",
       "transfer_distance": "same_task",
       "fixture": "alias",
-      "fixture_hash": "sha256:a55879c23cb5a8ca370836d70d64c13f809fa1313a4aa5b0f8d9cb87575c8414",
+      "fixture_hash": "sha256:d4c532673cd234e28c8080ebfb86d4df46016bdc68a34a4ea189ff4fb57c8fbf",
       "verifier": "node_test_alias",
       "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
     },
@@ -60,7 +60,7 @@
       "family": "pnpm-workspace",
       "transfer_distance": "same_task",
       "fixture": "core",
-      "fixture_hash": "sha256:5fdf92945afa2e9cb61bee34ffb4c7e2657a9d9bd4d890ea63e30755416fd84c",
+      "fixture_hash": "sha256:3a79f5e5d0444dd951c5fcb095070137b93688e951e5b9399f79d17d938d60f1",
       "verifier": "node_test_core",
       "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
     }
