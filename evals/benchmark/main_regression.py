@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+from functools import lru_cache
 import io
 import json
 import os
@@ -90,11 +91,9 @@ def main() -> int:
         return 0
     current = json.loads((args.run / "report.json").read_text())
     result = {"status": "unavailable", "reason": "No matching retained main report in the last 100 completed main runs; no baseline was launched."}
-    cache = {}
+    @lru_cache(maxsize=4)
     def fetch(repository, route):
-        if route not in cache:
-            cache[route] = api(repository, route)
-        return cache[route]
+        return api(repository, route)
     update = {"status": "unavailable", "reason": "No retained main report with a matching harness-update protocol."}
     try:
         match = latest_main(current, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"], args.artifact, fetch)
