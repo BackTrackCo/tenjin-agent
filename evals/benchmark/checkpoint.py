@@ -15,7 +15,7 @@ SCHEMA = "bench1.checkpoint.v1"
 INDEX = "checkpoint.json"
 NONCE = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{8}")
 REVISION = re.compile(r"[0-9a-f]{40,64}")
-ALLOWED = re.compile(r"(?:manifest\.json|schedule\.json|corpus-baseline\.json|server-revision\.json|records/[0-9a-f]{24}\.json|corpus-epochs/[0-9a-f]{64}\.json)")
+ALLOWED = re.compile(r"(?:harness-lock\.json|manifest\.json|schedule\.json|corpus-baseline\.json|server-revision\.json|records/[0-9a-f]{24}\.json|corpus-epochs/[0-9a-f]{64}\.json)")
 
 
 class CheckpointError(ValueError):
@@ -60,6 +60,12 @@ def evidence(root, manifest):
         raise CheckpointError("full frozen schedule differs")
     payload = {"manifest.json": encoded({"hash": manifest.hash, "nonce": sidecar["nonce"]}),
                "schedule.json": encoded(frozen)}
+    if manifest.release is not None:
+        lock = read(manifest.path.parent, manifest.path.name)
+        retained = root / "harness-lock.json"
+        if retained.exists() and read(root, "harness-lock.json") != lock:
+            raise CheckpointError("harness release lock differs")
+        payload["harness-lock.json"] = encoded(lock)
     expected = {trial.trial_id: trial for trial in trials}
     accepted = {}
     directory = root / "records"
@@ -175,7 +181,8 @@ def import_run(checkpoint: Path, out: Path, manifest_path: Path, revision: str):
     if read(checkpoint, "manifest.json") != json.loads(payload["manifest.json"]):
         raise CheckpointError("checkpoint manifest sidecar has unknown fields")
     sidecar = json.loads(payload["manifest.json"])
-    payload["manifest.json"] = encoded({**sidecar, "path": str(manifest.path.resolve())})
+    manifest_path = out / "harness-lock.json" if manifest.release is not None else manifest.path
+    payload["manifest.json"] = encoded({**sidecar, "path": str(manifest_path.resolve())})
     payload["schedule.sha256"] = (schedule_hash + "\n").encode()
     write_payload(out, payload)
     return {"run": str(out), "records": sum(name.startswith("records/") for name in payload)}
