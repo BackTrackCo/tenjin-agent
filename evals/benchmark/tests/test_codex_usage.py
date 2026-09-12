@@ -156,3 +156,37 @@ def test_shared_runner_resolves_native_codex_root_and_verifies_the_task(tmp_path
     assert result['native_root_id'] == 'root'
     assert result['usage'][0]['native_request_id'] == 'root-r1'
     assert result['agent_time_s'] == 1.5
+
+
+def test_native_fork_metadata_is_ancestry_not_another_actor_owner(tmp_path):
+    root = rollout()
+    child = rollout("child", "root")
+    child.insert(1, copy.deepcopy(root[0]))
+    grandchild = rollout("grandchild", "child")
+    grandchild[1:1] = [copy.deepcopy(child[0]), copy.deepcopy(root[0])]
+    root_path = write(tmp_path, root, "z_root")
+    write(tmp_path, child, "a_child")
+    write(tmp_path, grandchild, "b_grandchild")
+    parsed = parse(tmp_path)
+    assert parsed.reconciliation["status"] == "matched_with_descendants"
+    assert len(parsed.records) == 3
+    assert usage.totals(parsed.records)["total"] == 330
+    assert codex.transcript_path(tmp_path, "root") == root_path
+
+
+@pytest.mark.parametrize("variant", ["changed", "unrelated", "copied_usage"])
+def test_fork_history_cannot_smuggle_metadata_or_parent_spend(tmp_path, variant):
+    root = rollout()
+    child = rollout("child", "root")
+    copied = copy.deepcopy(root[0])
+    if variant == "changed":
+        copied["payload"]["cli_version"] = "other"
+    elif variant == "unrelated":
+        copied["payload"]["id"] = "foreign"
+    else:
+        child.insert(2, copy.deepcopy(root[3]))
+    child.insert(1, copied)
+    write(tmp_path, root)
+    write(tmp_path, child, "child")
+    with pytest.raises(codex.CodexUsageError):
+        parse(tmp_path)
