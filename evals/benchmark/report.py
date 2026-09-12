@@ -469,6 +469,12 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
     else:
         widths = [max(len(columns[i]), *(len(row[i]) for row in rows)) for i in range(len(columns))] if rows else [len(c) for c in columns]
         lines += [" | ".join(cell.ljust(width) for cell, width in zip(row, widths)) for row in [columns, *rows]]
+    for arm_id in ids:
+        producer = arms.get(arm_id, {}).get("producer")
+        if producer:
+            lines += ["", f"Producer {arm_id}: {producer['passes']}/{producer['attempts']} verified; "
+                      f"{producer['captured']} left reusable local pairings; {producer['findings']} capture drafts retained. "
+                      "Drafts are not published knowledge or proof of consumer delivery."]
     if complete:
         for arm_id, comparison in sorted(report.get("comparisons", {}).items()):
             for key, label in (("completion_time", "Time ratio"), ("completion_tokens", "Token ratio"), ("completion_rate", "Pass-rate difference")):
@@ -661,7 +667,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
         if producer:
             lines.append(
                 f"{arm_id} producer phases: {producer['attempts']} run, {producer['passes']} passed, {producer['captured']} left a closed local record, "
-                f"{producer['findings']} finding(s) harvested, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
+                f"{producer['findings']} capture draft(s) retained, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
             )
         diagnostics = [task.get("diagnostics", {}) for task in arm.get("tasks", {}).values()]
         spent = {phase: sum(item.get("attempt_phase_tokens", {}).get(phase, 0) for item in diagnostics) for phase in ("consumer", "nudge", "cli_search")}
