@@ -95,9 +95,9 @@ export function lookupArm(spec: LookupSpec): Arm {
         // and never the raw text: a refused prompt is where a pasted transcript
         // and a credential live.
         if (reason !== null) return { reason, text: skipText(raw) };
-        const q = question(raw);
-        if (q.text.length === 0) return null;
         const trigger = typeof spec.trigger === 'function' ? spec.trigger(ctx.input) : spec.trigger;
+        const q = question(raw, trigger);
+        if (q.text.length === 0) return null;
         return { question: q, stages: [spec.shelves.map((s) => searchLeg(s, trigger, cfg))] };
       };
       // A spec whose text is synchronous plans synchronously: the promise is

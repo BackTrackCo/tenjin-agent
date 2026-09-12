@@ -452,9 +452,10 @@ spawn's task is opaque on the wire, so no work order is looked up for a child. N
 them only adds context beside it. The arms ask your configured shelf a question
 and mention a tested answer if one exists. Five things leave the machine, each
 with its secrets stubbed and then cut at 512 characters: a prompt you typed, a
-WebSearch query, a WebFetch address and the prompt beside it, the work order a
-subagent is dispatched with, and — to the team shelf only — the fingerprint of a
-failed command. Nothing else does. The files you read and edit are recorded
+WebSearch query, a WebFetch address and the prompt beside it, the description
+and work order a subagent is dispatched with (this one cut at 8,000 characters,
+so the task and not only the rules above it is what the shelf reads), and — to
+the team shelf only — the fingerprint of a failed command. Nothing else does. The files you read and edit are recorded
 locally and asked about nowhere, so the failure and publish arms can tell your
 last command from the one before it.
 

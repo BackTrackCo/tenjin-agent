@@ -993,9 +993,13 @@ describe('the public render did not move', () => {
   // Every pinned invariant (firing gate pairs, leak refusal, denial rule and its
   // five-sentence cap, untrusted-data verbatim, mode handoff, no trust-scope
   // language) holds in both renders; only the digest moved.
+  //
+  // Re-pinned 2026-09-12 for tenjin-agent#346: `tenjin search` now cuts a
+  // question past 512 at a whole word instead of refusing with USAGE, so the
+  // one bullet that described the refusal says the cut. tenjin-publish untouched.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '9e0ec8e8600955353d1e902a60e83c4e',
+      'tenjin-search': 'a24b665cac975d738bc8dbb611362741',
       'tenjin-publish': '65aa2d84e5905ca99e2605c41df76a0a',
     });
   });

@@ -91,7 +91,7 @@ export type HookTool = ToolBase &
     | { kind: 'shell'; command: string }
     | { kind: 'edit'; paths: string[] }
     | { kind: 'read'; paths: string[] }
-    | { kind: 'dispatch'; task: string }
+    | { kind: 'dispatch'; task: string; description?: string }
     | { kind: 'web'; query: string }
     | { kind: 'fetch'; url: string; prompt: string }
     | { kind: 'other' }
