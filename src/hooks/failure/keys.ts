@@ -88,10 +88,6 @@ export function failureQuestionKey(parts: {
  * dropped: it is a hash of console text, not a key anyone publishes under. A
  * key that is nothing but `line:` yields an empty list, which is the honest
  * answer — that failure has no fingerprint to file a piece against.
- *
- * TOLERANT BY DESIGN. `fires` outlives a build, so a row written by an older
- * shape — a bare 16-hex `sig_v1_test` key, which is what the arm stored before
- * the composition — parses to nothing rather than to garbage.
  */
 export function failureKeyFingerprints(key: string): string[] {
   return key

@@ -76,18 +76,13 @@ const LEAD_LOOKUP_SQL =
  * resource id rather than on the failure, so it can mean nothing more than that
  * a note about a NEIGHBOURING failure had already been read.
  *
- * Selecting on outcomes went wrong three times in a row here, each time by
- * omitting one: `deadline` and `error`, then `rate-server`, then `hit`. So the
- * rule no longer reads outcomes at all.
+ * The three reasons excluded are the rows that are not a sighting at all:
+ * `no-question` never had one, and `asked`/`cached` are the same failure a
+ * second time, answered from the claim gate's own cache without a leg running.
+ * A key known only by those is not named, and none of them can stand in for a
+ * first sighting — the one thing a row's reason still decides.
  */
-const FAILURE_ANY_SQL = "arm = 'failure' AND reason != 'no-question'";
-
-/** The same failure a second time, carrying no verdict of its own: the claim
- *  gate answered from its own cache without a leg running. Not a second thing
- *  to write up, and it cannot stand in for a first sighting either, so a key
- *  known only by these is not named. The one thing a row's reason still
- *  decides. */
-const REPEAT_REASONS: ReadonlySet<string> = new Set(['asked', 'cached']);
+const FAILURE_ANY_SQL = "arm = 'failure' AND reason NOT IN ('no-question', 'asked', 'cached')";
 
 function hasMark(db: LoopDb, actor: Actor, prefix: string): boolean {
   return (
@@ -192,16 +187,13 @@ interface FailureHit {
  *
  * THE FACT, AND ONLY THE FACT. This is what the ask is ARMED by — an agent that
  * walked into a wall did real work (principle 5) whether or not the wall could
- * be fingerprinted. What is SAID about them is {@link failureLines}, which is
- * allowed to drop some, and the two are separate functions because wiring the
- * ask's trigger to the rendered text meant an editorial choice about prose
- * silently decided whether the ask happened at all.
+ * be fingerprinted. What is SAID about them is {@link failureLines}, which may
+ * drop some; keep the two apart, or an editorial choice about prose decides
+ * whether the ask happens.
  *
  * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED ({@link
- * FAILURE_ANY_SQL}). Every failure this actor hit is named once, and the only
- * thing a row's reason still decides is whether it can be the one that names it
- * ({@link REPEAT_REASONS}). The cost of naming one failure too many is a line
- * the agent ignores; the cost of dropping one is a fingerprint nobody can ever
+ * FAILURE_ANY_SQL}). The cost of naming one failure too many is a line the
+ * agent ignores; the cost of dropping one is a fingerprint nobody can ever
  * publish under, so the asymmetry decides the default.
  *
  * DEDUPED AND BOUNDED, WHICH IS WHAT KEEPS IT QUIET. One line per key however
@@ -240,7 +232,7 @@ interface FailureHit {
 function failuresHit(db: LoopDb, actor: Actor, since: number | null): FailureHit[] {
   const rows = db
     .prepare(
-      `SELECT question_key, question, at, reason FROM fires
+      `SELECT question_key, question, at FROM fires
        WHERE session = ? AND agent = ? AND ${FAILURE_ANY_SQL}
          AND question_key IS NOT NULL AND question_key != ''
        ORDER BY at, rowid`,
@@ -249,14 +241,12 @@ function failuresHit(db: LoopDb, actor: Actor, since: number | null): FailureHit
     question_key?: unknown;
     question?: unknown;
     at?: unknown;
-    reason?: unknown;
   }>;
   const seen = new Set<string>();
   const out: FailureHit[] = [];
   for (const row of rows) {
     const key = typeof row.question_key === 'string' ? row.question_key : '';
     if (key === '' || seen.has(key)) continue;
-    if (REPEAT_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
     seen.add(key);
     if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
     // Already masked and cut at the shelf's bound on the way into the row; the
@@ -279,14 +269,10 @@ function failuresHit(db: LoopDb, actor: Actor, since: number | null): FailureHit
  * too generic to key, the ask grew one such line per failure and said nothing
  * new each time.
  *
- * WHICH IS WHY THIS IS NOT WHAT ARMS THE ASK. That decision reads
- * {@link failuresHit} instead, and the two must not be the same list again: a
- * failure with no fingerprint is still worth publishing about, because the
- * failure arm asks the shelf about exactly these IN WORDS (`arms/failure.ts`,
- * the text stage) and a piece published with no `--key` is found by that same
- * text. Arming the ask off the rendered lines closed the write end of a loop
- * whose read end this branch had just built: we would ask the shelf a question
- * that nothing was ever nudged to answer.
+ * NOT WHAT ARMS THE ASK — that reads {@link failuresHit}. A failure with no
+ * fingerprint is still worth publishing about: the failure arm asks the shelf
+ * about exactly these IN WORDS (`arms/failure.ts`, the text stage), and a piece
+ * published with no `--key` is found by that same text.
  */
 function failureLines(hit: readonly FailureHit[]): string[] {
   return hit.filter((f) => f.keys.length > 0).map((f) => FAILURE_LINE(f.line, f.keys));
@@ -439,10 +425,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
   const misses = missLines(db, actor);
-  // THE FACT, NOT THE PROSE. A failure the agent hit is work it did, whether or
-  // not it could be fingerprinted; `failureLines` drops the keyless ones from
-  // the TEXT, and reading that here would have switched the whole ask off for a
-  // turn whose only work was a failure too generic to key.
+  // `hit`, never `failures`: the fact arms the ask, the prose only fills it.
   const kind = evidence(ctx, misses, hit.length > 0);
   if (kind === null) return null;
   setMark(db, actor, ASKED, kind, clock());

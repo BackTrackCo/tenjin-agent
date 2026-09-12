@@ -249,6 +249,19 @@ describe('the plan', () => {
     expect(plan?.question.text).toBe('npm ERR! errno 1');
   });
 
+  it('reads through an OSC-8 hyperlink sitting in front of the marker', async () => {
+    // OSC, not CSI: `ESC ] 8 ; ; <url> BEL <text> ESC ] 8 ; ; BEL`, which is how
+    // a runner turns a path into a clickable link. An SGR-only pattern leaves
+    // the `]8;;<url>` residue at the head of the line, and every marker that
+    // recognizes a diagnostic is anchored to the start of it, so the line is
+    // unrecognizable for exactly the reason a colour made it unrecognizable.
+    const link = (url: string, text: string): string =>
+      '\u001b]8;;' + url + '\u0007' + text + '\u001b]8;;\u0007';
+    const stderr = link('https://pnpm.io/errors/ELIFECYCLE', 'npm ERR!') + ' errno 1\n';
+    const plan = await planOf(shell({ command: 'pnpm build', ok: false, stderr }));
+    expect(plan?.question.text).toBe('npm ERR! errno 1');
+  });
+
   it('asks in words with no fingerprint at all, under a key of its own', async () => {
     const generic = 'error: linting failed for the workspace\n';
     const plan = await planOf(shell({ command: 'pnpm lint', ok: false, stderr: generic }));

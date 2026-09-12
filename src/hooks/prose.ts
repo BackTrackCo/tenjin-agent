@@ -121,16 +121,12 @@ export const MISS_LINE = (question: string, id: string): string =>
  * A failure this actor hit that neither round had anything for, and the
  * fingerprints it is filed under.
  *
- * IT ASSERTS NOTHING. "You fixed `<line>`" was a claim this machine could not
- * make: what stood behind it was a pairing closed by the next passing run of
- * the same command, which is "something passed later", not "you understood
- * it". An agent told it fixed something it worked around, or that a teammate's
- * push fixed, writes a piece about a fix that never happened. So the line
- * states what is on the row and no more: this came up, and no answer to it
- * reached this agent. It does not say the shelf was asked and came back empty,
- * because a failure also reaches this line when the lookup never finished.
- * The publish is offered conditioned on the agent's own judgement, and the
- * fingerprints are what make the answer findable next time.
+ * IT ASSERTS NOTHING about what the agent did with it. The line states what is
+ * on the row and no more: this came up. Not that it was fixed — this machine
+ * cannot see that — and not that the shelf came back empty, because a failure
+ * also reaches this line when the lookup never finished. The publish is offered
+ * conditioned on the agent's own judgement, and the fingerprints are what make
+ * the answer findable next time.
  *
  * A FINGERPRINT IS THE PRICE OF A LINE, and `capture.ts` does not call this
  * without one. A failure too generic for `sigV1` to key — no errno, no frame,
