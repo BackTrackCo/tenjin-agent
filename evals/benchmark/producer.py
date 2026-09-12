@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import loop_join, artifact, claude_usage, sha256_dir, sha256_file, sha256_text, tenjin_arm, usage, verifier
-from . import protocol
+from . import protocol, publication
 from .executor import ExecutorSpec, LaunchRequest, Provision, ProvisionError
 
 PHASE = artifact.PRODUCER_PHASE
@@ -235,6 +235,8 @@ def run(
         "sentinel": {"credential_exposures": 0},
         "private_hashes": {"root_transcript": None, "executor_stderr": sha256_text(completed.stderr) if completed.stderr else None},
     }
+    if arm.get("capture_publication") == "host":
+        facts["publication"] = {"mode": "host-assisted", "status": "not-run", "pieces": [], "wall_time_s": 0.0}
     invalid: str | None = identity_reason
     try:
         if spec.evidence.limited(sessions, session_id, producer_roots.stream):
@@ -310,6 +312,11 @@ def run(
     facts["outcome"] = "invalid" if invalid is not None else outcome
     facts["invalid_reason"] = invalid
     next_provision = provision
+    if invalid is None and arm.get("capture_publication") == "host":
+        facts["publication"], invalid = publication.publish(roots, provision, loop_join.stored_session(spec.harness, session_id), project_id(str(launch.cwd)))
+        if invalid is not None:
+            facts["outcome"] = "invalid"
+            facts["invalid_reason"] = invalid
     if invalid is None:
         next_provision = tenjin_arm.start_phase(roots, provision, "consumer")
     return ProducerResult(facts=facts, receipts=receipts, invalid_reason=invalid, provision=next_provision, foreign_sessions=(loop_join.stored_session(spec.harness, session_id),))

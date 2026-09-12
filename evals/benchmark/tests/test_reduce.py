@@ -208,7 +208,7 @@ def test_producer_facts_and_local_hits_are_summarised_per_arm() -> None:
     seeded = support.reduction_record("t1", "seeded", 0, 0, 500)
     seeded["delivery"] = {**seeded["delivery"], "legs": [{"fire_id": "f", "stage": 0, "shelf": "local", "status": "ok", "outcome": "hit", "actor": ["claude", seeded["native_root_id"], ""]}]}
     reduction = reduce_module.reduce(support.accept(record, other, seeded), [])
-    assert reduction["arms"]["on"]["producer"] == {"attempts": 2, "passes": 1, "captured": 1, "findings": 2, "invalid": 1, "wal_live": 1}
+    assert {key: reduction["arms"]["on"]["producer"][key] for key in ("attempts", "passes", "captured", "findings", "invalid", "wal_live")} == {"attempts": 2, "passes": 1, "captured": 1, "findings": 2, "invalid": 1, "wal_live": 1}
     assert reduction["arms"]["seeded"]["tasks"]["t1"]["diagnostics"]["local_hits"] == 1
 
 
@@ -537,3 +537,17 @@ def test_an_empty_checkpoint_preserves_every_declared_arm() -> None:
     assert result["arms"]["off"]["attempts"] == 0
     assert result["comparisons"]["on"]["headline"] is None
     assert not result["comparisons"]["on"]["headline_eligible"]
+
+
+def test_host_publication_requires_exact_consumer_piece_and_team_fire():
+    row = support.reduction_record("t1", "on", 0, 1, 400)
+    row["isolation"]["producer"] = {"outcome": "pass", "capture": {"findings": 1}, "publication": {"status": "complete", "wall_time_s": 2, "pieces": [{"piece_id": "mine", "published": True, "deleted": True}]}}
+    row["delivery"]["fires"] = [{"fire_id": "f1", "delivered": "inject:mine"}, {"fire_id": "f2", "delivered": "inject:other"}, {"fire_id": "f3", "delivered": "inject:mine"}]
+    row["delivery"]["legs"] = [{"fire_id": "f1", "shelf": "team", "outcome": "hit"}, {"fire_id": "f2", "shelf": "team", "outcome": "hit"}, {"fire_id": "f3", "shelf": "public", "outcome": "hit"}]
+    got = reduce_module.producer_summary([row])
+    assert (got["published"], got["consumer_deliveries"], got["consumers_with_delivery"], got["verified_with_delivery"], got["not_deleted"]) == (1, 1, 1, 1, 0)
+    row["outcome"] = "fail"
+    assert reduce_module.producer_summary([row])["verified_with_delivery"] == 0
+    del row["isolation"]["producer"]["publication"]
+    got = reduce_module.producer_summary([row])
+    assert got["published"] is None and got["consumer_deliveries"] is None

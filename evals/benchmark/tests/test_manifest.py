@@ -65,6 +65,7 @@ BAD_SHAPES = {
     "phase keys": {**BASE, "phases": {"producer": "x"}},
     "empty phase": {**BASE, "phases": {**BASE["phases"], "capture": ""}},
     "seed path is not an arm key": {**BASE, "arms": [{**ARM, "provision": "tenjin", "seed": "local"}, BASE["arms"][1]]},
+    "publication without producer": {**BASE, "arms": [{**ARM, "capture_publication": "host"}, BASE["arms"][1]]},
     "producer without provision": {**BASE, "arms": [{**ARM, "producer": True}, BASE["arms"][1]]},
     "producer not a boolean": {**BASE, "arms": [{**ARM, "provision": "tenjin", "producer": "yes"}, BASE["arms"][1]]},
     "slice kind": {**BASE, "slice": {"kind": "fast"}},
