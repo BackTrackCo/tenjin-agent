@@ -194,6 +194,7 @@ def project(
     reduction: dict[str, Any],
     accepted: dict[str, dict[str, Any]],
     corpus_snapshot: dict[str, Any] | None = None,
+    server_revision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The whole publishable artifact, refused as a unit if anything private rides along."""
     excluded: dict[str, int] = {}
@@ -201,6 +202,8 @@ def project(
         reason = item["reason"].split(":", 1)[0]
         excluded[reason] = excluded.get(reason, 0) + 1
     publishable, kind = stamp(accepted)
+    if server_revision is not None and server_revision.get("status") != "stable":
+        publishable = False
     # The delivery legs by shelf, summed over the accepted attempts. Every
     # count here comes from the daemon's own ledger, so it says which legs the
     # product recorded, never which requests left the container: the container
@@ -262,6 +265,7 @@ def project(
     }
     report = {
         "schema": REPORT_SCHEMA,
+        "server_revision": server_revision,
         "benchmark_version": manifest_data["benchmark_version"],
         "slice": manifest_data.get("slice"),
         "price_sheet_version": manifest_data["price_sheet_version"],
@@ -408,6 +412,9 @@ METHODOLOGY = "https://github.com/BackTrackCo/tenjin-agent/blob/main/evals/bench
 
 
 def run_status(report: dict[str, Any]) -> str:
+    server = report.get("server_revision")
+    if server and server.get("status") != "stable":
+        return "UNAVAILABLE — remote server changed or could not be checked; diagnostic evidence only"
     if report.get("isolation") == "fake":
         return "SYNTHETIC TEST — no product result"
     if not report.get("publishable"):
@@ -441,6 +448,10 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
              f"Ran: {recorded}/{expected} attempts | Tasks: {len(tasks)} | Arms: {len(ids)} | Repeats: {report.get('repeats', 'unknown')}",
              "Tasks: " + (", ".join(task["task_id"] for task in tasks) or "unknown"),
              "Control: " + str(report.get("baseline") or "none"), ""]
+    server = report.get("server_revision")
+    if server:
+        lines += [f"Remote server: {server.get('deployment_id') or 'unknown'} | Observations: {server.get('checks', 0)} | Status: {server.get('status')}",
+                  "Deployment observations detect changes; they do not lock the server or prove schema compatibility.", ""]
     columns = ["Arm", "Verified / planned", "Failed / capped / invalid", "Consumer s / completion", "System tokens / completion", "Time vs control", "Tokens vs control"]
     rows = []
     baseline = arms.get(report.get("baseline"), {})
