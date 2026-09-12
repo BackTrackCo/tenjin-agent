@@ -13,8 +13,8 @@ import type { Arm } from '../types';
  * by both is one lookup, which is the point — the loop does not double count.)
  *
  * NEITHER REWRITES ITS WORDS and neither has a length rule. A query is already a
- * query, a url is already an address, and the search leg cuts at 512 on a word
- * boundary, which is the shelf's bound and no arm's.
+ * query, a url is already an address, and `question()` cuts at the trigger's
+ * 512 on a word boundary, which is the shelf's bound and no arm's.
  */
 
 /**

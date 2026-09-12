@@ -231,11 +231,31 @@ describe('decode', () => {
       [
         'Agent',
         { prompt: 'find the flake', description: 'a label', subagent_type: 'Explore' },
-        { kind: 'dispatch', task: 'find the flake' },
+        { kind: 'dispatch', task: 'find the flake', description: 'a label' },
       ],
       ['WebSearch', { query: 'pg 16 collation' }, { kind: 'web', query: 'pg 16 collation' }],
     ])('%s carries its canonical fields', (tool_name, tool_input, expected) => {
       expect(decode({ ...PreToolUse, tool_name, tool_input })?.tool).toMatchObject(expected);
+    });
+
+    // The description is the one line a work order's rules do not bury, and the
+    // dispatch arm sends it ahead of the task. A dispatch that carried none
+    // must carry no key either, so the arm's `?? ''` is the only default.
+    it('Agent carries the description only when tool_input has one', () => {
+      const bare = decode({
+        ...PreToolUse,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'find the flake' },
+      })?.tool;
+      expect(bare).toMatchObject({ kind: 'dispatch', task: 'find the flake' });
+      expect(bare !== undefined && 'description' in bare).toBe(false);
+
+      const blank = decode({
+        ...PreToolUse,
+        tool_name: 'Agent',
+        tool_input: { prompt: 'find the flake', description: 42 },
+      })?.tool;
+      expect(blank !== undefined && 'description' in blank).toBe(false);
     });
   });
 

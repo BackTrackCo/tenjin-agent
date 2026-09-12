@@ -1070,11 +1070,13 @@ describe('the public render did not move', () => {
   // five-sentence cap, untrusted-data verbatim, mode handoff, no trust-scope
   // language) holds in both renders; only the digest moved.
   //
-  // Re-pinned by the merge of main into this branch: both chains above touch
-  // the same two files, so the digests below are this merge's own bytes.
+  // Re-pinned by the merge of origin/main into this branch, one digest from
+  // each side: #346 made `tenjin search` cut a question past 512 at a whole
+  // word instead of refusing with USAGE (tenjin-search), and this branch
+  // rewrote the publish nudge's failure wording (tenjin-publish).
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '9e0ec8e8600955353d1e902a60e83c4e',
+      'tenjin-search': 'a24b665cac975d738bc8dbb611362741',
       'tenjin-publish': '18251526058285eb9e09e0bbd1adf9e2',
     });
   });
