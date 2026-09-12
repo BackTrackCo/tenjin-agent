@@ -50,3 +50,27 @@ def test_product_revisions_can_change_but_measurement_inputs_cannot():
     current = report()
     current["manifest_hash"] = "new-product-version"
     assert regress.compare_reports(current, report())["status"] == "compared"
+
+
+def test_harness_update_signal_keeps_other_inputs_frozen_and_labels_attribution():
+    manifest = {"pins": {"model": "same", "harness_version": "1.0.0"}, "arms": []}
+    update = copy.deepcopy(manifest)
+    update["pins"]["harness_version"] = "1.1.0"
+    assert regress.protocol_hash(update) != regress.protocol_hash(manifest)
+    assert regress.protocol_hash(update, harness_update=True) == regress.protocol_hash(manifest, harness_update=True)
+    update["pins"]["model"] = "different"
+    assert regress.protocol_hash(update, harness_update=True) != regress.protocol_hash(manifest, harness_update=True)
+    old, new = report(), report()
+    for item, version in ((old, "1.0.0"), (new, "1.1.0")):
+        item["harness_update_protocol_hash"] = "update"
+        item["run_configuration"]["harness_version"] = version
+    new["regression_protocol_hash"] = "new"
+    new["arms"]["off"]["tokens_per_verified_resolution"] = 200
+    result = regress.compare_harness_updates(new, old)
+    assert result["status"] == "regressions found"
+    assert "mixed or unknown" in result["attribution"]
+    assert result["harness_versions"] == {"main": "1.0.0", "current": "1.1.0"}
+    old["invalid"] = [{}]
+    assert regress.compare_harness_updates(new, old)["status"] == "unavailable"
+    old["harness_update_protocol_hash"] = "other"
+    assert regress.compare_harness_updates(new, old)["status"] == "unavailable"
