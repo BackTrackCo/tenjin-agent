@@ -18,13 +18,12 @@ on:
       - '.github/workflows/benchmark-live.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'evals/benchmark/**'
-      - '.github/workflows/benchmark-live.yml'
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
   workflow_dispatch:
 
 concurrency:
-  group: benchmark-live-${{ github.workflow }}-${{ github.ref }}
+  group: >-
+    benchmark-live-${{ github.workflow }}-${{ github.ref }}${{ github.event.action == 'labeled' && github.event.label.name != 'benchmark: canary' && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 # Default-deny; the job opts into only what it needs.
@@ -32,6 +31,11 @@ permissions: {}
 
 jobs:
   live:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+       contains(github.event.pull_request.labels.*.name, 'benchmark: canary') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'benchmark: canary'))
     name: benchmark live (plumbing smoke)
     runs-on: ubuntu-latest
     timeout-minutes: 15
