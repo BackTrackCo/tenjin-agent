@@ -1,14 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { factsWithPrefix } from '../facts';
 import { getMark } from '../gates';
-import { FINDING_TAG } from '../prose';
 import { stopArm } from './stop';
 import { cleanup, fireContext, freshDb, hookInput, kernelConfig, LEAD } from './test-support';
 
 /**
- * The stop arm is registration plus two calls into `capture`; the ask and
- * harvest rules themselves are `capture.test.ts`. Under test here: the
- * switch, and that the answer turn of a lead nobody asked is not harvested.
+ * The stop arm is registration plus one call into `capture`; the ask rules
+ * themselves are `capture.test.ts`. Under test here: the switch, and that a
+ * lead with no evidence is left alone whatever its last message said.
  */
 
 afterEach(cleanup);
@@ -41,15 +39,15 @@ describe('the stop arm', () => {
     expect(getMark(db, LEAD, 'capture:asked')).toBeNull();
   });
 
-  it('does not harvest a fence from a lead it never asked', async () => {
+  it('says nothing to a lead with no evidence, whatever its last message held', async () => {
     const db = freshDb();
     const ctx = fireContext({
       db,
       arm: stopArm,
-      input: stop({ stopFuse: true, lastMessage: '```' + FINDING_TAG + '\nunasked\n```' }),
+      input: stop({ stopFuse: true, lastMessage: '# a finding nobody asked for' }),
       config: kernelConfig(),
     });
     expect(await stopArm.after?.(ctx, { reason: 'no-question' }, null)).toBeNull();
-    expect(factsWithPrefix(db, 'finding:')).toEqual([]);
+    expect(getMark(db, LEAD, 'capture:asked')).toBeNull();
   });
 });

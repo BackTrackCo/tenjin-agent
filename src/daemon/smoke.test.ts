@@ -607,10 +607,10 @@ describe('the daemon, cold-started from the real bundle', () => {
    * THE ONE END-TO-END PASS OF PR D: the captured events of one dispatched
    * turn (2.1.261) against the stub shelf. The parent's dispatch parks a
    * handoff; the child claims it at its start and gets the finding whole; the
-   * child's stop is asked (block) and its answer turn harvested; the lead's
-   * stop is asked and names the queued finding.
+   * child's stop is asked once and its answer turn says nothing; the lead's
+   * stop is asked on its own evidence.
    */
-  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked, the lead told', async () => {
+  it('a dispatched turn with a stubbed shelf: handoff parked and claimed, the child asked once, the lead asked', async () => {
     const original = await readFile(configPath(dataDir), 'utf8');
     await writeFile(
       configPath(dataDir),
@@ -702,18 +702,17 @@ describe('the daemon, cold-started from the real bundle', () => {
       // Never a blocking decision: `additionalContext` is the one channel.
       expect(stopRes.body?.decision).toBeUndefined();
 
-      // 5. The child answers with the fence: harvested, silently.
+      // 5. The child's answer turn: its row is written, and it reads nothing new.
       const answered = await post({
         hook_event_name: 'SubagentStop',
         agent_id: agent,
         agent_type: 'Explore',
         stop_hook_active: true,
-        last_assistant_message:
-          'Recorded:\n```tenjin-finding\n# The image tag flips the collation\nPin pg16 and re-seed.\n```\n',
+        last_assistant_message: 'Published it.',
       });
       expect(answered.status).toBe(204);
 
-      // 6. The lead stops: asked, and told what its child queued.
+      // 6. The lead stops: asked once, on its own evidence.
       const leadRes = await post({
         hook_event_name: 'Stop',
         stop_hook_active: false,
@@ -723,8 +722,6 @@ describe('the daemon, cold-started from the real bundle', () => {
       const leadAsk = contextOf(leadRes) ?? '';
       expect(leadAsk).toContain('Tenjin: this turn did work worth a second look.');
       expect(leadRes.body?.decision).toBeUndefined();
-      expect(leadAsk).toContain(`Explore subagent ${agent}`);
-      expect(leadAsk).toContain('"The image tag flips the collation"');
     } finally {
       await writeFile(configPath(dataDir), original);
     }
@@ -882,10 +879,8 @@ describe('the daemon, cold-started from the real bundle', () => {
         expect(out.reason).toContain('Tenjin');
         expect(out.reason).toContain(`--agent ${sibling.agent_id}`);
         expect(out.hookSpecificOutput).toBeUndefined();
-        // The answer turn: harvested, and nothing more to say.
-        const fused = await post(
-          stopFor(true, '```tenjin-finding\n# gamma\nthe file is gamma\n```'),
-        );
+        // The answer turn: the row is written, and nothing more is said.
+        const fused = await post(stopFor(true, 'published gamma'));
         expect(fused.status).toBe(204);
         const again = await post(stopFor(false, 'later'));
         expect(again.status).toBe(204);
