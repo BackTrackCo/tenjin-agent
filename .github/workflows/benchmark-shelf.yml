@@ -21,6 +21,10 @@ on:
       manifest:
         required: true
         type: string
+      harness_version:
+        description: latest resolves once per fresh run; exact release reproduces a prior run.
+        type: string
+        default: latest
       lane:
         required: true
         type: string
@@ -156,10 +160,38 @@ jobs:
           "$RUNNER_TEMP/bench-live-venv/bin/python" -m pip install --quiet --only-binary=:all: \
             -r evals/benchmark/requirements-live.txt
           echo "BENCH_PY=$RUNNER_TEMP/bench-live-venv/bin/python" >> "$GITHUB_ENV"
-      - name: Experiment that will run
+      - name: Download an explicitly selected checkpoint
+        if: steps.gate.outputs.live == 'true' && inputs.checkpoint_run > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECKPOINT_RUN: ${{ inputs.checkpoint_run }}
+          CHECKPOINT_ARTIFACT: ${{ inputs.checkpoint_artifact }}
+        run: |
+          [ -n "$CHECKPOINT_ARTIFACT" ] || { echo 'checkpoint artifact name is required'; exit 1; }
+          gh run download "$CHECKPOINT_RUN" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_ARTIFACT" --dir "$RUNNER_TEMP/checkpoint-download"
+
+      - name: Resolve the CLI release once, or retain the checkpoint release
         if: steps.gate.outputs.live == 'true'
         env:
-          BENCH_MANIFEST: ${{ inputs.manifest }}
+          SOURCE_MANIFEST: ${{ inputs.manifest }}
+          HARNESS_VERSION: ${{ inputs.harness_version }}
+          CHECKPOINT_RUN: ${{ inputs.checkpoint_run }}
+        run: |
+          resume=()
+          if [ "$CHECKPOINT_RUN" != "0" ]; then resume=(--from-lock "$RUNNER_TEMP/checkpoint-download/harness-lock.json"); fi
+          "$BENCH_PY" -m evals.benchmark.harness_release --manifest "$SOURCE_MANIFEST" \
+            --out "$RUNNER_TEMP/harness-lock.json" --version "$HARNESS_VERSION" "${resume[@]}"
+          echo "BENCH_MANIFEST=$RUNNER_TEMP/harness-lock.json" >> "$GITHUB_ENV"
+
+      - name: Validate and restore the matching checkpoint before image builds
+        if: steps.gate.outputs.live == 'true' && inputs.checkpoint_run > 0
+        run: |
+          "$BENCH_PY" -m evals.benchmark.checkpoint import \
+            --run "$RUNNER_TEMP/checkpoint-download" --out "$RUNNER_TEMP/bench-run" \
+            --manifest "$BENCH_MANIFEST" --revision "$(git rev-parse HEAD)"
+
+      - name: Experiment that will run
+        if: steps.gate.outputs.live == 'true'
         run: |
           "$BENCH_PY" -m evals.benchmark.cli describe --manifest "$BENCH_MANIFEST" | tee "$RUNNER_TEMP/experiment.txt"
           { echo '## Experiment planned'; echo '```text'; cat "$RUNNER_TEMP/experiment.txt"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
@@ -218,7 +250,7 @@ jobs:
         if: steps.gate.outputs.live == 'true'
         run: |
           "$BENCH_PY" -m evals.benchmark.cli attest \
-            --manifest "${{ inputs.manifest }}" \
+            --manifest "$BENCH_MANIFEST" \
             --tenjin-source "$RUNNER_TEMP/bench-data" \
             --instance "gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
             --image "${ImageOS:-ubuntu}-${ImageVersion:-unknown}" \
@@ -230,21 +262,7 @@ jobs:
       # never a silent fall back to a release.
       - name: Build the fixture images
         if: steps.gate.outputs.live == 'true'
-        run: '"$BENCH_PY" -m evals.benchmark.images build --manifest "${{ inputs.manifest }}"'
-
-      - name: Restore an explicitly selected matching checkpoint
-        if: steps.gate.outputs.live == 'true' && inputs.checkpoint_run > 0
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CHECKPOINT_RUN: ${{ inputs.checkpoint_run }}
-          CHECKPOINT_ARTIFACT: ${{ inputs.checkpoint_artifact }}
-          BENCH_MANIFEST: ${{ inputs.manifest }}
-        run: |
-          [ -n "$CHECKPOINT_ARTIFACT" ] || { echo 'checkpoint artifact name is required'; exit 1; }
-          gh run download "$CHECKPOINT_RUN" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_ARTIFACT" --dir "$RUNNER_TEMP/checkpoint-download"
-          "$BENCH_PY" -m evals.benchmark.checkpoint import \
-            --run "$RUNNER_TEMP/checkpoint-download" --out "$RUNNER_TEMP/bench-run" \
-            --manifest "$BENCH_MANIFEST" --revision "$(git rev-parse HEAD)"
+        run: '"$BENCH_PY" -m evals.benchmark.images build --manifest "$BENCH_MANIFEST"'
 
       # `live-run` resets the bench branch from its emptied parent before the
       # first trial and refuses the run if the reset fails, so the corpus this
@@ -262,9 +280,9 @@ jobs:
           # the reset has already happened.
           TENJIN_WALLET_PASSPHRASE: ${{ secrets.TENJIN_BENCH_WALLET_PASSPHRASE }}
         run: |
-          admission_seconds="$("$BENCH_PY" -m evals.benchmark.admission --manifest "${{ inputs.manifest }}" --job-minutes "${{ inputs.timeout_minutes }}" --started-at "$BENCH_JOB_STARTED")"
+          admission_seconds="$("$BENCH_PY" -m evals.benchmark.admission --manifest "$BENCH_MANIFEST" --job-minutes "${{ inputs.timeout_minutes }}" --started-at "$BENCH_JOB_STARTED")"
           "$BENCH_PY" -m evals.benchmark.cli live-run \
-            --manifest "${{ inputs.manifest }}" \
+            --manifest "$BENCH_MANIFEST" \
             --out "$RUNNER_TEMP/bench-run" \
             --attestation "$RUNNER_TEMP/attestation.json" \
             --tenjin-source "$RUNNER_TEMP/bench-data" \
@@ -305,8 +323,6 @@ jobs:
 
       - name: Export sanitized recovery evidence
         if: always() && steps.gate.outputs.live == 'true'
-        env:
-          BENCH_MANIFEST: ${{ inputs.manifest }}
         run: |
           [ -f "$RUNNER_TEMP/bench-run/corpus-baseline.json" ] || exit 0
           "$BENCH_PY" -m evals.benchmark.checkpoint export \

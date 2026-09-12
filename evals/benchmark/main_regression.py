@@ -17,7 +17,7 @@ def api(repository: str, route: str) -> bytes:
     return subprocess.run(["gh", "api", f"repos/{repository}/{route}"], check=True, capture_output=True, timeout=60).stdout
 
 
-def latest_main(current: dict, repository: str, run_id: str, artifact_name: str, fetch=api) -> tuple[dict, dict] | None:
+def latest_main(current: dict, repository: str, run_id: str, artifact_name: str, fetch=api, *, harness_update: bool = False) -> tuple[dict, dict] | None:
     """Newest matching report among the 100 most recent completed main runs.
 
     A failed run may still have a complete report. An invalid latest matching
@@ -46,8 +46,9 @@ def latest_main(current: dict, repository: str, run_id: str, artifact_name: str,
             if len(reports) != 1 or reports[0].file_size > 10_000_000:
                 raise ValueError("main artifact must contain exactly one bounded report.json")
             baseline = json.loads(zipped.read(reports[0]))
-        protocol = current.get("regression_protocol_hash")
-        if protocol and baseline.get("regression_protocol_hash") == protocol:
+        key = "harness_update_protocol_hash" if harness_update else "regression_protocol_hash"
+        protocol = current.get(key)
+        if protocol and baseline.get(key) == protocol:
             age = datetime.fromisoformat(cutoff.replace("Z", "+00:00")) - datetime.fromisoformat(candidate["updated_at"].replace("Z", "+00:00"))
             return baseline, {"run_id": candidate["id"], "workflow_id": workflow, "sha": candidate["head_sha"],
                               "url": candidate["html_url"], "artifact_id": artifact["id"], "report_hash": sha256_json(baseline),
@@ -55,8 +56,15 @@ def latest_main(current: dict, repository: str, run_id: str, artifact_name: str,
     return None
 
 
-def render(result: dict) -> str:
-    lines = [f"## Main regression: {result['status']}", ""]
+def render(result: dict, *, harness_update: bool = False) -> str:
+    title = "Harness update diagnostic" if harness_update else "Main product regression"
+    lines = [f"## {title}: {result['status']}", ""]
+    if result.get("harness_versions"):
+        versions = result["harness_versions"]
+        lines += [f"CLI release: `{versions['main']}` (last main) → `{versions['current']}` (this run).",
+                  result["attribution"],
+                  f"Product commits: {json.dumps(result['product_commits'], sort_keys=True)}",
+                  f"Server deployments: {json.dumps(result['server_deployments'], sort_keys=True)}", ""]
     if result.get("source"):
         source = result["source"]
         lines += [f"Baseline: [main run {source['run_id']}]({source['url']}) at `{source['sha']}`; {source['age_hours_at_run_start']:.1f} hours old at run start.", ""]
@@ -82,15 +90,26 @@ def main() -> int:
         return 0
     current = json.loads((args.run / "report.json").read_text())
     result = {"status": "unavailable", "reason": "No matching retained main report in the last 100 completed main runs; no baseline was launched."}
+    cache = {}
+    def fetch(repository, route):
+        if route not in cache:
+            cache[route] = api(repository, route)
+        return cache[route]
+    update = {"status": "unavailable", "reason": "No retained main report with a matching harness-update protocol."}
     try:
-        match = latest_main(current, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"], args.artifact)
+        match = latest_main(current, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"], args.artifact, fetch)
         if match:
             baseline, source = match
             result = {**regress.compare_reports(current, baseline), "source": source}
+        previous = latest_main(current, os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"], args.artifact, fetch, harness_update=True)
+        if previous:
+            baseline, source = previous
+            update = {**regress.compare_harness_updates(current, baseline), "source": source}
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, subprocess.SubprocessError) as error:
         print(f"Main artifact lookup failed ({type(error).__name__}).")
         result = {"status": "unavailable", "reason": "Main artifact lookup failed; inspect Actions access and artifact availability. No comparison was made."}
-    text = render(result)
+    text = render(result) + "\n" + render(update, harness_update=True)
+    result["harness_update"] = update
     print(text)
     (args.run / "regression.json").write_text(json.dumps(result, indent=2) + "\n")
     (args.run / "regression.md").write_text(text)

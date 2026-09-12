@@ -47,3 +47,28 @@ def test_no_artifact_never_launches_a_baseline_or_calls_it_clean():
     text = main_regression.render({'status': 'unavailable', 'reason': 'No matching main report'})
     assert 'unavailable' in text
     assert 'clean' not in text
+
+
+def test_update_lookup_uses_latest_protocol_match_even_when_version_is_unchanged():
+    def fetch(repo, route):
+        if route == 'actions/runs/99':
+            return b'{"workflow_id": 5, "created_at": "2026-09-05T00:00:00Z"}'
+        if route.startswith('actions/workflows/'):
+            return json.dumps({'workflow_runs': [dict(id=i, workflow_id=5, created_at=f'2026-09-0{i}T00:00:00Z', updated_at=f'2026-09-0{i}T01:00:00Z', head_branch='main', event='schedule', status='completed', head_repository={'full_name': repo}, head_sha=str(i), html_url='https://github.com/org/repo/actions/runs/' + str(i)) for i in (1, 2)]}).encode()
+        if '/artifacts?' in route:
+            return json.dumps({'artifacts': [{'id': int(route.split('/')[2]), 'name': 'lane', 'expired': False}]}).encode()
+        return zipped({'harness_update_protocol_hash': 'same', 'regression_protocol_hash': 'old-version', 'run_configuration': {'harness_version': '2.0.0'}})
+    current = {'harness_update_protocol_hash': 'same', 'regression_protocol_hash': 'new-version'}
+    assert main_regression.latest_main(current, 'org/repo', '99', 'lane', fetch) is None
+    previous, source = main_regression.latest_main(current, 'org/repo', '99', 'lane', fetch, harness_update=True)
+    assert source['run_id'] == 2
+    assert previous['run_configuration']['harness_version'] == '2.0.0'
+
+
+def test_update_readout_names_both_versions_and_mixed_attribution():
+    result = {'status': 'regressions found', 'harness_versions': {'main': '1.0.0', 'current': '2.0.0'},
+              'attribution': 'mixed product/server identities', 'product_commits': {'main': ['a'], 'current': ['b']},
+              'server_deployments': {'main': 'dpl_a', 'current': 'dpl_b'}}
+    text = main_regression.render(result, harness_update=True)
+    assert 'Harness update diagnostic' in text and '1.0.0' in text and '2.0.0' in text
+    assert 'mixed product/server identities' in text and 'dpl_a' in text
