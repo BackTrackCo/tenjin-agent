@@ -114,7 +114,7 @@ def assert_bench2_tasks(manifest: manifest_module.Manifest) -> None:
 def test_the_real_manifest_is_the_phase_one_local_pilot() -> None:
     manifest = manifest_module.load(experiments.REAL_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-1")
+    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-2")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_natural"]
     off, natural = manifest.arms
@@ -263,6 +263,7 @@ def test_the_slice_manifests_state_one_variation_each(path: Path) -> None:
     assert "Agent" in task["tools"]
     assert "Agent" in task["allowed_tools"]
     assert "subagent" in task["prompt"]
+    assert task["required_descendants"] == 1
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_seeded", "tenjin_seeded_no_public", "tenjin_natural"]
     for arm in manifest.arms[1:]:
         assert arm["lessons"] == ["test-harness-convention", "actor-fix"]

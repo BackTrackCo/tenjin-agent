@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-recursive-5",
+  "benchmark_version": "bench2-recursive-6",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,
@@ -54,8 +54,9 @@
       "family": "test-harness-convention",
       "transfer_distance": "same_family",
       "fixture": "actor",
-      "fixture_hash": "sha256:71649359979d59bf3801e65594740dc5741ec67faea726e973c1ddfb0553670b",
+      "fixture_hash": "sha256:70a9c3c9881f404fc7cecc14af548a3d1d276d18b8662d462a5b130e433bd147",
       "verifier": "node_test_actor",
+      "required_descendants": 1,
       "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
       "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],
       "allowed_tools": [

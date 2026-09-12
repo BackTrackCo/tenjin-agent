@@ -71,6 +71,11 @@ execution/accounting, not a reuse benefit.
 Full core remains 180 model sessions. Its first frozen ten-consumer chunk passed in 723.1
 seconds including producer and orchestration work. That early pace suggests roughly three
 hours, subject to harder tasks and subscription limits; it is not a validated full-run forecast.
+Core paused cleanly at 40/150 passing consumers, balanced across all five arms. The first
+recursive probe exposed contradictory fixture instructions and copied native fork metadata.
+Those probes are diagnostic evidence only: the corrected actor fixture has a new hash and
+experiment versions, so fresh measurements cannot pool with their old results. Recursive
+producers and consumers now require a positive-usage native descendant to count as a pass.
 The earlier eight-hour planning allowance is superseded by these preliminary measurements.
 GitHub-hosted jobs stop at six hours. The shared runner now subtracts elapsed setup and reserves
 active-trial/cleanup/upload time, then stops admission and saves an incomplete checkpoint.
