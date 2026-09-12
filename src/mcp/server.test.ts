@@ -585,17 +585,30 @@ describe('tenjin_edit', () => {
     excerpt: 'A short stored excerpt.',
     bodyMd: '# The Answer\n\nThe stored body.\n',
     tags: [],
+    // COMPLETE, and that is load-bearing: an edit whose result is not a draft
+    // takes the same card gate a publish does, so a fixture missing a rubric key
+    // would refuse every edit here for a reason none of them is about.
     resource: {
       temporalMode: 'maintained',
       questionsAnswered: ['What is it?'],
       tasksSupported: [],
       scope: 'L2 fees only',
-      exclusions: null,
+      exclusions: 'mainnet fees, which were not measured',
       appliesTo: { products: ['Base'] },
-      cacheEligible: false,
-      cacheEligibleMissing: ['exclusions'],
+      provenanceSummary: 'sampled 200 blocks and took the median',
+      cacheEligible: true,
+      cacheEligibleMissing: [],
       schemaVersion: 1,
     },
+  };
+
+  /** A DRAFT with a hole in its card, for the gate's own case: a promotion is
+   *  the change the gate is about, and a status that is already published is no
+   *  change at all. */
+  const THIN = {
+    ...STORED,
+    status: 'draft',
+    resource: { ...STORED.resource, exclusions: null },
   };
 
   /** A GET/PUT stub over the owner-scoped route that records the PUT bodies. */
@@ -638,6 +651,38 @@ describe('tenjin_edit', () => {
       expect(error.message).toMatch(/CLI stdin|Could not read/);
     }
     expect(server.puts()).toHaveLength(0);
+  });
+
+  /**
+   * THE GATE IS `runEdit`'S, so this surface takes it too — the same reason the
+   * publish gate lives in the shared publish function. A promotion is the other
+   * door to the public page, and an MCP client must not be the one that walks
+   * around it.
+   */
+  it('refuses a promotion whose card is incomplete, naming the keys, and writes nothing', async () => {
+    const puts: Record<string, unknown>[] = [];
+    const fetchImpl = (async (_u: string | URL, init?: RequestInit) => {
+      const method = init?.method ?? 'GET';
+      if (method === 'PUT') puts.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(JSON.stringify(THIN), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const client = await editClient(fetchImpl);
+    const res = await client.callTool({
+      name: 'tenjin_edit',
+      arguments: { postId: POST_ID, status: 'published', yes: true, mode: 'full-auto' },
+    });
+
+    expect(res.isError).toBe(true);
+    const error = (res.structuredContent as ErrorEnvelope).error;
+    expect(error.code).toBe('USAGE');
+    expect(error.message).toContain('`exclusions`: what it does not.');
+    expect((error.details as { card: { missingKeys: string[] } }).card.missingKeys).toEqual([
+      'exclusions',
+    ]);
+    expect(puts).toHaveLength(0);
   });
 
   it('review mode without yes returns NEEDS_CONFIRMATION carrying the change summary', async () => {

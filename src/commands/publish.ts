@@ -872,18 +872,25 @@ const CARD_KEY_MEANING: Record<string, string> = {
  *
  * DRAFTS DO NOT COME HERE. A draft is unfinished by definition; the caller
  * decides when it is finished by publishing it.
+ *
+ * EXPORTED FOR `edit`, WHICH IS THE OTHER DOOR TO THE SAME PAGE. A draft
+ * promoted with `edit --status published` goes public without passing through
+ * this file, so the gate has to be one function two commands call rather than a
+ * rule publish enforces and promotion walks around. Only the `fix` differs, and
+ * it is a parameter because the remedy is the caller's verb: publish edits a
+ * file, edit passes flags.
  */
-function requirePublishableCard(card: ResourceCardInput | undefined): void {
+export function requirePublishableCard(
+  card: ResourceCardInput | undefined,
+  fix = "Write those keys into the document's frontmatter and re-run `tenjin publish <file>`. A piece that is genuinely unfinished can be parked with --draft, which skips this check.",
+): void {
   const tokens = cardEligibilityTokens(card);
   if (tokens.length === 0) return;
   const keys = tokens.map((t) => CARD_KEY_MEANING[t] ?? t);
   throw new CliError(
     'USAGE',
     `This document has no complete answer card, so there is nothing for the next searcher to judge it by. Add to the frontmatter: ${keys.join(' ')}`,
-    {
-      fix: "Write those keys into the document's frontmatter and re-run `tenjin publish <file>`. A piece that is genuinely unfinished can be parked with --draft, which skips this check.",
-      details: { card: { missingKeys: tokens } },
-    },
+    { fix, details: { card: { missingKeys: tokens } } },
   );
 }
 

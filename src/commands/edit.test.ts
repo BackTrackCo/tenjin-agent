@@ -22,7 +22,14 @@ afterEach(async () => {
 
 const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-/** The stored post every test edits, card included (a snapshot, one question). */
+/**
+ * The stored post every test edits, card included (a snapshot, one question).
+ *
+ * ITS CARD IS COMPLETE, and that is load-bearing now: an edit whose RESULT is not
+ * a draft takes the same card gate a publish does, so a fixture missing a rubric
+ * key would refuse every edit in this file for a reason none of them is about.
+ * The gate's own cases build their own posts.
+ */
 const STORED = {
   id: POST_ID,
   creatorId: '0197cccc-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -44,9 +51,9 @@ const STORED = {
     questionsAnswered: ['What is it?'],
     tasksSupported: [],
     scope: 'L2 fees only',
-    exclusions: null,
+    exclusions: 'mainnet fees, which were not measured',
     appliesTo: { products: ['Base'] },
-    provenanceSummary: null,
+    provenanceSummary: 'sampled 200 blocks and took the median',
     methodologySummary: null,
     maintenanceCadence: null,
     reproductionMinutes: null,
@@ -56,6 +63,14 @@ const STORED = {
     schemaVersion: 1,
   },
 };
+
+/**
+ * The same post, parked as a draft. A draft is exempt from the card gate, so it
+ * is what the cases below about WIRE SHAPE use: clearing a required card key is
+ * a legitimate thing to do to an unfinished piece and a refusal on a live one,
+ * and neither of those cases is about the shape of the PUT.
+ */
+const DRAFT = { ...STORED, status: 'draft' };
 
 function makeCtx(): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
@@ -350,8 +365,9 @@ describe('runEdit — flag to body mapping', () => {
 describe('runEdit — --clear', () => {
   it('clears nullable scalars with an explicit null and containers with []/{}', async () => {
     // A card with every clearable field SET, so every clear is a real change.
+    // A draft, because clearing a required key on a live piece is refused.
     const full = {
-      ...STORED,
+      ...DRAFT,
       resource: {
         ...STORED.resource,
         exclusions: 'L1 data fees',
@@ -396,24 +412,20 @@ describe('runEdit — --clear', () => {
   });
 
   it('drops a clear of a field that is already empty, rather than re-clearing it', async () => {
-    // STORED already has exclusions/provenance/methodology/supersedesPostId null
-    // and tasksSupported empty. Sending those keys anyway would count as a card
+    // This draft already has methodologySummary/supersedesPostId null and
+    // tasksSupported empty. Sending those keys anyway would count as a card
     // write server-side and re-run the embedding for a card nobody changed.
-    const { stub } = await edit({
-      clear: [
-        'scope',
-        'exclusions',
-        'provenance',
-        'methodology',
-        'supersedesPostId',
-        'tasksSupported',
-      ],
-    });
+    const { stub } = await edit(
+      {
+        clear: ['scope', 'methodology', 'supersedesPostId', 'tasksSupported'],
+      },
+      { get: DRAFT },
+    );
     expect(stub.putBody()).toEqual({ resource: { scope: null } });
   });
 
   it('combines a clear with a set on a different field', async () => {
-    const { stub } = await edit({ clear: ['asOf'], scope: 'still scoped' });
+    const { stub } = await edit({ clear: ['asOf'], scope: 'still scoped' }, { get: DRAFT });
     expect(stub.putBody()).toEqual({ resource: { scope: 'still scoped', asOf: null } });
   });
 
@@ -804,7 +816,7 @@ describe('runEdit — notes and the summary', () => {
   });
 
   it('renders a clear as (cleared)', async () => {
-    const stub = stubServer();
+    const stub = stubServer({ get: DRAFT });
     const { ctx, stderr } = makeCtxCapturingStderr();
     await runEdit(
       args({ yes: true, clear: ['scope', 'questionsAnswered'] }),
@@ -1219,8 +1231,137 @@ describe('runEdit — appliesTo is compared as a value, not a key count', () => 
   });
 });
 
+/**
+ * THE OTHER DOOR TO THE PUBLIC PAGE. A draft parks with no card on purpose, so
+ * the promotion is where that exemption has to end: without this gate the rule
+ * every publish takes would be one a flag walks around. It reads the card the
+ * piece will HAVE, so an edit that supplies the missing keys in the same call
+ * goes through, and one that clears a key on a live piece does not.
+ */
+describe('runEdit — the card gate on anything that is not a draft', () => {
+  const THIN = {
+    ...DRAFT,
+    resource: { ...DRAFT.resource, exclusions: null, provenanceSummary: null },
+  };
+
+  it('refuses a promotion whose card is incomplete, naming the keys, before any write', async () => {
+    const stub = stubServer({ get: THIN });
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'USAGE',
+      exitCode: 2,
+      message:
+        'This document has no complete answer card, so there is nothing for the next searcher ' +
+        'to judge it by. Add to the frontmatter: `exclusions`: what it does not. ' +
+        '`provenanceSummary`: how you know — what you ran, read, measured.',
+      details: { card: { missingKeys: ['exclusions', 'provenanceOrMethodology'] } },
+    });
+    // The read happened (the gate needs the stored card); the WRITE did not.
+    expect(stub.puts()).toHaveLength(0);
+    // One signature for the owner-scoped read, none for a write that never ran.
+    expect(signCount()).toBeLessThanOrEqual(1);
+  });
+
+  it('names the edit as the remedy, not a file', async () => {
+    const stub = stubServer({ get: THIN });
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({
+      fix: expect.stringContaining(`tenjin edit ${POST_ID} --scope`),
+    });
+  });
+
+  // The card the piece WILL have, not the one it has: supplying the missing keys
+  // in the same call is exactly how an author fixes this.
+  it('lets a promotion through when the same call supplies the missing keys', async () => {
+    const { stub } = await edit(
+      {
+        status: 'published',
+        exclusions: 'mainnet, which was not measured',
+        provenance: 'sampled 200 blocks',
+      },
+      { get: THIN },
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toMatchObject({ status: 'published' });
+  });
+
+  it('refuses a promotion that clears a required key in the same call', async () => {
+    const stub = stubServer({ get: DRAFT });
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published', clear: ['exclusions'] }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'USAGE',
+      details: { card: { missingKeys: ['exclusions'] } },
+    });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  // The RESULTING status, not the flag: a piece that is already public is being
+  // edited into public, so clearing a required key on it is the same refusal.
+  it('gates an ordinary edit of a live piece, with no status flag anywhere', async () => {
+    const stub = stubServer();
+    await expect(
+      runEdit(
+        args({ yes: true, clear: ['scope'] }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', details: { card: { missingKeys: ['scope'] } } });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  // `asOf` is the conditional key, and the mode is merged too: a promotion that
+  // turns the piece into a snapshot needs one even though the stored card is not.
+  it('asks for asOf when the edit itself makes the piece a snapshot', async () => {
+    const stub = stubServer({
+      get: { ...DRAFT, resource: { ...DRAFT.resource, temporalMode: 'evergreen', asOf: null } },
+    });
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published', temporalMode: 'snapshot' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', details: { card: { missingKeys: ['asOf'] } } });
+  });
+
+  // A draft is unfinished by definition, and staying one is not publishing.
+  it('lets a draft stay a draft with no card at all', async () => {
+    const { stub } = await edit(
+      { title: 'A Better Answer' },
+      { get: { ...DRAFT, resource: undefined } },
+    );
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('lets a demotion to draft through whatever the card is missing', async () => {
+    const { stub } = await edit(
+      { status: 'draft' },
+      { get: { ...STORED, resource: { ...STORED.resource, scope: null, exclusions: null } } },
+    );
+    expect(stub.putBody()).toMatchObject({ status: 'draft' });
+  });
+});
+
 describe('runEdit — a post with no answer card', () => {
-  const CARDLESS = { ...STORED, resource: undefined };
+  // A DRAFT, necessarily: a live piece with no card is what the gate refuses,
+  // and these cases are about the wire shape of a card-less PUT.
+  const CARDLESS = { ...DRAFT, resource: undefined };
 
   it('clearing a card field writes nothing (there is no card to clear)', async () => {
     const stub = stubServer({ get: CARDLESS });
@@ -1460,7 +1601,7 @@ describe('runEdit — the receipt echoes the mode that was actually used', () =>
 describe('runEdit — the notes never contradict the summary', () => {
   it('clearing asOf drops the "asOf is unchanged" note', async () => {
     const file = await writeDoc('# New\n\nA fresh body.\n');
-    const stub = stubServer();
+    const stub = stubServer({ get: DRAFT });
     const { ctx, stderr } = makeCtxCapturingStderr();
     await runEdit(
       args({ yes: true, body: file, clear: ['asOf'] }),
