@@ -654,6 +654,26 @@ describe('the lead ask', () => {
     ]);
   });
 
+  it('still asks for a failure with no fingerprint, and says nothing about it', async () => {
+    // The whole turn is one unhashable failure: no edit, no search, no read, so
+    // the failure is the only thing that can earn the ask. It must still earn
+    // it. A piece published about this one carries no `--key` and is found by
+    // the same words the failure arm searches with, so arming the ask off the
+    // RENDERED LINES would close the write end of the loop the text stage opens.
+    const db = freshDb();
+    started(db);
+    seedFailure(db, CHILD, {
+      questionKey: 'line:' + '0'.repeat(32),
+      question: 'error: linting failed for the workspace',
+      at: NOW - 10,
+    });
+    const reason = (await fire(db, childStop()))?.context ?? '';
+    expect(reason).toContain('Tenjin: this turn did work worth a second look.');
+    // Asked, but with nothing added: the line would only repeat the ask above it.
+    expect(reason).not.toContain('- Encountered this turn');
+    expect(getMark(db, CHILD, 'capture:asked')).toBe('failure');
+  });
+
   it('is re-armed by a failure hit after the ask, and not by one hit before it', async () => {
     const db = freshDb();
     seedFire(db, LEAD, 'prompt', 'no-hit');

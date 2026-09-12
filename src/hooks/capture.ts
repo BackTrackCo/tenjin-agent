@@ -177,9 +177,25 @@ function missLines(db: LoopDb, actor: Actor): string[] {
   return out;
 }
 
+/** One failure this actor hit, as the ask reads it back off the `fires`
+ *  row: what to say about it, and what it can be filed under. */
+interface FailureHit {
+  /** The masked error line, empty for a failure known only by a test identity. */
+  line: string;
+  /** The `<kind>:<hash>` fingerprints it is filed under; empty below the floor. */
+  keys: string[];
+}
+
 /**
  * The failures this actor hit and does not already have an answer to, oldest
- * first, one line each.
+ * first.
+ *
+ * THE FACT, AND ONLY THE FACT. This is what the ask is ARMED by — an agent that
+ * walked into a wall did real work (principle 5) whether or not the wall could
+ * be fingerprinted. What is SAID about them is {@link failureLines}, which is
+ * allowed to drop some, and the two are separate functions because wiring the
+ * ask's trigger to the rendered text meant an editorial choice about prose
+ * silently decided whether the ask happened at all.
  *
  * SELECTED BY WHAT HAPPENED, NOT BY WHAT THE LOOKUP RETURNED ({@link
  * FAILURE_ANY_SQL}). Every failure this actor hit is named once, and the only
@@ -220,7 +236,8 @@ function missLines(db: LoopDb, actor: Actor): string[] {
  * re-writes the row behind every run of the same failing command, and matching
  * on the key's FIRST row is what keeps that from re-arming the ask every turn.
  */
-function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] {
+
+function failuresHit(db: LoopDb, actor: Actor, since: number | null): FailureHit[] {
   const rows = db
     .prepare(
       `SELECT question_key, question, at, reason FROM fires
@@ -235,29 +252,44 @@ function failureLines(db: LoopDb, actor: Actor, since: number | null): string[] 
     reason?: unknown;
   }>;
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: FailureHit[] = [];
   for (const row of rows) {
     const key = typeof row.question_key === 'string' ? row.question_key : '';
     if (key === '' || seen.has(key)) continue;
     if (REPEAT_REASONS.has(typeof row.reason === 'string' ? row.reason : '')) continue;
     seen.add(key);
-    // NO FINGERPRINT, NO LINE. A key that is nothing but the line hash belongs
-    // to a failure below `sigV1`'s specificity floor, and there is nothing to
-    // publish it under. The line it would render says only "this failed, and
-    // publish if it was worth it", which `CAPTURE_ASK` already says two lines
-    // above — so on a machine where most failures are too generic to key, the
-    // ask grew one such line per failure and told the agent nothing each time.
-    // It is still looked up: the arm asks the shelf in words for exactly these
-    // (`arms/failure.ts`, the text stage). Only the publish nudge is dropped.
-    const fingerprints = failureKeyFingerprints(key);
-    if (fingerprints.length === 0) continue;
     if (since !== null && (typeof row.at === 'number' ? row.at : 0) <= since) continue;
     // Already masked and cut at the shelf's bound on the way into the row; the
     // second cut here is for the line's own width and nothing else.
     const line = clean(typeof row.question === 'string' ? row.question : '', 200);
-    out.push(FAILURE_LINE(line, fingerprints));
+    out.push({ line, keys: failureKeyFingerprints(key) });
   }
   return out;
+}
+
+/**
+ * Those of them worth a line of their own: the ones with a fingerprint to name.
+ *
+ * A FILTER ON THE PROSE, NEVER ON THE ASK. A key that is nothing but the line
+ * hash belongs to a failure below `sigV1`'s specificity floor, and the line it
+ * would render says only "this failed, and publish if it was worth it" — which
+ * `CAPTURE_ASK` says two lines above, and which the agent can read off its own
+ * context anyway. The fingerprint is the one thing it cannot derive itself, so
+ * the fingerprint is what earns the line. On a machine where most failures are
+ * too generic to key, the ask grew one such line per failure and said nothing
+ * new each time.
+ *
+ * WHICH IS WHY THIS IS NOT WHAT ARMS THE ASK. That decision reads
+ * {@link failuresHit} instead, and the two must not be the same list again: a
+ * failure with no fingerprint is still worth publishing about, because the
+ * failure arm asks the shelf about exactly these IN WORDS (`arms/failure.ts`,
+ * the text stage) and a piece published with no `--key` is found by that same
+ * text. Arming the ask off the rendered lines closed the write end of a loop
+ * whose read end this branch had just built: we would ask the shelf a question
+ * that nothing was ever nudged to answer.
+ */
+function failureLines(hit: readonly FailureHit[]): string[] {
+  return hit.filter((f) => f.keys.length > 0).map((f) => FAILURE_LINE(f.line, f.keys));
 }
 
 /**
@@ -394,7 +426,8 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
   // Both audiences: a failure belongs to the actor that hit it, where an open
   // search is the lead's loop to close and a child's publish is the lead's to
   // hear about.
-  const failures = failureLines(db, actor, askedAt);
+  const hit = failuresHit(db, actor, askedAt);
+  const failures = failureLines(hit);
   // A failure hit AFTER the ask re-arms it, the same shape as the queued
   // finding beside it: an actor asked at its first stop and then sent into a
   // wall it had to climb out of has something new to say, and the first ask
@@ -406,7 +439,11 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
     return null;
   if (audience === 'child' && agentTypeOf(ctx) === WORKFLOW_AGENT_TYPE) return null;
   const misses = missLines(db, actor);
-  const kind = evidence(ctx, misses, failures.length > 0);
+  // THE FACT, NOT THE PROSE. A failure the agent hit is work it did, whether or
+  // not it could be fingerprinted; `failureLines` drops the keyless ones from
+  // the TEXT, and reading that here would have switched the whole ask off for a
+  // turn whose only work was a failure too generic to key.
+  const kind = evidence(ctx, misses, hit.length > 0);
   if (kind === null) return null;
   setMark(db, actor, ASKED, kind, clock());
 
