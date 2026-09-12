@@ -1236,9 +1236,14 @@ describe('runEdit — appliesTo is compared as a value, not a key count', () => 
  * the promotion is where that exemption has to end: without this gate the rule
  * every publish takes would be one a flag walks around. It reads the card the
  * piece will HAVE, so an edit that supplies the missing keys in the same call
- * goes through, and one that clears a key on a live piece does not.
+ * goes through and one that clears a key in the same call does not.
+ *
+ * THE TRANSITION AND NOTHING ELSE. An edit that leaves a published piece
+ * published is not gated, whatever its card is missing: the shelf already holds
+ * pieces with incomplete cards, and gating those would put a card rewrite in
+ * front of a typo fix.
  */
-describe('runEdit — the card gate on anything that is not a draft', () => {
+describe('runEdit — the card gate on a promotion', () => {
   const THIN = {
     ...DRAFT,
     resource: { ...DRAFT.resource, exclusions: null, provenanceSummary: null },
@@ -1277,7 +1282,7 @@ describe('runEdit — the card gate on anything that is not a draft', () => {
         hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
       ),
     ).rejects.toMatchObject({
-      fix: expect.stringContaining(`tenjin edit ${POST_ID} --scope`),
+      fix: expect.stringContaining(`tenjin edit ${POST_ID} --status published --scope`),
     });
   });
 
@@ -1311,18 +1316,23 @@ describe('runEdit — the card gate on anything that is not a draft', () => {
     expect(stub.puts()).toHaveLength(0);
   });
 
-  // The RESULTING status, not the flag: a piece that is already public is being
-  // edited into public, so clearing a required key on it is the same refusal.
-  it('gates an ordinary edit of a live piece, with no status flag anywhere', async () => {
-    const stub = stubServer();
-    await expect(
-      runEdit(
-        args({ yes: true, clear: ['scope'] }),
-        makeCtx(),
-        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
-      ),
-    ).rejects.toMatchObject({ code: 'USAGE', details: { card: { missingKeys: ['scope'] } } });
-    expect(stub.puts()).toHaveLength(0);
+  /**
+   * THE CASE THE NARROW RULE EXISTS FOR. The shelf holds pieces published before
+   * the card was required; putting a card rewrite in front of a price or typo
+   * fix on one of those is the cost the reviewer refused to pay.
+   */
+  it('does not gate an edit that leaves a published piece published', async () => {
+    const { stub } = await edit(
+      { title: 'A Better Answer', price: '0.25' },
+      { get: { ...STORED, resource: undefined } },
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toMatchObject({ title: 'A Better Answer' });
+  });
+
+  it('does not gate a live piece even when the edit clears a required key', async () => {
+    const { stub } = await edit({ clear: ['scope'] }, { get: STORED });
+    expect(stub.putBody()).toEqual({ resource: { scope: null } });
   });
 
   // `asOf` is the conditional key, and the mode is merged too: a promotion that

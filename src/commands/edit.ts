@@ -216,25 +216,33 @@ export async function runEdit(
   if (changes.length === 0) return noChangeReceipt(stored);
 
   /**
-   * THE SAME CARD GATE `publish` RUNS, on the card the piece will HAVE. Promotion
-   * is the other door to the public page: without this, a draft parked with no
-   * card — the one publish deliberately lets through — went up by flag with
-   * nothing for the next searcher to judge it by, and the gate above every
-   * publish would have been a rule one command enforced and its twin walked
-   * around. It reads the RESULT, so clearing a required key on a live piece is
-   * refused for the same reason writing one without it is.
+   * THE SAME CARD GATE `publish` RUNS, on the PROMOTION and on nothing else.
    *
-   * The resulting status, not the flag: an edit that names no status leaves the
-   * piece where it is, and a piece that is already public is being edited into
-   * public. Only a draft that stays a draft is exempt.
+   * A draft parks with no card on purpose — the one thing publish's gate lets
+   * through — so `--status published` is the other door to the public page, and
+   * without this the rule above every publish would be one command's to enforce
+   * and its twin's to walk around. Promotion is where the draft's exemption ends,
+   * because it is the moment the piece becomes something a searcher has to judge.
+   *
+   * ONLY THE `draft` → NOT-`draft` TRANSITION (reviewer, 2026-09-12). Gating on
+   * the RESULTING status instead refused every edit to an already-published piece
+   * whose card is incomplete, and the shelf is full of those: a typo or a price
+   * fix on an old piece would have been blocked behind an unrelated rewrite of
+   * its card. An edit that leaves a published piece published is not gated, in
+   * either direction — it can clear a card key, and the piece stays as findable
+   * or as unfindable as it already was.
+   *
+   * It reads the card the piece WILL have, not the stored one, so an author who
+   * supplies the missing keys in the same call promotes in one command, and a
+   * promotion that clears a required key in the same call is refused.
    *
    * Placed here, above the promotion claims, the scan, the confirm and the
    * write: everything below spends something.
    */
-  if ((input.status ?? stored.status) !== 'draft') {
+  if (stored.status === 'draft' && (input.status ?? stored.status) !== 'draft') {
     requirePublishableCard(
       resultingCard(stored.resource, input.resource),
-      `Set them on this piece (\`tenjin edit ${args.postId} --scope <text> --exclusions <text> --provenance <text> --question <text>\`), or keep it a draft with \`--status draft\`, which skips this check.`,
+      `Set them in the same call that promotes it (\`tenjin edit ${args.postId} --status published --scope <text> --exclusions <text> --provenance <text> --question <text>\`), or leave it a draft, which stays exempt.`,
     );
   }
 
