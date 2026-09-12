@@ -38,6 +38,29 @@ pool. One-repeat health checks cannot establish a reliable speedup or replace th
 A configured experiment is not a completed result: read verified versus planned attempts,
 invalid/capped outcomes, and time/tokens to verified completion before interpreting comparisons.
 
+## Harness releases
+
+Fresh CI experiments and local runs using `harness_release` track the official `latest` CLI
+release. Resolution happens once before image builds, attestation or corpus reset. All arms
+and producer/consumer phases use the same saved `harness-lock.json`; checkpoint resumes keep
+its version and integrity without querying the registry. Reference manifests retain exact
+pins for offline tests and reproduction, but those are not the live resolver's default.
+
+```sh
+python3 -m evals.benchmark.harness_release --manifest evals/benchmark/fixtures/live/codex-core-selection.json --out harness-lock.json
+python3 -m evals.benchmark.images build --manifest harness-lock.json
+```
+
+Use the lock for subsequent `describe`, `attest`, `live-run`, and checkpoint commands. Add
+`--version X.Y.Z` to the resolver to reproduce an exact release. This updates the harness,
+not the selected Opus 5/Sol models, subscription-only authentication or speed settings.
+
+The readout records the resolved package, version, integrity and timestamp. PR product
+comparisons require the exact same release; a separate harness-update diagnostic compares
+with the latest otherwise-compatible main run and shows both versions, product commits and
+server deployments. A mixed product/server change cannot be attributed to the harness.
+No extra old-version baseline is automatically run. Missing or invalid evidence stays explicit.
+
 ## Targeted selections of core
 
 The copied full-corpus and high-discovery manifests are removed. Two small selection files

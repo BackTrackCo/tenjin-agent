@@ -32,6 +32,7 @@ jobs:
     secrets: inherit
     with:
       manifest: evals/benchmark/fixtures/live/canary-manifest.json
+      harness_version: latest
       lane: benchmark-canary
       check_name: benchmark canary
       timeout_minutes: 60

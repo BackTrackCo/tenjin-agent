@@ -51,6 +51,7 @@ jobs:
     secrets: inherit
     with:
       manifest: evals/benchmark/fixtures/live/local-arms-manifest.json
+      harness_version: latest
       lane: benchmark-headline
       checkpoint_run: ${{ inputs.core_checkpoint_run || 0 }}
       checkpoint_artifact: ${{ inputs.core_checkpoint_artifact || '' }}
@@ -73,6 +74,7 @@ jobs:
     secrets: inherit
     with:
       manifest: evals/benchmark/fixtures/live/recursive-manifest.json
+      harness_version: latest
       lane: benchmark-recursive
       checkpoint_run: ${{ inputs.recursive_checkpoint_run || 0 }}
       checkpoint_artifact: ${{ inputs.recursive_checkpoint_artifact || '' }}
