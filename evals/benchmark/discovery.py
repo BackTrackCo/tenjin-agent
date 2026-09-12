@@ -76,8 +76,12 @@ def _reads_setup(block: dict[str, Any]) -> bool:
     return False
 
 
-def derive(sessions: Path, task_id: str, source: str | None = None) -> dict[str, Any]:
+def derive(sessions: Path, task_id: str, source: str | None = None, *, harness: str = "claude") -> dict[str, Any] | None:
     """The two discovery facts for one attempt, from every transcript of its session. `source` is the file the fix touches."""
+    # These tool blocks are Claude-native. Unparsed evidence is unknown, not
+    # proof that no tests or source edits occurred.
+    if harness != "claude":
+        return None
     source = f"src/{task_id}.mjs" if source is None else source
     results: dict[str, str] = {}
     errors: dict[str, bool] = {}
