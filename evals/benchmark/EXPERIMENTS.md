@@ -19,17 +19,18 @@ admits up to three workers, with only one shelf-provisioning trial at a time. Co
 its managed auth file; preflight/canary/recursive are also serial. Producer sessions are additional model work. The smoke configurations live in Bench-1: plumbing is one control launch, hooks smoke is
 4 consumers, and failure-key smoke is 6 consumers. They check different delivery paths.
 
-| Experiment              | Tasks × arms × repeats | Consumers | Producers | Purpose / trigger                                                                                                                                            |
-| ----------------------- | ---------------------- | --------: | --------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Natural-reuse preflight | 3 × 2 × 1              |         6 |         3 | Manual capture/reuse check: actor, alias and core cover convention, path-alias and workspace setup.                                                          |
-| Full core               | 10 × 5 × 3             |       150 |        30 | Main comparison: off, flat notes, seeded, seeded without public fallback, natural. Weekly/release/manual; ready PRs require `ci` plus `benchmark: headline`. |
-| Seeded canary           | 2 × 2 × 1              |         4 |         0 | Alias/workspace health check. Ready PRs use `ci`; adding it and subsequent pushes run the canary. Main pushes/nightly/manual supply baselines.               |
-| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Delegated diagnosis and capture/delivery check, also run after full core with a separate report.                                                             |
+| Experiment              | Tasks × arms × repeats | Consumers | Producers | Purpose / trigger                                                                                                                                             |
+| ----------------------- | ---------------------- | --------: | --------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Natural-reuse preflight | 3 × 2 × 1              |         6 |         3 | Manual capture/reuse check: actor, alias and core cover convention, path-alias and workspace setup.                                                           |
+| Full core               | 10 × 5 × 3             |       150 |        30 | Main comparison: off, flat notes, seeded, seeded without public fallback, natural. Weekly/release/manual; ready PRs require only `benchmark: headline`.       |
+| Seeded canary           | 2 × 2 × 1              |         4 |         0 | Alias/workspace health check. Ready PRs use `benchmark: canary`; adding it and subsequent pushes run the canary. Main pushes/nightly/manual supply baselines. |
+| Recursive diagnostic    | 1 × 4 × 3              |        12 |         3 | Delegated diagnosis and capture/delivery check, also run after full core with a separate report.                                                              |
 
-The canary has no path filter: every ready PR into main with `ci` gets the same four attempts,
-including changes outside the benchmark directory. #349 introduces the matching normal-CI
-label gate and is not yet merged; until it lands, normal tests retain their existing trigger.
-The full experiment requires both PR labels; unrelated label events start neither lane.
+The canary has no path filter: every ready PR into main with `benchmark: canary` gets the same
+four attempts, including changes outside the benchmark directory. The same label opts into
+the live plumbing smoke. Ordinary CI, including offline benchmark checks, stays automatic.
+Full Bench-2 requires only `benchmark: headline`; neither `ci` nor `benchmark: canary` is a
+prerequisite. Unrelated label events start neither lane. Main baseline triggers stay automatic.
 Forks without credentials report a skip rather than a measured pass.
 
 Preflight and canary use 600-second consumer caps; core uses 1,500 seconds. Their results do not

@@ -1,7 +1,7 @@
 name: benchmark canary
 
 # Seeded product-health experiment: two tasks, two arms, one repeat.
-# Ready PRs use the normal ci label, matching the gate proposed in #349.
+# Ready PRs opt in with benchmark: canary; ordinary CI stays automatic.
 # A report may be incomplete or invalid even when its workflow succeeds.
 on:
   push:
@@ -22,8 +22,8 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
-       contains(github.event.pull_request.labels.*.name, 'ci') &&
-       (github.event.action != 'labeled' || github.event.label.name == 'ci'))
+       contains(github.event.pull_request.labels.*.name, 'benchmark: canary') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'benchmark: canary'))
     uses: ./.github/workflows/benchmark-shelf.yml
     permissions:
       contents: read

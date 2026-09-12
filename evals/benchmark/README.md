@@ -44,6 +44,12 @@ removes only projects recorded by that run. Provisioning, corpus reset, producer
 images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
 and concrete preset/configuration data arrive in the next two layers.
 
+Ordinary CI, including offline benchmark checks, runs automatically. On ready PRs into main,
+`benchmark: canary` opts into the live plumbing smoke on label addition and subsequent pushes,
+without a PR path filter. Main retains its benchmark-path smoke trigger; manual runs remain available.
+Bench-2 adds a seeded canary under the same label and full experiments under the independent
+`benchmark: headline` label. Neither live gate requires `ci`.
+
 ## Read the result at a glance
 
 Every text summary and CI check starts with the experiment identity, model/harness, task list,
