@@ -618,6 +618,38 @@ describe('the lead ask', () => {
     expect(again).not.toContain(ENOENT_LINE);
   });
 
+  /**
+   * THE ANSWER TURN IS NEVER RE-ASKED, whatever it hit. `stopFuse` is the
+   * harness saying it is already handling a stop hook, so this is the turn that
+   * answers the first ask — and answering it is exactly when an agent runs the
+   * commands that fail. Asking again on top of its own answer would be the loop
+   * talking over itself. Nothing is lost: the next ordinary stop still carries
+   * the line.
+   */
+  it('is not re-armed on its own answer turn, and carries the failure at the next stop', async () => {
+    const db = freshDb();
+    seedFire(db, LEAD, 'prompt', 'no-hit');
+    expect((await fire(db, leadStop()))?.context).toBeDefined();
+    expect(getMark(db, LEAD, 'capture:asked')).toBe('lookup');
+
+    // A fingerprinted failure hit DURING the answer turn: the re-arm would fire
+    // on it, and the `stopFuse` guard is what stops it.
+    seedFailure(db, LEAD, { at: NOW + 10 });
+    expect(
+      await fire(
+        db,
+        leadStop({ stopFuse: true, lastMessage: 'published it' }),
+        TEAM,
+        () => NOW + 20,
+      ),
+    ).toBeNull();
+
+    // The next ordinary stop is the one that says it, so the re-arm still works.
+    const again = (await fire(db, leadStop(), TEAM, () => NOW + 30))?.context ?? '';
+    expect(again).toContain(ENOENT_LINE);
+    expect(again).toContain('`--key fingerprint=sig_v1:aaaabbbbccccdddd`');
+  });
+
   it('names a failure that keeps recurring once, and is not re-armed by its repeat', async () => {
     const db = freshDb();
     // `no-answer` is a leg that never landed, so the fire releases its

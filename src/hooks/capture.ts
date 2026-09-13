@@ -419,10 +419,19 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
  * never reached the ask — and it has to be said out loud now the harvest is
  * gone. A child's later turns are its answer turn and whatever follows it; it
  * has no open loop of its own for a second ask to be about, and the failure
- * re-arm below is the lead's.
+ * re-arm is the lead's.
  *
- * THE LEAD'S GUARD LIVES IN `ask`, because the one thing that re-arms it is a
- * failure it hit after being asked, and only `ask` has read the ledger.
+ * AND THE LEAD'S ANSWER TURN IS NEVER RE-ASKED. `stopFuse` is the harness saying
+ * it is already handling a stop hook, so this is the turn that ANSWERS the ask —
+ * and answering it is exactly when an agent runs the commands that fail. Without
+ * this guard #327's failure re-arm would see a fresh fingerprinted failure from
+ * that very turn and ask again on top of its own answer. The re-arm is not lost,
+ * only deferred: the next ordinary stop still carries the line, which is the
+ * second half of the case in `capture.test.ts`.
+ *
+ * WHAT IS LEFT OF THE LEAD'S GUARD LIVES IN `ask`, because the one thing that
+ * re-arms it is a failure it hit after being asked, and only `ask` has read the
+ * ledger.
  *
  * SAYING NOTHING IS NOT SKIPPING. The fire still writes its row — this decides
  * what the agent reads, not whether the daemon records the stop — and it is what
@@ -430,6 +439,7 @@ function ask(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
  * already set by then, on the lead's `stopFuse` turn as on a child's.
  */
 export function stop(ctx: FireContext, audience: 'child' | 'lead'): Emit | null {
-  if (audience === 'child' && getMark(ctx.deps.db, ctx.actor, ASKED) !== null) return null;
+  const asked = getMark(ctx.deps.db, ctx.actor, ASKED) !== null;
+  if (asked && (audience === 'child' || ctx.input.stopFuse === true)) return null;
   return ask(ctx, audience);
 }
