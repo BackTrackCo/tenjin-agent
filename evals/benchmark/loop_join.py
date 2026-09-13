@@ -31,17 +31,12 @@ class LoopJoinError(RuntimeError):
     pass
 
 
-# The product's own `Shelf` union (src/hooks/types.ts): the team shelf, the
-# public marketplace, the keys leg the public marketplace also serves, and the
-# local leg that never leaves the process. Anything else is `other`.
+# Current product routes fingerprint resolution to the team shelf. The local
+# shelf also carries handoff facts; it is not the removed inferred-fix store.
+# These are ledger classifications, not network observations.
 SHELVES = ("team", "public", "keys", "local")
-# What each leg is as a request. Under a seeded config the reachable set is
-# known by construction: `team` is the seeded shelf, `public` is the public
-# marketplace host and covers the keys leg too, `local` reaches nothing, and
-# `other` is an origin outside that set. These are daemon ledger facts,
-# not observations of network traffic blocked by the execution backend.
 CLASSES = ("team", "public", "local", "other")
-CLASS_OF = {"team": "team", "public": "public", "keys": "public", "local": "local"}
+CLASS_OF = {"team": "team", "public": "public", "keys": "team", "local": "local"}
 # A leg the product planned but never sent: public fallback off, or a stage
 # the arm dropped. It reached no origin, so it is not a request.
 SKIPPED = "skipped"
@@ -88,7 +83,7 @@ def cli_searches(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def failure_key(connection: sqlite3.Connection, foreign_sessions: tuple[str, ...] = ()) -> dict[str, Any] | None:
-    """The last failure fire that carried a key: which lane keyed it, whether the keys leg hit, and what was delivered.
+    """The last failure fire that carried a key: which fingerprint kinds it carried, whether the keys leg hit, and what was delivered.
 
     A foreign phase's fires (the producer's, the seed replay's) are on the
     same ledger and are never this attempt's failure key.
@@ -105,20 +100,17 @@ def failure_key(connection: sqlite3.Connection, foreign_sessions: tuple[str, ...
     if fire is None:
         return None
     key = str(fire["question_key"])
-    lane = None
-    try:
-        row = connection.execute("SELECT kind FROM pairings WHERE key = ? ORDER BY at DESC LIMIT 1", (key,)).fetchone()
-        lane = None if row is None else str(row["kind"])
-    except sqlite3.Error:
-        lane = None
+    # The composed ledger key names every fingerprint sent, not the winner.
+    # A line-only failure has no fingerprint; its team text lookup still runs.
+    lanes = sorted({part.split(":", 1)[0] for part in key.split("|") if part.startswith(("sig_v1:", "sig_v1_test:"))})
     legs = [dict(row) for row in connection.execute("SELECT shelf, status, outcome FROM legs WHERE fire_id = ? ORDER BY stage, shelf", (fire["id"],))]
     keys_legs = [leg for leg in legs if leg.get("shelf") == "keys"]
     delivered = fire["delivered"]
     piece = delivered.split(":", 1)[1] if isinstance(delivered, str) and ":" in delivered else None
     return {
         "fire_id": fire["id"],
-        "lane": lane,
-        "key_hash": hashlib.sha256(f"{lane}:{key}".encode("utf-8")).hexdigest()[:16] if lane else hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
+        "lanes": lanes,
+        "key_hash": hashlib.sha256(key.encode("utf-8")).hexdigest()[:16],
         "keys_leg": None if not keys_legs else {"status": keys_legs[-1].get("status"), "outcome": keys_legs[-1].get("outcome")},
         "keys_leg_hit": any(leg.get("outcome") == HIT for leg in keys_legs),
         "reason": fire["reason"],
@@ -155,8 +147,8 @@ def classify(legs: list[dict[str, Any]]) -> dict[str, int]:
 def public_summary(legs: list[dict[str, Any]]) -> dict[str, int]:
     """The public-origin legs, counted the way the canary gate reads them.
 
-    `legs` is how many requests reached the public marketplace (public and
-    keys legs), `hits` how many came back with a piece, `timeouts` how many
+    `legs` is how many requests reached the public marketplace (public
+    legs only; fingerprint resolution is a team request), `hits` how many came back with a piece, `timeouts` how many
     the product gave up waiting on, and `no_answer` how many ended without
     an answer of any kind, the outcome a timeout usually pairs with.
     """

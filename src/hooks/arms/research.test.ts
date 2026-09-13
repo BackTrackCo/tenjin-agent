@@ -220,7 +220,7 @@ describe('fetchQuestion', () => {
     expect(fetchQuestion({ url: '' })).toBe('');
   });
 
-  it("has no length rule: the search leg's 512 is the only bound", () => {
+  it("has no length rule: `question()`'s cut at the trigger's bound is the only one", () => {
     const q = fetchQuestion({ url: 'https://example.com/a', prompt: 'x'.repeat(900) });
     expect(q).toBe(`https://example.com/a ${'x'.repeat(900)}`);
   });
