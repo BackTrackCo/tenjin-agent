@@ -502,7 +502,16 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
         widths = [max(len(columns[i]), *(len(row[i]) for row in rows)) for i in range(len(columns))] if rows else [len(c) for c in columns]
         lines += [" | ".join(cell.ljust(width) for cell, width in zip(row, widths)) for row in [columns, *rows]]
     for arm_id in ids:
-        producer = arms.get(arm_id, {}).get("producer")
+        whole = arms.get(arm_id, {})
+        if whole.get("outcomes", {}).get("invalid", 0):
+            effort = whole.get("invalid_observed_effort", {})
+            lines += ["", f"Invalid attempts in {arm_id} (excluded from ratios; observed spend retained): "
+                      f"{display(effort.get('pipeline_tokens'))} total tokens, including "
+                      f"{display(effort.get('phase_tokens', {}).get('producer'))} producer and "
+                      f"{display(effort.get('phase_tokens', {}).get('capture'))} capture tokens; "
+                      f"{display(effort.get('agent_seconds'), 1)} consumer and {display(effort.get('producer_agent_seconds'), 1)} producer agent seconds. "
+                      f"Missing timings: {effort.get('missing_timing', 0)} consumer, {effort.get('producer_missing_timing', 0)} producer."]
+        producer = whole.get("producer")
         if producer:
             lines += ["", f"Producer {arm_id}: {producer['passes']}/{producer['attempts']} verified; "
                       f"{producer.get('failures', 0)} failed, {producer.get('capped_or_interrupted', 0)} capped/interrupted, {producer['invalid']} invalid; "
