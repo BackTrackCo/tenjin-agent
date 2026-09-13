@@ -564,7 +564,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         # the cap is worth recording; the outcome stays `capped`, a failed
         # task with its spend, and the verdict is the diagnostic beside it.
         try:
-            copy = roots.hidden_copy(verifier_spec.hidden_layer)
+            copy = roots.hidden_copy(verifier_spec.hidden_layer, image_dependencies=verifier_spec.kind == "historical_vitest")
         except artifact.ArtifactError as error:
             copy = None
             invalid_reason = f"isolation:{error.code}"
