@@ -11,8 +11,8 @@ cost anyway and phase `capture` for what the turn-end capture ask added; the
 consumer's own usage never mixes with either.
 
 Between the phases the daemon is stopped and its WAL has to be gone: the
-store is read once, settled, for what the producer left (closed pairings,
-harvested findings, its fires), and the consumer's daemon is then started on
+store is read once, settled, for what the producer left (harvested findings
+and its fires), and the consumer's daemon is then started on
 the consumer config with the same data dir and token on a fresh port. A WAL
 still live at that point is a refusal, because the consumer would otherwise
 read a ledger the producer's daemon was still writing.
@@ -32,7 +32,6 @@ from . import protocol, publication
 from .executor import ExecutorSpec, LaunchRequest, Provision, ProvisionError
 
 PHASE = artifact.PRODUCER_PHASE
-PAIRING_STATUSES = ("open", "unverified", "verified")
 
 
 def project_id(cwd: str) -> str:
@@ -42,32 +41,8 @@ def project_id(cwd: str) -> str:
     return hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:16]
 
 
-def pairings_of(loop_db: Path, project: str) -> list[dict[str, Any]]:
-    """The project's pairing rows as the record may carry them: kind, key hash, status, closes; never the error line."""
-    if not loop_db.is_file():
-        return []
-    uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
-    try:
-        connection = sqlite3.connect(uri, uri=True)
-    except sqlite3.Error as error:
-        raise ProvisionError(f"cannot open loop.db read-only: {error}") from error
-    try:
-        rows = connection.execute("SELECT kind, key, status, closes FROM pairings WHERE project IS ? ORDER BY id", (project,)).fetchall()
-    except sqlite3.Error as error:
-        raise ProvisionError(f"loop.db has no readable pairings table: {error}") from error
-    finally:
-        connection.close()
-    return [{"kind": kind, "key_hash": sha256_text(f"{kind}:{key}")[:16], "status": status, "closes": int(closes or 0)} for kind, key, status, closes in rows]
-
-
-def summarize(rows: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {status: 0 for status in PAIRING_STATUSES}
-    for row in rows:
-        counts[row["status"]] = counts.get(row["status"], 0) + 1
-    return counts
 COMPONENT = "producer"
 CAPTURE_PHASE = "capture"
-FINDING_PREFIX = "finding:"
 TURN_END = "turn.end"
 
 
@@ -102,17 +77,14 @@ def request_times(transcript: Path) -> dict[str, int]:
 
 
 def store_facts(loop_db: Path, session: str, project: str) -> dict[str, Any]:
-    """What the producer left in the settled store: pairings for the project, harvested findings, and its own fires."""
-    facts: dict[str, Any] = {"pairings": summarize([]), "pairing_key_hashes": [], "findings": 0, "fires": 0, "turn_end_fires": 0, "first_turn_end_at": None, "actor_capture_from": {}}
+    """The producer session/project's captured drafts and its own settled fires."""
+    facts: dict[str, Any] = {"findings": 0, "fires": 0, "turn_end_fires": 0, "first_turn_end_at": None, "actor_capture_from": {}}
     if not loop_db.is_file():
         return facts
-    rows = pairings_of(loop_db, project)
-    facts["pairings"] = summarize(rows)
-    facts["pairing_key_hashes"] = sorted({row["key_hash"] for row in rows if row["status"] != "open"})
     uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
     try:
-        facts["findings"] = int(connection.execute("SELECT count(*) FROM facts WHERE substr(key, 1, ?) = ?", (len(FINDING_PREFIX), FINDING_PREFIX)).fetchone()[0])
+        facts["findings"] = len(publication.drafts_of(loop_db, session, project))
         facts["fires"] = int(connection.execute("SELECT count(*) FROM fires WHERE session = ?", (session,)).fetchone()[0])
         boundaries = connection.execute("SELECT agent, min(at) FROM fires WHERE session = ? AND event IN ('turn.end', 'agent.stop') GROUP BY agent", (session,)).fetchall()
         facts["actor_capture_from"] = {str(agent): int(at) for agent, at in boundaries}

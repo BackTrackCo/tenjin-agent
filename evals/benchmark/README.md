@@ -336,7 +336,9 @@ The first table reports verified/planned attempts, failures/caps/invalid attempt
 execution seconds and system tokens per verified completion. Within each task, all scored
 attempt spend is divided by verified passes; the displayed arm averages those task cells.
 A task with no pass makes its completion endpoint unavailable. Incremental capture is charged
-at reuse 1, while producer task work and reuse 2/5/10 remain separate diagnostics.
+at reuse 1. Reuse 2/5/10 uses the same task-paired completion denominator and ratio of arm
+means; failed/capped effort stays charged. Producer task work remains a separate per-attempt
+diagnostic.
 
 `agent_time_s` brackets the actual agent process, including its tools and hooks. Container
 startup/shutdown, settlement, producer work and hidden verification are excluded; verification
@@ -497,7 +499,7 @@ with the intended producer store. The existing exclusive shelf window covers pub
 consumer execution and deletion. Missing/ambiguous receipts stop further admission;
 known piece IDs are still cleaned up. A fresh corpus reset is required after an
 uncertain write. Failed producers are never published. Publication and confirmed
-cleanup are visible alongside drafts, closed local pairings, attributed team-hook
+cleanup are visible alongside drafts, attributed team-hook
 delivery and verified completion. A delivery followed by a pass does not prove use.
 This treatment measures host-assisted publication, not autonomous agent publishing.
 Host publication time is separate from agent completion time and adds no model tokens.

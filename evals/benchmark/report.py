@@ -740,7 +740,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
                 span = "" if not interval or interval.get("low") is None else f"  interval [{interval['low']:.3f}, {interval['high']:.3f}] at {interval['confidence']:.0%} over {plural(interval['tasks'], 'task')}"
                 lines.append(f"  headline {arm_id}: {headline:.3f} ({HEADLINE_LABEL}){span}, {eligible}")
             curve = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_capture_only_token_ratio", [])}
-            lines.append(f"    reuse 2/5/10: {_number(curve.get(2), '5.3f')}/{_number(curve.get(5), '5.3f')}/{_number(curve.get(10), '5.3f')}")
+            lines.append(f"    per-completion reuse 2/5/10: {_number(curve.get(2), '5.3f')}/{_number(curve.get(5), '5.3f')}/{_number(curve.get(10), '5.3f')}")
             ratio = comparison["token_ratio"]
             if ratio is None:
                 lines.append(f"    {CAPTURE_FREE_LABEL}: none ({comparison['token_ratio_reason']})")
@@ -758,7 +758,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
                 lines.append(f"    {RETRIEVAL_ONLY_LABEL}: {retrieval:.3f}")
             amortized = {point["reuse"]: point["token_ratio"] for point in comparison.get("amortized_token_ratio", [])}
             if any(value is not None for value in amortized.values()):
-                lines.append(f"    diagnostic, the producer's own work charged too, reuse 1/10: {_number(amortized.get(1), '5.3f')}/{_number(amortized.get(10), '5.3f')}")
+                lines.append(f"    per-attempt diagnostic, producer work charged too, reuse 1/10: {_number(amortized.get(1), '5.3f')}/{_number(amortized.get(10), '5.3f')}")
             lines += _decomposition(report, arm_id, baseline, comparison)
     else:
         lines.append(f"no comparison: {baseline} is the only arm with a result")

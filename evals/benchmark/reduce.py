@@ -406,31 +406,27 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
             retrieval = []
             break
         retrieval.append(arm["tasks"][task_id]["retrieval_only_tokens_per_attempt"] / divisor)
-    # Amortization is per lesson, task-equal like everything else: each shared
-    # task's consumer tokens plus that task's per-producer one-time cost over
-    # `reuse` uses, against the baseline's, then the mean of the ratios. The
-    # first series charges the producer's own work too (a diagnostic); the
-    # second charges only what the capture ask added, which is the headline
-    # rule (pre-registered before any pilot number was read): every token the
-    # capture ask added is charged to a single consumer at reuse 1, and
-    # nothing of the producer's own work, which would have happened anyway.
-    # The reuse-1 set of the capture-only series is bootstrapped for the
-    # headline interval.
+    # Producer-work amortization remains a per-attempt diagnostic. The capture
+    # curve shares the headline's verified-completion denominator and task mean.
     capture_ratio: list[dict[str, Any]] = []
     capture_only: list[dict[str, Any]] = []
-    headline_ratios: list[float] = []
-    for phases, series in ((("producer", "capture"), capture_ratio), (("capture",), capture_only)):
-        for reuse in REUSE_POINTS:
-            per_task: list[float] = []
-            for task_id in shared:
-                divisor = task_cost(base["tasks"][task_id], phases, reuse)
-                if not divisor:
-                    per_task = []
-                    break
-                per_task.append(task_cost(arm["tasks"][task_id], phases, reuse) / divisor)
-            series.append({"reuse": reuse, "token_ratio": _mean(per_task)})
-            if series is capture_only and reuse == 1:
-                headline_ratios = per_task
+    for index, reuse in enumerate(REUSE_POINTS):
+        per_task: list[float] = []
+        for task_id in shared:
+            divisor = task_cost(base["tasks"][task_id], ("producer", "capture"), reuse)
+            if not divisor:
+                per_task = []
+                break
+            per_task.append(task_cost(arm["tasks"][task_id], ("producer", "capture"), reuse) / divisor)
+        capture_ratio.append({"reuse": reuse, "token_ratio": _mean(per_task)})
+        left = [arm["tasks"][task]["system_completion_by_reuse"][index]["tokens"] for task in shared]
+        right = [base["tasks"][task]["system_completion_by_reuse"][index]["tokens"] for task in shared]
+        paired = shared and set(arm["tasks"]) == set(base["tasks"])
+        observed = paired and all(value is not None for value in left + right)
+        point = None
+        if observed and statistics.fmean(right) > 0:
+            point = _round(statistics.fmean(left) / statistics.fmean(right))
+        capture_only.append({"reuse": reuse, "token_ratio": point})
     pass_delta = (
         None
         if arm["pass_rate"] is None or base["pass_rate"] is None
