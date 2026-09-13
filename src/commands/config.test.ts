@@ -981,6 +981,54 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     });
   });
 
+  it('serializes concurrent mode-and-grant transactions under the config lock', async () => {
+    const events: string[] = [];
+    let grantMode = 'review';
+    let releaseFirst!: () => void;
+    let markFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => {
+      markFirstEntered = resolve;
+    });
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const adapters = adaptersWithCodexGrant(async (_home, mode) => {
+      events.push(`${mode}:start`);
+      if (mode === 'auto') {
+        markFirstEntered();
+        await firstGate;
+      }
+      grantMode = mode;
+      events.push(`${mode}:end`);
+      return {
+        path: join(home, '.codex', 'rules', 'tenjin.rules'),
+        granted: mode === 'review' ? [] : ['tenjin publish'],
+        wrote: true,
+      };
+    });
+    const first = runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      isInteractive: true,
+      confirmRule: async () => true,
+      adapters,
+    });
+    await firstEntered;
+    const second = runConfigSet({ key: 'publish.mode', value: 'review' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      adapters,
+    });
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(events).toEqual(['auto:start', 'auto:end', 'review:start', 'review:end']);
+    expect(grantMode).toBe('review');
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'review', source: 'file' },
+    });
+  });
+
   // Tightening only ever removes what this CLI wrote, so it needs no question —
   // including on a headless machine, which is where a stale grant would sit.
   it('retracts the rule on review, unprompted, and reports it', async () => {

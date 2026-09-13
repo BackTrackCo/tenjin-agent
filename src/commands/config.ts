@@ -419,41 +419,52 @@ async function setPublishKey(
   // harness could not carry. Because several files cannot commit atomically,
   // every later failure compensates completed grants back to the previous mode.
   const mode = entry.value as PublishMode;
-  const previousMode =
-    (await loadRawConfig(ctx.dataDir)).publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
-  const allowlist = await syncPublishRule(mode, ctx, deps);
-  const failure = grantSyncFailure(allowlist);
-  if (failure !== undefined) {
-    const rollback = await rollbackGrantChanges(previousMode, allowlist, ctx, deps);
-    throw new CliError(
-      'REFUSED',
-      `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
-      {
-        fix:
-          failure.fix ??
-          `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
-        details: { key, value: entry.value, allowlist, rollback },
-      },
-    );
-  }
-  try {
-    if (deps.persistPublishMode !== undefined) {
-      await deps.persistPublishMode(ctx.dataDir, mode);
-    } else {
-      await persistEntry();
+  // The SAME cross-process lock used by every config writer covers grants,
+  // commit and compensation as one transaction. A second mode change cannot
+  // interleave a different grant or make `previousMode` stale underneath a
+  // rollback. The harness writers retain their own compare-before-write checks
+  // for edits by processes outside this CLI.
+  const allowlist = await withConfigLock(ctx.dataDir, async () => {
+    const existing = await loadRawConfig(ctx.dataDir);
+    const previousMode = existing.publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
+    const synced = await syncPublishRule(mode, ctx, deps);
+    const failure = grantSyncFailure(synced);
+    if (failure !== undefined) {
+      const rollback = await rollbackGrantChanges(previousMode, synced, ctx, deps);
+      throw new CliError(
+        'REFUSED',
+        `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
+        {
+          fix:
+            failure.fix ??
+            `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
+          details: { key, value: entry.value, allowlist: synced, rollback },
+        },
+      );
     }
-  } catch (err) {
-    const rollback = await rollbackGrantChanges(previousMode, allowlist, ctx, deps);
-    throw new CliError(
-      'INTERNAL',
-      `publish.mode was not changed because its config could not be written: ${errorMessage(err)}`,
-      {
-        fix: `Fix the reported config problem, then re-run \`tenjin config set publish.mode ${mode}\`.`,
-        details: { key, value: entry.value, allowlist, rollback },
-        cause: err,
-      },
-    );
-  }
+    try {
+      if (deps.persistPublishMode !== undefined) {
+        await deps.persistPublishMode(ctx.dataDir, mode);
+      } else {
+        await writePartialConfig(ctx.dataDir, {
+          ...existing,
+          publish: { ...existing.publish, mode },
+        });
+      }
+    } catch (err) {
+      const rollback = await rollbackGrantChanges(previousMode, synced, ctx, deps);
+      throw new CliError(
+        'INTERNAL',
+        `publish.mode was not changed because its config could not be written: ${errorMessage(err)}`,
+        {
+          fix: `Fix the reported config problem, then re-run \`tenjin config set publish.mode ${mode}\`.`,
+          details: { key, value: entry.value, allowlist: synced, rollback },
+          cause: err,
+        },
+      );
+    }
+    return synced;
+  });
   return {
     data: { key, ...entry, allowlist },
     humanLines: [...humanLines, ...allowlistLines(allowlist)],
@@ -1050,21 +1061,19 @@ async function persist(
   dir: string,
   merge: (existing: PartialConfig) => PartialConfig,
 ): Promise<void> {
+  await withConfigLock(dir, async () => {
+    const existing = await loadRawConfig(dir);
+    await writePartialConfig(dir, merge(existing));
+  });
+}
+
+/** One mutex for every config mutation, including the publish-mode transaction
+ * whose adapter-owned files must not interleave with another mode decision. */
+async function withConfigLock<T>(dir: string, action: () => Promise<T>): Promise<T> {
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const lockPath = `${configPath(dir)}.lock`;
   try {
-    await withFileLock(lockPath, async () => {
-      const existing = await loadRawConfig(dir);
-      const merged = merge(existing);
-      const validated = RawConfigSchema.parse(merged);
-      // 0600, matching lib/config.ts's `writeConfig`: this file holds
-      // `shelfBypassSecret`, and this is the writer `config set` uses to put it
-      // there. See that function for why dirMode alone is not enough.
-      await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
-        mode: 0o600,
-        dirMode: 0o700,
-      });
-    });
+    return await withFileLock(lockPath, action);
   } catch (err) {
     // A lock timeout is not the user's malformed input; surface it as INTERNAL with
     // the one manual step (there is no auto-steal), keeping the JSON error contract.
@@ -1076,6 +1085,17 @@ async function persist(
     }
     throw err;
   }
+}
+
+async function writePartialConfig(dir: string, next: PartialConfig): Promise<void> {
+  const validated = RawConfigSchema.parse(next);
+  // 0600, matching lib/config.ts's `writeConfig`: this file holds
+  // `shelfBypassSecret`, and this is the writer `config set` uses to put it
+  // there. See that function for why dirMode alone is not enough.
+  await writeFileAtomic(configPath(dir), `${JSON.stringify(validated, null, 2)}\n`, {
+    mode: 0o600,
+    dirMode: 0o700,
+  });
 }
 
 function formatLine(key: string, entry: RenderedSetting): string {
