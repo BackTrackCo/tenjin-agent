@@ -606,3 +606,18 @@ def test_server_unavailable_before_run_does_not_reset_or_start_model(lane):
     assert api.calls == []
     assert not list((lane.out / 'records').glob('*.json'))
     assert report.run_status(json.loads((lane.out / 'report.json').read_text())).startswith('UNAVAILABLE')
+
+
+def test_dedicated_benchmark_key_is_bound_to_written_attestation(attest):
+    import hashlib
+    from evals.benchmark import benchmark_key
+    receipt = {"schema": benchmark_key.SCHEMA, "project_id": benchmark_key.PROJECT,
+               "origin": benchmark_key.ORIGIN, "key_sha256": hashlib.sha256(b"benchmark-test-key").hexdigest()}
+    source = support.tenjin_source(attest.dir / "dedicated-data", base_url="https://" + benchmark_key.ORIGIN, shelf_secret="benchmark-test-key")
+    (source / benchmark_key.FILE).write_text(json.dumps(receipt))
+    data = json.loads(attest.manifest.read_text())
+    data["corpus"]["origin"] = benchmark_key.ORIGIN
+    attest.manifest.write_text(json.dumps(data))
+    payload = attest(tenjin_source=source)
+    loaded = artifact.load_attestation(attest.out)
+    assert loaded.benchmark_shelf_key == receipt == payload["benchmark_shelf_key"]

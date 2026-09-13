@@ -86,6 +86,20 @@ def test_hashes_counts_and_enums_are_publishable() -> None:
     )
 
 
+def test_hook_injections_appear_in_json_ci_and_terminal_readouts(corpus, project) -> None:
+    import copy
+    from evals.benchmark.tests.test_injections import evidence
+    _manifest, _digest, accepted, _ = corpus
+    accepted = copy.deepcopy(accepted)
+    first = next(iter(accepted))
+    accepted[first]["delivery"] = evidence()["trial-a"]["delivery"]
+    published = project(accepted_records=accepted)
+    assert published["injections"]["by_hook_shelf"][0]["delivered"] == 1
+    for rendered in [report.render(published), report.check_summary(published)]:
+        assert "Hook injections" in rendered and "Unreviewed" in rendered
+        assert "public" in rendered
+
+
 def test_an_opaque_string_longer_than_the_cap_is_refused() -> None:
     assert refusal({"arm_id": "a" * 65}).code == "not_opaque"
     report.guard({"arm_id": "a" * 64})
@@ -665,3 +679,13 @@ def test_remote_server_drift_cannot_look_like_a_product_result(corpus, reduction
     assert "diagnostic evidence only" in text
     assert "they do not lock the server or prove schema compatibility" in text
     assert "lower" not in text
+
+
+def test_dedicated_benchmark_key_stays_attested_and_visible(project, stamped):
+    from evals.benchmark.tests.test_benchmark_key import isolation
+    published = project(accepted_records=stamped(**isolation()))
+    assert published["shelf_secret_present"] and published["publishable"]
+    assert published["isolation"] == "attested"
+    assert "dedicated benchmark shelf key present" in report.render(published)
+    assert "NOT PUBLISHABLE" not in report.render(published)
+    report.guard(published)

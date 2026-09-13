@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import loop_join, phases as phases_module, usage
+from . import benchmark_key, loop_join, phases as phases_module, usage
 from .schedule import trial_id as derive_trial_id
 
 RECORD_SCHEMA = "bench1.attempt.v1"
@@ -302,7 +302,13 @@ def validate(record: dict[str, Any]) -> None:
         if name in isolation and not isinstance(isolation[name], bool):
             raise RecordError(f"isolation.{name} must be true or false")
     # Non-publishable by construction: the file on disk cannot claim otherwise.
-    if isolation.get("shelf_secret_present") and isolation["publishable"]:
+    try:
+        scoped = benchmark_key.recorded(isolation)
+    except ValueError as error:
+        raise RecordError(str(error)) from error
+    if isolation.get("benchmark_shelf_key") is not None and not scoped:
+        raise RecordError("benchmark key scope lacks matching attested benchmark corpus")
+    if isolation.get("shelf_secret_present") and isolation["publishable"] and not scoped:
         raise RecordError("an attempt that seeded a team shelf secret cannot be publishable")
     for name in ("shelf_origin", "public_origin"):
         if isolation.get(name) is not None and (not isinstance(isolation[name], str) or not isolation[name]):

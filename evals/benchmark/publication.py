@@ -72,7 +72,7 @@ def publish(roots, provision, session: str, project: str):
                 seen.add(digest)
                 body = private / f"draft-{index}.md"
                 body.write_text(document, encoding="utf-8")
-                code, payload, _tail = tenjin_arm._run_cli([*tenjin_arm.PUBLISH_ARGV(body, ()), "--price", "0"], tenjin_arm.cli_environment(publisher), source.secrets)
+                code, payload, _tail = tenjin_arm._run_cli(tenjin_arm.PUBLISH_ARGV(body, ()), tenjin_arm.cli_environment(publisher), source.secrets)
                 piece_id = tenjin_arm.piece_id_of(payload)
                 valid_id = isinstance(piece_id, str) and PIECE_ID.fullmatch(piece_id) is not None
                 ok = code == 0 and valid_id and tenjin_arm._find(payload, "alreadyPublished") is not True and tenjin_arm._find(payload, "status") == "published" and tenjin_arm._find(payload, "ok") is not False
