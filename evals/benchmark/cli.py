@@ -295,6 +295,7 @@ def plan_trial(
     """Build one trial's roots and launch exactly as `runner.run_trial` does, then stop."""
     task = next(item for item in manifest.tasks if item["id"] == trial.task_id)
     arm = next(item for item in manifest.arms if item["id"] == trial.arm_id)
+    arm = manifest.trial_arm(task, arm)
     spec = executor.lookup(arm["executor"])
     # The roots are built as the run builds them, short of the dependency tree:
     # a dry run copies nothing out of the image and starts nothing.
@@ -303,7 +304,7 @@ def plan_trial(
     if arm.get("provision") and spec.prepare is not None:
         # A dry run seeds the data dir and resolves the template with a port of
         # 0 and a labelled token; it starts no daemon.
-        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True, task=task))
+        provision = spec.prepare(executor.ProvisionRequest(trial.trial_id, roots, arm, source or tenjin_arm.dry_source(), dry_run=True, task=task, lessons_dir=manifest.asset_path(task["knowledge"]) if "knowledge" in task else None))
     launch = spec.launch(
         executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True, egress=egress)
     )
@@ -678,7 +679,7 @@ def do_verify(run_dir: Path) -> dict[str, Any]:
             verdicts[trial_id] = {"status": "worktree_absent", "recorded": record["outcome"]}
             continue
         task = next(item for item in manifest.tasks if item["id"] == record["task_id"])
-        verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir, image=(record.get("isolation", {}).get("image") or {}).get("id"))
+        verdict = verifier.run(manifest.verifier_spec(task), copy, run_dir, image=(record.get("isolation", {}).get("image") or {}).get("id"))
         # A capped attempt keeps its verdict beside the outcome, so the fresh
         # verdict is read against the recorded verdict rather than `capped`.
         recorded = record["outcome"] if record["verifier"] is None else verifier.outcome_of(record["verifier"]["exit_code"])

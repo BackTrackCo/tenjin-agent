@@ -4,8 +4,8 @@
 # difference is the context and the labels, which `images.py` supplies.
 #
 # `pnpm install` runs here, at build time, with a network. That is why a
-# fixture commits a `package.json` with its test runner pinned and no lockfile,
-# no `.npmrc`, and no vendored archive: the installed tree is the image, and
+# fixture pins its test runner; historical fixtures also keep their frozen lock.
+# No operator `.npmrc` or vendored archive enters: the installed tree is the image, and
 # `images.json` plus the image's own labels name the build a run used.
 ARG BASE_TAG
 FROM ${BASE_TAG}
@@ -22,10 +22,9 @@ WORKDIR /opt/fixture
 # A fixture without a package.json (the plumbing smoke's repository) installs
 # nothing and still gets an image, so every live trial runs the same way.
 RUN if [ -f package.json ]; then \
-      printf '\nstrictDepBuilds: false\n' >> pnpm-workspace.yaml \
-      && pnpm install \
-      && pnpm exec vitest --version \
-      && pnpm exec esbuild --version; \
+      if [ -f pnpm-lock.yaml ]; then pnpm install --frozen-lockfile --ignore-scripts; \
+      else printf '\nstrictDepBuilds: false\n' >> pnpm-workspace.yaml && pnpm install && pnpm exec esbuild --version; fi \
+      && pnpm exec vitest --version; \
     else \
       mkdir -p /opt/fixture/node_modules; \
     fi

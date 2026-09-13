@@ -17,7 +17,7 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-from . import container, images, sha256_dir, sha256_file
+from . import vitest_result, container, database_service, images, sha256_dir, sha256_file
 
 ROOT = Path(__file__).parent / "historical"
 REVISION = ("before", "after")
@@ -41,7 +41,7 @@ def task_named(name: str, catalog: Path) -> dict:
     for revision in REVISION:
         if HEX40.fullmatch(task[f"{revision}_commit"]) is None or HEX40.fullmatch(task["trees"][revision]) is None:
             raise ReplayError("historical task requires full commit and tree IDs")
-    if task["source_repository"] != "https://github.com/BackTrackCo/tenjin-agent.git":
+    if task["source_repository"] not in {"https://github.com/BackTrackCo/tenjin-agent.git", "https://github.com/BackTrackCo/tenjin.git"}:
         raise ReplayError("historical source repository is not allowlisted")
     if task["oracle"] != name + ".test.ts":
         raise ReplayError("oracle must be the task's code-owned file")
@@ -86,6 +86,7 @@ def prepare(repo: Path, task_id: str, revision: str, out: Path, *, catalog: Path
     shutil.copyfile(catalog.parent / "oracles" / task["oracle"], out / "oracle.test.ts")
     shutil.copyfile(ROOT / "vitest.config.mjs", out / "vitest.config.mjs")
     shutil.copyfile(ROOT / "Dockerfile", out / "Dockerfile")
+    shutil.copyfile(ROOT / "database.mjs", out / "database.mjs")
     receipt = {"schema": "bench1.historical-source.v1", "task": task_id, "revision": revision, "catalog_sha256": sha256_file(catalog),
                "commit": commit, "tree": tree.strip(), "source_hash": sha256_dir(source),
                "lock_sha256": sha256_file(lock), "oracle_sha256": sha256_file(out / "oracle.test.ts"),
@@ -108,8 +109,8 @@ def validate_context(context: Path, *, catalog: Path) -> dict:
         raise ReplayError("context does not name the catalog's historical source")
     if sha256_dir(context / "source") != receipt["source_hash"] or sha256_file(context / "source" / "pnpm-lock.yaml") != task["lock_sha256"]:
         raise ReplayError("historical source or dependency lock changed after preparation")
-    for source, staged in [(catalog.parent / "oracles" / task["oracle"], context / "oracle.test.ts"), (ROOT / "Dockerfile", context / "Dockerfile"), (ROOT / "vitest.config.mjs", context / "vitest.config.mjs")]:
-        if sha256_file(source) != sha256_file(staged):
+    for source, staged in [(catalog.parent / "oracles" / task["oracle"], context / "oracle.test.ts"), (ROOT / "Dockerfile", context / "Dockerfile"), (ROOT / "vitest.config.mjs", context / "vitest.config.mjs"), (ROOT / "database.mjs", context / "database.mjs")]:
+        if not source.is_file() or not staged.is_file() or sha256_file(source) != sha256_file(staged):
             raise ReplayError("code-owned verifier or build recipe changed after preparation")
     return receipt
 
@@ -138,11 +139,14 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path) -> dict:
     project = container.record_project(run_dir, identity, name)
     recipe = container.Recipe(name=name, image=image, workdir=Path("/opt/task"),
                               trial_dir=run_dir / identity / "trial", environment_dir=run_dir / identity / "environment",
-                              plan=[], environment={"HOME": "/tmp"}, egress=container.no_network())
+                              plan=[container.Mount(context / "database.mjs", Path("/benchmark-database.mjs"), "ro")] if task_named(receipt["task"], catalog).get("database") == "postgres" else [], environment={"HOME": "/tmp"}, egress=container.no_network())
     result = {**receipt, "image": image, "status": "invalid", "cleanup": False, "tests": None}
     try:
-        with container.Container(recipe=recipe) as running:
-            completed = running.exec(COMMAND, cwd=recipe.workdir, timeout_s=120)
+        enabled = task_named(receipt["task"], catalog).get("database") == "postgres"
+        if enabled:
+            result["database_image"] = database_service.IMAGE
+        with container.Container(recipe=recipe) as running, database_service.service(running, enabled) as database_environment:
+            completed = running.exec(COMMAND, cwd=recipe.workdir, environment=database_environment, timeout_s=120)
             report = running.exec(["cat", "/tmp/benchmark-historical-result.json"], timeout_s=10)
         if report.returncode == 0:
             data = json.loads(report.stdout)
@@ -150,11 +154,7 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path) -> dict:
             result["tests"] = {"total": total, "passed": data.get("numPassedTests", 0), "failed": failed}
             # Import/setup/collection failures cannot masquerade as fail-before.
             assertions = [a for suite in data.get("testResults", []) for a in suite.get("assertionResults", [])]
-            if total > 0 and len(assertions) == total and data.get("numRuntimeErrorTestSuites", 0) == 0:
-                if completed.returncode == 0 and data.get("success") and failed == 0:
-                    result["status"] = "pass"
-                elif completed.returncode == 1 and failed > 0 and any(a.get("status") == "failed" for a in assertions):
-                    result["status"] = "fail"
+            result["status"] = vitest_result.outcome(data, completed.returncode)
             result["assertions"] = [{"title": a.get("fullName"), "status": a.get("status"), "failures": a.get("failureMessages", [])} for a in assertions]
         result["detail"] = (completed.stderr or completed.stdout)[-1600:]
     except Exception as error:
@@ -183,6 +183,9 @@ def main(catalog: Path | None = None) -> int:
     prep.add_argument("--task", required=True)
     prep.add_argument("--revision", choices=REVISION, required=True)
     prep.add_argument("--out", type=Path, required=True)
+    model = commands.add_parser("materialize")
+    model.add_argument("--context", type=Path, required=True)
+    model.add_argument("--out", type=Path, required=True)
     image = commands.add_parser("build")
     image.add_argument("--context", type=Path, required=True)
     check = commands.add_parser("verify")
@@ -192,6 +195,9 @@ def main(catalog: Path | None = None) -> int:
     args = parser.parse_args()
     if args.command == "prepare":
         result = prepare(args.repo, args.task, args.revision, args.out, catalog=args.catalog)
+    elif args.command == "materialize":
+        from . import task_assets
+        result = task_assets.materialize(args.context, args.out, catalog=args.catalog)
     elif args.command == "build":
         name = build(args.context, catalog=args.catalog)
         result = {"name": name, "id": images.image_id(name)}

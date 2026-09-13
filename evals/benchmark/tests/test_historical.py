@@ -50,13 +50,13 @@ def test_catalog_rejects_unknown_task_and_shell_shaped_name(tmp_path):
 def context(tmp_path, monkeypatch):
     root = tmp_path / "definitions"
     (root / "oracles").mkdir(parents=True)
-    for path in [root / "oracles" / "fixture.test.ts", root / "Dockerfile", root / "vitest.config.mjs"]:
+    for path in [root / "oracles" / "fixture.test.ts", root / "Dockerfile", root / "vitest.config.mjs", root / "database.mjs"]:
         path.write_text("code-owned")
     monkeypatch.setattr(replay, "ROOT", root)
     out = tmp_path / "prepared"
     (out / "source").mkdir(parents=True)
     (out / "source" / "pnpm-lock.yaml").write_text("frozen-lock")
-    for src, dest in [(root / "oracles/fixture.test.ts", out / "oracle.test.ts"), (root / "Dockerfile", out / "Dockerfile"), (root / "vitest.config.mjs", out / "vitest.config.mjs")]:
+    for src, dest in [(root / "oracles/fixture.test.ts", out / "oracle.test.ts"), (root / "Dockerfile", out / "Dockerfile"), (root / "vitest.config.mjs", out / "vitest.config.mjs"), (root / "database.mjs", out / "database.mjs")]:
         dest.write_bytes(src.read_bytes())
     task = {"id": "fixture", "before_commit": "a" * 40, "after_commit": "b" * 40, "trees": {"before": "c" * 40, "after": "d" * 40}, "lock_sha256": sha256_file(out / "source/pnpm-lock.yaml"), "oracle": "fixture.test.ts"}
     catalog = root / "catalog.json"
@@ -67,7 +67,7 @@ def context(tmp_path, monkeypatch):
     return out
 
 
-@pytest.mark.parametrize("path", ["source/pnpm-lock.yaml", "oracle.test.ts", "Dockerfile", "vitest.config.mjs"])
+@pytest.mark.parametrize("path", ["source/pnpm-lock.yaml", "oracle.test.ts", "Dockerfile", "vitest.config.mjs", "database.mjs"])
 def test_context_drift_refuses_before_image_execution(context, path):
     (context / path).write_text("drift")
     with pytest.raises(replay.ReplayError):
@@ -100,6 +100,9 @@ def test_wrong_image_is_refused_before_container_creation(context, monkeypatch, 
     (1, 1, [{"fullName": "independent contract", "status": "failed"}], 0, "fail"),
     (1, 0, [{"fullName": "independent contract", "status": "passed"}], 0, "pass"),
     (1, 1, [], 0, "invalid"),
+    (1, 0, [{"status": "pending"}], 0, "invalid"),
+    (1, 0, [{"status": "todo"}], 0, "invalid"),
+    (1, 0, [{"status": "failed"}], 0, "invalid"),
     (1, 1, [{"fullName": "independent contract", "status": "failed"}], 1, "invalid"),
 ])
 def test_only_completed_assertions_establish_fail_before_or_pass_after(context, tmp_path, monkeypatch, total, failed, assertions, runtime_errors, expected):
