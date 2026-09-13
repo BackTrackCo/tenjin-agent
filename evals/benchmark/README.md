@@ -393,3 +393,19 @@ may be present; neither is reported as the winning match. Line-only failures can
 still retrieve through team text search. Fingerprint resolution counts as a team
 request. The removed `pairings` table is not read. Capture means a retained draft;
 publication and downstream delivery are separate receipt-backed measurements.
+
+### Complete pipeline cost
+
+The product overview retains the declared consumer-completion comparison and also
+shows complete pipeline cost for producer arms. This secondary quantity adds the
+earlier producer, capture and consumer tokens once, divided by verified consumers
+within each task. Its time adds both measured agent brackets and host publication
+time; container preparation and hidden verification remain separately timed.
+Failed and capped producers stay in the denominator's attempted population, and
+their spending is retained when the consumer continues. Missing producer timing
+and zero consumer successes produce `n/a`, never a fabricated zero.
+
+This is the cost to prepare memory and complete a later task. It is not a matched
+two-task comparison against a control that also did the earlier work, and it does
+not replace the consumer-reuse headline. The readout names producer failures,
+caps, invalid measurements, drafts, publication and consumer delivery separately.
