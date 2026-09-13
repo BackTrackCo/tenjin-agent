@@ -338,7 +338,6 @@ def validate(record: dict[str, Any]) -> None:
         hashes = knowledge["body_hashes"]
         if not isinstance(hashes, dict) or not all(isinstance(key, str) and key for key in hashes):
             raise RecordError("knowledge body_hashes must name lessons")
-        import re
         if any(not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in [knowledge["corpus_hash"], *hashes.values()]):
             raise RecordError("knowledge versions must be SHA-256 hashes")
         available = knowledge["available"]
