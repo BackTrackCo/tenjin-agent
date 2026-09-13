@@ -308,6 +308,15 @@ def plan_trial(
     launch = spec.launch(
         executor.LaunchRequest(trial.trial_id, roots, task, arm, manifest.pins, provision, dry_run=True, egress=egress)
     )
+    producer_plan = None
+    if arm.get("producer"):
+        from . import task_assets
+        prior = task.get("producer_task", task)
+        prior_roots = artifact.create(out, trial.trial_id, manifest.fixture_path(prior), phase="producer", data_dir=roots.data_dir)
+        prior_launch = spec.launch(executor.LaunchRequest(trial.trial_id, prior_roots, prior, arm, manifest.pins, provision, phase="producer", dry_run=True, egress=egress))
+        producer_plan = {"task_id": prior["id"], "prompt": prior["prompt"], "fixture_hash": prior["fixture_hash"],
+                         "verifier": prior["verifier"], "argv": list(prior_launch.argv), "container": prior_launch.container_plan,
+                         "source": task_assets.source_facts(manifest, prior)}
     settings = arm.get("settings") or {}
     resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
     return {
@@ -318,6 +327,7 @@ def plan_trial(
         "argv": list(launch.argv),
         "provision": None if provision is None else {**provision.facts, "origins": list(provision.origins)},
         "producer": bool(arm.get("producer", False)),
+        "producer_phase": producer_plan,
         "slice": manifest.slice,
         "package_manager": launch.package_manager,
         "container": launch.container_plan,
@@ -368,6 +378,12 @@ def render_plan(manifest: manifest_module.Manifest, plans: list[dict[str, Any]])
             lines.append(f"  {name:10}{value}")
         if plan.get("producer"):
             lines.append(f"  {'phases':10}producer (own session, same data dir, verified) then consumer on a fresh repository copy; the daemon is restarted between them")
+            prior = plan.get("producer_phase")
+            if prior:
+                lines += [f"  producer task={prior['task_id']} verifier={prior['verifier']} fixture={prior['fixture_hash']}",
+                          f"  producer prompt: {prior['prompt']}", f"  producer argv: {shlex.join(prior['argv'])}"]
+                if prior.get("container"):
+                    lines.append(f"  producer image: {prior['container']['image']['reference']}")
         if plan.get("slice") is not None:
             lines.append(f"  {'slice':10}" + " ".join(f"{key}={value}" for key, value in sorted(plan["slice"].items())))
         lines.append(f"  {'client env':10}{' '.join(plan['environment'])}")

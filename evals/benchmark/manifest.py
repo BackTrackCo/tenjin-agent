@@ -196,6 +196,7 @@ ASSET = {"type": "object", "additionalProperties": False, "required": ["path", "
 TASK_SCHEMA = SCHEMA["properties"]["tasks"]["items"]
 TASK_SCHEMA["properties"].update({
     "hidden": ASSET,
+    "verification": ASSET,
     "database": {"const": "postgres"},
     "allowed_changes": {"type": "array", "minItems": 1, "items": FIXTURE_PATH},
     "knowledge": {"type": "object", "additionalProperties": False,
