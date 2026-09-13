@@ -172,3 +172,14 @@ def test_the_command_line_exits_zero_whatever_it_finds(fake_run: Path, path: Pat
     assert code == 0
     assert "regression: arm off:" in printed.getvalue()
     assert "::warning title=benchmark regression::" in printed.getvalue()
+
+
+def test_invalid_spend_is_named_without_skewing_scored_cost_warning(check: Check) -> None:
+    records = accepted()
+    invalid = support.reduction_record("invalid", "on", 0, 9, 90000, "invalid")
+    invalid["cost_usd"] = 99
+    records[invalid["trial_id"]] = invalid
+    found, _ = check(report(invalid=1), records=records)
+    assert found == ["1 invalid attempt"]
+    observed = regress.observe(report(invalid=1), {invalid["trial_id"]: invalid})
+    assert observed["on"]["mean_cost_usd"] is None
