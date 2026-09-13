@@ -197,7 +197,7 @@ def test_an_absent_source_is_refused(tmp_path: Path) -> None:
 def test_the_seeded_config_forces_the_constants_and_carries_the_port(write_source: WriteSource) -> None:
     source = tenjin_arm.load_source(write_source())
     seeded = tenjin_arm.seeded_config(source, 4321)
-    assert seeded["publish"] == {"mode": "review"}
+    assert seeded["publish"] == {"mode": "review", "defaultPrice": "0"}
     # The seven product arms, all on: the product as shipped, and no key the product does not read.
     assert seeded["hooks"] == {arm: True for arm in ("prompt", "web-search", "web-fetch", "subagent", "failure", "publish", "primer")}
     assert seeded["team"] == {"publicFallback": "on"}
@@ -207,7 +207,7 @@ def test_the_seeded_config_forces_the_constants_and_carries_the_port(write_sourc
     assert "shelfBypassSecret" not in tenjin_arm.seeded_config(source, 1, with_secret=False)
     # The producer's daemon tells the capture ask to publish; there is no other mode.
     producer_config = tenjin_arm.seeded_config(source, 1, mode="producer")
-    assert (producer_config["publish"], producer_config["baseUrl"]) == ({"mode": "auto"}, "https://team-shelf.example")
+    assert (producer_config["publish"], producer_config["baseUrl"]) == ({"mode": "auto", "defaultPrice": "0"}, "https://team-shelf.example")
     with pytest.raises(ProvisionError):
         tenjin_arm.seeded_config(source, 1, mode="seed")
 
@@ -379,7 +379,7 @@ def test_the_phase_change_rewrites_the_config_and_starts_nothing(make_roots, pre
     with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a phase change starts no process")):
         consumer = tenjin_arm.start_phase(roots, provision, "consumer")
     seeded = json.loads((roots.data_dir / "config.json").read_text(encoding="utf-8"))
-    assert seeded["publish"] == {"mode": "review"}
+    assert seeded["publish"] == {"mode": "review", "defaultPrice": "0"}
     assert consumer.values == provision.values
     assert consumer.stop_state["mode"] == "consumer"
 
@@ -987,7 +987,7 @@ def test_prepare_probes_publishes_with_the_key_and_stop_deletes(seed_roots, seed
     assert PROBE_KEY not in json.dumps(seed)
     assert not (seed_roots.base / "probe").exists()
     publish = calls()[0]
-    assert publish["argv"][:1] + publish["argv"][2:] == ["publish", "--yes", "--json", "--key", f"fingerprint=sig_v1:{PROBE_KEY}"]
+    assert publish["argv"][:1] + publish["argv"][2:] == ["publish", "--yes", "--json", "--price", "0", "--key", f"fingerprint=sig_v1:{PROBE_KEY}"]
     body = Path(publish["argv"][1])
     assert body.is_relative_to(seed_roots.base) and not body.is_relative_to(seed_roots.repo)
     assert f"Benchmark seed: run 20260908T000000Z-0badf00d trial {seed_roots.trial_id}." in body.read_text(encoding="utf-8")
@@ -1010,7 +1010,7 @@ def test_a_task_with_a_fix_lesson_seeds_two_pieces_under_two_kinds_and_stop_dele
     assert seeds[1]["key_hashes"] == [tenjin_arm.key_hash(f"sig_v1_test:{fix_key}")]
     assert seeds[1]["probe"] == {"node assertion-probe.mjs": tenjin_arm.key_hash(f"sig_v1_test:{fix_key}")}
     publishes = [call["argv"] for call in calls() if call["argv"][0] == "publish"]
-    assert publishes[1][2:] == ["--yes", "--json", "--key", f"fingerprint=sig_v1_test:{fix_key}"]
+    assert publishes[1][2:] == ["--yes", "--json", "--price", "0", "--key", f"fingerprint=sig_v1_test:{fix_key}"]
     report = tenjin_arm.stop(seed_roots, provision)
     assert report["seed_deleted"] == {"piece-1": None, "piece-2": None}
     isolation = runner.isolation_of({"live": True}, provision, report)

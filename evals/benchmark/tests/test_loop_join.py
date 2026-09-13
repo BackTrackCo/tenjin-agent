@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -17,6 +18,40 @@ SESSION = "sess-family"
 ROOT = ("claude", SESSION, "")
 CHILD = ("claude", SESSION, "child01")
 SIBLING = ("claude", SESSION, "sib0a")
+
+
+def test_exact_emit_form_is_projected_without_exporting_its_text(db: Path):
+    text = "[Tenjin] A finding\n--- tenjin-body abc ---\nPrivate answer\n--- tenjin-body abc ---"
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE fires SET delivered = ?, emit = ? WHERE id = ?", ("inject:piece-1", json.dumps({"context": text}), "fire-root"))
+    projected = loop_join.project(db, [ROOT])
+    fire = projected["fires"][0]
+    assert fire["delivery_form"] == "full_body"
+    assert fire["emitted_context_chars"] == len(text)
+    assert "Private answer" not in str(projected) and "emit" not in fire
+
+
+def test_old_record_backfill_is_in_memory_and_refuses_a_different_piece(db: Path, tmp_path: Path):
+    import copy
+    import shutil
+    path = tmp_path / "run/trials/trial/data/loop.db"
+    path.parent.mkdir(parents=True)
+    text = "[Tenjin] A finding\nInspect it free: tenjin inspect piece-1"
+    with sqlite3.connect(db) as connection:
+        connection.execute("UPDATE fires SET delivered = ?, emit = ? WHERE id = ?", ("inject:piece-1", json.dumps({"context": text}), "fire-root"))
+    shutil.copyfile(db, path)
+    delivery = loop_join.project(db, [ROOT])
+    for fire in delivery["fires"]:
+        fire.pop("delivery_form")
+        fire.pop("emitted_context_chars")
+    accepted = {"trial": {"actors": [{"key": list(ROOT), "parent_actor_key": None, "parent_provenance": "unavailable"}], "delivery": delivery}}
+    original = copy.deepcopy(accepted)
+    updated = loop_join.with_presentations(accepted, tmp_path / "run")
+    assert accepted == original
+    assert updated["trial"]["delivery"]["fires"][0]["delivery_form"] == "pointer"
+    accepted["trial"]["delivery"]["fires"][0]["delivered"] = "inject:different"
+    updated = loop_join.with_presentations(accepted, tmp_path / "run")
+    assert "delivery_form" not in updated["trial"]["delivery"]["fires"][0]
 
 
 @pytest.fixture

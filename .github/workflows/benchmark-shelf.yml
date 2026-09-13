@@ -84,17 +84,18 @@ jobs:
         env:
           MODEL: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN != '' }}
           NEON: ${{ secrets.NEON_API_KEY != '' }}
+          SHELF: ${{ secrets.TENJIN_BENCH_SHELF_BYPASS_SECRET != '' && secrets.TENJIN_BENCH_SHELF_KEY_RECEIPT != '' }}
           WALLET: ${{ secrets.TENJIN_BENCH_WALLET != '' && secrets.TENJIN_BENCH_WALLET_PASSPHRASE != '' }}
         run: |
-          if [ "$MODEL" = "true" ] && [ "$NEON" = "true" ] && [ "$WALLET" = "true" ]; then
+          if [ "$MODEL" = "true" ] && [ "$NEON" = "true" ] && [ "$WALLET" = "true" ] && [ "$SHELF" = "true" ]; then
             echo "live=true" >> "$GITHUB_OUTPUT"
           else
             echo "live=false" >> "$GITHUB_OUTPUT"
             {
               echo "## ${{ inputs.lane }}: skipped"
               echo
-              echo "This lane needs three repository secrets and does not have all of them:"
-              echo "\`CLAUDE_CODE_OAUTH_TOKEN\` present: $MODEL, \`NEON_API_KEY\` present: $NEON, \`TENJIN_BENCH_WALLET\` and its passphrase present: $WALLET."
+              echo "This lane is missing benchmark credentials:"
+              echo "\`CLAUDE_CODE_OAUTH_TOKEN\` present: $MODEL, \`NEON_API_KEY\` present: $NEON, \`TENJIN_BENCH_WALLET\` and its passphrase present: $WALLET. Dedicated benchmark shelf key and receipt present: $SHELF."
               echo
               echo "No attempt ran, nothing was reset, and no number was published."
             } >> "$GITHUB_STEP_SUMMARY"
@@ -202,12 +203,15 @@ jobs:
       # this run publishes or searches can reach the team shelf; `live-run`
       # refuses a source that names any other shelf than the manifest's corpus.
       #
-      # No `shelfBypassSecret`: the bench deployment is on a custom domain and
-      # is exempt from the account's `all_except_custom_domains` protection.
+      # The existing CLI uses shelfBypassSecret to enter team mode even on a
+      # public custom domain. This key is scoped only to tenjin-bench; the
+      # independent receipt binds its digest and project into the attestation.
       - name: Build the bench data dir
         if: steps.gate.outputs.live == 'true'
         env:
           TENJIN_BENCH_WALLET: ${{ secrets.TENJIN_BENCH_WALLET }}
+          TENJIN_BENCH_SHELF_BYPASS_SECRET: ${{ secrets.TENJIN_BENCH_SHELF_BYPASS_SECRET }}
+          TENJIN_BENCH_SHELF_KEY_RECEIPT: ${{ secrets.TENJIN_BENCH_SHELF_KEY_RECEIPT }}
           # `wallet.json` is an encrypted keystore whose passphrase lives in the
           # OS keychain, not in the file, so the file alone opens nothing on a
           # runner. `TENJIN_WALLET_PASSPHRASE` is the product's headless seam
@@ -219,12 +223,7 @@ jobs:
           data="$RUNNER_TEMP/bench-data"
           mkdir -p "$data"
           chmod 700 "$data"
-          cat > "$data/config.json" <<'CONFIG'
-          {
-            "baseUrl": "https://bench.tenjin.sh",
-            "publicShelfUrl": "https://tenjin.blog"
-          }
-          CONFIG
+          "$BENCH_PY" -m evals.benchmark.benchmark_key --source "$data"
           printf '%s' "$TENJIN_BENCH_WALLET" > "$data/wallet.json"
           chmod 600 "$data/wallet.json"
           # The CLI calls below are the benchmark's traffic too, and this step
