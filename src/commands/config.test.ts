@@ -1029,6 +1029,46 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     });
   });
 
+  it('does not hold the config lock while waiting for consent', async () => {
+    let releaseConsent!: () => void;
+    let markConsentEntered!: () => void;
+    const consentEntered = new Promise<void>((resolve) => {
+      markConsentEntered = resolve;
+    });
+    const consentGate = new Promise<void>((resolve) => {
+      releaseConsent = resolve;
+    });
+    const modeSet = runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+      homeDir: home,
+      harnessesInPlay: ['codex'],
+      isInteractive: true,
+      confirmRule: async () => {
+        markConsentEntered();
+        await consentGate;
+        return true;
+      },
+      adapters: adaptersWithCodexGrant(async () => ({
+        path: join(home, '.codex', 'rules', 'tenjin.rules'),
+        granted: ['tenjin publish'],
+        wrote: true,
+      })),
+    });
+    await consentEntered;
+
+    // Completes while the first command is still at its prompt; if that prompt
+    // held config.json.lock this would time out at the lock's five-second gate.
+    await runConfigSet({ key: 'publish.defaultPrice', value: '0.25' }, makeCtx());
+    releaseConsent();
+    await modeSet;
+
+    expect(await runConfigGet({ key: 'publish.defaultPrice' }, makeCtx())).toMatchObject({
+      data: { value: { atomic: '250000' }, source: 'file' },
+    });
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'auto', source: 'file' },
+    });
+  });
+
   // Tightening only ever removes what this CLI wrote, so it needs no question —
   // including on a headless machine, which is where a stale grant would sit.
   it('retracts the rule on review, unprompted, and reports it', async () => {

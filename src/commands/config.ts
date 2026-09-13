@@ -419,6 +419,10 @@ async function setPublishKey(
   // harness could not carry. Because several files cannot commit atomically,
   // every later failure compensates completed grants back to the previous mode.
   const mode = entry.value as PublishMode;
+  // A person may take minutes to answer. Consent is gathered without the
+  // config mutex; the locked phase re-probes before it writes and refuses if
+  // the approved grant surface grew while the prompt was open.
+  const decision = await decidePublishRule(mode, ctx, deps);
   // The SAME cross-process lock used by every config writer covers grants,
   // commit and compensation as one transaction. A second mode change cannot
   // interleave a different grant or make `previousMode` stale underneath a
@@ -427,7 +431,7 @@ async function setPublishKey(
   const allowlist = await withConfigLock(ctx.dataDir, async () => {
     const existing = await loadRawConfig(ctx.dataDir);
     const previousMode = existing.publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
-    const synced = await syncPublishRule(mode, ctx, deps);
+    const synced = await syncPublishRule(mode, ctx, deps, decision);
     const failure = grantSyncFailure(synced);
     if (failure !== undefined) {
       const rollback = await rollbackGrantChanges(previousMode, synced, ctx, deps);
@@ -532,7 +536,7 @@ async function rollbackGrantChanges(
 ): Promise<GrantRollback> {
   if (!grantSyncChanged(changed)) return { attempted: false, ok: true };
   try {
-    const allowlist = await syncPublishRule(previousMode, ctx, deps, true);
+    const allowlist = await syncPublishRule(previousMode, ctx, deps, { kind: 'rollback' });
     const failure = grantSyncFailure(allowlist);
     return {
       attempted: true,
@@ -572,40 +576,26 @@ function publishRuleQuestion(
   );
 }
 
-/**
- * Keep the harness allowlist in step with the mode just written.
- *
- * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
- *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
- *    No TTY, `--json`, or a declined prompt all leave the file alone and return
- *    the pointer instead; nothing here writes on silence.
- *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
- *    the operator has just changed, so it runs unconditionally — the same reason
- *    install sweeps a retired rule without asking. Leaving it behind would keep
- *    publishing pre-cleared after the operator said "ask me first", which is the
- *    failure that matters.
- */
-async function syncPublishRule(
+interface PublishRuleContext {
+  home: string;
+  selectedAdapters: HarnessAdapter[];
+  isClaude: boolean;
+  probe: Awaited<ReturnType<typeof inspectFreeVerbRules>>;
+  pointer?: string;
+  grantable: Harness[];
+}
+
+type PublishRuleDecision =
+  | { kind: 'narrowing' | 'recheck' | 'rollback' }
+  | { kind: 'skip'; result: AllowlistSync }
+  | { kind: 'approved'; harnesses: Harness[]; pending: string[] };
+
+async function publishRuleContext(
   mode: PublishMode,
   ctx: CommandContext,
   deps: ConfigSetDeps,
-  preapproved = false,
-): Promise<AllowlistSync> {
+): Promise<PublishRuleContext> {
   const home = deps.homeDir ?? homedir();
-  const nothing: AllowlistSync = { byHarness: {} };
-
-  const write = async (): Promise<AllowlistSync> => {
-    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
-    if (result.skipped !== undefined) {
-      return {
-        byHarness: { claude: result },
-        skipped: 'unwritable',
-        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
-      };
-    }
-    return { byHarness: { claude: result } };
-  };
-
   const adapters = deps.adapters ?? ADAPTERS;
   const env = deps.env ?? process.env;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
@@ -630,6 +620,110 @@ async function syncPublishRule(
       .map((entry) => entry.adapter.id);
   const selectedAdapters = inPlay.map((harness) => adapters[harness]);
   const isClaude = inPlay.includes('claude');
+  const probe = isClaude
+    ? await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode)
+    : { pending: [] as string[] };
+  const gated = new Set<string>(MODE_GATED_RULES);
+  const missing = (probe.pending ?? []).filter((rule) => gated.has(rule));
+  const pointer = modeGatedPointer(mode, missing) ?? undefined;
+  return {
+    home,
+    selectedAdapters,
+    isClaude,
+    probe,
+    ...(pointer !== undefined ? { pointer } : {}),
+    grantable: selectedAdapters
+      .filter((adapter) => adapter.registrar.grant !== undefined)
+      .map((adapter) => adapter.id),
+  };
+}
+
+/** Ask before the transaction lock. The returned receipt is narrow: the locked
+ * phase may write only the same harnesses and no rules beyond those disclosed. */
+async function decidePublishRule(
+  mode: PublishMode,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+): Promise<PublishRuleDecision> {
+  if (mode === 'review') return { kind: 'narrowing' };
+  const planned = await publishRuleContext(mode, ctx, deps);
+  const nothing: AllowlistSync = { byHarness: {} };
+  if (planned.grantable.length === 0) {
+    return { kind: 'skip', result: { ...nothing, skipped: 'not-claude' } };
+  }
+  if (
+    planned.probe.satisfied !== undefined &&
+    planned.selectedAdapters.length === 1 &&
+    planned.isClaude
+  ) {
+    return { kind: 'recheck' };
+  }
+  const canPrompt =
+    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+  if (!canPrompt) {
+    return {
+      kind: 'skip',
+      result: {
+        ...nothing,
+        skipped: 'no-tty',
+        ...(planned.pointer !== undefined ? { pointer: planned.pointer } : {}),
+      },
+    };
+  }
+  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
+  if (!(await confirm(publishRuleQuestion(mode, planned.probe.pending ?? [], planned.grantable)))) {
+    return {
+      kind: 'skip',
+      result: {
+        ...nothing,
+        skipped: 'declined',
+        ...(planned.pointer !== undefined ? { pointer: planned.pointer } : {}),
+      },
+    };
+  }
+  return {
+    kind: 'approved',
+    harnesses: planned.grantable,
+    pending: [...(planned.probe.pending ?? [])],
+  };
+}
+
+/**
+ * Keep the harness allowlist in step with the mode just written.
+ *
+ * ASYMMETRIC ON PURPOSE, and the asymmetry is the consent rule:
+ *  - Loosening (auto/full-auto) ADDS a grant, so it needs a human in the loop.
+ *    No TTY, `--json`, or a declined prompt all leave the file alone and return
+ *    the pointer instead; nothing here writes on silence.
+ *  - Tightening (review) only ever REMOVES a rule this CLI wrote under a setting
+ *    the operator has just changed, so it runs unconditionally — the same reason
+ *    install sweeps a retired rule without asking. Leaving it behind would keep
+ *    publishing pre-cleared after the operator said "ask me first", which is the
+ *    failure that matters.
+ */
+async function syncPublishRule(
+  mode: PublishMode,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+  decision: PublishRuleDecision,
+): Promise<AllowlistSync> {
+  const planned = await publishRuleContext(mode, ctx, deps);
+  const { home, selectedAdapters, isClaude, probe, pointer, grantable } = planned;
+  const nothing: AllowlistSync = { byHarness: {} };
+
+  const write = async (): Promise<AllowlistSync> => {
+    const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
+    if (result.skipped !== undefined) {
+      return {
+        byHarness: { claude: result },
+        skipped: 'unwritable',
+        ...(result.fix !== undefined ? { pointer: result.fix } : {}),
+      };
+    }
+    return { byHarness: { claude: result } };
+  };
+
+  const env = deps.env ?? process.env;
 
   const withOtherGrants = async (sync: AllowlistSync): Promise<AllowlistSync> => {
     const byHarness = { ...sync.byHarness };
@@ -646,20 +740,11 @@ async function syncPublishRule(
   // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
   // that nothing reads, so prompting about it is noise and writing to it is an
   // uninvited edit — and the retraction would sweep a file we never owned.
-  if (selectedAdapters.every((adapter) => adapter.registrar.grant === undefined)) {
+  if (grantable.length === 0) {
     // No settings file of ours to be missing anything, so the pointer would be
     // advice about a machine this is not.
     return { ...nothing, skipped: 'not-claude' };
   }
-
-  const probe = isClaude
-    ? await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode)
-    : { pending: [] as string[] };
-  const gated = new Set<string>(MODE_GATED_RULES);
-  const missing = (probe.pending ?? []).filter((r) => gated.has(r));
-  // Only ever names rules this machine does not have. A pointer built from the
-  // mode alone told a fully-wired operator to go add what they already had.
-  const pointer = modeGatedPointer(mode, missing) ?? undefined;
 
   // Tightening runs with no question and with no precondition, through a pass
   // that can only ever REMOVE. Riding the additive writer made this decline
@@ -687,19 +772,22 @@ async function syncPublishRule(
   // already has.
   if (probe.satisfied !== undefined && selectedAdapters.length === 1 && isClaude) return nothing;
 
-  const grantable = selectedAdapters
-    .filter((adapter) => adapter.registrar.grant !== undefined)
-    .map((adapter) => adapter.id);
-  if (!preapproved) {
-    const canPrompt =
-      ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-    if (!canPrompt) {
-      return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
-    }
-
-    const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
-    if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
-      return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
+  if (decision.kind === 'skip') return decision.result;
+  if (decision.kind === 'recheck') {
+    return { ...nothing, skipped: 'no-tty', ...(pointer !== undefined ? { pointer } : {}) };
+  }
+  if (decision.kind === 'approved') {
+    const sameHarnesses =
+      decision.harnesses.length === grantable.length &&
+      decision.harnesses.every((harness, index) => harness === grantable[index]);
+    const disclosed = new Set([...decision.pending, ...MODE_GATED_RULES]);
+    const addedSincePrompt = (probe.pending ?? []).filter((rule) => !disclosed.has(rule));
+    if (!sameHarnesses || addedSincePrompt.length > 0) {
+      throw new CliError(
+        'REFUSED',
+        'The harness grant surface changed while confirmation was open, so nothing was written.',
+        { fix: `Re-run \`tenjin config set publish.mode ${mode}\` to review the current grant.` },
+      );
     }
   }
   return await withOtherGrants(isClaude ? await write() : nothing);
