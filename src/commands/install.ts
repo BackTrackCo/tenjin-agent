@@ -709,6 +709,26 @@ async function installBody(
   const hooks = await underDataDir(ctx.dataDir, () =>
     resolveHooks({ harnesses: selectedHarnesses, home, ctx, deps, noHooks, dryRun }),
   );
+  const failedActivation = hooks.find(
+    (hook) => hook.trusted !== undefined && hook.warning !== undefined,
+  );
+  if (failedActivation?.warning !== undefined) {
+    // Finish every selected harness first, then fail the command. A mixed
+    // install therefore preserves Claude's usable result in the error details,
+    // while Codex-only automation still gets the non-zero outcome an inert loop
+    // requires instead of mistaking a warning-bearing success for completion.
+    throw new CliError('REFUSED', failedActivation.warning, {
+      ...(failedActivation.fix !== undefined ? { fix: failedActivation.fix } : {}),
+      details: {
+        dryRun,
+        skillsSource,
+        harnesses,
+        publishMode,
+        permissions: { byHarness: grants },
+        hooks,
+      },
+    });
+  }
 
   // On BOTH paths: the loop this command sets up needs a key, so a headless run
   // creates one rather than leaving the operator a setup that stops at the first
@@ -1636,6 +1656,7 @@ async function activateHooks(
   if (!result.ok) {
     return {
       ...written,
+      trusted: result.trusted.length,
       warning: `Codex hook trust could not be completed at the ${result.failedAt} step: ${result.reason}. The ${written.entries} entries are written but Codex will not run them.`,
       fix: 'Run `tenjin install --harness claude` to keep the Claude installation only, or fix the Codex app server and re-run `tenjin install --harness codex`.',
     };

@@ -887,6 +887,32 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     expect(syncOf(res.data)?.codexGrant?.granted).toEqual(['tenjin publish']);
   });
 
+  it('does not persist the mode when the accepted Codex grant write fails', async () => {
+    const path = join(home, '.codex', 'rules', 'tenjin.rules');
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        harnessesInPlay: ['codex'],
+        isInteractive: true,
+        confirmRule: async () => true,
+        adapters: adaptersWithCodexGrant(async () => ({
+          path,
+          granted: [],
+          wrote: false,
+          error: 'permission denied',
+        })),
+      }),
+    );
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('permission denied'),
+      fix: expect.stringContaining('tenjin config set publish.mode auto'),
+    });
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'review', source: 'default' },
+    });
+  });
+
   // Tightening only ever removes what this CLI wrote, so it needs no question —
   // including on a headless machine, which is where a stale grant would sit.
   it('retracts the rule on review, unprompted, and reports it', async () => {

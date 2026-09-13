@@ -3476,26 +3476,58 @@ describe('runInstall: harness hooks', () => {
     expect(JSON.stringify(file)).not.toContain(DAEMON_PORT.toString());
   });
 
-  it('keeps the Claude install usable when Codex trust cannot be completed', async () => {
-    const res = await runInstall(
-      { harness: ['claude', 'codex'] },
-      makeCtx({ json: true }),
-      deps({
-        adapters: adaptersWithTrust(async () => ({
-          ok: false,
-          trusted: [],
-          failedAt: 'list',
-          reason: 'the codex app server could not be reached',
-        })),
-      }),
+  it('fails but keeps the Claude install usable when Codex trust cannot be completed', async () => {
+    const err = await caught(() =>
+      runInstall(
+        { harness: ['claude', 'codex'] },
+        makeCtx({ json: true }),
+        deps({
+          adapters: adaptersWithTrust(async () => ({
+            ok: false,
+            trusted: [],
+            failedAt: 'list',
+            reason: 'the codex app server could not be reached',
+          })),
+        }),
+      ),
     );
-    const hooks = (res.data as HooksData).hooks;
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('app server could not be reached'),
+      fix: expect.stringContaining('--harness claude'),
+    });
+    const hooks = (err.details as HooksData).hooks;
     expect(hooks.find((h) => h.harness === 'claude')).toMatchObject({ entries: 11 });
     expect(hooks.find((h) => h.harness === 'codex')).toMatchObject({
       entries: 7,
+      trusted: 0,
       warning: expect.stringContaining('app server could not be reached'),
       fix: expect.stringContaining('--harness claude'),
     });
+  });
+
+  it('fails a Codex-only install when its written hooks cannot be trusted', async () => {
+    const err = await caught(() =>
+      runInstall(
+        { harness: ['codex'] },
+        makeCtx({ json: true }),
+        deps({
+          adapters: adaptersWithTrust(async () => ({
+            ok: false,
+            trusted: [],
+            failedAt: 'verify',
+            reason: 'Codex confirmed 0 of 7 entries as trusted after the write',
+          })),
+        }),
+      ),
+    );
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      message: expect.stringContaining('0 of 7 entries'),
+    });
+    expect((err.details as HooksData).hooks).toEqual([
+      expect.objectContaining({ harness: 'codex', entries: 7, trusted: 0 }),
+    ]);
   });
 
   it('both harnesses: one outcome each, one daemon, and Codex reported as trusted', async () => {

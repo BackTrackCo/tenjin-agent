@@ -395,18 +395,41 @@ async function setPublishKey(
         : 'defaultPrice';
   const stored =
     key === 'publish.defaultPrice' ? (entry.value as Money).atomic : (entry.value as string);
-  await persist(ctx.dataDir, (existing) => ({
-    ...existing,
-    publish: { ...existing.publish, [subkey]: stored },
-  }));
+  const persistEntry = async (): Promise<void> =>
+    persist(ctx.dataDir, (existing) => ({
+      ...existing,
+      publish: { ...existing.publish, [subkey]: stored },
+    }));
   const humanLines = [formatLine(key, entry)];
-  if (key !== 'publish.mode') return { data: { key, ...entry }, humanLines };
+  if (key !== 'publish.mode') {
+    await persistEntry();
+    return { data: { key, ...entry }, humanLines };
+  }
 
   // The mode decides whether a publish asks; the harness rule decides whether the
   // harness asks ANYWAY. Settling one and leaving the other to the next `tenjin
   // install` is the seam that made publish.mode look broken (tenjin-agent #161),
   // so the two move together from here too.
+  // Synchronize before committing the mode. A grant writer may refuse after
+  // consent (permissions, concurrent edits, an unwritable parent); persisting
+  // first made the command exit successfully with an unattended mode that its
+  // harness could not carry. Grant-first is also the least-authority failure
+  // order: if a later config write fails, the CLI still resolves the old mode.
   const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
+  const failure = grantSyncFailure(allowlist);
+  if (failure !== undefined) {
+    throw new CliError(
+      'REFUSED',
+      `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
+      {
+        fix:
+          failure.fix ??
+          `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
+        details: { key, value: entry.value, allowlist },
+      },
+    );
+  }
+  await persistEntry();
   return {
     data: { key, ...entry, allowlist },
     humanLines: [...humanLines, ...allowlistLines(allowlist)],
@@ -422,6 +445,30 @@ interface AllowlistSync {
   byHarness: Partial<Record<Harness, PermissionsResult | CodexGrantResult>>;
   skipped?: 'not-claude' | 'no-tty' | 'declined' | 'unwritable';
   pointer?: string;
+}
+
+/** A writer refusal is an error, not informational output: the mode and every
+ * harness grant are one operator decision and may not report success apart. */
+function grantSyncFailure(
+  sync: AllowlistSync,
+): { harness: Harness; path: string; reason: string; fix?: string } | undefined {
+  for (const [harness, result] of Object.entries(sync.byHarness) as [
+    Harness,
+    PermissionsResult | CodexGrantResult,
+  ][]) {
+    if ('error' in result && result.error !== undefined) {
+      return { harness, path: result.path, reason: result.error };
+    }
+    if ('warning' in result && result.warning !== undefined) {
+      return {
+        harness,
+        path: result.path ?? '(unknown path)',
+        reason: result.warning,
+        ...(result.fix !== undefined ? { fix: result.fix } : {}),
+      };
+    }
+  }
+  return undefined;
 }
 
 /** Names what the write actually carries: on a machine that never ran `install`,
