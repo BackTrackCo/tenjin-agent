@@ -114,7 +114,7 @@ def assert_bench2_tasks(manifest: manifest_module.Manifest) -> None:
 def test_the_real_manifest_is_the_phase_one_local_pilot() -> None:
     manifest = manifest_module.load(experiments.REAL_MANIFEST)
     trials = schedule.expand(manifest)
-    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-2-host1")
+    assert (len(trials), manifest.data["repeats"], manifest.data["benchmark_version"]) == (6, 1, "bench2-local-preflight-3-host1")
     schedule.check_balance(trials, [arm["id"] for arm in manifest.arms])
     assert [arm["id"] for arm in manifest.arms] == ["off", "tenjin_natural"]
     off, natural = manifest.arms

@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-local-preflight-2-host1",
+  "benchmark_version": "bench2-local-preflight-3-host1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,

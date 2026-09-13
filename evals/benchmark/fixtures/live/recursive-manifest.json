@@ -1,5 +1,5 @@
 {
-  "benchmark_version": "bench2-recursive-6-host1",
+  "benchmark_version": "bench2-recursive-7-host1",
   "schema_version": 1,
   "harness": "claude",
   "seed": 20260908,

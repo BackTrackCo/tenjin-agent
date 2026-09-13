@@ -131,8 +131,9 @@ partial core's pace, combined runtime is provisionally **3–4 hours**, before a
 overhead. Natural trials now avoid one redundant dependency export each (30 core plus three
 recursive); the measured saving is not yet known. Codex managed-auth runs remain serial,
 Claude independent work may fill three workers, and shared-shelf trials remain exclusive through
-publication, consumption and cleanup. The initial protocol preflight passed; the next full run waits for current-main integration
-and its fresh preflight, not database migrations.
+publication, consumption and cleanup. The initial protocol preflight passed. Current main is integrated; preflight version 3, core
+version 4 and recursive version 7 identify the new failure-ledger readout. Fresh measurements
+start with a new preflight and rebuilt CLI/images, not an old-runtime checkpoint.
 
 The earlier eight-hour planning allowance is superseded by these preliminary measurements.
 GitHub-hosted jobs stop at six hours. The shared runner now subtracts elapsed setup and reserves
