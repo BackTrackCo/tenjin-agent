@@ -176,7 +176,7 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {
         "attempts": len(phases),
         "passes": sum(1 for phase in phases if phase.get("outcome") == "pass"),
-        "captured": sum(1 for phase in phases if sum(phase.get("capture", {}).get("pairings", {}).get(status, 0) for status in ("unverified", "verified")) > 0),
+        "captured": sum(1 for phase in phases if phase.get("capture", {}).get("findings", 0) > 0),
         "findings": sum(int(phase.get("capture", {}).get("findings", 0)) for phase in phases),
         "invalid": sum(1 for phase in phases if phase.get("outcome") == "invalid"),
         "wal_live": sum(1 for phase in phases if phase.get("wal_live_between_phases")),

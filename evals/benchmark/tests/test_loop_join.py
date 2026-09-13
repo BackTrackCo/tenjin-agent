@@ -59,11 +59,8 @@ def test_legs_are_counted_per_shelf_and_a_skipped_leg_is_not_a_request(db: Path)
 
 
 def test_every_shelf_the_product_writes_has_a_class_and_only_an_unknown_one_is_other() -> None:
-    # The tool-failure fire sends a keys leg and a local leg; the prompt
-    # fire sends a team leg and, on a team miss, a public leg. The keys
-    # leg is served by the public marketplace, so it is a public request;
-    # the local leg never leaves the process, so it is not a request at
-    # all; a shelf value outside the product's union is an unknown origin.
+    # Fingerprint resolution goes to the team; only public fallback is public.
+    # Local handoff remains a local read after inferred pairings are removed.
     legs = [
         {"shelf": "team", "status": "ok", "outcome": "miss"},
         {"shelf": "public", "status": "timeout", "outcome": "no-answer"},
@@ -74,8 +71,8 @@ def test_every_shelf_the_product_writes_has_a_class_and_only_an_unknown_one_is_o
         {"shelf": "public", "status": "skipped", "outcome": None},
     ]
     assert loop_join.count_shelves(legs) == {"team": 1, "public": 1, "keys": 2, "local": 1, "other": 1}
-    assert loop_join.classify(legs) == {"team": 1, "public": 3, "local": 1, "other": 1}
-    assert loop_join.public_summary(legs) == {"legs": 3, "hits": 1, "timeouts": 1, "no_answer": 1}
+    assert loop_join.classify(legs) == {"team": 3, "public": 1, "local": 1, "other": 1}
+    assert loop_join.public_summary(legs) == {"legs": 1, "hits": 0, "timeouts": 1, "no_answer": 1}
     for shelf in loop_join.SHELVES:
         assert loop_join.class_of({"shelf": shelf}) in loop_join.CLASSES
         assert loop_join.class_of({"shelf": shelf}) != "other"
@@ -154,11 +151,11 @@ def test_foreign_database_is_an_error(tmp_path: Path) -> None:
         loop_join.project(other, [ROOT])
 
 
-def test_the_last_keyed_failure_fire_names_its_lane_and_the_keys_leg_verdict(tmp_path: Path) -> None:
+def test_the_last_keyed_failure_fire_names_all_its_fingerprints_and_the_keys_leg_verdict(tmp_path: Path) -> None:
     path = tmp_path / "loop.db"
     connection = sqlite3.connect(path)
     connection.executescript(loop_ddl())
-    for fire_id, at, key, delivered in (("f1", 1, "aaaaaaaaaaaaaaaa", None), ("f2", 2, "502b90852a1505e3", "keys:piece-7")):
+    for fire_id, at, key, delivered in (("f1", 1, "aaaaaaaaaaaaaaaa", None), ("f2", 2, "sig_v1:aaaaaaaaaaaaaaaa|sig_v1_test:502b90852a1505e3|line:abcdef", "keys:piece-7")):
         connection.execute(
             "INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms, elapsed_ms, reason, question_key, delivered)"
             " VALUES (?, ?, 's', '', 'failure', 'claude', 'tool.after', '', 'sync', 1000, 5, 'hit', ?, ?)",
@@ -166,13 +163,10 @@ def test_the_last_keyed_failure_fire_names_its_lane_and_the_keys_leg_verdict(tmp
         )
     connection.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('f2', 0, 'local', 'ok', 'no-answer', 1)")
     connection.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('f2', 0, 'keys', 'ok', 'hit', 40)")
-    connection.execute(
-        "INSERT INTO pairings (uid, at, session, project, machine, kind, key, scope, status) VALUES ('u', 2, 's', 'p', 'm', 'sig_v1_test', '502b90852a1505e3', 'project', 'open')"
-    )
     connection.commit()
     connection.close()
     key = loop_join.project(path, [])["failure_key"]
-    assert (key["fire_id"], key["lane"], key["keys_leg_hit"], key["delivered_piece_id"], key["report_file_present"]) == ("f2", "sig_v1_test", True, "piece-7", None)
+    assert (key["fire_id"], key["lanes"], key["keys_leg_hit"], key["delivered_piece_id"], key["report_file_present"]) == ("f2", ["sig_v1", "sig_v1_test"], True, "piece-7", None)
     assert key["keys_leg"] == {"status": "ok", "outcome": "hit"}
     assert re.match(r"^[0-9a-f]{16}$", key["key_hash"])
     assert "502b90852a1505e3" not in str(key)
@@ -213,3 +207,17 @@ def test_namespaced_ledger_joins_native_root_and_children_without_aliasing(db, h
     foreign = loop_join.project(db, [], (f"{harness}:{SESSION}",))
     assert foreign["unmatched_fires"] == []
     assert foreign["phase_fires"] == {f"{harness}:{SESSION}": 3}
+
+
+def test_line_only_failure_has_no_fingerprint_and_retains_team_text_delivery(tmp_path: Path) -> None:
+    path = tmp_path / "loop.db"
+    with sqlite3.connect(path) as db:
+        db.executescript(loop_ddl())
+        db.execute("DROP TABLE IF EXISTS pairings")
+        db.execute("INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms, elapsed_ms, reason, question_key, question, delivered) VALUES ('line', 1, 's', '', 'failure', 'claude', 'tool.after', '', 'tool', 1000, 5, 'hit', 'line:abc', 'AssertionError: expected root', 'team:text-piece')")
+        db.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES ('line', 0, 'team', 'ok', 'hit', 5)")
+    key = loop_join.project(path, [])['failure_key']
+    assert key['lanes'] == []
+    assert key['keys_leg'] is None
+    assert key['keys_leg_hit'] is False
+    assert key['delivered_piece_id'] == 'text-piece'

@@ -3,7 +3,7 @@
 `python3 -m evals.benchmark.cli cases --run <dir> --tenjin-source <dir> --out <file.jsonl>`
 reads a settled run and writes one JSONL record per hook fire that carried a
 question or a question key: the prompt as fired, or for a failure fire the
-command head and error line the ledger holds as the observed situation packet,
+masked error line the fire holds as the observed situation packet,
 the context the benchmark knows about the trial, the baseline's own outcome
 from the ledger, and the shelf's shortlist for the same question (post-floor,
 top ten). Human labels are not filled in here; the schema note says what a
@@ -47,7 +47,6 @@ LABELS_SCHEMA = (
 )
 FIRE_COLUMNS = ("id", "at", "session", "agent", "arm", "harness", "event", "prompt_id", "reason", "question_key", "question", "delivered", "error")
 LEG_COLUMNS = ("stage", "shelf", "status", "outcome", "elapsed_ms", "search_id", "title", "url", "form", "calibration")
-PAIRING_COLUMNS = ("kind", "key", "cmd_head", "cmd", "error_line", "error_files", "status", "post_id")
 
 Replay = Callable[[str], dict[str, Any]]
 
@@ -97,7 +96,7 @@ def refuse_live(run_dir: Path, trial_ids: list[str]) -> None:
 
 
 def ledger(loop_db: Path) -> dict[str, Any] | None:
-    """The trial's fires, their legs, and the pairings by key, read only; None when the trial has no ledger."""
+    """The trial's fires and their legs, read only; None when the trial has no ledger."""
     if not loop_db.is_file():
         return None
     uri = f"file:{loop_db.resolve().as_posix()}?mode=ro&immutable=1"
@@ -108,33 +107,18 @@ def ledger(loop_db: Path) -> dict[str, Any] | None:
         legs: dict[str, list[dict[str, Any]]] = {}
         for row in connection.execute(f"SELECT fire_id, {', '.join(LEG_COLUMNS)} FROM legs ORDER BY fire_id, stage, shelf"):
             legs.setdefault(row["fire_id"], []).append({name: row[name] for name in LEG_COLUMNS})
-        pairings: dict[str, list[dict[str, Any]]] = {}
-        try:
-            for row in connection.execute(f"SELECT {', '.join(PAIRING_COLUMNS)} FROM pairings ORDER BY at, id"):
-                pairings.setdefault(row["key"], []).append({name: row[name] for name in PAIRING_COLUMNS})
-        except sqlite3.Error:
-            pairings = {}
     except sqlite3.Error as error:
         raise CasesError(f"cannot read {loop_db}: {error}") from error
     finally:
         connection.close()
-    return {"fires": fires, "legs": legs, "pairings": pairings}
+    return {"fires": fires, "legs": legs}
 
 
-def situation(fire: dict[str, Any], pairings: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
-    """A failure fire's observed situation: the command head and the error line the pairing row kept, each with its source."""
-    key = fire.get("question_key")
-    rows = pairings.get(key or "", [])
-    if not rows:
-        return None if fire.get("event") != "tool.after" and fire.get("arm") != "failure" else {"command_head": None, "command": None, "error_line": None, "source": "no pairings row for the fire's question_key"}
-    row = rows[-1]
+def situation(fire: dict[str, Any]) -> dict[str, Any]:
+    """The masked failure question the current product records; commands are not retained."""
     return {
-        "command_head": row["cmd_head"],
-        "command": row["cmd"],
-        "error_line": row["error_line"],
-        "error_files": row["error_files"],
-        "key_kind": row["kind"],
-        "source": {"command_head": "pairings.cmd_head", "command": "pairings.cmd", "error_line": "pairings.error_line", "key": "fires.question_key = pairings.key"},
+        "error_line": fire.get("question") or None,
+        "source": {"error_line": "fires.question", "key": "fires.question_key"},
     }
 
 
@@ -224,7 +208,7 @@ def trial_cases(manifest: Manifest, run_dir: Path, nonce: str | None, record: di
             "fixture_hash": task["fixture_hash"],
             "family": task["family"],
             "transfer_distance": task["transfer_distance"],
-            "situation": situation(fire, rows["pairings"]) if failure else None,
+            "situation": situation(fire) if failure else None,
             "runner": {
                 "package_manager": isolation.get("package_manager"),
                 "vendor": task.get("vendor"),
