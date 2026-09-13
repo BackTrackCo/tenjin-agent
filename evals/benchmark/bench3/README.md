@@ -2,7 +2,7 @@
 
 This is the single Bench-3 experiment PR (#355). `protocol.json` defines the
 population, deterministic pilot proof queue, four treatments, historical knowledge
-cutoffs, delivery analysis and completion metrics. Model admission is still false.
+cutoffs, delivery analysis and completion metrics. The pilot is admitted; model results remain pending.
 All reusable preparation, containers, databases, task/knowledge assets, scheduling,
 verification, reporting and cleanup arrive from Bench-1 through #313.
 
@@ -38,8 +38,11 @@ are disclosed; all four producer tasks declare callable interfaces for independe
 testing. This evaluates implementation under those interfaces, not unconstrained
 architecture selection. Existing tests, fixture support and tooling remain fixed.
 The earlier producer tasks and four historically versioned lesson bodies have been
-reviewed. The pilot still needs model-visible environment proof, bound manifests and
-frozen caps before admission. Stale prior release policy is a declared risk,
+reviewed. The model-visible environment passed 33 isolated source/adapter checks. Bound
+manifests pass all 16 distinct task/arm dry-run templates, including four producers.
+The pilot freezes 600 seconds per phase, Sol/low/requested-fast subscription mode,
+and serialized mutable-shelf execution. All eight immutable consumer/producer images are built and their identities verified.
+The admitted pilot is diagnostic; it cannot establish a representative team effect. Stale prior release policy is a declared risk,
 not an approved correct answer for the later task.
 
 Prepare each revision from a checkout containing its Git objects:

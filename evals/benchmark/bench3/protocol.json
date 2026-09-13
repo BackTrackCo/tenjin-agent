@@ -1,7 +1,7 @@
 {
   "schema": "bench3.protocol.v1",
-  "status": "admission-in-progress",
-  "model_admission": false,
+  "status": "pilot-admitted-results-pending",
+  "model_admission": true,
   "population": {
     "window_start": "2026-08-15T00:00:00Z",
     "window_end_exclusive": "2026-09-12T00:00:00Z",
@@ -111,13 +111,7 @@
     "speed_mode": "fast requested, actual availability recorded",
     "harness": "Resolve latest official Codex CLI once into an integrity-bound lock; resume that exact release.",
     "concurrency": "Respect serialized shared subscription refresh and exclusive mutable corpus. Parallelize independent source preparation and no-model verification where safe.",
-    "caps": "Freeze task cap and complete run budget after no-model admission and before the first pilot model attempt."
+    "caps": "Frozen before model admission: 600 seconds per producer or consumer phase, 48 consumer attempts and 12 producer attempts, at most 36,000 model-bracket seconds plus separately reported preparation, publication and verification. No automatic paid fallback or cap increase."
   },
-  "admission_remaining": [
-    "Finalize reviewed task clusters and objective eligibility",
-    "Complete all four consumer and four prior producer verifier proofs",
-    "Freeze full work orders and historically prior versioned lesson/distractor bodies",
-    "Materialize both repository manifests through Bench-1 and validate dry runs",
-    "Freeze pilot caps and run identity before spending"
-  ]
+  "admission_remaining": []
 }
