@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shutil
 
-from . import container, database_service, verifier, vitest_result
+from . import container, database_service, historical_outputs, verifier, vitest_result
 
 
 def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> verifier.Verdict:
@@ -51,7 +51,8 @@ def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> v
             historical = spec.kind == "historical_vitest"
             if historical:
                 # Use fresh image dependencies, never model-modified tooling.
-                for argv in (["tar", "-C", str(target), "--exclude=./node_modules", "--exclude=./.pnpm-store", "--exclude=./tsconfig.tsbuildinfo", "-cf", "/tmp/historical-source.tar", "."],
+                excludes = [f"--exclude=./{name}" for name in historical_outputs.names(repo)]
+                for argv in (["tar", "-C", str(target), "--no-wildcards", *excludes, "-cf", "/tmp/historical-source.tar", "."],
                              ["mkdir", "-p", "/tmp/historical-task"],
                              ["tar", "-xf", "/tmp/historical-source.tar", "-C", "/tmp/historical-task"],
                              ["ln", "-s", "/opt/fixture/node_modules", "/tmp/historical-task/node_modules"]):

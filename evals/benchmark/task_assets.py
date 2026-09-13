@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import sha256_dir, sha256_file, sha256_json, verifier
+from . import historical_outputs, sha256_dir, sha256_file, sha256_json, verifier
 
 HISTORICAL = "historical_vitest"
 ORACLE = "src/benchmark-independent.test.ts"
@@ -52,6 +52,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
                     if "sha256:" + sha256_dir(asset) != task[key]["hash"]:
                         raise ValueError(f"{key} asset hash differs")
                 if task["verifier"] == HISTORICAL:
+                    if historical_outputs.names(fixture):
+                        raise ValueError("historical fixture contains reserved generated outputs")
                     if not task.get("hidden") or not task.get("verification") or not task.get("allowed_changes"):
                         raise ValueError("historical verifier needs hidden, verification assets and allowed changes")
                     hidden = confined(base, task["hidden"]["path"])
@@ -165,7 +167,7 @@ def changed_outside_contract(spec: verifier.VerifierSpec, repo: Path) -> str | N
     for actual in repo.rglob("*"):
         relative = actual.relative_to(repo).as_posix()
         # Dependencies are replaced from the immutable image before execution.
-        if relative.startswith("node_modules/") or relative.split("/")[0] in {".git", ".bench1", ".pnpm-store"} or relative == "tsconfig.tsbuildinfo":
+        if historical_outputs.contains(relative) or relative.split("/")[0] in {".git", ".bench1"}:
             continue
         if not actual.is_file() and not actual.is_symlink():
             continue
