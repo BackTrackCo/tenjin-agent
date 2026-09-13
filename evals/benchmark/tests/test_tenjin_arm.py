@@ -1815,6 +1815,7 @@ def test_pipeline_policy_keeps_failed_producer_spend_and_runs_consumer(
     data = natural_manifest.data
     natural = next(arm for arm in data['arms'] if arm['id'] == 'tenjin_natural')
     natural['producer_failure'] = 'continue_unpublished'
+    natural['capture_publication'] = 'host'
     spawns = []
     base = producer_spawn(fix=False)
     def spawn(launch, roots, timeout_s):
@@ -1827,3 +1828,5 @@ def test_pipeline_policy_keeps_failed_producer_spend_and_runs_consumer(
     assert record['isolation']['producer']['outcome'] == 'fail'
     assert record['isolation']['producer']['consumer_policy'] == 'continue-without-producer-publication'
     assert record['auxiliary']
+    assert record['isolation']['producer']['publication']['pieces'] == []
+    assert record['isolation']['producer']['publication']['status'] == 'not-attempted-producer-failed'
