@@ -841,12 +841,21 @@ const CARD_KEY_MEANING: Record<string, string> = {
 /**
  * REFUSE AN UNPUBLISHABLE DOCUMENT BY NAME, before anything is written.
  *
- * The answer card is the whole of what makes a finding findable: without it the
- * next searcher gets a title and a price and no way to judge fit, and the piece
- * fails every `freshWithin` and `appliesTo` filter. It used to be optional, and
- * the receipt said so afterwards — which is a complaint about a piece that is
- * already public. This is the same rubric, run first, spelling the missing
- * frontmatter keys so the author can fix the file and re-run.
+ * WHAT THE GATE ACTUALLY BUYS, stated carefully, because the easy version of
+ * this sentence is not true. The five fields are the server's COMPLETENESS
+ * rubric, and completeness sets the sort tier: a complete card ranks above every
+ * incomplete one in plain search, and it is the rank-1 card a searcher reads to
+ * judge fit before paying. That is the whole mechanical effect. The `freshWithin`
+ * and `appliesTo` gates fail only a row with NO card at all — any card row
+ * passes `freshWithin` for a durable piece, and `appliesTo` matches only a card
+ * that carries that map, which this gate does not require and must not, because
+ * a required `appliesTo` is a field authors fill with invented values.
+ *
+ * So this is a quality policy mirrored from the server's rubric, with that one
+ * ranking effect. It used to be optional and the receipt complained afterwards,
+ * which is a complaint about a piece that is already public; this is the same
+ * rubric run first, spelling the missing frontmatter keys so the author can fix
+ * the file and re-run.
  *
  * DRAFTS DO NOT COME HERE. A draft is unfinished by definition; the caller
  * decides when it is finished by publishing it.
