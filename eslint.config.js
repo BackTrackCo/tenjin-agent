@@ -10,6 +10,7 @@ export default [
       'node_modules/**',
       'evals/benchmark/fixtures/**',
       'evals/benchmark/hidden/**',
+      'evals/benchmark/local/**',
     ],
   },
   js.configs.recommended,
