@@ -346,6 +346,9 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     if image is not None:
         isolation = {**isolation, "image": image.facts}
     from . import task_assets
+    provenance = task_assets.source_facts(manifest, task)
+    if provenance is not None:
+        isolation = {**isolation, "historical_source": provenance}
     knowledge = task_assets.knowledge_facts(manifest, task, arm)
     if knowledge is not None:
         isolation = {**isolation, "knowledge": knowledge}
@@ -411,6 +414,11 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
             )
             provision = produced.provision
             foreign_sessions = produced.foreign_sessions
+            prior_source = task_assets.source_facts(manifest, prior)
+            if prior_source is not None:
+                produced.facts["historical_source"] = prior_source
+            if prior_image is not None:
+                produced.facts["image"] = prior_image.facts
             isolation = {**isolation, "producer": produced.facts}
             artifact.refresh_repo(roots, manifest.fixture_path(task), image)
         launch = spec.launch(

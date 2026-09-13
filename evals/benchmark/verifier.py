@@ -65,6 +65,8 @@ class VerifierSpec:
     hidden_layer: Path | None = None
     container_test: str | None = None
     marker: Callable[[Path], str | None] | None = None
+    support: Path | None = None
+    support_hash: str | None = None
     database: bool = False
     kind: str = "node"
     fixture: Path | None = None
