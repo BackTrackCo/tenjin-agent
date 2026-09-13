@@ -319,7 +319,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     spec = executor.lookup(arm["executor"])
     if spec.harness != manifest.harness:
         raise executor.ExecutorError(f"executor {spec.name!r} runs {spec.harness!r}, manifest pins {manifest.harness!r}")
-    verifier_spec = verifier.lookup(task["verifier"])
+    verifier_spec = manifest.verifier_spec(task)
+    arm = manifest.trial_arm(task, arm)
     provisioned = seeds_shelf(manifest, trial)
     # The isolation facts a provisioned arm brings are known before any root
     # exists: they are facts about the source, and the gate reads them first so
@@ -344,6 +345,10 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
     image = images.require(task, manifest.fixture_path(task), manifest.pins) if spec.live else None
     if image is not None:
         isolation = {**isolation, "image": image.facts}
+    from . import task_assets
+    knowledge = task_assets.knowledge_facts(manifest, task, arm)
+    if knowledge is not None:
+        isolation = {**isolation, "knowledge": knowledge}
     # Natural prepare has no lesson probe. The producer installs this image's
     # dependency tree before its first launch; avoid exporting it only to have
     # producer.create immediately discard and export it again.
@@ -357,7 +362,8 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         try:
             provision = spec.prepare(
                 executor.ProvisionRequest(
-                    trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce, image=None if image is None else image.id
+                    trial.trial_id, roots, arm, runtime.source, task=task, nonce=runtime.run_nonce, image=None if image is None else image.id,
+                    lessons_dir=manifest.asset_path(task["knowledge"]) if "knowledge" in task else None
                 )
             )
         except executor.ProvisionError as error:
@@ -387,18 +393,20 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         foreign_sessions: tuple[str, ...] = ()
         if provisioned and arm.get("producer"):
             assert provision is not None
+            prior = task.get("producer_task", task)
+            prior_image = images.require(prior, manifest.fixture_path(prior), manifest.pins) if spec.live else None
             produced = producer_module.run(
                 spec=spec,
                 trial_id=trial.trial_id,
-                task=task,
+                task=prior,
                 arm=arm,
                 pins=manifest.pins,
-                fixture=manifest.fixture_path(task),
-                image=image,
+                fixture=manifest.fixture_path(prior),
+                image=prior_image,
                 roots=roots,
                 provision=provision,
                 runtime=runtime,
-                verifier_spec=verifier_spec,
+                verifier_spec=manifest.verifier_spec(prior),
                 wall_clock_s=float(manifest.pins["wall_clock_s"]),
             )
             provision = produced.provision

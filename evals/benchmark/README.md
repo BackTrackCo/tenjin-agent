@@ -604,7 +604,39 @@ assertions with no network or credentials, validates results, and owns cleanup.
 Repository automation is omitted and dependency lifecycle scripts are disabled.
 An experiment does not implement its own runner or result validation.
 
-`python -m evals.benchmark.historical --catalog PATH prepare|build|verify` uses the
-same commands as an experiment's thin entrypoint. The initial adapter supports
-historical pnpm/Vitest tasks from the allowlisted tenjin-agent repository. Task
-selection, historical boundaries and oracle assertions belong to the experiment.
+`python -m evals.benchmark.historical --catalog PATH prepare|build|verify|materialize`
+uses the same commands as an experiment's thin entrypoint. The adapter supports
+historical pnpm/Vitest tasks from the allowlisted tenjin-agent and tenjin repositories.
+Private source stays in operator-prepared assets; public CI needs no private checkout.
+Task selection, historical boundaries and oracle assertions belong to the experiment.
+
+`materialize` turns a proven before revision into an ordinary runner fixture plus a
+separate hidden oracle. Its manifest binds both directory hashes, the work order,
+allowed product paths and optional earlier `producer_task`. The shared image builder
+builds both producer and consumer fixtures; each starts from its own pristine source.
+Verification restores immutable image dependencies and refuses source edits outside
+the declared contract. Every assertion must complete; skipped tests, contradictory
+counts, collection failures and broken cleanup are invalid measurements.
+
+Historical tasks can request a disposable PostgreSQL service. The trusted controller
+attaches a pinned pgvector image to the verifier's existing deny-all network namespace,
+listening only on loopback. It exposes no host port, Docker socket, persistent volume
+or real credential. The immutable support module migrates the synthetic database from
+the submitted historical source; the verifier receipt names the database image.
+The controller removes the service with the owning container project.
+
+A task may bind an earlier knowledge directory. Flat and seeded arms use the same
+source bodies; records include the corpus hash, each body hash and available lesson IDs.
+Publication nonces and piece IDs remain separate from those source versions. A natural
+arm seeds only the declared background corpus, then publishes captured producer drafts
+through the host as configured. With `producer_failure: continue_unpublished`, a valid
+failed or capped producer retains its outcome and spending and the consumer still runs,
+without publishing that producer's drafts. Its local captures may remain in the shared
+store: this policy does not claim an empty memory. Measurement errors still invalidate
+the attempt. Existing arms without this policy keep their declared producer-success gate.
+Consumer-only reuse and complete producer-plus-consumer costs must be named separately.
+
+`workload.assign` deterministically ranks a semantically reviewed candidate frame and
+keeps whole correlation clusters out of the locked reserve after pilot selection.
+It never decides eligibility or replaces a difficult task; its output explicitly leaves
+model admission false until the experiment's independent acceptance gates pass.

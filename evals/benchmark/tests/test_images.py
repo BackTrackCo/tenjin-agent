@@ -288,6 +288,7 @@ class FakeManifest:
     def __init__(self, root: Path, ids: tuple[str, ...]) -> None:
         self.pins = PINS
         self.tasks = [{"id": task_id, "fixture_hash": FIXTURE_HASH} for task_id in ids]
+        self.image_tasks = self.tasks
         self.root = root
         for task_id in ids:
             (root / task_id).mkdir(parents=True, exist_ok=True)

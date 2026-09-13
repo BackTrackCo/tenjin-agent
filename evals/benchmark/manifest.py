@@ -17,6 +17,7 @@ an arm's choices need a provisioned arm, and which tasks a slice's kind needs.
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from dataclasses import dataclass
@@ -189,6 +190,29 @@ SCHEMA: dict[str, Any] = {
 }
 
 
+# Optional experiment assets are bound into the manifest before model launch.
+ASSET = {"type": "object", "additionalProperties": False, "required": ["path", "hash"],
+         "properties": {"path": FIXTURE_PATH, "hash": HASH_TOKEN}}
+TASK_SCHEMA = SCHEMA["properties"]["tasks"]["items"]
+TASK_SCHEMA["properties"].update({
+    "hidden": ASSET,
+    "database": {"const": "postgres"},
+    "allowed_changes": {"type": "array", "minItems": 1, "items": FIXTURE_PATH},
+    "knowledge": {"type": "object", "additionalProperties": False,
+                  "required": ["path", "hash", "lessons", "background"],
+                  "properties": {"path": FIXTURE_PATH, "hash": HASH_TOKEN,
+                                 "lessons": {"type": "array", "items": IDENTIFIER},
+                                 "background": {"type": "array", "items": IDENTIFIER}}},
+})
+# A distinct earlier producer has the same task contract, without recursion.
+PRODUCER_TASK_SCHEMA = copy.deepcopy(TASK_SCHEMA)
+TASK_SCHEMA["properties"]["producer_task"] = PRODUCER_TASK_SCHEMA
+SCHEMA["properties"]["arms"]["items"]["properties"].update({
+    "producer_failure": {"enum": ["continue_unpublished"]},
+    "flat_knowledge": {"const": True},
+})
+
+
 class ManifestError(ValueError):
     pass
 
@@ -231,6 +255,21 @@ class Manifest:
         return ((self.fixture_base or self.path.parent) / task["fixture"]).resolve()
 
     @property
+    def image_tasks(self) -> list[dict[str, Any]]:
+        return self.tasks + [task["producer_task"] for task in self.tasks if "producer_task" in task]
+
+    def asset_path(self, asset: dict[str, Any]) -> Path:
+        return ((self.fixture_base or self.path.parent) / asset["path"]).resolve()
+
+    def verifier_spec(self, task: dict[str, Any]):
+        from . import task_assets
+        return task_assets.verifier_spec(self, task)
+
+    def trial_arm(self, task: dict[str, Any], arm: dict[str, Any]) -> dict[str, Any]:
+        from . import task_assets
+        return task_assets.trial_arm(self, task, arm)
+
+    @property
     def corpus(self) -> corpus_module.Corpus | None:
         """The database branch a run resets before its first trial, when it names one."""
         if "corpus" not in self.data:
@@ -249,6 +288,10 @@ def fixture_hash(fixture: Path) -> str:
 
 def _arm_rules(name: str, arm: dict[str, Any]) -> None:
     """What an arm's choices need of each other, which is what the schema cannot see."""
+    if "producer_failure" in arm and not arm.get("producer"):
+        raise ManifestError(f"{name}.producer_failure requires a producer")
+    if arm.get("flat_knowledge") and arm.get("provision"):
+        raise ManifestError(f"{name}.flat_knowledge cannot provision a shelf")
     if "producer" in arm and not arm.get("provision"):
         raise ManifestError(f"{name}.producer needs a provisioned arm")
     if "capture_publication" in arm and not arm.get("producer"):
@@ -293,6 +336,8 @@ def validate(data: dict[str, Any], base: Path) -> None:
             raise ManifestError(f"task {task_id!r} fixture path is missing: {task['fixture']}")
         if task["fixture_hash"] != fixture_hash(fixture):
             raise ManifestError(f"task {task_id!r} fixture_hash does not match the fixture directory")
+    from . import task_assets
+    task_assets.validate(data, base)
     seen.clear()
     for arm in data["arms"]:
         if arm["id"] in seen:

@@ -81,6 +81,7 @@ class ProvisionRequest:
     # The fixture image a probe runs in, so a provisioner that runs the task's
     # own commands runs them where the agent will: same image, same tree.
     image: str | None = None
+    lessons_dir: Path | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped

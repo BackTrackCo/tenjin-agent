@@ -507,7 +507,7 @@ def build_all(manifest: Any, docker: Docker | None = None, only: str | None = No
     if base != resolved.base:
         raise ImageError("base_name", f"Harbor built {base} where this run resolved {resolved.base}, so a trial would look for a name that does not exist")
     built = {base: Image(tag=base, id=image_id(base, docker) or "", base=base, cli=resolved.cli)}
-    for task in manifest.tasks:
+    for task in manifest.image_tasks:
         task_id = str(task["id"])
         if only is not None and task_id != only:
             continue
@@ -522,7 +522,7 @@ def build_all(manifest: Any, docker: Docker | None = None, only: str | None = No
 def check_all(manifest: Any, docker: Docker | None = None) -> dict[str, Any]:
     """Every task's image, or the first refusal. What `live-run` does before it spends anything."""
     resolved = _plan(manifest.pins)
-    return {str(task["id"]): require(task, manifest.fixture_path(task), manifest.pins, docker, resolved).facts for task in manifest.tasks}
+    return {str(task["id"]): require(task, manifest.fixture_path(task), manifest.pins, docker, resolved).facts for task in manifest.image_tasks}
 
 
 def main(argv: list[str] | None = None) -> int:
