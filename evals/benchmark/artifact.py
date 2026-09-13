@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import benchmark_key, images as images_module, sha256_json, sha256_text
+from . import benchmark_key, historical_outputs, images as images_module, sha256_json, sha256_text
 
 CANARY_PREFIX = "bench1-canary-"
 CREDENTIAL_FILE = ".benchmark-credential"
@@ -157,7 +157,7 @@ class TrialRoots:
         # Copying gigabytes of model-visible dependencies only to discard them
         # wastes disk and can time out before any behavioral assertion runs.
         def ignore(directory, names):
-            return {"node_modules", ".pnpm-store", "tsconfig.tsbuildinfo"}.intersection(names) if image_dependencies and Path(directory) == self.repo else set()
+            return {name for name in names if historical_outputs.contains(name)} if image_dependencies and Path(directory) == self.repo else set()
         shutil.copytree(self.repo, self.verify, symlinks=True, ignore=ignore)
         if hidden_layer is not None:
             if not hidden_layer.is_dir():
