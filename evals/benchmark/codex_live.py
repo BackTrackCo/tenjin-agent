@@ -228,6 +228,7 @@ def launch(request: LaunchRequest) -> Launch:
     return Launch(argv, roots.repo, "pending-" + request.trial_id, recipe=recipe, separate_streams=True,
                   database=request.task.get("database") == "postgres",
                   resolved_settings_hash="sha256:" + sha256_json({"config": config, "hooks": generated}),
+                  hook_settings=generated,
                   package_manager=claude_live.package_manager(), container_plan={**recipe.to_json(), "agent": argv, "database": "postgres" if request.task.get("database") == "postgres" else None})
 
 
