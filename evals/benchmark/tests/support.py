@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import re
 import shutil
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
+from unittest import mock
 
 from evals.benchmark import (
     FIXTURES,
@@ -15,6 +18,7 @@ from evals.benchmark import (
     artifact,
     claude_usage,
     executor,
+    images,
     manifest as manifest_module,
     records,
     runner,
@@ -28,6 +32,61 @@ STORE = REPO_ROOT / "src" / "hooks" / "store.ts"
 
 Edit = Callable[[list[Any]], list[Any]]
 Before = Callable[[executor.Launch, artifact.TrialRoots], None]
+
+# The image a live case runs in. Nothing here builds or inspects one: a case
+# that reaches `images.require` stubs it with this. The CLI facts are here
+# because a record whose image cannot name its CLI build is refused.
+CLI_BUILD = "cd" * 8
+CLI_COMMIT = "9f1c0d3e5a7b2c4d6e8f0a1b3c5d7e9f1a2b3c4d"
+IMAGE = images.Image(
+    tag="bench2-task--0123456789abcdef",
+    id="sha256:" + "1c" * 32,
+    fixture_hash="sha256:" + "ab" * 32,
+    base="bench2-base--fedcba9876543210",
+    cli={"build": CLI_BUILD, "commit": CLI_COMMIT},
+)
+
+def tenjin_source(path: Path, *, base_url: str, public_url: str = "https://tenjin.blog", shelf_secret: str | None = None) -> Path:
+    """A data dir `tenjin_arm.load_source` accepts: the copied config keys and the three bundles."""
+    from evals.benchmark import tenjin_arm
+
+    (path / tenjin_arm.HOOKS_DIR).mkdir(parents=True, exist_ok=True)
+    for name in tenjin_arm.BUNDLES:
+        (path / tenjin_arm.HOOKS_DIR / name).write_text(f"// placeholder {name}\n", encoding="utf-8")
+    config: dict[str, Any] = {"baseUrl": base_url, "publicShelfUrl": public_url}
+    if shelf_secret is not None:
+        config["shelfBypassSecret"] = shelf_secret
+    (path / tenjin_arm.CONFIG_FILE).write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+@contextlib.contextmanager
+def live_gates() -> Iterator["images.Image"]:
+    """Every seam a live case would otherwise take to Docker: the image gate, the image lookup, and the run's egress.
+
+    A case that enters this still builds the real plan and the real argv; what
+    it does not do is talk to a daemon.
+    """
+    from evals.benchmark import cli, container
+
+    with (
+        patched_images() as image,
+        mock.patch.object(cli, "refuse_without_images", lambda manifest, out=None: None),
+        # The allowlist gate asks Docker whether Harbor could enforce it. A
+        # case here starts no container, so the answer is stubbed rather than
+        # probed; `test_container.py` covers the gate itself.
+        mock.patch.object(container, "require_egress", lambda egress, probe=None: None),
+    ):
+        yield image
+
+
+@contextlib.contextmanager
+def patched_images(image: "images.Image | None" = None) -> Iterator["images.Image"]:
+    """Stub the image lookup and the tree export for one case. No case here reaches Docker."""
+    resolved = IMAGE if image is None else image
+    with mock.patch.object(images, "require", return_value=resolved), mock.patch.object(images, "export_node_modules", return_value=0):
+        yield resolved
+
 
 ATTESTED = artifact.Attestation(
     kind="container",
@@ -341,7 +400,6 @@ def reduction_record(
         "isolation": {"live": False, "publishable": True, "fresh_roots": True, "attested_container": False, "attestation_hash": None, "automated": False},
         "private_hashes": {"root_transcript": "sha256:root", "executor_stderr": None},
     }
-
 
 
 def receipt(component: str, phase: str, request: str, input_total: int, output_total: int) -> dict[str, Any]:

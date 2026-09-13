@@ -8,8 +8,21 @@ from pathlib import Path
 
 import pytest
 
-from evals.benchmark import cli, manifest
+from evals.benchmark import cli, manifest, presets
 from evals.benchmark.manifest import ManifestError
+
+
+def committed(path: Path) -> dict:
+    """A committed manifest as `load` hands it on: presets expanded, which is what `validate` is defined over."""
+    return presets.expand(json.loads(path.read_text(encoding="utf-8")))
+
+
+def provisioned_arm(**arm: object) -> dict:
+    """The hooks smoke manifest with its provisioned arm carrying one more choice."""
+    data = committed(cli.HOOKS_SMOKE_MANIFEST)
+    data["arms"][1].update(arm)
+    return data
+
 
 BASE = json.loads(cli.FAKE_MANIFEST.read_text())
 DIR = cli.FAKE_MANIFEST.parent
@@ -51,6 +64,16 @@ BAD_SHAPES = {
     },
     "phase keys": {**BASE, "phases": {"producer": "x"}},
     "empty phase": {**BASE, "phases": {**BASE["phases"], "capture": ""}},
+    "seed path is not an arm key": {**BASE, "arms": [{**ARM, "provision": "tenjin", "seed": "local"}, BASE["arms"][1]]},
+    "publication without producer": {**BASE, "arms": [{**ARM, "capture_publication": "host"}, BASE["arms"][1]]},
+    "producer without provision": {**BASE, "arms": [{**ARM, "producer": True}, BASE["arms"][1]]},
+    "producer not a boolean": {**BASE, "arms": [{**ARM, "provision": "tenjin", "producer": "yes"}, BASE["arms"][1]]},
+    "slice kind": {**BASE, "slice": {"kind": "fast"}},
+    "retired slice": {**BASE, "slice": {"kind": "scale", "distractors": 50}},
+    "slice with an extra key": {**BASE, "slice": {"kind": "recursive", "distractors": 1}},
+    "recursive slice without a subagent task": {**BASE, "slice": {"kind": "recursive"}},
+    "subagent tool outside a recursive slice": {**BASE, "tasks": [{**TASK, "tools": ["Agent"]}]},
+    "task tools not strings": {**BASE, "tasks": [{**TASK, "tools": [1]}]},
     # A membership test alone raised TypeError on an unhashable value, which
     # escaped this module's refusal contract; a schema keyword refuses it.
     "harness that is not hashable": {**BASE, "harness": ["claude"]},
@@ -72,6 +95,17 @@ def test_fake_manifest_loads_with_a_stable_hash() -> None:
 def test_manifest_rejects_bad_shapes(data: dict) -> None:
     with pytest.raises(ManifestError):
         manifest.validate(data, DIR)
+
+
+def test_a_slice_and_a_producer_arm_validate() -> None:
+    data = json.loads(json.dumps(BASE))
+    data["arms"][1].update({"provision": "tenjin", "producer": True, "lessons": ["actor-fix"]})
+    manifest.validate(data, DIR)
+    recursive = {**data, "slice": {"kind": "recursive"}, "tasks": [{**data["tasks"][0], "tools": ["Bash", "Agent"], "allowed_tools": ["Bash(pnpm:*)"]}]}
+    manifest.validate(recursive, DIR)
+    loaded = manifest.Manifest(data=recursive, path=DIR / "manifest.json", hash="sha256:x")
+    assert loaded.slice == {"kind": "recursive"}
+    assert manifest.Manifest(data=data, path=DIR / "manifest.json", hash="sha256:x").slice is None
 
 
 def test_concurrency_defaults_to_one_and_rides_the_environment_hash() -> None:
@@ -104,3 +138,57 @@ def test_load_rejects_non_object_and_unreadable(tmp_path: Path) -> None:
         manifest.load(path)
     with pytest.raises(ManifestError):
         manifest.load(tmp_path / "missing.json")
+
+
+# Who may turn a product hook arm off, and who may not.
+
+
+def test_a_provisioned_consumption_arm_may_disable_a_hook_arm() -> None:
+    manifest.validate(provisioned_arm(hooks_disabled=["publish"]), cli.HOOKS_SMOKE_MANIFEST.parent)
+
+
+def test_an_arm_that_captures_may_not_disable_one() -> None:
+    with pytest.raises(ManifestError) as caught:
+        manifest.validate(provisioned_arm(hooks_disabled=["publish"], producer=True), cli.HOOKS_SMOKE_MANIFEST.parent)
+    assert "captures" in str(caught.value)
+
+
+def test_an_empty_list_is_not_a_choice() -> None:
+    with pytest.raises(ManifestError):
+        manifest.validate(provisioned_arm(hooks_disabled=[]), cli.HOOKS_SMOKE_MANIFEST.parent)
+
+
+# The product's `team.publicFallback` as an arm's choice, and the default that keeps every old manifest true.
+
+
+def test_a_provisioned_arm_may_turn_the_marketplace_leg_off() -> None:
+    manifest.validate(provisioned_arm(public_fallback="off"), cli.HOOKS_SMOKE_MANIFEST.parent)
+    manifest.validate(provisioned_arm(public_fallback="on"), cli.HOOKS_SMOKE_MANIFEST.parent)
+
+
+def test_an_arm_that_names_nothing_is_still_valid() -> None:
+    data = committed(cli.HOOKS_SMOKE_MANIFEST)
+    assert "public_fallback" not in data["arms"][1]
+    manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
+
+
+@pytest.mark.parametrize("value", ["false", "", True, None])
+def test_a_value_the_product_has_no_setting_for_is_refused(value: object) -> None:
+    with pytest.raises(ManifestError) as caught:
+        manifest.validate(provisioned_arm(public_fallback=value), cli.HOOKS_SMOKE_MANIFEST.parent)
+    assert "public_fallback" in str(caught.value)
+
+
+@pytest.mark.parametrize("key, value", [("hooks_disabled", ["publish"]), ("public_fallback", "off")])
+def test_an_unprovisioned_arm_has_no_seeded_config_to_write_it_into(key: str, value: object) -> None:
+    data = committed(cli.HOOKS_SMOKE_MANIFEST)
+    data["arms"][0][key] = value
+    with pytest.raises(ManifestError) as caught:
+        manifest.validate(data, cli.HOOKS_SMOKE_MANIFEST.parent)
+    assert "provisioned arm" in str(caught.value)
+
+
+@pytest.fixture(autouse=True)
+def generated_hooks_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from evals.benchmark.tests import live_inputs
+    monkeypatch.setattr(cli, "HOOKS_SMOKE_MANIFEST", live_inputs.write(tmp_path / "hooks-input", hooks=True), raising=False)

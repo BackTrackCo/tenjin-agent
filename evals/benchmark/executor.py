@@ -6,11 +6,11 @@ grandchild into the trial output root and never spawn a real tool, so CI
 exercises the whole chain, recursion included, with zero spend. The rows
 follow the shapes `claude_usage.py` freezes.
 
-`live` marks a spec that would start a real agent. Nothing shipped here sets
-it: this package is the offline chain, and `DEFERRED` is the seam a live
-executor registers through when one arrives. `artifact.require_isolation`
-refuses a publishable live run without an isolation attestation, and refuses
-any live run under CI.
+`live` marks a spec that would start a real agent. The one entry that sets it
+is `claude_live`, which lives in its own module and is imported only when a
+manifest names it; CI reaches it through `cli.py live-run --dry-run` and
+nowhere else. `artifact.require_isolation` refuses a publishable live run
+without an isolation attestation, and refuses any live run under CI.
 """
 
 from __future__ import annotations
@@ -78,6 +78,9 @@ class ProvisionRequest:
     # Minted once per `live-run` invocation and reused on resume, so what a
     # provisioner writes to a shelf differs between runs of the same schedule.
     nonce: str | None = None
+    # The fixture image a probe runs in, so a provisioner that runs the task's
+    # own commands runs them where the agent will: same image, same tree.
+    image: str | None = None
 
 
 # An arm that declares `provision` is prepared before its launch and stopped
@@ -101,6 +104,16 @@ class LaunchRequest:
     # A dry run builds the launch and starts nothing, so a spec that seeds or
     # probes the host toolchain reports what it would do instead of doing it.
     dry_run: bool = False
+    # The consumer by default; the natural arm's producer runs first under the
+    # same trial with its own session, so the phase is part of the session id.
+    phase: str | None = None
+    # The image this attempt runs in, by id once the run has resolved it. A dry
+    # run leaves it None and the spec derives the tag from the task, so
+    # building an argv never needs Docker.
+    image: str | None = None
+    # The run's egress (`container.Egress`): the network the container joins
+    # and the proxy variables it is given. None outside a live run.
+    egress: Any = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,7 @@ class Launch:
     argv: list[str]
     cwd: Path
     root_session_id: str
+    separate_streams: bool = False
     # A spec that needs more than the roots' own allowlist (a live one needs
     # the credential seam) owns its child environment here. `None` keeps the
     # roots' default, which is what every fake spec uses.
@@ -116,9 +130,17 @@ class Launch:
     # declared fragment is a template resolved per trial. The record keeps it
     # under `private_hashes`: the resolved bytes hold a bearer token.
     resolved_settings_hash: str | None = None
-    # The package manager the child runs (`toolchain.PackageManager.facts`),
-    # recorded in the attempt's isolation block by a live spec.
+    # The package manager the child runs, recorded in the attempt's isolation
+    # block by a live spec. For a container trial it is the image's pnpm.
     package_manager: dict[str, Any] | None = None
+    # The plan a dry run prints for the container this attempt runs in. What
+    # the container IS is `recipe` below; this is only its readable form.
+    container_plan: dict[str, Any] | None = None
+    # What a container spawn needs to bring the environment up and exec into
+    # it: a `container.Recipe`. `argv` above stays the agent's own command, so
+    # a fake spec and a live one describe the same thing and only the seam that
+    # runs it differs. None is a launch that starts no container.
+    recipe: Any = None
 
 
 # Where a finished trial's transcripts are, given its roots and root session
@@ -157,7 +179,7 @@ class ExecutorError(ValueError):
 
 def _fake_launch(behavior: str) -> Callable[[LaunchRequest], Launch]:
     def launch(request: LaunchRequest) -> Launch:
-        session = f"fake-{request.trial_id}"
+        session = f"fake-{request.trial_id}" if request.phase is None else f"fake-{request.trial_id}-{request.phase}"
         argv = [
             sys.executable,
             "-m",
@@ -194,9 +216,8 @@ REGISTRY: dict[str, ExecutorSpec] = {
 # An executor whose implementation is its own module registers itself when that
 # module is imported. Naming the module here keeps `lookup` the single entry
 # point without importing a live executor into every process that loads this
-# one, and without a circular import back from that module. Nothing offline
-# needs the seam, so it ships empty and an unknown name still fails closed.
-DEFERRED: dict[str, str] = {}
+# one, and without a circular import back from that module.
+DEFERRED = {"claude_live": "evals.benchmark.claude_live", "codex_live": "evals.benchmark.codex_live"}
 
 
 def lookup(name: str) -> ExecutorSpec:

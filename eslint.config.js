@@ -3,7 +3,15 @@ import tseslint from 'typescript-eslint';
 import prettier from 'eslint-config-prettier';
 
 export default [
-  { ignores: ['dist/**', 'node_modules/**'] },
+  // Bench-1 task fixtures and hidden layers are agent-visible task code, not this package's.
+  {
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'evals/benchmark/fixtures/**',
+      'evals/benchmark/hidden/**',
+    ],
+  },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   prettier,
@@ -22,6 +30,19 @@ export default [
       // TS's compiler already flags undefined identifiers; core no-undef only
       // false-positives on Node globals (process, Buffer, fetch) in a TS file.
       'no-undef': 'off',
+    },
+  },
+  {
+    // The Bench-2 container entrypoint: it runs inside the fixture image on
+    // Node 24, with no bundler and no TS compiler behind it.
+    files: ['evals/benchmark/docker/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        process: 'readonly',
+        fetch: 'readonly',
+        AbortSignal: 'readonly',
+        setTimeout: 'readonly',
+      },
     },
   },
   {

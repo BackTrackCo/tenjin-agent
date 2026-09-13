@@ -29,6 +29,43 @@ usage-limit percentages and surge multipliers, which move for reasons unrelated 
 LLM judge, which if ever added is benchmark overhead in its own field, neither product cost nor
 correctness. The outcome is raw provider token counts under an executable verifier; subscription dollar cost is supplementary.
 
+## Shared local and CI execution
+
+Local and CI runs use the same container runner, images, Docker Compose lifecycle, verifier,
+and reporting commands. Colima can provide Docker on macOS. Put run directories on a path
+shared with the Docker VM. The fake executor is an offline test double, not a second live runner.
+Build images with `python3 -m evals.benchmark.images --help`, then pass an explicit manifest to
+`python3 -m evals.benchmark.cli live-run --manifest PATH --out RUN`. Use `--dry-run` to inspect
+that same launch without starting it. Install `requirements-live.txt` for live execution.
+
+New local and CI runs resolve the latest official harness release once, before building images:
+
+```sh
+python3 -m evals.benchmark.harness_release --manifest MANIFEST --out harness-lock.json
+python3 -m evals.benchmark.images build --manifest harness-lock.json
+```
+
+Pass that same `harness-lock.json` to `describe`, `attest`, `live-run`, and checkpoint commands.
+The lock preserves the source experiment, exact package/version/integrity and resolution time;
+fixture paths still resolve against the source manifest. Existing locks and restored checkpoints
+never query today's tag. `--version X.Y.Z` requests an exact release for reproduction. The
+checked-in manifest pins remain reference configurations; the resolver's default is `latest`.
+Use a new lock path for a new run. Source changes refuse reuse instead of silently re-resolving.
+Root package integrity and installed CLI version are checked before any model call. Complete
+platform dependency identity is also captured by the built image; the receipt alone is not a
+lockfile for every transitive binary. In-run auto-updates are disabled.
+
+Codex hook trust is configured by the same resolved container image, without network or a
+subscription-auth mount. The host's installed Codex version cannot decide task hook trust.
+Native transcript versions must match the run's resolved pin; unknown or incomplete native
+usage still invalidates the attempt. Updating a CLI does not grant new dispatch capabilities.
+
+Every live attempt captures stdout and stderr, settles usage from retained transcripts and the
+stream envelope, and tears down its Compose project. After an interrupted run, `cleanup --run RUN`
+removes only projects recorded by that run. Provisioning, corpus reset, producer/consumer phases,
+images, and HTTP snapshot transport are shared framework capabilities. The full fixture library
+and concrete preset/configuration data arrive in the next two layers.
+
 ## Read the result at a glance
 
 Every text summary and CI check starts with the experiment identity, model/harness, task list,
@@ -239,6 +276,54 @@ omitted usage. The live Codex launch/activation integration is a separate contai
 across arms. Readouts state the request rather than claiming provider acceptance. Claude remains
 standard for subscription-only runs because its fast mode requires separate usage credits.
 
+## Subscription container execution
+
+The live adapters share Harbor/Docker Compose locally and in CI. Codex pins CLI 0.154.0,
+`gpt-5.6-sol`, explicit reasoning effort and ChatGPT login. Supply a private 0600 auth-only
+file through `CODEX_BENCH_AUTH_FILE`, outside the run directory. API-key authentication is
+refused. The generated profile mounts only that file, not the operator's Codex home.
+One Codex trial runs at a time because refresh writes share the managed credential.
+
+Subscription login does not itself disable a provider account's credit fallback. Before a
+live run, verify that purchased-credit/extra-usage fallback is unavailable or disabled. Never
+buy credits, enable extra usage, redeem resets or switch to API billing to finish a run.
+Codex fast mode may use included allowance faster. Claude fast mode is always disabled here
+because it requires separate credits. Provider exhaustion saves the partial report, stops new
+trial admission and produces UNAVAILABLE, not a product pass or a usable main baseline.
+
+The pinned Codex build uses legacy Landlock inside default-privilege Docker containers;
+protected workspace metadata directories are also mounted read-only. Image-owned protected
+names under `/tmp` keep the native policy representable. The native default Bubblewrap path
+cannot create its namespace under this container policy. No extra Docker privileges are used.
+Native JSON stdout and diagnostic stderr are retained separately for strict reconciliation.
+
+The coordinator fills free workers with independent trials while admitting only one trial
+that provisions the shared shelf. A cleanup failure stops further admission. Run-directory
+leases protect local writers; CI owns the shared shelf through its workflow concurrency group.
+Start a resumable corpus run with `--freeze-corpus`; every continuation restores its saved
+source LSN, validates source generation and the settled target revision, and retains a unique
+reset receipt. `--max-new-trials N` executes at most N additional trials while retaining the
+full schedule and incomplete-coverage status. Repeat the same command/output directory to
+continue, or add `--until-complete` to repeat chunks under one resource lease.
+`--admission-seconds N` stops new admissions after N seconds; active trials finish and
+checkpoint. A changed benchmark runtime refuses frozen continuation before provider calls.
+These chunks need not be independently balanced; only the complete schedule supports
+the complete experiment. Without a frozen baseline, retained corpus evidence refuses before reset.
+Offline and corpus-free runs also preserve full-schedule identity across continuation.
+
+`--neon-cli` uses an existing Neon CLI login through the same guarded provider contract as CI's
+API credential. A target-scoped local lease prevents two runs from resetting the same branch
+through different origin aliases; CI additionally serializes the shared shelf workflow.
+Changed source generation, expired restore history, missing/modified epoch receipts or a
+changed schedule refuse continuation without falling back to parent head. Each report retains
+all reset epochs beside one logical baseline identity. This freezes initial Postgres state;
+it does not freeze an independently deployed application or external search/cache state.
+
+Producer records retain agent and verifier duration separately. Capture-token attribution uses
+each actor's own stop boundary; child capture before the root finishes cannot be mislabeled as
+ordinary producer work. The primary time endpoint remains consumer execution per completion;
+producer task work and total pipeline latency must not be inferred from that label.
+
 ## Completion readout
 
 The first table reports verified/planned attempts, failures/caps/invalid attempts, consumer
@@ -332,3 +417,88 @@ estimated from text length.
 
 None of this changes the manifest schema, the record schema, the reducer, or the guard. A change
 that does is a benchmark version bump, and a treatment-informed rewrite is always a new version.
+
+The internal `bench2-` image/container names and marker filenames are retained implementation
+identifiers from the original container runner. They name shared Bench-1 infrastructure and
+are used unchanged by every experiment, locally and in CI.
+
+Portable checkpoints contain the original nonce, full schedule, validated final records with
+private refusal text removed, and the frozen corpus/epoch receipts. They contain no trial
+worktrees, model transcripts, profiles or credentials. Export from a stopped run and import
+into an empty directory using the same checkout revision and manifest:
+
+```sh
+python -m evals.benchmark.checkpoint export --run RUN --out CHECKPOINT --manifest MANIFEST --revision GIT_SHA
+python -m evals.benchmark.checkpoint import --run CHECKPOINT --out RESUMED_RUN --manifest MANIFEST --revision GIT_SHA
+```
+
+Continuation preserves accepted final attempts, including invalid ones. It does not retry a
+recorded quota/instrumentation failure or erase its spend. After such a failure, retain the
+partial evidence and start a fresh run when the cause is fixed; clean deadline checkpoints
+can continue without repeating completed work.
+
+The importer verifies file inventory and hashes, runtime revision, Git revision, manifest,
+full schedule and every referenced epoch before writing. It rewrites only the local manifest
+path and preserves the nonce. Then use the ordinary `live-run --freeze-corpus` command against
+RESUMED_RUN. Re-verification of retained worktrees remains an explicit `verify` command; a
+record-only checkpoint has no worktree to re-verify and uses the recorded hidden verdict.
+
+CI uses `admission.py` to subtract elapsed setup, the longest producer-plus-consumer model
+caps and a conservative cleanup/upload reserve from the job timeout. It is a practical margin,
+not a guarantee against a stalled external service. Deadline stops retain incomplete coverage.
+The reusable workflow accepts an explicit prior run/artifact pair for recovery; it never picks
+an arbitrary latest checkpoint. A different tested commit or runtime requires a fresh run.
+
+### Remote server observations
+
+Live runs that name a corpus automatically read the deployed Next.js identity from the shelf's
+public page before database reset and after each completed trial (after each completed group
+when concurrent). These HTTP checks run outside the agent timing bracket. The run stores only
+an opaque deployment ID and observation state in `server-revision.json`, carries that evidence
+through portable checkpoints, and checks the original ID again before a continuation starts.
+No server change, Vercel credential or private source checkout is required.
+
+A changed ID or unavailable observation stops new admission, lets active work settle, preserves
+completed records and makes the shared CI/local readout **UNAVAILABLE — diagnostic evidence
+only**. A later successful probe cannot rehabilitate that run; start a fresh run. Old records
+without server evidence cannot adopt a newly observed server on continuation. Failure to read
+the page never counts as a measured pass.
+
+This detects deployment changes; it does not lock deployments, inspect database migrations,
+or rule out a change and rollback between observations. Schema-changing work still needs a
+coordinated run window. A frozen database LSN preserves the old schema as well as the corpus;
+new schema/server releases require a fresh baseline. Next.js documents the identifier under
+[deploymentId](https://nextjs.org/docs/app/api-reference/config/next-config-js/deploymentId).
+
+### Host-assisted natural capture
+
+An arm may select `capture_publication: host` only with a producer and a pinned
+disposable corpus. The producer keeps its own task, hooks, verification and native
+usage accounting. Its phase prompt explains that the container has no publishing
+wallet and asks it to use the product's finding-fence fallback when capture is
+requested. The host publishes only that producer session/project's captured drafts,
+without substituting fixture lessons, adding fingerprint keys, or adding run-stamp
+prose. Identical drafts within one producer are deduplicated. No draft is a valid
+zero-capture result; it is never filled in by the harness.
+
+Publication uses a temporary host-only CLI data directory and a link to the existing
+benchmark wallet, with a free price and the configured disposable shelf. This avoids
+cross-run local publish dedup while keeping the signing wallet outside task mounts
+and artifacts. The directory is removed on every normal or exceptional exit. Normal
+CLI validation and content scanning still apply. The host records only opaque draft
+and body hashes, returned piece IDs, publication status and elapsed time.
+
+The consumer starts only after successful publication and receives a fresh repository
+with the intended producer store. The existing exclusive shelf window covers publish,
+consumer execution and deletion. Missing/ambiguous receipts stop further admission;
+known piece IDs are still cleaned up. A fresh corpus reset is required after an
+uncertain write. Failed producers are never published. Publication and confirmed
+cleanup are visible alongside drafts, closed local pairings, attributed team-hook
+delivery and verified completion. A delivery followed by a pass does not prove use.
+This treatment measures host-assisted publication, not autonomous agent publishing.
+Host publication time is separate from agent completion time and adds no model tokens.
+
+Natural execution exports fixture dependencies once before each agent phase, retaining
+the reset that removes producer edits before the consumer. Codex managed-auth runs
+remain serial; independent Claude work may fill three workers while provisioned trials
+keep the shared shelf exclusive.

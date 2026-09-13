@@ -1,4 +1,4 @@
-"""Executing a schedule: settlement, caps, outcomes, sentinels, resume, and concurrency.
+"""Executing a schedule: settlement, caps, outcomes, the credential canary, resume, and concurrency.
 
 Every case injects the clock, the settlement barrier, and the process
 boundary. Three exceptions start a real short-lived process: the timeout case,
@@ -24,7 +24,7 @@ from typing import Callable
 
 import pytest
 
-from evals.benchmark import artifact, cli, executor, loop_join, records, reduce as reduce_module, runner, schedule
+from evals.benchmark import artifact, cli, executor, loop_join, records, reduce as reduce_module, runner, schedule, snapshot as snapshot_module
 from evals.benchmark.artifact import IsolationError
 from evals.benchmark.executor import ExecutorSpec
 from evals.benchmark.manifest import Manifest
@@ -218,6 +218,14 @@ def test_a_credential_that_leaves_the_disposable_home_makes_the_attempt_invalid(
     assert record["outcome"] == "invalid"
     assert record["invalid_reason"] == "sentinel:credential_exposure"
     assert record["sentinel"] == {"credential_exposures": 1}
+
+
+def test_a_record_states_only_the_sentinel_evidence_the_harness_can_still_gather(one_trial: OneTrial, make_manifest, make_runtime) -> None:
+    # The loopback public-request sentinel is retired with the container
+    # harness that could report a refusal, so a record carries the credential
+    # scan and nothing standing in for egress the harness cannot see.
+    record = one_trial(make_manifest(), make_runtime())
+    assert record["sentinel"] == {"credential_exposures": 0}
 
 
 # The CLI's own budget and turn stops: a failed attempt with its spend, never an invalid one.
@@ -536,6 +544,19 @@ def test_a_receipt_reusing_a_consumer_request_id_makes_the_attempt_invalid(one_t
     assert record["invalid_reason"] == "auxiliary:duplicate_request"
 
 
+def test_the_quoted_refusal_masks_every_secret_the_source_holds_and_stays_bounded() -> None:
+    secrets = ("shelf-secret-value", "wallet-passphrase-value")
+    detail = runner.refusal_detail("publish failed:\n  token shelf-secret-value\n  opened with wallet-passphrase-value", secrets)
+    assert detail == "publish failed: token [secret] opened with [secret]"
+    for secret in secrets:
+        assert secret not in detail
+    # A provisioner that dumps a transcript into its message does not make
+    # the record one: the tail is dropped and the cut says so.
+    long = runner.refusal_detail("x" * (records.DETAIL_LIMIT * 2), ())
+    assert len(long) == records.DETAIL_LIMIT
+    assert long.endswith("...")
+
+
 def test_a_refused_prepare_invalidates_its_trial_and_the_run_goes_on(
     tmp_path: Path, make_runtime, run_dir: Path, register_executor
 ) -> None:
@@ -562,13 +583,97 @@ def test_a_refused_prepare_invalidates_its_trial_and_the_run_goes_on(
     records.validate(first)
     assert (first["invalid_reason"], first["usage"], first["actors"], first["stop_reason"]) == ("provision:seed_key_drift", [], [], "exit")
     assert "seed key drift" in (run_dir / "trials" / results[0].trial_id / "output" / "provision-refusal.txt").read_text(encoding="utf-8")
-    assert "seed key drift" not in json.dumps(first)
+    # The roots die with the runner, so the record quotes the refusal too: a
+    # reason code alone cannot say what the publish, or the probe, saw.
+    assert first["invalid_detail"] == "seed key drift: the lesson records another key"
     # The default code, for a provisioner that names none.
     assert executor.ProvisionError("plain").code == "refused"
+    # A refused attempt never provisioned, so it claims nothing about the
+    # hook arms: the field belongs to the attempts that got past prepare.
+    assert "hooks_disabled" not in first["isolation"]
+
+
+def test_a_provisioned_attempt_records_the_hook_arms_its_config_turned_off(
+    tmp_path: Path, make_runtime, run_dir: Path, register_executor
+) -> None:
+    def prepare(request: executor.ProvisionRequest) -> executor.Provision:
+        return executor.Provision(facts={"hooks_disabled": list(request.arm.get("hooks_disabled") or ())})
+
+    name = register_executor(
+        "provisioned_hooks_for_this_test",
+        ExecutorSpec(name="provisioned_hooks_for_this_test", harness="claude", launch=executor.REGISTRY["fake"].launch, prepare=prepare),
+    )
+    manifest = support.synthetic_manifest(tmp_path, executor_name=name, arms=("off_nudge", "as_shipped"))
+    for arm in manifest.data["arms"]:
+        arm["provision"] = "tenjin"
+    manifest.data["arms"][0]["hooks_disabled"] = ["publish"]
+    results = runner.run(manifest, schedule.expand(manifest), run_dir, "sha256:schedule", make_runtime())
+    written = {}
+    for result in results:
+        record = json.loads(result.path.read_text(encoding="utf-8"))
+        records.validate(record)
+        written[record["arm_id"]] = record["isolation"].get("hooks_disabled", "absent")
+    # The arm that runs the product as shipped says so with an empty list,
+    # rather than leaving a reader to read absence as either.
+    assert written == {"off_nudge": ["publish"], "as_shipped": []}
+
+
+# The run's one corpus reading fires once the first seed is on the shelf, and never twice.
+
+
+def snapshot_executor(register_executor, prepared: list[str], *, refuse_first: bool = False) -> str:
+    name = "provisioned_snapshot_for_this_test"
+
+    def prepare(request: executor.ProvisionRequest) -> executor.Provision:
+        prepared.append(request.trial_id)
+        if request.trial_id == prepared[0] and len(prepared) == 1 and refuse_first:
+            raise executor.ProvisionError("the seed never published", code="seed_publish")
+        return executor.Provision()
+
+    return register_executor(
+        name, ExecutorSpec(name=name, harness="claude", launch=executor.REGISTRY["fake"].launch, prepare=prepare)
+    )
+
+
+def manifest_and_once(tmp_path: Path, run_dir: Path, name: str) -> tuple[Manifest, snapshot_module.Once, list[object]]:
+    manifest = support.synthetic_manifest(tmp_path, executor_name=name, arms=("on", "on2"))
+    for arm in manifest.data["arms"]:
+        arm["provision"] = "tenjin"
+    pages = [{"items": [{"id": "a", "slug": "s", "title": "t", "price": "0", "publishedAt": "p", "updatedAt": "u"}], "nextCursor": None}]
+    asked: list[object] = []
+
+    class Catalog:
+        def page(self, origin, cursor):
+            asked.append(cursor)
+            return pages[0]
+
+    return manifest, snapshot_module.Once(run_dir, "bench.tenjin.sh", Catalog()), asked
+
+
+def test_the_reading_is_taken_once_however_many_trials_seeded(tmp_path: Path, make_runtime, run_dir: Path, register_executor) -> None:
+    prepared: list[str] = []
+    manifest, once, asked = manifest_and_once(tmp_path, run_dir, snapshot_executor(register_executor, prepared))
+    results = runner.run(manifest, schedule.expand(manifest), run_dir, "sha256:schedule", make_runtime(snapshot=once))
+    assert [result.outcome for result in results] == ["pass", "pass"]
+    assert len(prepared) == 2
+    assert len(asked) == 1
+    assert (once.result["posts"], once.result["origin"]) == (1, "bench.tenjin.sh")
+
+
+def test_a_trial_whose_seeding_was_refused_reads_nothing(tmp_path: Path, make_runtime, run_dir: Path, register_executor) -> None:
+    prepared: list[str] = []
+    manifest, once, asked = manifest_and_once(tmp_path, run_dir, snapshot_executor(register_executor, prepared, refuse_first=True))
+    trials = schedule.expand(manifest)
+    results = runner.run(manifest, trials[:1], run_dir, "sha256:schedule", make_runtime(snapshot=once))
+    assert [result.outcome for result in results] == ["invalid"]
+    assert asked == []
+    assert once.result is None
 
 
 @pytest.fixture
-def live_manifest(make_manifest, register_executor) -> Manifest:
+def live_manifest(make_manifest, register_executor, live_gates) -> Manifest:
+    # A live spec resolves its fixture image before any root exists; that
+    # lookup is the one thing stubbed, so no case here reaches Docker.
     register_executor(
         LIVE,
         ExecutorSpec(
@@ -851,14 +956,6 @@ def test_no_module_can_kill_by_matching_a_process_name() -> None:
     assert offenders == [], "a name-matching kill is never the cleanup"
 
 
-def test_a_record_states_only_the_sentinel_evidence_the_harness_can_still_gather(one_trial: OneTrial, make_manifest, make_runtime) -> None:
-    # The loopback public-request sentinel is retired with the container
-    # harness that could report a refusal, so a record carries the credential
-    # scan and nothing standing in for egress the harness cannot see.
-    record = one_trial(make_manifest(), make_runtime())
-    assert record["sentinel"] == {"credential_exposures": 0}
-
-
 def test_subscription_exhaustion_is_unavailable_not_a_task_failure(one_trial, make_manifest, make_runtime):
     def exhausted(launch, roots):
         roots.stream.write_text(json.dumps({"type": "result", "is_error": True,
@@ -870,3 +967,58 @@ def test_subscription_exhaustion_is_unavailable_not_a_task_failure(one_trial, ma
     reduction = reduce_module.reduce({record["trial_id"]: record}, [])
     assert reduction["arms"][record["arm_id"]]["outcomes"]["fail"] == 0
     assert reduction["arms"][record["arm_id"]]["tokens_per_verified_resolution"] is None
+
+
+def test_waiting_shelf_trials_do_not_occupy_independent_worker_slots(tmp_path, run_dir, monkeypatch) -> None:
+    manifest = support.synthetic_manifest(tmp_path, arms=("on", "on2", "off"), concurrency=2)
+    trials = schedule.expand(manifest)
+    # Put two exclusive trials ahead of an independent one. Admission must
+    # bypass the second exclusive trial to fill the other worker.
+    trials = sorted(trials, key=lambda trial: trial.arm_id == "off")
+    monkeypatch.setattr(runner, "seeds_shelf", lambda manifest, trial: trial.arm_id != "off")
+    independent_started = threading.Event()
+    def attempt(manifest, trial, out, digest, runtime):
+        if trial == trials[0]:
+            assert independent_started.wait(5), "an idle worker was trapped behind the shelf gate"
+        elif trial.arm_id == "off":
+            independent_started.set()
+        return runner.TrialResult(trial.trial_id, "pass", False, out / trial.trial_id)
+    monkeypatch.setattr(runner, "attempt", attempt)
+    result = runner.run_concurrently(manifest, trials, run_dir, "sha256:schedule", runner.Runtime(), 2)
+    assert len(result) == 3
+
+
+def test_launch_refusal_still_cleans_a_successfully_prepared_trial(tmp_path, run_dir, register_executor, make_runtime) -> None:
+    stopped = []
+    def launch(request):
+        raise ValueError("launch refused")
+    name = register_executor("launch_refusal_cleanup", ExecutorSpec(
+        name="launch_refusal_cleanup", harness="claude", launch=launch,
+        prepare=lambda request: executor.Provision(),
+        stop=lambda roots, provision: stopped.append(roots.trial_id) or {}))
+    manifest = support.synthetic_manifest(tmp_path, executor_name=name, arms=("on",))
+    manifest.data["arms"][0]["provision"] = "tenjin"
+    trial = schedule.expand(manifest)[0]
+    with pytest.raises(ValueError, match="launch refused"):
+        runner.run_trial(manifest, trial, run_dir, "sha256:schedule", make_runtime())
+    assert stopped == [trial.trial_id]
+
+
+@pytest.mark.parametrize("degree", (1, 3))
+def test_cleanup_failure_records_evidence_and_stops_new_shelf_trials(tmp_path, run_dir, register_executor, make_runtime, degree):
+    prepared = []
+    def prepare(request):
+        prepared.append(request.trial_id)
+        return executor.Provision()
+    name = register_executor("poisoned_shelf", ExecutorSpec(
+        name="poisoned_shelf", harness="claude", launch=executor.REGISTRY["fake"].launch,
+        prepare=prepare, stop=lambda roots, provision: {"seed_deleted": {"piece": "delete failed"}}))
+    manifest = support.synthetic_manifest(tmp_path, executor_name=name, arms=("on", "on2"), concurrency=degree)
+    for arm in manifest.data["arms"]:
+        arm["provision"] = "tenjin"
+    with pytest.raises(executor.ProvisionError, match="cleanup failed"):
+        runner.run(manifest, schedule.expand(manifest), run_dir, "sha256:schedule", make_runtime())
+    assert len(prepared) == 1
+    written = json.loads(records.final_path(run_dir / "records", prepared[0]).read_text())
+    assert written["invalid_reason"] == "isolation:seed_cleanup"
+    assert written["usage"]

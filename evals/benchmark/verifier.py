@@ -12,25 +12,40 @@ the verifier process gets the same treatment as the agent's: an allowlisted
 environment rather than the operator's, so a wallet or shelf variable is not
 in scope for code that reads a trial's final worktree.
 
-The two specs here are the offline ones: a file check and a deliberate crash,
-which is what the fake chain needs to prove pass, fail, and undecided are
-three different outcomes. A verifier that runs a real task's test suite ships
-with the task fixture it runs on.
+A task verifier decides two things: the hidden test passes on the retained
+worktree, and the run marker the fixture's vitest reporter writes on a green
+run names exactly the one test file the prompt asked for. The marker is
+evidence that the named test ran green inside the trial, not proof: the
+agent can write any file, so the transcript's tool counts stay the primary
+record of what ran.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
 
-from . import REPO_ROOT
+from . import PACKAGE_ROOT, REPO_ROOT
 
 OUTPUT_LIMIT = 800
+# Code-owned hidden layers, one directory per task, mounted into the
+# verifier's copy after shutdown. The agent-visible fixture never holds them.
+HIDDEN = PACKAGE_ROOT / "hidden"
+HIDDEN_TESTS = "hidden-tests"
+# Where the fixture's `scripts/ran-marker.mjs` reporter records a green run.
+MARKER_DIR = ".bench1"
+
+
+def TEST_FILE(task: str) -> "re.Pattern[str]":  # noqa: N802
+    return re.compile(rf"^tests/{re.escape(task)}\.test\.(?:mjs|ts)\Z")
+NODE = "node"
 # What a `python3 -m` child needs to run at all. Everything else the operator
 # happens to have exported stays out of the verifier process.
 INHERITED = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
@@ -70,9 +85,35 @@ def _fake_crash(repo: Path) -> list[str]:
     return [sys.executable, "-m", "evals.benchmark.verifier", "fake-crash", "--repo", str(repo)]
 
 
+def _node_test(task: str, package: str) -> Callable[[Path], list[str]]:
+    """A Node test from the task's hidden layer, run inside the verifier's copy."""
+
+    def argv(repo: Path) -> list[str]:
+        base = [sys.executable, "-m", "evals.benchmark.verifier", "node-test", "--repo", str(repo), "--test", f"{HIDDEN_TESTS}/{task}.test.mjs", "--task", task]
+        return base + (["--package", package] if package else [])
+
+    return argv
+
+
+def node_test_spec(task: str, package: str = "") -> VerifierSpec:
+    """`package` is the workspace package the task's tests live in (`packages/core`), where the run marker is written; empty for a single-package fixture."""
+    return VerifierSpec(name=f"node_test_{task}", argv=_node_test(task, package), timeout_s=60, hidden_layer=HIDDEN / task)
+
+
+# The Bench-0 family, one project each, and the Bench-2 families: `core` is a
+# pnpm workspace whose tests and marker live in `packages/core`. `shadow` is a
+# workspace too, but its one Vitest project is the root, so its marker is the
+# root's and only the library it consumes lives under `packages/`.
+TASK_PACKAGES: dict[str, str] = {}
+# The file the task's fix touches, which the discovery facts read edits against.
+# `shadow` names the library source rather than the built artifact the test
+# imports, because an edit there is the edit the task is about.
+TASK_SOURCES: dict[str, str] = {}
+
 REGISTRY: dict[str, VerifierSpec] = {
     "fake_answer_file": VerifierSpec(name="fake_answer_file", argv=_fake_answer_file, timeout_s=30),
     "fake_crash": VerifierSpec(name="fake_crash", argv=_fake_crash, timeout_s=30),
+    **{f"node_test_{task}": node_test_spec(task, package) for task, package in TASK_PACKAGES.items()},
 }
 
 
@@ -125,16 +166,75 @@ def fake_answer_file(repo: Path) -> int:
     return 0
 
 
+def marker_path(repo: Path, task: str, package: str = "") -> Path:
+    return (repo / package if package else repo) / MARKER_DIR / f"ran-{task}.json"
+
+
+def check_marker(repo: Path, task: str, package: str = "") -> str | None:
+    """Why the run marker does not show the task's one test file ran green alone, or None.
+
+    The marker names files relative to the vitest root, which is the package
+    the test lives in, so `tests/<task>.test.<ext>` is the expected entry
+    whether the fixture is one project or a workspace package.
+    """
+    path = marker_path(repo, task, package)
+    where = f"{package}/{MARKER_DIR}" if package else MARKER_DIR
+    if not path.is_file():
+        return f"no run marker at {where}/ran-{task}.json: tests/{task}.test.* never ran green inside the trial"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return "run marker is not readable JSON"
+    if not isinstance(data, dict) or data.get("task") != task:
+        return f"run marker does not name task {task!r}"
+    files = data.get("files")
+    if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], str) or not TEST_FILE(task).match(files[0]):
+        return f"run marker names {files!r} rather than exactly the one tests/{task}.test.* file"
+    passed = data.get("passed")
+    if not isinstance(passed, int) or isinstance(passed, bool) or passed < 1 or data.get("failed") != 0:
+        return "run marker does not record a green run"
+    return None
+
+
+def node_test(repo: Path, test: str, task: str, package: str = "") -> int:
+    """Run one hidden Node test in the copy, then require the run marker. 0 and 1 are the verdict; anything else is ours."""
+    target = repo / test
+    if not target.is_file():
+        print(f"hidden test {test} is not mounted")
+        return 3
+    try:
+        completed = subprocess.run([NODE, str(target)], cwd=repo, env=child_environment(), capture_output=True, text=True, shell=False, check=False)
+    except FileNotFoundError:
+        print("node is not on PATH")
+        return 3
+    sys.stdout.write(completed.stdout[-OUTPUT_LIMIT:])
+    sys.stderr.write(completed.stderr[-OUTPUT_LIMIT:])
+    if completed.returncode != 0:
+        return 1 if completed.returncode == 1 else 3
+    reason = check_marker(repo, task, package)
+    if reason is not None:
+        print(reason)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="evals.benchmark.verifier")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("fake-answer-file", "fake-crash"):
         commands.add_parser(name).add_argument("--repo", required=True)
+    node = commands.add_parser("node-test")
+    node.add_argument("--repo", required=True)
+    node.add_argument("--test", required=True)
+    node.add_argument("--task", required=True)
+    node.add_argument("--package", default="")
     args = parser.parse_args(argv)
     if args.command == "fake-crash":
         # A verifier that cannot decide. The attempt is invalid, not failed.
         print("fake verifier crashed")
         return 3
+    if args.command == "node-test":
+        return node_test(Path(args.repo), args.test, args.task, args.package)
     return fake_answer_file(Path(args.repo))
 
 
