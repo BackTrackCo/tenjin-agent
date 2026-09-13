@@ -1,0 +1,5 @@
+{
+  "schema": "bench1.selection.v1",
+  "source": "local-arms-manifest.json",
+  "arms": ["off", "tenjin_seeded"]
+}

@@ -1,0 +1,200 @@
+{
+  "benchmark_version": "bench2-core-suite-3-host1",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260908,
+  "repeats": 3,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 1500,
+    "turn_budget": 80,
+    "max_budget_usd": 2.5,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ],
+    "billing_mode": "subscription",
+    "speed_mode": "standard",
+    "concurrency": 3
+  },
+  "price_sheet_version": "real-2026-09",
+  "phases": {
+    "producer": "natural-or-shelf-seeded",
+    "capture": "local-store",
+    "consumer": "local"
+  },
+  "corpus": {
+    "provider": "neon",
+    "project_id": "weathered-paper-24312028",
+    "branch_id": "br-ancient-dream-ave43t84",
+    "parent_id": "br-shiny-mountain-av1jfsuq",
+    "origin": "bench.tenjin.sh"
+  },
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "fixture_hash": "sha256:86b48d133f09b0bfccba62fb870f68b5017494a378b16de49d9aa29ace55a793",
+      "verifier": "node_test_actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "budget",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "budget",
+      "fixture_hash": "sha256:e4bd2b6f17d48638a90e14ff49e4b3aff30f04072d30bd13292ea3efde3bbba2",
+      "verifier": "node_test_budget",
+      "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "candidate",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "candidate",
+      "fixture_hash": "sha256:b19f1811c593fd82481698d2032b65098ab25c22f070267706d31928ae75ce9e",
+      "verifier": "node_test_candidate",
+      "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "slug",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "slug",
+      "fixture_hash": "sha256:c95bc957792e675e3300127450a7a26cbda7bd5e1911faf10347f46fbf56d8ec",
+      "verifier": "node_test_slug",
+      "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "alias",
+      "family": "vitest-path-alias",
+      "transfer_distance": "same_task",
+      "fixture": "alias",
+      "fixture_hash": "sha256:d4c532673cd234e28c8080ebfb86d4df46016bdc68a34a4ea189ff4fb57c8fbf",
+      "verifier": "node_test_alias",
+      "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "level",
+      "family": "node-type-stripping",
+      "transfer_distance": "same_task",
+      "fixture": "level",
+      "fixture_hash": "sha256:486d1901af2301820aa0a5a6133660025785dbda6c9784d4462615ddecbaa9be",
+      "verifier": "node_test_level",
+      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "money",
+      "family": "esm-cjs-interop",
+      "transfer_distance": "same_task",
+      "fixture": "money",
+      "fixture_hash": "sha256:dd8bc00aaae31aa5085e99b5abcc42190944a3f51af2bfcdb93ece69ad153111",
+      "verifier": "node_test_money",
+      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "core",
+      "family": "pnpm-workspace",
+      "transfer_distance": "same_task",
+      "fixture": "core",
+      "fixture_hash": "sha256:3a79f5e5d0444dd951c5fcb095070137b93688e951e5b9399f79d17d938d60f1",
+      "verifier": "node_test_core",
+      "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "shadow",
+      "family": "stale-build-artifact",
+      "transfer_distance": "same_task",
+      "fixture": "shadow",
+      "fixture_hash": "sha256:4bd356f4aeda052c7eca6145fb64aa04acd1c6f62de8a00f677e243a9bdc5abd",
+      "verifier": "node_test_shadow",
+      "prompt": "Make tests/shadow.test.mjs pass by fixing the @fixture/range package, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "ambient",
+      "family": "invisible-whitespace-mismatch",
+      "transfer_distance": "same_task",
+      "fixture": "ambient",
+      "fixture_hash": "sha256:5b1fe306328ebf13a5252a22c7b731aab78f6123a58748461018382d18511d1c",
+      "verifier": "node_test_ambient",
+      "prompt": "Fix src/price.mjs so that tests/ambient.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "flat",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {
+        "overlay": {
+          "CLAUDE.md": "Work only inside this disposable fixture. Fix the requested source file, run only the named test, do not chain test commands with `echo`, and do not spawn subagents. Network access is limited to configured Tenjin search/read/inspect commands. Do not publish from the task container. Before running anything, read LESSONS.md: it holds what earlier work in this repository learned.\n",
+          "LESSONS.md": "# Lessons from earlier work in this repository\n\nEach section is one thing an earlier session learned here; find the one that matches what you are about to do.\n\n# Running one Vitest file in a repository whose test script wraps every project\n\nThe package `test` script here is a wrapper, not the runner: `scripts/all-tests.mjs` starts Vitest over everything the config includes, the `unrelated/` shards among them, and it drops any file argument it is given. So `pnpm test -- tests/<name>.test.mjs` runs the whole set and fails on the shards whatever the named test does, and the run marker is never written.\n\nThe runner itself refuses to start unless it was reached through pnpm, and a test file imports `vitest`, so `node tests/<name>.test.mjs`, `npx vitest run`, and `./node_modules/.bin/vitest run` each stop before a test runs.\n\nRun exactly one file through the runner under pnpm's agent:\n\n    pnpm exec vitest run tests/<name>.test.mjs\n\nThat carries pnpm's agent into the config, runs only the named file, and writes the run marker when the file is green. `pnpm vitest run tests/<name>.test.mjs` is the same path.\n\n# actorKey: the agent half of the key defaults to root\n\n`actorKey(session, agent)` in `src/actor.mjs` builds `<session>:<agent>`, and the failing case is the one with no agent: the template interpolates `undefined` and the key reads `<session>:undefined`. The rule the test encodes is that a missing agent is the root actor of the session, so the agent half falls back to the literal `root` when it is `undefined` or `null`.\n\nThe fix is the fallback in the template:\n\n    return `${session}:${agent ?? 'root'}`;\n\nA present agent is kept as given; only a missing one becomes `root`. Re-run the one file with `pnpm exec vitest run tests/actor.test.mjs`.\n\n# budgetMs: the budget is a ceiling, not a rate\n\n`budgetMs` in `src/budget.mjs` returns a value above the limit the test names, so the failing case reads `expected 3200 to be 2500`: the function passes the computed figure through when it should cap it. The rule the test encodes is that the budget is a ceiling: the result is the smaller of the computed figure and the cap.\n\nThe fix is a `Math.min` against the cap on the return path; a figure under the cap is kept as given. Re-run the one file with `pnpm exec vitest run tests/budget.test.mjs`.\n\n# firstStrong: pick the first strong candidate, null when none\n\n`firstStrong` in `src/candidate.mjs` returns the first candidate whatever its `strong` flag, so the failing case receives `{ id: 'a', strong: false }` where a later strong one was expected. The rule the test encodes is that only a candidate with `strong: true` counts, the first such one wins, and a list with none yields `null` rather than the first item.\n\nThe fix is a `find` on `strong === true` with `null` as the fallback. Re-run the one file with `pnpm exec vitest run tests/candidate.test.mjs`.\n\n# repoSlug: lower-case the slug and drop the .git suffix\n\n`repoSlug` in `src/slug.mjs` only trims its input, so the failing case reads `'BackTrackCo/Tenjin.git'` against `'backtrackco/tenjin'`. The rule the test encodes is that a slug is normalized: lower-cased, with a trailing `.git` removed, after the trim.\n\nThe fix is `toLowerCase()` followed by a `.git$` strip on the trimmed value. Re-run the one file with `pnpm exec vitest run tests/slug.test.mjs`.\n\n# Vitest does not read tsconfig paths: the `@/` alias needs `resolve.alias` in the Vitest config\n\n`tsconfig.json` maps `@/*` to `src/*` under `compilerOptions.paths`, and the editor and `tsc` follow it. Vitest does not: it resolves imports through Vite, which never reads `paths`, so a test that imports `@/window.mjs` fails to collect with `Error: Cannot find package '@/window.mjs' imported from 'tests/alias.test.ts'` before a single test runs, whatever the source says.\n\nThe fix is the same mapping stated where Vite reads it, in `vitest.config.mjs`:\n\n    resolve: { alias: { '@': new URL('./src', import.meta.url).pathname } },\n\nWith that in place the file collects and its assertions run; a case the run then prints is the next thing to fix.\n\n# lastWindow: a window of size 0 is empty, not the whole list\n\n`lastWindow(values, size)` in `src/window.mjs` returns `values.slice(-size)`, and the failing case is size 0: `slice(-0)` is `slice(0)`, the whole list, where the test expects `[]`. A non-positive size is an empty window.\n\n    return size > 0 ? values.slice(-size) : [];\n\nRe-run the one file with `pnpm exec vitest run tests/alias.test.ts`.\n\n# Node runs TypeScript by stripping types, and refuses an `enum`\n\nNode 24 runs a `.ts` file directly by erasing type syntax; it does not compile. Syntax that needs generated code is refused at load time: `SyntaxError [ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX]: TypeScript enum is not supported in strip-only mode`, and the same goes for `namespace`, parameter properties, and `const enum`. Vitest transpiles through esbuild, so an `enum` runs fine under the test runner and fails only where the file meets Node itself, such as a CLI the test spawns.\n\nReplace the enum with a constant object and a type derived from it, which erases cleanly and keeps the same names:\n\n    export const Level = { Low: 'low', High: 'high' } as const;\n    export type Level = (typeof Level)[keyof typeof Level];\n\n# level: replace the enum with a const object so Node can strip the file\n\n`src/level.ts` declares `enum Level`, and the CLI test spawns `node src/cli.ts`, where Node's type stripping refuses an enum (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`). Keep the `Level` export and the `levelOf` rule; only the declaration changes:\n\n    export const Level = { Low: 'low', High: 'high' } as const;\n    export type Level = (typeof Level)[keyof typeof Level];\n\nRe-run the one file with `pnpm exec vitest run tests/level.test.mjs`.\n\n# A CommonJS module's `exports.default` is not an ESM default import\n\nWhen ESM imports a CommonJS file, Node hands `import x from './m.cjs'` the whole `module.exports` object, never its `default` property. A module written the way TypeScript emits it (`exports.__esModule = true; exports.default = fn`) therefore arrives as `{ default: fn }`, and calling the import fails with `TypeError: <name> is not a function`, with nothing in the message about interop. Bundlers and Vitest unwrap `.default` for you, so the same code passes under the test runner and fails only where Node loads it directly.\n\nEither read the property on the ESM side:\n\n    import money from './money.cjs';\n    const formatMoney = money.default;\n\nor export the function itself on the CommonJS side (`module.exports = formatMoney`).\n\n# money: take the CommonJS module's `default` before calling it\n\n`src/cli.mjs` imports `src/money.cjs` as a default import and calls it, but that CommonJS file exports the formatter under `exports.default`, so under Node the import is the exports object and the call fails with `TypeError: formatMoney is not a function`. Read the property:\n\n    import money from './money.cjs';\n    const formatMoney = money.default;\n\nRe-run the one file with `pnpm exec vitest run tests/money.test.mjs`.\n\n# In this pnpm workspace, run a package's tests from the package: `pnpm --filter <name> exec vitest run <file>`\n\nThe root `package.json` has no `test` script, so `pnpm test` at the root stops with `ERR_PNPM_NO_SCRIPT`, and `pnpm -r test` runs every package's whole suite. Vitest reads its config from the directory it starts in: a run from the root (`pnpm exec vitest run packages/core/tests/core.test.mjs`, or `npx vitest run` with that path) finds no root config, so the package's setup and reporters never run: the file collects with no test suite, and nothing the package records is written.\n\nTarget the package instead. Either form starts Vitest inside `packages/core`, with its config and its reporters:\n\n    pnpm --filter core exec vitest run tests/core.test.mjs\n    pnpm -C packages/core exec vitest run tests/core.test.mjs\n\n`pnpm --filter core test -- tests/core.test.mjs` is the same path through the package's own script.\n\n# clampPct: clamp to the 0 to 100 range\n\n`clampPct(value)` in `packages/core/src/core.mjs` returns its argument unchanged, and the run prints the rule: 140 is expected to be 100 and -5 to be 0. A percentage is clamped to the closed range:\n\n    return Math.min(100, Math.max(0, value));\n\nRe-run the one file from the package with `pnpm --filter core exec vitest run tests/core.test.mjs`.\n"
+        }
+      },
+      "settings_hash": "sha256:900db9a0fc7ff2a6f9beacbff4225ddf345ee40d7b171f203b8156de8a9eb52c",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_seeded",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"]
+    },
+    {
+      "id": "tenjin_seeded_no_public",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"],
+      "public_fallback": "off"
+    },
+    {
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "exposed",
+      "id": "tenjin_natural",
+      "producer": true,
+      "capture_publication": "host"
+    }
+  ]
+}

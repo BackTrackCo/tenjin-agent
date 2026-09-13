@@ -1,0 +1,126 @@
+{
+  "benchmark_version": "bench2-recursive-6-host1",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260908,
+  "repeats": 3,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 600,
+    "turn_budget": 40,
+    "max_budget_usd": 0.75,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ],
+    "billing_mode": "subscription",
+    "speed_mode": "standard",
+    "concurrency": 1
+  },
+  "price_sheet_version": "real-2026-09",
+  "phases": {
+    "producer": "natural-or-shelf-seeded",
+    "capture": "local-store",
+    "consumer": "local"
+  },
+  "slice": {
+    "kind": "recursive"
+  },
+  "corpus": {
+    "provider": "neon",
+    "project_id": "weathered-paper-24312028",
+    "branch_id": "br-ancient-dream-ave43t84",
+    "parent_id": "br-shiny-mountain-av1jfsuq",
+    "origin": "bench.tenjin.sh"
+  },
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "fixture_hash": "sha256:86b48d133f09b0bfccba62fb870f68b5017494a378b16de49d9aa29ace55a793",
+      "verifier": "node_test_actor",
+      "required_descendants": 1,
+      "prompt": "Delegate the diagnosis of why tests/actor.test.mjs fails to a subagent that runs only that one test file and reports the failing case, then fix src/actor.mjs yourself and run only that one test file again. Never run the whole suite.",
+      "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep", "Agent"],
+      "allowed_tools": [
+        "Bash(pnpm:*)",
+        "Bash(npx:*)",
+        "Bash(node:*)",
+        "Bash(ls:*)",
+        "Bash(cat:*)",
+        "Read(./**)",
+        "Edit(./**)",
+        "Write(./**)",
+        "Glob(./**)",
+        "Grep(./**)",
+        "Agent"
+      ]
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_seeded",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "lessons": ["test-harness-convention", "actor-fix"],
+      "hooks_disabled": ["publish"]
+    },
+    {
+      "id": "tenjin_seeded_no_public",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "lessons": ["test-harness-convention", "actor-fix"],
+      "hooks_disabled": ["publish"],
+      "public_fallback": "off"
+    },
+    {
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "exposed",
+      "id": "tenjin_natural",
+      "producer": true,
+      "lessons": ["test-harness-convention", "actor-fix"],
+      "capture_publication": "host"
+    }
+  ]
+}
