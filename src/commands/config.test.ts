@@ -913,6 +913,74 @@ describe('publish.mode keeps the harness allowlist in step', () => {
     });
   });
 
+  it('rolls an earlier harness back when a later grant write fails', async () => {
+    const codexModes: string[] = [];
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        harnessesInPlay: ['claude', 'codex'],
+        isInteractive: true,
+        confirmRule: async () => true,
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          codexModes.push(mode);
+          return mode === 'auto'
+            ? {
+                path: join(home, '.codex', 'rules', 'tenjin.rules'),
+                granted: [],
+                wrote: false,
+                error: 'permission denied',
+              }
+            : {
+                path: join(home, '.codex', 'rules', 'tenjin.rules'),
+                granted: [],
+                wrote: true,
+              };
+        }),
+      }),
+    );
+    expect(err).toMatchObject({
+      code: 'REFUSED',
+      details: { rollback: { attempted: true, ok: true } },
+    });
+    expect(codexModes).toEqual(['auto', 'review']);
+    for (const rule of MODE_GATED_RULES) expect(await allowOf()).not.toContain(rule);
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'review', source: 'default' },
+    });
+  });
+
+  it('rolls grants back when the final config write fails', async () => {
+    const codexModes: string[] = [];
+    const err = await caught(() =>
+      runConfigSet({ key: 'publish.mode', value: 'auto' }, makeCtx(), {
+        homeDir: home,
+        harnessesInPlay: ['codex'],
+        isInteractive: true,
+        confirmRule: async () => true,
+        persistPublishMode: async () => {
+          throw new Error('config is unwritable');
+        },
+        adapters: adaptersWithCodexGrant(async (_home, mode) => {
+          codexModes.push(mode);
+          return {
+            path: join(home, '.codex', 'rules', 'tenjin.rules'),
+            granted: mode === 'review' ? [] : ['tenjin publish'],
+            wrote: true,
+          };
+        }),
+      }),
+    );
+    expect(err).toMatchObject({
+      code: 'INTERNAL',
+      message: expect.stringContaining('config is unwritable'),
+      details: { rollback: { attempted: true, ok: true } },
+    });
+    expect(codexModes).toEqual(['auto', 'review']);
+    expect(await runConfigGet({ key: 'publish.mode' }, makeCtx())).toMatchObject({
+      data: { value: 'review', source: 'default' },
+    });
+  });
+
   // Tightening only ever removes what this CLI wrote, so it needs no question —
   // including on a headless machine, which is where a stale grant would sit.
   it('retracts the rule on review, unprompted, and reports it', async () => {

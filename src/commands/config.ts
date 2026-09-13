@@ -14,6 +14,7 @@ import {
 import { modeGatedPointer } from '../lib/permissions';
 import { PRODUCTION_ORIGIN, isSameDeployment } from '../lib/production-origin';
 import {
+  CONFIG_DEFAULTS,
   CONFIG_KEYS,
   HOOKS_CONFIG_KEYS,
   PUBLISH_CONFIG_KEYS,
@@ -92,6 +93,8 @@ export interface ConfigSetDeps {
   env?: NodeJS.ProcessEnv;
   inspectAllowlist?: typeof inspectFreeVerbRules;
   wireAllowlist?: (home: string, mode: PublishMode) => Promise<PermissionsResult>;
+  /** Publish-mode commit seam; tests make the final config write fail after grants land. */
+  persistPublishMode?: (dir: string, mode: PublishMode) => Promise<void>;
 }
 
 const CONFIRM_ABOVE = 'above:';
@@ -413,11 +416,15 @@ async function setPublishKey(
   // Synchronize before committing the mode. A grant writer may refuse after
   // consent (permissions, concurrent edits, an unwritable parent); persisting
   // first made the command exit successfully with an unattended mode that its
-  // harness could not carry. Grant-first is also the least-authority failure
-  // order: if a later config write fails, the CLI still resolves the old mode.
-  const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
+  // harness could not carry. Because several files cannot commit atomically,
+  // every later failure compensates completed grants back to the previous mode.
+  const mode = entry.value as PublishMode;
+  const previousMode =
+    (await loadRawConfig(ctx.dataDir)).publish?.mode ?? CONFIG_DEFAULTS.publish.mode;
+  const allowlist = await syncPublishRule(mode, ctx, deps);
   const failure = grantSyncFailure(allowlist);
   if (failure !== undefined) {
+    const rollback = await rollbackGrantChanges(previousMode, allowlist, ctx, deps);
     throw new CliError(
       'REFUSED',
       `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
@@ -425,11 +432,28 @@ async function setPublishKey(
         fix:
           failure.fix ??
           `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
-        details: { key, value: entry.value, allowlist },
+        details: { key, value: entry.value, allowlist, rollback },
       },
     );
   }
-  await persistEntry();
+  try {
+    if (deps.persistPublishMode !== undefined) {
+      await deps.persistPublishMode(ctx.dataDir, mode);
+    } else {
+      await persistEntry();
+    }
+  } catch (err) {
+    const rollback = await rollbackGrantChanges(previousMode, allowlist, ctx, deps);
+    throw new CliError(
+      'INTERNAL',
+      `publish.mode was not changed because its config could not be written: ${errorMessage(err)}`,
+      {
+        fix: `Fix the reported config problem, then re-run \`tenjin config set publish.mode ${mode}\`.`,
+        details: { key, value: entry.value, allowlist, rollback },
+        cause: err,
+      },
+    );
+  }
   return {
     data: { key, ...entry, allowlist },
     humanLines: [...humanLines, ...allowlistLines(allowlist)],
@@ -469,6 +493,49 @@ function grantSyncFailure(
     }
   }
   return undefined;
+}
+
+function grantSyncChanged(sync: AllowlistSync): boolean {
+  return Object.values(sync.byHarness).some((result) => {
+    if (result === undefined) return false;
+    if ('wrote' in result) return result.wrote;
+    return result.added.length > 0 || result.removed.length > 0;
+  });
+}
+
+interface GrantRollback {
+  attempted: boolean;
+  ok: boolean;
+  allowlist?: AllowlistSync;
+  error?: string;
+}
+
+/** Restore the adapter-owned grant state that the previous mode requires. The
+ * writer is idempotent and owns only Tenjin's rules, so this is the recoverable
+ * transaction boundary when another harness or the config commit fails. */
+async function rollbackGrantChanges(
+  previousMode: PublishMode,
+  changed: AllowlistSync,
+  ctx: CommandContext,
+  deps: ConfigSetDeps,
+): Promise<GrantRollback> {
+  if (!grantSyncChanged(changed)) return { attempted: false, ok: true };
+  try {
+    const allowlist = await syncPublishRule(previousMode, ctx, deps, true);
+    const failure = grantSyncFailure(allowlist);
+    return {
+      attempted: true,
+      ok: failure === undefined,
+      allowlist,
+      ...(failure !== undefined ? { error: `${failure.harness}: ${failure.reason}` } : {}),
+    };
+  } catch (err) {
+    return { attempted: true, ok: false, error: errorMessage(err) };
+  }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Names what the write actually carries: on a machine that never ran `install`,
@@ -511,6 +578,7 @@ async function syncPublishRule(
   mode: PublishMode,
   ctx: CommandContext,
   deps: ConfigSetDeps,
+  preapproved = false,
 ): Promise<AllowlistSync> {
   const home = deps.homeDir ?? homedir();
   const nothing: AllowlistSync = { byHarness: {} };
@@ -608,18 +676,20 @@ async function syncPublishRule(
   // already has.
   if (probe.satisfied !== undefined && selectedAdapters.length === 1 && isClaude) return nothing;
 
-  const canPrompt =
-    ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  if (!canPrompt) {
-    return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
-  }
-
-  const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
   const grantable = selectedAdapters
     .filter((adapter) => adapter.registrar.grant !== undefined)
     .map((adapter) => adapter.id);
-  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
-    return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
+  if (!preapproved) {
+    const canPrompt =
+      ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
+    if (!canPrompt) {
+      return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
+    }
+
+    const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
+    if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
+      return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
+    }
   }
   return await withOtherGrants(isClaude ? await write() : nothing);
 }
