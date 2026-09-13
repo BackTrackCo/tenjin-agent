@@ -61,11 +61,6 @@ def write_ledger(run_dir: Path, trial_id: str, session: str, agent: str, *, wal:
         )
     db.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms, search_id, title, url, form, calibration) VALUES ('f1', 0, 'team', 'ok', 'hit', 40, 'search-9', 'The convention piece', 'https://team-shelf.example/p/piece-real', 'inline', 'hybrid-v1')")
     db.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms, search_id) VALUES ('f2', 0, 'keys', 'ok', 'no-answer', 30, NULL)")
-    db.execute(
-        "INSERT INTO pairings (uid, at, session, project, machine, kind, key, cmd_head, cmd, error_line, error_files, scope, status)"
-        " VALUES ('u1', 2, ?, 'proj', 'm', 'sig_v1_test', '502b90852a1505e3', 'pnpm', 'pnpm exec vitest run tests/actor.test.mjs', ?, '[]', 'project', 'open')",
-        (session, f"AssertionError: expected 's1:undefined' to be 's1:root' {SECRET}"),
-    )
     db.commit()
     db.close()
     if wal:
@@ -148,12 +143,11 @@ def test_one_record_per_fire_with_a_question_or_a_key_replayed_and_seeded_marked
     assert prompt["attempt"]["tokens"] is not None
     assert (failure["trigger"], failure["prompt"]["text"], failure["prompt"]["question_key"]) == ("failure", None, "502b90852a1505e3")
     situation = failure["context_packet"]["situation"]
-    assert (situation["command_head"], situation["command"], situation["key_kind"]) == ("pnpm", "pnpm exec vitest run tests/actor.test.mjs", "sig_v1_test")
-    assert situation["source"]["error_line"] == "pairings.error_line"
+    assert situation["error_line"] is None
+    assert situation["source"]["error_line"] == "fires.question"
     assert "skipped" in failure["replay"]
     text = out.read_text(encoding="utf-8")
     assert SECRET not in text
-    assert "[secret]" in text
     assert "/Users/operator" not in text
 
 
@@ -273,3 +267,21 @@ def test_saved_cases_need_no_replay_source(fake_run: Path, trials: list[str], tm
     ledger_for(fake_run, trials[0])
     write_snapshot(fake_run, trials[0], [snapshot_entry("How do I run one vitest file here?", None, [])], [])
     assert export(fake_run, None, tmp_path / "saved.jsonl")["from_snapshot"] == 1
+
+
+def test_failure_text_is_replayed_from_the_fire_without_pairings_and_redacted(fake_run: Path, source_dir: Path, trials: list[str], tmp_path: Path) -> None:
+    path = ledger_for(fake_run, trials[0])
+    question = f"AssertionError: expected root {SECRET}"
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE IF EXISTS pairings")
+        db.execute("UPDATE fires SET question = ?, question_key = 'sig_v1_test:502b90852a1505e3|line:abc' WHERE id = 'f2'", (question,))
+    out = tmp_path / 'cases.jsonl'
+    summary = export(fake_run, source_dir, out)
+    failure = next(json.loads(line) for line in out.read_text().splitlines() if json.loads(line)['trigger'] == 'failure')
+    assert summary['replayed'] == 2
+    assert failure['context_packet']['situation'] == {
+        'error_line': 'AssertionError: expected root [secret]',
+        'source': {'error_line': 'fires.question', 'key': 'fires.question_key'},
+    }
+    assert failure['replay']['source'] == 'post_run_replay'
+    assert SECRET not in out.read_text()

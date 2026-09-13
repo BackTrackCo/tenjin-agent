@@ -233,7 +233,7 @@ def project(
                 seeds["published"] += 1
                 if seed.get("deleted") is not True:
                     seeds["not_deleted"] += 1
-    # The failure path per arm: which lane keyed the failure fire, whether the
+    # The failure path per arm: which fingerprints the failure fire carried, whether the
     # keys leg hit, whether the reporter's artifact existed, what was delivered.
     failure_keys: dict[str, dict[str, Any]] = {}
     for record in accepted.values():
@@ -243,8 +243,8 @@ def project(
         if key is None:
             continue
         row["keyed"] += 1
-        lane = key.get("lane") or "unknown"
-        row["lanes"][lane] = row["lanes"].get(lane, 0) + 1
+        for lane in key.get("lanes", []) or ["no-fingerprint"]:
+            row["lanes"][lane] = row["lanes"].get(lane, 0) + 1
         row["keys_leg_hits"] += int(bool(key.get("keys_leg_hit")))
         row["report_files"] += int(key.get("report_file_present") is True)
         row["delivered"] += int(key.get("delivered_piece_id") is not None)
@@ -497,7 +497,7 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
         producer = arms.get(arm_id, {}).get("producer")
         if producer:
             lines += ["", f"Producer {arm_id}: {producer['passes']}/{producer['attempts']} verified; "
-                      f"{producer['captured']} left reusable local pairings; {producer['findings']} capture drafts retained. "
+                      f"{producer['captured']} retained drafts; {producer['findings']} capture drafts retained. "
                       "Drafts are not published knowledge or proof of consumer delivery."]
             if producer.get("publication_mode") == "host-assisted":
                 lines += [f"Host-assisted publication: {producer['published']} pieces published; {producer['consumers_with_delivery']} consumers received a producer piece through a team hook; {producer['verified_with_delivery']} of those passed. "
@@ -696,7 +696,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
         producer = arm.get("producer")
         if producer:
             lines.append(
-                f"{arm_id} producer phases: {producer['attempts']} run, {producer['passes']} passed, {producer['captured']} left a closed local record, "
+                f"{arm_id} producer phases: {producer['attempts']} run, {producer['passes']} passed, {producer['captured']} retained drafts, "
                 f"{producer['findings']} capture draft(s) retained, {producer['invalid']} invalid; one-time tokens producer {arm['phase_tokens']['producer']}, capture {arm['phase_tokens']['capture']}"
             )
         diagnostics = [task.get("diagnostics", {}) for task in arm.get("tasks", {}).values()]

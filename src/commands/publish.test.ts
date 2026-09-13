@@ -1079,80 +1079,6 @@ describe('runPublish — publish <file> --key', () => {
     expect(body()).not.toHaveProperty('keys');
   });
 
-  /** A closed pairing under `key`, `post_id` as given: the shape the failure
-   *  arm leaves behind once a fix has landed. */
-  function seedPairing(uid: string, key: string, postId: string | null): number {
-    return withLoopDb(dir, (db) =>
-      Number(
-        db
-          .prepare(
-            `INSERT INTO pairings (uid, at, session, project, machine, kind, key, scope, status, post_id)
-             VALUES (?, 0, 's', NULL, 'm', 'sig_v1', ?, 'code', 'unverified', ?)`,
-          )
-          .run(uid, key, postId).lastInsertRowid,
-      ),
-    );
-  }
-
-  function postIdOf(id: number): string | null {
-    const row = withLoopDb(dir, (db) =>
-      db.prepare('SELECT post_id FROM pairings WHERE id = ?').get(id),
-    ) as { post_id?: unknown };
-    return typeof row.post_id === 'string' ? row.post_id : null;
-  }
-
-  const FIX_KEY = '0f3a9c1d2b4e5f60';
-
-  it('stamps the unstamped pairing the key names, and no other', async () => {
-    const unstamped = seedPairing('u1', FIX_KEY, null);
-    const stamped = seedPairing('u2', FIX_KEY, 'an-earlier-post');
-    const elsewhere = seedPairing('u3', 'ffffffffffffffff', null);
-    const { fetch } = bodyServer();
-    await runPublish(
-      baseArgs(await writeDoc(CLEAN), { mode: 'auto', key: [`fingerprint=sig_v1:${FIX_KEY}`] }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
-    );
-    expect(postIdOf(unstamped)).toBe(CREATED.id);
-    // The row a piece already claims is not taken over by the next one, and a
-    // row under another key is not touched at all.
-    expect(postIdOf(stamped)).toBe('an-earlier-post');
-    expect(postIdOf(elsewhere)).toBeNull();
-  });
-
-  // A draft answered nobody: the pairing is still owed the write-up the turn-end
-  // ask will offer again, and the promotion is what claims the row.
-  it('stamps nothing on a --draft publish', async () => {
-    const unstamped = seedPairing('u1', FIX_KEY, null);
-    const { fetch } = stubServer({ ...CREATED, status: 'draft' });
-    await runPublish(
-      baseArgs(await writeDoc(CLEAN), {
-        mode: 'auto',
-        draft: true,
-        key: [`fingerprint=sig_v1:${FIX_KEY}`],
-      }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
-    );
-    expect(postIdOf(unstamped)).toBeNull();
-  });
-
-  it('stamps nothing on --dry-run', async () => {
-    const unstamped = seedPairing('u1', FIX_KEY, null);
-    const { fetch, calls } = stubServer();
-    await runPublish(
-      baseArgs(await writeDoc(CLEAN), {
-        mode: 'auto',
-        dryRun: true,
-        key: [`fingerprint=sig_v1:${FIX_KEY}`],
-      }),
-      makeCtx(),
-      hermetic({ fetchImpl: fetch, provider: spyProvider().provider }),
-    );
-    expect(calls).toEqual([]);
-    expect(postIdOf(unstamped)).toBeNull();
-  });
-
   it('refuses a bad kind or a bare value at the edge, before anything is signed', async () => {
     const file = await writeDoc(CLEAN);
     for (const key of ['errno=ENOENT', 'sig_v1:abc', '=x']) {
@@ -3126,8 +3052,8 @@ describe('runPublish — publish --finding', () => {
    * MAJOR (round 2): the queue is machine-wide and `publish.mode` resolves from
    * the CURRENT directory, so a finding harvested in a private repo under
    * `review` was listable and publishable from an unrelated `full-auto` repo
-   * inside the window with no confirm anywhere. Same bug class `pairings`
-   * already binds `project IS ?` against.
+   * inside the window with no confirm anywhere: a finding written about one
+   * checkout going out as if it were about another.
    */
   it('refuses a finding from another project until somebody says --yes', async () => {
     const id = await seedFinding({ uid: 'FND-ELSEWHERE', project: 'deadbeefdeadbeef' });
