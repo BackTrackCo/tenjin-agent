@@ -18,12 +18,13 @@ let calls: string;
 let stub: string;
 let server: ReturnType<typeof createServer>;
 let url: string;
-let requests: any[];
+type KeyMessage = { keys: { key: string }[] };
+let requests: { path: string | undefined; body: KeyMessage | null }[];
 const silence = {
   stdout: { write: () => true },
   stderr: { write: () => true },
   isTTY: false,
-} as any;
+};
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 beforeEach(async () => {
@@ -55,7 +56,7 @@ beforeEach(async () => {
     });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  url = `http://127.0.0.1:${(server.address() as any).port}`;
+  url = `http://127.0.0.1:${(server.address() as import('node:net').AddressInfo).port}`;
   await writeFile(
     join(data, 'config.json'),
     JSON.stringify({
@@ -111,12 +112,12 @@ async function seed(cwd: string, suffix = 'one') {
   store.close();
   return uid;
 }
-async function script(source: string, input: any) {
+async function script(source: string, input: unknown) {
   const file = join(root, randomUUID() + '.mjs');
   await writeFile(file, source);
   return new Promise<number | null>((resolve, reject) => {
     const child = spawn(process.execPath, [file], {
-      env: { PATH: process.env.PATH ?? '' },
+      env: { PATH: process.env.PATH ?? '', HOME: root },
       stdio: ['pipe', 'ignore', 'pipe'],
     });
     let errors = '';
@@ -149,13 +150,13 @@ async function observedCalls() {
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line));
-  } catch (error: any) {
-    if (error.code === 'ENOENT') return [];
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return [];
     throw error;
   }
 }
 async function sync(cwd: string) {
-  const sent: any[] = [];
+  const sent: KeyMessage[] = [];
   const signer = testSigner();
   const provider = {
     id: 'local',
@@ -167,9 +168,9 @@ async function sync(cwd: string) {
     }),
     getSigner: async () => signer,
     diagnostics: async () => ({ warnings: [] }),
-  } as any;
-  const fetchImpl = (async (_url: any, init: any) => {
-    sent.push(JSON.parse(init.body));
+  };
+  const fetchImpl = (async (_url: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    sent.push(JSON.parse(String(init?.body)));
     return new Response(
       JSON.stringify({
         id: '11111111-1111-4111-8111-111111111111',
@@ -184,7 +185,7 @@ async function sync(cwd: string) {
     );
   }) as typeof fetch;
   const result = await runSync(
-    { flags: { json: true, timeout: 3000 }, dataDir: data, io: silence } as any,
+    { flags: { json: true, timeout: 3000 }, dataDir: data, io: silence },
     { cwd, provider, fetchImpl },
   );
   return { result, sent };
@@ -234,7 +235,7 @@ it('resolve and publish agree across HTTPS, SCP and SSH, preserving host and ful
     if (!store) throw new Error('Missing store');
     const row = store.get('SELECT coarse_key FROM pairings WHERE project=?', [
       state.projectId(repo),
-    ]) as any;
+    ]) as { coarse_key: string };
     store.close();
     const expected =
       'sig_v1c:' +
@@ -242,7 +243,9 @@ it('resolve and publish agree across HTTPS, SCP and SSH, preserving host and ful
         .update(row.coarse_key + '|' + scopes[i])
         .digest('hex')
         .slice(0, 16);
-    const key = wire[i].body.keys.find((entry: any) => entry.key.startsWith('sig_v1c:')).key;
+    const key = wire[i].body.keys.find((entry: { key: string }) =>
+      entry.key.startsWith('sig_v1c:'),
+    ).key;
     expect(key).toBe(expected);
     resolveKeys.push(key);
     await seed(repo, 'wire');
@@ -254,7 +257,9 @@ it('resolve and publish agree across HTTPS, SCP and SSH, preserving host and ful
         .digest('hex')
         .slice(0, 16);
     expect(published.sent).toHaveLength(1);
-    expect(published.sent[0].keys.some((entry: any) => entry.key === expectedPublished)).toBe(true);
+    expect(
+      published.sent[0].keys.some((entry: { key: string }) => entry.key === expectedPublished),
+    ).toBe(true);
   }
   expect(new Set(resolveKeys.slice(0, 3)).size).toBe(1);
   expect(new Set([resolveKeys[0], ...resolveKeys.slice(3)]).size).toBe(4);
@@ -271,7 +276,11 @@ it.each([null, '../local-clone'])(
     const store = await state.openStore(data);
     if (!store) throw new Error('Missing store');
     expect(
-      (store.get('SELECT synced_at FROM pairings WHERE uid=?', [uid]) as any).synced_at,
+      (
+        store.get('SELECT synced_at FROM pairings WHERE uid=?', [uid]) as {
+          synced_at: number | null;
+        }
+      ).synced_at,
     ).toBeNull();
     store.close();
     expect(await stop(repo)).toBe(0);
@@ -311,9 +320,9 @@ it.each(['alias', 'deep'])(
     expect(await realpath(got[0].cwd)).toBe(mode === 'alias' ? repo : deep);
     const published = await sync(target);
     expect(published.sent).toHaveLength(1);
-    expect(published.sent[0].keys.some((entry: any) => entry.key === 'sig_v1:fine-intended')).toBe(
-      true,
-    );
+    expect(
+      published.sent[0].keys.some((entry: { key: string }) => entry.key === 'sig_v1:fine-intended'),
+    ).toBe(true);
     expect(JSON.stringify(published.sent)).not.toContain('fine-different');
   },
 );
@@ -387,7 +396,7 @@ it('the CLI rejects an explicitly empty cwd', async () => {
       return true;
     },
   };
-  const io = { stdout: sink, stderr: sink, isTTY: false } as any;
+  const io = { stdout: sink, stderr: sink, isTTY: false };
   expect(await main(['sync', '--cwd', ''], io)).toBe(2);
   expect(output.join('')).toMatch(/cwd|argument/i);
   expect(await observedCalls()).toEqual([]);
