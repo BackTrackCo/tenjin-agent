@@ -2,10 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factsWithPrefix, getFact, setFact } from '../hooks/facts';
+import { factsWithPrefix, setFact } from '../hooks/facts';
 import { withLoopDb } from './loop-db';
 import {
-  dequeueFinding,
   normalizePublishBody,
   publishBodyHash,
   publishedUrlFor,
@@ -15,8 +14,8 @@ import {
 /**
  * The dedup and the child-publish record, both `facts` rows on `loop.db`. What
  * these pin: the same body twice is one publish, a re-render that differs only
- * in line endings hashes the same, one row per PUBLISH rather than per agent,
- * and a publish takes its finding off the queue.
+ * in line endings hashes the same, and one row per PUBLISH rather than per
+ * agent.
  */
 
 let dir: string;
@@ -70,12 +69,6 @@ describe('recordPublished', () => {
     expect(keys('agent_published:')).toEqual([]);
   });
 
-  it('a publish takes its finding off the queue', async () => {
-    withLoopDb(dir, (db) => setFact(db, 'finding:F1', '{"body":"x"}', Date.now()));
-    await recordPublished(dir, 'a body', 'https://tenjin.blog/p/one', { findingId: 'F1' });
-    expect(keys('finding:')).toEqual([]);
-  });
-
   it('nothing ages out: an old row still answers', async () => {
     const body = 'an old finding';
     await recordPublished(dir, body, 'https://tenjin.blog/p/old');
@@ -84,19 +77,5 @@ describe('recordPublished', () => {
     );
     await recordPublished(dir, 'something new', 'https://tenjin.blog/p/new');
     expect(await publishedUrlFor(dir, body)).toBe('https://tenjin.blog/p/old');
-  });
-});
-
-describe('dequeueFinding', () => {
-  it('says the row is off the queue, whether or not this call took it', async () => {
-    withLoopDb(dir, (db) => setFact(db, 'finding:F1', '{"body":"x"}', Date.now()));
-    expect(await dequeueFinding(dir, 'F1')).toBe(true);
-    expect(withLoopDb(dir, (db) => getFact(db, 'finding:F1'))).toBeNull();
-    // A discard after a publish already dequeued it is not a failure.
-    expect(await dequeueFinding(dir, 'F1')).toBe(true);
-  });
-
-  it('refuses an empty id rather than deleting the prefix row', async () => {
-    expect(await dequeueFinding(dir, '')).toBe(false);
   });
 });

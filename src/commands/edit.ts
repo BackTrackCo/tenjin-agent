@@ -7,6 +7,7 @@ import { findings as scanFindings } from '../lib/redact';
 import { sanitizeForTerminal } from '../lib/output';
 import { markSearchResolved, searchesForDraft, type StoredSearch } from '../lib/searches';
 import { recordPublished } from '../lib/publish-dedup';
+import { requirePublishableCard } from './publish';
 import {
   deriveCard,
   missingSentences,
@@ -213,6 +214,37 @@ export async function runEdit(
   // to burn a nonce on a write that changes nothing. Exit 0 with the current post.
   const { input, lines: changes } = diffUpdate(stored, intent);
   if (changes.length === 0) return noChangeReceipt(stored);
+
+  /**
+   * THE SAME CARD GATE `publish` RUNS, on the PROMOTION and on nothing else.
+   *
+   * A draft parks with no card on purpose — the one thing publish's gate lets
+   * through — so `--status published` is the other door to the public page, and
+   * without this the rule above every publish would be one command's to enforce
+   * and its twin's to walk around. Promotion is where the draft's exemption ends,
+   * because it is the moment the piece becomes something a searcher has to judge.
+   *
+   * ONLY THE `draft` → NOT-`draft` TRANSITION (reviewer, 2026-09-12). Gating on
+   * the RESULTING status instead refused every edit to an already-published piece
+   * whose card is incomplete, and the shelf is full of those: a typo or a price
+   * fix on an old piece would have been blocked behind an unrelated rewrite of
+   * its card. An edit that leaves a published piece published is not gated, in
+   * either direction — it can clear a card key, and the piece stays as findable
+   * or as unfindable as it already was.
+   *
+   * It reads the card the piece WILL have, not the stored one, so an author who
+   * supplies the missing keys in the same call promotes in one command, and a
+   * promotion that clears a required key in the same call is refused.
+   *
+   * Placed here, above the promotion claims, the scan, the confirm and the
+   * write: everything below spends something.
+   */
+  if (stored.status === 'draft' && (input.status ?? stored.status) !== 'draft') {
+    requirePublishableCard(
+      resultingCard(stored.resource, input.resource),
+      `Set them in the same call that promotes it (\`tenjin edit ${args.postId} --status published --scope <text> --exclusions <text> --provenance <text> --question <text>\`), or leave it a draft, which stays exempt.`,
+    );
+  }
 
   // PROMOTION is this draft actually going public, so it settles what the draft
   // publish deferred (publish.ts): the searches parked on the draft ride the
@@ -625,6 +657,52 @@ function cardLabel(key: keyof ResourceCardUpdate): string {
  * already-cleared, which is what makes clearing a field on a cardless post the
  * no-op it should be rather than a card-creating write.
  */
+/**
+ * The card the piece WILL have once this edit lands: the stored card with the
+ * edit's surviving changes on top, in the shape the rubric reads.
+ *
+ * `null` IS A CLEAR, so it lands as absent rather than as a value — which is the
+ * whole reason a promotion cannot be waved through on the stored card alone: the
+ * same call can add a scope and clear an exclusions. Only the keys the rubric
+ * reads are merged; the rest of the card does not change whether a piece is
+ * judgeable.
+ */
+function resultingCard(
+  stored: OwnPostCard | undefined,
+  change: ResourceCardUpdate | undefined,
+): ResourceCardInput {
+  const text = (
+    after: string | null | undefined,
+    before: string | null | undefined,
+  ): string | undefined => (after !== undefined ? (after ?? undefined) : (before ?? undefined));
+  const list = (
+    after: string[] | null | undefined,
+    before: string[] | null | undefined,
+  ): string[] | undefined => (after !== undefined ? (after ?? undefined) : (before ?? undefined));
+
+  const card: ResourceCardInput = {};
+  const questions = list(change?.questionsAnswered, stored?.questionsAnswered);
+  if (questions !== undefined) card.questionsAnswered = questions;
+  const tasks = list(change?.tasksSupported, stored?.tasksSupported);
+  if (tasks !== undefined) card.tasksSupported = tasks;
+  const scope = text(change?.scope, stored?.scope);
+  if (scope !== undefined) card.scope = scope;
+  const exclusions = text(change?.exclusions, stored?.exclusions);
+  if (exclusions !== undefined) card.exclusions = exclusions;
+  const provenance = text(change?.provenanceSummary, stored?.provenanceSummary);
+  if (provenance !== undefined) card.provenanceSummary = provenance;
+  const methodology = text(change?.methodologySummary, stored?.methodologySummary);
+  if (methodology !== undefined) card.methodologySummary = methodology;
+  const asOf = text(change?.asOf, stored?.asOf);
+  if (asOf !== undefined) card.asOf = asOf;
+  // `asOf` is required only for a snapshot, so the mode has to be merged too.
+  const mode = text(change?.temporalMode, stored?.temporalMode);
+  if (mode === 'snapshot' || mode === 'maintained' || mode === 'evergreen') {
+    card.temporalMode = mode;
+  }
+  return card;
+}
+
 function diffCard(
   stored: OwnPostCard | undefined,
   next: ResourceCardUpdate | undefined,

@@ -9,22 +9,22 @@ import { STARTED_MARK } from './actor';
 import { stopArm } from './arms/stop';
 import { subagentStopArm } from './arms/subagent-stop';
 import { CHILD, cleanup, freshDb, hookInput, kernelConfig, LEAD, NOW } from './arms/test-support';
-import { findingBlock } from './capture';
-import { factsWithPrefix, setFact } from './facts';
+import { setFact } from './facts';
 import { runFire } from './fire';
 import { getMark, setMark } from './gates';
-import { CAPTURE_ASK, FINDING_TAG, QUEUED_FINDINGS_TAIL } from './prose';
+import { CAPTURE_ASK } from './prose';
 import type { LoopDb } from './store';
 import type { Actor, Deps, KernelConfig } from './types';
 
 /**
- * Capture through the two arms that call it (from #298's suite, re-keyed
- * onto the kernel). Both audiences are asked once, with evidence, as context;
- * the lead is re-armed by what its children queue and by a failure newer than
- * its ask; the stop after an ask harvests the fence whole. The LEAD's ask also
- * names what this session left open: its unanswered searches, what its children
- * queued and published. A child's ask carries none of those, and both carry the
- * failures the actor itself hit that nothing answered.
+ * Capture through the two arms that call it (from #298's suite, re-keyed onto
+ * the kernel). Both audiences are asked ONCE, with evidence, as context; the
+ * LEAD is re-armed by a failure newer than its ask and by nothing else, and every
+ * other stop says nothing, because the ask names a command and there is nothing
+ * left for a later turn to collect. The LEAD's ask also names what this session
+ * left open: its unanswered searches and what its children published. A child's
+ * ask carries neither, and both carry the failures the actor itself hit that
+ * nothing answered.
  */
 
 const TEAM = kernelConfig();
@@ -37,10 +37,6 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   cleanup();
 });
-
-function fence(body: string): string {
-  return 'Done. Here is what I settled:\n```' + FINDING_TAG + '\n' + body + '\n```\n';
-}
 
 function childStop(over: Partial<HookInput> = {}): HookInput {
   return hookInput({
@@ -133,27 +129,6 @@ function seedSearch(
   );
 }
 
-function queueFinding(db: LoopDb, over: Record<string, unknown> = {}, at = NOW - 10): string {
-  const id = randomUUID();
-  setFact(
-    db,
-    `finding:${id}`,
-    JSON.stringify({
-      title: 'ox 0.14 keeps Bytes.from',
-      body: 'Pinning the resolver to 4.1 stops the parse throw.',
-      session: LEAD.session,
-      agent: CHILD.agent,
-      agentType: 'general-purpose',
-      project: null,
-      searchId: SEARCH_ID,
-      at,
-      ...over,
-    }),
-    at,
-  );
-  return id;
-}
-
 function shelf(): { calls: number } {
   const state = { calls: 0 };
   vi.stubGlobal('fetch', async () => {
@@ -186,10 +161,6 @@ async function fire(db: LoopDb, input: HookInput, config: KernelConfig = TEAM, c
   return result.emit;
 }
 
-function findings(db: LoopDb): Array<Record<string, unknown>> {
-  return factsWithPrefix(db, 'finding:').map((f) => JSON.parse(f.value) as Record<string, unknown>);
-}
-
 function fireCount(db: LoopDb): number {
   return Number((db.prepare('SELECT COUNT(*) AS n FROM fires').get() as { n: number }).n);
 }
@@ -203,10 +174,11 @@ describe('the child ask', () => {
     expect(getMark(db, CHILD, 'capture:asked')).toBeNull();
   });
 
-  it('an edit, one Read row, or a claimed handoff miss each earn the ask, and the mark says which', async () => {
+  it('an edit, a web lookup, or a claimed handoff miss each earn the ask, and the mark says which', async () => {
     const cases: Array<[string, (db: LoopDb) => void]> = [
       ['edited', (db) => setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW)],
-      ['research', (db) => seedFire(db, CHILD, 'context', 'no-question', 'tool.after')],
+      ['research', (db) => seedFire(db, CHILD, 'research', 'no-hit')],
+      ['research', (db) => seedFire(db, CHILD, 'fetch', 'seen')],
       ['handoff-miss', (db) => setMark(db, CHILD, 'handoff:miss', SEARCH_ID, NOW)],
     ];
     for (const [kind, seed] of cases) {
@@ -218,22 +190,34 @@ describe('the child ask', () => {
       expect(reason.startsWith('Tenjin: this turn did work worth a second look.'), kind).toBe(true);
       expect(reason, kind).toContain(`tenjin publish <file> --agent ${CHILD.agent}`);
       expect(reason, kind).toContain('publish.mode is review');
-      expect(reason, kind).toContain('```' + FINDING_TAG + ' fence');
-      expect(reason, kind).not.toContain(QUEUED_FINDINGS_TAIL);
+      expect(reason, kind).toContain(
+        `write it as a file and run \`tenjin publish <file> --agent ${CHILD.agent}`,
+      );
       expect(getMark(db, CHILD, 'capture:asked'), kind).toBe(kind);
       if (kind === 'handoff-miss') expect(reason).toContain(` --search-id ${SEARCH_ID}`);
       else expect(reason).not.toContain('--search-id');
     }
   });
 
-  it('a child with no evidence, a Bash-only child, a capture-off machine, and a workflow child are not asked', async () => {
+  /**
+   * A READ ALONE IS NOT EVIDENCE (owner, 2026-09-12). Decision 2's "one Read is
+   * a row" is withdrawn: it is the cheapest row an agent can leave, so it asked
+   * nearly every child whatever it had been doing.
+   */
+  it('a Read-only, Bash-only, bare, capture-off or workflow child is not asked', async () => {
     const bare = freshDb();
     started(bare);
     expect(await fire(bare, childStop())).toBeNull();
     expect(getMark(bare, CHILD, 'capture:asked')).toBeNull();
 
-    // A Bash call is a context row too, on `tool.before`; decision 2 names
-    // WebSearch, WebFetch, edit and Read, and no more.
+    // A Read is a context row on `tool.after`; a Bash call is one on
+    // `tool.before`. Neither counts now.
+    const readOnly = freshDb();
+    started(readOnly);
+    seedFire(readOnly, CHILD, 'context', 'no-question', 'tool.after');
+    expect(await fire(readOnly, childStop())).toBeNull();
+    expect(getMark(readOnly, CHILD, 'capture:asked')).toBeNull();
+
     const bashOnly = freshDb();
     started(bashOnly);
     seedFire(bashOnly, CHILD, 'context', 'no-question', 'tool.before');
@@ -256,58 +240,20 @@ describe('the child ask', () => {
     expect(getMark(workflow, CHILD, 'capture:asked')).toBeNull();
   });
 
-  it('asks no shelf at either stop; the answer turn harvests', async () => {
+  it('asks no shelf, and the answer turn after the ask is not asked again', async () => {
     const db = freshDb();
     started(db);
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
     const stub = shelf();
-    await fire(db, childStop({ lastMessage: 'Both worktrees share one Docker daemon.' }));
+    expect(await fire(db, childStop())).not.toBeNull();
     expect(stub.calls).toBe(0);
 
-    const body = 'Pinning the resolver to 4.1 stops the parse throw.';
-    const emit = await fire(
-      db,
-      childStop({ stopFuse: true, lastMessage: fence('# ox 0.14 keeps Bytes.from\n' + body) }),
-    );
-    expect(emit).toBeNull();
+    // The turn that ANSWERS the ask, and every turn after it: the row is still
+    // written, and the agent reads nothing new.
+    expect(await fire(db, childStop({ stopFuse: true, lastMessage: 'Published it.' }))).toBeNull();
+    expect(await fire(db, childStop({ stopFuse: true, lastMessage: 'Again.' }))).toBeNull();
     expect(stub.calls).toBe(0);
-    expect(findings(db)).toMatchObject([
-      {
-        title: 'ox 0.14 keeps Bytes.from',
-        body,
-        session: LEAD.session,
-        agent: CHILD.agent,
-        agentType: 'general-purpose',
-        searchId: '',
-      },
-    ]);
-    expect(getMark(db, CHILD, 'capture:harvested')).not.toBeNull();
-  });
-
-  it('stores title and body whole: a 300-character heading is still the title, and a key never is', async () => {
-    const db = freshDb();
-    started(db);
-    setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
-    await fire(db, childStop());
-    const heading = 'w'.repeat(300);
-    const body =
-      'x'.repeat(5000) + ' sk-abcdefghijklmnopqrstuvwxyz012345 and src/lib/a.ts at a1b2c3d';
-    await fire(db, childStop({ stopFuse: true, lastMessage: fence(`# ${heading}\n${body}`) }));
-    const [stored] = findings(db);
-    expect(stored?.title).toBe(heading);
-    expect(String(stored?.body).startsWith('x'.repeat(5000))).toBe(true);
-    expect(stored?.body).not.toContain('sk-abcdefghijklmnopqrstuvwxyz012345');
-    expect(stored?.body).toContain('src/lib/a.ts at a1b2c3d');
-  });
-
-  it('a second stop after the harvest is a no-op', async () => {
-    const db = freshDb();
-    started(db);
-    setMark(db, CHILD, 'handoff:miss', SEARCH_ID, NOW);
-    await fire(db, childStop());
-    await fire(db, childStop({ stopFuse: true, lastMessage: fence('first') }));
-    await fire(db, childStop({ stopFuse: true, lastMessage: fence('second') }));
-    expect(findings(db)).toMatchObject([{ body: 'first', searchId: SEARCH_ID }]);
+    expect(fireCount(db)).toBe(3);
   });
 
   it('carries no miss line, though the lead in the same session gets one', async () => {
@@ -353,75 +299,40 @@ describe('the child ask', () => {
     expect(child).not.toContain('You fixed');
   });
 
-  it('is asked once however many failures follow: an asked child harvests instead', async () => {
+  it('is asked once however many failures follow', async () => {
     const db = freshDb();
     started(db);
     setMark(db, CHILD, 'edited:abc', 'src/a.ts', NOW);
     await fire(db, childStop());
 
-    // The re-arm is the lead's in practice, and this is why: `stop()` sends an
-    // already-asked child to its harvest and never reaches the ask at all.
+    // The re-arm is the LEAD's, and only the lead's: `stop()` sends an
+    // already-asked child nowhere. A child's later turns are its answer turn
+    // and whatever follows it, and it has no loop of its own to re-arm.
     seedFailure(db, CHILD, { at: NOW + 20 });
-    expect(
-      await fire(db, childStop({ lastMessage: fence('done') }), TEAM, () => NOW + 30),
-    ).toBeNull();
-    expect(findings(db)).toMatchObject([{ body: 'done' }]);
+    expect(await fire(db, childStop({ lastMessage: 'done' }), TEAM, () => NOW + 30)).toBeNull();
   });
 });
 
 describe('the lead ask', () => {
-  it('is asked once on a lookup that ran, re-armed by a new queued finding and not by a publish (#294)', async () => {
+  it('is asked once on a lookup that ran, and not re-armed by a publish (#294)', async () => {
     const db = freshDb();
     seedFire(db, LEAD, 'prompt', 'no-hit');
     const first = await fire(db, leadStop());
     expect(first?.context?.startsWith('Tenjin: this turn did work')).toBe(true);
     expect(first?.context).not.toContain('--agent');
     expect(getMark(db, LEAD, 'capture:asked')).toBe('lookup');
-    await fire(
-      db,
-      leadStop({ stopFuse: true, lastMessage: fence('first answer') }),
-      TEAM,
-      () => NOW + 5,
-    );
-    expect(await fire(db, leadStop())).toBeNull();
 
-    setFact(db, 'published:abc', 'https://tenjin.blog/p/abc', NOW + 10);
+    // The answer turn (`stopFuse`), then an ordinary one, then one after a
+    // publish: each writes its row and says nothing. Only a NEW failure re-arms
+    // the lead, which is the case below.
+    expect(
+      await fire(db, leadStop({ stopFuse: true, lastMessage: 'done' }), TEAM, () => NOW + 5),
+    ).toBeNull();
+    expect(await fire(db, leadStop(), TEAM, () => NOW + 10)).toBeNull();
+
+    setFact(db, 'published:abc', 'https://tenjin.blog/p/abc', NOW + 15);
     expect(await fire(db, leadStop(), TEAM, () => NOW + 20)).toBeNull();
-
-    const id = queueFinding(db, {}, NOW + 30);
-    const again = await fire(db, leadStop(), TEAM, () => NOW + 40);
-    expect(again?.context).toContain(
-      `- ${id} general-purpose subagent ${CHILD.agent}, search ${SEARCH_ID}: "ox 0.14 keeps Bytes.from"`,
-    );
-    expect(again?.context).toContain(QUEUED_FINDINGS_TAIL);
-    // The second answer turn is harvested too: once per ask, not once per lead.
-    await fire(
-      db,
-      leadStop({ stopFuse: true, lastMessage: fence('second answer') }),
-      TEAM,
-      () => NOW + 50,
-    );
-    expect(findings(db).filter((f) => f.agent === '')).toMatchObject([
-      { body: 'first answer' },
-      { body: 'second answer' },
-    ]);
-    expect(await fire(db, leadStop(), TEAM, () => NOW + 60)).toBeNull();
-  });
-
-  it('a queued finding alone is evidence, and the lines name this session only, titles cleaned', async () => {
-    const db = freshDb();
-    const mine = queueFinding(db, { title: 'a titlewith a bell\nand a break' });
-    const theirs = queueFinding(db, { session: 's-other' });
-    const own = queueFinding(db, { agent: '' });
-    const emit = await fire(db, leadStop());
-    const reason = emit?.context ?? '';
-    expect(getMark(db, LEAD, 'capture:asked')).toBe('finding');
-    expect(reason).toContain("1 finding(s) this session's subagents");
-    expect(reason).toContain(`- ${mine} `);
-    expect(reason).toContain('"a title with a bell and a break"');
-    expect(reason).not.toContain(theirs);
-    expect(reason).not.toContain(own);
-    expect(reason).not.toContain('Pinning the resolver');
+    expect(fireCount(db)).toBe(5);
   });
 
   it('team-mode repo activity is evidence; public-mode activity is not', async () => {
@@ -442,6 +353,14 @@ describe('the lead ask', () => {
     expect(emit).toEqual({
       context: CAPTURE_ASK.replace('<mode>', 'review').replace('<flags>', ''),
     });
+    // The text itself, spelled out once: one paragraph, one command, no fence.
+    expect(emit?.context).toBe(
+      'Tenjin: this turn did work worth a second look. If it settled something reusable ' +
+        '(a probe result, a version gotcha, a tested workaround; on the team shelf also a ' +
+        'decision and why, or a code map), write it as a file and run `tenjin publish <file>`; ' +
+        'publish.mode is review. The tenjin-publish skill has the shape. If nothing durable, ' +
+        'just finish.',
+    );
 
     // A harness that sends no fuse at all says the same thing: the ask is not a
     // decision, so there is nothing for the fuse to gate.
@@ -680,7 +599,7 @@ describe('the lead ask', () => {
     // Hit before the ask: the first ask already named it, so it re-arms nothing.
     seedFailure(db, LEAD, { at: NOW - 10 });
     expect((await fire(db, leadStop()))?.context).toContain('- Encountered this turn');
-    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
+    await fire(db, leadStop({ stopFuse: true, lastMessage: 'first' }), TEAM, () => NOW + 5);
     expect(await fire(db, leadStop(), TEAM, () => NOW + 10)).toBeNull();
 
     // A wall it had to climb out of AFTER its first stop is something new to
@@ -706,50 +625,20 @@ describe('the lead ask', () => {
     // row behind every run of the same failing command.
     seedFailure(db, LEAD, { reason: 'no-answer', at: NOW - 10 });
     expect((await fire(db, leadStop()))?.context).toContain(ENOENT_LINE);
-    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('first') }), TEAM, () => NOW + 5);
+    await fire(db, leadStop({ stopFuse: true, lastMessage: 'first' }), TEAM, () => NOW + 5);
 
     seedFailure(db, LEAD, { reason: 'no-answer', at: NOW + 20 });
     expect(await fire(db, leadStop(), TEAM, () => NOW + 30)).toBeNull();
   });
 
-  it('the second stop harvests the lead own fence; a skipped lookup is not evidence', async () => {
+  it('a skipped lookup is not evidence', async () => {
     const db = freshDb();
     seedFire(db, LEAD, 'prompt', 'words');
     expect(await fire(db, leadStop())).toBeNull();
+    expect(getMark(db, LEAD, 'capture:asked')).toBeNull();
 
     seedFire(db, LEAD, 'prompt', 'cached');
-    await fire(db, leadStop());
-    await fire(db, leadStop({ stopFuse: true, lastMessage: fence('the lead settled this') }));
-    expect(findings(db)).toMatchObject([
-      { body: 'the lead settled this', agent: '', agentType: '' },
-    ]);
-  });
-});
-
-describe('the fence parse', () => {
-  it('opens on the last marker line, closes fence-aware, and reads an unclosed block to the end', () => {
-    const snippet = [
-      '```' + FINDING_TAG,
-      'the fix:',
-      '```js',
-      'z.object({}).passthrough();',
-      '```',
-      'and that is all.',
-      '```',
-    ].join('\n');
-    const quoted = 'I was asked for a ```' + FINDING_TAG + '\nblock, so:\n\n' + snippet;
-    expect(findingBlock(quoted)).toEqual({
-      title: '',
-      body: 'the fix:\n```js\nz.object({}).passthrough();\n```\nand that is all.',
-    });
-    expect(findingBlock('```' + FINDING_TAG + '\n# T\nforgot the close')).toEqual({
-      title: 'T',
-      body: 'forgot the close',
-    });
-    expect(findingBlock('nothing worth a ```' + FINDING_TAG + ' block here')).toBeNull();
-    expect(findingBlock('```' + FINDING_TAG + '\n# only a heading\n```')).toEqual({
-      title: '',
-      body: '# only a heading',
-    });
+    expect(await fire(db, leadStop())).not.toBeNull();
+    expect(getMark(db, LEAD, 'capture:asked')).toBe('lookup');
   });
 });

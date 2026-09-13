@@ -557,27 +557,49 @@ describe('the deleted verbs and their replacements', () => {
   });
 });
 
-describe('publish --finding', () => {
-  it('is registered on publish rather than as a command group of its own', async () => {
+/**
+ * ONE COMMAND, ONE SHAPE. `publish` takes a document and nothing else: the
+ * source flags and the card-authoring flags are gone, and a caller reaching for
+ * one gets commander's unknown-option refusal rather than a silent drop.
+ */
+describe('publish takes a document and nothing else', () => {
+  it('carries no source, dry-run or card-authoring flags', async () => {
     const help = captureIo();
     expect(await main(['publish', '--help'], help.io)).toBe(0);
-    expect(help.stdout()).toContain('--finding <id>');
-    expect(help.stdout()).toContain('--dry-run');
-
-    const gone = captureIo();
-    expect(await main(['finding', 'list'], gone.io)).toBe(2);
+    const text = help.stdout();
+    for (const gone of [
+      '--finding',
+      '--dry-run',
+      '--discard',
+      '--question',
+      '--task',
+      '--scope',
+      '--exclusions',
+      '--applies-to',
+      '--as-of',
+      '--valid-until',
+      '--artifact-type',
+      '--temporal-mode',
+      '--provenance',
+      '--methodology',
+    ]) {
+      expect(text, gone).not.toContain(gone);
+    }
+    // The flags that stay.
+    for (const kept of ['--agent <id>', '--search-id <id>', '--draft', '--key <kind=value>']) {
+      expect(text, kept).toContain(kept);
+    }
   });
 
-  it('reports an unknown id as not found', async () => {
-    const cap = captureIo();
-    expect(await main(['publish', '--finding', 'no-such-id', '--json'], cap.io)).toBe(1);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('RESOURCE_NOT_FOUND');
-  });
-
-  it('refuses a file and an id together rather than picking one', async () => {
-    const cap = captureIo();
-    expect(await main(['publish', 'post.md', '--finding', 'abc', '--json'], cap.io)).toBe(2);
-    expect(JSON.parse(cap.stdout()).error.code).toBe('USAGE');
+  it('refuses a removed flag rather than dropping it', async () => {
+    for (const argv of [
+      ['publish', 'post.md', '--finding', 'abc', '--json'],
+      ['publish', 'post.md', '--dry-run', '--json'],
+      ['publish', 'post.md', '--scope', 'x', '--json'],
+    ]) {
+      const cap = captureIo();
+      expect(await main(argv, cap.io), argv.join(' ')).toBe(2);
+    }
   });
 });
 
@@ -585,21 +607,20 @@ describe('stdin command routing', () => {
   const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
   const markdown = '# Stdin probe\n\nA plain body from the pipe.\n';
 
-  it('routes `publish -` and bare non-TTY publish through the same dry-run pipeline', async () => {
+  // Both stdin forms reach the same pipeline, and reach it far enough to be
+  // refused for the document's shape: the card gate runs above every write, so
+  // a piped body with no card never touches a wallet or a shelf.
+  it('routes `publish -` and bare non-TTY publish through the same pipeline', async () => {
     for (const argv of [
-      ['publish', '-', '--dry-run', '--json'],
-      ['publish', '--dry-run', '--json'],
+      ['publish', '-', '--json'],
+      ['publish', '--json'],
     ]) {
       const cap = captureIo(false, { stream: Readable.from([markdown]), isTTY: false });
-      expect(await main(argv, cap.io)).toBe(0);
+      expect(await main(argv, cap.io), argv.join(' ')).toBe(2);
       const parsed = JSON.parse(cap.stdout());
       expect(parsed.command).toBe('publish');
-      expect(parsed.data).toMatchObject({
-        dryRun: true,
-        published: false,
-        title: 'Stdin probe',
-        body: markdown,
-      });
+      expect(parsed.error.code).toBe('USAGE');
+      expect(parsed.error.message).toContain('answer card');
     }
   });
 

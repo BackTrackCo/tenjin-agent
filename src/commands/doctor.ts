@@ -455,7 +455,7 @@ function checkNode(): BuiltCheck {
  * Does this machine's loop database open, and what is it holding?
  *
  * The whole of the loop's state — every fire and leg, the gate marks, the
- * search record, the finding queue — is one SQLite file opened through Node's
+ * search record — is one SQLite file opened through Node's
  * built-in module. The daemon fails OPEN without it, which is the right
  * posture for a tool call and the wrong one for a diagnosis: a machine whose
  * loop has quietly stopped remembering anything looks identical from the

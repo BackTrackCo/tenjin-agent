@@ -22,7 +22,15 @@ afterEach(async () => {
 
 const POST_ID = '0197aaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-/** The stored post every test edits, card included (a snapshot, one question). */
+/**
+ * The stored post every test edits, card included (a snapshot, one question).
+ *
+ * ITS CARD IS COMPLETE, and that is load-bearing: the promotion cases below open
+ * ONE hole in a copy of it and assert exactly which key the gate names, so a
+ * fixture with holes of its own would make every one of those assertions a list
+ * of coincidences. Editing this post is not gated — only a promotion is — so the
+ * completeness costs the other cases nothing.
+ */
 const STORED = {
   id: POST_ID,
   creatorId: '0197cccc-bbbb-cccc-dddd-eeeeeeeeeeee',
@@ -44,9 +52,9 @@ const STORED = {
     questionsAnswered: ['What is it?'],
     tasksSupported: [],
     scope: 'L2 fees only',
-    exclusions: null,
+    exclusions: 'mainnet fees, which were not measured',
     appliesTo: { products: ['Base'] },
-    provenanceSummary: null,
+    provenanceSummary: 'sampled 200 blocks and took the median',
     methodologySummary: null,
     maintenanceCadence: null,
     reproductionMinutes: null,
@@ -56,6 +64,12 @@ const STORED = {
     schemaVersion: 1,
   },
 };
+
+/**
+ * The same post, parked as a draft: what the promotion cases start from, since a
+ * promotion is the one transition the card gate reads.
+ */
+const DRAFT = { ...STORED, status: 'draft' };
 
 function makeCtx(): CommandContext {
   const sink = () => ({ write: () => true }) as unknown as NodeJS.WritableStream;
@@ -396,18 +410,11 @@ describe('runEdit — --clear', () => {
   });
 
   it('drops a clear of a field that is already empty, rather than re-clearing it', async () => {
-    // STORED already has exclusions/provenance/methodology/supersedesPostId null
-    // and tasksSupported empty. Sending those keys anyway would count as a card
+    // STORED already has methodologySummary/supersedesPostId null and
+    // tasksSupported empty. Sending those keys anyway would count as a card
     // write server-side and re-run the embedding for a card nobody changed.
     const { stub } = await edit({
-      clear: [
-        'scope',
-        'exclusions',
-        'provenance',
-        'methodology',
-        'supersedesPostId',
-        'tasksSupported',
-      ],
+      clear: ['scope', 'methodology', 'supersedesPostId', 'tasksSupported'],
     });
     expect(stub.putBody()).toEqual({ resource: { scope: null } });
   });
@@ -1216,6 +1223,143 @@ describe('runEdit — appliesTo is compared as a value, not a key count', () => 
     expect(stub.putBody()).toEqual({
       resource: { appliesTo: { products: ['Vercel', 'Base'] } },
     });
+  });
+});
+
+/**
+ * THE OTHER DOOR TO THE PUBLIC PAGE. A draft parks with no card on purpose, so
+ * the promotion is where that exemption has to end: without this gate the rule
+ * every publish takes would be one a flag walks around. It reads the card the
+ * piece will HAVE, so an edit that supplies the missing keys in the same call
+ * goes through and one that clears a key in the same call does not.
+ *
+ * THE TRANSITION AND NOTHING ELSE. An edit that leaves a published piece
+ * published is not gated, whatever its card is missing: the shelf already holds
+ * pieces with incomplete cards, and gating those would put a card rewrite in
+ * front of a typo fix.
+ */
+describe('runEdit — the card gate on a promotion', () => {
+  const THIN = {
+    ...DRAFT,
+    resource: { ...DRAFT.resource, exclusions: null, provenanceSummary: null },
+  };
+
+  it('refuses a promotion whose card is incomplete, naming the keys, before any write', async () => {
+    const stub = stubServer({ get: THIN });
+    const { provider, signCount } = spyProvider();
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'USAGE',
+      exitCode: 2,
+      message:
+        'This document has no complete answer card, so there is nothing for the next searcher ' +
+        'to judge it by. Add to the frontmatter: `exclusions`: what it does not. ' +
+        '`provenanceSummary`: how you know — what you ran, read, measured.',
+      details: { card: { missingKeys: ['exclusions', 'provenanceOrMethodology'] } },
+    });
+    // The read happened (the gate needs the stored card); the WRITE did not.
+    expect(stub.puts()).toHaveLength(0);
+    // One signature for the owner-scoped read, none for a write that never ran.
+    expect(signCount()).toBeLessThanOrEqual(1);
+  });
+
+  it('names the edit as the remedy, not a file', async () => {
+    const stub = stubServer({ get: THIN });
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({
+      fix: expect.stringContaining(`tenjin edit ${POST_ID} --status published --scope`),
+    });
+  });
+
+  // The card the piece WILL have, not the one it has: supplying the missing keys
+  // in the same call is exactly how an author fixes this.
+  it('lets a promotion through when the same call supplies the missing keys', async () => {
+    const { stub } = await edit(
+      {
+        status: 'published',
+        exclusions: 'mainnet, which was not measured',
+        provenance: 'sampled 200 blocks',
+      },
+      { get: THIN },
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toMatchObject({ status: 'published' });
+  });
+
+  it('refuses a promotion that clears a required key in the same call', async () => {
+    const stub = stubServer({ get: DRAFT });
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published', clear: ['exclusions'] }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({
+      code: 'USAGE',
+      details: { card: { missingKeys: ['exclusions'] } },
+    });
+    expect(stub.puts()).toHaveLength(0);
+  });
+
+  /**
+   * THE CASE THE NARROW RULE EXISTS FOR. The shelf holds pieces published before
+   * the card was required; putting a card rewrite in front of a price or typo
+   * fix on one of those is the cost the reviewer refused to pay.
+   */
+  it('does not gate an edit that leaves a published piece published', async () => {
+    const { stub } = await edit(
+      { title: 'A Better Answer', price: '0.25' },
+      { get: { ...STORED, resource: undefined } },
+    );
+    expect(stub.puts()).toHaveLength(1);
+    expect(stub.putBody()).toMatchObject({ title: 'A Better Answer' });
+  });
+
+  it('does not gate a live piece even when the edit clears a required key', async () => {
+    const { stub } = await edit({ clear: ['scope'] }, { get: STORED });
+    expect(stub.putBody()).toEqual({ resource: { scope: null } });
+  });
+
+  // `asOf` is the conditional key, and the mode is merged too: a promotion that
+  // turns the piece into a snapshot needs one even though the stored card is not.
+  it('asks for asOf when the edit itself makes the piece a snapshot', async () => {
+    const stub = stubServer({
+      get: { ...DRAFT, resource: { ...DRAFT.resource, temporalMode: 'evergreen', asOf: null } },
+    });
+    await expect(
+      runEdit(
+        args({ yes: true, status: 'published', temporalMode: 'snapshot' }),
+        makeCtx(),
+        hermetic({ fetchImpl: stub.fetch, provider: spyProvider().provider }),
+      ),
+    ).rejects.toMatchObject({ code: 'USAGE', details: { card: { missingKeys: ['asOf'] } } });
+  });
+
+  // A draft is unfinished by definition, and staying one is not publishing.
+  it('lets a draft stay a draft with no card at all', async () => {
+    const { stub } = await edit(
+      { title: 'A Better Answer' },
+      { get: { ...DRAFT, resource: undefined } },
+    );
+    expect(stub.puts()).toHaveLength(1);
+  });
+
+  it('lets a demotion to draft through whatever the card is missing', async () => {
+    const { stub } = await edit(
+      { status: 'draft' },
+      { get: { ...STORED, resource: { ...STORED.resource, scope: null, exclusions: null } } },
+    );
+    expect(stub.putBody()).toMatchObject({ status: 'draft' });
   });
 });
 

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { deleteFact, getFact, setFact } from '../hooks/facts';
+import { getFact, setFact } from '../hooks/facts';
 import { withLoopDb } from './loop-db';
 
 /**
@@ -31,9 +31,6 @@ export const PUBLISHED_KEY_PREFIX = 'published:';
 /** One row per child publish. ⚠ MIRRORED in `hooks/capture.ts`, which reads
  *  this prefix back to tell a lead what its children published. */
 const PUBLISHED_AGENT_PREFIX = 'agent_published:';
-
-/** The queue the turn-end harvest writes and `publish --finding` reads. */
-const FINDING_PREFIX = 'finding:';
 
 /**
  * The bytes the hash is taken over.
@@ -92,9 +89,6 @@ export interface PublishProvenance {
   /** The harness `agent_id` of the agent that ran the command, when it named
    *  one (`--agent`, which a child's turn-end ask fills in). */
   agentId?: string | null;
-  /** The stored finding this body came from (`--finding`), which publishing
-   *  takes off the unpublished queue. */
-  findingId?: string | null;
 }
 
 /**
@@ -116,9 +110,6 @@ export interface PublishProvenance {
  * is appended after an `@`, a character the agent-id charset cannot contain, so
  * the reader recovers the id and the parent lists every publish.
  *
- * THE DEQUEUE IS WHY THE QUEUE IS A QUEUE. A finding stays listed in every ask
- * until something publishes it; without this the ask would name the same
- * published finding in every session, forever.
  */
 export async function recordPublished(
   dataDir: string,
@@ -138,37 +129,10 @@ export async function recordPublished(
           at,
         );
       }
-      if (typeof provenance.findingId === 'string' && provenance.findingId !== '') {
-        deleteFact(db, FINDING_PREFIX + provenance.findingId);
-      }
     });
   } catch {
     // The post is up. A record this could not write costs a possible duplicate
     // later and one unreported child publish; failing the command here would
     // report a piece that IS published as a publish that did not happen.
-  }
-}
-
-/**
- * Take a stored finding off the queue without recording a new publish, and SAY
- * WHETHER IT WENT.
- *
- * Two callers assert the outcome to the operator — the already-published short
- * circuit and `--discard`, which both print "it is off the queue" — so a
- * best-effort void was a claim neither of them could stand behind.
- *
- * IT ANSWERS "IS THE ROW OFF THE QUEUE", NOT "DID THIS DELETE IT". A row that
- * was already gone leaves the queue in exactly the state both callers are about
- * to describe, so it is a true answer — and a `changes > 0` test would turn a
- * publish followed by a discard into a false failure. The untrue answer is the
- * other one: a store this could not open, or a statement it could not run.
- */
-export async function dequeueFinding(dataDir: string, findingId: string): Promise<boolean> {
-  if (findingId === '') return false;
-  try {
-    withLoopDb(dataDir, (db) => deleteFact(db, FINDING_PREFIX + findingId));
-    return true;
-  } catch {
-    return false;
   }
 }
