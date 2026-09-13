@@ -30,12 +30,17 @@ def stub(monkeypatch, *, code=0, error=None, cleanup=True):
                 raise error
             return SimpleNamespace(returncode=code, stdout="", stderr="")
     monkeypatch.setattr(container, "Container", Running)
-    monkeypatch.setattr(container, "remove_project", lambda _: cleanup)
+    def remove_project(_):
+        if isinstance(cleanup, Exception):
+            raise cleanup
+        return cleanup
+    monkeypatch.setattr(container, "remove_project", remove_project)
     return seen
 
 
-def test_hidden_source_uses_only_pinned_image_readonly_copy_and_no_network(repo, monkeypatch):
-    seen = stub(monkeypatch)
+@pytest.mark.parametrize("removed", [False, True])
+def test_hidden_source_uses_only_pinned_image_readonly_copy_and_no_network(repo, monkeypatch, removed):
+    seen = stub(monkeypatch, cleanup=removed)
     spec = verifier.node_test_spec("actor")
     # The model's green marker is checked independently of its hidden test.
     monkeypatch.setattr(verifier, "check_marker", lambda *_: None)
@@ -72,7 +77,7 @@ def test_hidden_failure_and_missing_green_marker_stay_task_failures(repo, monkey
 
 
 def test_timeout_and_cleanup_failure_are_invalid_and_keep_cleanup_ownership(repo, monkeypatch):
-    seen = stub(monkeypatch, error=TimeoutError("host detail"), cleanup=False)
+    seen = stub(monkeypatch, error=TimeoutError("host detail"), cleanup=container.ImageError("cleanup_failed", "cannot list objects"))
     result = verifier.run(verifier.node_test_spec("actor"), repo, repo.parents[2], image=IMAGE)
     assert result.outcome == "invalid"
     assert "cleanup failed" in result.detail and "host detail" not in result.detail
