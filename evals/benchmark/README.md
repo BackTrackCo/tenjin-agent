@@ -673,3 +673,28 @@ manifest alongside fixture and hidden-oracle hashes. Verification refuses later
 support-file drift; trial reports retain consumer and producer commit/tree/lock
 provenance plus each producer image. Dry-run output validates and displays both
 phase commands, prompts, fixture images and verifiers before a model is started.
+
+Historical server tasks also receive visible test support in `.bench1/`, bound
+into the fixture hash. Run an existing focused source test with
+`pnpm exec vitest run --config .bench1/model-tests.config.mjs --configLoader runner tests/integration/<file>.test.ts`.
+The adapter replaces the historical Docker-dependent test helper, creates a fresh
+synthetic database for each checkout, and applies that checkout's migration files.
+Missing database support is an error; integration tests cannot silently skip.
+Neither the hidden oracle nor its configuration is part of these model-visible files.
+
+The model session retains its normal subscription authentication and provider/shelf
+network allowlist. Its synthetic PostgreSQL service shares only the task's loopback,
+has no published host port, real database credential, Docker socket or persistent
+volume, and is removed on completion, cap or launch failure. Hidden verification
+remains a separate credential-free, network-denied execution. Result rows name the
+model-tool environment separately from the hidden verifier and its source evidence.
+
+Materialize local historical manifests and assets under `evals/benchmark/local/`,
+which is ignored by Git. It lets the ordinary harness lock bind both repositories'
+fixtures without committing private source. Visible test configuration includes
+separate Node and DOM projects; select one focused source file, never a full suite.
+The reusable no-model environment proof uses the normal `historical verify`
+command with `--visible-test <existing integration/lib test path>`; add
+`--visible-test database-support` to check database separation, blank checkout,
+failed migration cleanup and the missing-service refusal. These results are labeled
+`model-visible-source-tests` and never substitute for the independent task oracle.
