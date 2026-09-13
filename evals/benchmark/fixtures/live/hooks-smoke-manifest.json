@@ -1,0 +1,73 @@
+{
+  "benchmark_version": "bench1-hooks-smoke-9-network1",
+  "schema_version": 1,
+  "harness": "claude",
+  "seed": 20260907,
+  "repeats": 2,
+  "pins": {
+    "model": "claude-opus-5",
+    "harness_version": "2.1.263",
+    "effort": "default",
+    "image": "operator-machine",
+    "dependency_lock_hash": "sha256:none",
+    "permission_mode": "dontAsk",
+    "wall_clock_s": 600,
+    "turn_budget": 40,
+    "max_budget_usd": 0.75,
+    "credential_env": "CLAUDE_CODE_OAUTH_TOKEN",
+    "tools": ["Bash", "Read", "Edit", "Write", "Glob", "Grep"],
+    "allowed_tools": [
+      "Bash(pnpm:*)",
+      "Bash(npx:*)",
+      "Bash(node:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)"
+    ],
+    "billing_mode": "subscription",
+    "speed_mode": "standard"
+  },
+  "price_sheet_version": "smoke-2026-09",
+  "phases": {
+    "producer": "seeded",
+    "capture": "none",
+    "consumer": "local"
+  },
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "fixture_hash": "sha256:86b48d133f09b0bfccba62fb870f68b5017494a378b16de49d9aa29ace55a793",
+      "verifier": "node_test_actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    }
+  ],
+  "arms": [
+    {
+      "id": "off",
+      "executor": "claude_live",
+      "product_version": "none",
+      "settings": {},
+      "settings_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none"
+    },
+    {
+      "id": "tenjin_seeded",
+      "executor": "claude_live",
+      "product_version": "operator-installed",
+      "provision": "tenjin",
+      "settings_preset": "tenjin-hooks-and-cli-reads",
+      "settings_hash": "sha256:e88581553afac93ea55d673f06ec0cfb7ec91dfc94639352d1c20af5ae64bbbf",
+      "memory_snapshot_hash": "sha256:empty",
+      "auxiliary_usage": "none",
+      "hooks_disabled": ["publish"]
+    }
+  ]
+}
