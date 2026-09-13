@@ -1058,7 +1058,12 @@ def prepare(request: ProvisionRequest) -> Provision:
         "hooks_disabled": list(disabled),
         "public_fallback": public_fallback,
     }
-    lessons = [] if request.task is None or mode == "producer" else lessons_for(request.task, selected=request.arm.get("lessons"))
+    knowledge = (request.task or {}).get("knowledge")
+    if knowledge is not None:
+        selected = knowledge["background"] if mode == "producer" else knowledge["lessons"]
+        lessons = lessons_for(request.task, lessons=request.lessons_dir, selected=selected) if selected else []
+    else:
+        lessons = [] if request.task is None or mode == "producer" else lessons_for(request.task, selected=request.arm.get("lessons"))
     task_id = str(request.task["id"]) if request.task is not None else ""
     pieces: list[str] = []
     probed: dict[str, dict[str, str | None]] | None = None
