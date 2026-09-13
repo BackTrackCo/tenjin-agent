@@ -40,7 +40,7 @@ def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> v
             if historical:
                 # Use fresh image dependencies, never model-modified tooling.
                 for argv in (["cp", "-a", str(target), "/tmp/historical-task"],
-                             ["rm", "-rf", "/tmp/historical-task/node_modules"],
+                             ["rm", "-rf", "/tmp/historical-task/node_modules", "/tmp/historical-task/.pnpm-store"],
                              ["ln", "-s", "/opt/fixture/node_modules", "/tmp/historical-task/node_modules"]):
                     if running.exec(argv, timeout_s=60).returncode != 0:
                         raise ValueError("cannot stage historical verification")
