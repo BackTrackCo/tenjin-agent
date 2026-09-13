@@ -17,3 +17,6 @@ __pycache__/
 # The Bench-2 image ledger: which local image id each fixture tag names on
 # this machine. `images build` rewrites it; nothing reads it across machines.
 evals/benchmark/fixtures/live/images.json
+
+# Operator-generated historical fixtures, private source and frozen local manifests.
+evals/benchmark/local/

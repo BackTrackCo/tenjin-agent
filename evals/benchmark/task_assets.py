@@ -207,6 +207,11 @@ def materialize(context: Path, out: Path, *, catalog: Path) -> dict[str, Any]:
         raise ValueError("experiment must declare its work order and allowed source paths")
     fixture = out / "fixture"
     shutil.copytree(context / "source", fixture, ignore=shutil.ignore_patterns("AGENTS.md", "CLAUDE.md", "node_modules", ".npmrc", ".pnpmfile.cjs"))
+    if task.get("database") == "postgres":
+        visible = fixture / ".bench1"
+        visible.mkdir(exist_ok=True)
+        for name in ("model-tests.config.mjs", "model-test-database.mjs"):
+            shutil.copyfile(Path(__file__).with_name("historical") / name, visible / name)
     hidden = out / "hidden" / "src"
     hidden.mkdir(parents=True)
     shutil.copyfile(context / "oracle.test.ts", hidden / "benchmark-independent.test.ts")

@@ -71,7 +71,20 @@ def trust_hooks(roots, expected, version, image):
     try:
         return _trust_hooks(roots, expected, version, image, name)
     finally:
-        subprocess.run(["docker", "rm", "--force", name], env=docker_environment(), capture_output=True, timeout=15)
+        remove_trust_container(name)
+
+
+def remove_trust_container(name):
+    # Docker can finish removal after its client times out under contention.
+    # Retry only this uniquely owned setup container, before admitting a model.
+    for _ in range(3):
+        try:
+            removed = subprocess.run(["docker", "rm", "--force", name], env=docker_environment(), capture_output=True, text=True, timeout=30)
+            if removed.returncode == 0 or "No such container" in (removed.stderr or "") or "No such object" in (removed.stderr or ""):
+                return
+        except subprocess.TimeoutExpired:
+            pass
+    raise ExecutorError("native hook setup container cleanup could not be confirmed")
 
 
 def docker_environment():
@@ -213,8 +226,9 @@ def launch(request: LaunchRequest) -> Launch:
     argv = ["codex", "exec", "--json", "--strict-config", "--ignore-rules", "--skip-git-repo-check",
             "--sandbox", "workspace-write", "-m", codex_usage.MODEL, "-C", str(roots.repo), protocol.phase_prompt(request, claude_live.prompt_of(request.task))]
     return Launch(argv, roots.repo, "pending-" + request.trial_id, recipe=recipe, separate_streams=True,
+                  database=request.task.get("database") == "postgres",
                   resolved_settings_hash="sha256:" + sha256_json({"config": config, "hooks": generated}),
-                  package_manager=claude_live.package_manager(), container_plan={**recipe.to_json(), "agent": argv})
+                  package_manager=claude_live.package_manager(), container_plan={**recipe.to_json(), "agent": argv, "database": "postgres" if request.task.get("database") == "postgres" else None})
 
 
 SPEC = ExecutorSpec(name=NAME, harness="codex", launch=launch, live=True, required_origins=ORIGINS,
