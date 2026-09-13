@@ -751,6 +751,7 @@ def launch(request: LaunchRequest) -> Launch:
         root_session_id=session_id,
         database=request.task.get("database") == "postgres",
         resolved_settings_hash=resolved_hash,
+        hook_settings={"hooks": settings.get("hooks", {})},
         package_manager=package_manager(),
         recipe=recipe,
         container_plan={

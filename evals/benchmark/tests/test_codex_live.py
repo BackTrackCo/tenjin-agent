@@ -208,3 +208,23 @@ def test_hook_cleanup_retries_only_its_owned_container_after_docker_timeout(monk
     else:
         codex_live.remove_trust_container("bench2-trust-owned")
         assert len(calls) == 2
+
+
+@pytest.mark.parametrize("provisioned", [False, True])
+def test_full_codex_dry_run_uses_its_native_hook_config_without_claude_settings(tmp_path, provisioned):
+    from dataclasses import replace
+    from evals.benchmark import cli, manifest, schedule
+    from evals.benchmark.tests import live_inputs
+    source = manifest.load(live_inputs.write(tmp_path / 'source', hooks=True))
+    data = json.loads(json.dumps(source.data))
+    data['harness'] = 'codex'
+    data['pins'] = {**data['pins'], **PINS, 'max_budget_usd': None}
+    arm = data['arms'][int(provisioned)]
+    arm['executor'] = 'codex_live'
+    data['arms'] = [arm]
+    config = replace(source, data=data)
+    plan = cli.plan_trial(config, schedule.expand(config)[0], tmp_path / 'dry-run')
+    assert plan['argv'][0] == 'codex'
+    assert bool(plan['hooks']) is provisioned
+    assert all('--harness codex' in hook for hook in plan['hooks'])
+    assert not list((tmp_path / 'dry-run').glob('trials/*/settings.json'))

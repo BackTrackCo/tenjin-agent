@@ -132,6 +132,8 @@ class Launch:
     # declared fragment is a template resolved per trial. The record keeps it
     # under `private_hashes`: the resolved bytes hold a bearer token.
     resolved_settings_hash: str | None = None
+    # Adapter-owned hook data for dry-run readouts; no shared filename assumption.
+    hook_settings: dict[str, Any] | None = None
     # The package manager the child runs, recorded in the attempt's isolation
     # block by a live spec. For a container trial it is the image's pnpm.
     package_manager: dict[str, Any] | None = None
