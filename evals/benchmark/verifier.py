@@ -8,9 +8,9 @@ fail, anything else is invalid: the measurement, not the task, is what broke.
 
 A manifest names a verifier; it never supplies one. An unknown name, a target
 outside the run directory, and a shell-shaped value all fail closed here, and
-the verifier process gets the same treatment as the agent's: an allowlisted
-environment rather than the operator's, so a wallet or shelf variable is not
-in scope for code that reads a trial's final worktree.
+live hidden tests execute in the exact trial image with a read-only worktree
+mount, no network, and no credential mounts or forwarded environment. Host-only
+fake verifiers read synthetic answer files with an allowlisted environment.
 
 A task verifier decides two things: the hidden test passes on the retained
 worktree, and the run marker the fixture's vitest reporter writes on a green
@@ -63,6 +63,8 @@ class VerifierSpec:
     argv: Callable[[Path], list[str]]
     timeout_s: int
     hidden_layer: Path | None = None
+    container_test: str | None = None
+    marker: Callable[[Path], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +73,14 @@ class Verdict:
     outcome: str
     exit_code: int | None
     detail: str
+    image: str | None = None
+
+
+def facts(verdict: Verdict) -> dict:
+    out = {"id": verdict.verifier_id, "exit_code": verdict.exit_code}
+    if verdict.image is not None:
+        out["runtime"] = {"kind": "container", "image": verdict.image}
+    return out
 
 
 class VerifierError(ValueError):
@@ -97,7 +107,7 @@ def _node_test(task: str, package: str) -> Callable[[Path], list[str]]:
 
 def node_test_spec(task: str, package: str = "") -> VerifierSpec:
     """`package` is the workspace package the task's tests live in (`packages/core`), where the run marker is written; empty for a single-package fixture."""
-    return VerifierSpec(name=f"node_test_{task}", argv=_node_test(task, package), timeout_s=60, hidden_layer=HIDDEN / task)
+    return VerifierSpec(name=f"node_test_{task}", argv=_node_test(task, package), timeout_s=60, hidden_layer=HIDDEN / task, container_test=f"{HIDDEN_TESTS}/{task}.test.mjs", marker=lambda repo: check_marker(repo, task, package))
 
 
 # The Bench-0 family, one project each, and the Bench-2 families: `core` is a
@@ -124,7 +134,7 @@ def lookup(name: str) -> VerifierSpec:
     return spec
 
 
-def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path) -> Verdict:
+def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path, *, image: str | None = None) -> Verdict:
     resolved = repo_copy.resolve()
     if not resolved.is_relative_to(allowed_root.resolve()):
         raise VerifierError("verifier target escapes the run directory")
@@ -133,6 +143,11 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path) -> Verdict:
     argv = spec.argv(resolved)
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
         raise VerifierError(f"verifier {spec.name!r} did not produce an argv list")
+    if spec.container_test is not None:
+        if image is None:
+            return Verdict(spec.name, "invalid", None, "hidden source verification requires the pinned trial image")
+        from . import container_verifier
+        return container_verifier.run(spec, resolved, allowed_root.resolve(), image)
     try:
         completed = subprocess.run(
             argv,

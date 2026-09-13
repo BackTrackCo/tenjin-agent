@@ -270,9 +270,9 @@ def run(
         else:
             facts["patch_hash"] = "sha256:" + sha256_dir(copy)
             verification_started = runtime.clock()
-            verdict = verifier.run(verifier_spec, copy, roots.run_dir)
+            verdict = verifier.run(verifier_spec, copy, roots.run_dir, image=None if image is None else image.id)
             facts["verification_time_s"] = runtime.clock() - verification_started
-            facts["verifier"] = {"id": verdict.verifier_id, "exit_code": verdict.exit_code}
+            facts["verifier"] = verifier.facts(verdict)
             if outcome != "capped":
                 outcome = verdict.outcome
                 if outcome == "invalid":

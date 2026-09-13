@@ -545,7 +545,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         if copy is not None:
             patch_hash = "sha256:" + sha256_dir(copy)
             verification_started = time.monotonic()
-            verdict = verifier.run(verifier_spec, copy, run_dir)
+            verdict = verifier.run(verifier_spec, copy, run_dir, image=None if image is None else image.id)
             verification_time_s = time.monotonic() - verification_started
             if outcome != "capped":
                 outcome = verdict.outcome
@@ -599,7 +599,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         "auxiliary": auxiliary,
         "outcome": outcome,
         "invalid_reason": invalid_reason,
-        "verifier": None if verdict is None else {"id": verdict.verifier_id, "exit_code": verdict.exit_code},
+        "verifier": None if verdict is None else verifier.facts(verdict),
         "patch_hash": patch_hash,
         "stop_reason": stop_reason,
         "wall_time_s": wall_time_s,

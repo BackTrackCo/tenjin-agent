@@ -515,3 +515,10 @@ may be present; neither is reported as the winning match. Line-only failures can
 still retrieve through team text search. Fingerprint resolution counts as a team
 request. The removed `pairings` table is not read. Capture means a retained draft;
 publication and downstream delivery are separate receipt-backed measurements.
+
+Hidden source verification uses the same immutable fixture image as its agent phase,
+through the shared container backend. The finalized copy and hidden tests are mounted
+read-only after the model stops; the verifier has no network or credential mounts.
+Consumer, producer and saved-run verification use this path and record the verifier
+image. Synthetic answer-file plumbing remains a host-side file read. Missing image
+identity, container failures and failed cleanup produce invalid measurements.
