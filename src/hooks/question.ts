@@ -1,19 +1,25 @@
 import { createHash } from 'node:crypto';
+import { queryMax } from '../lib/agent-api';
 import { mask } from '../lib/redact';
-import { clean } from './text';
-import type { Question, SkipReason } from './types';
+import { clean, cut } from './text';
+import type { Question, SkipReason, Trigger } from './types';
 
 /**
  * What an arm asks, and the key the once-per-question gate is claimed on
  * (02-redesign.md §4).
  *
- * A QUESTION IS WHAT THE AGENT TYPED, WITH ITS SECRETS STUBBED. `mask` is the
- * only thing that happens to an arm's text here, and the search leg's cut at the
- * shelf's 512 characters is the only other thing that happens to it before it
- * leaves the machine (owner decision 2026-09-06). No condensing, no identifier
+ * A QUESTION IS WHAT THE AGENT TYPED, WITH ITS SECRETS STUBBED AND CUT TO WHAT
+ * THE SHELF WILL READ. `mask` and then `cut` at the trigger's bound
+ * (`queryMax`: 8,000 for a dispatch work order, 512 for everything else) are the
+ * only two things that happen to an arm's text before it leaves the machine
+ * (owner decisions 2026-09-06 and 2026-09-11). No condensing, no identifier
  * lifting, no per-arm shaping: an arm that rewrites its own words is guessing at
  * a question nobody asked, and the shelf ranks better on the sentence than on
  * this machine's summary of it.
+ *
+ * THE CUT LIVES HERE AND NOWHERE ELSE, so `Question.text` IS the wire text: the
+ * leg sends it whole, the ledger stores it whole, and the once-per-question key
+ * is a hash of exactly what was sent.
  *
  * LEADING AND TRAILING WHITESPACE COMES OFF, and is named here so the list is
  * the real one rather than the tidy one. An arm trims the text it built
@@ -42,26 +48,31 @@ function wordCount(text: string): number {
 }
 
 /**
- * The claim key: sha256 over the normalization a search question is
- * fingerprinted with (lower-cased, whitespace collapsed, trimmed, 512
- * characters), hex, first 16 bytes. A fan-out re-asks
- * near-identical questions, and case and spacing carry no meaning between them.
+ * The claim key: sha256 over the WHOLE sent text, lower-cased, whitespace
+ * collapsed and trimmed; hex, first 16 bytes. A fan-out re-asks near-identical
+ * questions, and case and spacing carry no meaning between them.
+ *
+ * The whole text, not a head of it: two work orders that open with the same
+ * rules and differ in their task are two questions, and a key over the first
+ * 512 characters would have answered the second child from the first one's
+ * cache without asking.
  *
  * NEVER A WIRE VALUE. A plain hash of text this machine already holds, with no
  * salt and no rule table, so nothing depends on it staying secret and no stored
  * key has to be migrated when an arm changes what it asks.
  */
 export function questionKeyOf(text: string): string {
-  const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 512);
+  const normalized = text.toLowerCase().replace(/\s+/g, ' ').trim();
   return createHash('sha256').update(normalized).digest('hex').slice(0, 32);
 }
 
 /**
- * Mask the text and key the result. This never skips: an arm that will not ask
- * says so with a {@link SkipReason} before it gets here.
+ * Mask the text, cut it to what the trigger's shelf request will read, and key
+ * the result. This never skips: an arm that will not ask says so with a
+ * {@link SkipReason} before it gets here.
  */
-export function question(text: string): Question {
-  const out = mask(text);
+export function question(text: string, trigger: Trigger): Question {
+  const out = cut(mask(text), queryMax(trigger));
   return { text: out, questionKey: questionKeyOf(out) };
 }
 
@@ -78,9 +89,9 @@ const HARNESS_PREFIXES = ['<task-notification>', '<agent-message', '[SYSTEM NOTI
  * this text is addressed to the harness, or it is not words at all.
  *
  * THERE IS NO LENGTH RULE. A short question is a question and a long paste is
- * still what the person is asking about; both go as typed, and the search leg's
- * 512-character cut is the only bound either meets. Each reason is its own, so
- * the ledger says which one bit.
+ * still what the person is asking about; both go as typed, and `question()`'s
+ * cut at the trigger's bound is the only one either meets. Each reason is its
+ * own, so the ledger says which one bit.
  *
  * `words` counts the MASKED text, not the raw one: a prompt that is three
  * identifiers and no prose is a question, and a masked credential must not count

@@ -1,7 +1,14 @@
 import { CliError } from '../lib/errors';
 import { formatUsdDisplay, parseUsdToAtomic } from '../lib/money';
 import { resolveContextSettings, type ResolvedSettings } from '../lib/settings';
-import { buildSearchRequest, postSearch, MAX_LIMIT, type SearchInput } from '../lib/agent-api';
+import {
+  buildSearchRequest,
+  postSearch,
+  MAX_LIMIT,
+  QUERY_MAX,
+  type SearchInput,
+} from '../lib/agent-api';
+import { cut } from '../hooks/text';
 import { recordSearch } from '../lib/searches';
 import { readActor, type SessionActor } from '../lib/session';
 import { assertOnBaseOrigin } from '../lib/resource-ref';
@@ -59,7 +66,10 @@ export async function runSearch(
   deps: SearchDeps = {},
 ): Promise<CommandResult> {
   const settings = await resolveContextSettings(ctx);
-  const input: SearchInput = { question: args.question };
+  // Cut to the shelf's bound at a word boundary, silently, as the daemon's arms
+  // do: an agent mid-task that wrote a long question gets its head answered
+  // rather than a USAGE refusal and a retry (owner decision 2026-09-12).
+  const input: SearchInput = { question: cut(args.question.trim(), QUERY_MAX) };
   if (args.maxPrice !== undefined) input.maxPrice = parseUsdToAtomic(args.maxPrice);
   if (args.freshWithin !== undefined) input.freshWithin = args.freshWithin;
   if (args.limit !== undefined) input.limit = parseLimit(args.limit);

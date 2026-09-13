@@ -43,16 +43,7 @@ function names(db: LoopDb, type: 'table' | 'index'): string[] {
     .sort();
 }
 
-const TABLES = [
-  'facts',
-  'fires',
-  'handoff',
-  'legs',
-  'marks',
-  'pairing_closes',
-  'pairings',
-  'searches',
-];
+const TABLES = ['facts', 'fires', 'handoff', 'legs', 'marks', 'searches'];
 
 const FIRE = {
   id: 'f1',
@@ -86,7 +77,7 @@ function insertFire(db: LoopDb, id = FIRE.id): void {
 }
 
 describe('openLoopDb', () => {
-  it('creates loop.db with its eight tables and their indexes', async () => {
+  it('creates loop.db with its six tables and their indexes', async () => {
     // A nested, not-yet-existing dataDir: the daemon may be the first thing to
     // touch ~/.tenjin on a fresh machine.
     const dir = join(await freshDir(), 'nested', 'data');
@@ -97,8 +88,6 @@ describe('openLoopDb', () => {
       'fires_actor',
       'fires_at',
       'handoff_claim',
-      'pairings_key_status',
-      'pairings_open_head',
       'searches_at',
       'searches_session_at',
     ]);
@@ -212,6 +201,42 @@ describe('openLoopDb', () => {
     expect(db.prepare('SELECT count(*) AS n FROM handoff').get()).toEqual({ n: 0 });
     const columns = db.prepare('PRAGMA table_info(handoff)').all() as Array<{ name: string }>;
     expect(columns.map((c) => c.name)).toContain('question');
+  });
+
+  it('drops the retired pairing tables off a file that still carries them', async () => {
+    // The DROPs in the DDL are the only thing that can reach these: they are
+    // gone from LOOP_SHAPE, and `shapeMatches` inspects nothing it does not
+    // list, so a file holding them passes the shape check and is never rebuilt.
+    // They cannot be built from LOOP_DDL either — it no longer creates them —
+    // so the old statements are written out by hand here.
+    const dir = await freshDir();
+    const old = track(new (await import('node:sqlite')).DatabaseSync(loopDbPath(dir)));
+    old.exec(`CREATE TABLE pairings (
+                id INTEGER PRIMARY KEY, uid TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
+                session TEXT NOT NULL, project TEXT, machine TEXT NOT NULL, kind TEXT NOT NULL,
+                key TEXT NOT NULL, cmd_head TEXT, cmd TEXT, error_line TEXT, error_files TEXT,
+                fix_cmd TEXT, fix_files TEXT, pkg_versions TEXT, scope TEXT NOT NULL,
+                status TEXT NOT NULL, closes INTEGER NOT NULL DEFAULT 0, closed_at INTEGER,
+                post_id TEXT);
+              CREATE TABLE pairing_closes (
+                pairing_id INTEGER NOT NULL, session TEXT NOT NULL, agent_id TEXT,
+                at INTEGER NOT NULL, fix_cmd TEXT, fix_files TEXT, scope TEXT,
+                PRIMARY KEY (pairing_id, session));
+              CREATE INDEX pairings_key_status ON pairings(key, status);
+              CREATE INDEX pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';`);
+    old
+      .prepare(
+        `INSERT INTO pairings (uid, at, session, machine, kind, key, scope, status)
+         VALUES ('u1', 1, 's', 'm', 'sig_v1', 'k', 'code', 'open')`,
+      )
+      .run();
+    old.prepare(`INSERT INTO pairing_closes (pairing_id, session, at) VALUES (1, 's', 2)`).run();
+    old.close();
+
+    const db = track(openLoopDb(dir));
+    expect(names(db, 'table')).toEqual(TABLES);
+    expect(names(db, 'index')).not.toContain('pairings_key_status');
+    expect(names(db, 'index')).not.toContain('pairings_open_head');
   });
 
   it('leaves a loop.db of the CURRENT shape alone, rows and all', async () => {

@@ -218,7 +218,7 @@ def test_the_failure_key_lane_and_keys_leg_verdict_are_summed_per_arm(corpus, pr
     arm = records_in[first]["arm_id"]
     records_in[first]["delivery"] = {
         **records_in[first]["delivery"],
-        "failure_key": {"fire_id": "f", "lane": "sig_v1_test", "key_hash": "abcd", "keys_leg": {"status": "ok", "outcome": "hit"}, "keys_leg_hit": True, "reason": "hit", "delivered_piece_id": "p1", "report_file_present": True},
+        "failure_key": {"fire_id": "f", "lanes": ["sig_v1_test"], "key_hash": "abcd", "keys_leg": {"status": "ok", "outcome": "hit"}, "keys_leg_hit": True, "reason": "hit", "delivered_piece_id": "p1", "report_file_present": True},
     }
     published = project(accepted_records=records_in)
     assert published["failure_keys"][arm]["keyed"] == 1
@@ -349,7 +349,7 @@ def test_the_trial_rows_sum_to_their_arm_total(corpus, project: Project, reducti
 
 def test_the_slice_and_the_producer_reach_the_report_and_its_reading() -> None:
     record = support.reduction_record("t1", "on", 0, 1, 400, auxiliary=(support.receipt("producer", "producer", "p_1", 600, 200), support.receipt("producer", "capture", "p_2", 100, 50)))
-    record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 0}, "phase_tokens": {"producer": 800, "capture": 150}, "wal_live_between_phases": False}, "slice": {"kind": "recursive"}}
+    record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"findings": 1}, "phase_tokens": {"producer": 800, "capture": 150}, "wal_live_between_phases": False}, "slice": {"kind": "recursive"}}
     off = support.reduction_record("t1", "off", 0, 0, 800)
     accepted = support.accept(off, record)
     manifest_data = {"benchmark_version": "bench2-test", "price_sheet_version": "fake", "seed": 1, "repeats": 1, "slice": {"kind": "recursive"}, "pins": {}, "tasks": []}
@@ -360,7 +360,7 @@ def test_the_slice_and_the_producer_reach_the_report_and_its_reading() -> None:
     assert (row["producer_outcome"], row["producer_tokens"], row["local_hits"], row["child_tokens"]) == ("pass", 950, 0, 0)
     text = report.render(projected)
     assert "slice: kind=recursive" in text
-    assert "on producer phases: 1 run, 1 passed, 1 left a closed local record" in text
+    assert "on producer phases: 1 run, 1 passed, 1 retained drafts" in text
     # The pre-registered headline: capture-only amortized at reuse 1, first, with its own
     # task-paired interval; the reuse curve; the consumer-only ratio as the secondary line;
     # the producer's-own-work amortization last, as a diagnostic.
