@@ -61,6 +61,7 @@ AGGREGATE_FRAME_RE = re.compile(r"([A-Za-z0-9_.+-]+(?:[/\\][A-Za-z0-9_.+-]+)*\.[
 RUNNER_HEADER_RE = re.compile(rf"^{S}{{0,4}}(?:FAIL\b|PASS\b|ok\b|not ok\b|●|✓|✔|✗|✘|×|✖|❯|---|===|failures:)", A)
 BLOCK_SCAN_MAX = 60
 LINE_SCAN_MAX = 400
+TOTALS_GAP_MAX = 4
 ERRNO_NAMES = frozenset(
     "ENOENT EACCES EPERM EEXIST EISDIR ENOTDIR ENOTEMPTY ENAMETOOLONG ELOOP EXDEV EROFS EMFILE ENFILE ENOSPC EDQUOT "
     "EFBIG EBUSY EAGAIN EPIPE ESPIPE EBADF EINVAL ERANGE ENOMEM ENOSYS EINTR EADDRINUSE EADDRNOTAVAIL ECONNREFUSED "
@@ -152,6 +153,22 @@ def _block_end(lines: list[str], at: int) -> int:
     return end
 
 
+def _preceding_failure_block(lines: list[str], totals_start: int) -> tuple[int, int] | None:
+    """One immediately preceding runner block, across at most four blank lines."""
+    j = totals_start - 1
+    while j >= 0 and _blank(lines, j):
+        if totals_start - j > TOTALS_GAP_MAX:
+            return None
+        j -= 1
+    if j < 0:
+        return None
+    start = _block_start(lines, j)
+    header = lines[start]
+    if not RUNNER_HEADER_RE.search(header) or is_aggregate_line(_trim(header)):
+        return None
+    return start, j
+
+
 @dataclass(frozen=True)
 class ErrorLine:
     line: str
@@ -177,6 +194,18 @@ def error_line(text: str) -> ErrorLine | None:
             if not has_error_marker(candidate) or is_aggregate_line(candidate):
                 continue
             return ErrorLine(candidate, block)
+        above = _preceding_failure_block(lines, start)
+        if above is None:
+            return None
+        above_start, above_end = above
+        above_block = "\n".join(lines[above_start:above_end + 1])
+        for j in range(above_end, above_start - 1, -1):
+            candidate = _trim(lines[j])
+            if candidate == "" or STACK_FRAME_RE.search(candidate):
+                continue
+            if not has_error_marker(candidate) or is_aggregate_line(candidate):
+                continue
+            return ErrorLine(candidate, above_block)
         return None
     return None
 

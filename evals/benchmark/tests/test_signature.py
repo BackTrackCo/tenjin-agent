@@ -184,3 +184,17 @@ def test_the_test_identity_key_reads_the_last_fail_header_and_matches_the_produc
     nested = signature.identity_from_console(" FAIL  src/a.test.ts > outer > inner > two\n")
     assert (nested.file, nested.suite, nested.test) == ("src/a.test.ts", "outer > inner", "two")
     assert signature.identity_from_console("FAIL  some suite\n") is None
+
+
+@pytest.mark.parametrize("blanks", [1, 2, 3, 4])
+def test_totals_reach_only_the_immediately_preceding_failure_block(blanks: int) -> None:
+    block = " FAIL  tests/actor.test.mjs > actorKey case 1\nAssertionError: expected root\n ❯ tests/actor.test.mjs:5:12"
+    found = signature.error_line(block + "\n" * (blanks + 1) + " Test Files  1 failed (1)\n Tests 1 failed\n")
+    assert found is not None and found.line == "AssertionError: expected root"
+    assert "Test Files" not in found.block
+
+
+def test_totals_do_not_reach_past_free_text_or_a_wide_gap() -> None:
+    block = " FAIL  tests/actor.test.mjs > actorKey\nAssertionError: expected root"
+    for gap in ["\n" * 6, "\n\nan unrelated operation\n\n"]:
+        assert signature.error_line(block + gap + " Test Files 1 failed\n") is None
