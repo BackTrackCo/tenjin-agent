@@ -663,7 +663,7 @@ def do_verify(run_dir: Path) -> dict[str, Any]:
             verdicts[trial_id] = {"status": "worktree_absent", "recorded": record["outcome"]}
             continue
         task = next(item for item in manifest.tasks if item["id"] == record["task_id"])
-        verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir)
+        verdict = verifier.run(verifier.lookup(task["verifier"]), copy, run_dir, image=(record.get("isolation", {}).get("image") or {}).get("id"))
         # A capped attempt keeps its verdict beside the outcome, so the fresh
         # verdict is read against the recorded verdict rather than `capped`.
         recorded = record["outcome"] if record["verifier"] is None else verifier.outcome_of(record["verifier"]["exit_code"])
