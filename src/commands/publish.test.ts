@@ -2152,7 +2152,13 @@ describe('runPublish — the same body is published once per machine', () => {
     // Success, not an error: a capture ask that fires twice must not turn a
     // clean turn end into a failure for a piece that is already up.
     expect(second.data).toEqual({ alreadyPublished: true, url: CREATED.url });
-    expect(second.humanLines).toEqual([`Already published: ${CREATED.url}`]);
+    // Both lines: the url, and the verb that changes a piece that is already up.
+    // Without the second an agent re-running a publish to fix a title just runs
+    // it again.
+    expect(second.humanLines).toEqual([
+      `Already published: ${CREATED.url}`,
+      'To change its title or answer card, edit the piece itself: `tenjin edit <id>`.',
+    ]);
     // Nothing on the wire, and no keystore unlock either: the check runs before
     // the scan, the consent gate and the wallet.
     expect(calls).toHaveLength(1);

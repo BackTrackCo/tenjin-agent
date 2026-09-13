@@ -208,9 +208,17 @@ export async function runPublish(
     if (already !== null) {
       // Success, deliberately. The caller is a turn end that already did its
       // work; failing it would report a broken publish for a piece that is up.
+      //
+      // AND IT NAMES THE OTHER VERB. This answer is what an agent gets when it
+      // re-runs a publish because the title or the card was wrong, and with
+      // nothing but a url it will try the publish again, or a third time. The
+      // piece is already up: changing it is `edit`'s job, not this one's.
       return {
         data: { alreadyPublished: true, url: already },
-        humanLines: [`Already published: ${sanitizeForTerminal(already)}`],
+        humanLines: [
+          `Already published: ${sanitizeForTerminal(already)}`,
+          'To change its title or answer card, edit the piece itself: `tenjin edit <id>`.',
+        ],
       };
     }
   }

@@ -153,7 +153,7 @@ const publishInput = {
     .union([z.string(), z.array(z.string())])
     .optional()
     .describe(
-      'The search this file answers, or every search of one thread it answers (max 10, accepted or refused as one batch); closes each open loop and prefills the first question when the draft names none',
+      'The search this document answers, or every search of one thread it answers (max 10, accepted or refused as one batch); it closes each open loop and nothing else — the answer card lives in the document’s frontmatter, and no part of it is filled in for you',
     ),
   draft: z.boolean().optional().describe('Save as a private draft instead of publishing'),
   yes: z
