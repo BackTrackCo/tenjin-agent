@@ -61,12 +61,12 @@ def observe(report: dict[str, Any], accepted: Mapping[str, dict[str, Any]]) -> d
 
     Pass rate and tokens per attempt are the reducer's, so this check cannot
     drift from what `summary` prints. Cost is not in the projection, so it is
-    the mean of `cost_usd` over the arm's accepted records, null when none of
+    the mean of `cost_usd` over the arm's scored records, null when none of
     them carries one.
     """
     observed: dict[str, dict[str, Any]] = {}
     for arm_id, arm in report["arms"].items():
-        costs = [record["cost_usd"] for record in accepted.values() if record["arm_id"] == arm_id and record["cost_usd"] is not None]
+        costs = [record["cost_usd"] for record in accepted.values() if record["arm_id"] == arm_id and record["outcome"] != "invalid" and record["cost_usd"] is not None]
         observed[arm_id] = {
             "attempts": arm["attempts"],
             "pass": arm["outcomes"]["pass"],
