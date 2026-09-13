@@ -118,6 +118,12 @@ def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(histor
     assert ['ln','-s','/opt/fixture/node_modules','/tmp/historical-task/node_modules'] in seen
     assert ['tar','-C','/benchmark-verify','--exclude=./node_modules','--exclude=./.pnpm-store','-cf','/tmp/historical-source.tar','.'] in seen
     assert seen[0].egress.mode==container.NO_NETWORK and not seen[0].forward
+    support_mount = seen[0].plan[1]
+    assert support_mount.host.is_relative_to(base/'run')
+    assert support_mount.host.read_bytes() == (spec.support/'vitest.config.mjs').read_bytes()
+    diagnostics = list((base/'run/verification-containers').glob('*/diagnostic.json'))
+    assert len(diagnostics) == 1
+    assert json.loads(diagnostics[0].read_text())['assertions']['numFailedTests'] == 1
     # Changed oracle is measurement corruption, not an accepted assertion pass.
     (repo/task_assets.ORACLE).write_text('forged')
     assert verifier.run(spec,repo,base/'run',image='sha256:'+'ab'*32).outcome=='invalid'
