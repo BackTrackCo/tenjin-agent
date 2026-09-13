@@ -1,9 +1,15 @@
-# Bench-3 historical task readiness
+# Bench-3 historical reuse experiments
 
-These are executable verifier readiness probes for historical public repository
-tasks. They establish whether an independent behavioral test fails before and
+The experiment catalog and independent oracles below define historical public
+repository tasks. They establish whether an independent behavioral test fails before and
 passes after a known fix. They do not select the representative workload, freeze
 pilot/locked assignments, or launch a model.
+
+All reusable source preparation, image building, container execution, result
+validation and cleanup live in Bench-1's `historical.py` and fixed recipe under
+`historical/` (#335). This directory contains only experiment definitions,
+oracles and a thin entrypoint selecting their catalog. #355 is the single
+Bench-3 PR and will carry the remaining experiment matrix and workload choices.
 
 The representative workload frame is reviewed separately. Eligibility and clustering
 remain separate from this small engineering shortlist. A readiness shortlist
