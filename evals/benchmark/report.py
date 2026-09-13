@@ -499,8 +499,11 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
         producer = arms.get(arm_id, {}).get("producer")
         if producer:
             lines += ["", f"Producer {arm_id}: {producer['passes']}/{producer['attempts']} verified; "
-                      f"{producer['captured']} retained drafts; {producer['findings']} capture drafts retained. "
+                      f"{producer.get('failures', 0)} failed, {producer.get('capped_or_interrupted', 0)} capped/interrupted, {producer['invalid']} invalid; "
+                      f"{producer['captured']} attempts retained drafts; {producer['findings']} drafts total. "
                       "Drafts are not published knowledge or proof of consumer delivery."]
+            whole = arms[arm_id]
+            lines += [f"Complete pipeline cost per verified consumer (secondary): {display(whole.get('pipeline_tokens_per_verified_resolution'))} tokens; {display(whole.get('pipeline_seconds_per_verified_resolution'), 1)} agent/publication seconds. Includes the earlier producer and capture once, plus scored failed/capped work; no successful-producer filter."]
             if producer.get("publication_mode") == "host-assisted":
                 lines += [f"Host-assisted publication: {producer['published']} pieces published; {producer['consumers_with_delivery']} consumers received a producer piece through a team hook; {producer['verified_with_delivery']} of those passed. "
                           f"{producer['publication_failed']} publication phases failed; {producer['not_deleted']} pieces lack confirmed cleanup; {producer['publication_time_s']:.1f}s host publication time.",

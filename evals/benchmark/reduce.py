@@ -176,6 +176,9 @@ def producer_summary(records: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {
         "attempts": len(phases),
         "passes": sum(1 for phase in phases if phase.get("outcome") == "pass"),
+        "failures": sum(phase.get("outcome") == "fail" for phase in phases),
+        "capped_or_interrupted": sum(phase.get("outcome") in {"capped", "interrupted"} for phase in phases),
+        "continued_unpublished": sum(phase.get("consumer_policy") == "continue-without-producer-publication" for phase in phases),
         "captured": sum(1 for phase in phases if phase.get("capture", {}).get("findings", 0) > 0),
         "findings": sum(int(phase.get("capture", {}).get("findings", 0)) for phase in phases),
         "invalid": sum(1 for phase in phases if phase.get("outcome") == "invalid"),
@@ -221,7 +224,25 @@ def _cell(records: list[dict[str, Any]]) -> dict[str, Any]:
     timed = all(value is not None for value in durations)
     capture_share = per_producer(records)["capture"]
     system_tokens = tokens + capture_share * attempts
+    pipeline_seconds = sum(durations) if timed else None
+    seen_producers = set()
+    for record in records:
+        producer = record["isolation"].get("producer")
+        if not isinstance(producer, dict):
+            continue
+        identity = producer.get("native_root_id") or record["trial_id"]
+        if identity in seen_producers:
+            continue
+        seen_producers.add(identity)
+        seconds = producer.get("agent_time_s")
+        if seconds is None:
+            pipeline_seconds = None
+        elif pipeline_seconds is not None:
+            pipeline_seconds += seconds + float(producer.get("publication", {}).get("wall_time_s", 0))
+    pipeline_tokens = tokens + capture_tokens(records)
     return {
+        "pipeline_tokens_per_verified_resolution": None if not passes else _round(pipeline_tokens / passes),
+        "pipeline_seconds_per_verified_resolution": None if not passes or pipeline_seconds is None else _round(pipeline_seconds / passes),
         "consumer_tokens_per_verified_resolution": None if not passes else _round(tokens / passes),
         "system_completion_by_reuse": [{"reuse": reuse, "tokens": None if not passes else _round((tokens + capture_share * attempts / reuse) / passes)} for reuse in REUSE_POINTS],
         "consumer_seconds_per_verified_resolution": None if not passes or not timed else _round(sum(durations) / passes),
@@ -445,6 +466,8 @@ def _compare(arm: dict[str, Any], base: dict[str, Any], seed: int) -> dict[str, 
         "completion_tokens": completion_tokens,
         "completion_time": completion_time,
         "completion_rate": completion_rate,
+        "pipeline_tokens": completion_interval(arm, base, "pipeline_tokens_per_verified_resolution", seed),
+        "pipeline_time": completion_interval(arm, base, "pipeline_seconds_per_verified_resolution", seed),
         "tasks": len(shared),
         "token_ratio": ratio,
         "token_ratio_reason": reason,
@@ -549,6 +572,9 @@ def reduce(
         durations = [task["consumer_seconds_per_verified_resolution"] for task in tasks]
         arm["consumer_seconds_per_verified_resolution"] = _mean(durations) if durations and all(value is not None for value in durations) else None
         arm["consumer_seconds_reason"] = None if arm["consumer_seconds_per_verified_resolution"] is not None else ("timing_unavailable" if any(task["consumer_seconds_reason"] == "timing_unavailable" for task in tasks) else "no_verified_resolution")
+        for endpoint in ("pipeline_tokens_per_verified_resolution", "pipeline_seconds_per_verified_resolution"):
+            values = [task[endpoint] for task in tasks]
+            arm[endpoint] = _mean(values) if values and all(value is not None for value in values) else None
         arm["system_completion_by_reuse"] = [
             {"reuse": reuse, "tokens": _mean([task["system_completion_by_reuse"][index]["tokens"] for task in tasks])
              if tasks and all(task["passes"] for task in tasks) else None}
