@@ -228,3 +228,13 @@ def test_full_codex_dry_run_uses_its_native_hook_config_without_claude_settings(
     assert bool(plan['hooks']) is provisioned
     assert all('--harness codex' in hook for hook in plan['hooks'])
     assert not list((tmp_path / 'dry-run').glob('trials/*/settings.json'))
+
+
+def test_codex_postgres_launch_uses_the_same_visible_test_instructions(tmp_path):
+    from dataclasses import replace
+    from evals.benchmark import claude_live
+    item = request(tmp_path)
+    item = replace(item, task={**item.task, "database": "postgres"})
+    prompt = codex_live.launch(item).argv[-1]
+    assert prompt == claude_live.prompt_of(item.task)
+    assert "--config .bench1/model-tests.config.mjs --configLoader runner <test-file>" in prompt
