@@ -55,7 +55,7 @@ def test_a_dry_run_lists_the_cases_and_calls_nothing(fake_run: Path, trials: lis
         code = cli.main(["cases", "--run", str(fake_run), "--dry-run"])
     assert code == 0
     assert f"cases dry run: 2 case(s) across {len(trials)} trial(s); nothing replayed, nothing written" in stdout.getvalue()
-    assert "failure pnpm" in stdout.getvalue()
+    assert "failure (key only)" in stdout.getvalue()
     assert not (tmp_path / "cases.jsonl").exists()
 
 
