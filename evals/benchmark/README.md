@@ -646,3 +646,21 @@ Consumer-only reuse and complete producer-plus-consumer costs must be named sepa
 keeps whole correlation clusters out of the locked reserve after pilot selection.
 It never decides eligibility or replaces a difficult task; its output explicitly leaves
 model admission false until the experiment's independent acceptance gates pass.
+
+### Complete pipeline cost
+
+The product overview retains the declared consumer-completion comparison and also
+shows complete pipeline cost for producer arms. This secondary quantity adds the
+earlier producer, capture and consumer tokens once, divided by verified consumers
+within each task. Its time adds both measured agent brackets and host publication
+time; container preparation and hidden verification remain separately timed.
+Failed and capped producers stay in the denominator's attempted population, and
+their spending is retained when the consumer continues. Missing producer timing
+and zero consumer successes produce `n/a`, never a fabricated zero.
+
+This is the cost to prepare memory and complete a later task. It is not a matched
+two-task comparison against a control that also did the earlier work, and it does
+not replace the consumer-reuse headline. The readout names producer failures,
+caps, invalid measurements, drafts, publication and consumer delivery separately.
+
+Historical tasks can allow broad product source roots (for example `src/`) so their work orders do not disclose the reference patch's file locations. Existing and newly added tests, fixtures, dependency manifests and verifier configuration remain protected. Prepared contexts bind the individual task definition and oracle; adding an unrelated catalog task does not invalidate that evidence.

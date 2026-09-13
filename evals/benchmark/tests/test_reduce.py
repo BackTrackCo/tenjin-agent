@@ -579,3 +579,27 @@ def test_capture_reuse_curve_is_unavailable_without_paired_task_completions() ->
     )
     comparison = reduce_module.reduce(accepted, [], baseline="off")["comparisons"]["on"]
     assert all(point["token_ratio"] is None for point in comparison["amortized_capture_only_token_ratio"])
+
+
+def test_complete_pipeline_charges_failed_producer_and_preserves_zero_success():
+    records = []
+    for repeat, outcome in enumerate(['pass', 'fail']):
+        row = support.reduction_record('one', 'natural', repeat, repeat + 1, 100,
+            auxiliary=(support.receipt('producer', 'producer', f'prior-{repeat}', 200, 0),
+                       support.receipt('producer', 'capture', f'capture-{repeat}', 30, 0)))
+        row['outcome'] = outcome
+        row['agent_time_s'] = 10
+        row['isolation']['producer'] = {'outcome': 'fail', 'agent_time_s': 20,
+            'consumer_policy': 'continue-without-producer-publication',
+            'publication': {'status': 'not-attempted-producer-failed', 'pieces': [], 'wall_time_s': 0}}
+        records.append(row)
+    cell = reduce_module._cell(records)
+    assert cell['pipeline_tokens_per_verified_resolution'] == 660
+    assert cell['pipeline_seconds_per_verified_resolution'] == 60
+    assert reduce_module.producer_summary(records)['failures'] == 2
+    assert reduce_module.producer_summary(records)['continued_unpublished'] == 2
+    records[0]['outcome'] = 'fail'
+    assert reduce_module._cell(records)['pipeline_tokens_per_verified_resolution'] is None
+    records[0]['outcome'] = 'pass'
+    records[0]['isolation']['producer']['agent_time_s'] = None
+    assert reduce_module._cell(records)['pipeline_seconds_per_verified_resolution'] is None

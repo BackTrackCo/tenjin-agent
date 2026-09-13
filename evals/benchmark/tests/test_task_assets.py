@@ -129,3 +129,34 @@ def test_linked_source_parent_is_refused_before_reading_its_files(historical):
     shutil.rmtree(repo / 'src')
     (repo / 'src').symlink_to(base / 'fixture/src', target_is_directory=True)
     assert task_assets.changed_outside_contract(spec, repo) == 'submitted source contains a symlink'
+
+
+@pytest.mark.parametrize("path", ["src/product.test.ts", "src/other.spec.mjs", "src/__tests__/case.ts", "src/fixtures/data.json", "src/lib/read-test-utils.ts", "src/package.json", "src/vitest.config.mjs", "src/.env", "src/benchmark-independent.test.ts"])
+def test_broad_product_root_keeps_tests_and_tooling_protected(historical, path):
+    data, base = historical
+    data['tasks'][0]['allowed_changes'] = ['src/']
+    original = base / 'fixture' / path
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_text('trusted')
+    data['tasks'][0]['fixture_hash'] = manifest.fixture_hash(base/'fixture')
+    spec = config(data,base).verifier_spec(data['tasks'][0])
+    repo = base/'run/verify'
+    shutil.copytree(base/'fixture',repo)
+    (repo/path).write_text('forged')
+    assert task_assets.changed_outside_contract(spec,repo) == 'changed file outside allowed source paths'
+    original.unlink()
+    assert task_assets.changed_outside_contract(spec,repo) == ('added file outside allowed source paths' if path != task_assets.ORACLE else None)
+
+
+def test_broad_product_root_permits_localization_and_new_source_helpers(historical):
+    data, base = historical
+    data['tasks'][0]['allowed_changes'] = ['src/']
+    spec = config(data,base).verifier_spec(data['tasks'][0])
+    repo = base/'run/verify'
+    shutil.copytree(base/'fixture',repo)
+    (repo/'src/product.ts').write_text('fixed')
+    (repo/'src/helper.ts').write_text('new implementation helper')
+    assert task_assets.changed_outside_contract(spec,repo) is None
+    (repo/'src-neighbor').mkdir()
+    (repo/'src-neighbor/product.ts').write_text('outside source root')
+    assert task_assets.changed_outside_contract(spec,repo) == 'added file outside allowed source paths'

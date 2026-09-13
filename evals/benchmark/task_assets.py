@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from pathlib import Path
+import re
 from typing import Any
 
 from . import sha256_dir, verifier
@@ -10,6 +11,18 @@ from . import sha256_dir, verifier
 HISTORICAL = "historical_vitest"
 ORACLE = "src/benchmark-independent.test.ts"
 CONFIG = "hidden-tests/historical.config.mjs"
+
+
+def may_change(relative: str, allowed: tuple[str, ...] | list[str]) -> bool:
+    path = Path(relative)
+    # Broader source roots avoid handing the model the reference patch's file
+    # list. Their tests, fixtures and dependency/tooling configuration stay fixed.
+    if (relative == ORACLE or any(part in {"tests", "__tests__", "fixtures", "__fixtures__", "_support", "node_modules", "hidden-tests"} for part in path.parts)
+            or re.search(r"(?:\.(?:test|spec)\.|(?:^|-)test-utils\.)", path.name)
+            or path.name in {"package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs"}
+            or path.name.startswith(("tsconfig", "vitest.config", "vite.config", ".env"))):
+        return False
+    return any(relative == rule or (rule.endswith("/") and relative.startswith(rule)) for rule in allowed)
 
 
 def confined(base: Path, relative: str) -> Path:
@@ -43,7 +56,7 @@ def validate(data: dict[str, Any], base: Path) -> None:
                     hidden = confined(base, task["hidden"]["path"])
                     if not (hidden / ORACLE).is_file():
                         raise ValueError("historical behavioral oracle is missing")
-                    if any(Path(path).is_absolute() or ".." in Path(path).parts or path.startswith(("node_modules/", "hidden-tests/")) or path == ORACLE for path in task["allowed_changes"]):
+                    if any(not Path(path).parts or Path(path).is_absolute() or ".." in Path(path).parts or path.startswith(("node_modules/", "hidden-tests/")) or path == ORACLE or "*" in path for path in task["allowed_changes"]):
                         raise ValueError("allowed changes must name confined product source files")
                 elif any(key in task for key in ("hidden", "allowed_changes", "database")):
                     raise ValueError("custom hidden assets require the historical verifier")
@@ -113,12 +126,14 @@ def changed_outside_contract(spec: verifier.VerifierSpec, repo: Path) -> str | N
         if not original.is_file():
             continue
         relative = original.relative_to(spec.fixture).as_posix()
-        if relative in spec.allowed_changes:
+        if may_change(relative, spec.allowed_changes):
             continue
         actual = repo / relative
         if actual.is_symlink() or not actual.is_file() or actual.read_bytes() != original.read_bytes():
             return "changed file outside allowed source paths"
     for relative in spec.allowed_changes:
+        if relative.endswith("/"):
+            continue
         actual = repo / relative
         if actual.is_symlink() or ((spec.fixture / relative).is_file() and not actual.is_file()):
             return "allowed source path is absent or a symlink"
@@ -129,7 +144,7 @@ def changed_outside_contract(spec: verifier.VerifierSpec, repo: Path) -> str | N
             continue
         if not actual.is_file() and not actual.is_symlink():
             continue
-        if (spec.fixture / relative).exists() or relative in spec.allowed_changes or relative in {ORACLE, "CLAUDE.md", "AGENTS.md", "LESSONS.md"}:
+        if (spec.fixture / relative).exists() or may_change(relative, spec.allowed_changes) or relative in {ORACLE, "CLAUDE.md", "AGENTS.md", "LESSONS.md"}:
             continue
         return "added file outside allowed source paths"
     return None
