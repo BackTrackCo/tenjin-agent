@@ -9,7 +9,7 @@ import {
   MODE_GATED_RULES,
 } from './harness-permissions';
 import { inspectHooksFile, pruneHooks } from './harness-hooks';
-import type { HarnessAdapter } from '../adapters/types';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import {
   daemonPidPath,
   daemonSpawnPath,
@@ -77,6 +77,8 @@ export interface UninstallReport {
   hookFiles: SettingsOutcome[];
   /** How the loop daemon ended, from `stopDaemon`. */
   daemon: string;
+  /** Harness-native grant files changed by this run. */
+  grants: Partial<Record<Harness, string>>;
   skills: string[];
   scripts: string[];
   hooksDir?: string;

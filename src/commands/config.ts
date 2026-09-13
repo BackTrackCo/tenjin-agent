@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { styleText } from 'node:util';
 import { CliError } from '../lib/errors';
 import { confirmChoice } from '../lib/clack';
+import type { CodexGrantResult } from '../lib/harness-permissions';
 import {
   inspectFreeVerbRules,
   MODE_GATED_RULES,
@@ -42,11 +43,13 @@ import type {
   LoopConfigKey,
   TeamConfigKey,
 } from '../lib/config';
-import { detectHarnesses, harnessInPlay, harnessTargetDir, onPath } from '../lib/skill-wiring';
-import type { Harness } from '../adapters/types';
+import { onPath } from '../lib/skill-wiring';
+import type { Harness, HarnessAdapter } from '../adapters/types';
+import { ADAPTERS } from '../adapters/registry';
 import { isTeamShelfOrigin, loadProjectConfig } from '../lib/settings';
 import { configPath } from '../lib/paths';
 import { writeFileAtomic } from '../lib/atomic-json';
+import { installedHarnessInPlay } from '../lib/harness-presence';
 import { withFileLock, LockTimeoutError } from '../lib/lock';
 import { parseUsdToAtomic, toMoney } from '../lib/money';
 import type { Money } from '../schemas';
@@ -71,15 +74,16 @@ interface RenderedSetting extends RenderedValue {
  * Tests inject all of them; nothing here is reachable from a flag.
  */
 export interface ConfigSetDeps {
+  /** Harness lifecycle implementations; tests inject adapters at this boundary. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Home whose `.claude/settings.json` is synced; defaults to os.homedir(). */
   homeDir?: string;
   /** Overrides TTY detection, exactly as install's own seam does. */
   isInteractive?: boolean;
   /** The yes/no for a loosening write; defaults to the clack confirm (default yes). */
   confirmRule?: (label: string) => Promise<boolean>;
-  /** Whether this machine's harness is Claude Code (the only settings file we write).
-   *  Absent, it is DETECTED the way install and doctor detect it. */
-  harnessIsClaude?: boolean;
+  /** Settled harness selection; absent, each registered adapter is detected normally. */
+  harnessesInPlay?: readonly Harness[];
   /** The retraction-only pass `review` runs; defaults to the real writer. */
   retractModeGated?: (home: string) => Promise<PermissionsResult>;
   /** PATH probe for harness detection; defaults to probing `env.PATH`. */
@@ -391,18 +395,41 @@ async function setPublishKey(
         : 'defaultPrice';
   const stored =
     key === 'publish.defaultPrice' ? (entry.value as Money).atomic : (entry.value as string);
-  await persist(ctx.dataDir, (existing) => ({
-    ...existing,
-    publish: { ...existing.publish, [subkey]: stored },
-  }));
+  const persistEntry = async (): Promise<void> =>
+    persist(ctx.dataDir, (existing) => ({
+      ...existing,
+      publish: { ...existing.publish, [subkey]: stored },
+    }));
   const humanLines = [formatLine(key, entry)];
-  if (key !== 'publish.mode') return { data: { key, ...entry }, humanLines };
+  if (key !== 'publish.mode') {
+    await persistEntry();
+    return { data: { key, ...entry }, humanLines };
+  }
 
   // The mode decides whether a publish asks; the harness rule decides whether the
   // harness asks ANYWAY. Settling one and leaving the other to the next `tenjin
   // install` is the seam that made publish.mode look broken (tenjin-agent #161),
   // so the two move together from here too.
+  // Synchronize before committing the mode. A grant writer may refuse after
+  // consent (permissions, concurrent edits, an unwritable parent); persisting
+  // first made the command exit successfully with an unattended mode that its
+  // harness could not carry. Grant-first is also the least-authority failure
+  // order: if a later config write fails, the CLI still resolves the old mode.
   const allowlist = await syncPublishRule(entry.value as PublishMode, ctx, deps);
+  const failure = grantSyncFailure(allowlist);
+  if (failure !== undefined) {
+    throw new CliError(
+      'REFUSED',
+      `publish.mode was not changed because the ${failure.harness} grant could not be updated: ${failure.reason}`,
+      {
+        fix:
+          failure.fix ??
+          `Fix the permissions for ${failure.path}, then re-run \`tenjin config set publish.mode ${entry.value as string}\`.`,
+        details: { key, value: entry.value, allowlist },
+      },
+    );
+  }
+  await persistEntry();
   return {
     data: { key, ...entry, allowlist },
     humanLines: [...humanLines, ...allowlistLines(allowlist)],
@@ -415,23 +442,55 @@ async function setPublishKey(
  * is the operator's move.
  */
 interface AllowlistSync {
-  added: string[];
-  removed: string[];
+  byHarness: Partial<Record<Harness, PermissionsResult | CodexGrantResult>>;
   skipped?: 'not-claude' | 'no-tty' | 'declined' | 'unwritable';
   pointer?: string;
+}
+
+/** A writer refusal is an error, not informational output: the mode and every
+ * harness grant are one operator decision and may not report success apart. */
+function grantSyncFailure(
+  sync: AllowlistSync,
+): { harness: Harness; path: string; reason: string; fix?: string } | undefined {
+  for (const [harness, result] of Object.entries(sync.byHarness) as [
+    Harness,
+    PermissionsResult | CodexGrantResult,
+  ][]) {
+    if ('error' in result && result.error !== undefined) {
+      return { harness, path: result.path, reason: result.error };
+    }
+    if ('warning' in result && result.warning !== undefined) {
+      return {
+        harness,
+        path: result.path ?? '(unknown path)',
+        reason: result.warning,
+        ...(result.fix !== undefined ? { fix: result.fix } : {}),
+      };
+    }
+  }
+  return undefined;
 }
 
 /** Names what the write actually carries: on a machine that never ran `install`,
  *  the free tier is pending too, and a question naming two lines while eleven
  *  land is asking about something else. */
-function publishRuleQuestion(mode: PublishMode, pending: readonly string[]): string {
+function publishRuleQuestion(
+  mode: PublishMode,
+  pending: readonly string[],
+  harnesses: readonly Harness[],
+): string {
   const gated = new Set<string>(MODE_GATED_RULES);
   const others = pending.filter((rule) => !gated.has(rule)).length;
   const also =
-    others > 0 ? ` Also adds the ${others} free-verb rule(s) \`tenjin install\` writes.` : '';
+    others > 0 ? ` Also adds the ${others} command-grant rule(s) \`tenjin install\` writes.` : '';
+  const targets = harnesses
+    .map((harness) =>
+      harness === 'claude' ? 'Claude Code' : harness === 'codex' ? 'Codex' : harness,
+    )
+    .join(' and ');
   return (
-    `publish.mode ${mode} is unattended only if your harness allowlist carries ` +
-    `${MODE_GATED_RULES.join(' and ')}. Add them to ~/.claude/settings.json now?${also}`
+    `publish.mode ${mode} is unattended only if ${targets} carries the matching grant for ` +
+    `${MODE_GATED_RULES.join(' and ')}. Update the ${targets} grant now?${also}`
   );
 }
 
@@ -454,19 +513,53 @@ async function syncPublishRule(
   deps: ConfigSetDeps,
 ): Promise<AllowlistSync> {
   const home = deps.homeDir ?? homedir();
-  const nothing: AllowlistSync = { added: [], removed: [] };
+  const nothing: AllowlistSync = { byHarness: {} };
 
   const write = async (): Promise<AllowlistSync> => {
     const result = await (deps.wireAllowlist ?? wireFreeVerbAllowlist)(home, mode);
     if (result.skipped !== undefined) {
       return {
-        added: [],
-        removed: [],
+        byHarness: { claude: result },
         skipped: 'unwritable',
         ...(result.fix !== undefined ? { pointer: result.fix } : {}),
       };
     }
-    return { added: result.added, removed: result.removed };
+    return { byHarness: { claude: result } };
+  };
+
+  const adapters = deps.adapters ?? ADAPTERS;
+  const env = deps.env ?? process.env;
+  const which = deps.which ?? ((bin: string) => onPath(bin, env));
+  const requested = await loadRawConfig(ctx.dataDir)
+    .then((config) => config.install?.harness ?? [])
+    .catch(() => [] as Harness[]);
+  const inPlay =
+    deps.harnessesInPlay ??
+    (
+      await Promise.all(
+        Object.values(adapters).map(async (adapter) => ({
+          adapter,
+          selected: await installedHarnessInPlay(adapter, home, ctx.dataDir, {
+            env,
+            which,
+            requested,
+          }),
+        })),
+      )
+    )
+      .filter((entry) => entry.selected)
+      .map((entry) => entry.adapter.id);
+  const selectedAdapters = inPlay.map((harness) => adapters[harness]);
+  const isClaude = inPlay.includes('claude');
+
+  const withOtherGrants = async (sync: AllowlistSync): Promise<AllowlistSync> => {
+    const byHarness = { ...sync.byHarness };
+    for (const adapter of selectedAdapters) {
+      if (adapter.id === 'claude' || adapter.registrar.grant === undefined) continue;
+      const result = await adapter.registrar.grant.write(home, mode, env);
+      byHarness[adapter.id] = result;
+    }
+    return { ...sync, byHarness };
   };
 
   // Only Claude Code has a settings file of this shape; guessing at another
@@ -474,14 +567,15 @@ async function syncPublishRule(
   // DETECTED, never assumed: a codex-only machine has a ~/.claude/settings.json
   // that nothing reads, so prompting about it is noise and writing to it is an
   // uninvited edit — and the retraction would sweep a file we never owned.
-  const isClaude = deps.harnessIsClaude ?? (await claudeInPlay(home, ctx, deps));
-  if (!isClaude) {
+  if (selectedAdapters.every((adapter) => adapter.registrar.grant === undefined)) {
     // No settings file of ours to be missing anything, so the pointer would be
     // advice about a machine this is not.
     return { ...nothing, skipped: 'not-claude' };
   }
 
-  const probe = await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode);
+  const probe = isClaude
+    ? await (deps.inspectAllowlist ?? inspectFreeVerbRules)(home, mode)
+    : { pending: [] as string[] };
   const gated = new Set<string>(MODE_GATED_RULES);
   const missing = (probe.pending ?? []).filter((r) => gated.has(r));
   // Only ever names rules this machine does not have. A pointer built from the
@@ -493,63 +587,61 @@ async function syncPublishRule(
   // whenever the free tier was not byte-exact — silently, and in the tightening
   // direction, on the undo the operator just typed.
   if (mode === 'review') {
-    const retracted = await (deps.retractModeGated ?? retractModeGatedRules)(home);
-    if (retracted.skipped !== undefined) {
+    const retracted = isClaude
+      ? await (deps.retractModeGated ?? retractModeGatedRules)(home)
+      : undefined;
+    if (retracted?.skipped !== undefined) {
       return {
         ...nothing,
         skipped: 'unwritable',
         ...(retracted.fix !== undefined ? { pointer: retracted.fix } : {}),
       };
     }
-    return { added: [], removed: retracted.removed };
+    return await withOtherGrants({
+      byHarness: retracted === undefined ? {} : { claude: retracted },
+    });
   }
 
   // SATISFIED BEFORE TTY, and the order is the point: a fully-wired machine has
   // nothing to ask about and nothing to write, so a `--json` or headless run
   // there is a no-op rather than a `no-tty` skip carrying a pointer at rules it
   // already has.
-  if (probe.satisfied !== undefined) return nothing;
+  if (probe.satisfied !== undefined && selectedAdapters.length === 1 && isClaude) return nothing;
 
   const canPrompt =
     ctx.flags.json === true ? false : (deps.isInteractive ?? Boolean(process.stdin.isTTY));
-  if (!canPrompt) return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
+  if (!canPrompt) {
+    return { ...nothing, skipped: 'no-tty', ...(pointer ? { pointer } : {}) };
+  }
 
   const confirm = deps.confirmRule ?? ((label: string) => confirmChoice(label, true));
-  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [])))) {
+  const grantable = selectedAdapters
+    .filter((adapter) => adapter.registrar.grant !== undefined)
+    .map((adapter) => adapter.id);
+  if (!(await confirm(publishRuleQuestion(mode, probe.pending ?? [], grantable)))) {
     return { ...nothing, skipped: 'declined', ...(pointer ? { pointer } : {}) };
   }
-  return write();
-}
-
-/** Claude Code's business? The union install and doctor target with: detected on
- *  PATH or by its home directory, or named by a past `--harness`, which outranks
- *  the probes. */
-async function claudeInPlay(
-  home: string,
-  ctx: CommandContext,
-  deps: ConfigSetDeps,
-): Promise<boolean> {
-  const env = deps.env ?? process.env;
-  const which = deps.which ?? ((bin: string) => onPath(bin, env));
-  const requested = await loadRawConfig(ctx.dataDir)
-    .then((c) => c.install?.harness ?? [])
-    .catch(() => [] as Harness[]);
-  return harnessInPlay(
-    home,
-    harnessTargetDir(home, 'claude'),
-    detectHarnesses(home, which),
-    requested,
-  );
+  return await withOtherGrants(isClaude ? await write() : nothing);
 }
 
 /** The human rendering of {@link syncPublishRule}, or nothing when it was a no-op. */
 function allowlistLines(sync: AllowlistSync): string[] {
   const lines: string[] = [];
-  if (sync.added.length > 0) {
-    lines.push(`Added ${sync.added.length} harness rule(s) to your allowlist.`);
+  const claude = sync.byHarness.claude as PermissionsResult | undefined;
+  if ((claude?.added.length ?? 0) > 0) {
+    lines.push(`Added ${claude?.added.length ?? 0} harness rule(s) to your allowlist.`);
   }
-  if (sync.removed.length > 0) {
-    lines.push(`Removed ${sync.removed.join(', ')} from your allowlist.`);
+  if ((claude?.removed.length ?? 0) > 0) {
+    lines.push(`Removed ${claude?.removed.join(', ')} from your allowlist.`);
+  }
+  const grant = sync.byHarness.codex as CodexGrantResult | undefined;
+  if (grant !== undefined && grant.error === undefined && grant.wrote) {
+    lines.push(
+      `Codex now allows ${grant.granted.length} tenjin command prefix(es) in ${grant.path}.`,
+    );
+  }
+  if (grant?.error !== undefined) {
+    lines.push(`Codex's grant at ${grant.path} could not be updated (${grant.error}).`);
   }
   if (sync.pointer !== undefined) lines.push(sync.pointer);
   return lines;
@@ -691,15 +783,15 @@ export async function persistInstallHarness(
 /**
  * Record the EXACT free-verb rules `install` declined, through the same locked
  * read-modify-write every `config set` uses. Set to whatever was pending at the
- * moment of `--no-allow-free-verbs`; cleared back to `[]` the moment an install
+ * moment of `--no-grant`; cleared back to `[]` the moment an install
  * actually wires the allowlist, or finds it already fully satisfied. `--refresh` subtracts this list from what it would otherwise
  * report as pending, so a settled no stays settled per rule — without also
  * silencing a genuinely NEW rule a later version adds (tenjin-agent#234).
  */
-export async function persistFreeVerbsDeclined(dir: string, declined: string[]): Promise<void> {
+export async function persistGrantDeclined(dir: string, declined: string[]): Promise<void> {
   await persist(dir, (existing) => ({
     ...existing,
-    install: { ...existing.install, freeVerbsDeclined: declined },
+    install: { ...existing.install, grantDeclined: declined },
   }));
 }
 

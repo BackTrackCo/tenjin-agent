@@ -28,9 +28,9 @@ import {
 } from '../lib/skill-wiring';
 import { skillMaterialize } from '../lib/skill-materialize';
 import type { HarnessWiring, NotInvocableReason } from '../lib/skill-wiring';
-import type { Harness } from '../adapters/types';
+import type { Harness, HarnessAdapter } from '../adapters/types';
 import { fetchJson, type FetchJsonFailure, type ShelfBypass } from '../lib/http';
-import { loadRawConfig, resolveSettings } from '../lib/config';
+import { loadRawConfig, resolveGrantDeclined, resolveSettings } from '../lib/config';
 import {
   isTeamModeConfig,
   isTeamShelfOrigin,
@@ -44,14 +44,19 @@ import { walletFileExists } from '../lib/wallet/store';
 import { sanitizeForTerminal } from '../lib/output';
 import { modeGatedPointer, recommendedPermissions } from '../lib/permissions';
 import {
+  applyGrantDecline,
   claudeSettingsPath,
-  inspectFreeVerbRules,
+  inspectClaudeGrant,
   MODE_GATED_RULES,
 } from '../lib/harness-permissions';
+import { trustKey } from '../lib/codex-trust';
+import type { CodexTrust, CodexTrustReport } from '../lib/codex-trust';
 import { hookBundlesPresent, registeredHooks } from '../lib/harness-hooks';
+import { installedHarnessInPlay } from '../lib/harness-presence';
+import type { RegisteredHooks } from '../lib/harness-hooks';
 import { ADAPTERS } from '../adapters/registry';
 import { existsSync } from 'node:fs';
-import { health, readPid } from '../hooks/shim';
+import { health, missingRoutes, readPid } from '../hooks/shim';
 import type { EffectiveSettings, PartialConfig, PublishMode } from '../lib/config';
 import type { ErrorCode } from '../schemas';
 import type { Io } from '../lib/output';
@@ -147,6 +152,8 @@ interface BuiltCheck {
 }
 
 export interface DoctorDeps {
+  /** Harness lifecycle implementations; tests inject adapters with recorded trust answers. */
+  adapters?: Readonly<Record<Harness, HarnessAdapter>>;
   /** Environment for wallet-key detection and settings precedence. */
   env?: NodeJS.ProcessEnv;
   /** The loop-database open; tests inject a failing one to exercise the
@@ -198,6 +205,13 @@ export interface DoctorChecks {
    * which harness rules the operator needs, and it can never pass or fail.
    */
   publishMode: PublishMode;
+  /**
+   * Whether any harness here can carry a `Bash(...)` rule at all. False on a
+   * Codex-only machine, and it suppresses both the mode-gated pointer and the
+   * `effective` claim on the recommendation payload: rules a harness has never
+   * heard of are not a finding about that harness (tenjin-agent#342).
+   */
+  grantable: boolean;
 }
 
 export async function collectDoctorChecks(
@@ -233,8 +247,10 @@ export async function collectDoctorChecks(
   // instead of sending the team shelf's key to that host three times.
   const bypass: ShelfBypass | undefined = resolveShelfBypass(config, settings);
   const home = deps.homeDir ?? homedir();
+  const adapters = deps.adapters ?? ADAPTERS;
   const which = deps.which ?? ((bin: string) => onPath(bin, env));
   const requested = config.install?.harness ?? [];
+  const grantDeclined = resolveGrantDeclined(config.install?.grantDeclined);
   const teamMode = isTeamModeConfig(config);
   const built: BuiltCheck[] = [
     checkNode(),
@@ -274,7 +290,15 @@ export async function collectDoctorChecks(
   // Silent (nothing pushed) on a machine with no hook entries of ours at all;
   // see checkHooks.
   built.push(
-    ...(await checkHooks(home, ctx.dataDir, env, deps.openLoopDb ?? openLoopDbForCli)),
+    ...(await checkHooks(
+      home,
+      ctx.dataDir,
+      env,
+      deps.openLoopDb ?? openLoopDbForCli,
+      settings.publishMode.value,
+      adapters,
+      grantDeclined,
+    )),
     await checkSkills(
       home,
       which,
@@ -299,15 +323,34 @@ export async function collectDoctorChecks(
   // Ask the settings file rather than assuming: the pointer below exists to name
   // a rule that is MISSING, and printing it at a machine that already carries
   // both is a nag with no action behind it.
-  const probe = await inspectFreeVerbRules(deps.homeDir ?? homedir(), publishMode);
+  //
+  // AND ONLY WHERE THE RULES MEAN ANYTHING. `Bash(...)` is Claude Code's
+  // grammar. On a Codex-only machine the pointer named two rules that harness
+  // has never heard of and offered `tenjin install` as the remedy, which
+  // writes nothing there — so the operator's `publish.mode=auto` looked one
+  // command away from working when nothing would have made it work
+  // (tenjin-agent#342). The per-harness `permissions` check carries the truth
+  // for those machines instead.
+  const grantable = await installedHarnessInPlay(adapters.claude, home, ctx.dataDir, {
+    env,
+    which,
+    requested: config.install?.harness ?? [],
+  });
+  const probe = applyGrantDecline(
+    await inspectClaudeGrant(deps.homeDir ?? homedir(), publishMode),
+    grantDeclined,
+  );
   const gated = new Set<string>(MODE_GATED_RULES);
-  const missingModeGated = (probe.pending ?? []).filter((r) => gated.has(r));
+  const missingModeGated = grantable
+    ? probe.missing.filter((rule) => gated.has(rule))
+    : ([] as string[]);
   const firstFail = built.find((b) => b.result.required && b.result.status === 'fail');
-  if (firstFail === undefined) return { checks, publishMode, missingModeGated };
+  if (firstFail === undefined) return { checks, publishMode, missingModeGated, grantable };
   return {
     checks,
     publishMode,
     missingModeGated,
+    grantable,
     failure: { code: firstFail.failCode ?? 'INTERNAL', result: firstFail.result },
   };
 }
@@ -316,7 +359,10 @@ export async function runDoctor(
   ctx: CommandContext,
   deps: DoctorDeps = {},
 ): Promise<CommandResult> {
-  const { checks, failure, publishMode, missingModeGated } = await collectDoctorChecks(ctx, deps);
+  const { checks, failure, publishMode, missingModeGated, grantable } = await collectDoctorChecks(
+    ctx,
+    deps,
+  );
   if (failure !== undefined) {
     const r = failure.result;
     // The allowlist rides on the FAILURE envelope too. An operator whose fresh
@@ -327,7 +373,7 @@ export async function runDoctor(
     // the machine payload is where this has to land.
     throw new CliError(failure.code, r.detail, {
       ...(r.fix !== undefined ? { fix: r.fix } : {}),
-      details: { checks, permissions: recommendedPermissions(publishMode) },
+      details: { checks, permissions: recommendedPermissions(publishMode, grantable) },
     });
   }
 
@@ -351,7 +397,7 @@ export async function runDoctor(
     : modeGatedPointer(publishMode, missingModeGated, 'tenjin install');
   const showModeLine = fromEnv ? missingModeGated.length > 0 : modeLine !== null;
   return {
-    data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode) },
+    data: { status: 'pass', checks, permissions: recommendedPermissions(publishMode, grantable) },
     humanLines: [
       ...renderDoctorHuman(ctx.io, checks),
       ...(showModeLine && modeLine !== null ? ['', modeLine] : []),
@@ -1169,23 +1215,42 @@ function halfWiredShelfWarn(settings: EffectiveSettings): BuiltCheck | null {
  * `entries` is Claude's file itself: how many of ours are registered, and its
  * mode, because that file carries the daemon token as a literal.
  *
- * `codex hooks` keeps two durable facts apart: configured (entries of ours in
- * hooks.json) and observed (fires the daemon recorded from Codex this week).
- * Install already carries the registrar's one-time `/hooks` activation step;
- * doctor does not parse Codex's private, versioned trust-ledger grammar.
+ * FIVE STATES, PER HARNESS, NEVER CONFLATED (tenjin-agent#342). A Codex
+ * install can be configured and inert, trusted and unobserved, observed but
+ * answered 404, or live while `publish.mode=auto` still prompts; one "ok" line
+ * over all of that let an operator conclude the loop was running when nothing
+ * had fired. So: `configured`, `trusted` (READ from the harness's own ledger,
+ * never written — lib/codex-trust.ts), `observed` (fires received, the one
+ * nobody can fake), `permissions` (on this harness's own surface), and
+ * `daemon` (does the RUNNING process carry the route these entries post to).
  */
 async function checkHooks(
   homeDir: string,
   dataDir: string,
   env: NodeJS.ProcessEnv,
   open: typeof openLoopDbForCli,
+  publishMode: PublishMode,
+  adapters: Readonly<Record<Harness, HarnessAdapter>>,
+  grantDeclined: readonly string[],
 ): Promise<BuiltCheck[]> {
   const out: BuiltCheck[] = [];
-  const claude = await registeredHooks(ADAPTERS.claude, homeDir, dataDir, env);
-  const codex = await registeredHooks(ADAPTERS.codex, homeDir, dataDir, env);
-  if (claude.entries === 0 && codex.entries === 0) return out;
-  out.push(await checkDaemon(claude.port, dataDir));
-  if (claude.entries > 0) {
+  const registered = await Promise.all(
+    Object.values(adapters).map(async (adapter) => ({
+      adapter,
+      hooks: await registeredHooks(adapter, homeDir, dataDir, env),
+    })),
+  );
+  const wired = registered.filter((entry) => entry.hooks.entries > 0);
+  if (wired.length === 0) return out;
+  const claude = wired.find((entry) => entry.adapter.id === 'claude')?.hooks;
+  out.push(
+    await checkDaemon(
+      claude?.port ?? null,
+      dataDir,
+      wired.map((entry) => entry.adapter.id),
+    ),
+  );
+  if (claude !== undefined) {
     const path = claudeSettingsPath(homeDir);
     const mode = await settingsMode(homeDir);
     const wide = mode !== null && (mode & 0o077) !== 0;
@@ -1206,14 +1271,152 @@ async function checkHooks(
           },
     });
   }
-  if (codex.entries > 0) {
-    const observed = codexFiresThisWeek(dataDir, open);
-    const facts = `${codex.entries} in ${codex.path}; ${observed} fire${observed === 1 ? '' : 's'} observed in ${WEEK_DAYS}d`;
-    out.push({
-      result: { name: 'codex hooks', status: 'ok', required: false, detail: facts },
-    });
+  for (const { adapter, hooks } of wired) {
+    if (adapter.registrar.trust !== undefined) {
+      out.push(...(await checkTrustedHooks(adapter, homeDir, dataDir, env, hooks, open)));
+    }
+    out.push(await checkHarnessPermissions(adapter, homeDir, publishMode, grantDeclined, env));
   }
   return out;
+}
+
+/**
+ * Configured, trusted and observed as three lines: they fail separately and
+ * each has its own remedy. `trusted` asks Codex rather than modelling it, so
+ * this line never claims a security state from a file read.
+ */
+async function checkTrustedHooks(
+  adapter: HarnessAdapter,
+  homeDir: string,
+  dataDir: string,
+  env: NodeJS.ProcessEnv,
+  codex: RegisteredHooks,
+  open: typeof openLoopDbForCli,
+): Promise<BuiltCheck[]> {
+  const out: BuiltCheck[] = [
+    {
+      result: {
+        name: 'codex configured',
+        status: 'ok',
+        required: false,
+        detail: `${codex.entries} entries in ${codex.path}`,
+      },
+    },
+  ];
+  const keys = codex.handlers
+    .map((h) => trustKey(codex.path, h.event, h.groupIndex, h.handlerIndex))
+    .filter((k): k is string => k !== null);
+  const trust = await adapter.registrar.trust!.read(homeDir, keys, { env });
+  const willRun = trust.state === 'trusted';
+  // `unknown` is NOT ok. It means Codex could not settle whether these entries
+  // run, and a green line there reads as a working loop
+  // -- which, with one fire still inside the observation window, makes an
+  // inert install look healthy on both lines (tenjin-agent#343). It warns,
+  // like the equivalent unknown permission state, and carries its own remedy
+  // rather than the trust one, because re-trusting is not what it needs.
+  out.push({
+    result: {
+      name: 'codex trusted',
+      status: willRun ? 'ok' : 'warn',
+      required: false,
+      detail: TRUST_DETAIL[trust.state](trust),
+      ...(willRun ? {} : { fix: trust.state === 'unknown' ? TRUST_UNKNOWN_FIX : TRUST_FIX }),
+    },
+  });
+  const observed = codexFiresThisWeek(dataDir, open);
+  out.push({
+    result: {
+      name: 'codex observed',
+      status: observed > 0 ? 'ok' : 'warn',
+      required: false,
+      detail:
+        observed > 0
+          ? `${observed} fire${observed === 1 ? '' : 's'} in ${WEEK_DAYS}d`
+          : `no fires in ${WEEK_DAYS}d, so nothing has reached the daemon yet`,
+      ...(observed > 0
+        ? {}
+        : {
+            fix: willRun
+              ? 'Start a new Codex session: hooks are read at session start.'
+              : trust.state === 'unknown'
+                ? TRUST_UNKNOWN_FIX
+                : TRUST_FIX,
+          }),
+    },
+  });
+  return out;
+}
+
+/** The `/hooks` gesture, exact enough to follow without a second lookup. */
+const TRUST_FIX = 'Run `tenjin install` to trust the entries it wrote.';
+
+/** Unknown is a different problem: nothing is known to be wrong, and nothing
+ *  is known to be right, so the remedy is to make Codex answerable. */
+const TRUST_UNKNOWN_FIX =
+  'Check that `codex` is on PATH and $CODEX_HOME/config.toml is readable, then re-run `tenjin doctor`.';
+
+/** One sentence per trust state, kept beside the vocabulary that names them. */
+const TRUST_DETAIL: Readonly<Record<CodexTrust, (r: CodexTrustReport) => string>> = {
+  trusted: (r) => `Codex will run all ${r.expected} (asked ${r.source})`,
+  // The state a file reader cannot see: trusted once, edited since, and Codex
+  // refuses it. Re-trusting is the remedy, not re-installing.
+  modified: (r) =>
+    `${r.expected} entries changed since you trusted them, so Codex is refusing them`,
+  untrusted: (r) => `none of the ${r.expected} entries is trusted; they are installed and inert`,
+  partial: (r) => `Codex will run ${r.trusted} of ${r.expected}`,
+  disabled: () => 'at least one entry is trusted but switched off',
+  unknown: (r) => `Codex could not be asked, and ${r.configPath} did not settle it`,
+};
+
+/**
+ * This harness's own grant state, on this harness's own surface.
+ *
+ * NEVER CLAUDE'S RULES UNDER ANOTHER HARNESS'S NAME: `doctor --json` printed
+ * `Bash(tenjin publish:*)` on every machine, so a Codex-only install read as
+ * operational while Codex rejected `tenjin publish` before the CLI ever ran
+ * (tenjin-agent#342).
+ */
+async function checkHarnessPermissions(
+  adapter: HarnessAdapter,
+  homeDir: string,
+  publishMode: PublishMode,
+  grantDeclined: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<BuiltCheck> {
+  const harness = adapter.id;
+  const p =
+    adapter.registrar.grant === undefined
+      ? {
+          harness,
+          state: 'unsupported' as const,
+          rules: [],
+          missing: [],
+          detail: `This build knows no permission surface for ${harness}.`,
+        }
+      : applyGrantDecline(
+          await adapter.registrar.grant.inspect(homeDir, publishMode, env),
+          grantDeclined,
+        );
+  // `unsupported` is a fact about the harness, not a fault in the machine, so
+  // it warns only where it changes what happens: an unattended mode that will
+  // be prompted anyway.
+  const consequential = p.state === 'unsupported' && publishMode !== 'review';
+  return {
+    result: {
+      name: `${harness} permissions`,
+      status:
+        p.state === 'granted' || p.state === 'skipped'
+          ? 'ok'
+          : p.state === 'unsupported' && !consequential
+            ? 'ok'
+            : 'warn',
+      required: false,
+      detail: consequential
+        ? `${p.state}: publish.mode=${publishMode} still prompts here. ${p.detail}`
+        : `${p.state}: ${p.detail}`,
+      ...(p.fix !== undefined ? { fix: p.fix } : {}),
+    },
+  };
 }
 
 const WEEK_DAYS = 7;
@@ -1241,18 +1444,48 @@ function codexFiresThisWeek(dataDir: string, open: typeof openLoopDbForCli): num
  * The daemon behind the entries. With a port from Claude's `http` entries the
  * check is whether THAT port answers; with none (Codex alone), whether the
  * daemon `daemon.pid` names answers at all.
+ *
+ * ANSWERING IS NOT ENOUGH. A daemon can be healthy, on the right port, on this
+ * build's version, and hold no route for the harness whose entries were just
+ * written; every fire then 404s with only a `daemon.log` line to show for it
+ * (tenjin-agent#342). `/health` now names the routes the running PROCESS has,
+ * so `wired` can be compared against them rather than inferred from a version.
  */
-async function checkDaemon(port: number | null, dataDir: string): Promise<BuiltCheck> {
+async function checkDaemon(
+  port: number | null,
+  dataDir: string,
+  wired: readonly string[],
+): Promise<BuiltCheck> {
   const pid = readPid(dataDir);
   const probe = port ?? pid?.port ?? null;
   const live = probe === null ? null : await health(probe);
   if (live !== null && live.data_dir === dataDir) {
+    // A daemon too old to REPORT its routes is not evidence that it lacks
+    // them. `install` treats silence as "replace", which is safe and heals
+    // itself on the next run; `doctor` runs every day and must not warn where
+    // it cannot tell, so it only speaks when the daemon named its routes and
+    // one this machine needs is missing.
+    const short = live.harnesses === undefined ? [] : missingRoutes(live, wired);
+    if (short.length > 0) {
+      return {
+        result: {
+          name: 'daemon',
+          status: 'warn',
+          required: false,
+          detail: `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}, but it has no /hook/${short.join(' or /hook/')} route: it is running an older build than the one installed, and answers those fires 404`,
+          fix: 'tenjin daemon stop, then tenjin install',
+        },
+      };
+    }
     return {
       result: {
         name: 'daemon',
         status: 'ok',
         required: false,
-        detail: `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}`,
+        detail:
+          live.harnesses === undefined
+            ? `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}`
+            : `127.0.0.1:${probe}, pid ${live.pid}, v${live.version}, serving ${wired.join(' and ')}`,
       },
     };
   }
@@ -1529,7 +1762,23 @@ async function checkBalance(address: string, rpcUrl: string): Promise<CheckResul
 const CHECK_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
   ['Environment', ['node', 'store', 'config', 'data-dir']],
   ['Shelf', ['api', 'read', 'search', 'team shelf']],
-  ['Hooks', ['daemon', 'entries', 'codex hooks', 'skills']],
+  // Codex's four states in the order an operator hits them: the file exists,
+  // the harness accepted it, something actually fired, and the commands the
+  // mode needs are cleared. Rolled into one line they were unactionable
+  // (tenjin-agent#342).
+  [
+    'Hooks',
+    [
+      'daemon',
+      'entries',
+      'codex configured',
+      'codex trusted',
+      'codex observed',
+      'claude permissions',
+      'codex permissions',
+      'skills',
+    ],
+  ],
   ['Wallet', ['wallet', 'wallet-custody', 'balance']],
 ];
 

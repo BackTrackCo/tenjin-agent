@@ -33,6 +33,7 @@ import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyGrantDecline,
   claudeSettingsPath,
   FORBIDDEN_VERB_FRAGMENTS,
   FREE_VERB_RULES,
@@ -77,6 +78,37 @@ async function seedSettings(value: unknown): Promise<void> {
 
 const allowOf = (s: Record<string, unknown>): unknown[] =>
   (s.permissions as { allow: unknown[] }).allow;
+
+describe('applyGrantDecline', () => {
+  const pending = {
+    harness: 'claude',
+    state: 'pending' as const,
+    path: '/tmp/settings.json',
+    rules: [],
+    missing: ['rule-a', 'rule-b'],
+    detail: '2 rules are missing',
+    fix: 'tenjin install',
+  };
+
+  it('settles a fully declined grant without leaving a nag or stale fix', () => {
+    expect(applyGrantDecline(pending, ['rule-a', 'rule-b'])).toEqual({
+      harness: 'claude',
+      state: 'skipped',
+      path: '/tmp/settings.json',
+      rules: [],
+      missing: [],
+      detail: 'the command grant was explicitly declined',
+    });
+  });
+
+  it('still surfaces rules added after the recorded decline', () => {
+    expect(applyGrantDecline(pending, ['rule-a'])).toMatchObject({
+      state: 'pending',
+      missing: ['rule-b'],
+      fix: 'tenjin install',
+    });
+  });
+});
 
 // The upgrade path a real user takes: they installed an older tenjin, updated,
 // and re-ran `tenjin install`. Their settings.json must end up with exactly the
@@ -726,7 +758,6 @@ describe('permissionsSkipped', () => {
 
   it('carries a fix on every skip reason there is', async () => {
     const reasons = [
-      'harness-not-claude',
       'not-requested',
       'declined',
       'dry-run',
@@ -743,15 +774,11 @@ describe('permissionsSkipped', () => {
     }
   });
 
-  it('names no path for a harness that has no such file', () => {
-    // A Codex-only install has no ~/.claude/settings.json in play, so the
-    // envelope must not point its reader at one.
-    for (const harness of ['codex', 'shared']) {
-      const result = permissionsSkipped(harness, home, 'harness-not-claude');
-      expect(result.harness).toBe(harness);
-      expect(result.path).toBeUndefined();
-      expect(result).not.toHaveProperty('path');
-    }
+  it('does not invent a repair path for a harness with no grant surface', () => {
+    const none = permissionsSkipped('shared', home, 'harness-unsupported');
+    expect(none.fix).toBeTruthy();
+    expect(none.fix).not.toMatch(/tenjin (install|doctor)/);
+    expect(none).not.toHaveProperty('path');
   });
 });
 

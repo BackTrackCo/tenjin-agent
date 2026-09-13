@@ -426,17 +426,34 @@ export interface RecommendedPermissions {
    * others would be offering a choice that has been made.
    */
   modeGated: AllowlistEntry[];
+  /**
+   * Whether any harness on THIS machine can carry the rules above. They are
+   * `Bash(...)` lines, Claude Code's grammar; a reader that took this payload
+   * for a description of a Codex-only machine concluded `publish.mode=auto`
+   * was in force while Codex was rejecting `tenjin publish` before the CLI ran
+   * (tenjin-agent#342). The document still ships for a harness you have not
+   * installed yet, so check this before treating any rule below as granted.
+   */
+  effective: boolean;
   /** Caveats that qualify the rules above; never omit them when rendering. */
   caveats: { flags: string[]; mcp: string[] };
 }
 
-/** `mode` defaults to the shipped `review`, i.e. no mode-gated rules. */
-export function recommendedPermissions(mode: PublishMode = 'review'): RecommendedPermissions {
+/**
+ * `mode` defaults to the shipped `review`, i.e. no mode-gated rules.
+ * `effective` defaults to FALSE, so a caller that has not established such a
+ * harness cannot have the payload claim one by omission.
+ */
+export function recommendedPermissions(
+  mode: PublishMode = 'review',
+  effective = false,
+): RecommendedPermissions {
   return {
     alwaysSafe: ALWAYS_SAFE_ALLOWLIST.map((e) => ({ ...e })),
     optIn: OPT_IN_ALLOWLIST.map((e) => ({ ...e })),
     neverAllowlisted: NEVER_ALLOWLISTED.map((e) => ({ ...e })),
     modeGated: modeGatedAllowlist(mode),
+    effective,
     caveats: { flags: [...FLAG_CAVEAT], mcp: [...MCP_CAVEAT] },
   };
 }
