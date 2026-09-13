@@ -38,6 +38,15 @@ def test_a_host_path_cannot_enter_the_projection(planted: str) -> None:
     assert refusal({"invalid_reason": planted}).code == "host_path"
 
 
+@pytest.mark.parametrize("phase", ("model_tool_environment", "producer_model_tool_environment"))
+def test_pinned_database_image_provenance_is_publishable_without_allowing_paths(phase):
+    image = "pgvector/pgvector@sha256:" + "a" * 64
+    report.guard({"trials": [{phase: {"database_image": image}}]})
+    for planted in (HOST_PATH, "pgvector/pgvector:latest", "private/image@sha256:" + "a" * 64):
+        assert refusal({"trials": [{phase: {"database_image": planted}}]}).code == "host_path"
+    assert refusal({"unrelated": image}).code == "host_path"
+
+
 @pytest.mark.parametrize(
     "planted",
     (
