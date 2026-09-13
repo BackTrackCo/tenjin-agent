@@ -318,7 +318,7 @@ def plan_trial(
                          "verifier": prior["verifier"], "argv": list(prior_launch.argv), "container": prior_launch.container_plan,
                          "source": task_assets.source_facts(manifest, prior)}
     settings = arm.get("settings") or {}
-    resolved = json.loads((roots.base / "settings.json").read_text(encoding="utf-8")) if launch.resolved_settings_hash else settings
+    resolved = launch.hook_settings if launch.hook_settings is not None else settings
     return {
         "trial_id": trial.trial_id,
         "task_id": trial.task_id,
