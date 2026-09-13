@@ -146,7 +146,7 @@ PROJECT_DIR_VAR = "CLAUDE_CODE_PROJECT_DIR_NAME"
 # The CLI truncates a slug longer than this and appends a hash this module
 # cannot re-derive, which is one reason the trial pins the directory name.
 SLUG_LIMIT = 200
-PROMPT_LIMIT = 4000
+PROMPT_LIMIT = 16000  # Complete historical work orders, bounded before argv construction.
 HOOK_COMMAND_LIMIT = 512
 # A per-attempt ceiling on `--max-budget-usd`. A manifest that asks for more
 # than this is refused: a typo in a pin is otherwise a spend event.

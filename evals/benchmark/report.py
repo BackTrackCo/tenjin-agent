@@ -662,7 +662,7 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
     labels = {arm_id: f"{arm_id} (baseline)" if arm_id == baseline else arm_id for arm_id in report["arms"]}
     width = max([len(label) for label in labels.values()] + [len("arm")])
     stamp_line = (
-        f"isolation {report['isolation']}, publishable"
+        f"isolation {report['isolation']}, artifact shareable; headline eligibility is separate"
         if report["publishable"]
         else f"isolation {report['isolation']}: NOT PUBLISHABLE, plumbing evidence only, no number here is a result"
     )
