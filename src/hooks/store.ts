@@ -17,9 +17,7 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  * to migrate; `CREATE TABLE IF NOT EXISTS` per table, and a shape change means
  * DELETE `loop.db`, which is what a column added or dropped here (PR C's
  * `legs.calibration`, PR C's dropped `actors`) costs. Each PR creates only the
- * tables it writes: PR D's `handoff`, `facts`, `pairings` and `pairing_closes`.
- * A pairing's `post_id` is the piece the agent published about that fix, and it
- * is what `publish --key` stamps.
+ * tables it writes: PR D's `handoff` and `facts`.
  *
  * AND THE DELETE HAPPENS HERE, because nothing else does it: `CREATE TABLE IF
  * NOT EXISTS` is silent about a table whose columns have changed, and the row
@@ -35,6 +33,24 @@ import { DAEMON_BUSY_TIMEOUT_MS } from './constants';
  */
 
 export const LOOP_DDL = `
+-- THESE TWO DROPS ARE PERMANENT, NOT A MIGRATION STEP. The mechanical
+-- error-to-fix lane is gone, so neither table is in LOOP_SHAPE any more -- and
+-- shapeMatches only inspects what LOOP_SHAPE lists, so a file still carrying
+-- them passes the shape check and is never rebuilt. Without these two lines the
+-- tables would sit on disk on every machine that ever ran the lane, forever,
+-- holding masked error lines and command strings nothing reads. There is
+-- nowhere else it could be done: there is no migration ladder by design, and
+-- the rebuild path fires only on a shape MISMATCH.
+--
+-- One hazard, taken knowingly: this DDL runs on every open, the CLI's included,
+-- so a new-build CLI in one worktree drops the tables under an old-build daemon
+-- holding the same file open in another, and that daemon's next pairing insert
+-- throws until it is restarted. The alternative is never dropping them.
+--
+-- No index drops: SQLite takes pairings_key_status and pairings_open_head with
+-- their table.
+DROP TABLE IF EXISTS pairings;
+DROP TABLE IF EXISTS pairing_closes;
 CREATE TABLE IF NOT EXISTS fires (
   id           TEXT PRIMARY KEY,
   at           INTEGER NOT NULL,
@@ -113,40 +129,6 @@ CREATE TABLE IF NOT EXISTS searches (
 );
 CREATE INDEX IF NOT EXISTS searches_at ON searches(at);
 CREATE INDEX IF NOT EXISTS searches_session_at ON searches(session, at);
-CREATE TABLE IF NOT EXISTS pairings (
-  id INTEGER PRIMARY KEY,
-  uid TEXT NOT NULL UNIQUE,
-  at INTEGER NOT NULL,
-  session TEXT NOT NULL,
-  project TEXT,
-  machine TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  key TEXT NOT NULL,
-  cmd_head TEXT,
-  cmd TEXT,
-  error_line TEXT,
-  error_files TEXT,
-  fix_cmd TEXT,
-  fix_files TEXT,
-  pkg_versions TEXT,
-  scope TEXT NOT NULL,
-  status TEXT NOT NULL,
-  closes INTEGER NOT NULL DEFAULT 0,
-  closed_at INTEGER,
-  post_id TEXT
-);
-CREATE TABLE IF NOT EXISTS pairing_closes (
-  pairing_id INTEGER NOT NULL,
-  session TEXT NOT NULL,
-  agent_id TEXT,
-  at INTEGER NOT NULL,
-  fix_cmd TEXT,
-  fix_files TEXT,
-  scope TEXT,
-  PRIMARY KEY (pairing_id, session)
-);
-CREATE INDEX IF NOT EXISTS pairings_key_status ON pairings(key, status);
-CREATE INDEX IF NOT EXISTS pairings_open_head ON pairings(cmd_head, at) WHERE status = 'open';
 `;
 
 /**
@@ -208,29 +190,6 @@ const LOOP_SHAPE: Record<string, readonly string[]> = {
     'resolved_by',
     'resolved_at',
   ],
-  pairings: [
-    'id',
-    'uid',
-    'at',
-    'session',
-    'project',
-    'machine',
-    'kind',
-    'key',
-    'cmd_head',
-    'cmd',
-    'error_line',
-    'error_files',
-    'fix_cmd',
-    'fix_files',
-    'pkg_versions',
-    'scope',
-    'status',
-    'closes',
-    'closed_at',
-    'post_id',
-  ],
-  pairing_closes: ['pairing_id', 'session', 'agent_id', 'at', 'fix_cmd', 'fix_files', 'scope'],
 };
 
 /** Does every table this build knows about have exactly the columns it expects? */

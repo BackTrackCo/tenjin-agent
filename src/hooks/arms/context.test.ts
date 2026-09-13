@@ -116,8 +116,8 @@ describe('the marks PR D reads', () => {
   it('marks every edited path whatever its extension, with the path as the value', () => {
     const path = '/p/drizzle.config.toml';
     edit(path);
-    // The close rule asks whether the path is under the checkout and compares
-    // its basename with the files the error named; the time is `marks.at`.
+    // Nothing reads the value — the publish arm's evidence test asks only
+    // whether the prefix is there — so this is the one place it is checked.
     expect(getMark(db, LEAD, `edited:${key(path)}`)).toBe(path);
   });
 

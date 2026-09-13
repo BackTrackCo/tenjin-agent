@@ -45,7 +45,6 @@ import { publishedUrlFor, recordPublished } from '../lib/publish-dedup';
 import { scanNoteLines, scanReceipt } from '../lib/scan-gate';
 import { describeWallet, resolveWalletProvider, type WalletProvider } from '../lib/wallet';
 import { AGENT_ID_RE } from '../lib/grade';
-import { withLoopDb } from '../lib/loop-db';
 import { readMarkdownStdin, type StdinInput } from '../lib/stdin';
 import { readRegularUtf8File } from '../lib/regular-file';
 import type { CommandContext, CommandResult } from '../context';
@@ -105,8 +104,8 @@ export interface PublishArgs {
    * Exact-match keys this piece answers resolve-by-key lookups on, each spelled
    * `<kind>=<value>` (`fingerprint=sig_v1:…`, `package_version=zod@4.1.0`,
    * `command_head=pnpm`, `repo=owner/name`). Repeatable, up to 32. Always sent
-   * unverified: `verified` is the close rule's claim (two independent fixes),
-   * not a flag a hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
+   * unverified: `verified` is the shelf's own claim about a key, not a flag a
+   * hand publish gets to assert. Needs KNOWLEDGE_KEYS on the shelf.
    */
   key?: string[];
 }
@@ -364,7 +363,6 @@ export async function runPublish(
   // second row. Not for a draft, whose whole purpose is to be published later.
   if (!parksPrivately) {
     await recordPublished(ctx.dataDir, body, result.url, { agentId });
-    stampPairings(ctx.dataDir, keys, result.resourceId);
   }
   // Park the named claims on the draft (record's own spelling: the store matches
   // ids by exact string), so the promotion can send what this create withheld.
@@ -414,34 +412,6 @@ export function parseKeyFlags(flags: string[] | undefined): PostKeyInput[] {
     parsed.push({ kind: flag.slice(0, eq) as PostKeyKind, key: flag.slice(eq + 1) });
   }
   return normalizePostKeys(parsed, '--key');
-}
-
-/**
- * The fix this piece explains, named once. The turn-end ask hands the agent
- * `--key fingerprint=sig_v1:<hash>`; a `pairings` row stores the hash alone, so
- * the stamp matches on the part after the prefix, and only where nothing has
- * claimed the row yet — a second piece under the same key does not displace the
- * first, and re-running the same publish is not a second stamp.
- *
- * NOT ON A DRAFT, which is why the call sits under the same `!parksPrivately`
- * guard as the dedup record: a draft answered nobody, so the pairing is still
- * owed a write-up and must stay on offer until the promotion publishes one.
- *
- * BEST EFFORT, BECAUSE THE PUBLISH HAS ALREADY LANDED. A `loop.db` that cannot
- * be opened or written costs one repeat of the ask at the next turn end;
- * failing the command here would report a piece that is up as a failure.
- */
-function stampPairings(dataDir: string, keys: PostKeyInput[], postId: string): void {
-  const fingerprints = keys.filter((k) => k.kind === 'fingerprint');
-  if (fingerprints.length === 0) return;
-  try {
-    withLoopDb(dataDir, (db) => {
-      const stamp = db.prepare('UPDATE pairings SET post_id = ? WHERE key = ? AND post_id IS NULL');
-      for (const { key } of fingerprints) stamp.run(postId, key.slice(key.indexOf(':') + 1));
-    });
-  } catch {
-    // See above: the ask names the fix again next turn.
-  }
 }
 
 /**

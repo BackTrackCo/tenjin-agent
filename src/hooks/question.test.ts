@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { promptSkip, question, questionKeyOf, skipText } from './question';
-import { cut } from './text';
 
 /**
- * `question()` is pure: text in, `{ text, questionKey }` out. What is under test
- * is that MASKING IS THE WHOLE TRANSFORM — the words an arm was given are the
- * words that leave, minus the secrets — and that nothing else shortens, drops or
- * rewrites them on the way.
+ * `question()` is pure: text and trigger in, `{ text, questionKey }` out. What is
+ * under test is that MASKING AND THE TRIGGER'S CUT ARE THE WHOLE TRANSFORM — the
+ * words an arm was given are the words that leave, minus the secrets and minus
+ * whatever the shelf would not read — and that nothing else drops or rewrites
+ * them on the way.
  */
 
 const PROMPT =
@@ -17,8 +17,10 @@ const PROMPT =
  *  prefix as a stub, so the assertion is on the secret, not on the prefix. */
 const SECRET = 'abcdefghijklmnopqrstuvwxyz0123456789';
 
-/** The shelf's own bound, which the search leg applies and no arm does. */
+/** The shelf's bounds, which `question()` cuts to and nothing downstream repeats:
+ *  8,000 characters for a dispatch work order, 512 for every other trigger. */
 const QUERY_MAX = 512;
+const DISPATCH_QUERY_MAX = 8000;
 
 describe('question', () => {
   it('leaves the text alone: the question is what was typed', () => {
@@ -28,12 +30,12 @@ describe('question', () => {
       'arXiv 2608.13568',
       'the migrate.yml step of PR 751 keeps failing and I cannot see why',
     ]) {
-      expect(question(text).text).toBe(text);
+      expect(question(text, 'prompt').text).toBe(text);
     }
   });
 
   it('a ghp_ token reaches neither the text nor the key', () => {
-    const q = question(PROMPT);
+    const q = question(PROMPT, 'prompt');
     expect(q.text).not.toContain(SECRET);
     // Everything around the token is untouched.
     expect(q.text).toContain('the migrate.yml step of PR 751');
@@ -42,15 +44,39 @@ describe('question', () => {
     expect(q.questionKey).not.toBe(questionKeyOf(PROMPT));
   });
 
-  it("has no length rule of its own: the search leg's cut is the only bound", () => {
-    const paste = `${'collation '.repeat(500)}pgvector`;
-    expect(paste.length).toBeGreaterThan(5000);
-    const q = question(paste);
-    expect(q.text).toBe(paste);
-    // What the shelf sees is the leg's 512 characters, cut at a whole word.
-    const sent = cut(q.text, QUERY_MAX);
-    expect(sent.length).toBeLessThanOrEqual(QUERY_MAX);
-    expect(sent.endsWith('collation')).toBe(true);
+  it("cuts to the TRIGGER's bound at a whole word, and the key is over what it cut to", () => {
+    const paste = `${'collation '.repeat(1500)}pgvector`;
+    expect(paste.length).toBeGreaterThan(DISPATCH_QUERY_MAX);
+
+    const asked = question(paste, 'prompt');
+    expect(asked.text.length).toBeLessThanOrEqual(QUERY_MAX);
+    expect(asked.text.endsWith('collation')).toBe(true);
+    expect(paste.startsWith(`${asked.text} `)).toBe(true);
+
+    const dispatched = question(paste, 'dispatch');
+    expect(dispatched.text.length).toBeLessThanOrEqual(DISPATCH_QUERY_MAX);
+    expect(dispatched.text.length).toBeGreaterThan(QUERY_MAX);
+    expect(dispatched.text.endsWith('collation')).toBe(true);
+    expect(paste.startsWith(`${dispatched.text} `)).toBe(true);
+
+    // `Question.text` IS the wire text, so the key is a hash of it and of
+    // nothing longer: the two triggers cut to different text and key apart.
+    expect(asked.questionKey).toBe(questionKeyOf(asked.text));
+    expect(dispatched.questionKey).toBe(questionKeyOf(dispatched.text));
+    expect(dispatched.questionKey).not.toBe(asked.questionKey);
+  });
+
+  it('keys two work orders apart when only their tails differ', () => {
+    // The once-per-question collision this change removes: a work order opens
+    // with the same rules for every child and says what to do after them, so a
+    // key over the first 512 characters answered the second child from the
+    // first one's cached verdict without ever asking.
+    const rules = 'follow the repo rules and never push. '.repeat(20);
+    expect(rules.length).toBeGreaterThan(QUERY_MAX);
+    const first = question(`${rules}now fix the pgvector collation flip`, 'dispatch');
+    const second = question(`${rules}now fix the ivfflat index build`, 'dispatch');
+    expect(first.text.slice(0, QUERY_MAX)).toBe(second.text.slice(0, QUERY_MAX));
+    expect(first.questionKey).not.toBe(second.questionKey);
   });
 
   it('keys the same question the same way across case and whitespace', () => {

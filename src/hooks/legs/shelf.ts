@@ -7,7 +7,6 @@ import {
 import { httpRequest, type ShelfBypass } from '../../lib/http';
 import { isTeamShelfOrigin } from '../../lib/settings';
 import { tryOriginOf } from '../../lib/url';
-import { cut } from '../text';
 import type {
   Answer,
   KernelConfig,
@@ -32,19 +31,16 @@ import type {
  * bypass, a non-JSON body and a JSON body of the wrong shape are five
  * different facts and used to be one silent miss.
  *
- * THE 512-CHARACTER CUT LIVES HERE, cut at a word boundary, because it is the
- * SHELF's bound and not any arm's. No arm has a length rule; `buildSearchRequest`
- * would otherwise throw `USAGE` at a long question, which for a hook is a crash
- * where a shorter query would have done.
+ * THE LEG SENDS `Question.text` WHOLE. The cut to the trigger's bound is
+ * `question()`'s (`hooks/question.ts`), made once when the plan is built, so
+ * what the leg sends, what the ledger stores and what the claim key hashes are
+ * one string. `buildSearchRequest` still throws `USAGE` past the bound, as the
+ * last guard against a question that skipped that path.
  */
 
 /** Candidates asked for, so a search `verdict` can take a strong rank 2 or 3
  *  over an un-strong rank 1; the keys resolve asks for the same. */
 const SEARCH_LIMIT = 3;
-
-/** The server's query bound (`lookupRequestSchema`). Exported because the
- *  ledger stores what was sent, so `fire.ts` cuts the row to the same bound. */
-export const QUERY_MAX = 512;
 
 /** The team shelf's origin, or null when `baseUrl` is the public marketplace:
  *  keys go to a team shelf only (there is no public resolve), and the primer
@@ -204,7 +200,7 @@ function shelfLeg(spec: ShelfSpec, fetchImpl?: typeof fetch): Leg {
 }
 
 /**
- * `POST /api/search`: the question as written, cut at the shelf's bound.
+ * `POST /api/search`: the question as built, whole.
  *
  * THE VERDICT IS THE ONLY THING THAT DECIDES WHETHER AN AGENT SEES A PIECE,
  * and it is the shelf's decision, not this machine's: the FIRST candidate the
@@ -234,7 +230,7 @@ export function searchLeg(
       path: '/api/search',
       body: (q, budgetMs) =>
         buildSearchRequest({
-          question: cut(q.text, QUERY_MAX),
+          question: q.text,
           limit: SEARCH_LIMIT,
           trigger,
           budgetMs,

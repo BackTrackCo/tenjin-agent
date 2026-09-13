@@ -17,9 +17,7 @@ export interface Actor {
 /** Who is blocked on this fire; picks `human_wait_ms` or `tool_wait_ms`. */
 export type Wait = 'human' | 'tool';
 
-/** `local` is this machine's own `loop.db`: a parked handoff or a closed
- *  pairing, read by a leg exactly as a shelf is asked (13-pr-d-local-arms.md). */
-export type Shelf = 'team' | 'public' | 'keys' | 'local';
+export type Shelf = 'team' | 'public' | 'keys';
 
 /**
  * The wire `trigger`: which arm asked, so the server can tell a prompt lookup

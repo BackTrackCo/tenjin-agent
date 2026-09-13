@@ -1005,6 +1005,82 @@ describe('the public render did not move', () => {
   // `tenjin hooks` (table + enable/disable) instead of letting agents guess a
   // `config get hooks` subtree that never existed. tenjin-publish is untouched.
   //
+  // Re-pinned once more (review r7): the block tier was enumerated three ways
+  // across the two arms and safety-model.md, so all three now name the same five
+  // families (TOTP provisioning URIs is what the public arm was missing), and the
+  // "usually fine" warn bucket got back the qualifiers that make it conditional.
+  //
+  // Re-pinned again for the marketplace ingest gate: a `--yes` re-run can now hit
+  // a SECOND exit 3 carrying findings marked `[server]` that the first payload
+  // could not have shown, and an agent told only to re-run with `--yes` would
+  // loop on it. Both arms moved; the team arm also drops the claim that the
+  // survivors are the only findings there are, since the shelf scans at ingest.
+  //
+  // Re-pinned merging main into #158: #158's own wallet fund rename touches
+  // skills/tenjin-search/SKILL.md's fund line outside any `tenjin:when` arm,
+  // so tenjin-search's digest carries that rename on top of whatever main's
+  // own chain above pins. tenjin-publish is untouched by #158, so it keeps
+  // main's value unchanged.
+  //
+  // Re-pinned for the outcome line's copy-paste hazard: the status list sat
+  // inside a bash fence as `a|b|c`, which a shell reads as three piped commands
+  // whose first one posts `used`. It is spelled out below the fence now, the
+  // same fix the child rung already carries. tenjin-publish is untouched.
+  //
+  // Re-pinned for stdin publishing (#260): the canonical publish example is a
+  // heredoc whose command begins with `tenjin publish -`, and the file fallback
+  // explicitly stays a standalone prefix-matched command. The follow-up regular-
+  // file boundary names that constraint on the fallback without changing either
+  // publish mode's policy.
+  //
+  // Re-pinned for tenjin#733 and the post-#797 card contract: `--excerpt` is a
+  // listing teaser rather than the in-page preview boundary, and legacy card
+  // completeness no longer claims any relevance, placement, candidacy, or
+  // answer-source effect. tenjin-search is untouched, so its digest still carries
+  // the value the stdin rung pinned; tenjin-publish's is this merge's own bytes,
+  // both chains applied.
+  //
+  // Re-pinned for the 2026-09-04 redact-module decision
+  // (tenjin-notes/loop-redesign/06-pr-a-redact.md): the local scan is warn-only
+  // now, so tenjin-publish's mode table, scan sections and exit-3 guidance were
+  // rewritten to say the local scan never refuses and only the marketplace's own
+  // ingest scan still blocks; the team-shelf warn survivor list dropped from six
+  // to two (`secret-assignment`, `hex32-value`) and `private-repo-reference` is
+  // gone. tenjin-search is untouched.
+  //
+  // Re-pinned for the loop's lookup arms (PR C): the generated Stop hook that
+  // led with a `publish.mode=` line is unregistered, so tenjin-publish no longer
+  // promises it; hook searches are the daemon's now and close their own loops,
+  // so tenjin-search's open-loop sentence names only the searches you ran; and
+  // its item bullet gained `strong` and `body`, the two candidate fields the
+  // shelf sends since search learned to say which item answers and to carry a
+  // free piece whole. Both arms moved.
+  //
+  // Re-pinned for the CLI on `loop.db` (PR E): `outcome --last` and `--all-open`
+  // are deleted — the CLI knows the harness session but never the agent inside
+  // it, so in a fan-out `--last` could rate a sibling's search — and the outcome
+  // paragraph names `--search-id <id>` alone. tenjin-publish is untouched.
+  //
+  // Re-pinned again for the same PR's fix lane: the turn-end ask names a fix
+  // this session closed and the key it was recorded under, so tenjin-publish
+  // says to pass that key as `--key fingerprint=<key>`. tenjin-search is
+  // untouched.
+  //
+  // Re-pinned for one hook surface (PR E2, decision 15): `tenjin session start`
+  // is deleted and `read` mints its own read-scoped session, so tenjin-search's
+  // read paragraph says the piece simply comes back and the refusal's
+  // `entitlementCheck` list drops `not_performed` and the `sessionCommand` it
+  // used to point at. tenjin-publish is untouched.
+  //
+  // Re-pinned once more for the same PR's mint pin: `read` signs only for the
+  // shelves the config names, so tenjin-search says so and its
+  // `entitlementCheck` list gains `origin_not_configured`.
+  //
+  // Re-pinned for the failure arm's text round: this machine no longer keeps an
+  // error-to-fix record, so the turn-end ask names a failure this turn HIT
+  // rather than a fix it closed, and tenjin-publish's key sentence follows it.
+  // tenjin-search is untouched.
+  //
   // Re-pinned for the tenjin-search tighten (same PR): 228 to 207 lines with no
   // fact dropped — compressed bullets (matched/item/miss, read refusal taxonomy,
   // outcome id lines, publish-handoff close), a shorter team-privacy bullet and
@@ -1014,27 +1090,31 @@ describe('the public render did not move', () => {
   // five-sentence cap, untrusted-data verbatim, mode handoff, no trust-scope
   // language) holds in both renders; only the digest moved.
   //
-  // Re-pinned 2026-09-12 for the publish-document shape, twice, tenjin-publish
-  // only; tenjin-search is untouched by either.
+  // Re-pinned 2026-09-12, tenjin-publish for the publish-document shape and
+  // tenjin-search by the merge of origin/main.
   //
-  // First for the CLI change: the answer-card authoring rubric and the publish
-  // example were stood down to a `TODO(writer)` block, because the behaviour
-  // under them moved (the card is frontmatter with no flag form, a non-draft
-  // publish without one is refused by name, `--dry-run`/`--finding`/`--discard`
-  // are gone). The still-true paragraphs either side — the completeness/filters
-  // contract and the card-vocabulary paragraph — were kept verbatim, and the
-  // `--search-id` paragraph lost only its claim to prefill `questionsAnswered`.
+  // tenjin-publish moved twice on this branch. First for the CLI change: the
+  // answer-card authoring rubric and the publish example were stood down to a
+  // `TODO(writer)` block, because the behaviour under them moved (the card is
+  // frontmatter with no flag form, a non-draft publish without one is refused by
+  // name, `--dry-run`/`--finding`/`--discard` are gone). The still-true
+  // paragraphs either side — the completeness/filters contract and the
+  // card-vocabulary paragraph — were kept verbatim, and the `--search-id`
+  // paragraph lost only its claim to prefill `questionsAnswered`. Then for the
+  // prose itself: the writer's rubric and worked example replace that block, and
+  // the pins above are live tests again, rewritten against the text as written —
+  // the item count is 3 to 8, the register advice is four sentences rather than
+  // "Vary the register", and the 200-character cap, the "never a bare topic
+  // label" phrasing and the warning about a short `provenance:` are not on the
+  // page any more. The merge then took main's `--key` paragraph on top.
   //
-  // Then for the prose itself: the writer's rubric and worked example replace
-  // that block. The pins above are live tests again, rewritten against the text
-  // as written — the item count is 3 to 8, the register advice is four sentences
-  // rather than "Vary the register", and the 200-character cap, the "never a bare
-  // topic label" phrasing and the warning about a short `provenance:` are not on
-  // the page any more.
+  // tenjin-search is this branch's only by inheritance: #346 made `tenjin
+  // search` cut a question past 512 at a whole word instead of refusing with
+  // USAGE. Main's digest for it is taken as-is.
   it('renders the exact bytes a public install shipped before team mode existed', () => {
     expect(Object.fromEntries(SHAPED_SKILLS.map((n) => [n, digest(read(n))]))).toEqual({
-      'tenjin-search': '9e0ec8e8600955353d1e902a60e83c4e',
-      'tenjin-publish': '799771137a9b2a176df3ef27a11f5bc0',
+      'tenjin-search': 'a24b665cac975d738bc8dbb611362741',
+      'tenjin-publish': 'e84eac8cd4c88c7246f5928a6c7379c7',
     });
   });
 

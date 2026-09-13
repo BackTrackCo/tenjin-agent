@@ -161,6 +161,27 @@ export function emitWriteNotice(io: Io, text: string): void {
 }
 
 /**
+ * Every escape sequence a terminal writes: CSI (colour, cursor), OSC — which
+ * covers the OSC-8 hyperlinks pnpm wraps package names in, terminated by BEL
+ * or ST — charset selection, and a stray ESC with a single final byte.
+ *
+ * ONE COPY, because the other reader is the failure lane: `stripAnsi`
+ * (`hooks/text.ts`) takes colour off a runner's output before the arm scans it
+ * for a diagnostic, and a pattern that misses OSC-8 leaves `]8;;https://…`
+ * sitting in front of the very line the start-anchored markers must match.
+ * That reader CANNOT call {@link sanitizeForTerminal}: this is only its first
+ * clause, and the second strips `\n`, which would flatten the output it is
+ * about to split into lines.
+ *
+ * Safe to share despite the `g` flag: both callers use it through
+ * `String.replace`, which starts at 0 and resets `lastIndex`. Do not `test()`
+ * or `exec()` it.
+ */
+export const ANSI_ESCAPE_RE =
+  // eslint-disable-next-line no-control-regex
+  /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+
+/**
  * Strip ANSI escape sequences, C0/C1 control characters, Unicode bidirectional
  * formatting, and invisible tag/BOM characters from a string headed for a
  * terminal. Commands apply this to every SERVER-sourced string (titles,
@@ -181,8 +202,7 @@ export function sanitizeForTerminal(text: string): string {
     text
       // CSI/OSC/charset escape sequences first, then any stray ESC and the rest
       // of C0 (except \t) plus DEL and the C1 range.
-      // eslint-disable-next-line no-control-regex
-      .replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g, '')
+      .replace(ANSI_ESCAPE_RE, '')
       // eslint-disable-next-line no-control-regex
       .replace(/[\x00-\x08\x0a-\x1f\x7f-\x9f]/g, '')
       // The UAX#9 directional formatting set: the marks (LRM/RLM/ALM), the
