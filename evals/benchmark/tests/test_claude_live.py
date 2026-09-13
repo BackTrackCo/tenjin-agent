@@ -1429,3 +1429,11 @@ def test_dry_run_validates_and_displays_the_distinct_producer_launch(run_dir):
     rendered = cli.render_plan(config, [plan])
     assert 'producer task=earlier-task' in rendered
     assert prior['prompt'] in rendered
+
+
+def test_complete_historical_work_order_is_preserved_and_still_bounded():
+    prompt = "Implement the complete historical behavior.\n" + "Requirement detail. " * 300
+    assert len(prompt) > 4000
+    assert claude_live.prompt_of({"prompt": prompt}) == prompt
+    with pytest.raises(LiveExecutorError, match="too long"):
+        claude_live.prompt_of({"prompt": "x" * (claude_live.PROMPT_LIMIT + 1)})
