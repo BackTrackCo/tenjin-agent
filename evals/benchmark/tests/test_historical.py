@@ -110,6 +110,8 @@ def test_only_completed_assertions_establish_fail_before_or_pass_after(context, 
     image = "sha256:" + "1" * 64
     image_backend(monkeypatch, image)
     report = {"numTotalTests": total, "numFailedTests": failed, "numPassedTests": total - failed, "numRuntimeErrorTestSuites": runtime_errors, "success": not failed and not runtime_errors, "testResults": [{"assertionResults": assertions}]}
+    if runtime_errors:
+        report["testResults"][0]["message"] = "fixture setup refused invalid synthetic configuration"
     seen = []
     class Running:
         def __init__(self, *, recipe):
@@ -122,11 +124,14 @@ def test_only_completed_assertions_establish_fail_before_or_pass_after(context, 
             if argv[0] == "cat":
                 return SimpleNamespace(returncode=0, stdout=json.dumps(report), stderr="")
             assert argv == replay.COMMAND
-            return SimpleNamespace(returncode=int(failed > 0 or runtime_errors > 0), stdout="", stderr="")
+            return SimpleNamespace(returncode=int(failed > 0 or runtime_errors > 0), stdout="startup diagnostic", stderr="JSON report written")
     monkeypatch.setattr(container, "Container", Running)
     monkeypatch.setattr(container, "remove_project", lambda _: False)
     result = replay.verify(context, tmp_path / "run", image, catalog=replay.ROOT / "catalog.json")
     assert result["status"] == expected and result["cleanup"]
+    assert "startup diagnostic" in result["detail"] and "JSON report written" in result["detail"]
+    if runtime_errors:
+        assert result["suite_errors"] == ["fixture setup refused invalid synthetic configuration"]
     assert seen[0].plan == [] and seen[0].forward == ()
     assert seen[0].egress.mode == container.NO_NETWORK
     assert list((tmp_path / "run/projects").glob("*.project")) == []
