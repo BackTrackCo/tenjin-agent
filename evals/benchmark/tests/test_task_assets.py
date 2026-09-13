@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from evals.benchmark import cli, container, manifest, sha256_dir, task_assets, verifier
+from evals.benchmark import cli, container, manifest, sha256_dir, sha256_file, task_assets, verifier
 
 
 @pytest.fixture
@@ -21,6 +21,13 @@ def historical(tmp_path):
     hidden = tmp_path / 'hidden' / 'src'
     hidden.mkdir(parents=True)
     (hidden / 'benchmark-independent.test.ts').write_text('// independently controlled oracle\n')
+    support = tmp_path / 'verification'; support.mkdir()
+    for name in ['vitest.config.mjs', 'database.mjs']:
+        (support/name).write_text('// controlled support\n')
+    receipt = {'task': task['id'], 'revision': 'before', 'commit': 'a'*40, 'tree': 'b'*40,
+               'source_hash': 'c'*64, 'lock_sha256': 'd'*64, 'oracle_sha256': sha256_file(hidden/'benchmark-independent.test.ts'), 'catalog_sha256': 'e'*64, 'task_sha256': 'f'*64}
+    (support/'source-receipt.json').write_text(json.dumps(receipt))
+    task['verification'] = {'path': 'verification', 'hash': 'sha256:'+sha256_dir(support)}
     task.update(fixture='fixture', fixture_hash=manifest.fixture_hash(fixture), verifier='historical_vitest',
                 hidden={'path':'hidden', 'hash':'sha256:'+sha256_dir(hidden.parent)}, allowed_changes=['src/product.ts'])
     data['tasks'] = [task]
@@ -160,3 +167,26 @@ def test_broad_product_root_permits_localization_and_new_source_helpers(historic
     (repo/'src-neighbor').mkdir()
     (repo/'src-neighbor/product.ts').write_text('outside source root')
     assert task_assets.changed_outside_contract(spec,repo) == 'added file outside allowed source paths'
+
+
+@pytest.mark.parametrize('file', ['vitest.config.mjs', 'database.mjs', 'source-receipt.json'])
+def test_verifier_support_and_provenance_drift_refuse_before_launch(historical, file):
+    data, base = historical
+    loaded = config(data, base)
+    source = task_assets.source_facts(loaded, data['tasks'][0])
+    assert source['commit'] == 'a'*40
+    assert source['verification_hash'] == data['tasks'][0]['verification']['hash']
+    spec = loaded.verifier_spec(data['tasks'][0])
+    assert spec.support == base/'verification'
+    (base/'verification'/file).write_text('changed')
+    with pytest.raises(manifest.ManifestError, match='hash'):
+        config(data, base)
+
+
+def test_provenance_cannot_name_another_oracle_even_with_new_support_hash(historical):
+    data, base = historical
+    path = base/'verification/source-receipt.json'
+    receipt = json.loads(path.read_text()); receipt['oracle_sha256'] = '0'*64; path.write_text(json.dumps(receipt))
+    data['tasks'][0]['verification']['hash'] = 'sha256:'+sha256_dir(path.parent)
+    with pytest.raises(manifest.ManifestError, match='different oracle'):
+        config(data, base)

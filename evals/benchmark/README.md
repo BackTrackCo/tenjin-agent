@@ -660,3 +660,10 @@ caps, invalid measurements, drafts, publication and consumer delivery separately
 Historical tasks can allow broad product source roots (for example `src/`) so their work orders do not disclose the reference patch's file locations. Existing and newly added tests, fixtures, dependency manifests and verifier configuration remain protected. Prepared contexts bind the individual task definition and oracle; adding an unrelated catalog task does not invalidate that evidence.
 
 Historical catalogs pin the prepared source content hash for each Git revision. Build and verification compare against that independent catalog value as well as the receipt, so coordinated source/receipt edits refuse. Each verification invocation owns a fresh project identity and result path. Failed preparation removes only the new directory it created, permitting a retry without deleting another run's evidence.
+
+Historical live tasks bind a separate `verification` asset: the source receipt,
+Vitest configuration and disposable database adapter. Its hash participates in the
+manifest alongside fixture and hidden-oracle hashes. Verification refuses later
+support-file drift; trial reports retain consumer and producer commit/tree/lock
+provenance plus each producer image. Dry-run output validates and displays both
+phase commands, prompts, fixture images and verifiers before a model is started.
