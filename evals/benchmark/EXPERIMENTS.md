@@ -94,34 +94,33 @@ execution/accounting, not a reuse benefit.
 
 Full core remains 180 model sessions. Preliminary chunks suggest roughly three hours,
 subject to harder tasks and subscription limits; this is not a completed full-run measurement.
-The old fixture configuration paused at 40/150 passing consumers. The corrected September 12
-run stopped cleanly at 30/150 passing consumers and six passing producers after the remote
-server deployed a new revision during the schedule. No owned containers remain from either
-run. The benchmark parent also lacks the newer reranker schema fields present in its upstream
-team-shelf database. A fresh full run awaits schema alignment and a stable server window. The first
-recursive probe exposed contradictory fixture instructions and copied native fork metadata.
-Those probes are diagnostic evidence only: the corrected actor fixture has a new hash and
-experiment versions, so fresh measurements cannot pool with their old results. Recursive
-producers and consumers now require a positive-usage native descendant to count as a pass.
+Migration PR tenjin#846 is merged, both benchmark branches applied their migrations, and
+`bench.tenjin.sh` is redeployed. The fresh host-assisted preflight on product `76876f64`
+passed **6/6 consumers and 3/3 producers**: three captured drafts were published and all
+three pieces were deleted after use; two consumers received their own producer's piece.
+This accepts the assisted-publication protocol, not a product benefit claim.
+
+Core on that frozen runtime stopped at a clean boundary with **19/150 passing consumers**
+and **3/3 passing producers**, with no partial records or active trial containers. Product
+#327 merged during the run and removed inferred local pairings; the benchmark stack must
+integrate its current failure ledger before fresh measurements. Retained drafts, publication
+and consumer delivery are the current stages, with no local-pairing closure metric.
+These incomplete records are diagnostic and cannot be pooled with a new product revision.
+Earlier run history remains in `tenjin-notes/benchmark/`.
+
 The corrected Sol recursive diagnostic on `f00c91a5` completed **12/12 consumers and 3/3
 producers**, all with two native actors and matched usage, in **24.2 minutes of active run
-time** including setup/cleanup and excluding operator pauses. The three natural producers retained three capture drafts, but zero reusable closed failure
-pairings; none of their consumers received an injection. The producer-to-consumer database
-transfer was intact. The current Codex adapter never establishes successful-shell evidence to
-close those pairings, and capture drafts are not a searchable shelf. Publication in those recorded runs was protocol-confounded: producer instructions banned
-network access while the Stop nudge requested publishing, and the traces contain no publish attempt. These observations do not
-establish a Codex 0.154.0 native hook limitation or isolate product quality. Seeded failure-hook
-delivery reached children. This one-fixture result establishes execution/accounting coverage, not a natural-reuse
-benefit or team-representative result. Codex does not expose the dispatch work order through
-its current product adapter, and its discovery counters remain unavailable until native parsing
-is implemented. Claude dispatch-reranker acceptance is still separate.
+time**. This establishes execution/accounting coverage for one fixture. A fresh host-assisted
+recursive measurement still follows current-product preflight. Codex does not expose the
+dispatch work order through its current product adapter, and its discovery counters remain
+unavailable until native parsing is implemented. Claude dispatch-reranker acceptance is separate.
 
 The current natural arm explicitly selects **host-assisted publication**. A verified producer
 responds to the product's capture ask with its own finding fence; the host publishes those
 captured drafts free on the disposable shelf before the consumer starts. It adds no lesson,
 fingerprint key or nonce prose. An empty capture stays empty. Task containers carry no wallet
 and allow only configured Tenjin read commands over the network. The readout separates drafts,
-closed local pairings, published pieces, exact producer-piece team-hook deliveries, verified
+published pieces, exact producer-piece team-hook deliveries, verified
 consumers after delivery, publication failures and cleanup. Host publication time is separate
 from agent completion time; delivery plus a pass does not establish that knowledge helped.
 This intervention measures assisted publication, not autonomous publishing. The `host1`
@@ -132,8 +131,8 @@ partial core's pace, combined runtime is provisionally **3–4 hours**, before a
 overhead. Natural trials now avoid one redundant dependency export each (30 core plus three
 recursive); the measured saving is not yet known. Codex managed-auth runs remain serial,
 Claude independent work may fill three workers, and shared-shelf trials remain exclusive through
-publication, consumption and cleanup. No model calls were spent validating this protocol change.
-A fresh full run still waits for benchmark schema alignment through tenjin#846.
+publication, consumption and cleanup. The initial protocol preflight passed; the next full run waits for current-main integration
+and its fresh preflight, not database migrations.
 
 The earlier eight-hour planning allowance is superseded by these preliminary measurements.
 GitHub-hosted jobs stop at six hours. The shared runner now subtracts elapsed setup and reserves
