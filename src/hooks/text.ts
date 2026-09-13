@@ -1,3 +1,5 @@
+import { ANSI_ESCAPE_RE } from '../lib/output';
+
 /**
  * The two string bounds every arm and every shared piece uses, in one place.
  *
@@ -36,6 +38,31 @@ const NON_LAYOUT_CONTROL_CHARS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]
  */
 export function stripControlKeepingLines(text: string): string {
   return text.replace(NON_LAYOUT_CONTROL_CHARS, ' ');
+}
+
+/**
+ * Terminal escape sequences, removed rather than spaced: a colour sequence is
+ * not layout and not a character, so the text a person saw is exactly what is
+ * left when it is gone. `stripControl` cannot serve here — it turns the escape
+ * byte into a space and leaves the `[31m` behind, which is worse than either
+ * keeping or dropping the whole sequence.
+ *
+ * It exists because every marker a runner's diagnostic is RECOGNIZED by is
+ * anchored to the start of the line (`^[ \t]*(?:\w*Error|error):`, `npm ERR!`,
+ * `error[E\d+]`, `panic:`, `fatal:`, and vitest's own ` FAIL <file> > <test>`
+ * header). A line that opens with a colour matches none of them, so under
+ * `FORCE_COLOR` or a pty the scanner walks straight past the real diagnostic.
+ *
+ * The pattern is {@link ANSI_ESCAPE_RE}, shared with the terminal sanitizer
+ * rather than written again here: OSC-8 hyperlinks are the case a narrower SGR
+ * pattern misses, and pnpm emits them.
+ *
+ * `normalizeForSig` keeps its own copy on purpose: that one is part of the
+ * frozen `sig_v1` formula and is not free to change. After this runs, its
+ * clause simply never fires.
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_RE, '');
 }
 
 /** Drop a trailing high surrogate a cut left without its pair. */

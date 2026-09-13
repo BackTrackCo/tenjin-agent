@@ -180,15 +180,14 @@ describe('ask: stage progression', () => {
     ]);
   });
 
-  it('ranks team over keys over local over public, so a shelf write-up beats this machine', async () => {
-    const local = okLeg('local', {}, mkAnswer('local'));
+  it("ranks team over keys over public, so a teammate's write-up beats a key match", async () => {
     const keys = okLeg('keys', {}, mkAnswer('keys'));
     const pub = okLeg('public', {}, mkAnswer('public'));
     const team = okLeg('team', {}, mkAnswer('team'));
-    expect((await ask(context(), plan([[local, pub]]))).answer?.shelf).toBe('local');
-    expect((await ask(context(), plan([[local, keys]]))).answer?.shelf).toBe('keys');
-    expect((await ask(context(), plan([[keys, team, local, pub]]))).answer?.shelf).toBe('team');
-    expect(SHELF_RANK).toEqual({ team: 4, keys: 3, local: 2, public: 1 });
+    expect((await ask(context(), plan([[keys, pub]]))).answer?.shelf).toBe('keys');
+    expect((await ask(context(), plan([[team, keys]]))).answer?.shelf).toBe('team');
+    expect((await ask(context(), plan([[keys, team, pub]]))).answer?.shelf).toBe('team');
+    expect(SHELF_RANK).toEqual({ team: 4, keys: 3, public: 1 });
   });
 
   it('every stage runs while every stage misses, and the answer stays null', async () => {

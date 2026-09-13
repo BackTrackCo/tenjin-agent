@@ -3,22 +3,22 @@ import { localLeg } from './local';
 import type { Answer, Question } from '../types';
 
 const Q: Question = { text: 'q', questionKey: 'qk' };
-const PAIRING: Answer = {
-  shelf: 'local',
-  resourceId: 'pairing-7',
-  title: 'ENOENT: no such file',
-  text: 'Fixed here before by changing foo.ts.',
+const PARKED: Answer = {
+  shelf: 'team',
+  resourceId: '22222222-2222-4222-8222-222222222222',
+  title: 'The collation flip',
+  text: 'The collation flips on an image swap.',
 };
 
 describe('localLeg', () => {
-  it('resolves at once with status ok, and the record is its verdict', async () => {
-    const leg = localLeg('local', () => PAIRING);
+  it('resolves at once with status ok, and the parked answer is its verdict', async () => {
+    const leg = localLeg('team', () => PARKED);
     const result = await leg.request(Q, 4000, new AbortController().signal);
-    expect(result).toMatchObject({ status: 'ok', title: PAIRING.title });
-    expect(leg.verdict(result)).toEqual(PAIRING);
+    expect(result).toMatchObject({ status: 'ok', title: PARKED.title });
+    expect(leg.verdict(result)).toEqual(PARKED);
   });
 
-  it('a record that is not there is a definite miss: ok, and null', async () => {
+  it('an answer that is not there is a definite miss: ok, and null', async () => {
     const leg = localLeg('team', () => null);
     const result = await leg.request(Q, 4000, new AbortController().signal);
     expect(result.status).toBe('ok');
