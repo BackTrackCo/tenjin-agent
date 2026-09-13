@@ -266,7 +266,7 @@ def run(
             invalid = f"producer:harness_{envelope.subtype}"
     if invalid is None and outcome != "interrupted":
         try:
-            copy = producer_roots.hidden_copy(verifier_spec.hidden_layer)
+            copy = producer_roots.hidden_copy(verifier_spec.hidden_layer, image_dependencies=verifier_spec.kind == "historical_vitest")
         except artifact.ArtifactError as error:
             invalid = f"producer:isolation_{error.code}"
         else:
