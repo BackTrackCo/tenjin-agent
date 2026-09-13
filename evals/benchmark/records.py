@@ -331,6 +331,19 @@ def validate(record: dict[str, Any]) -> None:
     if isolation.get("wal_checkpoint") is not None and (not isinstance(isolation["wal_checkpoint"], str) or not isolation["wal_checkpoint"]):
         raise RecordError("isolation.wal_checkpoint must be null or the reason the ledger's WAL did not close")
     seeds = isolation.get("seed")
+    knowledge = isolation.get("knowledge")
+    if knowledge is not None:
+        if not isinstance(knowledge, dict) or set(knowledge) != {"corpus_hash", "available", "body_hashes"}:
+            raise RecordError("isolation.knowledge must bind the corpus and available body versions")
+        hashes = knowledge["body_hashes"]
+        if not isinstance(hashes, dict) or not all(isinstance(key, str) and key for key in hashes):
+            raise RecordError("knowledge body_hashes must name lessons")
+        import re
+        if any(not isinstance(value, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", value) is None for value in [knowledge["corpus_hash"], *hashes.values()]):
+            raise RecordError("knowledge versions must be SHA-256 hashes")
+        available = knowledge["available"]
+        if not isinstance(available, list) or not all(isinstance(key, str) and key in hashes for key in available) or len(set(available)) != len(available):
+            raise RecordError("available knowledge must uniquely name bound bodies")
     if seeds is not None and not isinstance(seeds, list):
         raise RecordError("isolation.seed must be a list, one entry per seeded lesson")
     for seed in seeds or []:
@@ -462,4 +475,3 @@ def select(
             continue
         accepted[record["trial_id"]] = record
     return accepted, excluded
-

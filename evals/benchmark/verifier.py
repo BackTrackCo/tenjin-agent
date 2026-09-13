@@ -65,6 +65,10 @@ class VerifierSpec:
     hidden_layer: Path | None = None
     container_test: str | None = None
     marker: Callable[[Path], str | None] | None = None
+    database: bool = False
+    kind: str = "node"
+    fixture: Path | None = None
+    allowed_changes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,12 +78,15 @@ class Verdict:
     exit_code: int | None
     detail: str
     image: str | None = None
+    database_image: str | None = None
 
 
 def facts(verdict: Verdict) -> dict:
     out = {"id": verdict.verifier_id, "exit_code": verdict.exit_code}
     if verdict.image is not None:
         out["runtime"] = {"kind": "container", "image": verdict.image}
+    if verdict.database_image is not None:
+        out["runtime"]["database_image"] = verdict.database_image
     return out
 
 
@@ -140,6 +147,9 @@ def run(spec: VerifierSpec, repo_copy: Path, allowed_root: Path, *, image: str |
         raise VerifierError("verifier target escapes the run directory")
     if not resolved.is_dir():
         raise VerifierError("verifier target is not a directory")
+    if spec.kind == "historical_vitest":
+        from . import task_assets
+        return task_assets.verify(spec, resolved, allowed_root, image)
     argv = spec.argv(resolved)
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
         raise VerifierError(f"verifier {spec.name!r} did not produce an argv list")

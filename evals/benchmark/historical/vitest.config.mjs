@@ -1,4 +1,7 @@
+import process from 'node:process';
+
 export default {
+  resolve: { alias: { '@': process.cwd(), '#benchmark/database': '/benchmark-database.mjs' } },
   cacheDir: '/tmp/benchmark-historical-vite-cache',
   test: {
     environment: 'node',
