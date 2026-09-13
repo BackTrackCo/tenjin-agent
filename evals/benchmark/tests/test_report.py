@@ -163,14 +163,14 @@ def test_a_fake_corpus_is_publishable_and_says_so(project: Project, reduction: d
     published = project()
     assert published["publishable"] is True
     assert published["isolation"] == "fake"
-    assert published["comparisons"]["on"]["headline_eligible"] == reduction["comparisons"]["on"]["headline_eligible"]
+    assert published["comparisons"]["on"]["headline_eligible"] is False
 
 
-def test_an_attested_live_run_stays_publishable_and_headline_eligible(project: Project, stamped: Stamped) -> None:
+def test_attestation_does_not_make_invalid_evidence_headline_eligible(project: Project, stamped: Stamped) -> None:
     published = project(accepted_records=stamped(live=True, attested_container=True, attestation_hash="sha256:" + "d" * 64))
     assert published["publishable"] is True
     assert published["isolation"] == "attested"
-    assert published["comparisons"]["on"]["headline_eligible"] is True
+    assert published["comparisons"]["on"]["headline_eligible"] is False
     report.guard(published)
 
 
@@ -184,7 +184,7 @@ def test_a_plumbing_run_projects_as_non_publishable_and_never_headline_eligible(
     assert published["comparisons"]["on"]["headline_eligible"] is False
     # The numbers are unchanged: the stamp is a label, not a reduction.
     assert published["comparisons"]["on"]["token_ratio"] == reduction["comparisons"]["on"]["token_ratio"]
-    assert published["arms"] == reduction["arms"]
+    assert published["arms"] == {key: {**arm, "headline_eligible": False} for key, arm in reduction["arms"].items()}
     report.guard(published)
 
 
@@ -379,12 +379,12 @@ def test_the_slice_and_the_producer_reach_the_report_and_its_reading() -> None:
     # task-paired interval; the reuse curve; the consumer-only ratio as the secondary line;
     # the producer's-own-work amortization last, as a diagnostic.
     comparison = projected["comparisons"]["on"]
-    assert (comparison["headline"], comparison["headline_rule"], comparison["headline_eligible"]) == (round(550 / 800, 12), "system_tokens_per_verified_completion_reuse_1", True)
+    assert (comparison["headline"], comparison["headline_rule"], comparison["headline_eligible"]) == (round(550 / 800, 12), "system_tokens_per_verified_completion_reuse_1", False)
     assert (comparison["headline_interval"]["tasks"], comparison["headline_interval"]["point"]) == (1, round(550 / 800, 12))
     assert comparison["token_ratio"] == 0.5
     lines = text.splitlines()
     headline = next(index for index, line in enumerate(lines) if line.startswith("  headline on: 0.688 (" + report.HEADLINE_LABEL + ")"))
-    assert "headline eligible" in lines[headline]
+    assert "NOT headline eligible" in lines[headline]
     assert lines[headline + 1].startswith("    per-completion reuse 2/5/10: 0.594/0.537/0.519")
     assert lines[headline + 2].startswith("    " + report.CAPTURE_FREE_LABEL + ": 0.500  interval")
     # The retrieval-only decomposition sits between the capture-free line
@@ -679,3 +679,25 @@ def test_remote_server_drift_cannot_look_like_a_product_result(corpus, reduction
     assert "diagnostic evidence only" in text
     assert "they do not lock the server or prove schema compatibility" in text
     assert "lower" not in text
+
+
+@pytest.mark.parametrize("condition", ["complete", "missing", "invalid", "quota", "excluded", "fake"])
+def test_json_headline_flags_follow_the_whole_run_gate(tmp_path, condition):
+    manifest = support.synthetic_manifest(tmp_path)
+    off = support.reduction_record("task-0", "off", 0, 0, 800)
+    on = support.reduction_record("task-0", "on", 0, 1, 400)
+    for row in [off, on]:
+        row["isolation"].update(live=condition != "fake", attested_container=True, attestation_hash="sha256:" + "d" * 64)
+    if condition in {"invalid", "quota"}:
+        on.update(outcome="invalid", invalid_reason="provider:rate_limit" if condition == "quota" else "provision:refused")
+    accepted = support.accept(off) if condition == "missing" else support.accept(off, on)
+    reduction = reduce_module.reduce(accepted, [], baseline="off")
+    if condition == "excluded":
+        reduction["excluded"] = [{"reason": "parse:invalid_json"}]
+    value = report.project(manifest.data, manifest.hash, "sha256:s", reduction, accepted)
+    expected = condition == "complete"
+    assert all(row["headline_eligible"] is expected for row in value["arms"].values())
+    assert all(row["headline_eligible"] is expected for row in value["comparisons"].values())
+    assert (report.run_status(value) == report.PROVISIONAL_STATUS) is expected
+    # Diagnostic numbers remain available; the report does not delete the failed attempt.
+    assert len(value["trials"]) == len(accepted)
