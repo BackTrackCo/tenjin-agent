@@ -43,8 +43,12 @@ def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> v
         verdict = verifier.Verdict(spec.name, "invalid", None, f"container verification failed: {type(error).__name__}")
     finally:
         # Keep a cleanup marker if teardown fails, so the normal run sweep can retry.
-        if container.remove_project(project):
-            container.forget_project(run_dir, identity)
-        else:
+        try:
+            # False means the context manager already removed every object.
+            # Cleanup failures raise; the return value only reports removal.
+            container.remove_project(project)
+        except container.ImageError:
             verdict = verifier.Verdict(spec.name, "invalid", None, "verification container cleanup failed")
+        else:
+            container.forget_project(run_dir, identity)
     return verdict
