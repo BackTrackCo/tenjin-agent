@@ -116,6 +116,7 @@ def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(histor
     result=verifier.run(spec,repo,base/'run',image='sha256:'+'ab'*32)
     assert result.outcome=='fail'
     assert ['ln','-s','/opt/fixture/node_modules','/tmp/historical-task/node_modules'] in seen
+    assert ['rm','-rf','/tmp/historical-task/node_modules','/tmp/historical-task/.pnpm-store'] in seen
     assert seen[0].egress.mode==container.NO_NETWORK and not seen[0].forward
     # Changed oracle is measurement corruption, not an accepted assertion pass.
     (repo/task_assets.ORACLE).write_text('forged')
@@ -126,6 +127,9 @@ def test_unrequested_source_or_tooling_edit_fails_contract(historical):
     data,base=historical;loaded=config(data,base);spec=loaded.verifier_spec(data['tasks'][0])
     repo=base/'run/verify';shutil.copytree(base/'fixture',repo)
     (repo/'src/product.ts').write_text('fixed')
+    assert task_assets.changed_outside_contract(spec,repo) is None
+    cache = repo/'.pnpm-store/v11'; cache.mkdir(parents=True)
+    (cache/'index.db').write_bytes(b'package-manager-generated cache')
     assert task_assets.changed_outside_contract(spec,repo) is None
     (repo/'unexpected.ts').write_text('shadow dependency')
     assert 'added file' in task_assets.changed_outside_contract(spec,repo)

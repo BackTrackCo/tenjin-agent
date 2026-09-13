@@ -165,7 +165,7 @@ def changed_outside_contract(spec: verifier.VerifierSpec, repo: Path) -> str | N
     for actual in repo.rglob("*"):
         relative = actual.relative_to(repo).as_posix()
         # Dependencies are replaced from the immutable image before execution.
-        if relative.startswith("node_modules/") or relative.split("/")[0] in {".git", ".bench1"}:
+        if relative.startswith("node_modules/") or relative.split("/")[0] in {".git", ".bench1", ".pnpm-store"}:
             continue
         if not actual.is_file() and not actual.is_symlink():
             continue
