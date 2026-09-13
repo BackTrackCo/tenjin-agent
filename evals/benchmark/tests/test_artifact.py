@@ -93,6 +93,21 @@ def test_hidden_verifier_bytes_are_unavailable_before_agent_shutdown(create: Cre
     assert not (roots.repo / "expected.txt").exists()
 
 
+def test_image_backed_verification_omits_only_discarded_root_dependencies(create: Create) -> None:
+    roots = create()
+    for name in ("node_modules", ".pnpm-store", "src/node_modules"):
+        folder = roots.repo / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "sentinel").write_text(name)
+    roots.mark_stopped()
+    copy = roots.hidden_copy(image_dependencies=True)
+    assert not (copy / "node_modules").exists()
+    assert not (copy / ".pnpm-store").exists()
+    assert (copy / "src/node_modules/sentinel").read_text() == "src/node_modules"
+    assert (roots.repo / "node_modules/sentinel").exists()
+    assert (roots.hidden_copy() / "node_modules/sentinel").exists()
+
+
 def test_a_symlink_out_of_the_worktree_fails_closed(create: Create, fixture: Path) -> None:
     roots = create()
     (roots.repo / "escape").symlink_to(fixture / "TASK.md")

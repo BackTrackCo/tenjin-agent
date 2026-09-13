@@ -116,7 +116,7 @@ def test_hidden_verifier_replaces_model_tooling_and_classifies_assertions(histor
     result=verifier.run(spec,repo,base/'run',image='sha256:'+'ab'*32)
     assert result.outcome=='fail'
     assert ['ln','-s','/opt/fixture/node_modules','/tmp/historical-task/node_modules'] in seen
-    assert ['rm','-rf','/tmp/historical-task/node_modules','/tmp/historical-task/.pnpm-store'] in seen
+    assert ['tar','-C','/benchmark-verify','--exclude=./node_modules','--exclude=./.pnpm-store','-cf','/tmp/historical-source.tar','.'] in seen
     assert seen[0].egress.mode==container.NO_NETWORK and not seen[0].forward
     # Changed oracle is measurement corruption, not an accepted assertion pass.
     (repo/task_assets.ORACLE).write_text('forged')
