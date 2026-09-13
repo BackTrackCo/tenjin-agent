@@ -1,0 +1,90 @@
+# Everything evals/benchmark/ installs, suite and package alike.
+#
+# pytest runs the suite. inline-snapshot maintains the goldens: the handful of
+# expectations that are whatever the producer emitted for a fixed fixture, as
+# opposed to a value a person chose. `--inline-snapshot=fix` rewrites those in
+# place, so nobody retypes a derived structure by hand; the value still lives at
+# the assertion, which is what keeps a test readable as the specification.
+# Contract literals (a reject code, an argv flag, a published field list) are
+# deliberately not snapshots and stay written out.
+#
+# scipy is `reduce.paired_bootstrap`'s interval, and jsonschema is the keyword
+# half of the manifest and live-executor validators. The package imports both,
+# so `fake-run`, `verify` and `summary` run from a venv built from this file
+# rather than from a bare interpreter, and CI builds that venv before it calls
+# them. numpy arrives under scipy, and attrs, jsonschema-specifications,
+# referencing and rpds-py under jsonschema.
+#
+# Pinned exactly and by hash, with every transitive dependency listed, because
+# the required CI job installs this: a floating resolve would make a required
+# check depend on whatever the index served that minute. scipy, numpy and
+# rpds-py ship platform wheels, so those carry one hash per wheel rather than
+# one per package: CPython 3.12, 3.13 and 3.14 on manylinux x86_64 and on
+# macOS arm64, which is the CI runner plus the machines a run is driven from.
+# A fourth platform or a free-threaded build needs its wheels added here.
+# Install with
+#
+#   python3 -m pip install --require-hashes --only-binary=:all: \
+#     -r evals/benchmark/requirements-test.txt
+#
+# To move a pin, bump the version and regenerate the hashes with
+# `pip download --only-binary=:all:` followed by `pip hash` on each wheel.
+pytest==9.1.1 \
+    --hash=sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+iniconfig==2.3.0 \
+    --hash=sha256:f631c04d2c48c52b84d0d0549c99ff3859c98df65b3101406327ecc7d53fbf12
+packaging==26.3 \
+    --hash=sha256:d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pluggy==1.6.0 \
+    --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746
+pygments==2.21.0 \
+    --hash=sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+inline-snapshot==0.35.4 \
+    --hash=sha256:0ad221c1bc6fe4ce249f7c1c4131284099ecac1a5c1023aa7b1a95921c07265d
+asttokens==3.0.2 \
+    --hash=sha256:9da13157f5b28becde0bd374fc677dcd3c290614264eff096f167c469cd9f933
+executing==2.2.1 \
+    --hash=sha256:760643d3452b4d777d295bb167ccc74c64a81df23fb5e08eff250c425a4b2017
+rich==15.0.0 \
+    --hash=sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb
+markdown-it-py==4.2.0 \
+    --hash=sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a
+mdurl==0.1.2 \
+    --hash=sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+scipy==1.18.1 \
+    --hash=sha256:e708533e8b2ae2497d65346538a7dcc92814410b25b81432eac66de0f2af8265 \
+    --hash=sha256:7bbf207c4453ce1ad2e00b17313852b33310b83090c2311bdaf97f93c0380d12 \
+    --hash=sha256:f55fa87b6c612ecd6b058f167c53231b1d14e412efe361d3d6e38b3631c73218 \
+    --hash=sha256:e6fb6a55cc0ba97b59a1f288fb86dc6fce8bdfc0fffcbfd015e3a954bf2a2d93 \
+    --hash=sha256:ea324d9dd34c38bfb9bec8ca4d1b407db97dbb74029f566b8e322b1b6fe56fe6 \
+    --hash=sha256:fdaf5ea890a6183d0565f51a61799d67081bd5b1cf03c5f4b3fd3732108625c9 \
+    --hash=sha256:9554bcc6d715ee87a633a3cc8e7703c6628b100dd29cb8a2efc4c0533c7ff729 \
+    --hash=sha256:011413b7426b75012840e35649e00fe0a2c3bae89fed433876e3a99251572efc \
+    --hash=sha256:ac0333bdf38309aa3dcbe7e3fa7ea29e7a2c37c6ea306a757b700ded8e4596ad
+numpy==2.5.3 \
+    --hash=sha256:f59a878c33d6b88122d80d239bb3b845d58708750b0cb06a09aebb9b18ec696c \
+    --hash=sha256:a72f874bc9e10e4b8f80426fb49716d5141f64442a0c8418065093ec8017fbb0 \
+    --hash=sha256:b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3 \
+    --hash=sha256:92f30e89b8ee0ecf363033576c422b2f58fed6a80bed0aa48dff6d14c654663e \
+    --hash=sha256:f9a2353b37a1a9e78fd82b27ad7e2a32a2d036604d18f02b05e3136c62ca3b09 \
+    --hash=sha256:a5fa86b80fd24bcd1aff83ad23be44ea323de3f787be8f8b15d4a65621e25321 \
+    --hash=sha256:012e66aca395d795496446e52aeeb5866312a5d4d3f27da270e5a0b43f70dc5c \
+    --hash=sha256:adc1ada2662f8a5f960b8a10d9986897e7499ef07e06d4cfe7197f8cce923c07 \
+    --hash=sha256:b0521d0f4aebb6e06189451025fa17a913287b13c03d5fe05c017333b654ea5b
+jsonschema==4.26.0 \
+    --hash=sha256:d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+attrs==26.1.0 \
+    --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+jsonschema-specifications==2025.9.1 \
+    --hash=sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+referencing==0.37.0 \
+    --hash=sha256:381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+rpds-py==2026.6.3 \
+    --hash=sha256:538949e262e46caa31ac01bdb3c1e8f642622922cacbabbae6a8445d9dc33eaf \
+    --hash=sha256:ecabd69db66de867690f9797f2f8fa27ba501bbc24540cbdbdc649cd15888ba6 \
+    --hash=sha256:f4d78253f6996be4901669ad25319f842f740eccf4d58e3c7f3dd39e6dde1d8f \
+    --hash=sha256:acac386b453c2516111b50985d60ce46e7fadb5ea71ae7b25f4c946935bf27cf \
+    --hash=sha256:d7469697dce35be237db177d42e2a2ee26e6dcc5fc052078a6fefabd288c6edd \
+    --hash=sha256:dc319e5a1de4b6913aac94bf6a2f9e847371e0a140a43dd4991db1a09bc2d504
