@@ -144,7 +144,7 @@ class TrialRoots:
                     relative = entry.relative_to(self.repo).as_posix()
                     raise ArtifactError("symlink_escape", f"{relative} links outside the trial repository")
 
-    def hidden_copy(self, hidden_layer: Path | None = None) -> Path:
+    def hidden_copy(self, hidden_layer: Path | None = None, *, image_dependencies: bool = False) -> Path:
         """Copy the final worktree for the verifier and mount the hidden layer."""
         if not self.stopped:
             raise ArtifactError("agent_live", "the verifier mount is built only after the agent has stopped")
@@ -153,7 +153,12 @@ class TrialRoots:
             shutil.rmtree(self.verify)
         # symlinks=True keeps a link a link: following one would copy bytes
         # from outside the worktree into the verifier's view.
-        shutil.copytree(self.repo, self.verify, symlinks=True)
+        # Historical verifiers restore dependencies from the immutable image.
+        # Copying gigabytes of model-visible dependencies only to discard them
+        # wastes disk and can time out before any behavioral assertion runs.
+        def ignore(directory, names):
+            return {"node_modules", ".pnpm-store"}.intersection(names) if image_dependencies and Path(directory) == self.repo else set()
+        shutil.copytree(self.repo, self.verify, symlinks=True, ignore=ignore)
         if hidden_layer is not None:
             if not hidden_layer.is_dir():
                 raise ArtifactError("hidden_layer_missing", f"{hidden_layer.name} is not a directory")
