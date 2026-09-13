@@ -153,3 +153,58 @@ def test_codex_accepts_resolved_new_release_but_not_mutable_tags():
     codex_live.validate_pins({**PINS, "harness_version": "0.155.0"})
     with pytest.raises(executor.ExecutorError, match="exact"):
         codex_live.validate_pins({**PINS, "harness_version": "latest"})
+
+
+def test_historical_database_is_requested_for_model_tools(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from evals.benchmark import container, database_service, runner
+    item = request(tmp_path)
+    item.task['database'] = 'postgres'
+    launch = codex_live.launch(item)
+    assert launch.database and launch.container_plan['database'] == 'postgres'
+    events = []
+    @contextmanager
+    def service(box, enabled):
+        assert enabled
+        events.append('database ready')
+        try: yield database_service.ENVIRONMENT
+        finally: events.append('database removed')
+    class Box:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): events.append('container removed')
+        def exec(self, command, **kwargs):
+            assert events == ['database ready']
+            assert kwargs['environment']['BENCHMARK_DATABASE_URL'] == database_service.ENVIRONMENT['BENCHMARK_DATABASE_URL']
+            events.append('model started')
+            raise RuntimeError('timed out')
+    monkeypatch.setattr(database_service, 'model_service', service)
+    monkeypatch.setattr(container, 'Container', Box)
+    monkeypatch.setattr(container, 'daemon_error', lambda output: None)
+    monkeypatch.setattr(container, 'stop', lambda name: None)
+    result = runner.container_spawn(launch, item.roots, 5)
+    assert result.timed_out
+    assert events == ['database ready', 'model started', 'database removed', 'container removed']
+
+
+@pytest.mark.parametrize("final", ["removed", "already-removed", "refused"])
+def test_hook_cleanup_retries_only_its_owned_container_after_docker_timeout(monkeypatch, final):
+    import subprocess
+    from types import SimpleNamespace
+    calls = []
+    def run(command, **kwargs):
+        calls.append(command)
+        assert command == ["docker", "rm", "--force", "bench2-trust-owned"]
+        assert kwargs["timeout"] == 30
+        if len(calls) == 1:
+            raise subprocess.TimeoutExpired(command, 30)
+        return SimpleNamespace(returncode=0 if final == "removed" else 1,
+                               stderr="No such container: bench2-trust-owned" if final == "already-removed" else "daemon unavailable")
+    monkeypatch.setattr(subprocess, "run", run)
+    if final == "refused":
+        with pytest.raises(executor.ExecutorError, match="cleanup could not be confirmed"):
+            codex_live.remove_trust_container("bench2-trust-owned")
+        assert len(calls) == 3
+    else:
+        codex_live.remove_trust_container("bench2-trust-owned")
+        assert len(calls) == 2

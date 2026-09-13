@@ -202,3 +202,19 @@ def test_mutation_mounts_are_read_only_and_receipts_contain_no_host_path(tmp_pat
     link = tmp_path/'link.ts';link.symlink_to(file)
     with pytest.raises(replay.ReplayError, match='regular file'):
         replay.mutation_mounts({'allowed_changes':['src/']}, {'src/product.ts':link})
+
+
+def test_visible_test_mounts_are_bound_and_do_not_mount_hidden_oracles(tmp_path):
+    source = tmp_path / 'context/source/tests/integration'; source.mkdir(parents=True)
+    (source / 'ordinary.test.ts').write_text('existing source test')
+    mounts, selected, hashes = replay.visible_mounts(tmp_path / 'context', tmp_path / 'support', ('database-support', 'tests/integration/ordinary.test.ts'))
+    assert selected == ['tests/integration/bench1-model-database.test.ts', 'tests/integration/ordinary.test.ts']
+    assert len(mounts) == 3 and len(hashes) == 3
+    assert all('benchmark-independent' not in str(mount.target) for mount in mounts)
+    assert all(len(value) == 64 for value in hashes.values())
+
+
+@pytest.mark.parametrize('selection', [(), ('../escape.test.ts',), ('--config=other',), ('tests/integration/missing.test.ts',)])
+def test_visible_test_selection_refuses_missing_or_arbitrary_tooling(tmp_path, selection):
+    with pytest.raises(replay.ReplayError, match='focused'):
+        replay.visible_mounts(tmp_path / 'context', tmp_path / 'support', selection)

@@ -153,7 +153,36 @@ def mutation_mounts(task: dict, overrides: dict[str, Path]) -> tuple[list, dict]
     return mounts, hashes
 
 
-def verify(context: Path, run_dir: Path, image: str, *, catalog: Path, overrides: dict[str, Path] | None = None) -> dict:
+def visible_mounts(context: Path, owned: Path, tests: tuple[str, ...]) -> tuple[list, list, dict]:
+    """Reuse the normal proof backend for the model-visible test environment."""
+    support = Path(__file__).with_name("historical")
+    owned.mkdir(parents=True, exist_ok=False)
+    mounts, names, hashes = [], [], {}
+    for name in ("model-tests.config.mjs", "model-test-database.mjs"):
+        staged = owned / name
+        shutil.copyfile(support / name, staged)
+        mounts.append(container.Mount(staged, Path("/opt/task/.bench1") / name, "ro"))
+        hashes[name] = sha256_file(staged)
+    for relative in tests:
+        if relative == "database-support":
+            source = Path(__file__).with_name("tests") / "fixtures/model-database.test.ts"
+            relative = "tests/integration/bench1-model-database.test.ts"
+            staged = owned / "model-database.test.ts"
+            shutil.copyfile(source, staged)
+            mounts.append(container.Mount(staged, Path("/opt/task") / relative, "ro"))
+            hashes[relative] = sha256_file(staged)
+        else:
+            path = Path(relative)
+            source = context / "source" / path
+            if path.is_absolute() or ".." in path.parts or not relative.startswith(("tests/integration/", "lib/", "app/")) or not relative.endswith((".test.ts", ".test.tsx")) or not source.is_file():
+                raise ReplayError("visible test must be an existing focused integration/lib/app test")
+        names.append(relative)
+    if not names:
+        raise ReplayError("visible verification requires at least one focused test")
+    return mounts, names, hashes
+
+
+def verify(context: Path, run_dir: Path, image: str, *, catalog: Path, overrides: dict[str, Path] | None = None, visible_tests: tuple[str, ...] | None = None) -> dict:
     if re.fullmatch(r"sha256:[0-9a-f]{64}", image) is None:
         raise ReplayError("verification requires an immutable image ID")
     receipt = validate_context(context, catalog=catalog)
@@ -164,19 +193,32 @@ def verify(context: Path, run_dir: Path, image: str, *, catalog: Path, overrides
     mutations, mutation_hashes = mutation_mounts(task_named(receipt["task"], catalog), overrides or {})
     identity = "replay-" + receipt["task"] + "-" + receipt["revision"] + "-" + image[7:19] + "-" + uuid.uuid4().hex[:12]
     name = container.container_name(identity)
+    task = task_named(receipt["task"], catalog)
+    visible = visible_tests is not None
+    visible_plan, selected, visible_hashes = [], [], {}
+    if visible:
+        if overrides or task.get("database") != "postgres":
+            raise ReplayError("visible database tests require a server task without mutation overrides")
+        visible_plan, selected, visible_hashes = visible_mounts(context, run_dir / identity / "visible-support", visible_tests)
     project = container.record_project(run_dir, identity, name)
     recipe = container.Recipe(name=name, image=image, workdir=Path("/opt/task"),
                               trial_dir=run_dir / identity / "trial", environment_dir=run_dir / identity / "environment",
-                              plan=mutations + ([container.Mount(context / "database.mjs", Path("/benchmark-database.mjs"), "ro")] if task_named(receipt["task"], catalog).get("database") == "postgres" else []), environment={"HOME": "/tmp"}, egress=container.no_network())
+                              plan=mutations + visible_plan + ([container.Mount(context / "database.mjs", Path("/benchmark-database.mjs"), "ro")] if task_named(receipt["task"], catalog).get("database") == "postgres" else []), environment={"HOME": "/tmp"}, egress=container.no_network())
     result = {**receipt, "image": image, "status": "invalid", "cleanup": False, "tests": None}
     if mutation_hashes:
         result["mutation_hashes"] = mutation_hashes
+    if visible:
+        result.update(verification_mode="model-visible-source-tests", visible_tests=selected,
+                      visible_support_hashes=visible_hashes, provider_authentication=False,
+                      network_allowlist=[])
     try:
         enabled = task_named(receipt["task"], catalog).get("database") == "postgres"
         if enabled:
             result["database_image"] = database_service.IMAGE
+        command = (["node", "/opt/task/node_modules/vitest/vitest.mjs", "run", "--config", "/opt/task/.bench1/model-tests.config.mjs", "--configLoader", "runner", *selected,
+                    "--reporter=json", "--outputFile=/tmp/benchmark-historical-result.json"] if visible else COMMAND)
         with container.Container(recipe=recipe) as running, database_service.service(running, enabled) as database_environment:
-            completed = running.exec(COMMAND, cwd=recipe.workdir, environment=database_environment, timeout_s=120)
+            completed = running.exec(command, cwd=recipe.workdir, environment=database_environment, timeout_s=120)
             report = running.exec(["cat", "/tmp/benchmark-historical-result.json"], timeout_s=10)
         if report.returncode == 0:
             data = json.loads(report.stdout)
@@ -223,6 +265,7 @@ def main(catalog: Path | None = None) -> int:
     check.add_argument("--context", type=Path, required=True)
     check.add_argument("--run", type=Path, required=True)
     check.add_argument("--image", required=True)
+    check.add_argument("--visible-test", action="append", help="Existing integration/lib/app test path, or database-support; no model or hidden oracle runs")
     args = parser.parse_args()
     if args.command == "prepare":
         result = prepare(args.repo, args.task, args.revision, args.out, catalog=args.catalog)
@@ -233,7 +276,7 @@ def main(catalog: Path | None = None) -> int:
         name = build(args.context, catalog=args.catalog)
         result = {"name": name, "id": images.image_id(name)}
     else:
-        result = verify(args.context, args.run, args.image, catalog=args.catalog)
+        result = verify(args.context, args.run, args.image, catalog=args.catalog, visible_tests=None if args.visible_test is None else tuple(args.visible_test))
     print(json.dumps(result, indent=2))
     return int(result.get("status") == "invalid")
 
