@@ -10,13 +10,9 @@ path's checkpoint has to settle without waiting; `--port`
 overrides the configured port, which is how a case stands in for a daemon the
 shim respawned.
 
-It also plays the failure arm's local record at the shape the seed and the
-producer phase depend on (`src/hooks/failure/pairings.ts`): a failing Bash
-call opens a pairing under the key the signature port derives from its
-output, an Edit is remembered, and the same command passing afterwards
-closes it `unverified`; a later failure under a closed key is a fire with a
-`local` leg hit; a Stop is a `turn.end` fire. Rows go through the product's
-own DDL, so the join reads them as it reads the real thing.
+It records a failure question and its team lookup legs, and a Stop fire. It
+never infers a fix or simulates the removed local pairing store. Rows use the
+product's own DDL, so the benchmark reads the current runtime's shape.
 """
 
 from __future__ import annotations
@@ -44,10 +40,6 @@ def key_of(text: str) -> dict:
     return signature.key_of(text)
 
 
-def project_of(cwd: str) -> str | None:
-    import hashlib
-
-    return hashlib.sha256(cwd.encode("utf-8")).hexdigest()[:16] if cwd else None
 
 
 class Store:
@@ -55,7 +47,6 @@ class Store:
 
     def __init__(self, path: Path) -> None:
         self.path = path
-        self.edited: dict[str, list[tuple[int, str]]] = {}
         self.counter = 0
 
     def now(self) -> int:
@@ -79,56 +70,25 @@ class Store:
         event = raw.get("hook_event_name")
         session, agent, cwd = str(raw.get("session_id", "")), str(raw.get("agent_id") or ""), str(raw.get("cwd", ""))
         tool = raw.get("tool_name")
-        tool_input = raw.get("tool_input") or {}
-        project = project_of(cwd)
         db = self.connect()
         try:
             if event == "Stop":
                 self.fire(db, session, agent, "turn.end", "stop", "no-question", None, cwd)
-            elif event == "PreToolUse" and tool == "Edit":
-                self.edited.setdefault(f"{session}:{agent}", []).append((self.now(), str(tool_input.get("file_path", ""))))
             elif event == "PostToolUseFailure" and tool == "Bash":
-                command = str(tool_input.get("command", ""))
                 found = key_of(str(raw.get("error", "")))
                 keys = [("sig_v1", found["key"]), ("sig_v1_test", found["test_key"])]
                 keys = [(kind, key) for kind, key in keys if key is not None]
-                for kind, key in keys:
-                    row = db.execute(
-                        "SELECT id FROM pairings WHERE project IS ? AND key = ? AND status IN ('unverified', 'verified') LIMIT 1", (project, key)
-                    ).fetchone()
-                    if row is not None:
-                        fire_id = self.fire(db, session, agent, "tool.after", "failure", "hit", f"pairing:{row[0]}", cwd)
-                        db.execute(
-                            "INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES (?, 0, 'local', 'ok', 'hit', 0)", (fire_id,)
-                        )
-                        break
-                else:
-                    if keys:
-                        self.fire(db, session, agent, "tool.after", "failure", "miss", None, cwd)
-                    for kind, key in keys:
-                        db.execute(
-                            "INSERT INTO pairings (uid, at, session, project, machine, kind, key, cmd_head, cmd, error_line, error_files, scope, status)"
-                            " VALUES (?, ?, ?, ?, 'fake', ?, ?, ?, ?, ?, '[]', 'ambiguous', 'open')",
-                            (f"{session}-{self.counter}-{kind}", self.now(), session, project, kind, key, command.split(" ")[0], command, found["line"] or ""),
-                        )
-            elif event == "PostToolUse" and tool == "Bash":
-                command = str(tool_input.get("command", ""))
-                edits = self.edited.get(f"{session}:{agent}", [])
-                for row in db.execute(
-                    "SELECT id, at FROM pairings WHERE status = 'open' AND project IS ? AND cmd_head = ? AND cmd = ?", (project, command.split(" ")[0], command)
-                ).fetchall():
-                    files = [path for at, path in edits if at > row[1]]
-                    if not files:
-                        continue
-                    now = self.now()
-                    db.execute(
-                        "INSERT OR IGNORE INTO pairing_closes (pairing_id, session, agent_id, at, fix_cmd, fix_files, scope) VALUES (?, ?, ?, ?, ?, ?, 'code')",
-                        (row[0], session, agent or None, now, command, json.dumps(files)),
-                    )
-                    db.execute(
-                        "UPDATE pairings SET closes = 1, status = 'unverified', closed_at = ?, fix_cmd = ?, fix_files = ?, scope = 'code' WHERE id = ?",
-                        (now, command, json.dumps(files), row[0]),
-                    )
+                line = found["line"] or ""
+                if keys or line:
+                    import hashlib
+                    parts = [f"{kind}:{key}" for kind, key in keys]
+                    if line:
+                        parts.append("line:" + hashlib.sha256(line.encode()).hexdigest()[:32])
+                    fire_id = self.fire(db, session, agent, "tool.after", "failure", "no-hit", None, cwd)
+                    db.execute("UPDATE fires SET question_key = ?, question = ? WHERE id = ?", ("|".join(parts), line, fire_id))
+                    shelves = (["keys"] if keys else []) + (["team"] if line else [])
+                    for stage, shelf in enumerate(shelves):
+                        db.execute("INSERT INTO legs (fire_id, stage, shelf, status, outcome, elapsed_ms) VALUES (?, ?, ?, 'ok', 'no-answer', 1)", (fire_id, stage, shelf))
             db.commit()
         finally:
             db.close()

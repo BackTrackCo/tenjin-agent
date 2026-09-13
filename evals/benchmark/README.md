@@ -493,7 +493,7 @@ with the intended producer store. The existing exclusive shelf window covers pub
 consumer execution and deletion. Missing/ambiguous receipts stop further admission;
 known piece IDs are still cleaned up. A fresh corpus reset is required after an
 uncertain write. Failed producers are never published. Publication and confirmed
-cleanup are visible alongside drafts, closed local pairings, attributed team-hook
+cleanup are visible alongside drafts, attributed team-hook
 delivery and verified completion. A delivery followed by a pass does not prove use.
 This treatment measures host-assisted publication, not autonomous agent publishing.
 Host publication time is separate from agent completion time and adds no model tokens.

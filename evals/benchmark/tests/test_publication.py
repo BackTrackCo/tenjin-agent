@@ -79,3 +79,20 @@ def test_capture_instruction_applies_only_to_opted_in_producer():
     assert protocol.phase_prompt(request, "Fix it.") == "Fix it."
     request.phase, request.arm = "producer", {}
     assert protocol.phase_prompt(request, "Fix it.") == "Fix it."
+
+
+def test_producer_capture_counts_only_its_own_drafts_without_pairings(tmp_path):
+    from evals.benchmark import producer
+    from evals.benchmark.tests.support import loop_ddl
+    roots, _ = setup(tmp_path)
+    path = roots.data_dir / 'loop.db'
+    with sqlite3.connect(path) as db:
+        db.executescript(loop_ddl())
+        db.execute('DROP TABLE IF EXISTS pairings')
+        db.execute("INSERT INTO fires (id, at, session, agent, arm, harness, event, cwd, wait, deadline_ms, elapsed_ms, reason) VALUES ('stop', 123, 'codex:root', '', 'stop', 'codex', 'turn.end', '', 'sync', 1000, 1, 'no-question')")
+    facts = producer.store_facts(path, 'codex:root', 'proj')
+    assert facts['findings'] == 1
+    assert facts['fires'] == facts['turn_end_fires'] == 1
+    assert facts['first_turn_end_at'] == 123
+    assert 'pairings' not in facts
+    assert producer.store_facts(path, 'codex:absent', 'proj')['findings'] == 0
