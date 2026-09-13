@@ -2,7 +2,7 @@
 
 This is the single Bench-3 experiment PR (#355). `protocol.json` defines the
 population, deterministic pilot proof queue, four treatments, historical knowledge
-cutoffs, delivery analysis and completion metrics. The pilot is paused after seven consumers in its third engineering cohort; model admission is disabled pending oracle-contract adjudication.
+cutoffs, delivery analysis and completion metrics. The pilot is readmitted under a fresh oracle-v2 freeze; earlier engineering cohorts remain separate.
 All reusable preparation, containers, databases, task/knowledge assets, scheduling,
 verification, reporting and cleanup arrive from Bench-1 through #313.
 
@@ -49,10 +49,12 @@ The latest engineering checkpoint separates generated-build rejection from behav
 After the shared Bench-1 repair, eight reference patches pass all 145 checks with
 build/cache/report outputs present. Retained repository-replay model patches still
 fail: control passes 6/9 checks, flat and seeded 7/9. The original records and costs
-remain in notes and are not pooled into a future controller cohort. Before further
-model admission, align the documented demand-honesty UI-oracle requirements with
-the supplied work order and validate any change against retained/reference patches
-without more model calls. The selected tasks and treatments remain fixed.
+remain in notes and are not pooled into a future controller cohort. The demand-honesty UI oracle now accepts equivalent copy and the real agents setup
+page. Reference and equivalent UI pass 16/16 checks; the retained producer still
+fails six data requirements (10/16 pass). Five targeted UI defects are caught.
+This adjudication used no model calls and changed no task, prompt, treatment or
+source fixture. The fresh cohort binds the corrected oracle before admission;
+notes retain both oracle identities, the proof and the earlier original attempts.
 
 Prepare each revision from a checkout containing its Git objects:
 

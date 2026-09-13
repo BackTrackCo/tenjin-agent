@@ -1,7 +1,7 @@
 {
   "schema": "bench3.protocol.v1",
-  "status": "pilot-paused-oracle-audit",
-  "model_admission": false,
+  "status": "pilot-readmitted-oracle-v2-results-pending",
+  "model_admission": true,
   "population": {
     "window_start": "2026-08-15T00:00:00Z",
     "window_end_exclusive": "2026-09-12T00:00:00Z",
