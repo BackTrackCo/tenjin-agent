@@ -202,9 +202,9 @@ def test_amortization_charges_each_task_its_own_lesson_at_the_mean_producer_cost
 
 def test_producer_facts_and_local_hits_are_summarised_per_arm() -> None:
     record = support.reduction_record("t1", "on", 0, 1, 400)
-    record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"pairings": {"open": 0, "unverified": 1, "verified": 0}, "findings": 2}, "wal_live_between_phases": False}}
+    record["isolation"] = {**record["isolation"], "producer": {"outcome": "pass", "capture": {"findings": 2}, "wal_live_between_phases": False}}
     other = support.reduction_record("t2", "on", 0, 3, 400, outcome="invalid")
-    other["isolation"] = {**other["isolation"], "producer": {"outcome": "invalid", "capture": {"pairings": {"open": 1, "unverified": 0, "verified": 0}, "findings": 0}, "wal_live_between_phases": True}}
+    other["isolation"] = {**other["isolation"], "producer": {"outcome": "invalid", "capture": {"findings": 0}, "wal_live_between_phases": True}}
     seeded = support.reduction_record("t1", "seeded", 0, 0, 500)
     seeded["delivery"] = {**seeded["delivery"], "legs": [{"fire_id": "f", "stage": 0, "shelf": "local", "status": "ok", "outcome": "hit", "actor": ["claude", seeded["native_root_id"], ""]}]}
     reduction = reduce_module.reduce(support.accept(record, other, seeded), [])

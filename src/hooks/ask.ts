@@ -18,10 +18,10 @@ import type { Answer, FireContext, Leg, LegResult, LegRow, LegStatus, Plan, Shel
  * failure arm plans two stages, and its ledger has to say which one hit).
  */
 
-/** The whole ranking: a teammate's write-up beats a key match beats this
- *  machine's own terse record beats the marketplace (decision 13). Nothing
- *  else separates two answers now that a leg has one grade to give. */
-export const SHELF_RANK: Record<Shelf, number> = { team: 4, keys: 3, local: 2, public: 1 };
+/** The whole ranking: a teammate's write-up beats a key match beats the
+ *  marketplace (decision 13). Nothing else separates two answers now that a
+ *  leg has one grade to give. */
+export const SHELF_RANK: Record<Shelf, number> = { team: 4, keys: 3, public: 1 };
 
 function better(a: Answer | null, b: Answer): boolean {
   if (a === null) return true;

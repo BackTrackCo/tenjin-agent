@@ -4,7 +4,6 @@ import {
   commandHeads,
   errnoOf,
   errorLine,
-  filesInError,
   normalizeForSig,
   sigV1,
   topFrameFile,
@@ -145,6 +144,95 @@ describe('the error line', () => {
     expect(errorLine(totals.join('\n'))).toBeNull();
   });
 
+  // The arm joins stdout, stderr, `error` and `text` with a newline apiece
+  // (`failureText`), so the single blank vitest prints before its summary
+  // arrives as two — and two blanks are a block boundary, which left the
+  // totals block holding nothing but totals.
+  const ENOENT_LINE = "Error: ENOENT: no such file or directory, open '/repo/fixtures/a.json'";
+  const spliced = (blanks: number): string =>
+    [
+      ' FAIL  src/thing.test.ts > loads config',
+      ENOENT_LINE,
+      '    at readFileSync (node:fs:1234:5)',
+      ...Array.from({ length: blanks }, () => ''),
+      ' Test Files  1 failed (1)',
+      '      Tests  1 failed (1)',
+      '',
+    ].join('\n');
+  const scrollback = Array.from({ length: 200 }, (_, n) => `  transform src/mod${n}.ts (ok)`);
+
+  it.each([0, 1, 2, 3, 4])(
+    'reaches the run own failure block across %i blank lines above the totals',
+    (blanks) => {
+      const found = errorLine(spliced(blanks));
+      expect(found?.line).toBe(ENOENT_LINE);
+      // The width of the gap is a splice artifact, so it must not reach the
+      // key: every width keys the same bytes, and the same bytes the
+      // one-blank output already keyed before this hop existed.
+      expect(sigV1(found?.line ?? '', found?.block ?? '')?.key).toBe('609f799adea79f63');
+    },
+  );
+
+  it('gives up past the gap: five blank lines is a different screenful', () => {
+    expect(errorLine(spliced(5))).toBeNull();
+  });
+
+  it.each([
+    [
+      'a lifecycle banner above',
+      [
+        '> api@1.0.0 test',
+        '> vitest run',
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an unrelated error 200 lines up',
+      [
+        "Error: EACCES: permission denied, open '/etc/hosts'",
+        '    at open (node:fs:9:9)',
+        ...scrollback,
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an earlier run failure block 200 lines up',
+      [
+        ' FAIL  src/old.test.ts > old',
+        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
+        '',
+        '',
+        ...scrollback,
+        '',
+        '',
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+    [
+      'an earlier run failure block across a wide blank gap',
+      [
+        ' FAIL  src/old.test.ts > old',
+        "Error: ECONNREFUSED: connect refused, open '/x/y.json'",
+        ...Array.from({ length: 30 }, () => ''),
+        ' Test Files  1 failed (1)',
+        '      Tests  1 failed (1)',
+        '',
+      ],
+    ],
+  ])('still yields nothing when the totals block is all there is: %s', (_name, out) => {
+    expect(errorLine(out.join('\n'))).toBeNull();
+  });
+
   it('anchors the block to the failure, so a frame from another failure cannot key it', () => {
     const two = [
       ' FAIL  src/a.test.ts > one',
@@ -199,6 +287,26 @@ describe('sig_v1', () => {
     expect(sigV1('ERROR: 2 tests failed', 'ERROR: 2 tests failed')).toBeNull();
   });
 
+  it('keys a bundler-generated frame the same on two builds', () => {
+    // The chunk name carries the build's own content hash, so the raw frame
+    // made every rebuild of one failure a key the shelf had never been asked.
+    const first = sigV1(
+      'TypeError: e.map is not a function',
+      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-4f2a91.js:1:2048)',
+    );
+    const second = sigV1(
+      'TypeError: e.map is not a function',
+      'TypeError: e.map is not a function\n    at render (/app/dist/assets/chunk-9b7c03.js:1:5100)',
+    );
+    expect(first?.key).toMatch(HEX16);
+    expect(first?.key).toBe(second?.key);
+    // Reduced, not dropped: a hand-written file still separates two failures
+    // that print the same message.
+    expect(
+      sigV1('TypeError: e.map is not a function', '    at render (src/list.tsx:9:1)')?.key,
+    ).not.toBe(first?.key);
+  });
+
   it('clears the floor on the frame alone, with no errno', () => {
     const sig = sigV1(
       'AssertionError: expected 1 to be 2',
@@ -231,13 +339,5 @@ describe('sig_v1', () => {
     expect(normalizeForSig('ERR_MODULE_NOT_FOUND at /a/b/c.js:12 on host.acme.io')).toBe(
       'e at @/:n on h',
     );
-  });
-
-  it('names the files the error itself did, and never an evaluated string', () => {
-    expect(
-      filesInError(
-        'src/app.ts(12,3): error\n    at run (src/migrate.ts:12:3)\n  File "<string>", line 1',
-      ),
-    ).toEqual(['app.ts', 'migrate.ts']);
   });
 });

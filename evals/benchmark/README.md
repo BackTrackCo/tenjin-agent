@@ -502,3 +502,10 @@ Natural execution exports fixture dependencies once before each agent phase, ret
 the reset that removes producer edits before the consumer. Codex managed-auth runs
 remain serial; independent Claude work may fill three workers while provisioned trials
 keep the shared shelf exclusive.
+
+The current failure readout reads the masked error text from `fires.question`
+and fingerprint kinds from the composed `fires.question_key`. Both fingerprints
+may be present; neither is reported as the winning match. Line-only failures can
+still retrieve through team text search. Fingerprint resolution counts as a team
+request. The removed `pairings` table is not read. Capture means a retained draft;
+publication and downstream delivery are separate receipt-backed measurements.
