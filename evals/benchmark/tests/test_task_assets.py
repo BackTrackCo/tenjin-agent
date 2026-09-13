@@ -85,6 +85,10 @@ def test_flat_knowledge_uses_exact_bound_seed_bodies(historical):
     assert actual['settings']['overlay']['LESSONS.md']==body
     assert 'LESSONS.md' in actual['settings']['overlay']['AGENTS.md']
     assert 'overlay' not in arm.get('settings',{})
+    from evals.benchmark import claude_live
+    # Both live adapters validate this exact contract before overlay delivery.
+    assert claude_live.settings_of(actual, {'permission_mode': 'dontAsk'}) == actual['settings']
+    assert actual['settings_hash'] != arm['settings_hash']
     receipt = task_assets.knowledge_facts(loaded, task, arm)
     assert receipt['available'] == ['prior']
     assert receipt['corpus_hash'] == task['knowledge']['hash']
