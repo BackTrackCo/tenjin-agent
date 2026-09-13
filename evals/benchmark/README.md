@@ -594,3 +594,17 @@ Runs made without this team profile, including earlier paid-pointer diagnostics,
 are not the free team-reuse measurement. Start a fresh run after changing it.
 The delivery readout separately counts pointers, full bodies, truncated bodies,
 and unknown forms; a successful publish alone does not prove body delivery.
+
+### Historical task execution
+
+Bench-1 owns `historical.py` and its fixed Node/Vitest container recipe. Experiments
+supply a catalog and code-owned oracles; the shared controller prepares committed
+source, checks tree/lock/catalog identity, builds immutable images, runs hidden
+assertions with no network or credentials, validates results, and owns cleanup.
+Repository automation is omitted and dependency lifecycle scripts are disabled.
+An experiment does not implement its own runner or result validation.
+
+`python -m evals.benchmark.historical --catalog PATH prepare|build|verify` uses the
+same commands as an experiment's thin entrypoint. The initial adapter supports
+historical pnpm/Vitest tasks from the allowlisted tenjin-agent repository. Task
+selection, historical boundaries and oracle assertions belong to the experiment.
