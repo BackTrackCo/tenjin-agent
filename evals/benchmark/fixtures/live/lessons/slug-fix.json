@@ -1,0 +1,13 @@
+{
+  "id": "slug-fix",
+  "title": "repoSlug: lower-case the slug and drop the .git suffix",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/slug.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "2ec26880e4b25d9f",
+      "check": true,
+      "reason": "the assertion on the unfixed source has no errno and no frame in its block, so sig_v1 is null; the product keys the failure on the test identity from vitest's FAIL header, which is stable"
+    }
+  ]
+}

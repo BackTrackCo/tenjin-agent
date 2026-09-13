@@ -1,0 +1,10 @@
+[
+  {
+    "args": [" BackTrackCo/Tenjin.git "],
+    "expected": "backtrackco/tenjin"
+  },
+  {
+    "args": ["acme/widgets"],
+    "expected": "acme/widgets"
+  }
+]

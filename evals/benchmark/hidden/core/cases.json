@@ -1,0 +1,14 @@
+[
+  {
+    "args": [140],
+    "expected": 100
+  },
+  {
+    "args": [-5],
+    "expected": 0
+  },
+  {
+    "args": [37],
+    "expected": 37
+  }
+]

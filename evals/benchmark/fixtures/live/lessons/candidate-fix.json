@@ -1,0 +1,13 @@
+{
+  "id": "candidate-fix",
+  "title": "firstStrong: pick the first strong candidate, null when none",
+  "commands": [
+    {
+      "command": "pnpm exec vitest run tests/candidate.test.mjs",
+      "kind": "sig_v1_test",
+      "key": "9847f3506a99e8be",
+      "check": true,
+      "reason": "the assertion on the unfixed source has no errno and no frame in its block, so sig_v1 is null; the product keys the failure on the test identity from vitest's FAIL header, which is stable"
+    }
+  ]
+}

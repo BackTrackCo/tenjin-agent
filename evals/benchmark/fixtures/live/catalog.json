@@ -1,0 +1,103 @@
+{
+  "tasks": [
+    {
+      "id": "actor",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "actor",
+      "fixture_hash": "sha256:86b48d133f09b0bfccba62fb870f68b5017494a378b16de49d9aa29ace55a793",
+      "verifier": "node_test_actor",
+      "prompt": "Fix src/actor.mjs so that tests/actor.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "budget",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "budget",
+      "fixture_hash": "sha256:e4bd2b6f17d48638a90e14ff49e4b3aff30f04072d30bd13292ea3efde3bbba2",
+      "verifier": "node_test_budget",
+      "prompt": "Fix src/budget.mjs so that tests/budget.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "candidate",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "candidate",
+      "fixture_hash": "sha256:b19f1811c593fd82481698d2032b65098ab25c22f070267706d31928ae75ce9e",
+      "verifier": "node_test_candidate",
+      "prompt": "Fix src/candidate.mjs so that tests/candidate.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "slug",
+      "family": "test-harness-convention",
+      "transfer_distance": "same_family",
+      "fixture": "slug",
+      "fixture_hash": "sha256:c95bc957792e675e3300127450a7a26cbda7bd5e1911faf10347f46fbf56d8ec",
+      "verifier": "node_test_slug",
+      "prompt": "Fix src/slug.mjs so that tests/slug.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "alias",
+      "family": "vitest-path-alias",
+      "transfer_distance": "same_task",
+      "fixture": "alias",
+      "fixture_hash": "sha256:d4c532673cd234e28c8080ebfb86d4df46016bdc68a34a4ea189ff4fb57c8fbf",
+      "verifier": "node_test_alias",
+      "prompt": "Make tests/alias.test.ts pass by fixing the project and src/window.mjs as needed, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "level",
+      "family": "node-type-stripping",
+      "transfer_distance": "same_task",
+      "fixture": "level",
+      "fixture_hash": "sha256:486d1901af2301820aa0a5a6133660025785dbda6c9784d4462615ddecbaa9be",
+      "verifier": "node_test_level",
+      "prompt": "Fix the source under src/ so that tests/level.test.mjs passes, keeping the Level export and without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "money",
+      "family": "esm-cjs-interop",
+      "transfer_distance": "same_task",
+      "fixture": "money",
+      "fixture_hash": "sha256:dd8bc00aaae31aa5085e99b5abcc42190944a3f51af2bfcdb93ece69ad153111",
+      "verifier": "node_test_money",
+      "prompt": "Fix the source under src/ so that tests/money.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "core",
+      "family": "pnpm-workspace",
+      "transfer_distance": "same_task",
+      "fixture": "core",
+      "fixture_hash": "sha256:3a79f5e5d0444dd951c5fcb095070137b93688e951e5b9399f79d17d938d60f1",
+      "verifier": "node_test_core",
+      "prompt": "Fix packages/core/src/core.mjs so that the core package's tests/core.test.mjs passes. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "shadow",
+      "family": "stale-build-artifact",
+      "transfer_distance": "same_task",
+      "fixture": "shadow",
+      "fixture_hash": "sha256:4bd356f4aeda052c7eca6145fb64aa04acd1c6f62de8a00f677e243a9bdc5abd",
+      "verifier": "node_test_shadow",
+      "prompt": "Make tests/shadow.test.mjs pass by fixing the @fixture/range package, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "ambient",
+      "family": "invisible-whitespace-mismatch",
+      "transfer_distance": "same_task",
+      "fixture": "ambient",
+      "fixture_hash": "sha256:5b1fe306328ebf13a5252a22c7b731aab78f6123a58748461018382d18511d1c",
+      "verifier": "node_test_ambient",
+      "prompt": "Fix src/price.mjs so that tests/ambient.test.mjs passes, without editing the test. Run only that one test file, never the whole suite, and do not spawn subagents."
+    },
+    {
+      "id": "answer-file",
+      "family": "smoke",
+      "transfer_distance": "none",
+      "fixture": "repo",
+      "fixture_hash": "sha256:ca6f76a594ad47542a6fc5ee7e43dcc77a3a553aeb7d85dbf901ae5568daae15",
+      "verifier": "fake_answer_file",
+      "prompt": "Write the single line 42 into a file named answer.txt in this directory. Change nothing else."
+    }
+  ]
+}
