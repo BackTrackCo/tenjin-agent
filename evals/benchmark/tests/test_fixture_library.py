@@ -1,6 +1,8 @@
 """The full shared task and lesson library; no experiment manifest is loaded."""
 from __future__ import annotations
 import dataclasses
+import contextlib
+import io
 import json
 import re
 import shutil
@@ -19,6 +21,20 @@ ACTOR_FIXTURE = LIVE / "actor"
 CATALOG = json.loads((LIVE / "catalog.json").read_text())["tasks"]
 
 
+def fixture_oracle(spec: verifier.VerifierSpec, copy: Path) -> verifier.Verdict:
+    """Unit-test code-owned fixtures directly; live/model copies require containers.
+
+    This offline suite proves the oracle fails before a fix and requires its
+    marker. Container routing is separately covered by test_container_verifier
+    and live saved-worktree acceptance; this helper is never used by a runner.
+    """
+    task = spec.name.removeprefix("node_test_")
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = verifier.node_test(copy, f"{verifier.HIDDEN_TESTS}/{task}.test.mjs", task, verifier.TASK_PACKAGES[task])
+    return verifier.Verdict(spec.name, verifier.outcome_of(code), code, output.getvalue())
+
+
 def test_the_node_test_verifier_decides_from_its_hidden_layer_and_fails_closed_without_it(run_dir: Path) -> None:
     spec = verifier.lookup("node_test_actor")
     roots = artifact.create(run_dir, "trial-node", ACTOR_FIXTURE)
@@ -27,17 +43,17 @@ def test_the_node_test_verifier_decides_from_its_hidden_layer_and_fails_closed_w
     # The hidden layer is on the copy and nowhere near the agent's mount.
     assert (copy / verifier.HIDDEN_TESTS / "actor.test.mjs").is_file()
     assert not (roots.repo / verifier.HIDDEN_TESTS).exists()
-    unfixed = verifier.run(spec, copy, run_dir)
+    unfixed = fixture_oracle(spec, copy)
     assert (unfixed.outcome, unfixed.exit_code) == ("fail", 1)
     (copy / "src" / "actor.mjs").write_text("export function actorKey(session, agent) {\n  return `${session}:${agent ?? 'root'}`;\n}\n", encoding="utf-8")
     # A correct edit alone is not a pass: the named test has to have run green in the trial.
-    unrun = verifier.run(spec, copy, run_dir)
+    unrun = fixture_oracle(spec, copy)
     assert (unrun.outcome, unrun.exit_code) == ("fail", 1)
     assert "no run marker" in unrun.detail
     _write_marker(copy, "actor", files=["tests/actor.test.mjs"])
-    assert verifier.run(spec, copy, run_dir).outcome == "pass"
+    assert fixture_oracle(spec, copy).outcome == "pass"
     (copy / verifier.HIDDEN_TESTS / "actor.test.mjs").unlink()
-    undecided = verifier.run(spec, copy, run_dir)
+    undecided = fixture_oracle(spec, copy)
     assert (undecided.outcome, undecided.exit_code) == ("invalid", 3)
 
 
@@ -108,7 +124,7 @@ def test_every_task_verifier_fails_its_unfixed_fixture_from_its_own_hidden_layer
     roots = artifact.create(run_dir, f"trial-{task}", copy)
     corpus_support.link_workspace_packages(roots.repo)
     roots.mark_stopped()
-    verdict = verifier.run(spec, roots.hidden_copy(spec.hidden_layer), run_dir)
+    verdict = fixture_oracle(spec, roots.hidden_copy(spec.hidden_layer))
     assert (verdict.outcome, verdict.exit_code) == ("fail", 1)
 
 
