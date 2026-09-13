@@ -1,6 +1,6 @@
 {
   "schema": "bench3.protocol.v1",
-  "status": "pilot-readmitted-oracle-v2-results-pending",
+  "status": "pilot-readmitted-oracle-v3-results-pending",
   "model_admission": true,
   "population": {
     "window_start": "2026-08-15T00:00:00Z",

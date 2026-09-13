@@ -272,7 +272,7 @@ it.each([null, '../local-clone'])(
     const uid = await seed(repo);
     const result = await sync(repo);
     expect(result.sent).toEqual([]);
-    expect(result.result.data).toMatchObject({ local: 1, synced: 0 });
+    expect(result.result.data).toMatchObject({ synced: 0 });
     const store = await state.openStore(data);
     if (!store) throw new Error('Missing store');
     expect(

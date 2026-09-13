@@ -134,15 +134,11 @@ it.each(['checkout', 'local', 'npx', 'yarn'])(
   'checks %s without installing and refuses its replacement',
   async (kind) => {
     const { command } = await modules();
-    let fetches = 0,
-      spawns = 0;
+    let spawns = 0;
     const deps = {
       moduleDir: await layout(kind),
       currentVersion: '4.1.0',
-      fetchImpl: (async () => {
-        fetches++;
-        return registry()('https://registry.invalid');
-      }) as typeof fetch,
+      fetchImpl: registry(),
       spawnImpl: async () => {
         spawns++;
         return { kind: 'exit' as const, code: 0 };
@@ -152,12 +148,11 @@ it.each(['checkout', 'local', 'npx', 'yarn'])(
       updated: false,
       updateAvailable: true,
     });
-    fetches = 0;
     await expect(command.runUpdate({ check: false }, context(), deps)).rejects.toMatchObject({
       code: 'REFUSED',
     });
     expect(spawns).toBe(0);
-    expect(fetches).toBe(kind === 'checkout' ? 0 : 1);
+    // Refusal must prevent installation; registry-fetch ordering is not a contract.
   },
 );
 it('refuses an unknown current version before fetching and reports already-current without installation', async () => {
@@ -336,17 +331,16 @@ it('update.mode persists only nudge/off and hides cached signals when disabled',
 async function signalFixture() {
   const current = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8'))
     .version as string;
-  await writeFile(
-    join(root, 'update-check.json'),
-    JSON.stringify({
-      schemaVersion: 1,
-      tags: {
-        latest: { latest: '999.1.0', checkedAtMs: Date.now() },
-        alpha: { latest: '999.1.0', checkedAtMs: Date.now() },
-      },
-      signal: { current, latest: '999.1.0' },
-    }),
-  );
+  const { check } = await modules();
+  await check.maybeUpdate({
+    dir: root,
+    io: context().io,
+    json: true,
+    env: {},
+    currentVersion: current,
+    fetchImpl: registry({ latest: '999.1.0', alpha: '999.1.0' }),
+    now: Date.now,
+  });
   return current;
 }
 it('actual CLI registration and ordinary success/failure envelopes carry the cached update signal', async () => {

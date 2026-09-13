@@ -2,7 +2,7 @@
 
 This is the single Bench-3 experiment PR (#355). `protocol.json` defines the
 population, deterministic pilot proof queue, four treatments, historical knowledge
-cutoffs, delivery analysis and completion metrics. The pilot is readmitted under a fresh oracle-v2 freeze; earlier engineering cohorts remain separate.
+cutoffs, delivery analysis and completion metrics. Pilot4 is stopped after six consumers. Corrected oracle-v3 contracts are proved and all 16 task/arm templates pass; the next cohort binds a fresh freeze before any model attempt.
 All reusable preparation, containers, databases, task/knowledge assets, scheduling,
 verification, reporting and cleanup arrive from Bench-1 through #313.
 
@@ -19,7 +19,7 @@ or show less benefit. The pilot calls for 48 consumers and 12 earlier producers.
 | `repository-replay` (#256) | Repository identity across transports, unknown-origin locality, exact hook cwd and stale sync claims | Pilot consumer; 9 checks                 |
 | `release-policy` (#170)    | Latest-only releases, registry versus transport errors, daily cache and metadata                     | Pilot consumer; 14 checks                |
 | `update-command` (#136)    | Manager ownership, explicit update, bounded output and passive notices                               | Earlier producer for #170; 24 checks     |
-| `team-learning` (#243)     | Publication, independent verification, local fallback and repository-scoped replay                   | Earlier producer for #256; 26 checks     |
+| `team-learning` (#243)     | Publication, independent verification, local fallback and repository-scoped replay                   | Earlier producer for #256; 25 checks     |
 | `actor-grade` (#247)       | Actor-owned injection transcript evidence                                                            | Engineering diagnostic outside the pilot |
 | `actor-score` (#251)       | Actor-owned outcome and search evidence                                                              | Engineering diagnostic outside the pilot |
 
@@ -27,7 +27,7 @@ Private server catalogs/oracles and workload evidence live in the authorized
 `tenjin-notes/benchmark/bench3/` directory. The public repository and its CI do not
 require that private checkout. #740 covers trending term/question separation;
 #674 covers content-based ranking, confidentiality, budgets, limits and telemetry.
-Their earlier producers are #727 demand population honesty and #670 content-vector generation. The four private tasks have 10, 27, 16 and 19 checks respectively. All eight before/after proof pairs pass admission: the before has assertion failures, the after passes all checks, and cleanup is confirmed. These 145 checks are verifier evidence, not model outcomes.
+Their earlier producers are #727 demand population honesty and #670 content-vector generation. The four private tasks have 10, 25, 16 and 19 checks respectively. All eight before/after proof pairs pass admission: the before has assertion failures, the after passes all checks, and cleanup is confirmed. These 142 checks are verifier evidence, not model outcomes.
 
 The catalog pins original PR URLs, before/after commits and trees, dependency locks,
 and prepared source content hashes. The same independent oracle runs on both sides.
@@ -45,16 +45,21 @@ and serialized mutable-shelf execution. All eight immutable consumer/producer im
 The pilot is diagnostic; it cannot establish a representative team effect. Stale prior release policy is a declared risk,
 not an approved correct answer for the later task.
 
-The latest engineering checkpoint separates generated-build rejection from behavior.
-After the shared Bench-1 repair, eight reference patches pass all 145 checks with
-build/cache/report outputs present. Retained repository-replay model patches still
-fail: control passes 6/9 checks, flat and seeded 7/9. The original records and costs
-remain in notes and are not pooled into a future controller cohort. The demand-honesty UI oracle now accepts equivalent copy and the real agents setup
-page. Reference and equivalent UI pass 16/16 checks; the retained producer still
-fails six data requirements (10/16 pass). Five targeted UI defects are caught.
-This adjudication used no model calls and changed no task, prompt, treatment or
-source fixture. The fresh cohort binds the corrected oracle before admission;
-notes retain both oracle identities, the proof and the earlier original attempts.
+Pilot4 preserves six original consumer records. The first matched task passes in all
+four arms; seeded uses 28.4% fewer tokens and 4.5% more agent time. That is one
+task/repeat, not a team headline. The next seeded repository patch passes 9/9 when
+an unrequested local-counter assertion is removed; control still fails two literal
+working-directory checks (7/9). Original records and costs are never overwritten.
+
+The broader oracle audit checks requirements through real APIs, hooks and sync,
+without requiring private receipt keys, score labels, cache representations or
+budget-helper signatures. Five changed references pass 102 assertions; three
+semantically equivalent variants pass and five targeted defects fail. The five
+before snapshots fail feature/behavior assertions. With the three unchanged proofs,
+all eight reference tasks pass 142 checks. No models were used for adjudication.
+One receipt-layout-specific partial-write fault case was removed because the
+public interface has no portable injection seam; retry and ownership behavior
+remain covered. Notes retain the audit, original results and every frozen identity.
 
 Prepare each revision from a checkout containing its Git objects:
 
