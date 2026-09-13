@@ -124,6 +124,11 @@ def guard(value: Any, trail: str = "report") -> None:
 
 
 def _guard_string(value: str, trail: str) -> None:
+    # The fixed database image is public provenance, not a host filesystem path.
+    if re.fullmatch(r"report\.trials\[\d+\]\.(?:producer_)?model_tool_environment\.database_image", trail) and re.fullmatch(
+        r"pgvector/pgvector@sha256:[0-9a-f]{64}", value
+    ):
+        return
     release = "report.run_configuration.harness_release."
     if trail == release + "package" and value in {"@anthropic-ai/claude-code", "@openai/codex"}:
         return
