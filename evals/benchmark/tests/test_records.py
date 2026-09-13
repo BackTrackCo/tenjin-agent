@@ -59,6 +59,14 @@ def test_complete_record_validates(family_session: claude_usage.SessionUsage) ->
     assert record["usage_reconciliation"]["status"] == "matched_with_descendants"
 
 
+@pytest.mark.parametrize("entry", [None, 7, True, "bad", [], [["adapter", "claude"]]])
+def test_non_object_retained_usage_is_a_record_error(family_session, entry) -> None:
+    value = attempt_record(family_session)
+    value["usage"] = [entry]
+    with pytest.raises(RecordError, match="usage entry"):
+        records.validate(value)
+
+
 def test_invalid_attempt_needs_a_reason_and_only_then(root_only_session: claude_usage.SessionUsage) -> None:
     invalid = attempt_record(parse("sess-mismatch"), outcome="invalid", invalid_reason="usage:mismatch", verifier=None)
     records.validate(invalid)
