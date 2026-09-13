@@ -114,6 +114,8 @@ class UsageRecord:
 
 
 def from_json(payload: dict[str, Any]) -> UsageRecord:
+    if not isinstance(payload, dict):
+        raise UsageError("bad_shape", "usage record must be an object")
     data = dict(payload)
     try:
         data["actor_key"] = tuple(data["actor_key"])
