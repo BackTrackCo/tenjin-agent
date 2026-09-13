@@ -28,6 +28,8 @@ from . import (
     executor,
     lease,
     manifest as manifest_module,
+    injections,
+    loop_join,
     records,
     regress as regress_module,
     snapshot as snapshot_module,
@@ -193,8 +195,10 @@ def do_reduce(run_dir: Path) -> dict[str, Any]:
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
+    accepted = loop_join.with_presentations(accepted, run_dir)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
-    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir))
+    review = read_run_file(run_dir, "injection-review.json") if (run_dir / "injection-review.json").exists() else None
+    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir), injection_review=review)
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
@@ -231,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command in ("summary", "headline", "regress", "verify", "reduce", "report"):
         try:
             return run_reader(args)
-        except (CliError, manifest_module.ManifestError, records.RecordError, regress_module.BaselineError) as error:
+        except (CliError, manifest_module.ManifestError, records.RecordError, regress_module.BaselineError, injections.InjectionReviewError) as error:
             sys.stderr.write(f"{error}\n")
             return 2
     payload = fake_run(args.out)

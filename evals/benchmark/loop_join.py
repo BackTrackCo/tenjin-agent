@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .usage import ActorKey
+from .injections import presentation
 
 STATUSES = frozenset({"unavailable", "joined"})
 FIRE_COLUMNS = ("id", "at", "session", "agent", "harness", "arm", "event", "prompt_id", "reason", "delivered")
@@ -197,7 +198,9 @@ def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tupl
     try:
         connection.row_factory = sqlite3.Row
         try:
-            rows = connection.execute(f"SELECT {', '.join(FIRE_COLUMNS)} FROM fires ORDER BY at, id").fetchall()
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(fires)")}
+            emit = "emit" if "emit" in columns else "NULL AS emit"
+            rows = connection.execute(f"SELECT {', '.join(FIRE_COLUMNS)}, {emit} FROM fires ORDER BY at, id").fetchall()
         except sqlite3.Error as error:
             raise LoopJoinError(f"loop.db has no readable fires table: {error}") from error
         for row in rows:
@@ -211,6 +214,7 @@ def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tupl
                 "prompt_id": row["prompt_id"],
                 "reason": row["reason"],
                 "delivered": row["delivered"],
+                **presentation(row["emit"], row["delivered"]),
             }
             if actor not in wanted:
                 if row["session"] in foreign_sessions:
@@ -239,3 +243,30 @@ def project(loop_db: Path | None, actors: list[ActorKey], foreign_sessions: tupl
         "failure_key": key,
         **({"phase_fires": phase_fires} if foreign_sessions else {}),
     }
+
+
+def with_presentations(accepted: dict[str, dict], run_dir: Path) -> dict[str, dict]:
+    """Backfill old records from exact settled ledger rows in memory only.
+
+    Portable artifacts may omit raw ledgers. Their delivery form stays unknown;
+    no source, price, or artifact type is used as a substitute for an emit.
+    """
+    updated = {}
+    for trial_id, record in accepted.items():
+        fires = record["delivery"].get("fires", [])
+        if not any(fire.get("delivered") and "delivery_form" not in fire for fire in fires):
+            updated[trial_id] = record
+            continue
+        try:
+            fresh = project(run_dir / "trials" / trial_id / "data" / "loop.db", [tuple(actor["key"]) for actor in record["actors"]])
+        except LoopJoinError:
+            fresh = unavailable()
+        indexed = {fire["fire_id"]: fire for fire in fresh["fires"]}
+        projected = []
+        for fire in fires:
+            current = indexed.get(fire["fire_id"])
+            matched = current is not None and all(current.get(key) == fire.get(key) for key in ("actor", "delivered", "at", "event", "hook_arm"))
+            fields = {key: current[key] for key in ("delivery_form", "emitted_context_chars")} if matched else {}
+            projected.append({**fire, **fields})
+        updated[trial_id] = {**record, "delivery": {**record["delivery"], "fires": projected}}
+    return updated

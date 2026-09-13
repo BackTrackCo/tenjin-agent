@@ -44,6 +44,60 @@ time includes shutdown and settlement, and excludes setup, producer work and hid
 Producer/capture amortization and existing intervals are diagnostic details below the overview.
 Endpoint and completion-metric uncertainty hardening are still required before a product claim.
 
+## Injection relevance by hook
+
+The shared JSON, terminal and CI readouts group delivered consumer injections by experiment,
+hook arm, event, winning source shelf and delivery form (`pointer`, `full_body`,
+`truncated_body`, `unknown`). Form comes from the exact saved hook emit: a recommendation
+card with a read/inspect pointer is not an inline body, and a bounded body with a truncation
+pointer is not a full body. The leg's `form` field is an artifact type and is never used for
+this distinction. Emitted-context character counts are retained as characters, not tokens.
+A public leg shadowed by a team winner is not a
+public delivery; missing or ambiguous winners remain `unknown`. Failure-key winners belong
+to the team shelf. Producer-phase and unmatched-actor fires are excluded from this consumer
+view. Hook fire counts also show paths that fired without delivering anything. Missing ledger
+coverage and absent dispatch coverage are explicit, not evidence of perfect precision.
+
+Fresh records retain form without retaining emitted prose. For existing runs, report generation
+can backfill form from an exact matching fire in its settled local ledger, in memory only.
+Missing raw ledgers or mismatched actors, timestamps, events or delivered pieces stay unknown.
+This does not rerun the agent or edit an accepted record. Pointer and body relevance denominators
+remain separate in every readout; later agent-initiated reads are not hook body delivery.
+
+Every delivery starts `unreviewed`. Task success, a seeded piece, or an exact producer-piece
+delivery never automatically means correct. Optional `RUN/injection-review.json` records
+manual task-relevance judgments, separately from product outcomes:
+
+```json
+{
+  "schema": "bench1.injection-review.v1",
+  "manifest_hash": "COPY_FROM_REPORT",
+  "schedule_hash": "COPY_FROM_REPORT",
+  "judgments": [
+    {
+      "delivery_id": "COPY_FROM_REPORT_INJECTIONS_DELIVERIES",
+      "relevance": "irrelevant",
+      "evidence_sha256": "SHA256_OF_PRIVATE_TASK_AND_INJECTION_REVIEW"
+    }
+  ]
+}
+```
+
+Judge each delivered card/body against its task using the retained trial evidence. `correct`
+means the delivered material applies to that task; `irrelevant` means it does not; use
+`uncertain` for an ambiguous case. Keep the review text private and record its SHA-256.
+`delivery_id` binds the trial, fire and exact delivered piece; `injections.identity` reproduces
+it from a raw record. The report carries opaque delivery IDs and judgments, never piece text.
+Rebuild with `python -m evals.benchmark.cli report --run RUN`, then use the normal `summary`
+or `headline` command. Bad run hashes, foreign/duplicate IDs and unsupported labels refuse
+the review. The review digest is included in `report.json`; deleting it does not change trial
+records or task outcomes. CI without an adjudication file reports unreviewed counts.
+
+These diagnostics include accepted infrastructure-invalid attempts and state their separate
+coverage. They identify where irrelevant material entered; they do not establish that it
+caused a time or token difference. Product comparisons retain their existing failure-inclusive
+accounting and experimental denominator.
+
 ## Layout, and where each contract lives
 
 Each contract is stated once, in the module that owns it, and held by the test module beside it.
