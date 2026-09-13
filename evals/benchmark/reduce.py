@@ -553,6 +553,19 @@ def reduce(
             "agent_seconds": sum(record["agent_time_s"] for record in invalid_records if record.get("agent_time_s") is not None),
             "missing_timing": sum(record.get("agent_time_s") is None for record in invalid_records),
         }
+        # Invalid infrastructure attempts do not enter scored ratios, but their
+        # earlier producer/capture work still happened and must remain visible.
+        effort = arm["invalid_observed_effort"]
+        effort["phase_tokens"] = phase_tokens(invalid_records)
+        effort["pipeline_tokens"] = effort["tokens"] + capture_tokens(invalid_records)
+        producers = {}
+        for record in invalid_records:
+            producer = record["isolation"].get("producer")
+            if isinstance(producer, dict):
+                producers[producer.get("native_root_id") or record["trial_id"]] = producer
+        effort["producer_agent_seconds"] = sum(item["agent_time_s"] for item in producers.values() if item.get("agent_time_s") is not None)
+        effort["producer_missing_timing"] = sum(item.get("agent_time_s") is None for item in producers.values())
+        effort["publication_seconds"] = sum(float(item.get("publication", {}).get("wall_time_s", 0)) for item in producers.values())
         tasks = list(arm["tasks"].values())
         arm["tokens"] = sum(task["tokens"] for task in tasks)
         arm["pass_rate"] = _mean([task["pass_rate"] for task in tasks])
