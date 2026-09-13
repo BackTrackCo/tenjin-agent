@@ -157,7 +157,7 @@ class TrialRoots:
         # Copying gigabytes of model-visible dependencies only to discard them
         # wastes disk and can time out before any behavioral assertion runs.
         def ignore(directory, names):
-            return {"node_modules", ".pnpm-store"}.intersection(names) if image_dependencies and Path(directory) == self.repo else set()
+            return {"node_modules", ".pnpm-store", "tsconfig.tsbuildinfo"}.intersection(names) if image_dependencies and Path(directory) == self.repo else set()
         shutil.copytree(self.repo, self.verify, symlinks=True, ignore=ignore)
         if hidden_layer is not None:
             if not hidden_layer.is_dir():
