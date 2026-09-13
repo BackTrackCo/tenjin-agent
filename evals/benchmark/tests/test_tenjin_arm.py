@@ -650,10 +650,8 @@ def test_team_and_public_fallback_legs_are_named_and_an_unnamed_shelf_is_counted
 def test_keys_and_local_legs_are_classified_and_never_invalidate(
     seeded_manifest, make_runtime, run_dir: Path, public_source
 ) -> None:
-    # What the second hooks smoke recorded per seeded attempt: the prompt
-    # fire's team miss and public timeout, then two tool-failure fires
-    # each sending a keys leg and a local leg. Every one of them is inside
-    # the seeded config's reachable set, so none is a public request.
+    # Fingerprint resolution is a team request; the public fallback is public.
+    # Local handoff legs remain valid local reads after pairing removal.
     trial = trial_of(seeded_manifest, "tenjin_seeded")
     before = legs(
         ("team", "ok", "miss"),
@@ -668,8 +666,8 @@ def test_keys_and_local_legs_are_classified_and_never_invalidate(
     )
     assert record["outcome"] == "pass"
     assert record["delivery"]["shelves"] == {"team": 1, "public": 1, "keys": 2, "local": 2, "other": 0}
-    assert record["delivery"]["classes"] == {"team": 1, "public": 3, "local": 2, "other": 0}
-    assert record["delivery"]["public"] == {"legs": 3, "hits": 1, "timeouts": 1, "no_answer": 1}
+    assert record["delivery"]["classes"] == {"team": 3, "public": 1, "local": 2, "other": 0}
+    assert record["delivery"]["public"] == {"legs": 1, "hits": 0, "timeouts": 1, "no_answer": 1}
     # The leg's own status and outcome travel with it.
     assert ("public", "timeout", "no-answer") in [(leg["shelf"], leg["status"], leg["outcome"]) for leg in record["delivery"]["legs"]]
     # A publishable run has to list both named origins beside the provider.
