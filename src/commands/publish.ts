@@ -215,10 +215,7 @@ export async function runPublish(
       // piece is already up: changing it is `edit`'s job, not this one's.
       return {
         data: { alreadyPublished: true, url: already },
-        humanLines: [
-          `Already published: ${sanitizeForTerminal(already)}`,
-          'To change its title or answer card, edit the piece itself: `tenjin edit <id>`.',
-        ],
+        humanLines: [`Already published: ${sanitizeForTerminal(already)}`],
       };
     }
   }
