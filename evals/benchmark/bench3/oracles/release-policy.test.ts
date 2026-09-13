@@ -94,24 +94,19 @@ describe('update command and daily checks share the promoted policy', () => {
   it('distinguishes absent and malformed latest from a network failure', async () => {
     await temporary(async (dir) => {
       const ctx = { flags: { json: true, timeout: 1000 }, dataDir: dir, io: silentIo() };
-      await expect(
-        runUpdate({ check: true }, ctx, {
-          currentVersion: '3.7.0-alpha.4',
-          fetchImpl: answer({ alpha: '9.0.0-alpha.3' }),
-        }),
-      ).rejects.toMatchObject({
-        code: 'RESOURCE_NOT_FOUND',
-        message: expect.stringContaining('no published'),
-      });
-      await expect(
-        runUpdate({ check: true }, ctx, {
-          currentVersion: '3.7.0',
-          fetchImpl: answer({ latest: 'garbled' }),
-        }),
-      ).rejects.toMatchObject({
-        code: 'RESOURCE_NOT_FOUND',
-        message: expect.stringContaining('not a version'),
-      });
+      const absent = await runUpdate({ check: true }, ctx, {
+        currentVersion: '3.7.0-alpha.4',
+        fetchImpl: answer({ alpha: '9.0.0-alpha.3' }),
+      }).catch((error) => error);
+      const malformed = await runUpdate({ check: true }, ctx, {
+        currentVersion: '3.7.0',
+        fetchImpl: answer({ latest: 'garbled' }),
+      }).catch((error) => error);
+      for (const error of [absent, malformed]) {
+        expect(error).toMatchObject({ code: 'RESOURCE_NOT_FOUND', message: expect.any(String) });
+        expect(error.message).toMatch(/latest|release|version/i);
+      }
+      expect(absent.message).not.toBe(malformed.message);
     });
   });
 

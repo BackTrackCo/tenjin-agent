@@ -19,7 +19,9 @@
       "behavior-preserving refactors"
     ],
     "unobserved_work": ["unmerged or abandoned work", "general research", "reviews"],
-    "eligibility": "Independent solvability, full original runtime work order, pinned before/after source, synthetic/inert dependencies, hidden behavioral failure before and success after. A difficult task or missing verifier is not an exclusion."
+    "eligibility": "Independent solvability, full original runtime work order, pinned before/after source, synthetic/inert dependencies, hidden behavioral failure before and success after. A difficult task or missing verifier is not an exclusion.",
+    "work_order_disclosure": "Tasks use retrospectively reconstructed historical work orders, not recovered original user prompts. Each work order combines the PR\u2019s stated requirements with explicitly identified requirements reconstructed from its final historical source. Original descriptions sometimes became stale during review. Sampling remains fixed independently of treatment outcomes.",
+    "compatibility_constraints": "Four earlier producer tasks declare new callable interfaces for independent testing. This pilot evaluates implementation under those interfaces, not unconstrained architecture selection."
   },
   "sampling": {
     "seed": "bench3-workload-2026-08-15_2026-09-12-v1",
