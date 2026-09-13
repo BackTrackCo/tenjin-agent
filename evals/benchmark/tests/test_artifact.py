@@ -100,9 +100,11 @@ def test_image_backed_verification_omits_only_discarded_root_dependencies(create
         folder.mkdir(parents=True, exist_ok=True)
         (folder / "sentinel").write_text(name)
     roots.mark_stopped()
+    (roots.repo / "tsconfig.tsbuildinfo").write_text("compiler cache")
     copy = roots.hidden_copy(image_dependencies=True)
     assert not (copy / "node_modules").exists()
     assert not (copy / ".pnpm-store").exists()
+    assert not (copy / "tsconfig.tsbuildinfo").exists()
     assert (copy / "src/node_modules/sentinel").read_text() == "src/node_modules"
     assert (roots.repo / "node_modules/sentinel").exists()
     assert (roots.hidden_copy() / "node_modules/sentinel").exists()

@@ -51,7 +51,7 @@ def run(spec: verifier.VerifierSpec, repo: Path, run_dir: Path, image: str) -> v
             historical = spec.kind == "historical_vitest"
             if historical:
                 # Use fresh image dependencies, never model-modified tooling.
-                for argv in (["tar", "-C", str(target), "--exclude=./node_modules", "--exclude=./.pnpm-store", "-cf", "/tmp/historical-source.tar", "."],
+                for argv in (["tar", "-C", str(target), "--exclude=./node_modules", "--exclude=./.pnpm-store", "--exclude=./tsconfig.tsbuildinfo", "-cf", "/tmp/historical-source.tar", "."],
                              ["mkdir", "-p", "/tmp/historical-task"],
                              ["tar", "-xf", "/tmp/historical-source.tar", "-C", "/tmp/historical-task"],
                              ["ln", "-s", "/opt/fixture/node_modules", "/tmp/historical-task/node_modules"]):
