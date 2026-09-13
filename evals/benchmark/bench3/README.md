@@ -1,61 +1,63 @@
 # Bench-3 historical reuse experiments
 
-The experiment catalog and independent oracles below define historical public
-repository tasks. They establish whether an independent behavioral test fails before and
-passes after a known fix. They do not select the representative workload, freeze
-pilot/locked assignments, or launch a model.
+This is the single Bench-3 experiment PR (#355). `protocol.json` defines the
+population, deterministic pilot proof queue, four treatments, historical knowledge
+cutoffs, delivery analysis and completion metrics. Model admission is still false.
+All reusable preparation, containers, databases, task/knowledge assets, scheduling,
+verification, reporting and cleanup arrive from Bench-1 through #313.
 
-All reusable source preparation, image building, container execution, result
-validation and cleanup live in Bench-1's `historical.py` and fixed recipe under
-`historical/` (#335). This directory contains only experiment definitions,
-oracles and a thin entrypoint selecting their catalog. #355 is the single
-Bench-3 PR and will carry the remaining experiment matrix and workload choices.
+The frozen frame contains 169 merged PRs from two repositories during August 15
+through September 11. Work-type screening proposes 99 runtime candidates and
+records 70 coverage gaps. Deterministic ranking selects tenjin#740, tenjin#674,
+tenjin-agent#256 and tenjin-agent#170 for proof; their correlation clusters are
+excluded from the locked reserve. This is a proof queue, not a completed or
+representative model result. Hard tasks cannot be replaced because they cost more
+or show less benefit. The pilot calls for 48 consumers and 12 earlier producers.
 
-The representative workload frame is reviewed separately. Eligibility and clustering
-remain separate from this small engineering shortlist. A readiness shortlist
-chosen for clear transfer relationships must not become a team headline sample.
+| Public task                | Contract                                                                                                        | Role                                                            |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `repository-replay` (#256) | Repository identity across transports, unknown-origin locality, exact hook cwd and concurrent stale sync claims | Ranked pilot candidate; oracle proof in progress                |
+| `release-policy` (#170)    | Latest-only updates, invalid registry answers versus transport errors, daily cache and metadata behavior        | Ranked pilot candidate; original branch boundary being verified |
+| `actor-grade` (#247)       | Actor-owned injection transcript evidence                                                                       | Scoped engineering diagnostic; outside the ranked pilot         |
+| `actor-score` (#251)       | Actor-owned outcome and search evidence                                                                         | Scoped engineering diagnostic; outside the ranked pilot         |
 
-| Task             | Historical change               | Independent contract                                                                                  | Prior work                                                                              |
-| ---------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `actor-grade`    | tenjin-agent#247, scoped subset | Injection grading reads the child's transcript even when the parent supplies opposite evidence        | Proposed earlier producer for `actor-score`                                             |
-| `actor-score`    | tenjin-agent#251                | A worker only receives close/search credit for its own evidence; matching evidence still earns credit | #247 established actor-specific injection grading                                       |
-| `release-policy` | tenjin-agent#170, scoped subset | Supported builds follow `latest`; absent/malformed `latest` cannot fall back to an unpromoted channel | #136's shared update resolver remains relevant, but its maximum-of-tags policy is stale |
+Private server catalogs/oracles and workload evidence live in the authorized
+`tenjin-notes/benchmark/bench3/` directory. The public repository and its CI do not
+require that private checkout. #740 covers trending term/question separation;
+#674 covers content-based ranking, confidentiality, budgets, limits and telemetry.
+Their contracts are kept separate from passing engineering probes.
 
-`catalog.json` pins the before/after commit and tree, original PR URL, dependency
-lock, scope and proposed earlier producer. Full original-PR boundaries stay in
-the private evidence ledger. These replay commits are landed snapshots, not an
-assumption that every PR's last commit is its complete diff.
+The catalog pins original PR URLs, before/after commits and trees, dependency locks,
+and prepared source content hashes. The same independent oracle runs on both sides.
+Prompts name behavior and broad product source roots, without giving the model the
+reference patch's file list. Existing tests, fixture support and tooling remain fixed.
+Earlier producer tasks and historically versioned lesson bodies must be accepted
+before the natural arm is admitted. Stale prior release policy is a declared risk,
+not an approved correct answer for the later task.
 
-Prepare each revision using a local checkout containing its Git objects:
+Prepare each revision from a checkout containing its Git objects:
 
 ```sh
 python -m evals.benchmark.bench3.replay prepare \
-  --repo /path/to/tenjin-agent --task actor-score --revision before \
-  --out /path/to/new/actor-before
-python -m evals.benchmark.bench3.replay build --context /path/to/new/actor-before
+  --repo /path/to/tenjin-agent --task repository-replay --revision before \
+  --out /path/to/new/replay-before
+python -m evals.benchmark.bench3.replay build --context /path/to/new/replay-before
 python -m evals.benchmark.bench3.replay verify \
-  --context /path/to/new/actor-before --image sha256:IMAGE_ID \
+  --context /path/to/new/replay-before --image sha256:IMAGE_ID \
   --run /path/to/readiness-results
 ```
 
 Repeat with `--revision after` and a fresh output directory. Preparation reads
-only committed source and verifies the tree and lock. Repository automation and
-installed agent configuration are omitted explicitly; dirty checkout content,
-host profiles and credentials are never copied. Installation uses the frozen
-historical lock with lifecycle scripts disabled. Source execution happens only
-in a network-free Harbor container using the shared Bench-1 container backend.
-The same code-owned oracle is injected after source preparation for both sides.
+committed source only, omits repository automation and installed agent configuration,
+and checks independently pinned source bytes. Dependencies install from the frozen
+lock with lifecycle scripts disabled. Historical source runs only inside the shared
+Bench-1 isolated container with no network or credentials. Private server tasks use
+a disposable loopback PostgreSQL/pgvector service in the same isolated namespace.
 
-The verifier runs exactly one test file, using the shared pinned Node image and
-package-manager version. The image identity binds source, oracle, recipe and
-platform. Import, collection, timeout and cleanup errors are invalid, never
-evidence of a useful fail-before result. Receipts retain individual assertions,
-test counts and cleanup status. A valid readiness pair requires an assertion
-failure before, every assertion passing after, and successful cleanup on both.
-
-Model experiments will use the shared Bench-1 runner and readouts. Before their
-admission, each task still needs a frozen task prompt, producer acceptance where
-applicable, earlier-knowledge cutoff, controlled corpus, and a declared sampling
-assignment. Actor-shaped input data here does not establish live subagent or
-dispatch coverage. The release-policy probe is explicitly a stale-knowledge
-diagnostic; its old prescription is not a correct seeded answer.
+A readiness pair requires real assertion failure before, every assertion passing
+after, and confirmed cleanup. Import, setup, timeout and cleanup errors are invalid
+proofs. Readiness checks spend no model tokens and do not establish savings.
+The ordinary shared runner will execute the admitted model experiments and report
+consumer-reuse metrics plus the complete producer/capture/consumer pipeline cost.
+Hook type, actor, shelf, pointer/body form and reviewed applicability stay separate.
+Actor-shaped test data does not establish live dispatch-reranker coverage.

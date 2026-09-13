@@ -16,8 +16,14 @@
       "oracle": "actor-grade.test.ts",
       "scope": "intended-worker injection attribution; scoped subset of original PR",
       "role": "proposed earlier producer for actor-score",
-      "eligibility": "pending-container-proof",
-      "assignment": "unassigned"
+      "eligibility": "scoped-engineering-oracle-proven",
+      "assignment": "unassigned",
+      "prompt": "Injection evaluation is attributing evidence to the wrong worker. A child can receive useful context while its parent transcript shows the opposite behavior. Make injection grading use the transcript belonging to the actor that received the delivery, preserving root handling and refusing unreadable child evidence. Change src/commands/push.ts and src/lib/grade.ts only; run its relevant existing test file. Do not alter tests or dependencies.",
+      "allowed_changes": ["src/commands/push.ts", "src/lib/grade.ts"],
+      "source_hashes": {
+        "before": "f8c88fca3c2c94b76a23f2e6287a1378188a59f601342f01ab37f44f5a1ca54c",
+        "after": "652c60b5293488fe34aa6ddde40fd2f43f1bdc436de9e66b17aa647fa87bd929"
+      }
     },
     {
       "id": "actor-score",
@@ -40,22 +46,28 @@
         "consumer_application": "#251 applies the same identity boundary to session-score pairing-close and search rows instead of borrowing sibling events.",
         "not_claimed": "No measured reuse benefit, natural capture success, or representative workload admission."
       },
-      "eligibility": "pending-container-proof",
-      "assignment": "unassigned"
+      "eligibility": "scoped-engineering-oracle-proven",
+      "assignment": "unassigned",
+      "prompt": "Session scoring credits one worker with a sibling worker\u2019s successful error repair or search. Make the session score evidence belong to the worker whose events are being scored. Preserve useful evidence for the matching worker and keep separate conversations separate. Change src/commands/push.ts only; run its relevant existing tests. Do not alter tests or dependencies.",
+      "allowed_changes": ["src/commands/push.ts"],
+      "source_hashes": {
+        "before": "665a8a939a1c35b7f3c34f0321055981804c473405c2b92dbec4c019ee61cfb5",
+        "after": "df288427b51314cb8910cb5f2ca83ed14f709d8afbd3c1eb95cf38f539c20958"
+      }
     },
     {
       "id": "release-policy",
       "source_repository": "https://github.com/BackTrackCo/tenjin-agent.git",
       "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/170",
-      "before_commit": "77244fdec4b62e615a3c55dc598f2d62ad8584b0",
-      "after_commit": "9aa18bafe5b09d66fa9850651f36b416460c329f",
+      "before_commit": "b4415c985c1fd9ad2271d868d41d20747798f3a6",
+      "after_commit": "395f5380c7c32e249440cdd66864a66620df6b78",
       "trees": {
-        "before": "ce18c834e11bc6668427853b7eb94bd52c84ef54",
-        "after": "e2f6420727dc6e5979a80823314ad989a33fb949"
+        "before": "2391d3662dc2051964f9c78c282b21931fedec46",
+        "after": "5007bd0d620488bcaffa56a48f999226650aa269"
       },
       "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
       "oracle": "release-policy.test.ts",
-      "scope": "latest-only release target selection; scoped subset of original PR",
+      "scope": "full original runtime behavior; original branch boundary proof pending",
       "earlier_producer": "https://github.com/BackTrackCo/tenjin-agent/pull/136",
       "relationship": {
         "status": "source-supported-policy-change-with-stale-knowledge-risk",
@@ -65,8 +77,37 @@
         "required_reporting": "Label this a policy-change/stale-knowledge diagnostic until the workload rubric admits it; never label the obsolete algorithm an approved correct seeded lesson.",
         "not_claimed": "No earlier piece may contain the later latest-only solution unless independently documented before the consumer cutoff."
       },
-      "eligibility": "pending-container-proof",
-      "assignment": "unassigned"
+      "eligibility": "independent-oracle-proof-required",
+      "assignment": "pilot-proof-required",
+      "prompt": "Make every recognized stable and alpha tenjin-cli build follow the npm latest release. An alpha tag ahead of latest must not redirect either explicit update checks or daily notices. Refuse unrecognizable current builds. Distinguish a missing latest tag from a malformed version and from a transport failure. Cache an answered registry check, including an unusable answer, for the usual daily interval; retry transport failures. Remove the obsolete channel field from update metadata. Preserve check-only behavior without installing. Work within the product source in src/; run the relevant existing update tests, never the full suite. Do not change dependencies or test files.",
+      "allowed_changes": ["src/"],
+      "source_hashes": {
+        "before": "9854f1e6ba8270edd63c17e6aa4e3d405b533568fbf3e26dce5ef1449b19fac3",
+        "after": "48e3b52ed2de5e7851fefc6d5d954261519929f12e30bab8461c10481914db98"
+      }
+    },
+    {
+      "id": "repository-replay",
+      "source_repository": "https://github.com/BackTrackCo/tenjin-agent.git",
+      "source_pr": "https://github.com/BackTrackCo/tenjin-agent/pull/256",
+      "before_commit": "7a94028148b7c742a27028af34236d8462cf1608",
+      "after_commit": "2d9bc9586be87a1ab0b083fc4f7e2b07ad091212",
+      "trees": {
+        "before": "f01921af183a0c3268491ae3c8a977193994b486",
+        "after": "a8c6c5bafe84b25d8627640f3be9ce9524ec0539"
+      },
+      "lock_sha256": "49604a80a97819037ac51e91f006ca9cb2cddb11afc9094f05cd75dcb823f19a",
+      "oracle": "repository-replay.test.ts",
+      "scope": "full original runtime behavior; proof pending",
+      "eligibility": "proof-required",
+      "assignment": "pilot-proof-required",
+      "earlier_producer": "https://github.com/BackTrackCo/tenjin-agent/pull/243",
+      "prompt": "Make team replay resolve and publish the same repository-scoped keys across transports, keep distinct host/full repository paths separate, prevent duplicate stale automatic-sync claim takeover, and synchronize the exact hook payload working-directory identity including symlinked/deep checkouts. Unknown repository origins must remain local. Work within the product source in src/; do not change tests or dependencies. Run only relevant focused tests, never the full suite.",
+      "allowed_changes": ["src/"],
+      "source_hashes": {
+        "before": "3119ca5c0ebcf25977ac918de0b037fc70101f824b8ed02273729321198edb82",
+        "after": "e642acceca795eebcd11940368c9dfe16ed03ac533546048b24191ef41d0aee7"
+      }
     }
   ]
 }
