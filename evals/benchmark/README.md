@@ -610,7 +610,59 @@ assertions with no network or credentials, validates results, and owns cleanup.
 Repository automation is omitted and dependency lifecycle scripts are disabled.
 An experiment does not implement its own runner or result validation.
 
-`python -m evals.benchmark.historical --catalog PATH prepare|build|verify` uses the
-same commands as an experiment's thin entrypoint. The initial adapter supports
-historical pnpm/Vitest tasks from the allowlisted tenjin-agent repository. Task
-selection, historical boundaries and oracle assertions belong to the experiment.
+`python -m evals.benchmark.historical --catalog PATH prepare|build|verify|materialize`
+uses the same commands as an experiment's thin entrypoint. The adapter supports
+historical pnpm/Vitest tasks from the allowlisted tenjin-agent and tenjin repositories.
+Private source stays in operator-prepared assets; public CI needs no private checkout.
+Task selection, historical boundaries and oracle assertions belong to the experiment.
+
+`materialize` turns a proven before revision into an ordinary runner fixture plus a
+separate hidden oracle. Its manifest binds both directory hashes, the work order,
+allowed product paths and optional earlier `producer_task`. The shared image builder
+builds both producer and consumer fixtures; each starts from its own pristine source.
+Verification restores immutable image dependencies and refuses source edits outside
+the declared contract. Every assertion must complete; skipped tests, contradictory
+counts, collection failures and broken cleanup are invalid measurements.
+
+Historical tasks can request a disposable PostgreSQL service. The trusted controller
+attaches a pinned pgvector image to the verifier's existing deny-all network namespace,
+listening only on loopback. It exposes no host port, Docker socket, persistent volume
+or real credential. The immutable support module migrates the synthetic database from
+the submitted historical source; the verifier receipt names the database image.
+The controller removes the service with the owning container project.
+
+A task may bind an earlier knowledge directory. Flat and seeded arms use the same
+source bodies; records include the corpus hash, each body hash and available lesson IDs.
+Publication nonces and piece IDs remain separate from those source versions. A natural
+arm seeds only the declared background corpus, then publishes captured producer drafts
+through the host as configured. With `producer_failure: continue_unpublished`, a valid
+failed or capped producer retains its outcome and spending and the consumer still runs,
+without publishing that producer's drafts. Its local captures may remain in the shared
+store: this policy does not claim an empty memory. Measurement errors still invalidate
+the attempt. Existing arms without this policy keep their declared producer-success gate.
+Consumer-only reuse and complete producer-plus-consumer costs must be named separately.
+
+`workload.assign` deterministically ranks a semantically reviewed candidate frame and
+keeps whole correlation clusters out of the locked reserve after pilot selection.
+It never decides eligibility or replaces a difficult task; its output explicitly leaves
+model admission false until the experiment's independent acceptance gates pass.
+
+### Complete pipeline cost
+
+The product overview retains the declared consumer-completion comparison and also
+shows complete pipeline cost for producer arms. This secondary quantity adds the
+earlier producer, capture and consumer tokens once, divided by verified consumers
+within each task. Its time adds both measured agent brackets and host publication
+time; container preparation and hidden verification remain separately timed.
+Failed and capped producers stay in the denominator's attempted population, and
+their spending is retained when the consumer continues. Missing producer timing
+and zero consumer successes produce `n/a`, never a fabricated zero.
+
+This is the cost to prepare memory and complete a later task. It is not a matched
+two-task comparison against a control that also did the earlier work, and it does
+not replace the consumer-reuse headline. The readout names producer failures,
+caps, invalid measurements, drafts, publication and consumer delivery separately.
+
+Historical tasks can allow broad product source roots (for example `src/`) so their work orders do not disclose the reference patch's file locations. Existing and newly added tests, fixtures, dependency manifests and verifier configuration remain protected. Prepared contexts bind the individual task definition and oracle; adding an unrelated catalog task does not invalidate that evidence.
+
+Historical catalogs pin the prepared source content hash for each Git revision. Build and verification compare against that independent catalog value as well as the receipt, so coordinated source/receipt edits refuse. Each verification invocation owns a fresh project identity and result path. Failed preparation removes only the new directory it created, permitting a retry without deleting another run's evidence.

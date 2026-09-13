@@ -1795,7 +1795,6 @@ def test_natural_phase_exports_dependencies_only_before_each_agent(
         target.mkdir(parents=True, exist_ok=True)
         (target / "ready").write_text("from-image")
     from evals.benchmark import images
-    monkeypatch.setattr(images, "export_node_modules", export)
     def spawn(launch, roots, timeout_s):
         assert (roots.repo / "node_modules" / "ready").read_text() == "from-image"
         assert not (roots.repo / "producer-only").exists()
@@ -1803,6 +1802,31 @@ def test_natural_phase_exports_dependencies_only_before_each_agent(
         if roots.phase == "producer":
             (roots.repo / "producer-only").write_text("must not reach consumer")
         return result
-    record = runner.run_trial(natural_manifest, trial_of(natural_manifest, "tenjin_natural"), run_dir, "sha256:schedule", make_runtime(spawn=spawn))
+    with monkeypatch.context() as local_patch:
+        local_patch.setattr(images, "export_node_modules", export)
+        record = runner.run_trial(natural_manifest, trial_of(natural_manifest, "tenjin_natural"), run_dir, "sha256:schedule", make_runtime(spawn=spawn))
     assert record["outcome"] == "pass"
     assert len(exports) == 2
+
+
+def test_pipeline_policy_keeps_failed_producer_spend_and_runs_consumer(
+    natural_manifest, make_runtime, producer_spawn, run_dir: Path
+) -> None:
+    data = natural_manifest.data
+    natural = next(arm for arm in data['arms'] if arm['id'] == 'tenjin_natural')
+    natural['producer_failure'] = 'continue_unpublished'
+    natural['capture_publication'] = 'host'
+    spawns = []
+    base = producer_spawn(fix=False)
+    def spawn(launch, roots, timeout_s):
+        spawns.append(roots.phase)
+        return base(launch, roots, timeout_s)
+    record = runner.run_trial(natural_manifest, trial_of(natural_manifest, 'tenjin_natural'), run_dir, 'sha256:schedule', make_runtime(spawn=spawn))
+    records.validate(record)
+    assert spawns == ['producer', None]
+    assert record['outcome'] == 'pass'
+    assert record['isolation']['producer']['outcome'] == 'fail'
+    assert record['isolation']['producer']['consumer_policy'] == 'continue-without-producer-publication'
+    assert record['auxiliary']
+    assert record['isolation']['producer']['publication']['pieces'] == []
+    assert record['isolation']['producer']['publication']['status'] == 'not-attempted-producer-failed'

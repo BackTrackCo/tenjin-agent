@@ -50,24 +50,25 @@ def test_catalog_rejects_unknown_task_and_shell_shaped_name(tmp_path):
 def context(tmp_path, monkeypatch):
     root = tmp_path / "definitions"
     (root / "oracles").mkdir(parents=True)
-    for path in [root / "oracles" / "fixture.test.ts", root / "Dockerfile", root / "vitest.config.mjs"]:
+    for path in [root / "oracles" / "fixture.test.ts", root / "Dockerfile", root / "vitest.config.mjs", root / "database.mjs"]:
         path.write_text("code-owned")
     monkeypatch.setattr(replay, "ROOT", root)
     out = tmp_path / "prepared"
     (out / "source").mkdir(parents=True)
     (out / "source" / "pnpm-lock.yaml").write_text("frozen-lock")
-    for src, dest in [(root / "oracles/fixture.test.ts", out / "oracle.test.ts"), (root / "Dockerfile", out / "Dockerfile"), (root / "vitest.config.mjs", out / "vitest.config.mjs")]:
+    for src, dest in [(root / "oracles/fixture.test.ts", out / "oracle.test.ts"), (root / "Dockerfile", out / "Dockerfile"), (root / "vitest.config.mjs", out / "vitest.config.mjs"), (root / "database.mjs", out / "database.mjs")]:
         dest.write_bytes(src.read_bytes())
     task = {"id": "fixture", "before_commit": "a" * 40, "after_commit": "b" * 40, "trees": {"before": "c" * 40, "after": "d" * 40}, "lock_sha256": sha256_file(out / "source/pnpm-lock.yaml"), "oracle": "fixture.test.ts"}
+    task["source_hashes"] = {revision: sha256_dir(out / "source") for revision in replay.REVISION}
     catalog = root / "catalog.json"
     catalog.write_text(json.dumps({"tasks": [task]}))
     monkeypatch.setattr(replay, "task_named", lambda *_: task)
-    receipt = {"catalog_sha256": sha256_file(catalog), "task": "fixture", "revision": "before", "commit": "a" * 40, "tree": "c" * 40, "source_hash": sha256_dir(out / "source")}
+    receipt = {"catalog_sha256": sha256_file(catalog), "task_sha256": replay.sha256_json(task), "task": "fixture", "revision": "before", "commit": "a" * 40, "tree": "c" * 40, "source_hash": sha256_dir(out / "source")}
     (out / "source-receipt.json").write_text(json.dumps(receipt))
     return out
 
 
-@pytest.mark.parametrize("path", ["source/pnpm-lock.yaml", "oracle.test.ts", "Dockerfile", "vitest.config.mjs"])
+@pytest.mark.parametrize("path", ["source/pnpm-lock.yaml", "oracle.test.ts", "Dockerfile", "vitest.config.mjs", "database.mjs"])
 def test_context_drift_refuses_before_image_execution(context, path):
     (context / path).write_text("drift")
     with pytest.raises(replay.ReplayError):
@@ -100,6 +101,9 @@ def test_wrong_image_is_refused_before_container_creation(context, monkeypatch, 
     (1, 1, [{"fullName": "independent contract", "status": "failed"}], 0, "fail"),
     (1, 0, [{"fullName": "independent contract", "status": "passed"}], 0, "pass"),
     (1, 1, [], 0, "invalid"),
+    (1, 0, [{"status": "pending"}], 0, "invalid"),
+    (1, 0, [{"status": "todo"}], 0, "invalid"),
+    (1, 0, [{"status": "failed"}], 0, "invalid"),
     (1, 1, [{"fullName": "independent contract", "status": "failed"}], 1, "invalid"),
 ])
 def test_only_completed_assertions_establish_fail_before_or_pass_after(context, tmp_path, monkeypatch, total, failed, assertions, runtime_errors, expected):
@@ -126,10 +130,53 @@ def test_only_completed_assertions_establish_fail_before_or_pass_after(context, 
     assert seen[0].plan == [] and seen[0].forward == ()
     assert seen[0].egress.mode == container.NO_NETWORK
     assert list((tmp_path / "run/projects").glob("*.project")) == []
+    replay.verify(context, tmp_path / "run", image, catalog=replay.ROOT / "catalog.json")
+    assert seen[0].name != seen[1].name
+    assert len(list((tmp_path / "run").glob("replay-*.json"))) == 2
 
 
-def test_changed_experiment_catalog_refuses_prepared_context(context):
+def test_changed_experiment_task_refuses_prepared_context(context):
     catalog = replay.ROOT / "catalog.json"
-    catalog.write_text(json.dumps({"tasks": [], "changed": True}))
-    with pytest.raises(replay.ReplayError, match="catalog changed"):
+    replay.task_named("fixture", catalog)["prompt"] = "different assignment"
+    with pytest.raises(replay.ReplayError, match="task changed"):
         replay.validate_context(context, catalog=catalog)
+
+
+def test_unrelated_catalog_addition_preserves_prepared_task(context):
+    catalog = replay.ROOT / "catalog.json"
+    data = json.loads(catalog.read_text())
+    data["tasks"].append({"id": "unrelated-new-task"})
+    catalog.write_text(json.dumps(data))
+    receipt = replay.validate_context(context, catalog=catalog)
+    assert receipt["catalog_sha256"] != sha256_file(catalog)
+
+
+def test_coordinated_source_and_receipt_tamper_is_refused(context):
+    (context/'source/injected.ts').write_text('different historical implementation')
+    path = context/'source-receipt.json'
+    receipt = json.loads(path.read_text())
+    receipt['source_hash'] = sha256_dir(context/'source')
+    path.write_text(json.dumps(receipt))
+    with pytest.raises(replay.ReplayError, match='historical source'):
+        replay.validate_context(context, catalog=replay.ROOT/'catalog.json')
+
+
+def test_failed_preparation_cleans_only_its_new_output_and_can_retry(context, monkeypatch, tmp_path):
+    monkeypatch.setattr(images, 'run_git', lambda *_: 'c'*40)
+    valid = archive([('pnpm-lock.yaml', b'frozen-lock')])
+    payloads = iter([archive([('../escape', b'bad')]), valid])
+    monkeypatch.setattr(replay.subprocess, 'run', lambda *_a, **_k: SimpleNamespace(returncode=0, stdout=next(payloads)))
+    target = tmp_path/'fresh'
+    with pytest.raises(replay.ReplayError, match='escapes'):
+        replay.prepare(Path('unused'), 'fixture', 'before', target, catalog=replay.ROOT/'catalog.json')
+    assert not target.exists() and context.exists()
+    assert replay.prepare(Path('unused'), 'fixture', 'before', target, catalog=replay.ROOT/'catalog.json')['source_hash'] == sha256_dir(target/'source')
+
+
+def test_link_to_same_bytes_still_refuses_historical_source(context, tmp_path):
+    outside = tmp_path/'outside-lock'
+    outside.write_bytes((context/'source/pnpm-lock.yaml').read_bytes())
+    (context/'source/pnpm-lock.yaml').unlink()
+    (context/'source/pnpm-lock.yaml').symlink_to(outside)
+    with pytest.raises(replay.ReplayError, match='links'):
+        replay.validate_context(context, catalog=replay.ROOT/'catalog.json')

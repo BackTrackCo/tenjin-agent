@@ -185,6 +185,8 @@ def run(
     producer_roots.mark_stopped()
     wall_time_s = runtime.clock() - started
     facts: dict[str, Any] = {
+        "task_id": task["id"],
+        "fixture_hash": task["fixture_hash"],
         "native_root_id": session_id,
         "daemon": "restarted",
         "daemon_respawned": bool(between["respawned"]),
@@ -278,14 +280,19 @@ def run(
                 if outcome == "invalid":
                     invalid = f"producer:verifier_{verdict.verifier_id}"
     invalid = protocol.completion_refusal(task, session, outcome, invalid)
-    if invalid is None and outcome != "pass":
-        # A producer that did not fix the task left nothing a consumer could
-        # reuse; the consumer is not run against an empty store.
+    continue_unpublished = arm.get("producer_failure") == "continue_unpublished" and invalid is None and outcome != "pass"
+    if invalid is None and outcome != "pass" and not continue_unpublished:
+        # This arm declares a successful-prior-work protocol. It cannot be
+        # interpreted as the unconditional capture/reuse pipeline.
         invalid = "producer:failed"
     facts["outcome"] = "invalid" if invalid is not None else outcome
     facts["invalid_reason"] = invalid
     next_provision = provision
-    if invalid is None and arm.get("capture_publication") == "host":
+    if continue_unpublished:
+        facts["consumer_policy"] = "continue-without-producer-publication"
+        if arm.get("capture_publication") == "host":
+            facts["publication"] = {"mode": "host-assisted", "status": "not-attempted-producer-failed", "pieces": [], "wall_time_s": 0.0}
+    if invalid is None and not continue_unpublished and arm.get("capture_publication") == "host":
         facts["publication"], invalid = publication.publish(roots, provision, loop_join.stored_session(spec.harness, session_id), project_id(str(launch.cwd)))
         if invalid is not None:
             facts["outcome"] = "invalid"
