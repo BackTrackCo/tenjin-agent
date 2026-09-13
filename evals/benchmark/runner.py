@@ -337,6 +337,7 @@ def run_trial(manifest: Manifest, trial: Trial, run_dir: Path, schedule_hash: st
         automated=runtime.automated,
         shelf_secret_present=bool(facts.get("shelf_secret_present", False)),
         shelf_origin=facts.get("shelf_origin"),
+        benchmark_shelf_key=facts.get("benchmark_shelf_key"),
     )
     # The image is resolved before any root exists: a missing or drifted image
     # is a refusal, and its id is what the record says the attempt ran in.

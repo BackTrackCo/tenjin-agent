@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from . import FIXTURES, artifact, container, loop_join, sha256_text, signature
+from . import benchmark_key, FIXTURES, artifact, container, loop_join, sha256_text, signature
 from .executor import Provision, ProvisionError, ProvisionRequest
 
 NAME = "tenjin"
@@ -746,6 +746,7 @@ class Source:
     # that builds the environment for the run's own publish, sweep, search and
     # delete, which are the calls the source's wallet has to sign.
     wallet_passphrase: str = ""
+    benchmark_shelf_key: dict[str, str] | None = None
 
     @property
     def shelf_secret(self) -> str:
@@ -783,6 +784,7 @@ class Source:
             "shelf_secret_present": self.shelf_secret_present,
             "shelf_origin": self.shelf_origin,
             "public_origin": self.public_origin,
+            **({"benchmark_shelf_key": self.benchmark_shelf_key} if self.benchmark_shelf_key else {}),
         }
 
     @property
@@ -820,7 +822,15 @@ def load_source(path: Path) -> Source:
     missing = sorted(name for name, bundle in bundles.items() if not bundle.is_file())
     if missing:
         raise ProvisionError(f"--tenjin-source has no {', '.join(missing)} under {HOOKS_DIR}/; run `tenjin daemon start` there")
-    return Source(path=path, config=config, bundles=bundles, wallet_passphrase=os.environ.get(WALLET_PASSPHRASE, ""))
+    receipt = None
+    if (path / benchmark_key.FILE).exists():
+        try:
+            if config.get("baseUrl", "").rstrip("/") != "https://" + benchmark_key.ORIGIN:
+                raise ValueError("benchmark team profile requires the HTTPS benchmark origin")
+            receipt = benchmark_key.bind(json.loads((path / benchmark_key.FILE).read_text()), str(config.get(SECRET_KEY) or ""), _host(config.get("baseUrl")))
+        except (OSError, ValueError) as error:
+            raise ProvisionError(str(error)) from error
+    return Source(path=path, config=config, bundles=bundles, wallet_passphrase=os.environ.get(WALLET_PASSPHRASE, ""), benchmark_shelf_key=receipt)
 
 
 def data_dir_string(roots: artifact.TrialRoots) -> str:

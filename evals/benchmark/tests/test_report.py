@@ -679,3 +679,13 @@ def test_remote_server_drift_cannot_look_like_a_product_result(corpus, reduction
     assert "diagnostic evidence only" in text
     assert "they do not lock the server or prove schema compatibility" in text
     assert "lower" not in text
+
+
+def test_dedicated_benchmark_key_stays_attested_and_visible(project, stamped):
+    from evals.benchmark.tests.test_benchmark_key import isolation
+    published = project(accepted_records=stamped(**isolation()))
+    assert published["shelf_secret_present"] and published["publishable"]
+    assert published["isolation"] == "attested"
+    assert "dedicated benchmark shelf key present" in report.render(published)
+    assert "NOT PUBLISHABLE" not in report.render(published)
+    report.guard(published)

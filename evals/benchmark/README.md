@@ -268,7 +268,7 @@ goes into every record, so a published result names the isolation it ran under.
 
 The operator prepares a disposable container or VM booted from a pinned image and thrown away
 after the run; fresh home, profile, data, repository, and output roots, which the run directory
-owns; no wallet in the image or the environment, and no shelf secret; the model credential in exactly one allowlisted variable
+owns; no wallet in the image or the environment, and no ordinary team shelf secret; the model credential in exactly one allowlisted variable
 named by `pins.credential_env`; network allowlisted to the provider plus the arm under test,
 matching the attestation; and `pins.image`, `pins.harness_version`, and `pins.model` set to what
 this instance actually runs. Project-scoped tool permissions and transcript redaction are
@@ -570,3 +570,27 @@ read-only after the model stops; the verifier has no network or credential mount
 Consumer, producer and saved-run verification use this path and record the verifier
 image. Synthetic answer-file plumbing remains a host-side file read. Missing image
 identity, container failures and failed cleanup produce invalid measurements.
+
+### Benchmark team-shelf configuration
+
+The existing CLI enters team mode through `shelfBypassSecret`, including on the
+public `bench.tenjin.sh` custom domain. The benchmark uses a dedicated automation
+key belonging only to the `tenjin-bench` Vercel project. Never copy the ordinary
+team-shelf key. Seeded and captured lessons explicitly publish at price `0`, and
+trial configs set `publish.defaultPrice` to `0`; this measures free team reuse.
+
+The private source directory contains `benchmark-shelf-key.json` with schema
+`bench1.shelf-key.v1`, the dedicated `project_id`, host `origin`, and `key_sha256`.
+The controller validates the actual configured key against this receipt, binds
+it into the isolation attestation, and requires the reset corpus to match.
+This is an operator attestation of project scope, not a Vercel signature. The
+source receipt must be created from the verified project's automation-key
+response, never by relabeling a production key. Credential presence stays true
+in records; only the attested benchmark key is allowed in measured/automated
+runs. Ordinary team keys retain their refusal. The key itself is excluded from
+reports and remains part of the credential-exposure scan.
+
+Runs made without this team profile, including earlier paid-pointer diagnostics,
+are not the free team-reuse measurement. Start a fresh run after changing it.
+The delivery readout separately counts pointers, full bodies, truncated bodies,
+and unknown forms; a successful publish alone does not prove body delivery.

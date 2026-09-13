@@ -21,7 +21,7 @@ import json
 import re
 from typing import Any
 
-from . import canonical_json, injections, regress
+from . import benchmark_key, canonical_json, injections, regress
 from .artifact import CANARY_PREFIX
 from .reduce import consumer_auxiliary
 
@@ -145,7 +145,7 @@ def _guard_string(value: str, trail: str) -> None:
 
 def isolation_kind(record: dict[str, Any]) -> str:
     isolation = record["isolation"]
-    if isolation.get("shelf_secret_present", False):
+    if isolation.get("shelf_secret_present", False) and not benchmark_key.recorded(isolation):
         return "team_shelf_secret"
     if not isolation["live"]:
         return "fake"
@@ -653,7 +653,9 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
     ]
     if include_overview:
         lines = [overview(report), "", "Detailed accounting (provisional diagnostics):", *lines]
-    if report.get("shelf_secret_present", False):
+    if report.get("shelf_secret_present", False) and report["isolation"] == "attested":
+        lines.append("dedicated benchmark shelf key present: scope bound to the attested benchmark corpus")
+    elif report.get("shelf_secret_present", False):
         lines.append("team shelf secret present: NOT PUBLISHABLE, the arm ran against a private shelf this run cannot vouch for")
     if report.get("slice"):
         lines.append("slice: " + " ".join(f"{key}={value}" for key, value in sorted(report["slice"].items())))

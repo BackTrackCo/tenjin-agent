@@ -45,6 +45,7 @@ from typing import Any, Mapping, MutableMapping
 from . import (
     FIXTURES,
     artifact,
+    benchmark_key,
     cases as cases_module,
     container,
     corpus as corpus_module,
@@ -540,7 +541,7 @@ def _live_run(
     if provisioned and source is None:
         raise CliError(f"arm {provisioned[0]!r} is provisioned: live-run needs --tenjin-source <data dir>")
     refuse_foreign_shelf(manifest, source)
-    if source is not None and source.shelf_secret_present and attestation_path is not None:
+    if source is not None and source.shelf_secret_present and source.benchmark_shelf_key is None and attestation_path is not None:
         raise CliError("--attestation refuses a source that carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, run it with --plumbing")
     if ci_live and automated:
         raise CliError("--ci-live and --automated are different lanes: the first is the unattested plumbing smoke, the second an attested measured run")
@@ -584,6 +585,11 @@ def _live_run(
     # The run's nonce is its identity to the marketplace, and the refusal here
     # is the last one that costs nothing.
     validate_schedule_identity(manifest, out)
+    if source is not None and source.benchmark_shelf_key:
+        try:
+            benchmark_key.bind_run(out, source.benchmark_shelf_key, manifest.hash)
+        except (OSError, ValueError) as error:
+            raise CliError(str(error)) from error
     if manifest.corpus is not None and not freeze_corpus and any((out / "records").glob("*.json")):
         raise CliError("corpus resume requires a verified frozen database revision; retained evidence is unchanged, use a new run directory")
     if manifest.corpus is not None and freeze_corpus:
@@ -616,7 +622,13 @@ def _live_run(
     if attestation_path is not None:
         attestation = artifact.load_attestation(attestation_path)
     elif not plumbing:
-        attestation = artifact.load_attestation_data(container.attestation(egress, seam or "", nonce))
+        payload = container.attestation(egress, seam or "", nonce)
+        if source is not None and source.benchmark_shelf_key:
+            payload["benchmark_shelf_key"] = source.benchmark_shelf_key
+        attestation = artifact.load_attestation_data(payload)
+    if source is not None and source.benchmark_shelf_key:
+        if attestation is None or attestation.benchmark_shelf_key != source.benchmark_shelf_key or manifest.corpus is None:
+            raise CliError("benchmark key scope must match the attestation and reset corpus")
     # The last thing before the first trial, and after every refusal that costs
     # nothing: the corpus a run measures is the one this reset left behind, so a
     # reset that does not happen ends the run here rather than in the numbers.
@@ -695,12 +707,14 @@ def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image:
     manifest = manifest_module.load(manifest_path)
     spec = require_executor(manifest, live=True)
     source = tenjin_arm.load_source(tenjin_source)
-    if source.shelf_secret_present:
+    if source.shelf_secret_present and source.benchmark_shelf_key is None:
         raise CliError(
             "--tenjin-source carries shelfBypassSecret: a run that seeds a team shelf secret is never publishable, "
-            "and the bench shelf is on a custom domain and needs none"
+            "use a dedicated benchmark key with a matching scope receipt"
         )
     refuse_foreign_shelf(manifest, source)
+    if source.benchmark_shelf_key and manifest.corpus is None:
+        raise CliError("a benchmark key requires a reset benchmark corpus")
     origins = set(allowlist_for(spec, source))
     if manifest.corpus is not None:
         origins |= set(manifest.corpus.origins)
@@ -714,6 +728,7 @@ def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image:
         "wallet_present": False,
         "credential_seam": str(manifest.pins["credential_env"]),
         "network_allowlist": sorted(origins),
+        **({"benchmark_shelf_key": source.benchmark_shelf_key} if source.benchmark_shelf_key else {}),
     }
     # Read it back through the same loader `live-run` uses, so a file this
     # command wrote and a file an operator wrote are refused on the same terms.

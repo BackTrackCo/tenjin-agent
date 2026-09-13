@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import images as images_module, sha256_json, sha256_text
+from . import benchmark_key, images as images_module, sha256_json, sha256_text
 
 CANARY_PREFIX = "bench1-canary-"
 CREDENTIAL_FILE = ".benchmark-credential"
@@ -315,9 +315,12 @@ class Attestation:
     credential_seam: str
     network_allowlist: tuple[str, ...] = field(default_factory=tuple)
     corpus: CorpusStamp | None = None
+    benchmark_shelf_key: dict[str, str] | None = None
 
     def hash(self) -> str:
         payload = asdict(self)
+        if self.benchmark_shelf_key is None:
+            payload.pop("benchmark_shelf_key")
         payload["network_allowlist"] = sorted(self.network_allowlist)
         return "sha256:" + sha256_json(payload)
 
@@ -340,7 +343,7 @@ def load_attestation_data(data: Any) -> Attestation:
     """The same checks over a payload a run built itself, so a self-written attestation is read no more kindly than a file."""
     if not isinstance(data, dict):
         raise IsolationError("attestation_shape", "the attestation must be a JSON object")
-    unknown = sorted(set(data) - ATTESTATION_KEYS)
+    unknown = sorted(set(data) - ATTESTATION_KEYS - {"benchmark_shelf_key"})
     missing = sorted(ATTESTATION_KEYS - set(data))
     if unknown or missing:
         detail = f"unknown keys: {', '.join(unknown)}" if unknown else f"missing keys: {', '.join(missing)}"
@@ -354,6 +357,12 @@ def load_attestation_data(data: Any) -> Attestation:
     for name in ("kind", "instance_id", "image", "credential_seam"):
         if not isinstance(data[name], str):
             raise IsolationError("attestation_shape", f"attestation {name} must be a string")
+    receipt = data.get("benchmark_shelf_key")
+    if receipt is not None:
+        try:
+            receipt = benchmark_key.validate(receipt)
+        except ValueError as error:
+            raise IsolationError("benchmark_shelf_key", str(error)) from error
     return Attestation(
         kind=data["kind"],
         instance_id=data["instance_id"],
@@ -362,6 +371,7 @@ def load_attestation_data(data: Any) -> Attestation:
         wallet_present=data["wallet_present"],
         credential_seam=data["credential_seam"],
         network_allowlist=tuple(origins),
+        benchmark_shelf_key=receipt,
     )
 
 
@@ -407,14 +417,15 @@ def require_isolation(
     automated: bool = False,
     shelf_secret_present: bool = False,
     shelf_origin: str | None = None,
+    benchmark_shelf_key: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """The isolation slice of an attempt record, or a refusal to run at all.
 
     Three rules, and the order is the argument.
 
-    A run that seeds a team shelf secret is never publishable: the secret is in
-    the trial by design, so asking for a publishable run is a refusal rather
-    than a downgrade, and an unwatched run never seeds one at all.
+    Ordinary team shelf secrets are refused for measured and automated runs.
+    A dedicated benchmark key is allowed only with a matching scope receipt,
+    attestation and reset benchmark corpus. Its presence remains recorded.
 
     A live run under CI is stamped `automated`, because a record that says a
     person watched a run nobody watched is the one claim no reader can check.
@@ -426,9 +437,20 @@ def require_isolation(
     launcher's identity ever was; a run without one is non-publishable whoever
     started it.
     """
-    if shelf_secret_present and publishable:
+    scoped = False
+    if benchmark_shelf_key is not None:
+        try:
+            scope = benchmark_key.validate(benchmark_shelf_key)
+        except ValueError as error:
+            raise IsolationError("benchmark_shelf_key", str(error)) from error
+        scoped = bool(live and shelf_secret_present and attestation is not None
+                      and attestation.benchmark_shelf_key == scope and shelf_origin == scope["origin"]
+                      and attestation.corpus is not None and attestation.corpus.origin == scope["origin"])
+        if not scoped:
+            raise IsolationError("benchmark_shelf_key", "benchmark key scope must match the source, attestation and reset corpus")
+    if shelf_secret_present and publishable and not scoped:
         raise IsolationError("shelf_secret_publishable", "a run that seeds a team shelf secret is never publishable")
-    if automated and shelf_secret_present:
+    if automated and shelf_secret_present and not scoped:
         raise IsolationError("automated_shelf_secret", "an automated live run never seeds a team shelf secret")
     if live and ci and not automated:
         raise IsolationError("automated_unstamped", "a live run in CI is stamped automated, so every record says nobody watched it")
@@ -457,6 +479,7 @@ def require_isolation(
         "automated": automated,
         "shelf_secret_present": shelf_secret_present,
         "shelf_origin": shelf_origin,
+        **({"benchmark_shelf_key": benchmark_shelf_key} if scoped else {}),
         # The corpus reaches the record as fields rather than as a hash alone,
         # so a reader sees which corpus the run measured without the file.
         "corpus": None if attestation is None or attestation.corpus is None else asdict(attestation.corpus),
