@@ -10,14 +10,14 @@ frontmatter carrying `title` plus the answer-card keys, then the body.
   answer card missing a rubric key, is refused with exit 2 naming the exact
   frontmatter keys to add, above the scan, the dedup answer, the confirm, the
   wallet and the network. `--draft` skips the card check and nothing else.
-- The card check is a quality policy mirrored from the server's completeness
-  rubric, and completeness has one mechanical effect: a complete card ranks above
-  every incomplete one in plain search, and it is the card a searcher reads to
-  judge fit before paying. It does not change filtered discoverability. The
-  server's `freshWithin` and `appliesTo` gates fail only a piece with no card at
-  all, and `appliesTo` matches only a card that carries that map — which the gate
-  deliberately does not require, since a required applicability map is one
-  authors fill with invented values.
+- The card check is a quality policy mirroring the server's completeness rubric.
+  What it buys is judgement, not rank: the card is the pre-purchase decision
+  payload, since the rank-1 card inlines the questions, the scope and the
+  exclusions, so a searcher judges fit without paying. An incomplete card is
+  labelled `no answer card` or `incomplete answer card` in every searcher's
+  `matchReasons`, and a piece with no card at all is the only one that fails
+  `freshWithin` and `appliesTo`. Completeness changes neither relevance nor
+  rank.
 - The title is frontmatter `title`, else the body's first level-1 `# ` heading.
   No other heading level counts.
 - Removed: `--dry-run` (validate-before-write is the preview), `--finding` and
