@@ -266,6 +266,8 @@ def test_an_arm_that_cannot_expose_auxiliary_spend_cannot_enter_the_headline() -
     accepted = support.accept(
         support.reduction_record("t1", "off", 0, 0, 10000, "pass"),
         support.reduction_record("t1", "on", 0, 1, 8000, "pass"),
+        support.reduction_record("t2", "off", 0, 2, 10000, "pass"),
+        support.reduction_record("t2", "on", 0, 3, 8000, "pass"),
     )
     # Same records either way: only the manifest can say whether the arm's
     # memory product is able to show what it spent.
@@ -626,3 +628,18 @@ def test_invalid_producer_spend_is_visible_without_entering_completion_ratios():
         'phase_tokens': {'producer': 142000, 'capture': 320}, 'pipeline_tokens': 142320,
         'producer_agent_seconds': 135, 'producer_missing_timing': 0, 'publication_seconds': 2,
     }
+
+
+def test_repeats_of_one_task_keep_a_point_but_cannot_qualify_as_a_headline() -> None:
+    rows = []
+    for repeat in range(3):
+        rows.extend([
+            support.reduction_record("only-task", "off", repeat, repeat * 2, 10000, "pass"),
+            support.reduction_record("only-task", "on", repeat, repeat * 2 + 1, 8000, "pass"),
+        ])
+    result = reduce_module.reduce(support.accept(*rows), [], "off")
+    comparison = result["comparisons"]["on"]
+    assert result["arms"]["on"]["accounting"] == "complete"
+    assert comparison["completion_tokens"]["point"] == 0.8
+    assert comparison["completion_tokens"]["reason"] == "insufficient_independent_tasks"
+    assert comparison["headline_eligible"] is False
