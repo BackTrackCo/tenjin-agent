@@ -899,7 +899,7 @@ describe('the daemon, cold-started from the real bundle', () => {
      * ACCEPTANCE 6 (tenjin-agent#342): the whole activation, end to end, with
      * nothing about it mocked except the one keypress a person has to make.
      *
-     *   install -> configured, and honestly reported as INERT
+     *   install -> configured, with trust UNKNOWN while Codex cannot be asked
      *   -> trust  -> Codex accepts the source
      *   -> a fresh session's captured events, through the real shim
      *   -> recorded fires, and doctor flips to observed.
@@ -953,13 +953,13 @@ describe('the daemon, cold-started from the real bundle', () => {
         );
         expect(keys.every((k) => k !== null)).toBe(true);
 
-        // 2. CONFIGURED, AND INERT. Before the keypress the honest answer is
-        // untrusted: the file exists and Codex will run none of it.
+        // 2. CONFIGURED, TRUST UNKNOWN. A hooks file alone cannot settle the
+        // private handler hash; without an app-server answer we do not guess.
         const before = await readCodexTrust(home, keys as string[], {
           env,
           listHooks: async () => null,
         });
-        expect(before.state).toBe('untrusted');
+        expect(before.state).toBe('unknown');
 
         // 3. TRUST, through the real writer. The scripted server answers as
         // Codex does: untrusted rows with hashes first, the same rows trusted
