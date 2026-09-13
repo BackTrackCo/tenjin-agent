@@ -21,7 +21,7 @@ import json
 import re
 from typing import Any
 
-from . import canonical_json, regress
+from . import canonical_json, injections, regress
 from .artifact import CANARY_PREFIX
 from .reduce import consumer_auxiliary
 
@@ -203,6 +203,7 @@ def project(
     corpus_snapshot: dict[str, Any] | None = None,
     server_revision: dict[str, Any] | None = None,
     harness_release: dict[str, Any] | None = None,
+    injection_review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The whole publishable artifact, refused as a unit if anything private rides along."""
     excluded: dict[str, int] = {}
@@ -333,6 +334,7 @@ def project(
         "invalid": reduction["invalid"],
         "excluded": excluded,
         "origins": origins,
+        "injections": injections.project(accepted, manifest_hash, schedule_hash, injection_review),
         "seeds": seeds,
         "failure_keys": failure_keys,
         "discovery": found,
@@ -505,6 +507,7 @@ def overview(report: dict[str, Any], *, markdown: bool = False) -> str:
                           "Publication is performed by the benchmark host. Delivery plus a pass does not establish that the piece was useful; compare completion time/tokens across treatments."]
             else:
                 lines += ["Producer publication and attributed team delivery: unavailable in these records."]
+    lines += injections.render(report.get("injections"), markdown=markdown)
     if complete:
         for arm_id, comparison in sorted(report.get("comparisons", {}).items()):
             for key, label in (("completion_time", "Time ratio"), ("completion_tokens", "Token ratio"), ("completion_rate", "Pass-rate difference")):
@@ -728,6 +731,8 @@ def render(report: dict[str, Any], *, include_overview: bool = True) -> str:
             f"public legs: {origins['public_legs']}, hits: {origins['public_hits']}, "
             f"timeouts: {origins['public_timeouts']}; legs the daemon logged to an unnamed shelf: {origins['unnamed_shelf_legs']}"
         )
+    if not include_overview:
+        lines += injections.render(report.get("injections"), show_empty_hooks=True)
     if report["comparisons"]:
         lines.append(f"Completion token comparison versus {baseline}, 1.0 means no change; decomposition follows:")
         for arm_id, comparison in sorted(report["comparisons"].items()):

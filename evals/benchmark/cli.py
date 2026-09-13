@@ -55,6 +55,8 @@ from . import (
     lease,
     server_revision,
     manifest as manifest_module,
+    injections,
+    loop_join,
     records,
     reduce as reduce_module,
     regress as regress_module,
@@ -95,6 +97,7 @@ REFUSALS = (
     records.RecordError,
     schedule.ScheduleError,
     regress_module.BaselineError,
+    injections.InjectionReviewError,
 )
 
 
@@ -723,9 +726,11 @@ def do_attest(manifest_path: Path, tenjin_source: Path, instance_id: str, image:
 def do_report(run_dir: Path) -> dict[str, Any]:
     manifest, digest = load_run(run_dir)
     accepted, excluded = records.select(run_dir / "records", manifest.hash, digest)
+    accepted = loop_join.with_presentations(accepted, run_dir)
     frozen_corpus.verify_records(run_dir, accepted)
     reduction = reduce_module.reduce(accepted, excluded, baseline(manifest), manifest.data["seed"], manifest.arms)
-    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir), server_revision.read(run_dir), harness_release=manifest.release)
+    review = read_run_file(run_dir, "injection-review.json") if (run_dir / "injection-review.json").exists() else None
+    report = report_module.project(manifest.data, manifest.hash, digest, reduction, accepted, snapshot_module.read(run_dir), server_revision.read(run_dir), harness_release=manifest.release, injection_review=review)
     (run_dir / "report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return report
 
