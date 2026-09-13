@@ -2,8 +2,9 @@ import type { LoopDb } from './store';
 
 /**
  * `facts`: the machine's key-value table on `loop.db` (13-pr-d-local-arms.md).
- * D writes `finding:<uid>`, the child finding queue; E moves the CLI's
- * `published:` and `agent_published:` writers here.
+ * The CLI's `published:` and `agent_published:` writers live here (E). Nothing
+ * is stored on an agent's behalf: the capture ask names a command, so there is
+ * no queue of half-published text and nothing to take off one.
  */
 
 export interface Fact {
@@ -31,10 +32,4 @@ export function factsWithPrefix(db: LoopDb, prefix: string): Fact[] {
   return db
     .prepare('SELECT key, value, at FROM facts WHERE substr(key, 1, ?) = ? ORDER BY at, key')
     .all(prefix.length, prefix) as unknown as Fact[];
-}
-
-/** Take one fact away. Deleting a row that was never there is the same answer
- *  as deleting one that was: the fact is not held. */
-export function deleteFact(db: LoopDb, key: string): void {
-  db.prepare('DELETE FROM facts WHERE key = ?').run(key);
 }

@@ -49,11 +49,11 @@ off, and the public shelf as the only shelf:
   back), the prompt lookup ran (`no-hit`), the `apply_patch` and Bash calls left
   `edited:` and `bashstart` marks under `codex:<session>`, the Stop ask went out
   as `decision: block` (Codex printed `hook: Stop Blocked`), the model answered,
-  and the fused Stop harvested;
+  and the fused Stop wrote its row and said nothing more;
 - child: SubagentStart wrote `started` under the child's own id, its patch was
   marked under that id, its SubagentStop carried the capture ask with
-  `--agent <id>`, and the fused SubagentStop harvested. No `daemon-down` line was
-  written in either session.
+  `--agent <id>`, and the fused SubagentStop wrote its row and said nothing more.
+  No `daemon-down` line was written in either session.
 
 ## Observed through the installed home-level registrar (2026-09-09)
 

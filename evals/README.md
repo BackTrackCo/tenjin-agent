@@ -77,7 +77,7 @@ fixtures should not. Point the tooling at these paths explicitly.
 regression tripwire rather than a research instrument: it exists because the
 description carrying the entire publish consent contract was rewritten with
 nothing measuring it. Positives cover the three routes in (an explicit
-publish/update/sales/drafts ask, the harvest ask, an after-a-MISS finding, and
+publish/update/sales/drafts ask, the turn-end ask, an after-a-MISS finding, and
 unprompted finished work); negatives are the description's own skip clauses
 (private to a repo or employer, work in progress, drive-by musing) plus
 confusables that belong to `tenjin-search` (a pure read, a buy) and two tasks
@@ -103,7 +103,7 @@ That comparison is what the set is for.
 **What this set has and has not shown.** An earlier, differently-phrased 16-query
 version did separate two descriptions: it scored 14 and 13 on a rewritten
 tenjin-publish description against 15 and 15 on its predecessor, missing the
-harvest ask and the unprompted-work ask. The set was then expanded to 20 to meet
+turn-end ask and the unprompted-work ask. The set was then expanded to 20 to meet
 `evals-fixtures.test.ts`'s balance floor, and the positives were rephrased in the
 process. **The committed 20-query set has not reproduced that separation.** Three
 runs exist: 19 vs 19 (3 runs/query, sonnet) and, from review, 18 vs 19 in the

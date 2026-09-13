@@ -485,25 +485,7 @@ Examples:
 
   leaf(program, PUBLISH, 'publish [file]', 'publish a finding')
     .description(
-      "Publish Markdown from a file, `-`/non-TTY stdin, or a finding one of this session's subagents stated at its own end (--finding <id>), as a paid or free piece with an optional answer card. Your publish.mode and a local scan gate it: a secret in the body hard-blocks, and soft findings need --yes.",
-    )
-    // The queued child finding named by the capture ask, published as the body
-    // through this same pipeline (tenjin-agent#228). It is a SOURCE, not a second
-    // publish path: consent, the confirm, the scan and pricing are the ones above.
-    .option(
-      '--finding <id>',
-      'publish a stored subagent finding instead of a file, by the id the capture ask printed',
-    )
-    .option(
-      '--dry-run',
-      'print what would be published, whole body included, and write and spend nothing',
-    )
-    // NO IS FINAL. Without a discard the only thing that took a finding off the
-    // queue was a publish, so a declined one was re-offered by every session's
-    // first ask for the next eight hours.
-    .option(
-      '--discard',
-      'with --finding: take that stored finding off the local queue without publishing it',
+      'Publish a finding: a Markdown document with frontmatter (`title` plus the answer-card keys) then the body, from a file or `-`/non-TTY stdin. It is checked before anything is written, so a missing title or an incomplete answer card is refused by name and costs nothing. Your publish.mode and a local scan gate the rest: a secret in the body hard-blocks, and soft findings need --yes.',
     )
     // ATTRIBUTION, NOT AUTHORITY: it changes no gate, no shelf and no price. The
     // SubagentStop capture ask fills it in so a child that publishes from its own
@@ -525,17 +507,10 @@ Examples:
       '--excerpt <text>',
       'the public preview text (max 500 chars; default: derived from the body)',
     )
-    .option('--question <text>', 'a question this piece answers (repeatable)', collect)
-    .option('--task <text>', 'a task this piece supports (repeatable)', collect)
-    .option('--scope <text>', 'what the piece covers (card scope)')
-    .option('--exclusions <text>', 'what the piece does not cover (card exclusions)')
-    .option('--applies-to <pair>', 'applicability key=value (repeatable)', collect)
-    .option('--as-of <iso>', 'as-of timestamp, ISO-8601 with offset')
-    .option('--valid-until <iso>', 'valid-until timestamp, ISO-8601 with offset')
-    .option('--artifact-type <type>', 'document | skill | dataset')
-    .option('--temporal-mode <mode>', 'snapshot | maintained | evergreen')
-    .option('--provenance <text>', 'provenance summary (card)')
-    .option('--methodology <text>', 'methodology summary (card)')
+    // NO CARD FLAGS. The answer card is part of the document, in its
+    // frontmatter, so there is one place to write it and one place to read it
+    // back; a flag copy meant the published card and the file on disk could
+    // disagree the moment either changed.
     .option(
       '--key <kind=value>',
       'an exact-match lookup key: fingerprint | package_version | command_head | repo, e.g. package_version=zod@4.1.0 (repeatable, up to 32)',
@@ -546,7 +521,7 @@ Examples:
       `
 Examples:
   $ tenjin publish finding.md --price 0.10
-  $ tenjin publish --finding <id> --dry-run
+  $ tenjin publish finding.md --draft
   $ tenjin publish finding.md --search-id <id> --key fingerprint=sig_v1:ab12
 `,
     )
@@ -557,9 +532,6 @@ Examples:
         return runPublish(
           {
             ...(typeof file === 'string' ? { file } : {}),
-            ...(typeof o.finding === 'string' ? { finding: o.finding } : {}),
-            ...(o.dryRun === true ? { dryRun: true } : {}),
-            ...(o.discard === true ? { discard: true } : {}),
             ...(typeof o.agent === 'string' ? { agent: o.agent } : {}),
             ...(Array.isArray(o.searchId) && o.searchId.length > 0
               ? { searchId: o.searchId as string[] }
@@ -569,22 +541,7 @@ Examples:
             ...(typeof o.mode === 'string' ? { mode: o.mode } : {}),
             ...(typeof o.price === 'string' ? { price: o.price } : {}),
             ...(typeof o.excerpt === 'string' ? { excerpt: o.excerpt } : {}),
-            ...(Array.isArray(o.question) && o.question.length > 0
-              ? { question: o.question as string[] }
-              : {}),
-            ...(Array.isArray(o.task) && o.task.length > 0 ? { task: o.task as string[] } : {}),
-            ...(typeof o.scope === 'string' ? { scope: o.scope } : {}),
-            ...(typeof o.exclusions === 'string' ? { exclusions: o.exclusions } : {}),
-            ...(Array.isArray(o.appliesTo) && o.appliesTo.length > 0
-              ? { appliesTo: o.appliesTo as string[] }
-              : {}),
-            ...(typeof o.asOf === 'string' ? { asOf: o.asOf } : {}),
-            ...(typeof o.validUntil === 'string' ? { validUntil: o.validUntil } : {}),
-            ...(typeof o.artifactType === 'string' ? { artifactType: o.artifactType } : {}),
-            ...(typeof o.temporalMode === 'string' ? { temporalMode: o.temporalMode } : {}),
-            ...(typeof o.provenance === 'string' ? { provenance: o.provenance } : {}),
             ...(Array.isArray(o.key) && o.key.length > 0 ? { key: o.key as string[] } : {}),
-            ...(typeof o.methodology === 'string' ? { methodology: o.methodology } : {}),
           },
           ctx,
           cliStdin(io),

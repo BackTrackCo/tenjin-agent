@@ -2,10 +2,10 @@ import type { Shelf } from './types';
 
 /**
  * Every sentence an agent reads, in one file (13-pr-d-local-arms.md, decision
- * 17): the openers, the closing line, the pointer lines, the primer, the
- * capture ask and its fence fallback. `deliver.ts` renders the openers and
- * pointers; the primer, capture and stop arms speak the rest. The two SKILL.md
- * files hold the how-to and do not restate any of this.
+ * 17): the openers, the closing line, the pointer lines, the primer and the
+ * capture ask. `deliver.ts` renders the openers and pointers; the primer,
+ * capture and stop arms speak the rest. The two SKILL.md files hold the how-to
+ * and do not restate any of this.
  *
  * A PARENT RELAY LINE, IF EVER, LIVES HERE and renders through `deliver()`:
  * one sentence, never a third string builder (decision D). There is none now;
@@ -72,12 +72,8 @@ export const PRIMER_TEXT =
 export const PRIMER_TEXT_TEAM =
   'Tenjin team mode: a shelf of findings about this project, with the public marketplace behind it. Before real effort on any durable question — this codebase, its services, or a past decision — run `tenjin search "<one sentence>" --json`; a team read is free and a miss takes a second. Use it in research and subagent prompts too. Skip live data and what the docs answer in a line.';
 
-/** The info-string of the fenced block a finding comes back in when a publish
- *  refused; `capture.harvest` reads it out of the last message. */
-export const FINDING_TAG = 'tenjin-finding';
-
 /**
- * The turn-end ask, two paragraphs, the same for the lead and for a child
+ * The turn-end ask, one paragraph, the same for the lead and for a child
  * (13-pr-d-local-arms.md decision 16; the E13 block).
  *
  * ONE TEMPLATE, THE AUDIENCE AS DATA. The shelf is not a fork either: the kinds
@@ -85,20 +81,21 @@ export const FINDING_TAG = 'tenjin-finding';
  * team mode still publishes ordinary public findings and a second wording only
  * doubled the words an agent reads at every turn end. `<mode>` is the resolved
  * publish.mode; `<flags>` is the attribution a child's publish carries
- * (` --agent`, ` --search-id`), both substituted by {@link captureAsk}. The long
- * how-to — the team bar, the snapshot rules, `validUntil` — lives in
- * `skills/tenjin-publish/SKILL.md` and is not repeated here.
+ * (` --agent`, ` --search-id`), both substituted by {@link captureAsk}.
+ *
+ * ONE WAY OUT, AND IT IS THE COMMAND. There is no fenced fallback any more: a
+ * finding is a publish document and `tenjin publish` is what turns one into a
+ * piece, so an ask that also offered a block to paste into a final answer was
+ * teaching a second shape that nothing downstream could read back. The long
+ * how-to — the document's frontmatter keys, the team bar, the snapshot rules —
+ * lives in `skills/tenjin-publish/SKILL.md` and is not repeated here.
  */
 export const CAPTURE_ASK =
   'Tenjin: this turn did work worth a second look. If it settled something reusable ' +
   '(a probe result, a version gotcha, a tested workaround; on the team shelf also a ' +
-  'decision and why, or a code map), publish it now: `tenjin publish <file><flags>`, title as ' +
-  'the first `# ` heading, one file per finding; publish.mode is <mode>. The ' +
-  'tenjin-publish skill has the rest. If nothing durable, just finish.\n' +
-  'If publish refuses or you cannot run it, put the finding in your final answer inside a ' +
-  '```' +
-  FINDING_TAG +
-  ' fence, first line `# <title>`; it is kept locally for a person.';
+  'decision and why, or a code map), write it as a file and run ' +
+  '`tenjin publish <file><flags>`; publish.mode is <mode>. The tenjin-publish skill has ' +
+  'the shape. If nothing durable, just finish.';
 
 /**
  * A `tenjin search` this session ran, that MISSed, and that nothing has closed.
@@ -167,55 +164,24 @@ export const CHILD_PUBLISHED_LINE = (agentType: string, agent: string, url: stri
   '- subagent ' + (agentType === '' ? '' : agentType + ' ') + agent + ' published ' + url;
 
 /**
- * The lead's ask also names what its children queued this session, one line
- * per finding, by the id `publish --finding` takes. Only this session's
- * (decision 12): a person lists the machine's whole queue with the CLI.
- */
-export const QUEUED_FINDINGS_HEAD =
-  " finding(s) this session's subagents stated at their own end, held locally and unpublished:";
-export const QUEUED_FINDINGS_TAIL =
-  'Read one with `tenjin publish --finding <id> --dry-run`, which publishes nothing; publish the ones that hold up with `tenjin publish --finding <id>`, or add `--discard` to drop one.';
-
-/** One queued finding as the lead's ask lists it: id, who, which search, title. */
-export interface QueuedLine {
-  id: string;
-  agentType: string;
-  agent: string;
-  searchId: string;
-  title: string;
-}
-
-/**
- * The one ask template (decision 16): the two-paragraph block with its two
- * substitutions, then whatever this actor actually has open — its unanswered
- * searches, the failures it hit that nothing answered, what its children queued,
- * what they published.
- * Nothing else builds this text, and a section with nothing in it is absent
- * rather than empty.
+ * The one ask template (decision 16): the block with its two substitutions,
+ * then whatever this actor actually has open — its unanswered searches, the
+ * failures it hit that nothing answered, what its children published. Nothing
+ * else builds this text, and a section with nothing in it is absent rather than
+ * empty.
+ *
+ * NOTHING IS HELD LOCALLY FOR IT TO LIST. The queued-findings block is gone with
+ * the queue: the ask names a command and the agent runs it or does not, so there
+ * is no store of half-published text for a later turn to offer back.
  */
 export function captureAsk(a: {
   mode: string;
   flags: string;
   misses: string[];
   failures: string[];
-  queued: QueuedLine[];
   published: string[];
 }): string {
   const lines = [CAPTURE_ASK.replace('<mode>', a.mode).replace('<flags>', a.flags)];
-  lines.push(...a.misses, ...a.failures);
-  if (a.queued.length > 0) {
-    lines.push(String(a.queued.length) + QUEUED_FINDINGS_HEAD);
-    for (const q of a.queued) {
-      const who =
-        (q.agentType === '' ? 'a' : q.agentType) +
-        ' subagent' +
-        (q.agent === '' ? '' : ' ' + q.agent);
-      const search = q.searchId === '' ? '' : ', search ' + q.searchId;
-      const title = q.title === '' ? '' : ': "' + q.title + '"';
-      lines.push('- ' + q.id + ' ' + who + search + title);
-    }
-    lines.push(QUEUED_FINDINGS_TAIL);
-  }
-  lines.push(...a.published);
+  lines.push(...a.misses, ...a.failures, ...a.published);
   return lines.join('\n');
 }
