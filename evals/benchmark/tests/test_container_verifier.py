@@ -12,6 +12,8 @@ IMAGE = "sha256:" + "ab" * 32
 def repo(tmp_path):
     path = tmp_path / "run" / "trials" / "one" / "verify"
     path.mkdir(parents=True)
+    (path / "hidden-tests").mkdir()
+    (path / "hidden-tests" / "actor.test.mjs").write_text("// code-owned oracle placeholder")
     return path
 
 
@@ -83,3 +85,10 @@ def test_timeout_and_cleanup_failure_are_invalid_and_keep_cleanup_ownership(repo
     assert "cleanup failed" in result.detail and "host detail" not in result.detail
     assert "closed" in seen
     assert len(list((repo.parents[2] / "projects").glob("*.project"))) == 1
+
+
+def test_missing_hidden_oracle_is_invalid_before_container_launch(repo, monkeypatch):
+    (repo / "hidden-tests" / "actor.test.mjs").unlink()
+    monkeypatch.setattr(container, "Container", lambda **_: pytest.fail("missing oracle must not launch"))
+    result = verifier.run(verifier.node_test_spec("actor"), repo, repo.parents[2], image=IMAGE)
+    assert result.outcome == "invalid" and "missing" in result.detail
